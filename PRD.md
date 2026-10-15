@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 4. The human decides when this is done.
+Status: draft, round 5. The human decides when this is done.
 
 Diagram: `docs/diskgc-design.svg` (interface plus an *example* tier list; the
 tier list itself is config).
@@ -12,8 +12,9 @@ tier list itself is config).
 The shape, interface and protocols below are decided. The Cargo tier still
 ships only after its race tests pass (see What good looks like); if they
 expose a flaw, the Cargo protocol is revised, not the rest. The backlog must
-therefore schedule the Cargo race tests (and the Nix-daemon GC and Docker
-`until` checks) first, before features that build on them.
+therefore schedule the Cargo race tests first, before features that build on
+them. (The Nix-daemon GC and Docker `until` checks were run on 2026-10-15;
+results are under Weak assumptions & risks.)
 
 ## Essence / problem
 
@@ -294,9 +295,11 @@ by Docker), `unchanged_for` (generic: newest mtime under the folder).
 
 ### `cargo`: Cargo `target/` dirs
 
-- **Lock files.** Cargo's lock set has grown: besides `.cargo-lock`, current
-  Cargo also creates `.cargo-build-lock` (taken *before* `.cargo-lock`) and
-  `.cargo-artifact-lock` in profile directories (observed on this machine).
+- **Lock files.** Cargo's lock set has grown: besides `.cargo-lock`, Cargo
+  1.96 also creates and takes `.cargo-build-lock` (taken *before*
+  `.cargo-lock`), and `.cargo-artifact-lock` appears in some profile
+  directories on this machine (which Cargo mode creates it is unknown; see
+  risks).
   diskgc has an explicit **allowlist of known Cargo lock file names**. A
   profile directory containing any other file matching `.cargo-*lock*` is an
   unknown layout: the target is skipped (`unsupported_layout`) until diskgc
@@ -321,9 +324,12 @@ by Docker), `unchanged_for` (generic: newest mtime under the folder).
     Nix wrapper names (`.cargo-wrapped` → `cargo`), starts with `cargo`
     has its working directory inside the target's project directory (the
     target's parent), or has `CARGO_TARGET_DIR` pointing at the target in
-    `/proc/<pid>/environ` (`in_use`). This covers the gap between Cargo
-    finishing compilation (locks released) and launching the binary
-    (`cargo run`, `cargo test`).
+    `/proc/<pid>/environ` (`in_use`). Cargo holds *no* lock while the
+    program runs under `cargo run` / `cargo test` (measured, see risks), so
+    for the whole run of such a binary these process checks are the only
+    protection: the executable check covers the binary, and this check
+    covers the `cargo` parent, including the moment between compilation
+    and launch.
 
   These are heuristics for the caller's own processes, not proof. The PRD
   does not claim Cargo targets are "provably" unused, only that diskgc never
@@ -356,16 +362,21 @@ by Docker), `unchanged_for` (generic: newest mtime under the folder).
 `docker builder prune --all --force --filter until=<unused_for>`. Without
 `--all`, Docker removes only *dangling* build cache, not all unused cache
 older than the filter. Docker's build cache `until` is based on last use
-(verify on the deployed Docker version). One action prunes everything
-matching; there is no per-candidate stop.
+(verified on Docker 29.9: entries used 5 s earlier survived `until=30s`;
+after 45 s idle they were removed). One action prunes everything matching;
+there is no per-candidate stop.
 
 ### `docker-images`
 
 `select: dangling` runs `docker image prune --force`.
 `select: unreferenced-by-containers` runs `docker image prune --all --force`,
 which also removes tagged images that no container references.
-No age option: Docker's image `until` filter uses the image's *creation*
-time, so an image built long ago but used hourly would look "old".
+No age option: Docker's image `until` filter is never "last used". With
+the containerd image store (the default on Docker 29) it is the local pull
+time (verified: an image pulled 20 s earlier, built months ago, was removed
+by `until=10s`); with the classic store it is the image's build date (per
+Docker's documentation, not tested). Either way an image pulled long ago but
+run hourly would look "old".
 
 ### `nix-gc`
 
@@ -377,9 +388,11 @@ measured, not assumed. Never removes generations or profiles.
 Store selection: `NIX_REMOTE` or the `store` setting can point `nix-store`
 at a different store than `/nix/store`. Before running GC, diskgc asks Nix,
 with the exact environment it will pass to `nix-store`, which store is in
-effect. Supported: the default local store (via the daemon or directly)
-whose real store directory is `/nix/store`; its filesystem is the one
-matched. Anything else: the tier is excluded and reported as an error
+effect (`nix --extra-experimental-features nix-command store info
+--json`, whose `url` field names the store; it does not report a
+directory). Supported: `url` is `daemon`, or `local` without `root=`,
+`store=` or `real=` parameters, and `builtins.storeDir` is `/nix/store`;
+the filesystem of `/nix/store` is the one matched. Anything else: the tier is excluded and reported as an error
 (`unsupported_store`), so a useless Nix tier is noticed.
 
 ### `generic`: the escape hatch
@@ -547,7 +560,9 @@ with its two flags.
   service runs as the owner (`User=`), CI as the runner user.
 - Docker requires the `docker` group (which is root-equivalent; that is
   Docker's model, not ours). Nix GC goes through the Nix daemon as a normal
-  user (believed allowed; to verify).
+  user: verified on Nix 2.34.8 for deleting a specific dead path
+  (`nix-store --delete`); `--gc --max-freed` uses the same daemon operation
+  but was not run, to avoid deleting the machine's real garbage.
 - With `--allow-root`, the config file and every directory above it must be
   owned by root and not writable by others (like sshd's StrictModes), since
   generic tiers execute commands from it.
@@ -698,14 +713,26 @@ below, each with the check that resolves it.
 
 ## Weak assumptions & risks
 
-- **Cargo lock coverage (load-bearing, partly verified).** Cargo's lock set
-  changes between versions: this machine already has `.cargo-build-lock`
-  and `.cargo-artifact-lock` next to `.cargo-lock` (Cargo 1.90 stable to a
-  1.96 nightly are installed). Not verified: which lock covers which phase,
-  the separate `build-dir` layout, how long locks are held around `cargo
-  run` / `cargo test`. The allowlist plus `unsupported_layout` keeps unknown
-  versions safe (skipped) rather than unsafe; the race tests, run per Cargo
-  version, decide what is supported.
+- **Cargo lock coverage (load-bearing, partly verified).** Probed on
+  2026-10-15 by sampling `/proc/locks` during real Cargo commands:
+  - Cargo 1.90 (stable) holds an exclusive `flock` on `<profile>/.cargo-lock`
+    during a build.
+  - Cargo 1.96 (nightly) holds `.cargo-build-lock` *and* `.cargo-lock`
+    during a build; a second build waits on `.cargo-build-lock` first;
+    `cargo check` waits behind a running build.
+  - **Neither version holds any lock while the program runs** under `cargo
+    run` or `cargo test`: the locks are free for the whole runtime of the
+    binary, not just a moment. Running binaries are therefore protected
+    only by the `/proc` process checks (executable or working directory
+    inside the target, and the `cargo` parent process), which makes them
+    essential, not a nicety.
+  - `.cargo-artifact-lock` exists in one of this machine's targets but was
+    not created by plain `build` / `run` / `test` on either version; which
+    mode creates it, and the separate `build-dir` layout, are not verified.
+
+  The allowlist plus `unsupported_layout` keeps unknown versions safe
+  (skipped) rather than unsafe; the race tests, run per Cargo version,
+  decide what is supported.
 - **Half-deleted incremental state.** Deleting `.fingerprint/` first should
   force a full rebuild, but rustc loading a partly deleted `incremental/`
   session might still fail. Resolved by race test 6.
@@ -724,12 +751,23 @@ below, each with the check that resolves it.
   Documented, not enforced.
 - **Nix GC.** Can take minutes on a large store, holding the host lock
   meanwhile (hence the deadline). With `auto-optimise-store`, freed space can
-  lag. To verify: non-root GC via the daemon, and how to ask Nix which
-  store is in effect without depending on the experimental `nix-command`
-  feature (`nix config show` / `nix store info` need it).
-- **Docker.** Build cache `until` semantics (last use) and where images live
-  (containerd image store vs `DockerRootDir`) to verify on the deployed
-  version. Remote contexts or builders are skipped, not guessed.
+  lag. Verified on Nix 2.34.8 (2026-10-15): an untrusted, non-root user can
+  delete dead store paths through the daemon (`nix-store --delete` on a
+  freshly added, unrooted path). The store in effect can be read without
+  relying on the user's config by passing the feature flag per call:
+  `nix --extra-experimental-features nix-command store info --json` (here:
+  `"url":"daemon"`). `builtins.storeDir` is not enough: it still says
+  `/nix/store` when `NIX_REMOTE` points at another store. Not verified:
+  Lix and other Nix variants.
+- **Docker.** Verified on Docker 29.9 (in a disposable `docker:dind`
+  container, since this machine has Podman, not Docker): build cache `until`
+  is last use; the containerd image store is the default
+  (`driver-type io.containerd.snapshotter.v1`). Inside dind, containerd
+  lives under `DockerRootDir` (`/var/lib/docker/containerd`); on a host
+  with a system containerd, images live in `/var/lib/containerd` instead.
+  Still to settle: how diskgc reliably finds the containerd root for
+  filesystem matching. Remote contexts or builders are skipped, not
+  guessed. Podman's `docker` shim is not supported (non-goal).
 - **Generic tier.** Arbitrary commands. Mitigated by non-root default, argv
   execution, `openat2` working directory, the inherited host lock and the
   StrictModes check under `--allow-root`. Still the most dangerous surface.
