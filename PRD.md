@@ -13,8 +13,9 @@ The shape, interface and protocols below are decided. The Cargo tier still
 ships only after its race tests pass (see What good looks like); if they
 expose a flaw, the Cargo protocol is revised, not the rest. The backlog must
 therefore schedule the Cargo race tests first, before features that build on
-them. They need the VM harness and `LinuxHost`, not `ModelHost`, so the VM
-harness is on the critical path; the host model can follow. (The Nix-daemon GC and Docker `until` checks were run on 2026-10-15;
+them. They need the container harness and `LinuxHost`, not `ModelHost`,
+so the container harness is on the critical path; the host model can
+follow. (The Nix-daemon GC and Docker `until` checks were run on 2026-10-15;
 results are under Weak assumptions & risks.)
 
 ## Essence / problem
@@ -154,8 +155,9 @@ JSON result (field names are part of the contract):
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
-  "actions":  [{"tier": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0}],
-  "skipped":  [{"tier": "", "candidate": "", "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | missing | unsafe_path"}],
+  "actions":  [{"tier": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
+  "skipped":  [{"tier": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | missing | unsafe_path | contains_ipc | contains_mount | not_owner"}],
+  "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "errors":   [{"tier": "", "candidate": "", "message": ""}]
 }
 ```
@@ -164,6 +166,12 @@ JSON result (field names are part of the contract):
 - `plan` is filled only by `--dry-run` (empty otherwise); `reason` uses the
   skip-reason enum, `estimated_bytes` is `null` for Docker and Nix tiers.
 - `avail_delta_bytes` is signed (see Reclamation core).
+- `count` is 1 for a single candidate. Tiers that can produce very many
+  entries (`tmp`) aggregate: one `skipped` entry per reason with `count`
+  and up to 20 `examples` (`candidate` is then empty), and after 1,000
+  `actions` a single summary entry with `count`.
+- `held_by_deleted_files` lists open-but-deleted files on the requested
+  filesystem (visible processes only); always present, possibly empty.
 - On a usage error, fields that could not be determined (`mount`, `path`,
   sizes) are `null`; `errors` says why.
 
@@ -230,6 +238,11 @@ groups:
       - name: nix-dead
         type: nix-gc
 
+      - name: tmp-stale
+        type: tmp
+        roots: [/tmp, /var/tmp]
+        unchanged_for: 2d
+
   - name: pressure             # costs rebuild or download time
     tiers:
       - name: docker-dangling
@@ -273,8 +286,8 @@ Rules:
 ### Protection marker
 
 Applies to directory-based tiers only: `cargo` (a `.diskgc-keep` file in a
-target or in any directory between a root and the target) and `generic` (in
-`path`). Excluded candidates are reported as `kept`. Docker images and Nix
+target or in any directory between a root and the target), `tmp` (in a
+top-level entry) and `generic` (in `path`). Excluded candidates are reported as `kept`. Docker images and Nix
 store paths have no such marker; protect them with Docker's and Nix's own
 means (running containers, GC roots). A generic command can still delete
 anything its author tells it to.
@@ -290,7 +303,8 @@ anything its author tells it to.
 Age fields are **type-specific on purpose**, because each measures something
 different and none of them proves "not in use":
 `idle_for` (Cargo: last build), `unused_for` (BuildKit: last use as recorded
-by Docker), `unchanged_for` (generic: newest mtime under the folder).
+by Docker), `unchanged_for` (`tmp` and generic: newest mtime, and for `tmp`
+also ctime, under the entry or folder).
 
 ## Tier types
 
@@ -396,6 +410,86 @@ directory). Supported: `url` is `daemon`, or `local` without `root=`,
 the filesystem of `/nix/store` is the one matched. Anything else: the tier is excluded and reported as an error
 (`unsupported_store`), so a useless Nix tier is noticed.
 
+### `tmp`: shared temporary directories
+
+`/tmp` and `/var/tmp` collect leftovers from builds, tests and agents. On
+this machine they sit on the root filesystem (not a tmpfs) and `/tmp` holds
+over 140,000 top-level entries, almost all owned by one user. systemd-tmpfiles
+already ages them out (`q /tmp 1777 root root 10d`), but only on a timer and
+only by age. The `tmp` tier adds a free-space trigger and in-use checks.
+Unlike a `generic` tier it knows who may be using an entry.
+
+```yaml
+- name: tmp-stale
+  type: tmp
+  roots: [/tmp, /var/tmp]
+  unchanged_for: 2d
+```
+
+- **Candidates:** each top-level entry of a root (a file or a whole
+  directory), never the root itself. Only entries owned by the user diskgc
+  runs as; others are skipped (`not_owner`). Under `--allow-root`, an
+  explicit `owners:` list (user names) is required; names must resolve to
+  existing users at load, and `root` and system users (uid below 1000) are
+  rejected.
+- **Mounts first:** `mountinfo` is read before anything else; an entry that
+  is a mount point or contains one (a user's FUSE or sshfs mount in `/tmp`
+  is common) is skipped (`contains_mount`) without being `stat`ed, so a dead
+  mount cannot hang the scan.
+- **Order:** oldest first, by the entry's own mtime (one `stat` per entry,
+  no tree walk), so roots with 100,000+ entries stay cheap to order. The
+  checks below run per entry, in order, until the goal is met; an entry
+  rejected as `not_idle` still costs one walk of its tree.
+- **Eligible** only if nothing in its tree changed within `unchanged_for`
+  (newest mtime or ctime; atime is unreliable under `relatime`).
+- **In use (skip):**
+  - a visible process has an open file descriptor, working directory, root
+    or memory mapping on a file in the entry, or an environment variable
+    whose value is a path inside it (e.g. `TMPDIR` of a dormant
+    `nix develop` shell) (`in_use`). Files are matched by **device and
+    inode**, not by path text: the walk records the entry's inodes, and
+    `/proc/<pid>/fd/*` is `stat`ed, `maps` read by its dev:inode columns,
+    `cwd`/`root` `stat`ed. Path text would be wrong for processes in other
+    mount namespaces (PrivateTmp, flatpak, containers). Environment values
+    are paths and are compared as paths;
+  - it is a directory locked with `flock` by someone else (the convention
+    systemd-tmpfiles also honours) (`locked`);
+  - it is, or contains, a socket or FIFO (`contains_ipc`): those belong to
+    running programs (agents, X11, tmux, ssh).
+- **Deletion, close to the check:**
+  1. Take an exclusive `flock` on the entry (directories), as
+     systemd-tmpfiles does, so cooperating tools see it is being removed.
+  2. Under that lock, re-walk the entry to collect its current inodes
+     (files created since the first walk included), then re-scan `/proc`
+     for them immediately before deleting (not a snapshot from the start of
+     the reclaim); any hit: release, skip.
+  3. Delete with the usual path rules (fd-relative, no symlinks, no mount
+     crossing).
+  4. Release.
+
+  Remaining gap, stated plainly: a process can still open a file in the
+  entry, or create one, between step 2 and the deletion. A file created
+  mid-delete makes the delete partial (`ENOTEMPTY`); that is reported as an
+  error for the entry, never retried silently.
+- **Visibility:** without root, other users' `/proc/<pid>/fd` cannot be
+  read, so their use of *your* entries is not seen. Fine for one-user
+  machines and runners; weaker on shared hosts.
+- Entries of systemd's `PrivateTmp` (`systemd-private-*`) are never
+  candidates.
+- **Hard links:** removing a name in `/tmp` that is hard-linked elsewhere
+  frees nothing; the signed `avail_delta` shows that.
+- **Report size:** with 100,000+ entries, this tier aggregates in the JSON
+  report: `skipped` holds one entry per reason with a `count` and up to 20
+  example candidates; `actions` holds the deleted entries up to 1,000, then
+  a single summary entry with a `count`.
+- **Space held by deleted files.** A file deleted while still open keeps its
+  space until the process closes it; deleting more cannot help. Every report
+  lists such files on the requested filesystem, found via `/proc/*/fd`
+  (`held_by_deleted_files`: pid, command, bytes), so a stuck process is
+  visible. diskgc never kills processes.
+- If `/tmp` is a tmpfs, the tier only helps a request for that tmpfs
+  (filesystem matching), which is correct: it frees memory, not disk.
+
 ### `generic`: the escape hatch
 
 ```yaml
@@ -469,7 +563,7 @@ with its two flags.
   deletions can inflate it. It is reported as an observation, never as
   "bytes freed by this action". Success is judged only by the final sample.
 - **Filesystem matching** happens before any tier runs: Cargo and generic
-  candidates by device and mount (see Path traversal); Docker by its data
+  and `tmp` candidates by device and mount (see Path traversal); Docker by its data
   root (`DockerRootDir`, or the containerd root when the containerd image
   store is in use) and a local, not remote, Docker context; Nix by the store
   it will actually collect (see `nix-gc`). A tier whose backend is
@@ -478,8 +572,8 @@ with its two flags.
   cannot handle is different: `unsupported_store` is a misconfiguration and
   reported as an error (see Validation).
 
-- **Overshoot:** for Cargo and generic candidates, at most one candidate past
-  the goal. Docker and Nix actions are whole operations with no such bound.
+- **Overshoot:** for Cargo, `tmp` and generic candidates, at most one
+  candidate past the goal. Docker and Nix actions are whole operations with no such bound.
 - **Tallies** (directory sizes) are computed only for `--dry-run`. They count
   allocated blocks and each inode once (Cargo hard-links binaries from
   `deps/`), and are still estimates. Decisions and reports use the statvfs
@@ -590,7 +684,7 @@ is accepted until measured otherwise.
 | `nix.gc.automatic` | Timed Nix GC | Time-based, not pressure-based. |
 | Docker `builder.gc` policy | Bounds BuildKit cache size | Docker only; size-based, not free-space-based. |
 | `cargo-sweep`, `cargo-clean-all` | Age-based Cargo target cleanup | No lock awareness, no free-space goal, no other tiers. |
-| `systemd-tmpfiles` age cleanup | Age-based deletion; skips paths protected by a BSD `flock` | No free-space trigger, no policy across ecosystems, no Cargo-specific lock handling. |
+| `systemd-tmpfiles` age cleanup | Age-based deletion (here: `/tmp` after 10 days, `/var/tmp` after 30); skips paths protected by a BSD `flock` | No free-space trigger, no open-file or socket checks, no policy across ecosystems, no Cargo-specific lock handling. diskgc's `tmp` tier honours the same `flock` convention. |
 
 diskgc's contribution is the coordinator: one free-space goal, an ordered
 policy across ecosystems, and in-use checks per type.
@@ -609,10 +703,8 @@ policy across ecosystems, and in-use checks per type.
 
 - **Rust everywhere**: the product, the test harness, the host-model
   generator, test helpers (e.g. the "pause before run" Cargo runner used by
-  race test 8). One exception: a NixOS VM test's `testScript` is Python by
-  design; it stays thin glue that boots the VM and runs a Rust test binary
-  (`machine.succeed("diskgc-e2e ...")`). No shell scripts in product or
-  tests.
+  race test 8). No shell scripts in product or tests; `just` recipes only
+  call Nix, Cargo and Podman.
 - **Nix flake** is the single entry point:
   - Build with **crane** (`buildDepsOnly` shares one dependency build across
     package, clippy and tests), with source filtering so that editing docs
@@ -622,12 +714,13 @@ policy across ecosystems, and in-use checks per type.
     this machine).
   - *Cargo under test* is separate from the build toolchain: dated,
     pinned rust-overlay toolchains (oldest supported stable and one dated
-    nightly, never "latest"), installed in the VM under
-    `/run/cargo-under-test/{stable,nightly}` together with a C toolchain.
+    nightly, never "latest"), installed in the test image under
+    `/opt/cargo-under-test/{stable,nightly}` together with a C toolchain.
     A smoke build per toolchain runs first, so a broken toolchain fails as
     such and not as a diskgc race failure.
   - Outputs: `packages.default` (the binary), `nixosModules.default`,
-    `devShells.default`, `checks` (fast checks and the VM tests).
+    `devShells.default`, `checks` (fast checks and evaluation of the NixOS
+    module), and the container images for the e2e tests.
 - **Cargo workspace:**
 
 | Crate | Role |
@@ -636,7 +729,7 @@ policy across ecosystems, and in-use checks per type.
 | `diskgc-linux` | `LinuxHost`, the real `Host`. A library, because the contract tests use it. |
 | `diskgc-model` | `ModelHost`, a `Host` backed by a host model (below), its YAML schema, and the model-test harness. Test-only. |
 | `diskgc-modelgen` | Generates host-model *values* (parameterised fixtures and `proptest` strategies); YAML is only how they are saved. Test-only. |
-| `diskgc-e2e` | Destructive tests that need a real kernel: the differential contract suite, `materialize` (below), the Cargo race tests. **Excluded from the workspace** (its own Cargo project depending on the workspace crates by path), so no `cargo` command in the workspace compiles it; built only by the VM check derivation. |
+| `diskgc-e2e` | Destructive tests that need a real kernel: the differential contract suite, `materialize` (below), the Cargo race tests. **Excluded from the workspace** (its own Cargo project depending on the workspace crates by path), so no `cargo` command in the workspace compiles it; built only into the e2e test image. |
 | `diskgc` | The binary: CLI and output; installs signal delivery (e.g. `signalfd`) into `LinuxHost`, which reports signals to the executor as port events; wires `diskgc-core` to `LinuxHost`. |
 
 ### The `Host` port
@@ -661,7 +754,7 @@ policy across ecosystems, and in-use checks per type.
 ## Testing strategy
 
 **No test ever runs diskgc against the developer's live system.** Tests run
-against a modelled host (in-process) or inside a NixOS VM.
+against a modelled host (in-process) or inside a rootless test container.
 
 ### 1. Planner tests: plain data
 
@@ -686,7 +779,8 @@ The model is designed as data, not as a second Linux:
 - **Grown on demand**: categories are added when a core test needs them. The
   full list in view: mounts (ids, parents, types including nfs/btrfs, bind
   and stacked mounts), trees, locks (holders and waiters), processes (exe,
-  cwd, environ, uid), kernel capabilities (`statx` masks, `openat2`),
+  cwd, root, environ, uid, open file descriptors including deleted files,
+  memory mappings), kernel capabilities (`statx` masks, `openat2`),
   scripted `docker` / `nix-store`, clock, delayed freeing.
 - **Strict loading**: unknown keys are errors (`deny_unknown_fields`
   throughout), references must resolve (a lock held by a pid that does not
@@ -755,47 +849,71 @@ test fails if any regression file has an old version.
 A model is only useful if it behaves like the kernel, and a hand-written
 contract suite only covers the cases someone thought of. So the contract is
 differential: `materialize(model)` builds a host model for real on a scratch
-filesystem inside the VM (directories, `fallocate`d files, bind mounts,
-symlinks, helper processes holding locks), and the same scenarios (fixtures
-and generated ones) run on `ModelHost` and on `LinuxHost`. Traces and
-outcomes must match. Model fields that cannot be built for real (clock,
-kernel capabilities, exact `statvfs` numbers, scripted Docker/Nix, delayed
-freeing) are marked *model-only* in the schema; tests that use them depend on
-the model being right, and say so.
+tmpfs inside a test container (directories, `fallocate`d files, bind mounts,
+stacked mounts, symlinks, helper processes holding locks), and the same
+scenarios (fixtures and generated ones) run on `ModelHost` and on
+`LinuxHost`. Traces and outcomes must match. Model fields that cannot be
+built for real in a rootless container (clock, kernel capabilities, exact
+`statvfs` numbers, filesystem types other than tmpfs, NFS, scripted
+Docker/Nix, delayed freeing) are marked *model-only* in the schema; tests
+that use them depend on the model being right, and say so.
 
-### 5. End-to-end tests in NixOS VMs
+### 5. End-to-end tests in containers
 
-NixOS VM tests run the real binary on a real kernel:
+End-to-end tests run the real binary in **rootless Podman containers**,
+built from images that Nix produces (`dockerTools`). Containers run
+everywhere, need no KVM, start fast, and isolate the test's filesystem,
+processes and mounts from the developer's system.
 
-- **Filesystems**: ext4, xfs (image of at least 300 MB, the xfsprogs
-  minimum), tmpfs, bind mounts, an NFS export mounted on the same node,
-  btrfs (for the warning), via `virtualisation.emptyDiskImages` and `mkfs`
-  in the VM.
-- **Cargo race tests** 1–9 with the pinned Cargo-under-test toolchains, on
-  fixture projects with no registry dependencies (or vendored ones),
-  `CARGO_NET_OFFLINE=true` and a temporary `CARGO_HOME`. Races are made
-  deterministic, not timing-based: a helper holding `.cargo-lock` makes
-  Cargo take `.cargo-build-lock` and block; a `build.rs` waits on a control
-  file.
-- **Docker** with images preloaded via `dockerTools` and `docker load` (the
-  build sandbox has no network); BuildKit cache created by `FROM scratch`
-  builds. Both the bundled and a separate containerd setup, to settle where
-  images live.
-- **Nix GC**: the VM's `/nix/store` is by default the host store mounted
-  read-only under an overlay, so garbage is created inside the VM (or the VM
-  uses its own store image) and the test asserts on that.
-- **Signals and SIGKILL, systemd units, tmpfiles lock provisioning, the
-  NixOS module, CI-hook use of `ensure`.**
+- **Cargo race tests** 1–9 with the pinned Cargo-under-test toolchains
+  (installed in the image under `/opt/cargo-under-test/{stable,nightly}`
+  with a C toolchain), on fixture projects with no registry dependencies (or
+  vendored ones), `CARGO_NET_OFFLINE=true` and a temporary `CARGO_HOME`.
+  Races are deterministic, not timing-based: a helper holding `.cargo-lock`
+  makes Cargo take `.cargo-build-lock` and block; a `build.rs` waits on a
+  control file.
+- **Mounts that a rootless container can create** in its own mount
+  namespace: tmpfs, bind mounts (including a bind mount of the same
+  filesystem), stacked mounts. This covers the path-traversal rules
+  (symlink refusal, no mount crossing).
+- **Docker**: a real Docker daemon in its own container (`docker:dind` under
+  rootless Podman with `--privileged`, which stays inside the user
+  namespace; verified working on this machine), images preloaded with
+  `docker load` since tests run offline; BuildKit cache created by
+  `FROM scratch` builds.
+- **Nix GC**: a container with its own Nix store and `nix-daemon`; garbage
+  is created inside it and the test asserts on what GC removes.
+- **`tmp` tier** on the scratch tmpfs mounted *at* the container's `/tmp`
+  (so interlock layer 3 holds): entries held open, used as working
+  directory, mapped, named in a process's `TMPDIR`, `flock`ed, containing a
+  socket or FIFO, containing a mount, owned by another user (needs subuid
+  ranges), a file created mid-delete, and a deleted-but-open file that must
+  show up in `held_by_deleted_files`; plus a root with 100,000+ entries to
+  check that ordering stays cheap and the report stays aggregated.
+- Mounts and the other-owner cases need `CAP_SYS_ADMIN` inside the
+  container's user namespace (rootless Podman grants it there) and subuid
+  ranges for the test user.
+- **Signals, SIGKILL, deadlines, the CLI-hook use of `ensure`, `watch`
+  running as a plain process** (no systemd in the container).
 
-VMs get 2–3 GB of memory where Cargo runs. They need KVM: CI runners must
-provide `/dev/kvm` and `system-features = kvm nixos-test` (present on this
-machine; absent on most shared CI runners and cloud VMs without nested
-virtualisation).
+The NixOS module is checked by evaluation in `nix flake check` (the
+generated unit, tmpfiles rules and YAML are asserted on), not by booting a
+system.
 
-Why VMs rather than containers: diskgc's hard problems are mounts, `flock`,
-`/proc` and daemons; rootless containers cannot create mounts and share the
-host kernel. Why not FUSE: it has its own `flock`, `statx` and mount-id
-semantics, needs privileges, and is a large extra moving part.
+**Not covered end-to-end (for now), and why:** real block filesystems (ext4
+or xfs as separate mounts, btrfs) and NFS cannot be mounted in a rootless
+container; behaviour on specific kernel versions (the Linux 5.8 minimum,
+`statx` capability fallbacks) follows whatever kernel the test host runs;
+systemd and tmpfiles are not run for real. These cases rest on model tests
+with model-only fields. A VM suite can be added later if that proves too
+thin (see Weak assumptions & risks).
+
+Why not FUSE: it has its own `flock`, `statx` and mount-id semantics, needs
+privileges, and is a large extra moving part.
+
+Container tests cannot run inside the Nix build sandbox, so they run from
+`just e2e` (Nix builds the images and the test binary; Podman runs them),
+not as `nix flake check` checks. They lose Nix's result caching.
 
 ### Safety interlock for destructive tests
 
@@ -804,30 +922,29 @@ CI settings). Three layers:
 
 1. **Build-time**: destructive tests live in `diskgc-e2e`, which is
    excluded from the workspace; `cargo test`, `cargo test --workspace` and
-   `just check` never compile it. Only the VM check derivation builds it.
-2. **Run-time**: the test binary refuses to run unless `/proc/cmdline`
-   contains `diskgc.test_vm=<token>`, and `systemd-detect-virt` reports a
-   VM. The token is a fixed constant compiled into both the test binary and
-   the VM's kernel parameters (deterministic, so Nix builds stay
-   reproducible and cacheable). It is not a secret; it proves the kernel
-   was booted by the test harness, which no stray shell variable can fake.
-3. **Per operation**: every test asserts that the paths it touches are on a
-   scratch filesystem it created (checked by filesystem label and device),
-   and aborts otherwise.
+   `just check` never compile it. It is built only into the test image.
+2. **Run-time**: the test binary refuses to run unless a marker file baked
+   into the test image exists (`/.diskgc-test-sandbox`, holding a fixed
+   constant also compiled into the binary) and `systemd-detect-virt
+   --container` reports a container. (A kernel command-line token would not
+   work: a container sees the host's `/proc/cmdline`.)
+3. **Per operation**: every test asserts that the paths it touches are on
+   the scratch tmpfs the harness mounted for it (checked by mount id), and
+   aborts otherwise.
 
 ### Commands
 
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), in the dev shell | constantly; seconds |
-| `e2e` | model tests plus all VM tests, built in parallel (`nix build .#checks.<system>.vm-* --keep-going`) | **before every commit** (the gate); budget under 5 minutes, split the suite if it grows past that |
-| `vm NAME` / `vm-debug NAME` | one VM test / its interactive driver | while working on one |
+| `e2e` | `check` plus all container tests (builds the images with Nix, runs them with Podman) | **before every commit** (the gate); budget under 5 minutes, split the suite if it grows past that |
+| `e2e-one NAME` | one container test, keeping the container for inspection on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |
-| `ci` | `nix flake check -L` | CI |
+| `ci` | `nix flake check -L` plus `just e2e` | CI |
 
-Nix caches check results, so an unchanged input costs nothing; any Rust
-change reruns the VM tests. Coverage of unit and model tests via
-`cargo llvm-cov`.
+Requirements on a machine running `just e2e`: Nix and rootless Podman.
+CI runners that are themselves containers need nested Podman (privileged
+runner containers). Coverage of unit and model tests via `cargo llvm-cov`.
 
 ## What good looks like (observable)
 
@@ -871,7 +988,7 @@ change reruns the VM tests. Coverage of unit and model tests via
 - `ensure` never runs longer than `--timeout` + 10 s.
 - Every invariant in What bad looks like has model tests and is checked by
   the property tests; the differential contract tests agree between
-  `ModelHost` and `LinuxHost`; the VM e2e suite passes for every supported
+  `ModelHost` and `LinuxHost`; the container e2e suite passes for every supported
   Cargo version; `just e2e` stays under its time budget.
 - No test touches the developer's live system.
 
@@ -886,6 +1003,9 @@ writes; diskgc only guarantees where and when it runs.
 - A target deleted while a Cargo process holds any of its locks, or two
   Cargo builds running in one target dir because of diskgc.
 - Anything outside locked profile directories deleted by the Cargo tier.
+- A `tmp` entry deleted while a visible process has it open, uses it as
+  working directory or maps it; a socket or FIFO deleted; an entry of
+  another user deleted without an explicit `owners:` list.
 - A Docker volume or container, a Nix GC root, profile or generation removed.
 - Deletion following a symlink or crossing into another mount.
 - A generic command run in any directory other than its validated `path`.
@@ -897,7 +1017,7 @@ writes; diskgc only guarantees where and when it runs.
 ## Scope
 
 In scope (v1): `ensure`, `watch`, `check`; tier types `cargo`,
-`docker-build-cache`, `docker-images`, `nix-gc`, `generic`; groups with
+`docker-build-cache`, `docker-images`, `nix-gc`, `tmp`, `generic`; groups with
 `ordered` / `random` ranking; `--json`; NixOS module; plain binary + YAML for
 CI.
 
@@ -916,9 +1036,12 @@ CI.
   `target/tmp`, `target/criterion`). A generic tier can cover them if
   someone wants that.
 - Inode exhaustion and user/project quotas: `ensure` reports bytes only.
-- Running as root by default; Podman; rootless Docker; non-Linux; Linux
+- Running as root by default; Podman as the Docker backend for the Docker
+  tiers (Podman is used only to run the e2e tests); rootless Docker; non-Linux; Linux
   older than 5.8.
 - FUSE- or `LD_PRELOAD`-based filesystem simulation (see Testing strategy).
+- A VM test suite, for now (real block filesystems, NFS, kernel versions,
+  booted NixOS module). Revisit if model-only coverage proves too thin.
 
 ## Key decisions
 
@@ -939,9 +1062,9 @@ CI.
 | Language and build | Rust only; Nix flake; Cargo workspace | One toolchain for product and tests; `nix flake check` is the full gate. |
 | Test seam | Pure planner + executor over a `Host` port; `LinuxHost` and YAML-driven `ModelHost` | Rules tested as data; weird filesystems and races tested in-process and deterministically; no FUSE or syscall interception. |
 | Race tests in the model | Events addressed by position in the `Host` call trace | No hooks in the product; every interleaving of a small scenario can be enumerated. |
-| Model fidelity | Differential: `materialize` the model for real in the VM, compare traces and outcomes | A hand-written contract suite only covers cases someone thought of. |
-| Destructive-test safety | Separate crate + kernel-cmdline token + scratch-filesystem check | An environment variable leaks too easily. |
-| E2E environment | NixOS VM tests, never the live system | Real kernel, mounts, daemons; full isolation. |
+| Model fidelity | Differential: `materialize` the model for real in a test container, compare traces and outcomes | A hand-written contract suite only covers cases someone thought of. |
+| Destructive-test safety | Crate outside the workspace + image marker file and container check + scratch-mount check | An environment variable leaks too easily. |
+| E2E environment | Rootless Podman containers, never the live system; no VM suite for now | Runs on any machine and CI runner without KVM, fast; real block filesystems, NFS and kernel versions are left to the model. |
 
 ## Open questions
 
@@ -1008,6 +1131,11 @@ below, each with the check that resolves it.
 - **Generic tier.** Arbitrary commands. Mitigated by non-root default, argv
   execution, `openat2` working directory, the inherited host lock and the
   StrictModes check under `--allow-root`. Still the most dangerous surface.
+- **No real block filesystems, NFS or kernel versions in e2e.** Without a
+  VM suite, NFS refusal, the btrfs warning, xfs/ext4 mount handling, the
+  Linux 5.8 minimum and `statx` fallbacks are tested only against the model
+  (model-only fields). A wrong assumption there reaches users first. The
+  NixOS module is evaluated, not booted.
 - **Lock stalling.** Any local user can hold `/run/diskgc/lock`, and an
   orphaned child keeps holding it until it exits.
 - **Asynchronous freeing.** Without `syncfs`, a filesystem that frees blocks
