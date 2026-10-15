@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 5. The human decides when this is done.
+Status: draft, round 6. The human decides when this is done.
 
 Diagram: `docs/diskgc-design.svg` (interface plus an *example* tier list; the
 tier list itself is config).
@@ -13,7 +13,8 @@ The shape, interface and protocols below are decided. The Cargo tier still
 ships only after its race tests pass (see What good looks like); if they
 expose a flaw, the Cargo protocol is revised, not the rest. The backlog must
 therefore schedule the Cargo race tests first, before features that build on
-them. (The Nix-daemon GC and Docker `until` checks were run on 2026-10-15;
+them. They need the VM harness and `LinuxHost`, not `ModelHost`, so the VM
+harness is on the critical path; the host model can follow. (The Nix-daemon GC and Docker `until` checks were run on 2026-10-15;
 results are under Weak assumptions & risks.)
 
 ## Essence / problem
@@ -596,13 +597,237 @@ policy across ecosystems, and in-use checks per type.
 
 ## Deployment
 
-- One Rust binary, Linux 5.8 or newer.
+- One Rust binary (see Implementation), Linux 5.8 or newer.
 - NixOS module: renders the YAML, ships the tmpfiles rule for the lock, runs
   `check` at build time, and starts one `diskgc watch` instance per
   configured path as the configured user.
 - CI runners: binary, YAML, the tmpfiles drop-in, and
   `diskgc ensure --min-free 50G --target-free 80G "$CI_BUILDS_DIR"` in the
   pre-job hook.
+
+## Implementation
+
+- **Rust everywhere**: the product, the test harness, the host-model
+  generator, test helpers (e.g. the "pause before run" Cargo runner used by
+  race test 8). One exception: a NixOS VM test's `testScript` is Python by
+  design; it stays thin glue that boots the VM and runs a Rust test binary
+  (`machine.succeed("diskgc-e2e ...")`). No shell scripts in product or
+  tests.
+- **Nix flake** is the single entry point:
+  - Build with **crane** (`buildDepsOnly` shares one dependency build across
+    package, clippy and tests), with source filtering so that editing docs
+    does not rebuild or rerun anything.
+  - Product toolchain from **rust-overlay**, pinned by `rust-toolchain.toml`
+    (not rustup, whose self-contained linker and nightlies are broken on
+    this machine).
+  - *Cargo under test* is separate from the build toolchain: dated,
+    pinned rust-overlay toolchains (oldest supported stable and one dated
+    nightly, never "latest"), installed in the VM under
+    `/run/cargo-under-test/{stable,nightly}` together with a C toolchain.
+    A smoke build per toolchain runs first, so a broken toolchain fails as
+    such and not as a diskgc race failure.
+  - Outputs: `packages.default` (the binary), `nixosModules.default`,
+    `devShells.default`, `checks` (fast checks and the VM tests).
+- **Cargo workspace:**
+
+| Crate | Role |
+|---|---|
+| `diskgc-core` | Config schema; the **planner** (pure: a snapshot of facts in, a plan, skip reasons, exit-code precedence and report out); the **executor** (runs lock → recheck → delete → re-sample through the `Host` port); the `Host` trait. No syscalls of its own. |
+| `diskgc-linux` | `LinuxHost`, the real `Host`. A library, because the contract tests use it. |
+| `diskgc-model` | `ModelHost`, a `Host` backed by a host model (below), its YAML schema, and the model-test harness. Test-only. |
+| `diskgc-modelgen` | Generates host-model *values* (parameterised fixtures and `proptest` strategies); YAML is only how they are saved. Test-only. |
+| `diskgc-e2e` | Destructive tests that need a real kernel: the differential contract suite, `materialize` (below), the Cargo race tests. **Excluded from the workspace** (its own Cargo project depending on the workspace crates by path), so no `cargo` command in the workspace compiles it; built only by the VM check derivation. |
+| `diskgc` | The binary: CLI and output; installs signal delivery (e.g. `signalfd`) into `LinuxHost`, which reports signals to the executor as port events; wires `diskgc-core` to `LinuxHost`. |
+
+### The `Host` port
+
+- **Two shapes of operation.** Files and locks are syscall-shaped
+  (`openat2`, `statx`, `flock`, `unlinkat`, `statvfs`, `mountinfo`, `/proc`
+  reads), so the safety logic (flags, ordering, rechecks) lives in the core
+  where the model can test it. Docker and Nix are domain-shaped:
+  `run(argv, env, deadline)`.
+- **Time is part of the port.** The clock and every blocking operation
+  (waiting for the host lock, waiting for a child, the SIGTERM → 10 s →
+  SIGKILL sequence, the re-sampling window) are port operations with an
+  explicit deadline. `ModelHost` keeps a virtual clock that advances on
+  those calls, and delivers signals as events, so exit codes 75, 124 and
+  130/143 are model-testable without real sleeping.
+- **`ModelHost` checks how it is called**, not only what is asked: an
+  `openat2` without `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+  RESOLVE_NO_XDEV`, or a lock released with `LOCK_UN` instead of `close`,
+  fails the test. Otherwise "no symlink followed" would test the model, not
+  diskgc.
+
+## Testing strategy
+
+**No test ever runs diskgc against the developer's live system.** Tests run
+against a modelled host (in-process) or inside a NixOS VM.
+
+### 1. Planner tests: plain data
+
+The planner is a pure function, so most of the PRD's rules (eligibility,
+ordering, skip reasons, the exit-code precedence table, the dry-run plan,
+the JSON report) are tested as data in, data out, with no host at all.
+
+### 2. Model tests: a YAML host model instead of a real disk
+
+All of diskgc's access to the machine goes through `Host`, so tests
+substitute `ModelHost`, which answers from a *host model*. Nothing is
+intercepted at the kernel level: no FUSE, no `LD_PRELOAD`.
+
+The model is designed as data, not as a second Linux:
+
+- **Inode graph**, not a path map: files and directories are inodes with
+  names in directories, so hard links, renames and "a symlink swapped in
+  between validation and `fchdir`" are expressible.
+- **Derived, not duplicated**: available space is computed (filesystem size
+  − allocated blocks, each inode counted once − `other_used`), so deleting
+  something in the model frees space in the model.
+- **Grown on demand**: categories are added when a core test needs them. The
+  full list in view: mounts (ids, parents, types including nfs/btrfs, bind
+  and stacked mounts), trees, locks (holders and waiters), processes (exe,
+  cwd, environ, uid), kernel capabilities (`statx` masks, `openat2`),
+  scripted `docker` / `nix-store`, clock, delayed freeing.
+- **Strict loading**: unknown keys are errors (`deny_unknown_fields`
+  throughout), references must resolve (a lock held by a pid that does not
+  exist is an error), and a JSON Schema is generated for editor checking.
+- **Events on the call trace.** A race is an event between two `Host`
+  calls, addressed by the call, not by a named point in diskgc's code:
+  `at: {op: flock, path: <…>, nth: 1, when: after}`. No hooks in the
+  product, nothing that breaks when code is refactored, and property tests
+  can place an event after every call *k* in turn, covering every
+  interleaving of a small scenario. The recorded trace of calls is itself
+  something tests assert on.
+
+Sketch of a model test:
+
+```yaml
+host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /,     fs: ext4, dev: "254:1", size: 1000G, other_used: 980G}
+  - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 900G,  other_used: 880G, parent: 1}
+tree:
+  /home/mark/src/app/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug:
+      .cargo-lock: {}
+      deps: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+locks:
+  - {path: /home/mark/src/app/target/debug/.cargo-lock, holder: 4242, mode: exclusive}
+processes:
+  - {pid: 4242, exe: /nix/store/x-cargo/bin/cargo, cwd: /home/mark/src/app}
+events:
+  - at: {op: flock, path: /home/mark/src/app/target/debug/.cargo-lock, nth: 1, when: after}
+    create: /home/mark/src/app/target/release/.cargo-lock
+expect:
+  exit: 1
+  skipped: [{candidate: /home/mark/src/app/target, reason: locked}]
+```
+
+Fixtures live in `tests/models/<area>/<case>.yaml`, one named test per file
+(`datatest-stable`); JSON reports are snapshot-tested (`insta`, with
+durations, timestamps and seed redacted), since the JSON fields are part of
+the contract.
+
+### 3. Property tests
+
+`diskgc-modelgen` generates random host models (`proptest`) and checks the
+invariants of What bad looks like, stated exactly:
+
+- no Cargo lock file ever deleted or moved; nothing outside a candidate's
+  scope deleted; no symlink followed; no mount crossed (all checked on the
+  call trace);
+- the exit code follows the full precedence table for the final state;
+- on an unchanged system with the same seed, the real run's actions are a
+  prefix of the eligible entries of the dry-run plan (Cargo and generic
+  tiers).
+
+A failing case shrinks to a minimal model, printed as YAML; developers save
+it under `crates/diskgc-model/tests/regressions/`, where it is replayed from
+then on. (Nix builds have a read-only source tree, so nothing writes there
+automatically; proptest's own seed files are disabled.) Regression files pin
+the host-model schema: when `host_model` changes, they are migrated, and a
+test fails if any regression file has an old version.
+
+### 4. Differential contract tests
+
+A model is only useful if it behaves like the kernel, and a hand-written
+contract suite only covers the cases someone thought of. So the contract is
+differential: `materialize(model)` builds a host model for real on a scratch
+filesystem inside the VM (directories, `fallocate`d files, bind mounts,
+symlinks, helper processes holding locks), and the same scenarios (fixtures
+and generated ones) run on `ModelHost` and on `LinuxHost`. Traces and
+outcomes must match. Model fields that cannot be built for real (clock,
+kernel capabilities, exact `statvfs` numbers, scripted Docker/Nix, delayed
+freeing) are marked *model-only* in the schema; tests that use them depend on
+the model being right, and say so.
+
+### 5. End-to-end tests in NixOS VMs
+
+NixOS VM tests run the real binary on a real kernel:
+
+- **Filesystems**: ext4, xfs (image of at least 300 MB, the xfsprogs
+  minimum), tmpfs, bind mounts, an NFS export mounted on the same node,
+  btrfs (for the warning), via `virtualisation.emptyDiskImages` and `mkfs`
+  in the VM.
+- **Cargo race tests** 1–9 with the pinned Cargo-under-test toolchains, on
+  fixture projects with no registry dependencies (or vendored ones),
+  `CARGO_NET_OFFLINE=true` and a temporary `CARGO_HOME`. Races are made
+  deterministic, not timing-based: a helper holding `.cargo-lock` makes
+  Cargo take `.cargo-build-lock` and block; a `build.rs` waits on a control
+  file.
+- **Docker** with images preloaded via `dockerTools` and `docker load` (the
+  build sandbox has no network); BuildKit cache created by `FROM scratch`
+  builds. Both the bundled and a separate containerd setup, to settle where
+  images live.
+- **Nix GC**: the VM's `/nix/store` is by default the host store mounted
+  read-only under an overlay, so garbage is created inside the VM (or the VM
+  uses its own store image) and the test asserts on that.
+- **Signals and SIGKILL, systemd units, tmpfiles lock provisioning, the
+  NixOS module, CI-hook use of `ensure`.**
+
+VMs get 2–3 GB of memory where Cargo runs. They need KVM: CI runners must
+provide `/dev/kvm` and `system-features = kvm nixos-test` (present on this
+machine; absent on most shared CI runners and cloud VMs without nested
+virtualisation).
+
+Why VMs rather than containers: diskgc's hard problems are mounts, `flock`,
+`/proc` and daemons; rootless containers cannot create mounts and share the
+host kernel. Why not FUSE: it has its own `flock`, `statx` and mount-id
+semantics, needs privileges, and is a large extra moving part.
+
+### Safety interlock for destructive tests
+
+An environment variable is not enough (it leaks through `export`, direnv,
+CI settings). Three layers:
+
+1. **Build-time**: destructive tests live in `diskgc-e2e`, which is
+   excluded from the workspace; `cargo test`, `cargo test --workspace` and
+   `just check` never compile it. Only the VM check derivation builds it.
+2. **Run-time**: the test binary refuses to run unless `/proc/cmdline`
+   contains `diskgc.test_vm=<token>`, and `systemd-detect-virt` reports a
+   VM. The token is a fixed constant compiled into both the test binary and
+   the VM's kernel parameters (deterministic, so Nix builds stay
+   reproducible and cacheable). It is not a secret; it proves the kernel
+   was booted by the test harness, which no stray shell variable can fake.
+3. **Per operation**: every test asserts that the paths it touches are on a
+   scratch filesystem it created (checked by filesystem label and device),
+   and aborts otherwise.
+
+### Commands
+
+| `just` recipe | What | When |
+|---|---|---|
+| `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), in the dev shell | constantly; seconds |
+| `e2e` | model tests plus all VM tests, built in parallel (`nix build .#checks.<system>.vm-* --keep-going`) | **before every commit** (the gate); budget under 5 minutes, split the suite if it grows past that |
+| `vm NAME` / `vm-debug NAME` | one VM test / its interactive driver | while working on one |
+| `soak` | property tests with many cases | before a release, nightly CI |
+| `ci` | `nix flake check -L` | CI |
+
+Nix caches check results, so an unchanged input costs nothing; any Rust
+change reruns the VM tests. Coverage of unit and model tests via
+`cargo llvm-cov`.
 
 ## What good looks like (observable)
 
@@ -614,7 +839,7 @@ policy across ecosystems, and in-use checks per type.
   there.
 - **Cargo race tests pass**, each with real Cargo processes, run against
   every supported Cargo version (at least the oldest supported stable and
-  current nightly):
+  one dated, pinned nightly):
   1. a build holding the lock: its target is skipped;
   2. a build that starts during deletion: it waits, then succeeds;
   3. one build blocked on the lock plus another started right after the
@@ -622,8 +847,8 @@ policy across ecosystems, and in-use checks per type.
   4. a target whose test binary is still running: skipped;
   5. a new profile (`--release`, `--target`) started between discovery and
      locking: skipped as `changed`, its build succeeds;
-  6. diskgc SIGKILLed at random points during deletion, repeatedly: the next
-     `cargo build` always succeeds;
+  6. diskgc SIGKILLed during deletion at each point of a seeded list of
+     positions in its call trace: the next `cargo build` always succeeds;
   7. a `cargo check` paused after taking `.cargo-build-lock` and before
      `.cargo-lock`, plus a concurrent `cargo build`: the target is skipped,
      no lock file is ever unlinked, both commands succeed;
@@ -644,6 +869,11 @@ policy across ecosystems, and in-use checks per type.
   *eligible* entries of the `--dry-run` plan (`ordered` groups, or `random`
   with the same seed; Cargo and generic tiers).
 - `ensure` never runs longer than `--timeout` + 10 s.
+- Every invariant in What bad looks like has model tests and is checked by
+  the property tests; the differential contract tests agree between
+  `ModelHost` and `LinuxHost`; the VM e2e suite passes for every supported
+  Cargo version; `just e2e` stays under its time budget.
+- No test touches the developer's live system.
 
 ## What bad looks like (must never happen)
 
@@ -688,6 +918,7 @@ CI.
 - Inode exhaustion and user/project quotas: `ensure` reports bytes only.
 - Running as root by default; Podman; rootless Docker; non-Linux; Linux
   older than 5.8.
+- FUSE- or `LD_PRELOAD`-based filesystem simulation (see Testing strategy).
 
 ## Key decisions
 
@@ -705,6 +936,12 @@ CI.
 | Concurrency | Fixed, provisioned `/run/diskgc/lock` | One lock inode per host, guaranteed. |
 | Privileges | Non-root by default | Removes the "root runs commands from YAML" hazard. |
 | `--target-free` default | `ensure`: equal to `--min-free`; `watch`: required | Asking for 50G must not delete 70G unless asked; a watcher needs two thresholds. |
+| Language and build | Rust only; Nix flake; Cargo workspace | One toolchain for product and tests; `nix flake check` is the full gate. |
+| Test seam | Pure planner + executor over a `Host` port; `LinuxHost` and YAML-driven `ModelHost` | Rules tested as data; weird filesystems and races tested in-process and deterministically; no FUSE or syscall interception. |
+| Race tests in the model | Events addressed by position in the `Host` call trace | No hooks in the product; every interleaving of a small scenario can be enumerated. |
+| Model fidelity | Differential: `materialize` the model for real in the VM, compare traces and outcomes | A hand-written contract suite only covers cases someone thought of. |
+| Destructive-test safety | Separate crate + kernel-cmdline token + scratch-filesystem check | An environment variable leaks too easily. |
+| E2E environment | NixOS VM tests, never the live system | Real kernel, mounts, daemons; full isolation. |
 
 ## Open questions
 
@@ -793,3 +1030,6 @@ Hard to walk back (deep review, tests before features):
 Tentative (change freely):
 - Example groups and tiers; default timeouts; back-off constants; discovery
   depth; human-readable output; log line format.
+- The `Host` trait and the crate split: internal, free to change.
+- The YAML host-model schema (`host_model: 1`): test-only, but pinned by
+  the regression files; changing it means migrating them.
