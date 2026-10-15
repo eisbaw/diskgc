@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 3. The human decides when this is done.
+Status: draft, round 4. The human decides when this is done.
 
 Diagram: `docs/diskgc-design.svg` (interface plus an *example* tier list; the
 tier list itself is config).
@@ -25,8 +25,9 @@ jobs.
 
 Almost all of that space is *rebuildable cache*. The problem is not "find big
 files"; it is: **keep enough space available that no job hits ENOSPC, by
-deleting the cache that is cheapest to lose and provably not in use, and fail
-loudly and early when that is not possible.**
+deleting the cache that is cheapest to lose and not in use as far as each
+tier type can tell, and fail loudly and early when that is not possible.**
+v1 is about filesystem *bytes*: inode exhaustion and quotas are out of scope.
 
 diskgc is one binary. `ensure` brings one filesystem up to a free-space goal,
 once. `watch` is a loop around the same core with two thresholds. What may be
@@ -70,14 +71,19 @@ diskgc check  [--config FILE]
   small one per job. The exit code depends only on `--min-free`; missing the
   target is reported (`target_met: false`) but is not a failure.
 - `--timeout` (default `10m`, `0` = none): deadline for the *whole* call,
-  including waiting for another reclaim to finish. A CI hook never hangs.
+  including waiting for another reclaim to finish. At the deadline diskgc
+  starts no new work and terminates a running child (SIGTERM, SIGKILL after
+  10 s) without waiting further for it to exit, so the worst-case runtime
+  is `--timeout` + 10 s, plus at most one in-flight `unlinkat` (a single
+  syscall; deleting a huge file can take a moment). A CI hook never hangs.
 - `--dry-run`: print, in order, every candidate diskgc would consider, whether
-  it is eligible or the skip reason, and its tallied size; delete nothing.
+  it is eligible or the skip reason, its estimated size and the operation it
+  would run (JSON: the `plan` array); delete nothing.
   Does not take the lock. Always prints, even if the goal is already met.
   With a `random` group, the printed order is for the printed seed only.
   Sizes are estimates; Docker and Nix tiers can only say what they would run.
-  Exits 0 (2 on usage errors, 130/143 when interrupted); JSON `status` is
-  `dry_run`.
+  Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
+  interrupted); JSON `status` is `dry_run`.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
   code including usage errors.
 
@@ -92,17 +98,24 @@ diskgc check  [--config FILE]
 - Below `--min-free`: run the same core as `ensure`, goal `--target-free`.
   No overall deadline; each action is bounded by its tier's `timeout`. The
   wait for the host lock must stay interruptible by SIGTERM.
-- Back-off: if a reclaim ends still below `--min-free` (everything left is
-  in use), do not start another until available space has dropped by a
-  further `max(1 GiB, 1% of the filesystem)` or 15 minutes have passed. One
-  log line per back-off, not per poll. These values are fixed in code.
+- Back-off: if a reclaim ends still below `--min-free` because everything
+  left is in use (`exhausted`), do not start another until available space
+  has dropped by a further `max(1 GiB, 1% of the filesystem)` or 15 minutes
+  have passed. The same applies when it ended with misconfiguration errors.
+  Only *backend* errors (a Docker or Nix daemon unreachable) shorten the
+  wait to 1 minute: backends often recover quickly, misconfigurations do
+  not. One log line per
+  back-off, not per poll. These values are fixed in code.
 - On SIGTERM/SIGINT: stop as described under Signals, exit 0.
 
 ### `check`
 
-Load and validate the config, print the resolved config path and the groups
-and tiers as diskgc understood them, exit 0 or 2. The NixOS module runs it at
-build time so a bad config fails `nixos-rebuild`, not the service at 3am.
+Static validation only (see Validation): load the config, print the
+resolved config path and the groups and tiers as diskgc understood them,
+exit 0 or 2. It needs nothing from the target machine, so the NixOS module
+runs it at build time (also when cross-building) and a bad config fails
+`nixos-rebuild`, not the service at 3am. Machine-specific problems (a
+missing root, a symlinked path) can only be found at run time.
 
 ### Exit codes (`ensure`)
 
@@ -115,7 +128,7 @@ The first matching row wins:
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
 | 124 | Deadline reached during reclaim, below `--min-free`. |
-| 3 | A tier failed (command error, permission error, daemon gone), below `--min-free`. Something may have been deleted; the report says what. |
+| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`. Something may have been deleted; the report says what. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
 The mapping is explicit in code and covered by tests. A Rust panic (101) is a
@@ -126,7 +139,7 @@ bug.
 - stdout carries only the result. Human mode: silent when nothing needed doing
   (like `cp`); otherwise a short summary. `--json`: always one object.
 - stderr carries progress logs: one line per action with tier, candidate,
-  bytes freed (statvfs delta), duration. Output of child commands (Docker,
+  observed change in available space, duration. Output of child commands (Docker,
   Nix, generic) goes to stderr, prefixed with the tier name.
 - `watch` logs to stderr only; journald collects it.
 
@@ -138,13 +151,19 @@ JSON result (field names are part of the contract):
   "mount": "/", "path": "/home/mark/src/app", "seed": null,
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
-  "actions":  [{"tier": "", "candidate": "", "freed_bytes": 0, "duration_ms": 0}],
-  "skipped":  [{"tier": "", "candidate": "", "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | missing | unsafe_path"}],
+  "plan":     [{"group": "", "tier": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
+  "actions":  [{"tier": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0}],
+  "skipped":  [{"tier": "", "candidate": "", "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | missing | unsafe_path"}],
   "errors":   [{"tier": "", "candidate": "", "message": ""}]
 }
 ```
 
-`seed` is `null` when no group uses `random`.
+- `seed` is `null` when no group uses `random`.
+- `plan` is filled only by `--dry-run` (empty otherwise); `reason` uses the
+  skip-reason enum, `estimated_bytes` is `null` for Docker and Nix tiers.
+- `avail_delta_bytes` is signed (see Reclamation core).
+- On a usage error, fields that could not be determined (`mount`, `path`,
+  sizes) are `null`; `errors` says why.
 
 ### Signals
 
@@ -178,7 +197,9 @@ but do no harm. (`PR_SET_PDEATHSIG` was rejected: it fires on parent
 
 ## Configuration (YAML)
 
-Lookup: `--config`, then `$DISKGC_CONFIG`, then
+Lookup: if `--config` or `$DISKGC_CONFIG` is given, that file and only that
+file is used; missing or unreadable is exit 2, never a fallback, so a typo
+cannot activate some other policy. Only when neither is given:
 `$XDG_CONFIG_HOME/diskgc/config.yaml` (default `~/.config/...`), then
 `/etc/diskgc/config.yaml`. None found: exit 2, listing the paths tried. The
 binary has **no built-in tiers**; an example config ships as
@@ -221,7 +242,7 @@ groups:
       - name: pip-cache
         type: generic
         path: /home/mark/.cache/pip
-        command: [pip, cache, purge]
+        command: [pip, --cache-dir, /home/mark/.cache/pip, cache, purge]
 
       # - name: docker-unreferenced   # removes tagged images too; opt in
       #   type: docker-images
@@ -241,15 +262,20 @@ Rules:
 - The same tier type may appear several times with different parameters.
 - All paths must be absolute. `~` is rejected: it would mean `/root` for one
   caller and `/home/mark` for another.
-- Validation is complete at load; any error → exit 2, nothing deleted.
-  Unknown keys are errors. `version` is mandatory. Tier names are unique
+- Static validation is complete at load; any error → exit 2, nothing
+  deleted. Unknown keys are errors. Machine-specific checks run before the
+  first deletion of each reclaim (see Validation). `version` is mandatory. Tier names are unique
   across all groups.
 - Disabling a tier = commenting it out. There is no `enabled` field.
 
 ### Protection marker
 
-A file named `.diskgc-keep` in a candidate directory, or in any directory
-between a tier's root and the candidate, excludes it. Reported as `kept`.
+Applies to directory-based tiers only: `cargo` (a `.diskgc-keep` file in a
+target or in any directory between a root and the target) and `generic` (in
+`path`). Excluded candidates are reported as `kept`. Docker images and Nix
+store paths have no such marker; protect them with Docker's and Nix's own
+means (running containers, GC roots). A generic command can still delete
+anything its author tells it to.
 
 ### Common tier fields
 
@@ -268,35 +294,52 @@ by Docker), `unchanged_for` (generic: newest mtime under the folder).
 
 ### `cargo`: Cargo `target/` dirs
 
-- **Discovery:** walk `roots` (depth limit 6, fixed in code) for directories that
-  contain a valid `CACHEDIR.TAG` and at least one *profile directory*: a
-  directory holding a `.cargo-lock`, at `<target>/<profile>/` or
+- **Lock files.** Cargo's lock set has grown: besides `.cargo-lock`, current
+  Cargo also creates `.cargo-build-lock` (taken *before* `.cargo-lock`) and
+  `.cargo-artifact-lock` in profile directories (observed on this machine).
+  diskgc has an explicit **allowlist of known Cargo lock file names**. A
+  profile directory containing any other file matching `.cargo-*lock*` is an
+  unknown layout: the target is skipped (`unsupported_layout`) until diskgc
+  learns it. Lock files are never deleted or moved.
+- **Discovery:** walk `roots` (depth limit 6, fixed in code) for directories
+  that contain a valid `CACHEDIR.TAG` and at least one *profile directory*:
+  a directory holding a known Cargo lock file, at `<target>/<profile>/` or
   `<target>/<triple>/<profile>/`. Do not descend into a found target. Never
-  follow symlinks, never cross mount points (like `find -xdev`). Refuse
+  follow symlinks, never cross mount points (see Path traversal). Refuse
   targets on NFS (`unsupported_fs`): Cargo does not lock there.
 - **Last build:** newest mtime of the profile directories and their
   `.fingerprint/`, `deps/`, `build/`, `incremental/` subdirectories. A few
   `stat` calls, no tree walk. Candidates are ordered by it, oldest first.
 - **Eligible** only if the last build is older than `idle_for` and some
-  profile directory holds more than its lock file (otherwise `empty`: an
+  profile directory holds more than its lock files (otherwise `empty`: an
   emptied target is not re-listed on every run).
-- **In use (skip):**
-  - any `.cargo-lock` cannot be `flock`ed without waiting (`locked`), or
+- **In use (skip)**, checked by locks and by process heuristics:
+  - any known lock file cannot be `flock`ed without waiting (`locked`);
   - a process the caller can see has its executable or working directory
-    inside the target, from `/proc/*/exe` and `/proc/*/cwd` (`in_use`; e.g.
-    a test binary still running after Cargo released the lock).
-- **Reclaim protocol: delete inside locked profile directories only, never
-  move or delete a lock file.**
-  1. Take every `.cargo-lock` of the target without waiting. Any failure:
-     release all, skip (`locked`).
+    inside the target (`in_use`; e.g. a test binary still running);
+  - a process the caller can see whose executable name, after normalising
+    Nix wrapper names (`.cargo-wrapped` → `cargo`), starts with `cargo`
+    has its working directory inside the target's project directory (the
+    target's parent), or has `CARGO_TARGET_DIR` pointing at the target in
+    `/proc/<pid>/environ` (`in_use`). This covers the gap between Cargo
+    finishing compilation (locks released) and launching the binary
+    (`cargo run`, `cargo test`).
+
+  These are heuristics for the caller's own processes, not proof. The PRD
+  does not claim Cargo targets are "provably" unused, only that diskgc never
+  deletes while Cargo holds a lock, and skips targets with visible activity.
+- **Reclaim protocol: delete inside locked profile directories only.**
+  1. Take every known lock file of the target, exclusively, without
+     waiting. Any failure: release all, skip (`locked`). (A Cargo that holds
+     `.cargo-build-lock` while waiting for `.cargo-lock` makes this fail,
+     which is the intended outcome.)
   2. List the lock files again and re-read the last build time. A new lock
      file (a profile created since discovery) or a newer build: release,
-     skip (`changed`). Repeat the `/proc` scan now that the locks are held;
-     a hit: release, skip (`in_use`).
+     skip (`changed`). Repeat the process checks now that the locks are
+     held; a hit: release, skip (`in_use`).
   3. In each locked profile directory: delete `.fingerprint/` first (so a
      half-deleted profile always forces a rebuild), then every other entry
-     except `.cargo-lock`. Deletion walks with directory file descriptors
-     and `unlinkat`, never follows symlinks, never crosses mounts.
+     except the lock files.
   4. Release the locks.
 
   Nothing outside the locked profile directories is touched: not
@@ -304,15 +347,17 @@ by Docker), `unchanged_for` (generic: newest mtime under the folder).
   entries such as `target/doc`, `target/tmp` (written by running tests
   without a lock) or `target/criterion` (benchmark baselines, which are data,
   not cache). Because lock files never move, a Cargo that was blocked on a
-  lock and a Cargo that starts afterwards both lock the *same* inode and stay
-  mutually exclusive. A Cargo started during step 3 prints its usual
+  lock and a Cargo that starts afterwards both lock the *same* inodes and
+  stay mutually exclusive. A Cargo started during step 3 prints its usual
   `Blocking waiting for file lock` and continues after step 4.
 
 ### `docker-build-cache`
 
-`docker builder prune --force --filter until=<unused_for>`. Docker's build
-cache `until` is based on last use (verify on the deployed Docker version).
-One action prunes everything matching; there is no per-candidate stop.
+`docker builder prune --all --force --filter until=<unused_for>`. Without
+`--all`, Docker removes only *dangling* build cache, not all unused cache
+older than the filter. Docker's build cache `until` is based on last use
+(verify on the deployed Docker version). One action prunes everything
+matching; there is no per-candidate stop.
 
 ### `docker-images`
 
@@ -329,6 +374,14 @@ roots, temporary roots, runtime roots of running processes). `--max-freed`
 means "stop after at least this much"; the real effect on available space is
 measured, not assumed. Never removes generations or profiles.
 
+Store selection: `NIX_REMOTE` or the `store` setting can point `nix-store`
+at a different store than `/nix/store`. Before running GC, diskgc asks Nix,
+with the exact environment it will pass to `nix-store`, which store is in
+effect. Supported: the default local store (via the daemon or directly)
+whose real store directory is `/nix/store`; its filesystem is the one
+matched. Anything else: the tier is excluded and reported as an error
+(`unsupported_store`), so a useless Nix tier is noticed.
+
 ### `generic`: the escape hatch
 
 ```yaml
@@ -336,7 +389,7 @@ measured, not assumed. Never removes generations or profiles.
   type: generic
   path: /home/mark/.cache/go-build
   unchanged_for: 2d          # optional; walks the tree
-  command: [go, clean, -cache]
+  command: [env, GOCACHE=/home/mark/.cache/go-build, go, clean, -cache]
   timeout: 5m
 ```
 
@@ -344,17 +397,22 @@ measured, not assumed. Never removes generations or profiles.
   protection and cannot limit what the command deletes; the config author
   owns that. Prefer the tool's own cleaner (`pip cache purge`,
   `go clean -cache`), which knows its own locking, over `rm`.
-- `path` (required): absolute, not `/`, not a mount root. It decides which
-  filesystem the tier belongs to, is tallied for `--dry-run`, and is the
-  command's working directory. Missing at run time → skip (`missing`), not a
-  config error.
-- Path safety: opened with `openat2(RESOLVE_NO_SYMLINKS)` (mounts along the
-  path, such as a separate `/home`, are fine), then `statx`: the device must
-  match the one validated at load and `STATX_ATTR_MOUNT_ROOT` must be unset;
-  otherwise skip (`unsafe_path`). Entered with `fchdir`, so a symlink
-  swapped in after validation is never followed.
-- A symlink anywhere in `path` (e.g. `/home -> /var/home`) is a config error
-  at load; the message names the component and the real path to use.
+- **`path` does not tell the command what to clean.** It gives the tier its
+  filesystem, its tally and its working directory. Most cleaners pick their
+  cache from their own config or environment, not from the working
+  directory, so the command must name the same location explicitly
+  (`pip --cache-dir <path> cache purge`, `env GOCACHE=<path> go clean
+  -cache`). Otherwise diskgc measures one directory and the command purges
+  another. The examples do this.
+- `path` (required): absolute, not `/`. It may itself be a mount point (a
+  dedicated cache mount is common on CI). Missing at run time → skip
+  (`missing`), not a config error.
+- Path safety, checked at run time (see Validation): resolved as described
+  under Path traversal, so no symlink anywhere in `path` is followed and no
+  mount is crossed below its own mount root. A violation (e.g. `/home -> /var/home`
+  on some distributions) is skipped as `unsafe_path` and reported as an
+  error naming the component and the real path to use. Entered with
+  `fchdir`, so a symlink swapped in later is never followed.
 - `command`: argv list, no shell. Use `[sh, -c, "..."]` explicitly if wanted.
 - Environment: `DISKGC_PATH`, `DISKGC_NEED_BYTES`, `DISKGC_MOUNT`.
 - Runs in its own process group; killed after `timeout`. Like every child
@@ -370,35 +428,98 @@ reclaim(min, goal, filesystem, deadline):
   lock /run/diskgc/lock, waiting until deadline
     on timeout: return met if avail >= min else lock_timeout
   if avail(filesystem) >= min: return met            # someone else freed it
+  preflight all tiers (environmental validation)      # before any deletion
   for group in groups:                                # list order
     for tier in group.tiers(ranking, seed):           # ordered or shuffled
-      skip tier if its backend is not on this filesystem
+      skip tier if preflight excluded it              # other_fs, missing, ...
       for candidate in tier.candidates():             # oldest first
         if avail(filesystem) >= goal: return met
         if kept / empty / not idle / in use / changed: record skip; continue
         tier.reclaim(candidate, need = goal - avail)
-        syncfs; record freed = avail delta
+        record avail_delta = avail now - avail before
   return met if avail >= min else (error if any errors else exhausted)
 ```
+
+Every loop step, child wait and native deletion step checks the deadline.
 
 `watch` calls it with `min = --min-free`, `goal = --target-free`; `ensure`
 with its two flags.
 
 - **Available space** = `f_bavail × f_frsize` from `statvfs`: what an
-  unprivileged writer can use, never the root reserve. `syncfs` before each
-  re-read, because some filesystems free blocks asynchronously.
+  unprivileged writer can use, never the root reserve. No `syncfs` (it waits
+  for unrelated I/O and cannot be cancelled). Some filesystems free blocks
+  asynchronously, so if a sample after an action shows less than expected,
+  diskgc re-samples a few times over at most 2 s before moving on.
+- **`avail_delta`** is the observed net change in available space around an
+  action. It is signed: concurrent writers can make it negative, unrelated
+  deletions can inflate it. It is reported as an observation, never as
+  "bytes freed by this action". Success is judged only by the final sample.
 - **Filesystem matching** happens before any tier runs: Cargo and generic
-  candidates by `st_dev`; Docker by its data root (`DockerRootDir`, or the
-  containerd root when the containerd image store is in use) and a local,
-  not remote, Docker context; Nix by the device of `/nix/store`. A tier
-  whose backend is elsewhere is skipped and reported (`other_fs`,
-  `remote_backend`): deleting there would hurt a cache and free nothing here.
+  candidates by device and mount (see Path traversal); Docker by its data
+  root (`DockerRootDir`, or the containerd root when the containerd image
+  store is in use) and a local, not remote, Docker context; Nix by the store
+  it will actually collect (see `nix-gc`). A tier whose backend is
+  elsewhere is skipped and reported (`other_fs`, `remote_backend`):
+  deleting there would hurt a cache and free nothing here. A Nix store diskgc
+  cannot handle is different: `unsupported_store` is a misconfiguration and
+  reported as an error (see Validation).
+
 - **Overshoot:** for Cargo and generic candidates, at most one candidate past
   the goal. Docker and Nix actions are whole operations with no such bound.
 - **Tallies** (directory sizes) are computed only for `--dry-run`. They count
   allocated blocks and each inode once (Cargo hard-links binaries from
   `deps/`), and are still estimates. Decisions and reports use the statvfs
   delta.
+
+### Path traversal
+
+- All directory work is fd-relative. To reach a configured root or `path`:
+  1. In `/proc/self/mountinfo`, pick the deepest mount point that is a
+     path prefix of the configured path (after unescaping `\040` and
+     friends; where mounts are stacked, the topmost one).
+  2. Open that mount point with `O_PATH | O_DIRECTORY | O_NOFOLLOW` and
+     confirm with `statx` that it is that mount: `STATX_ATTR_MOUNT_ROOT` set
+     and `stx_mnt_id` equal to the mountinfo ID.
+  3. Resolve the rest of the path relative to it with
+     `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)`; if
+     the path *is* the mount point, the rest is `.`.
+
+  Example: `/home/mark/.cache/pip` with `/home` as its own mount opens
+  `/home`, then resolves `mark/.cache/pip`. A `/home -> /var/home` symlink
+  on the root filesystem fails in step 3 (`ELOOP`) and becomes
+  `unsafe_path`. This refuses symlinks and *any* mount crossing below the
+  root, including a bind mount of the same filesystem, which a device
+  comparison would miss. (`statx` on the full path is not used to find the
+  mount: it follows symlinks in the middle of the path.)
+- Deletion walks with `openat2(... RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS)`
+  and `unlinkat`, never following a symlink and never entering another mount.
+- `statx` results are trusted only when the attribute's bit is set in
+  `stx_attributes_mask` (e.g. `STATX_ATTR_MOUNT_ROOT`). If the kernel cannot
+  answer a required check, the candidate is skipped (`unsupported_fs`),
+  never assumed safe.
+- Minimum kernel: Linux 5.8 (`openat2`, `STATX_ATTR_MOUNT_ROOT`, mount ids).
+  Older kernels: exit 2 at startup.
+
+### Validation
+
+- **Static** (`check`, and every startup): YAML syntax, schema, unknown keys,
+  `version`, unique names, absolute paths, no `~`, size and duration syntax.
+  Needs nothing from the machine, so it runs in a Nix build sandbox and when
+  cross-building. Failure: exit 2, nothing deleted.
+- **Environmental** (at the start of every reclaim, for *all* tiers, before
+  the first deletion): roots and paths exist, contain no symlinks, resolve
+  to a device and mount; Docker and Nix backends reachable and local.
+  - A missing path, another filesystem or a remote Docker context is
+    normal: that tier is skipped with its reason (`missing`, `other_fs`,
+    `remote_backend`). A path created later is picked
+    up on a later reclaim.
+  - A misconfiguration (`unsafe_path`, `unsupported_store`) excludes that
+    tier and is reported as an error (exit 3 if the goal is then not met),
+    so a broken tier is visible rather than silently empty. The other tiers
+    still run: refusing all cleanup because one tier is broken would let
+    the disk fill.
+  - A daemon that is down (Docker, Nix) is a *backend* error: the tier is
+    skipped and reported, and `watch` retries soon (see Back-off).
 
 ### Locking
 
@@ -453,14 +574,14 @@ is accepted until measured otherwise.
 | `nix.gc.automatic` | Timed Nix GC | Time-based, not pressure-based. |
 | Docker `builder.gc` policy | Bounds BuildKit cache size | Docker only; size-based, not free-space-based. |
 | `cargo-sweep`, `cargo-clean-all` | Age-based Cargo target cleanup | No lock awareness, no free-space goal, no other tiers. |
-| `systemd-tmpfiles` age cleanup | Age-based deletion of paths | No pressure trigger, no in-use checks. |
+| `systemd-tmpfiles` age cleanup | Age-based deletion; skips paths protected by a BSD `flock` | No free-space trigger, no policy across ecosystems, no Cargo-specific lock handling. |
 
 diskgc's contribution is the coordinator: one free-space goal, an ordered
 policy across ecosystems, and in-use checks per type.
 
 ## Deployment
 
-- One Rust binary, Linux only.
+- One Rust binary, Linux 5.8 or newer.
 - NixOS module: renders the YAML, ships the tmpfiles rule for the lock, runs
   `check` at build time, and starts one `diskgc watch` instance per
   configured path as the configured user.
@@ -470,12 +591,15 @@ policy across ecosystems, and in-use checks per type.
 
 ## What good looks like (observable)
 
-- With reclaimable candidates available, no job on a watched host fails with
-  ENOSPC unless writes outpace the reserve (see risks).
+- With reclaimable candidates available, no job on a watched host fails for
+  lack of filesystem bytes unless writes outpace the reserve (see risks).
+  Inode exhaustion and quotas are not covered.
 - `ensure` exits 0 only if its final sample of available space is at least
   `--min-free`, and exits 0 without taking the lock when space is already
   there.
-- **Cargo race tests pass**, each with real `cargo build` processes:
+- **Cargo race tests pass**, each with real Cargo processes, run against
+  every supported Cargo version (at least the oldest supported stable and
+  current nightly):
   1. a build holding the lock: its target is skipped;
   2. a build that starts during deletion: it waits, then succeeds;
   3. one build blocked on the lock plus another started right after the
@@ -484,31 +608,46 @@ policy across ecosystems, and in-use checks per type.
   5. a new profile (`--release`, `--target`) started between discovery and
      locking: skipped as `changed`, its build succeeds;
   6. diskgc SIGKILLed at random points during deletion, repeatedly: the next
-     `cargo build` always succeeds.
+     `cargo build` always succeeds;
+  7. a `cargo check` paused after taking `.cargo-build-lock` and before
+     `.cargo-lock`, plus a concurrent `cargo build`: the target is skipped,
+     no lock file is ever unlinked, both commands succeed;
+  8. the compile-to-run handoff: `cargo run` / `cargo test` on an old,
+     up-to-date target, paused deterministically between compilation and
+     execution (a `runner` wrapper that waits): the target is skipped as
+     `in_use`, the binary runs;
+  9. a profile directory containing an unknown `.cargo-*lock*` file:
+     skipped as `unsupported_layout`.
 - With available space steady between the two thresholds, `watch` does zero
   scans and zero deletions.
 - Every action produces one log line and one JSON `actions` entry.
+- A deliberately misconfigured generic tier (e.g. a symlinked `path`) shows
+  up as an error in the report, not as a silently empty tier.
 - An invalid config exits 2 and deletes nothing; `check` reports the same
   error; `--json` reports it as `usage_error`.
-- The real run's deletions are a prefix of the `--dry-run` list on an
-  unchanged system (`ordered` groups, or `random` with the same seed; Cargo
-  and generic tiers).
-- `ensure` never runs past `--timeout`.
+- On an unchanged system, the real run's actions are a prefix of the
+  *eligible* entries of the `--dry-run` plan (`ordered` groups, or `random`
+  with the same seed; Cargo and generic tiers).
+- `ensure` never runs longer than `--timeout` + 10 s.
 
 ## What bad looks like (must never happen)
 
-- Anything deleted that no configured tier selected (generic commands
-  excepted: their scope is the config author's).
-- A `.cargo-lock` file deleted or moved, a target deleted while a Cargo
-  process holds its lock, or two Cargo builds running in one target dir
-  because of diskgc.
+These apply to typed tiers. A generic command can do anything its author
+writes; diskgc only guarantees where and when it runs.
+
+- Anything deleted that no configured tier selected.
+- Any Cargo lock file (`.cargo-lock`, `.cargo-build-lock`,
+  `.cargo-artifact-lock`, or a later addition) deleted or moved.
+- A target deleted while a Cargo process holds any of its locks, or two
+  Cargo builds running in one target dir because of diskgc.
 - Anything outside locked profile directories deleted by the Cargo tier.
 - A Docker volume or container, a Nix GC root, profile or generation removed.
 - Deletion following a symlink or crossing into another mount.
 - A generic command run in any directory other than its validated `path`.
 - `ensure` exiting 0 when the space is not there, or running past its
-  deadline.
-- A config error discovered only after something was deleted.
+  deadline plus the 10 s termination grace.
+- A static config error discovered only after something was deleted, or a
+  tier's environmental check run only after other tiers deleted.
 
 ## Scope
 
@@ -531,7 +670,9 @@ CI.
 - Cargo top-level entries outside profile directories (`target/doc`,
   `target/tmp`, `target/criterion`). A generic tier can cover them if
   someone wants that.
-- Running as root by default; Podman; rootless Docker; non-Linux.
+- Inode exhaustion and user/project quotas: `ensure` reports bytes only.
+- Running as root by default; Podman; rootless Docker; non-Linux; Linux
+  older than 5.8.
 
 ## Key decisions
 
@@ -540,11 +681,12 @@ CI.
 | Tier policy location | YAML; tier types in code | Policy differs per machine; safety needs type knowledge. |
 | Ordering | Groups in list order; `ordered` or `random` tiers inside a group; candidates oldest first | Random spreads cache loss across a fleet without ever running pressure tiers before stale ones. |
 | Thresholds | Command-line arguments | Same config for laptop and CI; smaller frozen schema. |
-| Cargo deletion | Lock in place, delete inside locked profile dirs only, keep lock files | Blocked and new Cargo processes stay on one lock inode; unlocked areas are never touched. |
-| Cargo in-use | Locks + `/proc` exe/cwd scan + `idle_for` | Catches binaries still running after Cargo released the lock. |
+| Cargo deletion | Take all known lock files, delete inside locked profile dirs only, keep every lock file; unknown lock files → skip | Blocked and new Cargo processes stay on the same lock inodes; unlocked areas and unknown layouts are never touched. |
+| Cargo in-use | Locks + `/proc` heuristics (exe/cwd in target, `cargo*` processes in the project or with `CARGO_TARGET_DIR`) + `idle_for` | Covers running binaries and the compile-to-run handoff; a heuristic, stated as such. |
+| Path handling | fd-relative `openat2` from the mount root with `RESOLVE_BENEATH \| NO_SYMLINKS \| NO_XDEV` | Catches symlinks and bind mounts, which device comparison misses. |
 | Generic tier | Folder required + argv command | Folder gives it a filesystem, a tally and a working directory. |
 | State | None persisted | Wiped runners have nothing to drift or corrupt. |
-| Success measure | statvfs delta | Tallies are wrong with hard links and Nix dedup. |
+| Success measure | Final statvfs sample; per-action signed `avail_delta` as an observation | Tallies are wrong with hard links and Nix dedup; concurrent writers make per-action attribution impossible. |
 | Concurrency | Fixed, provisioned `/run/diskgc/lock` | One lock inode per host, guaranteed. |
 | Privileges | Non-root by default | Removes the "root runs commands from YAML" hazard. |
 | `--target-free` default | `ensure`: equal to `--min-free`; `watch`: required | Asking for 50G must not delete 70G unless asked; a watcher needs two thresholds. |
@@ -556,41 +698,52 @@ below, each with the check that resolves it.
 
 ## Weak assumptions & risks
 
-- **Cargo lock coverage (load-bearing, unverified).** Assumes Cargo holds an
-  exclusive `flock` on `<profile>/.cargo-lock` for the whole build, and that
-  all writers inside a profile directory go through Cargo. Verified so far:
-  the files exist, including per-triple directories. Not verified: lock
-  duration, Cargo's newer separate `build-dir` layout, whether `cargo test` /
-  `cargo run` hold the lock while running binaries. Resolved by the race
-  tests above.
+- **Cargo lock coverage (load-bearing, partly verified).** Cargo's lock set
+  changes between versions: this machine already has `.cargo-build-lock`
+  and `.cargo-artifact-lock` next to `.cargo-lock` (Cargo 1.90 stable to a
+  1.96 nightly are installed). Not verified: which lock covers which phase,
+  the separate `build-dir` layout, how long locks are held around `cargo
+  run` / `cargo test`. The allowlist plus `unsupported_layout` keeps unknown
+  versions safe (skipped) rather than unsafe; the race tests, run per Cargo
+  version, decide what is supported.
 - **Half-deleted incremental state.** Deleting `.fingerprint/` first should
   force a full rebuild, but rustc loading a partly deleted `incremental/`
   session might still fail. Resolved by race test 6.
 - **Last-build heuristic.** Directory mtimes change on real rebuilds but not
   on no-op builds, so an up-to-date, actively used target can look idle. The
-  lock and `/proc` checks still protect running work.
-- **`/proc` scan visibility.** Only the caller's own processes are visible
-  (and fewer with `hidepid`). Fine when diskgc runs as the owner of the
-  targets; weaker under `--allow-root` on multi-user hosts.
+  lock and process checks still protect visible running work.
+- **Process heuristics, not proof.** Only the caller's own processes are
+  visible (fewer with `hidepid`). A Cargo started from outside the project
+  directory without `CARGO_TARGET_DIR` (e.g. `--manifest-path`, or a
+  `.cargo/config.toml` `target-dir`) is not recognised in the
+  compile-to-run window. Fine when diskgc runs as the owner of the targets;
+  weaker under `--allow-root` on multi-user hosts. A strict guarantee would
+  need Cargo itself to hold a lock until the run ends.
 - **Burst writes.** Thresholds cannot protect against a write burst. The gap
   below `--min-free` must exceed write rate × (interval + slowest tier).
   Documented, not enforced.
 - **Nix GC.** Can take minutes on a large store, holding the host lock
   meanwhile (hence the deadline). With `auto-optimise-store`, freed space can
-  lag. Non-root GC via the daemon: to verify.
+  lag. To verify: non-root GC via the daemon, and how to ask Nix which
+  store is in effect without depending on the experimental `nix-command`
+  feature (`nix config show` / `nix store info` need it).
 - **Docker.** Build cache `until` semantics (last use) and where images live
   (containerd image store vs `DockerRootDir`) to verify on the deployed
   version. Remote contexts or builders are skipped, not guessed.
 - **Generic tier.** Arbitrary commands. Mitigated by non-root default, argv
   execution, `openat2` working directory, the inherited host lock and the
   StrictModes check under `--allow-root`. Still the most dangerous surface.
-- **Lock stalling.** Any local user can hold `/run/diskgc/lock`, and an orphaned child keeps holding it until it exits.
-- **`syncfs`** can stall on a busy disk; it counts against the deadline.
+- **Lock stalling.** Any local user can hold `/run/diskgc/lock`, and an
+  orphaned child keeps holding it until it exits.
+- **Asynchronous freeing.** Without `syncfs`, a filesystem that frees blocks
+  in the background can make diskgc delete one candidate more than needed.
+  Accepted: it is bounded by the overshoot rule.
 
 ## Irreversibility map
 
 Hard to walk back (deep review, tests before features):
-- **The deletion path:** the Cargo lock-in-place protocol, fd-relative
+- **The deletion path:** the Cargo lock-in-place protocol and its lock-file
+  allowlist, fd-relative
   deletion with symlink and mount rules, generic tier `path` handling and
   command execution, filesystem matching.
 - **CLI contract used by CI and harnesses:** `ensure` flags, exit codes and

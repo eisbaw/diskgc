@@ -98,7 +98,7 @@
   <circle cx="68" cy="656" r="14" fill="#2f9a5a"/><text x="68" y="661" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">?</text>
   <text x="96" y="651" class="h3">docker-build-cache · unused_for: 7d</text>
   <text x="724" y="651" class="small" text-anchor="end">layers rebuilt on demand</text>
-  <text x="96" y="672" class="mono code">docker builder prune --force --filter until=168h</text>
+  <text x="96" y="672" class="mono code">docker builder prune --all --force --filter until=168h</text>
 
   <rect x="40" y="692" width="700" height="56" rx="8" fill="#f3faf5" stroke="#9fd3b2"/>
   <circle cx="68" cy="720" r="14" fill="#2f9a5a"/><text x="68" y="725" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">?</text>
@@ -113,7 +113,7 @@
   <rect x="40" y="794" width="700" height="56" rx="8" fill="#fff8ee" stroke="#f0c98a"/>
   <circle cx="68" cy="822" r="14" fill="#d97706"/><text x="68" y="827" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">4</text>
   <text x="96" y="817" class="h3">docker-images · select: dangling</text>
-  <text x="724" y="817" class="small" text-anchor="end">untagged, nothing lost</text>
+  <text x="724" y="817" class="small" text-anchor="end">untagged; may cost a rebuild</text>
   <text x="96" y="838" class="mono code">docker image prune --force</text>
 
   <rect x="40" y="858" width="700" height="56" rx="8" fill="#fff8ee" stroke="#f0c98a"/>
@@ -126,7 +126,7 @@
   <circle cx="68" cy="950" r="14" fill="#d97706"/><text x="68" y="955" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">6</text>
   <text x="96" y="945" class="h3">generic · path: /home/mark/.cache/pip (escape hatch)</text>
   <text x="724" y="945" class="small" text-anchor="end">trusted command, no in-use check</text>
-  <text x="96" y="966" class="mono code">command: [pip, cache, purge]  (argv, cwd = path)</text>
+  <text x="96" y="966" class="mono code">command: [pip, --cache-dir, /home/mark/.cache/pip, cache, purge]</text>
 
   <!-- Per-candidate loop -->
   <text x="800" y="552" class="h3">For each tier, each candidate</text>
@@ -140,7 +140,7 @@
   <path d="M960 660 V674" class="edge" marker-end="url(#arrow)"/>
 
   <rect x="800" y="676" width="320" height="40" rx="6" fill="#fff7e6" stroke="#c98a12" stroke-width="1.2"/>
-  <text x="960" y="701" class="body" text-anchor="middle">safety gate: in use → skip, add to report</text>
+  <text x="960" y="701" class="body" text-anchor="middle">tier-specific checks fail → skip + report</text>
   <path d="M960 716 V730" class="edge" marker-end="url(#arrow)"/>
 
   <rect x="800" y="732" width="320" height="40" rx="6" class="node"/>
@@ -148,7 +148,7 @@
   <path d="M960 772 V786" class="edge" marker-end="url(#arrow)"/>
 
   <rect x="800" y="788" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="813" class="body" text-anchor="middle">syncfs, re-read available space</text>
+  <text x="960" y="813" class="body" text-anchor="middle">re-read available space</text>
   <path d="M960 828 V842" class="edge" marker-end="url(#arrow)"/>
 
   <rect x="800" y="844" width="320" height="40" rx="6" class="node"/>
@@ -171,14 +171,14 @@
   <!-- Cargo safety gate -->
   <rect x="40" y="1028" width="700" height="132" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
   <text x="64" y="1056" class="h3">Cargo tier: when and how a target/ is deleted</text>
-  <text x="64" y="1082" class="body">• CACHEDIR.TAG + profile dirs with .cargo-lock; no .diskgc-keep; built &gt; idle_for ago</text>
-  <text x="64" y="1102" class="body">• all .cargo-lock taken without waiting, then re-listed; no process exe/cwd inside</text>
-  <text x="64" y="1122" class="body">• only inside locked profile dirs: .fingerprint/ first, then all but .cargo-lock</text>
+  <text x="64" y="1082" class="body">• CACHEDIR.TAG + known lock files (unknown → skip); no .diskgc-keep; built &gt; idle_for ago</text>
+  <text x="64" y="1102" class="body">• all known Cargo lock files taken without waiting, re-listed; /proc shows no activity</text>
+  <text x="64" y="1122" class="body">• only inside locked profile dirs: .fingerprint/ first, then all but the lock files</text>
   <text x="64" y="1142" class="body">• lock files never move: waiting and new builds share one lock, so they just wait</text>
 
   <!-- Never touched -->
   <rect x="780" y="1028" width="380" height="132" rx="10" fill="#fdf0f0" stroke="#d9534f" stroke-width="1.5"/>
-  <text x="804" y="1056" class="h3">Never touched</text>
+  <text x="804" y="1056" class="h3">Never touched by typed tiers</text>
   <text x="804" y="1082" class="body">• Docker volumes and containers; Nix roots, generations</text>
   <text x="804" y="1102" class="body">• anything matched by no tier, or marked .diskgc-keep</text>
   <text x="804" y="1122" class="body">• lock files; target/doc, tmp, criterion; busy targets</text>
