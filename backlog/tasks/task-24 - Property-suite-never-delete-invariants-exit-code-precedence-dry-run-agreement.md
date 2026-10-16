@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:50'
+updated_date: '2026-10-16 23:12'
 labels:
   - wave-2
   - testing
@@ -29,6 +29,12 @@ Why: invariants must hold for inputs nobody thought of. Implement the property t
 - [ ] #2 A planted bug (deleting one unchecked entry) is caught and shrunk to a small regression file
 - [ ] #3 Every property listed in docs/testing.md#3-property-tests is implemented
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-1: 'just soak' is a placeholder (prints NOT RUN, exits 0). Replace it when the property suite exists.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

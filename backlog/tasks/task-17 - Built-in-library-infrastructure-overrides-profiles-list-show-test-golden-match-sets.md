@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:50'
+updated_date: '2026-10-16 23:13'
 labels:
   - wave-2
   - config
@@ -31,6 +31,12 @@ Why: the library must grow without silently changing meaning. Implement override
 - [ ] #4 Golden sets also cover the profiles shipped in wave 1 (cargo-target and the idle-* filters)
 - [ ] #5 profiles test matches examples on paths in diskgc-core (it does not depend on the test-only model crate)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-1: the flake's source filter is an allowlist (workspaceFiles in flake.nix): root Cargo.toml/Cargo.lock plus .rs/.toml files under crates/. Embedded or test YAML (include_str! built-in profiles, host models, golden sets, insta snapshots) is NOT a build input until added, e.g. lib.fileset.fileFilter (f: f.hasExt "yaml") ./crates. Without that, the dev shell works but nix build / nix flake check fail with a missing-file error. Add it in the same change that adds the first such file.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

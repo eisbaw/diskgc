@@ -4,7 +4,7 @@ title: 'ModelHost: YAML host model, virtual clock, events on the call trace'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:50'
+updated_date: '2026-10-16 23:13'
 labels:
   - wave-1
   - testing
@@ -28,6 +28,12 @@ Why: most behaviour is tested in-process and deterministically through the Host 
 - [ ] #3 Unknown keys and dangling pid references are load errors
 - [ ] #4 An unlinkat without a preceding identity check fails the test
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-1: the flake's source filter is an allowlist (workspaceFiles in flake.nix): root Cargo.toml/Cargo.lock plus .rs/.toml files under crates/. Embedded or test YAML (include_str! built-in profiles, host models, golden sets, insta snapshots) is NOT a build input until added, e.g. lib.fileset.fileFilter (f: f.hasExt "yaml") ./crates. Without that, the dev shell works but nix build / nix flake check fail with a missing-file error. Add it in the same change that adds the first such file.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

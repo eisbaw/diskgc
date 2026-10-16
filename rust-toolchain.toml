@@ -1,0 +1,13 @@
+# Product toolchain. Read by the flake (rust-overlay fromRustupToolchainFile),
+# so the dev shell, `nix build` and `nix flake check` all use exactly this.
+# Bumping the version here is the only way to change the product toolchain.
+# The Cargo versions *under test* (race tests) are pinned separately in the
+# e2e image (docs/architecture.md, Implementation).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+# The musl target is installed here but selected only by the flake's package
+# derivation (CARGO_BUILD_TARGET); the dev shell builds for the host (gnu)
+# target so cargo-fuzz keeps working.
+targets = ["x86_64-unknown-linux-musl"]
+profile = "minimal"

@@ -1,0 +1,13 @@
+# Destructive end-to-end tests that need a real kernel. NOT a workspace
+# member (the root Cargo.toml excludes it) and has its own Cargo.lock, so no
+# cargo command run in the workspace compiles it. It is built only into the
+# e2e test image (docs/testing.md, Safety interlock, layer 1); the flake
+# lints it with its own clippy check.
+[package]
+name = "diskgc-e2e"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+diskgc-core = { path = "../crates/diskgc-core" }

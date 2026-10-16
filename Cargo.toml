@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/diskgc",
+    "crates/diskgc-core",
+    "crates/diskgc-linux",
+    "crates/diskgc-model",
+    "crates/diskgc-modelgen",
+]
+# Destructive container tests live in a separate Cargo project so that no
+# cargo command run in this workspace compiles them (docs/testing.md, Safety
+# interlock, layer 1).
+exclude = ["diskgc-e2e"]
+
+[workspace.package]
+# Single source of the product version; the flake reads it from here.
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+diskgc-core = { path = "crates/diskgc-core" }
+diskgc-linux = { path = "crates/diskgc-linux" }
+diskgc-model = { path = "crates/diskgc-model" }
+diskgc-modelgen = { path = "crates/diskgc-modelgen" }
+
+# Line tables are enough for backtraces and keep incremental builds and
+# target/ small; dependencies carry no debug info at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
