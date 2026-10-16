@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 8. The human decides when this is done.
+Status: draft, round 9. The human decides when this is done.
 
 Diagram: `docs/diskgc-design.svg` (interface plus an *example* tier list; the
 tier list itself is config).
@@ -58,9 +58,11 @@ apply whatever the profile.
 
 ```
 diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
+              [--tally-budget DUR] [--no-index]
               [--dry-run] [--json] [--config FILE] [--allow-root] PATH
 diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR]
               [--config FILE] [--allow-root] PATH
+diskgc watch  --tally-only [--config FILE] PATH
 diskgc check  [--config FILE]
 diskgc survey [--select EXPR] [--json] [--config FILE] PATH...
 diskgc profiles list | show NAME | test   [--config FILE]
@@ -113,7 +115,11 @@ tiers.
 - `--target-free` is required here (unlike `ensure`): a watcher without two
   thresholds would reclaim a sliver at every poll. The error message says so.
 - Every `--interval` (default `10s`): one `statvfs`. At or above
-  `--min-free`: nothing else happens, no scanning, no tallying.
+  `--min-free`: no deletions; only the background tally keeps the index
+  fresh, within its I/O budget (see The tally).
+- `--tally-only`: maintain the index and its snapshot, never reclaim. For CI
+  runners, where `ensure` in the pre-job hook then finds a warm index.
+  `--min-free` / `--target-free` are not used in this mode.
 - Below `--min-free`: run the same core as `ensure`, goal `--target-free`.
   No overall deadline; each action is bounded by its tier's `timeout`. The
   wait for the host lock must stay interruptible by SIGTERM.
@@ -191,19 +197,26 @@ JSON result (field names are part of the contract):
 {
   "status": "met | exhausted | error | usage_error | lock_timeout | deadline | interrupted | dry_run",
   "mount": "/", "path": "/home/mark/src/app", "seed": null,
+  "index": {"source": "live | snapshot | sync", "age_s": 0, "units": 0, "untallied": 0},
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | missing | unsafe_path | contains_ipc | contains_mount | contains_special | protected | excluded | not_owner | has_not"}],
+  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | missing | unsafe_path | contains_ipc | contains_mount | contains_special | protected | excluded | not_owner | has_not | stale"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
 }
 ```
 
 - `seed` is `null` when no group uses `random`.
+- `index` says where the order came from: the live index of a running
+  `watch`, a snapshot, or a synchronous tally, how old it is, and how many
+  candidates were not yet tallied. `stale` skips are units that were gone
+  or replaced when re-checked.
 - `plan` is filled only by `--dry-run` (empty otherwise); `reason` uses the
-  skip-reason enum, `estimated_bytes` is `null` for Docker and Nix tiers.
+  skip-reason enum; a bucket is one plan entry with a member `count`;
+  `estimated_bytes` is `null` for Docker and Nix without a reported size
+  and for candidates not yet tallied.
 - `avail_delta_bytes` is signed (see Reclamation core).
 - `count` is 1 for a single candidate. Selections that match very many
   candidates (e.g. under `/tmp`) aggregate: one `skipped` entry per reason with `count`
@@ -359,8 +372,10 @@ Examples: `pytest-tmp && idle-10d`, `(pytest-tmp || nix-shell-rc) && idle-3d`
 - **Non-`fs` kinds** allow only `NAME` (`docker-images`, `nix-store`) or
   `NAME` / `NAME && idle-*` (`docker-build-cache`): they have no
   per-candidate enumeration, so unions and negation have nothing to act on.
-- **Filters are evaluated lazily**, per candidate, oldest first. A candidate
-  that fails a filter is reported as skipped with that filter's reason
+- **Filters are evaluated from the index** where it already knows the
+  answer, and re-evaluated at deletion time (see The reclaim walk). A
+  candidate that fails a filter is reported as skipped with that filter's
+  reason
   (`not_idle`, `has_not`). The set-algebra properties hold for the set of
   *eligible* candidates.
 
@@ -514,8 +529,10 @@ Rules:
   - `random`: shuffled on each reclaim. On a CI fleet, runners then lose
     different caches first, so the fleet as a whole stays warmer. The seed is
     in the report and can be fixed with `DISKGC_SEED` for reproducible tests.
-- Candidates *within* a tier are always oldest first, across all profiles
-  the tier's expression matched.
+- Within a tier, units are taken in the tier's `order` (`oldest` by
+  default, or `best-fit`; see The index), across all profiles the tier's
+  expression matched; candidates not yet in the index come after the
+  queue, oldest first.
 - A tier's optional `roots:` supplies the roots of the `roots: required`
   profiles in its expression (e.g. `cargo-target`); such a profile without
   roots is a load-time error, and so is `roots:` on a tier whose profiles
@@ -554,6 +571,7 @@ action can still delete anything its author tells it to.
 | `name` | Unique; used in logs and reports. |
 | `select` | Profile expression (see Composing profiles). |
 | `roots` | Roots for the `roots: required` profiles in `select`. |
+| `order` | `oldest` (default) or `best-fit`, see The index. |
 | `timeout` | Per-action limit (default `10m`); a child is killed after it. |
 
 ## Built-in kinds
@@ -570,10 +588,9 @@ checks. No profile or tier can switch them off.
   that is a mount point or contains one (a user's FUSE or sshfs mount in
   `/tmp` is common) is skipped (`contains_mount`) without being `stat`ed, so
   a dead mount cannot hang the scan.
-- **Order:** oldest first, by the candidate's own mtime (one `stat` each, no
-  tree walk), so roots with 100,000+ entries stay cheap to order. The checks
-  below run per candidate, in order, until the goal is met; a candidate
-  rejected by `idle_for` still costs one walk of its tree.
+- **Order:** from the index (the tier's `order`). Discovery of
+  100,000+ entries costs one `stat` each and happens in the background
+  tally, not in the reclaim walk.
 - **In use (skip):**
   - a visible process has an open file descriptor, working directory, root
     or memory mapping on a file in the candidate, or an environment variable
@@ -647,7 +664,8 @@ recheck, delete" steps.
   targets on NFS (`unsupported_fs`): Cargo does not lock there.
 - **Last build:** newest mtime of the profile directories and their
   `.fingerprint/`, `deps/`, `build/`, `incremental/` subdirectories. A few
-  `stat` calls, no tree walk. Candidates are ordered by it, oldest first.
+  `stat` calls, no tree walk. This is the target's `newest_change` in the
+  index.
 - **Eligible** only if (when the tier's expression uses an `idle-*` filter)
   the last build is older than its `idle_for`, and some profile directory
   holds more than its lock files (otherwise `empty`: an
@@ -774,32 +792,163 @@ the filesystem of `/nix/store` is the one matched. Anything else: the tier is ex
 - Non-zero exit is an error in the report (and exit 3 if the goal is not
   met), never just a log line.
 
-## Reclamation core
+## Gathering and reclaiming
+
+diskgc separates **knowing what could be freed** from **freeing it**. When a
+disk is nearly full is the worst moment to walk 45 GiB of `/tmp` to find out
+what is big: that walk alone took ncdu over 7 minutes on this machine. So:
+
+1. A **tally** builds and maintains an **index** of what the profiles match,
+   with sizes, ages and a last-checked time, slowly and in the background.
+2. A **reclaim walk** takes units from a **priority queue** over that index
+   and acts on them, revalidating each one cheaply first.
+
+**The index is a cache, never an authority.** Every unit is revalidated
+before anything is done to it, and all safety checks (ownership, mounts,
+protection, nesting, in use, locks, Cargo's protocol) run at deletion time,
+exactly as before. A stale, partial, corrupt or missing index can make
+diskgc slower or pick a worse candidate first; it can never make it delete
+something the checks would refuse.
+
+### The index
+
+The index is a set of trees, one per filesystem, of **units**: things the
+profiles found, with what the tally learned about them. A unit has medium
+granularity: coarse enough that the index stays small, fine enough that it
+is cheap to check whether it still holds.
+
+```
+Unit {
+  identity: single (mount, inode, birth time) | bucket (mount, parent, name family)
+  path
+  profiles                      # every source profile that found it (a set)
+  members                       # bucket only: count (names are re-read, not stored)
+  est_bytes, files              # allocated blocks, each inode counted once
+  newest_change                 # newest mtime/ctime seen (for idle-* filters)
+  flags                         # keep file, special content, sockets, mounts (as last seen)
+  checked_at, tallied_at
+  cursor                        # resumable walk position while a big tree is being tallied
+}
+```
+
+- **Granularity:** one unit per candidate (one `pytest-of-*` dir, one Cargo
+  target, one top-level `/tmp` entry). Small candidates are merged per
+  (profile set, parent directory, name family) into one **bucket**, so
+  98,000 tiny `nix-shell-*-*` rc dirs become a handful of units. The
+  bucket threshold is derived, not stored: the smallest power of two from
+  64 MiB up that keeps the index within its bound (default 100,000 units,
+  roughly 20 MB of memory).
+- **Identity** is (mount, inode, birth time from `statx`), falling back to
+  (mount, inode, parent identity) where the filesystem reports no birth
+  time. ctime and size are *not* identity: they change whenever something
+  inside changes, and only mean "refresh the estimate". A path that several
+  profiles match is one unit with a set of profiles, so it is counted once.
+- **Trees and queue:** units are stored in a per-mount path trie, which also
+  answers the overlap questions (`protect`, `!profile`, nesting) without
+  touching the disk. The **priority queue** is a derived view: for each
+  tier, the units its expression selects on that filesystem, ordered by
+  group, then tier, then the tier's `order` (below). Changing tiers rebuilds
+  the queue, not the index.
+- **Order within a tier** (`order:` on a tier):
+  - `oldest` (default): least recently changed first, as before. Keeps the
+    LRU gradient even in tiers without an `idle-*` filter, and makes the
+    smallest possible overshoot likely.
+  - `best-fit`: the smallest unit whose estimate covers the remaining need,
+    otherwise the largest. Frees "something sizable" in one step when the
+    disk is nearly full, with little overshoot. Buckets count as many
+    deletions and rank after single units of the same size.
+- **Freshness** has two levels. A **re-check** is cheap (`statx` the unit
+  and its parent: still there, same identity); a **re-tally** walks the
+  tree to refresh size and `newest_change`. Directory mtimes do not reveal
+  growth deep inside a tree, so re-tallies are scheduled by age, not
+  triggered by mtimes alone.
+
+### The tally
+
+- **Background (in `watch`):** the tally runs forever in **mini-batches**
+  with a **duty cycle**: after a batch that took *t*, it sleeps 19 × *t*, so
+  it uses about 5 % of one disk's time whatever the device (on a cold HDD a
+  `statx` can take 10 ms, on NVMe microseconds). It also runs at idle I/O
+  priority and `nice 19`; note that only the BFQ scheduler honours idle I/O
+  priority, so on NVMe (scheduler `none`) the duty cycle is the real limit.
+  Big trees are tallied across many batches via their `cursor`; a cursor
+  survives entries vanishing under it (`ENOENT` ends that branch).
+- **Order of work:** discovery (list profile roots for new and vanished
+  candidates), re-checks, re-tallies, with aging so that none starves the
+  others on a busy `/tmp`.
+- **Pausing:** before each batch the tally tests whether anyone holds the
+  host lock (`/run/diskgc/lock`, a non-blocking test); if so, a reclaim is
+  running (in this or another process) and the tally waits. The tally never
+  speeds up under pressure; when space is short, the reclaim walk uses what
+  is already known.
+- **Synchronous mode:** without a usable index (e.g. `ensure` on a runner
+  that runs no `watch`, or `--select` / `--roots` naming roots no index
+  covers), the same engine runs first at full speed for a bounded time
+  (`--tally-budget`, default the smaller of 30 s and a quarter of
+  `--timeout`; `0` means no limit), **before** taking the host lock (it is read-only), then the
+  reclaim walk uses the partial index.
+- **Snapshot:** `watch` writes its index atomically (temporary file +
+  rename) every 5 minutes and on exit, to
+  `$XDG_STATE_HOME/diskgc/index-<fs>` (mode 0600, it lists paths), with a
+  format version and a hash of what shapes the index (profiles and roots,
+  not tiers). `<fs>` is the filesystem's UUID where it has one, otherwise
+  its device number (`st_dev`); not `f_fsid`, which is 0 on tmpfs on older
+  kernels, and not the mount path. A single writer is enforced with a
+  separate lock file, `index-<fs>.lock`, that is never renamed (the
+  snapshot itself is replaced by rename, so a lock on it would not hold):
+  a second `watch` for the same filesystem and user fails at start (exit 2)
+  instead of racing. `ensure`
+  and `survey` use the snapshot if version and hash match and it is younger
+  than an hour; otherwise they tally synchronously. A snapshot another user
+  wrote is unreadable (0600), so that user's `ensure` tallies synchronously,
+  and says so in its report. A mismatched or corrupt snapshot is ignored
+  with a log line, never an error. `--no-index` forces synchronous mode.
+- **Docker and Nix units** carry the reclaimable size the tools report
+  (`docker buildx du`, `docker system df`), or no size if unknown.
+
+### The reclaim walk
 
 ```
 reclaim(min, goal, filesystem, deadline):
   if avail(filesystem) >= min: return met            # no lock taken
+  index := live index (watch) | fresh snapshot | synchronous tally (budget)
   lock /run/diskgc/lock, waiting until deadline
     on timeout: return met if avail >= min else lock_timeout
   if avail(filesystem) >= min: return met            # someone else freed it
   preflight all tiers (environmental validation)      # before any deletion
-  for group in groups:                                # list order
-    for tier in group.tiers(ranking, seed):           # ordered or shuffled
-      skip tier if preflight excluded it              # other_fs, missing, ...
-      for candidate in tier.candidates():             # oldest first
-        if avail(filesystem) >= goal: return met
-        if not_owner / protected / excluded / kept / contains_special /
-           contains_mount / not idle / has_not / in use / changed / empty:
-          record skip; continue
-        tier.reclaim(candidate, need = goal - avail)
-        record avail_delta = avail now - avail before
+  queue := units on this filesystem selected by a tier,
+           by group, tier rank, tier order (oldest | best-fit)
+  while avail < goal and queue not empty:
+    unit := queue.pop()
+    re-check unit (statx: same identity; bucket: one readdir of the parent,
+      members still match the family) and re-evaluate its selection now
+      (filters, `!profile`, `protect`, nesting):
+      gone or moved: record skip (stale), continue
+      changed estimate (cheap re-check only, no walk): note it, keep going;
+        the background tally refreshes it later
+    for candidate in unit (a bucket's members oldest first; one /proc scan
+                           per bucket, not per member):
+      if not_owner / protected / excluded / kept / contains_special /
+         contains_mount / not idle / has_not / in use / changed / empty:
+        record skip; continue                         # checks at deletion time
+      action(candidate, need = goal - avail)
+      record avail_delta
+      if avail >= goal: break
+  if avail < goal:                                    # always, any index source
+    one discovery pass over the selected profiles for candidates not in the
+      queue (created since the index was built), oldest first, same checks
   return met if avail >= min else (error if any errors else exhausted)
 ```
 
 Every loop step, child wait and native deletion step checks the deadline.
-
 `watch` calls it with `min = --min-free`, `goal = --target-free`; `ensure`
-with its two flags.
+with its two flags. With a warm index, the first deletion starts within
+seconds of crossing `--min-free`: re-checking a unit costs a few `statx`
+calls, not a walk. `exhausted` is only reported after the final discovery
+pass, so an index that missed something can delay success but never fake
+exhaustion. `stale` means the unit was gone or replaced at re-check;
+`changed` is Cargo's "a lock file or build appeared after the locks were
+taken".
 
 - **Available space** = `f_bavail × f_frsize` from `statvfs`: what an
   unprivileged writer can use, never the root reserve. No `syncfs` (it waits
@@ -823,10 +972,9 @@ with its two flags.
 
 - **Overshoot:** for filesystem candidates (including Cargo), at most one
   candidate past the goal. Docker and Nix actions are whole operations with no such bound.
-- **Tallies** (directory sizes) are computed only for `--dry-run`. They count
-  allocated blocks and each inode once (Cargo hard-links binaries from
-  `deps/`), and are still estimates. Decisions and reports use the statvfs
-  delta.
+- **Tallies** count allocated blocks and each inode once (Cargo hard-links
+  binaries from `deps/`), and are still estimates. They decide the order of
+  work, never whether a deletion is safe; reports use the statvfs delta.
 
 ### Path traversal
 
@@ -921,9 +1069,10 @@ with its two flags.
 | Nothing left to free | `watch` back-off until space drops further or 15 minutes pass. |
 | Within a reclaim | Stop as soon as the goal is met; re-check after every candidate. |
 
-Not included: per-tier cooldowns. They need state that survives between
-`ensure` processes; the cost (a no-op Nix GC per CI job when nothing is dead)
-is accepted until measured otherwise.
+Not included: per-tier cooldowns. The index snapshot could now carry
+them, but it is a cache that may be missing or discarded, and a cooldown
+that silently disappears is worse than none; the cost (a no-op Nix GC per
+CI job when nothing is dead) is accepted until measured otherwise.
 
 ## Prior art and why it is not enough
 
@@ -975,7 +1124,7 @@ apply whatever the profile.
 
 | Crate | Role |
 |---|---|
-| `diskgc-core` | Config schema; the **planner** (pure: a snapshot of facts in, a plan, skip reasons, exit-code precedence and report out); the **executor** (runs lock → recheck → delete → re-sample through the `Host` port); the `Host` trait. No syscalls of its own. |
+| `diskgc-core` | Config schema; the **index** types and the queue derivation (the planner's "snapshot of facts"); the **planner** (pure: index in, plan, skip reasons, exit-code precedence and report out); the **tally** engine and the **executor** (runs lock → re-check → delete → re-sample), both over the `Host` port, which also does snapshot I/O; the `Host` trait. No syscalls of its own. |
 | `diskgc-linux` | `LinuxHost`, the real `Host`. A library, because the contract tests use it. |
 | `diskgc-model` | `ModelHost`, a `Host` backed by a host model (below), its YAML schema, and the model-test harness. Test-only. |
 | `diskgc-modelgen` | Generates host-model *values* (parameterised fixtures and `proptest` strategies); YAML is only how they are saved. Test-only. |
@@ -989,6 +1138,10 @@ apply whatever the profile.
   reads), so the safety logic (flags, ordering, rechecks) lives in the core
   where the model can test it. Docker and Nix are domain-shaped:
   `run(argv, env, deadline)`.
+- **The tally's pacing is part of the port too:** batch timing, the duty
+  cycle's sleeps and the host-lock test go through the port and the virtual
+  clock, so the background tally and its pausing are model-testable, with
+  operation counts as the measure of I/O.
 - **Time is part of the port.** The clock and every blocking operation
   (waiting for the host lock, waiting for a child, the SIGTERM → 10 s →
   SIGKILL sequence, the re-sampling window) are port operations with an
@@ -1082,6 +1235,11 @@ invariants of What bad looks like, stated exactly:
 - no Cargo lock file ever deleted or moved; nothing outside a candidate's
   scope deleted; no symlink followed; no mount crossed (all checked on the
   call trace);
+- **the index is never an authority:** with a randomly stale, partial or
+  corrupted index (sizes, ages, flags, missing or extra units), every
+  deletion still passes the deletion-time checks, and nothing is deleted
+  that a run with a correct index would refuse; only the order and the
+  number of `stale` skips may differ;
 - the exit code follows the full precedence table for the final state;
 - on an unchanged system with the same seed, the real run's actions are a
   prefix of the eligible entries of the dry-run plan (filesystem
@@ -1150,6 +1308,13 @@ processes and mounts from the developer's system.
 - Mounts and the other-owner cases need `CAP_SYS_ADMIN` inside the
   container's user namespace (rootless Podman grants it there) and subuid
   ranges for the test user.
+- **Tally behaviour:** the duty cycle and the operation counts are
+  asserted in model tests (through the `Host` port; `/proc/<pid>/io` reads
+  close to zero on tmpfs and overlay, so it proves nothing in a
+  container); in the container, a warm-index reclaim starts deleting
+  within seconds on a 100,000-entry `/tmp`; a stale snapshot (wrong config
+  hash or too old) is ignored and `ensure` falls back to a
+  synchronous tally within `--tally-budget`.
 - **Signals, SIGKILL, deadlines, the CLI-hook use of `ensure`, `watch`
   running as a plain process** (no systemd in the container).
 
@@ -1232,8 +1397,14 @@ runner containers). Coverage of unit and model tests via `cargo llvm-cov`.
      `in_use`, the binary runs;
   9. a profile directory containing an unknown `.cargo-*lock*` file:
      skipped as `unsupported_layout`.
-- With available space steady between the two thresholds, `watch` does zero
-  scans and zero deletions.
+- With available space steady between the two thresholds, `watch` makes
+  zero deletions, and its tally keeps its duty cycle (asserted in model
+  tests through the `Host` port).
+- With a warm index, the first deletion starts within seconds of available
+  space crossing `--min-free`, even on a `/tmp` with 100,000+ entries (no
+  tree walk before acting).
+- The index stays within its bound (default 100,000 units) on such a
+  `/tmp`, by bucketing small candidates.
 - Every action produces one log line and one JSON `actions` entry.
 - A deliberately misconfigured profile (e.g. a symlinked root) shows up as
   an error in the report, not as a silently empty tier.
@@ -1241,9 +1412,11 @@ runner containers). Coverage of unit and model tests via `cargo llvm-cov`.
   model test on a fixture taken from a real survey (anonymised).
 - An invalid config exits 2 and deletes nothing; `check` reports the same
   error; `--json` reports it as `usage_error`.
-- On an unchanged system, the real run's actions are a prefix of the
-  *eligible* entries of the `--dry-run` plan (`ordered` groups, or `random`
-  with the same seed; filesystem candidates, including Cargo).
+- On an unchanged system and for the same index (or with `--no-index` and
+  `--tally-budget 0`, so the synchronous tally completes), the
+  real run's actions are a prefix of the *eligible*
+  entries of the `--dry-run` plan (`ordered` groups, or `random` with the
+  same seed; filesystem candidates, including Cargo).
 - `ensure` never runs longer than `--timeout` + 10 s.
 - Every invariant in What bad looks like has model tests and is checked by
   the property tests; the differential contract tests agree between
@@ -1285,13 +1458,18 @@ In scope (v1): `ensure`, `watch`, `check`, `survey`, `profiles`; profiles
 with `find` / `where` / `action` and the selection grammar; kinds `fs`,
 `cargo-target`, `docker-build-cache`, `docker-images`, `nix-store`; the
 initial built-in profile library; user profiles and overrides; groups with
-`ordered` / `random` ranking; `--json`; NixOS module; plain binary + YAML for
-CI.
+`ordered` / `random` ranking and per-tier `order`; the index, background and
+synchronous tally, snapshot, `watch --tally-only`, `--tally-budget`,
+`--no-index`; `--json`; NixOS module; plain binary + YAML for CI.
 
 ## Non-goals
 
-- Disk usage analysis (use `ncdu`, `nix-du`).
-- Persisted state: no usage database, no cooldown timestamps.
+- Disk usage analysis (use `ncdu`, `nix-du`). `survey` reports only what
+  profiles match and the unmatched top-level name families; it is no
+  general browser or visualiser.
+- Authoritative persisted state: no usage database, no cooldown
+  timestamps. The index snapshot is a cache; deleting it only costs a
+  synchronous tally.
 - Copy-on-write filesystems with snapshots (Btrfs, ZFS), where deleting may
   free nothing. Warn on them.
 - Event-driven watching (inotify/fanotify).
@@ -1328,7 +1506,9 @@ CI.
 | Special removal | `command` action on a profile (argv, `{path}`, working directory = the checked candidate) | Some cruft needs the tool's own cleaner; the candidate still gets the always-on safety checks first. |
 | Protection | `!profile` per tier and a global `protect:` list, both by overlap (is, inside, contains); `!` only narrows | Per-tier exclusion where it is local, a global list where it must hold everywhere; overlap catches parents of protected dirs. |
 | Nesting | Skip a candidate whose tree contains `.diskgc-keep` or anything a non-`delete` profile matches | A plain delete of a parent must never bypass a special action. |
-| State | None persisted | Wiped runners have nothing to drift or corrupt. |
+| Gathering vs acting | Background tally builds an index of medium-grained units (one per candidate, small ones bucketed); reclaim pops a priority queue over it and revalidates each unit; synchronous tally with a time budget when no fresh index exists | No lengthy survey when the disk is already full; steady low I/O instead of bursts. |
+| State | The index (in memory in `watch`, snapshot file for `ensure` / `survey`) is a cache, never an authority; all safety checks run at deletion time | A stale or missing index costs speed, never safety; wiped runners lose nothing that matters. |
+| Order within a tier | `oldest` by default; opt-in `best-fit` (smallest unit covering the need, else largest) | Keeps the LRU gradient and small overshoot by default; `best-fit` frees something sizable in one step when asked. |
 | Success measure | Final statvfs sample; per-action signed `avail_delta` as an observation | Tallies are wrong with hard links and Nix dedup; concurrent writers make per-action attribution impossible. |
 | Concurrency | Fixed, provisioned `/run/diskgc/lock` | One lock inode per host, guaranteed. |
 | Privileges | Non-root by default | Removes the "root runs commands from YAML" hazard. |
@@ -1426,6 +1606,17 @@ below, each with the check that resolves it.
   `check` prints each tier's expression normalised, with the profiles it
   resolves to; `survey --select` shows what it would match before any
   deletion.
+- **Index rot.** Files come and go faster than the tally re-checks them.
+  Revalidation before acting and the deletion-time checks keep this a
+  speed problem, not a safety problem; `stale` skips in reports show when
+  the tally is falling behind.
+- **Tally I/O.** Even throttled, a continuous tally of millions of files
+  costs I/O and keeps metadata in the page cache. The duty cycle, idle I/O
+  priority (honoured by BFQ only) and the pause during reclaim limit it;
+  the duty cycle is asserted in model tests, not assumed.
+- **Snapshot privacy.** The snapshot lists paths of the user's files; it is
+  written mode 0600 in the user's state directory and contains no file
+  contents.
 - **Lock stalling.** Any local user can hold `/run/diskgc/lock`, and an
   orphaned child keeps holding it until it exits.
 - **Asynchronous freeing.** Without `syncfs`, a filesystem that frees blocks
@@ -1455,5 +1646,7 @@ Tentative (change freely):
 - Example groups and tiers; default timeouts; back-off constants; discovery
   depth; human-readable output; log line format.
 - The `Host` trait and the crate split: internal, free to change.
+- The index structure, unit granularity, tally pacing and the snapshot
+  format: a cache, discarded on any version mismatch, free to change.
 - The YAML host-model schema (`host_model: 1`): test-only, but pinned by
   the regression files; changing it means migrating them.
