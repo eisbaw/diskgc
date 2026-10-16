@@ -20,7 +20,15 @@ The strongest end-to-end checks; if these are green, diskgc genuinely works.
    a `.cargo-lock` that Cargo recreated) outside the eligible set fails the
    test, whatever diskgc reported. Where the filesystem reports no birth
    time, the key falls back to (path, device, inode) and the harness logs
-   which key it used. A second, independent record comes from
+   which key it used. The fallback also applies on overlayfs (the
+   container's root): a copy-up, e.g. of a directory whose child is
+   deleted, keeps the overlay inode number but gives the object a new
+   birth time. Limit: there, a replacement that reuses the freed inode
+   number is invisible to the snapshot; the strace record still shows it
+   for traced processes. Pseudo filesystems (`/proc`, `/sys`, `devpts`,
+   cgroups, ...) are not walked; any other unreadable path fails the
+   snapshot rather than leaving a blind spot. A second, independent record
+   comes from
    `strace -f -e unlink,unlinkat,rmdir,rename,renameat,renameat2` on diskgc
    and its children; deletions done inside daemons (Docker, Nix) are
    invisible to it and are covered by the filesystem snapshot only. The
@@ -59,8 +67,13 @@ implements it. A bullet without a test is a gap, filed as a task.
   only be exercised against the real kernel (the container suite, which
   `cargo-mutants` does not run) get a one-off manual bite proof recorded in
   the task that implements them.
-- **Interlock tests bite too:** the destructive-test binary is run outside a
-  container in CI once per change to the interlock, and must refuse.
+- **Interlock tests bite too:** a do-nothing canary binary behind the same
+  run-time interlock as the destructive-test binary is run on the host by
+  every `just e2e` and `just e2e-full` before any container starts, and
+  must refuse (anything else stops the run); a container test requires it
+  to pass inside. A container test also proves the per-operation check
+  aborts (absolute path, `..`, a symlink out of the scratch mount, a bind
+  mount of the scratch filesystem itself).
 
 ### Definition of Done (every task)
 
@@ -292,16 +305,25 @@ it.
 
 Each container test runs in its own container (clean `/proc`, tests run in
 parallel) with `--cap-add SYS_ADMIN` (effective only inside the user
-namespace, needed for tmpfs, bind and stacked mounts and `unshare`) and
-`--network=none`. The harness runs as container root to set up fixtures;
+namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
+`--cap-add SYS_PTRACE` (container root's strace needs it to resolve the
+code under test's fds for `-y`; the code under test has no capabilities)
+and `--network=none`. The harness runs as container root to set up fixtures
+on a fresh scratch tmpfs at `/tmp`, and keeps its own records (strace
+output) on a second, root-only tmpfs;
 **diskgc itself runs as an unprivileged container user (uid 1000)**, so
 permission checks, `/proc` access limits and diskgc's own refusal to run as
-root behave as on a real machine; other owners use mapped subuids. A second
+root behave as on a real machine; other owners use mapped subuids (uid 1001
+in the image). strace attaches first and the traced process then drops to
+uid 1000 (groups, gid, uid) before exec. A second
 mount namespace for the "other namespace" tests is made with an `unshare`
 helper that bind-mounts the scratch directory at a different path (nested
-Podman is not used). Toolchains, tools and markers live in a base image
-tagged by its Nix store hash and reused when present; the binaries under
-test are added as a thin layer, so a code change does not rebuild the base.
+Podman is not used). Toolchains, tools, users, markers and the host lock
+(`/run/diskgc/lock`, as the tmpfiles lines in [safety.md](safety.md#host-lock)
+make it) live in a base image (`dockerTools.streamLayeredImage`) tagged by
+its Nix hash and reused when an image with that tag is loaded; the binaries
+under test are bind-mounted read-only, so a code change does not rebuild
+or reload the base.
 
 ## Safety interlock for destructive tests
 
@@ -309,8 +331,10 @@ An environment variable is not enough (it leaks through `export`, direnv,
 CI settings). Three layers:
 
 1. **Build-time:** destructive tests live in `diskgc-e2e`, excluded from the
-   workspace; no `cargo` command in the workspace compiles it. It is built
-   only into the test image.
+   workspace; no `cargo` command in the workspace compiles it. The flake
+   builds it; its test binary reaches a container only through the
+   read-only under-test mount. Its host-side runner starts containers and
+   runs nothing destructive.
 2. **Run-time:** the test binary refuses to run unless a marker file baked
    into the test image exists (`/.diskgc-test-sandbox`, holding a constant
    also compiled into the binary) and Podman's container marker
@@ -325,14 +349,16 @@ CI settings). Three layers:
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, a Cargo smoke on one toolchain | before every commit (the gate); budget under 5 minutes, measured per test and failing when exceeded |
-| `e2e-full` | every container test: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, the Debian variant, differential tests | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done |
+| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, a Cargo smoke on one toolchain | before every commit (the gate); budget under 5 minutes for the container phase (canary, image check, every test), durations reported per test; over budget it fails, and tests still running at the deadline are killed |
+| `e2e-full` | every container test, fast and full tiers: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, the Debian variant, differential tests | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; a 1-hour deadline only guards against hangs |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |
 | `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |
 | `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
 | `ci` | `nix flake check -L` plus `just e2e-full` | CI |
 
-Requirements for `just e2e`: Nix and rootless Podman (CI runners that are
-themselves containers need nested Podman). Coverage of unit and model tests
+Requirements for `just e2e`: Nix and rootless Podman on the host, with a
+subuid range covering uids 1000 and 1001 (the dev shell does not provide
+Podman; CI runners that are themselves containers need nested Podman).
+Each test's tier is declared in `diskgc-e2e/src/suite.rs`. Coverage of unit and model tests
 via `cargo llvm-cov`.

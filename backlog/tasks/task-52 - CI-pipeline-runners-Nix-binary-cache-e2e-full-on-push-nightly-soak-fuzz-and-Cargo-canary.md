@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-16 23:12'
+updated_date: '2026-10-16 23:48'
 labels:
   - wave-1
   - tooling
@@ -34,6 +34,8 @@ Why: docs/testing.md relies on CI for e2e-full, nightly soak and fuzz, the outsi
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-1: (1) 'just ci' = nix flake check -L, then just e2e-full. Runners need Nix >= 2.31.2 (crane 0.24.0) and rootless podman. (2) Until task-2/13/24/27 land, e2e-full, soak, fuzz and mutants print 'NOT RUN ...' to stderr and exit 0. CI must not report them as coverage. Consider grepping CI logs for 'NOT RUN'. (3) The flake supports x86_64-linux only.
+
+Forward-carried from task-2: (1) The NOT RUN placeholders for e2e and e2e-full are gone. just e2e = check + nix build .#checks.x86_64-linux.e2e-tests + the fast container suite (5-minute budget); just e2e-full = check + all tiers (1-hour hang guard). (2) Runner hosts need rootless Podman with a subuid range covering uids 1000 and 1001. Containers run with --cap-add SYS_ADMIN --cap-add SYS_PTRACE --network=none --pull=never. (3) AC3 (interlock canary refuses in CI) holds for every CI run of just e2e or e2e-full. The runner executes diskgc-e2e-canary on the host first and stops unless it exits 86. Log line: 'interlock canary refused to run on the host (exit 86), as it must'. On a containerised runner /run/.containerenv may exist, but the image marker does not, so the canary still refuses. (4) Per-test logs go to target/e2e-logs/<test>.log; archive them as CI artifacts.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

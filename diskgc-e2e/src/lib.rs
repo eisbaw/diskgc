@@ -1,4 +1,88 @@
-//! diskgc-e2e: the container test harness and destructive tests.
+//! diskgc-e2e: the rootless-container test harness and the destructive tests
+//! (docs/testing.md, End-to-end tests in containers).
 //!
-//! Empty until the harness lands (task-2). Kept as a crate now so the flake's
-//! clippy check for this out-of-workspace project has something to check.
+//! Two sides, one crate:
+//!
+//! - **In the container** (`diskgc-e2e`, running as container root): the
+//!   [`interlock`] first, then a fresh scratch tmpfs per test ([`scratch`]),
+//!   fixtures built through checked operations, the code under test started
+//!   as uid 1000 under strace ([`under_test`]), and the deletion oracle
+//!   ([`snapshot`], [`strace`], [`oracle`]). [`probe`] holds deliberately
+//!   misbehaving stand-ins for code under test that prove the checks bite.
+//!   The tests themselves are in [`suite`].
+//! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
+//!   image is loaded (reused when its Nix hash is already present), lists the
+//!   tests from inside a container, runs one container per test, reports
+//!   per-test durations and enforces the time budget.
+//!
+//! Exit codes shared by both sides are in [`exit`].
+
+pub mod interlock;
+pub mod oracle;
+pub mod probe;
+pub mod runner;
+pub mod scratch;
+pub mod snapshot;
+pub mod strace;
+pub mod suite;
+pub mod under_test;
+
+/// Exit codes of the in-container binaries, read by the runner and by tests
+/// that run probes as subprocesses.
+pub mod exit {
+    /// The test (or probe) ran and passed.
+    pub const PASS: i32 = 0;
+    /// The test ran and failed.
+    pub const FAIL: i32 = 1;
+    /// Bad command line.
+    pub const USAGE: i32 = 2;
+    /// The interlock refused to run (layer 2) or aborted an operation outside
+    /// the scratch mount (layer 3).
+    pub const INTERLOCK: i32 = 86;
+}
+
+/// Uid and gid of the unprivileged user the code under test runs as
+/// (`tester` in the image's /etc/passwd).
+pub const TESTER: Owner = Owner {
+    uid: 1000,
+    gid: 1000,
+};
+
+/// A second mapped user, owner of the "other user's" fixtures.
+pub const OTHER: Owner = Owner {
+    uid: 1001,
+    gid: 1001,
+};
+
+/// Container root (the harness).
+pub const ROOT: Owner = Owner { uid: 0, gid: 0 };
+
+/// Login name of [`TESTER`] in the image (USER and LOGNAME of the code
+/// under test).
+pub const TESTER_NAME: &str = "tester";
+
+/// Where the runner mounts the binaries under test, read-only.
+pub const UNDER_TEST_BIN_DIR: &str = "/opt/diskgc-e2e/bin";
+
+/// A file owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Informational log line on stderr (tests' stdout is reserved for results).
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)*) => { eprintln!("info: {}", format_args!($($arg)*)) };
+}
+
+/// Fails the current test (returns `Err(String)`) unless `cond` holds.
+#[macro_export]
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)*) => {
+        if !$cond {
+            return Err(format!($($arg)*));
+        }
+    };
+}

@@ -4,7 +4,7 @@ title: 'Pre-release sandbox gate: refuse real deletion outside test containers'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-16 22:54'
+updated_date: '2026-10-16 23:48'
 labels:
   - wave-1
   - irreversible
@@ -27,11 +27,15 @@ Why: from the first deleting code on, developers and AI agents could delete real
 - [ ] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
 
-
-
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Calling a LinuxHost deleting primitive on a scratch directory outside a container returns the gate error and deletes nothing (test run outside the harness)
 - [ ] #2 Non-deleting primitives (stat, read, walk without delete) work outside a container
 - [ ] #3 The default build contains the gate; a test inspects the build configuration so the gate cannot be removed except by the release flag
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-2: diskgc_linux::sandbox already holds MARKER_PATH, CONTAINERENV_PATH and MARKER_CONTENT (include_bytes! of crates/diskgc-linux/src/sandbox-marker, which the flake copies byte for byte into the e2e base image) plus check() -> Result<(), NotInSandbox>. The e2e interlock (diskgc-e2e/src/interlock.rs) uses it. The gate must reuse it, not define the markers a second time. check_under(root) is private and unit-tested; expose it (pub(crate) or cfg(test)) if the gate's tests need a fake root. Pattern for 'refuses outside a container': the runner runs diskgc-e2e-canary on the host before every e2e run and requires exit 86.
+<!-- SECTION:NOTES:END -->

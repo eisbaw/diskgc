@@ -14,8 +14,9 @@
 default:
     @just --list
 
-# diskgc-e2e is only format-checked here: compiling it is left to the flake's
-# e2e-clippy check and the e2e image (docs/testing.md, Safety interlock).
+# diskgc-e2e is only format-checked here: compiling and unit-testing it is
+# left to the flake (e2e-clippy, e2e-tests, e2e-runner; docs/testing.md,
+# Safety interlock).
 #
 # Fast gate: formatting, clippy (warnings are errors), workspace tests.
 check:
@@ -24,17 +25,27 @@ check:
     cargo clippy --workspace --all-targets --locked -- --deny warnings
     cargo test --workspace --locked
 
-# Commit gate: `check` plus the fast container tests.
-e2e: check
-    @just _not-yet "the container tests of 'just e2e'" task-2
+# The container recipes first run the harness's unit tests (a flake check),
+# then the flake's e2e runner. The runner runs nothing
+# destructive on the host, reuses the base image when its Nix hash is
+# already loaded, starts one rootless Podman container per test and reports
+# per-test durations (docs/testing.md, End-to-end tests in containers). The
+# budget is measured by the runner and is also the deadline for hung tests.
+# Host requirement: rootless Podman (not provided by the dev shell).
 
-# Every container test (slow suites, all toolchains, dind, Nix, Debian).
-e2e-full: e2e
-    @just _not-yet "the container tests of 'just e2e-full'" task-2
+# Commit gate: `check` plus the fast container tests, failing over 5 minutes.
+e2e: check
+    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    nix run -L .#e2e-runner -- run --suite fast --budget-secs 300
+
+# Every container test, fast and full tiers; the budget only guards hangs.
+e2e-full: check
+    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    nix run -L .#e2e-runner -- run --suite full --budget-secs 3600
 
 # One container test by NAME, keeping the container on failure.
 e2e-one NAME:
-    @just _not-yet "container test '{{NAME}}'" task-2
+    nix run -L .#e2e-runner -- one {{NAME}}
 
 # Property tests with many cases.
 soak:

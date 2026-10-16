@@ -1,13 +1,34 @@
 # Destructive end-to-end tests that need a real kernel. NOT a workspace
 # member (the root Cargo.toml excludes it) and has its own Cargo.lock, so no
-# cargo command run in the workspace compiles it. It is built only into the
-# e2e test image (docs/testing.md, Safety interlock, layer 1); the flake
-# lints it with its own clippy check.
+# cargo command run in the workspace compiles it (docs/testing.md, Safety
+# interlock, layer 1). The flake builds it, lints it and runs its unit tests
+# (pure functions only); its binaries reach a container only as the
+# read-only under-test mount of the e2e image.
 [package]
 name = "diskgc-e2e"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
+# In the container: the harness and the destructive tests. Refuses to run
+# outside a diskgc test container (layer 2).
+[[bin]]
+name = "diskgc-e2e"
+path = "src/bin/diskgc-e2e.rs"
+
+# On the host: builds nothing, starts one container per test and reports.
+[[bin]]
+name = "diskgc-e2e-runner"
+path = "src/bin/diskgc-e2e-runner.rs"
+
+# Do-nothing binary behind the same interlock; run on the host it must refuse.
+[[bin]]
+name = "diskgc-e2e-canary"
+path = "src/bin/diskgc-e2e-canary.rs"
+
 [dependencies]
-diskgc-core = { path = "../crates/diskgc-core" }
+diskgc-linux = { path = "../crates/diskgc-linux" }
+# Pure Rust (linux_raw backend): statx with mount ids and birth times, mount,
+# getuid, and the raw setgroups/setresgid/setresuid that drop to tester.
+# Works the same under static musl; no C toolchain needed.
+rustix = { version = "1", features = ["fs", "mount", "process", "thread"] }

@@ -37,6 +37,12 @@
       # Single source of the version: [workspace.package] in Cargo.toml.
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
+      # The test-sandbox marker constant (docs/testing.md, Safety interlock):
+      # compiled into the binaries by include_bytes! and copied byte for byte
+      # into the e2e base image. As a path of its own it changes the image
+      # only when the marker itself changes.
+      sandboxMarker = ./crates/diskgc-linux/src/sandbox-marker;
+
       # Source allowlist: only Cargo manifests, the lock file and Rust/TOML
       # files under the crate directories reach the build. docs/, backlog/,
       # *.md, flake.nix and the justfile are not build inputs, so editing them
@@ -45,6 +51,8 @@
         ./Cargo.toml
         ./Cargo.lock
         (craneLib.fileset.commonCargoSources ./crates)
+        # Non-Rust inputs of the crates, listed one by one.
+        sandboxMarker
       ];
       workspaceSrc = lib.fileset.toSource {
         root = ./.;
@@ -105,9 +113,115 @@
         '';
       };
       e2eDeps = craneLib.buildDepsOnly e2eArgs;
+
+      # ---- Container e2e harness (docs/testing.md, Container setup) ----
+
+      # The diskgc-e2e binaries: the in-container harness and tests, the
+      # do-nothing interlock canary, and the host-side runner. Static musl, so
+      # they run in any image and on the host.
+      e2eBins = craneLib.buildPackage (
+        e2eArgs
+        // {
+          cargoArtifacts = e2eDeps;
+          cargoExtraArgs = "--locked";
+          # Unit tests run once, in checks.e2e-tests.
+          doCheck = false;
+        }
+      );
+
+      # The binaries under test, as real files (not symlinks into the store):
+      # the runner bind-mounts $out/bin read-only at /opt/diskgc-e2e/bin. A
+      # code change rebuilds this directory, never the base image.
+      e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
+        mkdir -p $out/bin
+        cp ${lib.getExe diskgc} $out/bin/diskgc
+        cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary $out/bin/
+      '';
+
+      # The base image: userland, tools, users, markers and the host lock.
+      # Nothing here depends on diskgc's or the harness's code, so its tag
+      # (the Nix hash of its configuration) changes only when these inputs
+      # do, and the runner reuses a loaded image with that tag.
+      #
+      # Extension point (task-4): Cargo-under-test toolchains and their C
+      # toolchain go into `contents` (e.g. under /opt/cargo-under-test);
+      # they are base-image inputs, not code under test.
+      e2eBaseImage = pkgs.dockerTools.streamLayeredImage {
+        name = "localhost/diskgc-e2e-base";
+        contents = [
+          pkgs.busybox
+          pkgs.strace
+        ];
+        # Runs under fakeroot in the image's root directory.
+        fakeRootCommands = ''
+          # Interlock marker (docs/testing.md, Safety interlock, layer 2).
+          cp ${sandboxMarker} .diskgc-test-sandbox
+          chmod 0444 .diskgc-test-sandbox
+
+          # Users: tester runs the code under test; other owns the
+          # "other user's" fixtures (both mapped through the subuid range).
+          mkdir -p etc
+          printf '%s\n' \
+            'root:x:0:0:root:/root:/bin/sh' \
+            'tester:x:1000:1000:diskgc code under test:/home/tester:/bin/sh' \
+            'other:x:1001:1001:other owner:/home/other:/bin/sh' \
+            'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' > etc/passwd
+          printf '%s\n' \
+            'root:x:0:' 'tester:x:1000:' 'other:x:1001:' 'nogroup:x:65534:' > etc/group
+          printf '%s\n' 'passwd: files' 'group: files' > etc/nsswitch.conf
+          mkdir -p root home/tester home/other
+          chmod 0700 root
+          printf '# tester profile\n' > home/tester/.profile
+          chown -R 1000:1000 home/tester
+          chown -R 1001:1001 home/other
+          chmod 0755 home/tester home/other
+
+          # The host lock, as the tmpfiles lines of docs/safety.md (Host lock)
+          # provision it:
+          #   d /run/diskgc      0755 root root -
+          #   f /run/diskgc/lock 0644 root root -
+          mkdir -p run/diskgc
+          chmod 0755 run/diskgc
+          touch run/diskgc/lock
+          chmod 0644 run/diskgc/lock
+
+          # Mount points: the harness mounts tmpfs on /tmp (scratch) and on
+          # /run/diskgc-e2e (its records); the runner mounts the binaries
+          # under test on /opt/diskgc-e2e/bin.
+          mkdir -p tmp var/tmp run/diskgc-e2e opt/diskgc-e2e/bin
+          chmod 1777 tmp var/tmp
+          chmod 0700 run/diskgc-e2e
+        '';
+        config = {
+          Cmd = [ "/bin/sh" ];
+          Env = [ "PATH=/bin" ];
+          WorkingDir = "/";
+        };
+      };
+
+      # The host-side runner with the image and binaries baked into its
+      # arguments: `nix run .#e2e-runner -- run --suite fast`. A compiled
+      # wrapper (makeBinaryWrapper), not a shell script.
+      e2eRunner =
+        pkgs.runCommand "diskgc-e2e-runner"
+          {
+            nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+            meta.mainProgram = "diskgc-e2e-runner";
+          }
+          ''
+            makeBinaryWrapper ${e2eBins}/bin/diskgc-e2e-runner $out/bin/diskgc-e2e-runner \
+              --add-flags "--image-stream ${e2eBaseImage}" \
+              --add-flags "--image-ref ${e2eBaseImage.imageName}:${e2eBaseImage.imageTag}" \
+              --add-flags "--under-test ${e2eUnderTest}"
+          '';
     in
     {
-      packages.${system}.default = diskgc;
+      packages.${system} = {
+        default = diskgc;
+        e2e-runner = e2eRunner;
+        e2e-base-image = e2eBaseImage;
+        e2e-under-test = e2eUnderTest;
+      };
 
       checks.${system} = {
         inherit diskgc;
@@ -163,6 +277,14 @@
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           }
         );
+
+        # Pure-function unit tests of the harness (parsers, oracle diff,
+        # runner verdict). Nothing here needs a container.
+        e2e-tests = craneLib.cargoTest (e2eArgs // { cargoArtifacts = e2eDeps; });
+
+        # The runner, image script and binaries under test build; running
+        # them needs Podman, so that happens in `just e2e`, not here.
+        e2e-runner = e2eRunner;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

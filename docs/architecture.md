@@ -234,7 +234,7 @@ is accepted until measured otherwise.
 | `diskgc-linux` | `LinuxHost`, the real `Host`. A library, because the contract tests use it. |
 | `diskgc-model` | `ModelHost`, a `Host` backed by a YAML host model, and the model-test harness. Test-only. |
 | `diskgc-modelgen` | Generates host-model values (fixtures and `proptest` strategies). Test-only. |
-| `diskgc-e2e` | Destructive tests that need a real kernel. Excluded from the workspace; built only into the e2e test image. See [testing.md](testing.md). |
+| `diskgc-e2e` | Destructive tests that need a real kernel, their harness and the host-side runner. Excluded from the workspace; built by the flake only. See [testing.md](testing.md). |
 | `diskgc` | The binary: CLI and output; installs signal delivery into `LinuxHost`; wires `diskgc-core` to `LinuxHost`. |
 
 ### The `Host` port

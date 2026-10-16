@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:49'
+updated_date: '2026-10-16 23:49'
 labels:
   - wave-1
   - irreversible
@@ -34,6 +34,12 @@ Why: deleting files in use is the worst failure. Implement the in-use checks: op
 - [ ] #5 A running binary mapping its shared library from an overlayfs scratch dir is detected (overlay maps-inode mismatch)
 - [ ] #6 The one-second freshness bound holds across a simulated suspend (model test with a monotonic clock including suspend time)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-2: (1) The code under test runs as uid 1000 with no capabilities, so it sees only same-uid processes' fds and maps. Helper processes that hold files open must run as tester to be visible, or as another uid to test the invisible case. (2) under_test::run_as_tester blocks until exit; long-lived helpers need a spawn variant (see the task-4 note). (3) Container root has CAP_SYS_PTRACE, so harness-side checks can read any /proc entry in the container. The container has its own pid namespace with a clean /proc.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
