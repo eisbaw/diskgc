@@ -6,6 +6,77 @@ Normative for how the PRD's acceptance criteria and the guarantees in
 **No test ever runs diskgc against the developer's live system.** Tests run
 against a modelled host (in-process) or inside a rootless test container.
 
+## Grounding: acceptance signals and negative feedback
+
+### Acceptance signals
+
+The strongest end-to-end checks; if these are green, diskgc genuinely works.
+
+1. **Deletion oracle (e2e).** Every container scenario declares, in its
+   fixture, which objects are eligible to be deleted. Before and after
+   diskgc runs, the harness snapshots the **whole container filesystem**
+   (not only the scratch tmpfs) keyed by (path, device, inode, birth time);
+   any object that disappeared or was replaced (same path, new inode, e.g.
+   a `.cargo-lock` that Cargo recreated) outside the eligible set fails the
+   test, whatever diskgc reported. Where the filesystem reports no birth
+   time, the key falls back to (path, device, inode) and the harness logs
+   which key it used. A second, independent record comes from
+   `strace -f -e unlink,unlinkat,rmdir,rename,renameat,renameat2` on diskgc
+   and its children; deletions done inside daemons (Docker, Nix) are
+   invisible to it and are covered by the filesystem snapshot only. The
+   oracle is computed from the fixture's spec, never from diskgc's output;
+   the only allowlisted paths are diskgc's own state directory and the
+   fixture's own concurrent writers (declared in the fixture).
+2. **Cargo race tests 1–9** (below) green on every supported Cargo version.
+3. **Model property suite** green: never-delete invariants on the call
+   trace, the index is never an authority, selection semantics equal the
+   reference implementation, exit-code precedence.
+4. **JSON contract snapshots** (`insta`) unchanged, or changed together with
+   [reference.md](reference.md) in the same commit.
+5. **Freeing works:** on the 100,000-entry `/tmp` fixture, `ensure` reaches
+   `--min-free`, exits 0, and the first deletion starts within the latency
+   bound in the PRD.
+
+### Good and bad, observable
+
+The PRD's "What good / bad looks like" lists are the specification; each
+bullet maps to at least one named test in this document or in the task that
+implements it. A bullet without a test is a gap, filed as a task.
+
+### Negative feedback: how the system tells us it is wrong
+
+- **Gates:** `just check` (fast, every change) and `just e2e` (before every
+  commit). A red gate blocks the commit.
+- **Oracles independent of diskgc:** the deletion oracle above, the
+  reference implementation of the selection rules, `/proc/locks` sampling in
+  the Cargo race tests, `statvfs` read by the harness, not by diskgc.
+- **Prove the check bites.** Every safety check in [safety.md](safety.md)
+  has a **model test** (so it runs in the workspace) that fails when the
+  check is removed. This is verified mechanically in the hardening blocks
+  with mutation testing (`cargo-mutants`, workspace tests) on `diskgc-core`
+  and on `diskgc-linux`'s path resolution, mountinfo and `/proc` code: a
+  surviving mutant in a safety check is a bug in the tests. Checks that can
+  only be exercised against the real kernel (the container suite, which
+  `cargo-mutants` does not run) get a one-off manual bite proof recorded in
+  the task that implements them.
+- **Interlock tests bite too:** the destructive-test binary is run outside a
+  container in CI once per change to the interlock, and must refuse.
+
+### Definition of Done (every task)
+
+- Its acceptance criteria are met and demonstrated by tests that run in
+  `just check`, `just e2e` or `just e2e-full`; the task names them.
+  Review, journey and hardening tasks are exempt where an acceptance
+  criterion is a review outcome; their result is recorded in the task.
+- `just check` and `just e2e` are green.
+- Behaviour that changed is reflected in the one document that owns it
+  (PRD map); no rule is stated twice.
+- Honest limits found while implementing are written down where the rule
+  lives, not left in commit messages.
+- Tasks labelled `irreversible` additionally pass the deep review gate
+  (mped-architect plus the reviewers named in the task) before they are
+  marked done.
+
 ## 1. Planner tests: plain data
 
 The planner is a pure function (index in; plan, skip reasons, exit-code
@@ -204,6 +275,34 @@ privileges, and is a large extra moving part.
 Container tests cannot run inside the Nix build sandbox, so they run from
 `just e2e`, not as `nix flake check` checks.
 
+## Controlled pause and kill points
+
+Some tests must stop diskgc at an exact point (race test 5 pauses it
+between discovery and locking; race test 6 kills it at seeded call
+positions; the replace-between-walk-and-unlink test needs the replacement
+at one exact moment). In the model these are events on the `Host` call
+trace. In containers, the e2e image uses a **test-only `Host` wrapper**
+(compiled only into the e2e build of the binary, never into the release
+package) that pauses or aborts at a call position given by the harness.
+This is the one sanctioned exception to "no hooks in the product": it lives
+outside the product build, and the release build is checked not to contain
+it.
+
+## Container setup
+
+Each container test runs in its own container (clean `/proc`, tests run in
+parallel) with `--cap-add SYS_ADMIN` (effective only inside the user
+namespace, needed for tmpfs, bind and stacked mounts and `unshare`) and
+`--network=none`. The harness runs as container root to set up fixtures;
+**diskgc itself runs as an unprivileged container user (uid 1000)**, so
+permission checks, `/proc` access limits and diskgc's own refusal to run as
+root behave as on a real machine; other owners use mapped subuids. A second
+mount namespace for the "other namespace" tests is made with an `unshare`
+helper that bind-mounts the scratch directory at a different path (nested
+Podman is not used). Toolchains, tools and markers live in a base image
+tagged by its Nix store hash and reused when present; the binaries under
+test are added as a thin layer, so a code change does not rebuild the base.
+
 ## Safety interlock for destructive tests
 
 An environment variable is not enough (it leaks through `export`, direnv,
@@ -226,10 +325,13 @@ CI settings). Three layers:
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus all container tests (images built with Nix, run with Podman) | before every commit (the gate); budget under 5 minutes, split the suite if it grows past that |
+| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, a Cargo smoke on one toolchain | before every commit (the gate); budget under 5 minutes, measured per test and failing when exceeded |
+| `e2e-full` | every container test: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, the Debian variant, differential tests | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |
-| `ci` | `nix flake check -L` plus `just e2e` | CI |
+| `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |
+| `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
+| `ci` | `nix flake check -L` plus `just e2e-full` | CI |
 
 Requirements for `just e2e`: Nix and rootless Podman (CI runners that are
 themselves containers need nested Podman). Coverage of unit and model tests

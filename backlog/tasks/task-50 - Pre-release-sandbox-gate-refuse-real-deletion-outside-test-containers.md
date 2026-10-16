@@ -1,0 +1,37 @@
+---
+id: TASK-50
+title: 'Pre-release sandbox gate: refuse real deletion outside test containers'
+status: To Do
+assignee: []
+created_date: '2026-10-16 22:47'
+updated_date: '2026-10-16 22:54'
+labels:
+  - wave-1
+  - irreversible
+  - safety
+dependencies:
+  - TASK-2
+references:
+  - docs/safety.md#pre-release-sandbox-gate
+priority: high
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Why: from the first deleting code on, developers and AI agents could delete real data on their own machines with a work-in-progress build. Implement the gate in docs/safety.md#pre-release-sandbox-gate inside LinuxHost's deleting primitives (unlink, rmdir, the delete walk, and spawning prune/GC/command children), so every entry point is covered, including wave-1 test drivers: they refuse unless /.diskgc-test-sandbox and /run/.containerenv both exist. Compiled in by default; only the v1 release package (one build flag, set by the release task) removes it.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
+
+
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Calling a LinuxHost deleting primitive on a scratch directory outside a container returns the gate error and deletes nothing (test run outside the harness)
+- [ ] #2 Non-deleting primitives (stat, read, walk without delete) work outside a container
+- [ ] #3 The default build contains the gate; a test inspects the build configuration so the gate cannot be removed except by the release flag
+<!-- AC:END -->

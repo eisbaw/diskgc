@@ -12,3 +12,8 @@ changing behaviour it governs (each rule has exactly one home there).
   command that has a TUI); never edit task files by hand.
 - No test ever runs diskgc against the developer's live system: destructive
   tests run only in the rootless test containers (`docs/testing.md`).
+- **Never run a reclaiming `diskgc` (`ensure` or `watch` without
+  `--dry-run`) on this machine.** Until the release task lifts it, the
+  binary itself refuses to delete outside the test containers (sandbox
+  gate); do not work around the gate. `check`, `survey`, `profiles` and
+  `--dry-run` are safe to run anywhere.

@@ -92,6 +92,9 @@ kinds), and where those guarantees end. The protocols are in
   no Cargo lock file is ever deleted or moved.
 - No symlink followed, no mount crossed.
 - The index never decides safety; every check runs at deletion time.
+- Until v1 is released, the binary refuses to delete anything outside the
+  test containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)),
+  so work-in-progress builds cannot delete real data.
 
 Limits, stated plainly: diskgc only sees the caller's own processes without
 root; Cargo holds no lock while a program runs, so running binaries are

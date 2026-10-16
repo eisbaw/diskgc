@@ -65,6 +65,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
 - **Not protected or excluded** by overlap with a `protect` entry or a
   negated profile ([reference.md](reference.md#protect)).
 
+- **Fail closed on anything unreadable:** a directory the walk cannot
+  open or list (mode `000`, `EACCES`) makes the candidate ineligible
+  (`not_owner`); it is never treated as empty.
+
 The walk records every entry's (device, inode) for the in-use check. Its
 cost is proportional to the candidate's size: the index saves discovery and
 size tallying, not this walk.
@@ -86,8 +90,19 @@ A candidate is skipped (`in_use`) if a visible process:
 Or it is a directory locked with `flock` by someone else (`locked`), the
 convention systemd-tmpfiles also honours.
 
+**Unreadable or vanishing processes:** a process of the same user whose
+`fd` directory cannot be read (`EACCES`: non-dumpable processes such as
+`gpg-agent`, `ssh-agent` or setuid children) makes every candidate it could
+be using `in_use`, i.e. it is treated as using everything it might; a
+process that exits during the scan (`ESRCH`, `ENOENT`) is simply gone.
+**Overlay and btrfs:** `maps` can report a different (device, inode) than
+`stat` on overlayfs and btrfs subvolumes; diskgc matches both the reported
+pair and the underlying inode where the kernel exposes it, and the
+differential tests cover overlay.
+
 **Freshness:** the `/proc` scan used for a candidate is never older than one
-second when that candidate's deletion starts. Buckets
+second (monotonic clock including suspend time) when that candidate's
+deletion starts. Buckets
 ([architecture.md](architecture.md#the-index)) only group candidates for
 scheduling; each member gets its own check under this bound.
 
@@ -386,10 +401,24 @@ Minimum kernel: Linux 5.8; older kernels exit 2 at startup.
   harm. (`PR_SET_PDEATHSIG` was rejected: it fires on parent *thread* death
   and does not reach grandchildren.)
 
+## Pre-release sandbox gate
+
+Until v1 is released, diskgc's deleting primitives (unlink, rmdir, the
+delete walk, and starting prune, GC or command children) refuse to act
+unless they run inside a test container, so every entry point, including
+test drivers, is covered: both the image marker `/.diskgc-test-sandbox` and
+Podman's `/run/.containerenv` must exist (the same markers as the test
+interlock, see [testing.md](testing.md)). `check`, `survey`, `profiles`,
+`--dry-run` and `--tally-only` work anywhere. The gate is compiled in by
+default and removed only by the release package built for v1 (a dedicated
+build flag set in one place, by the release task), so it cannot be dropped
+by accident during development, and developers and AI agents cannot
+delete real data on their own machines with a work-in-progress build.
+
 ## Privileges
 
-- diskgc refuses to run as root unless `--allow-root` is given; the laptop
-  service runs as the owner, CI as the runner user.
+- diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
+  the laptop service runs as the owner, CI as the runner user.
 - Docker requires the `docker` group (root-equivalent; Docker's model, not
   ours). Nix GC goes through the Nix daemon as a normal user.
 - With `--allow-root`: an `owners:` list is required, command actions are

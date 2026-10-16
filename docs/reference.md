@@ -20,7 +20,10 @@ diskgc profiles list | show NAME | test   [--config FILE]
 ```
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
-(the config's user profiles and `protect` list still apply). `--roots DIR`
+(the config's user profiles and `protect` list still apply). With
+`--select`, a config file is optional: if none is found, `EXPR` is evaluated
+against the built-in profiles alone. Without `--select`, a missing config is
+exit 2 as described under Configuration file. `--roots DIR`
 (repeatable, one directory each) supplies roots for `roots: required`
 profiles in that selection, and is only valid together with `--select`.
 Example for a CI runner:
