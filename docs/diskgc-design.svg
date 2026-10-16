@@ -76,13 +76,14 @@
 
   <rect x="420" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="440" y="394" class="h3">Composing them in a tier</text>
-  <text x="440" y="420" class="mono code">select: (pytest-tmp || nix-shell-rc)</text>
-  <text x="440" y="438" class="mono code">        &amp;&amp; idle-3d &amp;&amp; !claude-code-tmp</text>
-  <text x="440" y="466" class="body">• each term: one source &amp;&amp; filters, !filter, !profile</text>
-  <text x="440" y="486" class="body">• || is a union; one kind and one action per select</text>
-  <text x="440" y="506" class="body">• ! and protect: exclude by overlap, only narrow</text>
-  <text x="440" y="526" class="body">• positive only: nothing no profile found is deleted</text>
-  <text x="440" y="546" class="body">• roots fixed, or roots: required (from tier / --roots)</text>
+  <text x="440" y="420" class="mono code">select: (profile:pytest-tmp ||</text>
+  <text x="440" y="438" class="mono code">          profile:nix-shell-rc)</text>
+  <text x="440" y="456" class="mono code">        &amp;&amp; filter:idle-3d</text>
+  <text x="440" y="482" class="body">• names qualified: profile:… and filter:…</text>
+  <text x="440" y="500" class="body">• term: one profile &amp;&amp; filters, !filter:, !profile:</text>
+  <text x="440" y="518" class="body">• || is a union; one kind and one action per select</text>
+  <text x="440" y="536" class="body">• ! and protect: exclude by overlap, only narrow</text>
+  <text x="440" y="554" class="body">• roots fixed, or roots: required (tier / --roots)</text>
   <text x="440" y="576" class="small">built-ins may get more precise, never broader</text>
 
   <rect x="800" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
@@ -153,15 +154,15 @@
   <rect x="40" y="938" width="740" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
   <circle cx="64" cy="962" r="5" fill="#2f9a5a"/>
   <text x="76" y="967" class="h3">group stale · ranking: random (tiers shuffled within the group)</text>
-  <text x="64" y="992" class="mono code">test-and-shell-cruft  (pytest-tmp || nix-shell-rc) &amp;&amp; idle-3d</text>
-  <text x="64" y="1012" class="mono code">cargo-stale           cargo-target &amp;&amp; idle-7d   roots: /home/mark/src</text>
-  <text x="64" y="1032" class="mono code">docker-cache-stale    docker-build-cache &amp;&amp; idle-7d</text>
-  <text x="64" y="1052" class="mono code">nix-dead              nix-garbage</text>
+  <text x="64" y="992" class="mono code">test-and-shell-cruft  (profile:pytest-tmp || profile:nix-shell-rc) &amp;&amp; filter:idle-3d</text>
+  <text x="64" y="1012" class="mono code">cargo-stale           profile:cargo-target &amp;&amp; filter:idle-7d   roots: /home/mark/src</text>
+  <text x="64" y="1032" class="mono code">docker-cache-stale    profile:docker-build-cache &amp;&amp; filter:idle-7d</text>
+  <text x="64" y="1052" class="mono code">nix-dead              profile:nix-garbage</text>
   <circle cx="64" cy="1084" r="5" fill="#d97706"/>
   <text x="76" y="1089" class="h3">group pressure · ordered (costs rebuild or download time)</text>
-  <text x="64" y="1114" class="mono code">docker-dangling       docker-dangling</text>
-  <text x="64" y="1134" class="mono code">tmp-old               tmp-entry &amp;&amp; idle-2d</text>
-  <text x="64" y="1154" class="mono code">cargo-recent          cargo-target &amp;&amp; idle-1h   roots: /home/mark/src</text>
+  <text x="64" y="1114" class="mono code">docker-dangling       profile:docker-dangling</text>
+  <text x="64" y="1134" class="mono code">tmp-old               profile:tmp-entry &amp;&amp; filter:idle-2d</text>
+  <text x="64" y="1154" class="mono code">cargo-recent          profile:cargo-target &amp;&amp; filter:idle-1h   roots: /home/mark/src</text>
   <text x="64" y="1186" class="mono code">protect: [claude-code-tmp]</text>
   <text x="300" y="1186" class="small">(never deleted by any tier, by overlap)</text>
 

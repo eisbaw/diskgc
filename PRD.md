@@ -39,7 +39,8 @@ for recognising one kind of cruft (pytest temp dirs under `/tmp`, Cargo
 targets, Docker build cache, ...), each with its removal action. A library
 of built-in profiles ships with diskgc; users add and override their own.
 The YAML config's tiers select profiles with expressions such as
-`(pytest-tmp || nix-shell-rc) && idle-3d` and arrange them in escalating
+`(profile:pytest-tmp || profile:nix-shell-rc) && filter:idle-3d` and
+arrange them in escalating
 groups. Safety checks (in use, locks, mounts, ownership) are code and
 apply whatever the profile.
 
@@ -71,7 +72,8 @@ diskgc profiles list | show NAME | test   [--config FILE]
 `EXPR` instead of the config's groups (still with the config's user
 profiles and `protect` list, if any). `--roots DIR` (repeatable, one
 directory each) supplies roots for `roots: required` profiles. Handy in CI:
-`diskgc ensure --min-free 50G --select 'cargo-target && idle-1d' --roots
+`diskgc ensure --min-free 50G --select 'profile:cargo-target &&
+filter:idle-1d' --roots
 "$CI_BUILDS_DIR" "$CI_BUILDS_DIR"` (the first is the profile's root, the
 second the `PATH` whose filesystem must have the space). `--roots` is only
 valid together with `--select`; without it, roots come from the config's
@@ -331,30 +333,65 @@ A predicate on a kind that does not support it is a load-time error. Two
 
 ### Composing profiles
 
-A tier selects candidates with an expression over profile names:
+A tier selects candidates with an expression over **qualified** names:
+every name says what it is, `profile:` for a source profile, `filter:` for
+a filter profile.
 
 ```
-expr   := term ( '||' term )*
-term   := source ( '&&' factor )*
-factor := filter | '!' filter | '!' source
+expr    := term | union
+union   := uterm ( '||' uterm )+
+uterm   := profile | '(' term ')'
+term    := sources ( '&&' factor )*
+sources := profile | '(' profile ( '||' profile )* ')'
+factor  := filter | '!' filter | '!' profile
+profile := 'profile:' NAME
+filter  := 'filter:' NAME
 ```
 
-Examples: `pytest-tmp && idle-10d`, `(pytest-tmp || nix-shell-rc) && idle-3d`
-(written with parentheses, it distributes: each source gets the filters),
-`tmp-entry && idle-2d && !idle-30d` (idle between 2 and 30 days),
-`tmp-entry && idle-2d && !claude-code-tmp`.
+Examples:
 
-- **One source per term.** Each `&&`-term is exactly one source profile plus
-  filters. Intersecting two source profiles that find at different depths
+```
+profile:pytest-tmp && filter:idle-10d
+(profile:pytest-tmp || profile:nix-shell-rc) && filter:idle-3d
+profile:tmp-entry && filter:idle-2d && !filter:idle-30d       # idle 2 to 30 days
+profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp
+```
+
+A parenthesised group of profiles distributes: `(profile:a || profile:b)
+&& filter:f` means `(profile:a && filter:f) || (profile:b && filter:f)`.
+
+- **No operator precedence to remember.** `||` and `&&` cannot be mixed at
+  the same level without parentheses: `profile:a || profile:b && filter:f`
+  is a parse error, because under the usual precedence it would mean
+  `a || (b && f)` and delete all of `a` unfiltered. Write
+  `(profile:a || profile:b) && filter:f` or
+  `(profile:a && filter:f) || (profile:b && filter:g)`.
+- Parentheses do not nest beyond that, filters cannot appear inside a
+  profile group, and `!` applies to one name, not to a group:
+  `!(profile:a || profile:b)` is written `!profile:a && !profile:b`.
+
+- **Qualifiers are required** in expressions, never optional. The grammar
+  rests on the difference between the two roles (one source per term;
+  `!filter` and `!profile` mean different things, below), so the
+  expression shows it instead of leaving the reader to know which name is
+  which. A filter and a profile can never collide by name, and a term
+  without a `profile:` is rejected by the parser before any name is looked
+  up. A wrong qualifier (`filter:pytest-tmp`) is a load-time error naming
+  what the name actually is. Fields that can only hold source profiles
+  (`protect:`) and a profile's own `name:` take bare names.
+
+- **One source per term.** After a profile group is distributed, each
+  term is exactly one source profile plus filters. Intersecting two source profiles that find at different depths
   matches only by accident, so it is not allowed.
 - **`||` is a union**, and all source profiles in one expression must share
   one action (and one kind). Then `a || b` and `b || a` select and remove
   exactly the same, and no rule about which action "wins" is needed.
   Different actions belong in different tiers.
-- **`!` only narrows.** `!filter` is a path-local complement (`!idle-30d`).
-  `!source` removes every candidate that **overlaps** a match of that source
-  profile: is it, lies inside it, or contains it. So
-  `tmp-entry && !claude-code-tmp` excludes `/tmp/claude-1000` as a whole,
+- **`!` only narrows.** `!filter:…` is a path-local complement
+  (`!filter:idle-30d`). `!profile:…` removes every candidate that
+  **overlaps** a match of that source profile: is it, lies inside it, or
+  contains it. So `profile:tmp-entry && !profile:claude-code-tmp` excludes
+  `/tmp/claude-1000` as a whole,
   because it contains Claude Code session dirs, even though the two
   profiles find at different depths. The negated profile's `find` is
   enumerated for this (bounded by its patterns, like any `find`); excluded
@@ -366,11 +403,13 @@ Examples: `pytest-tmp && idle-10d`, `(pytest-tmp || nix-shell-rc) && idle-3d`
   every tier at once, for things that must never go in any tier.
 - A negated profile must be of kind `fs` or `cargo-target`, and `!profile`
   is only allowed in `fs` / `cargo-target` expressions (e.g.
-  `tmp-entry && !cargo-target` is legal; nothing with Docker or Nix is).
+  `profile:tmp-entry && !profile:cargo-target` is legal; nothing with Docker
+  or Nix is).
   Negated profiles do not count towards "one kind and one action per
   expression".
-- **Non-`fs` kinds** allow only `NAME` (`docker-images`, `nix-store`) or
-  `NAME` / `NAME && idle-*` (`docker-build-cache`): they have no
+- **Non-`fs` kinds** allow only `profile:NAME` (`docker-images`,
+  `nix-store`) or `profile:NAME` / `profile:NAME && filter:idle-*`
+  (`docker-build-cache`): they have no
   per-candidate enumeration, so unions and negation have nothing to act on.
 - **Filters are evaluated from the index** where it already knows the
   answer, and re-evaluated at deletion time (see The reclaim walk). A
@@ -472,7 +511,7 @@ then, user profiles cover them.
   workflow: `diskgc survey --json` shows what no profile matches yet; an AI
   agent drafts a profile from it, including `examples` taken from the real
   paths it saw; `diskgc profiles test` checks the examples, and
-  `diskgc survey --select <new-profile>` shows everything the profile would
+  `diskgc survey --select profile:<new-profile>` shows everything the profile would
   match on this machine. The human reviews concrete paths and decides,
   without having to work out what a glob means.
 
@@ -509,23 +548,23 @@ groups:
     ranking: random                # ordered (default) | random
     tiers:
       - name: test-and-shell-cruft
-        select: (pytest-tmp || nix-shell-rc || zephyr-run) && idle-3d
+        select: (profile:pytest-tmp || profile:nix-shell-rc || profile:zephyr-run) && filter:idle-3d
       - name: cargo-stale
-        select: cargo-target && idle-7d
+        select: profile:cargo-target && filter:idle-7d
         roots: [/home/mark/src, /home/mark/topics]
       - name: docker-cache-stale
-        select: docker-build-cache && idle-7d
+        select: profile:docker-build-cache && filter:idle-7d
       - name: nix-dead
-        select: nix-garbage
+        select: profile:nix-garbage
 
   - name: pressure                 # costs rebuild or download time
     tiers:
       - name: docker-dangling
-        select: docker-dangling
+        select: profile:docker-dangling
       - name: tmp-old
-        select: tmp-entry && idle-2d
+        select: profile:tmp-entry && filter:idle-2d
       - name: cargo-recent
-        select: cargo-target && idle-1h
+        select: profile:cargo-target && filter:idle-1h
         roots: [/home/mark/src, /home/mark/topics]
 ```
 
@@ -554,8 +593,8 @@ Rules:
   caller and `/home/mark` for another. The only placeholder is `{uid}` (the
   effective user's id, e.g. in `/tmp/claude-{uid}`).
 - Static validation is complete at load: YAML, schema, unknown keys,
-  profile names, expression grammar (one source per term, `!` only
-  narrows), one kind and one action per expression, predicates supported by
+  profile names, expression grammar (qualified names, one source per
+  term, `!` only narrows), one kind and one action per expression, predicates supported by
   the kind, roots fixed vs required, `override:` on shadowed built-ins,
   profile `examples`, and `command` executables (resolved to absolute paths
   at load and shown by `check`). Any error → exit 2, nothing
@@ -1519,7 +1558,7 @@ tmpfiles drop-in), a NixOS module, and plain binary + YAML for CI.
 | Decision | Chosen | Why |
 |---|---|---|
 | What vs when | Profiles (what and how: `find`, `where`, `action`) separate from tiers (which and when: `select` expressions in ordered groups) | The same cruft knowledge serves every machine; only the policy differs. |
-| Profile composition | `\|\|` of terms, each term one source profile `&&` filters, `!filter` or `!profile`; one kind and one action per expression | Composable by name like the human asked; `a \|\| b` = `b \|\| a`; nothing is ever deleted that no source profile found. |
+| Profile composition | `\|\|` of terms, each term one `profile:` (or a parenthesised group of them) `&&` `filter:`s, `!filter:` or `!profile:`; qualifiers required; one kind and one action per expression | Composable by name like the human asked; `a \|\| b` = `b \|\| a`; nothing is ever deleted that no source profile found. |
 | Roots | Profiles have fixed roots or `roots: required`; only the latter take tier / `--roots` roots | A selection can never be re-pointed at a place its profile was not written for. |
 | Profile library | YAML data inside the binary, each built-in with `examples`, model tests and `verified_with`; user profiles add, `override: true` to replace | Knowledge grows without code changes; no accidental shadowing. |
 | Safety vs profiles | Safety checks are code, always on for every filesystem candidate; profiles cannot disable them | A wrong profile can at worst select the wrong *unused* files, never ones in use. |
