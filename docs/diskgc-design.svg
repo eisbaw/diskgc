@@ -33,7 +33,7 @@
   <text x="60" y="176" class="mono cmd" style="fill:#1d4ed8">diskgc watch --min-free 30G</text>
   <text x="60" y="194" class="mono cmd" style="fill:#1d4ed8">  --target-free 60G PATH</text>
   <text x="60" y="222" class="body">• every 10 s: statvfs; below min → reclaim to target</text>
-  <text x="60" y="242" class="body">• background tally keeps the index fresh (~5% disk)</text>
+  <text x="60" y="242" class="body">• background tally keeps the index fresh (~5% duty)</text>
   <text x="60" y="262" class="body">• writes an index snapshot for ensure / survey</text>
   <text x="60" y="282" class="body">• --tally-only: index only (CI runners between jobs)</text>
   <text x="60" y="302" class="small">one supervised process per filesystem, as the owner</text>
@@ -83,8 +83,8 @@
   <text x="440" y="500" class="body">• term: one profile &amp;&amp; filters, !filter:, !profile:</text>
   <text x="440" y="518" class="body">• || is a union; one kind and one action per select</text>
   <text x="440" y="536" class="body">• ! and protect: exclude by overlap, only narrow</text>
-  <text x="440" y="554" class="body">• roots fixed, or roots: required (tier / --roots)</text>
-  <text x="440" y="576" class="small">built-ins may get more precise, never broader</text>
+  <text x="440" y="554" class="body">• roots fixed, or required (tier / --roots / protect)</text>
+  <text x="440" y="576" class="small">a built-in name never changes what it matches</text>
 
   <rect x="800" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="820" y="394" class="h3">Built-in library (v1 targets)</text>
@@ -94,7 +94,7 @@
   <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
   <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-tmp</text>
   <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, playwright</text>
-  <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  sccache, cmake-build, gradle</text>
+  <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  cmake-build, gradle, maven</text>
   <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  zephyr-tmp, west-build, renode</text>
   <text x="820" y="562" class="body"><tspan font-weight="700">filters</tspan>  idle-1h … idle-30d</text>
   <text x="820" y="582" class="small">each ships once verified on a real system</text>
@@ -104,8 +104,8 @@
 
   <rect x="40" y="646" width="250" height="186" rx="10" fill="#eef7fb" stroke="#0e7490" stroke-width="1.5"/>
   <text x="58" y="672" class="h3">1  Tally (background)</text>
-  <text x="58" y="696" class="body">mini-batches; sleep 19 × work</text>
-  <text x="58" y="714" class="body">(~5% of the disk's time)</text>
+  <text x="58" y="696" class="body">≤50 ms batches; sleep 19 × work</text>
+  <text x="58" y="714" class="body">(worker ~5% active, not a disk cap)</text>
   <text x="58" y="734" class="body">idle I/O priority, nice 19</text>
   <text x="58" y="754" class="body">pauses while a reclaim runs</text>
   <text x="58" y="774" class="body">discovery · re-check · re-tally</text>
@@ -117,9 +117,9 @@
   <text x="338" y="696" class="body">one unit per candidate; small ones</text>
   <text x="338" y="714" class="body">bucketed by name family</text>
   <text x="338" y="734" class="body">identity: mount, inode, birth time</text>
-  <text x="338" y="754" class="body">size estimate, newest change, flags</text>
+  <text x="338" y="754" class="body">size estimate, newest change</text>
   <text x="338" y="774" class="body">per-mount path trie (overlap queries)</text>
-  <text x="338" y="798" class="small">≤ 100k units; snapshot file (0600)</text>
+  <text x="338" y="798" class="small">64 MB budget; snapshot file (0600)</text>
   <text x="338" y="816" class="small">for ensure and survey</text>
 
   <rect x="620" y="646" width="250" height="186" rx="10" fill="#eef7fb" stroke="#0e7490" stroke-width="1.5"/>
@@ -133,13 +133,13 @@
 
   <rect x="900" y="646" width="260" height="186" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
   <text x="918" y="672" class="h3">4  Reclaim walk</text>
-  <text x="918" y="696" class="body">pop unit; re-check it (statx)</text>
-  <text x="918" y="716" class="body">re-evaluate its selection now</text>
-  <text x="918" y="736" class="body">safety checks at deletion time</text>
-  <text x="918" y="756" class="body">act; re-read statvfs</text>
-  <text x="918" y="776" class="body">stop as soon as goal is met</text>
-  <text x="918" y="800" class="small">then one discovery pass for what</text>
-  <text x="918" y="818" class="small">the index has not seen yet</text>
+  <text x="918" y="696" class="body">next candidate in policy order</text>
+  <text x="918" y="716" class="body">identity re-check, then a full</text>
+  <text x="918" y="736" class="body">eligibility walk + in-use checks</text>
+  <text x="918" y="756" class="body">act; re-read statvfs; stop at goal</text>
+  <text x="918" y="776" class="body">queue empty? discover this tier</text>
+  <text x="918" y="800" class="small">afresh before the next tier, so</text>
+  <text x="918" y="818" class="small">policy order holds when stale</text>
 
   <path d="M290 739 H316" class="edge" marker-end="url(#arrow)"/>
   <path d="M590 739 H616" class="edge" marker-end="url(#arrow)"/>
@@ -189,21 +189,21 @@
 
   <rect x="40" y="1252" width="740" height="180" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
   <text x="60" y="1278" class="h3">Every filesystem candidate, whichever profile found it</text>
-  <text x="60" y="1302" class="body">• own files only (owners: list required with --allow-root); mounts read first, never crossed</text>
-  <text x="60" y="1322" class="body">• in use = open fd, cwd, mmap or TMPDIR-style env path, matched by device and inode</text>
-  <text x="60" y="1342" class="body">• skipped: flock'd dirs, sockets/FIFOs, .diskgc-keep or special-action content inside</text>
-  <text x="60" y="1362" class="body">• right before deleting: flock the candidate, re-walk it, re-scan /proc; no symlinks followed</text>
+  <text x="60" y="1302" class="body">• every entry must be your own (or in owners:); mounts read first, never crossed</text>
+  <text x="60" y="1322" class="body">• in use = open fd, cwd, mmap (dev:inode) or a path in the initial environment</text>
+  <text x="60" y="1342" class="body">• skipped: flock'd dirs, sockets/FIFOs, a .diskgc-keep or Cargo target inside</text>
+  <text x="60" y="1362" class="body">• right before deleting: flock, full walk, /proc ≤1 s old; identity check per unlink</text>
   <text x="60" y="1382" class="body">• cargo-target: take every known lock file, delete only inside locked profile dirs,</text>
   <text x="60" y="1400" class="body">  never touch a lock file; /proc covers binaries still running after Cargo unlocked</text>
-  <text x="60" y="1422" class="small">success is judged by statvfs, not by tallies</text>
+  <text x="60" y="1422" class="small">details: docs/safety.md · not a defence against a hostile local user</text>
 
   <rect x="800" y="1252" width="360" height="180" rx="10" fill="#fdf0f0" stroke="#d9534f" stroke-width="1.5"/>
-  <text x="820" y="1278" class="h3">Never touched</text>
+  <text x="820" y="1278" class="h3">Never deleted by diskgc itself</text>
   <text x="820" y="1302" class="body">• anything no source profile found</text>
   <text x="820" y="1322" class="body">• Docker volumes and containers</text>
   <text x="820" y="1342" class="body">• Nix GC roots, profiles, generations</text>
   <text x="820" y="1362" class="body">• Cargo lock files; target/doc, tmp, criterion</text>
-  <text x="820" y="1382" class="body">• anything in use, other users' files</text>
+  <text x="820" y="1382" class="body">• anything visibly in use; others' files</text>
   <text x="820" y="1402" class="body">• other mounts, symlink targets</text>
-  <text x="820" y="1422" class="small">command actions: trusted, author-scoped</text>
+  <text x="820" y="1422" class="small">command actions: trusted, never as root</text>
 </svg>
