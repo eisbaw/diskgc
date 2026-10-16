@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1190" width="1200" height="1190">
-  <title>diskgc: interface and reclamation</title>
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 1200 1460" width="1200" height="1460">
+  <title>diskgc: profiles, index and reclaim</title>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#6b7280"/>
@@ -10,177 +10,199 @@
       .h1 { font-size: 26px; font-weight: 700; }
       .sub { font-size: 14px; fill: #4b5563; }
       .section { font-size: 13px; font-weight: 700; fill: #6b7280; letter-spacing: 1.5px; }
-      .h2 { font-size: 17px; font-weight: 700; }
+      .h2 { font-size: 16px; font-weight: 700; }
       .h3 { font-size: 14px; font-weight: 700; }
-      .body { font-size: 13px; }
-      .muted { font-size: 13px; fill: #6b7280; }
+      .body { font-size: 12.5px; }
       .small { font-size: 12px; fill: #4b5563; }
-      .cmd { font-size: 14px; font-weight: 600; }
-      .code { font-size: 12.5px; fill: #374151; }
-      .edge { stroke: #6b7280; stroke-width: 1.6; fill: none; }
-      .node { fill: #ffffff; stroke: #9ca3af; stroke-width: 1.2; }
+      .cmd { font-size: 13px; font-weight: 600; }
+      .code { font-size: 12px; fill: #374151; }
+      .edge { stroke: #6b7280; stroke-width: 1.8; fill: none; }
     </style>
   </defs>
 
-  <rect width="1200" height="1190" fill="#ffffff"/>
+  <rect width="1200" height="1460" fill="#ffffff"/>
 
-  <text x="40" y="48" class="h1">diskgc: interface and reclamation</text>
-  <text x="40" y="74" class="sub">One cleanup core, tiers from config.yaml. A service calls it when available space drops; CI and agents call it on demand.</text>
+  <text x="40" y="48" class="h1">diskgc: profiles, index and reclaim</text>
+  <text x="40" y="74" class="sub">Profiles say what cruft is and how to remove it; tiers say when. A background tally keeps an index, so freeing space never waits for a survey.</text>
 
-  <!-- ============ INTERFACE ============ -->
+  <!-- ===================== INTERFACE ===================== -->
   <text x="40" y="112" class="section">INTERFACE</text>
 
-  <!-- Background service -->
-  <rect x="40" y="126" width="540" height="236" rx="10" fill="#eef4ff" stroke="#3b6fd8" stroke-width="1.5"/>
-  <text x="64" y="154" class="h2">Background service</text>
-  <text x="64" y="178" class="mono cmd" fill="#1d4ed8" style="fill:#1d4ed8">diskgc watch --min-free 30G --target-free 60G PATH</text>
-  <text x="64" y="200" class="muted">systemd unit per filesystem, runs as the owner (not root)</text>
+  <rect x="40" y="126" width="360" height="190" rx="10" fill="#eef4ff" stroke="#3b6fd8" stroke-width="1.5"/>
+  <text x="60" y="152" class="h2">Background service</text>
+  <text x="60" y="176" class="mono cmd" style="fill:#1d4ed8">diskgc watch --min-free 30G</text>
+  <text x="60" y="194" class="mono cmd" style="fill:#1d4ed8">  --target-free 60G PATH</text>
+  <text x="60" y="222" class="body">• every 10 s: statvfs; below min → reclaim to target</text>
+  <text x="60" y="242" class="body">• background tally keeps the index fresh (~5% disk)</text>
+  <text x="60" y="262" class="body">• writes an index snapshot for ensure / survey</text>
+  <text x="60" y="282" class="body">• --tally-only: index only (CI runners between jobs)</text>
+  <text x="60" y="302" class="small">one supervised process per filesystem, as the owner</text>
 
-  <!-- free-space gauge: left = 0 free, right = plenty free -->
-  <text x="212" y="222" class="small" text-anchor="middle">min-free 30G</text>
-  <text x="359" y="222" class="small" text-anchor="middle">target-free 60G</text>
-  <rect x="64" y="228" width="148" height="18" fill="#f3b4b4"/>
-  <rect x="212" y="228" width="147" height="18" fill="#f6dc9a"/>
-  <rect x="359" y="228" width="197" height="18" fill="#bfe5c9"/>
-  <rect x="64" y="228" width="492" height="18" fill="none" stroke="#9ca3af"/>
-  <text x="138" y="262" class="small" text-anchor="middle">reclaim</text>
-  <text x="285" y="262" class="small" text-anchor="middle">hold (hysteresis)</text>
-  <text x="457" y="262" class="small" text-anchor="middle">idle</text>
-  <text x="556" y="262" class="small" text-anchor="end">available →</text>
+  <rect x="420" y="126" width="360" height="190" rx="10" fill="#eefaf2" stroke="#2f9a5a" stroke-width="1.5"/>
+  <text x="440" y="152" class="h2">CI / agent util</text>
+  <text x="440" y="176" class="mono cmd" style="fill:#15803d">diskgc ensure --min-free 50G</text>
+  <text x="440" y="194" class="mono cmd" style="fill:#15803d">  [--target-free 80G] [--select E] PATH</text>
+  <text x="440" y="222" class="body">• warm index if a snapshot is fresh, else a sync</text>
+  <text x="440" y="240" class="body">  tally within --tally-budget (--no-index forces it)</text>
+  <text x="440" y="262" class="body">0 met · 1 exhausted · 2 usage · 3 tier failed</text>
+  <text x="440" y="282" class="body">75 lock busy · 124 deadline · 130/143 signal</text>
+  <text x="440" y="302" class="small">--json: one object on stdout; logs on stderr</text>
 
-  <text x="64" y="292" class="mono body" font-weight="600">every 10 s</text>
-  <text x="190" y="292" class="body">read available space (statvfs, one syscall)</text>
-  <text x="64" y="316" class="mono body" font-weight="600">below min</text>
-  <text x="190" y="316" class="body">reclaim until target-free; back off if stuck</text>
-  <text x="64" y="340" class="mono body" font-weight="600">otherwise</text>
-  <text x="190" y="340" class="body">do nothing</text>
+  <rect x="800" y="126" width="360" height="190" rx="10" fill="#f6f6f8" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="820" y="152" class="h2">Read-only</text>
+  <text x="820" y="176" class="mono cmd">diskgc survey PATH...</text>
+  <text x="820" y="196" class="body">what each profile matches, sizes, ages, in use,</text>
+  <text x="820" y="214" class="body">plus unmatched entries grouped by name family</text>
+  <text x="820" y="240" class="mono cmd">diskgc profiles list | show | test</text>
+  <text x="820" y="264" class="mono cmd">diskgc check</text>
+  <text x="930" y="264" class="body">static validation</text>
+  <text x="820" y="288" class="mono cmd">--dry-run</text>
+  <text x="910" y="288" class="body">the plan, from the index</text>
 
-  <!-- CI / agent util -->
-  <rect x="620" y="126" width="540" height="236" rx="10" fill="#eefaf2" stroke="#2f9a5a" stroke-width="1.5"/>
-  <text x="644" y="154" class="h2">CI / agent util</text>
-  <text x="644" y="178" class="mono cmd" style="fill:#15803d">diskgc ensure --min-free 50G [--target-free 80G] PATH</text>
-  <text x="644" y="200" class="muted">CI pre-job hook; agents before each task. [--json] [--dry-run]</text>
+  <!-- ===================== PROFILES ===================== -->
+  <text x="40" y="354" class="section">PROFILES: WHAT CRUFT IS AND HOW TO REMOVE IT</text>
 
-  <text x="644" y="234" class="mono body" font-weight="600">exit 0</text>
-  <text x="714" y="234" class="body">at least 50G available on the filesystem of PATH</text>
-  <text x="644" y="258" class="mono body" font-weight="600">exit 1</text>
-  <text x="714" y="258" class="body">exhausted: the rest is in use, kept or too recent;</text>
-  <text x="714" y="276" class="body">report lists what was skipped and why</text>
-  <text x="644" y="300" class="mono body" font-weight="600">exit 2</text>
-  <text x="714" y="300" class="body">usage/config error, nothing deleted (3: tier failed)</text>
-  <text x="644" y="340" class="muted">75: lock busy past --timeout, still short · 124: deadline · 130/143</text>
+  <rect x="40" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="60" y="394" class="h3">A profile (built-in YAML, or yours)</text>
+  <text x="60" y="420" class="mono code">name:  pytest-tmp</text>
+  <text x="60" y="440" class="mono code">find:  roots /tmp, /var/tmp</text>
+  <text x="60" y="458" class="mono code">       paths pytest-of-*,</text>
+  <text x="60" y="476" class="mono code">             nix-shell.*/pytest-of-*</text>
+  <text x="60" y="496" class="mono code">where: idle_for · has / has_not</text>
+  <text x="60" y="516" class="mono code">action: delete | command | kind</text>
+  <text x="60" y="536" class="mono code">kind:  fs | cargo-target | docker-*</text>
+  <text x="60" y="554" class="mono code">       | nix-store</text>
+  <text x="60" y="576" class="small">examples (match / no_match) run as tests</text>
 
-  <!-- arrows into the core -->
-  <path d="M310 362 V384 H540 V398" class="edge" marker-end="url(#arrow)"/>
-  <text x="322" y="378" class="small">min = min-free, goal = target-free</text>
-  <path d="M890 362 V384 H660 V398" class="edge" marker-end="url(#arrow)"/>
-  <text x="878" y="378" class="small" text-anchor="end">goal = --target-free (default: --min-free)</text>
+  <rect x="420" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="440" y="394" class="h3">Composing them in a tier</text>
+  <text x="440" y="420" class="mono code">select: (pytest-tmp || nix-shell-rc)</text>
+  <text x="440" y="438" class="mono code">        &amp;&amp; idle-3d &amp;&amp; !claude-code-tmp</text>
+  <text x="440" y="466" class="body">• each term: one source &amp;&amp; filters, !filter, !profile</text>
+  <text x="440" y="486" class="body">• || is a union; one kind and one action per select</text>
+  <text x="440" y="506" class="body">• ! and protect: exclude by overlap, only narrow</text>
+  <text x="440" y="526" class="body">• positive only: nothing no profile found is deleted</text>
+  <text x="440" y="546" class="body">• roots fixed, or roots: required (from tier / --roots)</text>
+  <text x="440" y="576" class="small">built-ins may get more precise, never broader</text>
 
-  <!-- core -->
-  <rect x="380" y="400" width="440" height="72" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
-  <text x="600" y="430" class="mono" font-size="15" font-weight="700" text-anchor="middle">reclaim(min, goal, filesystem, deadline)</text>
-  <text x="600" y="454" class="body" text-anchor="middle">min-free met? return. else flock /run/diskgc/lock, re-check</text>
+  <rect x="800" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="820" y="394" class="h3">Built-in library (v1 targets)</text>
+  <text x="820" y="418" class="body"><tspan font-weight="700">test</tspan>  pytest-tmp, pytest-cache</text>
+  <text x="820" y="436" class="body"><tspan font-weight="700">nix</tspan>  nix-shell-rc, nix-shell-tmpdir, nix-garbage</text>
+  <text x="820" y="454" class="body"><tspan font-weight="700">rust</tspan>  cargo-target</text>
+  <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
+  <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-tmp</text>
+  <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, playwright</text>
+  <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  sccache, cmake-build, gradle</text>
+  <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  zephyr-tmp, west-build, renode</text>
+  <text x="820" y="562" class="body"><tspan font-weight="700">filters</tspan>  idle-1h … idle-30d</text>
+  <text x="820" y="582" class="small">each ships once verified on a real system</text>
 
-  <!-- ============ RECLAMATION ============ -->
-  <text x="40" y="526" class="section">RECLAMATION: EXAMPLE config.yaml, GROUPS IN LIST ORDER, STOP WHEN GOAL IS MET</text>
+  <!-- ===================== GATHER, THEN ACT ===================== -->
+  <text x="40" y="632" class="section">GATHER, THEN ACT</text>
 
-  <!-- Pass 1 -->
-  <circle cx="48" cy="547" r="5" fill="#2f9a5a"/>
-  <text x="60" y="552" class="h3">group: stale · ranking: random (tiers shuffled within the group)</text>
+  <rect x="40" y="646" width="250" height="186" rx="10" fill="#eef7fb" stroke="#0e7490" stroke-width="1.5"/>
+  <text x="58" y="672" class="h3">1  Tally (background)</text>
+  <text x="58" y="696" class="body">mini-batches; sleep 19 × work</text>
+  <text x="58" y="714" class="body">(~5% of the disk's time)</text>
+  <text x="58" y="734" class="body">idle I/O priority, nice 19</text>
+  <text x="58" y="754" class="body">pauses while a reclaim runs</text>
+  <text x="58" y="774" class="body">discovery · re-check · re-tally</text>
+  <text x="58" y="798" class="small">no watch? a sync tally runs first,</text>
+  <text x="58" y="816" class="small">bounded by --tally-budget</text>
 
-  <rect x="40" y="564" width="700" height="56" rx="8" fill="#f3faf5" stroke="#9fd3b2"/>
-  <circle cx="68" cy="592" r="14" fill="#2f9a5a"/><text x="68" y="597" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">?</text>
-  <text x="96" y="587" class="h3">cargo · idle_for: 7d</text>
-  <text x="724" y="587" class="small" text-anchor="end">rebuild only if revisited</text>
-  <text x="96" y="608" class="mono code">delete inside locked profile dirs, keep lock files</text>
+  <rect x="320" y="646" width="270" height="186" rx="10" fill="#eef7fb" stroke="#0e7490" stroke-width="1.5"/>
+  <text x="338" y="672" class="h3">2  Index</text>
+  <text x="338" y="696" class="body">one unit per candidate; small ones</text>
+  <text x="338" y="714" class="body">bucketed by name family</text>
+  <text x="338" y="734" class="body">identity: mount, inode, birth time</text>
+  <text x="338" y="754" class="body">size estimate, newest change, flags</text>
+  <text x="338" y="774" class="body">per-mount path trie (overlap queries)</text>
+  <text x="338" y="798" class="small">≤ 100k units; snapshot file (0600)</text>
+  <text x="338" y="816" class="small">for ensure and survey</text>
 
-  <rect x="40" y="628" width="700" height="56" rx="8" fill="#f3faf5" stroke="#9fd3b2"/>
-  <circle cx="68" cy="656" r="14" fill="#2f9a5a"/><text x="68" y="661" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">?</text>
-  <text x="96" y="651" class="h3">docker-build-cache · unused_for: 7d</text>
-  <text x="724" y="651" class="small" text-anchor="end">layers rebuilt on demand</text>
-  <text x="96" y="672" class="mono code">docker builder prune --all --force --filter until=168h</text>
+  <rect x="620" y="646" width="250" height="186" rx="10" fill="#eef7fb" stroke="#0e7490" stroke-width="1.5"/>
+  <text x="638" y="672" class="h3">3  Priority queue</text>
+  <text x="638" y="696" class="body">derived per tier from the index</text>
+  <text x="638" y="716" class="body">group → tier → order</text>
+  <text x="638" y="740" class="body">order: oldest (default)</text>
+  <text x="638" y="760" class="body">or best-fit: smallest unit that</text>
+  <text x="638" y="778" class="body">covers the need, else largest</text>
+  <text x="638" y="808" class="small">rebuilt when tiers change</text>
 
-  <rect x="40" y="692" width="700" height="56" rx="8" fill="#f3faf5" stroke="#9fd3b2"/>
-  <circle cx="68" cy="720" r="14" fill="#2f9a5a"/><text x="68" y="725" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">?</text>
-  <text x="96" y="715" class="h3">nix-gc</text>
-  <text x="724" y="715" class="small" text-anchor="end">mostly re-downloadable</text>
-  <text x="96" y="736" class="mono code">nix-store --gc --max-freed &lt;goal − available&gt;</text>
+  <rect x="900" y="646" width="260" height="186" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
+  <text x="918" y="672" class="h3">4  Reclaim walk</text>
+  <text x="918" y="696" class="body">pop unit; re-check it (statx)</text>
+  <text x="918" y="716" class="body">re-evaluate its selection now</text>
+  <text x="918" y="736" class="body">safety checks at deletion time</text>
+  <text x="918" y="756" class="body">act; re-read statvfs</text>
+  <text x="918" y="776" class="body">stop as soon as goal is met</text>
+  <text x="918" y="800" class="small">then one discovery pass for what</text>
+  <text x="918" y="818" class="small">the index has not seen yet</text>
 
-  <!-- Pass 2 -->
-  <circle cx="48" cy="777" r="5" fill="#d97706"/>
-  <text x="60" y="782" class="h3">group: pressure · ranking: ordered (costs rebuild or download time)</text>
+  <path d="M290 739 H316" class="edge" marker-end="url(#arrow)"/>
+  <path d="M590 739 H616" class="edge" marker-end="url(#arrow)"/>
+  <path d="M870 739 H896" class="edge" marker-end="url(#arrow)"/>
 
-  <rect x="40" y="794" width="700" height="56" rx="8" fill="#fff8ee" stroke="#f0c98a"/>
-  <circle cx="68" cy="822" r="14" fill="#d97706"/><text x="68" y="827" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">4</text>
-  <text x="96" y="817" class="h3">docker-images · select: dangling</text>
-  <text x="724" y="817" class="small" text-anchor="end">untagged; may cost a rebuild</text>
-  <text x="96" y="838" class="mono code">docker image prune --force</text>
+  <rect x="40" y="848" width="1120" height="38" rx="8" fill="#fff7e6" stroke="#c98a12"/>
+  <text x="600" y="872" class="body" text-anchor="middle" font-weight="700">The index is a cache, never an authority: a stale or missing index costs speed, never safety.</text>
 
-  <rect x="40" y="858" width="700" height="56" rx="8" fill="#fff8ee" stroke="#f0c98a"/>
-  <circle cx="68" cy="886" r="14" fill="#d97706"/><text x="68" y="891" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">5</text>
-  <text x="96" y="881" class="h3">cargo · idle_for: 1h</text>
-  <text x="724" y="881" class="small" text-anchor="end">minutes of rebuild</text>
-  <text x="96" y="902" class="mono code">delete inside locked profile dirs, keep lock files</text>
+  <!-- ===================== CONFIG ===================== -->
+  <text x="40" y="924" class="section">CONFIG: GROUPS ESCALATE, TIERS SELECT PROFILES</text>
 
-  <rect x="40" y="922" width="700" height="56" rx="8" fill="#fff8ee" stroke="#f0c98a"/>
-  <circle cx="68" cy="950" r="14" fill="#d97706"/><text x="68" y="955" font-size="14" font-weight="700" text-anchor="middle" style="fill:#fff">6</text>
-  <text x="96" y="945" class="h3">generic · path: /home/mark/.cache/pip (escape hatch)</text>
-  <text x="724" y="945" class="small" text-anchor="end">trusted command, no in-use check</text>
-  <text x="96" y="966" class="mono code">command: [pip, --cache-dir, /home/mark/.cache/pip, cache, purge]</text>
+  <rect x="40" y="938" width="740" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
+  <circle cx="64" cy="962" r="5" fill="#2f9a5a"/>
+  <text x="76" y="967" class="h3">group stale · ranking: random (tiers shuffled within the group)</text>
+  <text x="64" y="992" class="mono code">test-and-shell-cruft  (pytest-tmp || nix-shell-rc) &amp;&amp; idle-3d</text>
+  <text x="64" y="1012" class="mono code">cargo-stale           cargo-target &amp;&amp; idle-7d   roots: /home/mark/src</text>
+  <text x="64" y="1032" class="mono code">docker-cache-stale    docker-build-cache &amp;&amp; idle-7d</text>
+  <text x="64" y="1052" class="mono code">nix-dead              nix-garbage</text>
+  <circle cx="64" cy="1084" r="5" fill="#d97706"/>
+  <text x="76" y="1089" class="h3">group pressure · ordered (costs rebuild or download time)</text>
+  <text x="64" y="1114" class="mono code">docker-dangling       docker-dangling</text>
+  <text x="64" y="1134" class="mono code">tmp-old               tmp-entry &amp;&amp; idle-2d</text>
+  <text x="64" y="1154" class="mono code">cargo-recent          cargo-target &amp;&amp; idle-1h   roots: /home/mark/src</text>
+  <text x="64" y="1186" class="mono code">protect: [claude-code-tmp]</text>
+  <text x="300" y="1186" class="small">(never deleted by any tier, by overlap)</text>
 
-  <!-- Per-candidate loop -->
-  <text x="800" y="552" class="h3">For each tier, each candidate</text>
+  <rect x="800" y="938" width="360" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
+  <text x="820" y="964" class="h3">Hysteresis</text>
+  <text x="900" y="992" class="small" text-anchor="middle">min-free</text>
+  <text x="1010" y="992" class="small" text-anchor="middle">target-free</text>
+  <rect x="820" y="998" width="80" height="18" fill="#f3b4b4"/>
+  <rect x="900" y="998" width="110" height="18" fill="#f6dc9a"/>
+  <rect x="1010" y="998" width="130" height="18" fill="#bfe5c9"/>
+  <rect x="820" y="998" width="320" height="18" fill="none" stroke="#9ca3af"/>
+  <text x="860" y="1032" class="small" text-anchor="middle">reclaim</text>
+  <text x="955" y="1032" class="small" text-anchor="middle">hold</text>
+  <text x="1075" y="1032" class="small" text-anchor="middle">idle</text>
+  <text x="820" y="1062" class="body">• watch: below min → reclaim to target</text>
+  <text x="820" y="1082" class="body">• ensure: target defaults to min-free</text>
+  <text x="820" y="1102" class="body">• idle-* filters: recent stuff not eligible</text>
+  <text x="820" y="1122" class="body">• back-off when everything left is in use</text>
+  <text x="820" y="1142" class="body">• stop as soon as the goal is met</text>
+  <text x="820" y="1180" class="small">thresholds are CLI flags, not config</text>
 
-  <rect x="800" y="564" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="589" class="body" text-anchor="middle">groups in order; tiers ordered or shuffled</text>
-  <path d="M960 604 V618" class="edge" marker-end="url(#arrow)"/>
+  <!-- ===================== SAFETY ===================== -->
+  <text x="40" y="1238" class="section">SAFETY: CODE, ALWAYS ON, NO PROFILE CAN SWITCH IT OFF</text>
 
-  <rect x="800" y="620" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="645" class="body" text-anchor="middle">candidates on this filesystem, oldest first</text>
-  <path d="M960 660 V674" class="edge" marker-end="url(#arrow)"/>
+  <rect x="40" y="1252" width="740" height="180" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
+  <text x="60" y="1278" class="h3">Every filesystem candidate, whichever profile found it</text>
+  <text x="60" y="1302" class="body">• own files only (owners: list required with --allow-root); mounts read first, never crossed</text>
+  <text x="60" y="1322" class="body">• in use = open fd, cwd, mmap or TMPDIR-style env path, matched by device and inode</text>
+  <text x="60" y="1342" class="body">• skipped: flock'd dirs, sockets/FIFOs, .diskgc-keep or special-action content inside</text>
+  <text x="60" y="1362" class="body">• right before deleting: flock the candidate, re-walk it, re-scan /proc; no symlinks followed</text>
+  <text x="60" y="1382" class="body">• cargo-target: take every known lock file, delete only inside locked profile dirs,</text>
+  <text x="60" y="1400" class="body">  never touch a lock file; /proc covers binaries still running after Cargo unlocked</text>
+  <text x="60" y="1422" class="small">success is judged by statvfs, not by tallies</text>
 
-  <rect x="800" y="676" width="320" height="40" rx="6" fill="#fff7e6" stroke="#c98a12" stroke-width="1.2"/>
-  <text x="960" y="701" class="body" text-anchor="middle">tier-specific checks fail → skip + report</text>
-  <path d="M960 716 V730" class="edge" marker-end="url(#arrow)"/>
-
-  <rect x="800" y="732" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="757" class="body" text-anchor="middle">delete (cargo: in place, locks held)</text>
-  <path d="M960 772 V786" class="edge" marker-end="url(#arrow)"/>
-
-  <rect x="800" y="788" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="813" class="body" text-anchor="middle">re-read available space</text>
-  <path d="M960 828 V842" class="edge" marker-end="url(#arrow)"/>
-
-  <rect x="800" y="844" width="320" height="40" rx="6" class="node"/>
-  <text x="960" y="869" class="body" text-anchor="middle">goal met?</text>
-
-  <!-- no: loop back -->
-  <path d="M1120 864 H1145 V640 H1124" class="edge" marker-end="url(#arrow)"/>
-  <text x="1160" y="752" class="small" text-anchor="middle" transform="rotate(90 1160 752)">no: next candidate / tier</text>
-
-  <!-- yes -->
-  <path d="M960 884 V902" class="edge" marker-end="url(#arrow)"/>
-  <text x="970" y="898" class="small">yes</text>
-  <rect x="800" y="904" width="320" height="36" rx="6" fill="#eefaf2" stroke="#2f9a5a" stroke-width="1.2"/>
-  <text x="960" y="927" class="body" text-anchor="middle">done (ensure exits 0)</text>
-
-  <rect x="800" y="952" width="320" height="52" rx="6" fill="#fdf0f0" stroke="#d9534f" stroke-width="1.2"/>
-  <text x="960" y="973" class="body" text-anchor="middle">exhausted, below min-free: ensure exits 1</text>
-  <text x="960" y="992" class="small" text-anchor="middle">between min and target: exit 0, target_met false</text>
-
-  <!-- Cargo safety gate -->
-  <rect x="40" y="1028" width="700" height="132" rx="10" fill="#fff7e6" stroke="#c98a12" stroke-width="1.5"/>
-  <text x="64" y="1056" class="h3">Cargo tier: when and how a target/ is deleted</text>
-  <text x="64" y="1082" class="body">• CACHEDIR.TAG + known lock files (unknown → skip); no .diskgc-keep; built &gt; idle_for ago</text>
-  <text x="64" y="1102" class="body">• all known Cargo lock files taken without waiting, re-listed; /proc shows no activity</text>
-  <text x="64" y="1122" class="body">• only inside locked profile dirs: .fingerprint/ first, then all but the lock files</text>
-  <text x="64" y="1142" class="body">• lock files never move: waiting and new builds share one lock, so they just wait</text>
-
-  <!-- Never touched -->
-  <rect x="780" y="1028" width="380" height="132" rx="10" fill="#fdf0f0" stroke="#d9534f" stroke-width="1.5"/>
-  <text x="804" y="1056" class="h3">Never touched by typed tiers</text>
-  <text x="804" y="1082" class="body">• Docker volumes and containers; Nix roots, generations</text>
-  <text x="804" y="1102" class="body">• anything matched by no tier, or marked .diskgc-keep</text>
-  <text x="804" y="1122" class="body">• lock files; target/doc, tmp, criterion; busy targets</text>
-  <text x="804" y="1142" class="body">• symlink targets, other mounts, other filesystems</text>
+  <rect x="800" y="1252" width="360" height="180" rx="10" fill="#fdf0f0" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="820" y="1278" class="h3">Never touched</text>
+  <text x="820" y="1302" class="body">• anything no source profile found</text>
+  <text x="820" y="1322" class="body">• Docker volumes and containers</text>
+  <text x="820" y="1342" class="body">• Nix GC roots, profiles, generations</text>
+  <text x="820" y="1362" class="body">• Cargo lock files; target/doc, tmp, criterion</text>
+  <text x="820" y="1382" class="body">• anything in use, other users' files</text>
+  <text x="820" y="1402" class="body">• other mounts, symlink targets</text>
+  <text x="820" y="1422" class="small">command actions: trusted, author-scoped</text>
 </svg>

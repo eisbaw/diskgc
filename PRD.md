@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 9. The human decides when this is done.
+Status: draft, round 10. The human decides when this is done.
 
 Diagram: `docs/diskgc-design.svg` (interface plus an *example* tier list; the
 tier list itself is config).
@@ -46,13 +46,12 @@ apply whatever the profile.
 ## Users / actors
 
 - **Laptop owner** running several projects and overnight coding agents on
-  NixOS. Runs `watch` as a service under their own user; agents call `ensure`
-  before each task.
+  a Linux machine (any distribution; NixOS is not assumed). Runs `watch` as
+  a service under their own user; agents call `ensure` before each task.
 - **CI runner fleet operator.** Persistent runners, one job at a time. Calls
   `ensure` from the pre-job hook; no service needed.
 - **Agent harness** (a script). Calls `ensure --json` and branches on exit code
   and the JSON result: retry later, skip the task, alert.
-- **Config author.** Writes the YAML; usually one of the above.
 
 ## Interface
 
@@ -110,8 +109,8 @@ tiers.
 
 ### `watch`
 
-- One process per filesystem. On NixOS, one instance of a systemd template
-  unit per watched path.
+- One process per filesystem, e.g. one instance of a systemd template unit
+  per watched path (any supervisor works; systemd is not required).
 - `--target-free` is required here (unlike `ensure`): a watcher without two
   thresholds would reclaim a sliver at every poll. The error message says so.
 - Every `--interval` (default `10s`): one `statvfs`. At or above
@@ -159,9 +158,10 @@ it. `test`: run every profile's `examples` against an in-memory model; exit
 
 Static validation only (see Validation): load the config, print the
 resolved config path and the groups and tiers as diskgc understood them,
-exit 0 or 2. It needs nothing from the target machine, so the NixOS module
-runs it at build time (also when cross-building) and a bad config fails
-`nixos-rebuild`, not the service at 3am. Machine-specific problems (a
+exit 0 or 2. It needs nothing from the target machine, so packaging and
+configuration tools run it before deploying (the NixOS module at build
+time, so a bad config fails `nixos-rebuild`), not the service at 3am.
+Machine-specific problems (a
 missing root, a symlinked path) can only be found at run time.
 
 ### Exit codes (`ensure`)
@@ -467,6 +467,14 @@ then, user profiles cover them.
 - `check` warns about a user profile whose last path segment is only
   wildcards outside `/tmp` and `/var/tmp` (e.g. `roots: [/home/mark]`,
   `paths: ["*"]`).
+- **Profiles are meant to be written by an AI and checked by the tool.**
+  Globs are hard for humans to read; concrete paths are not. The intended
+  workflow: `diskgc survey --json` shows what no profile matches yet; an AI
+  agent drafts a profile from it, including `examples` taken from the real
+  paths it saw; `diskgc profiles test` checks the examples, and
+  `diskgc survey --select <new-profile>` shows everything the profile would
+  match on this machine. The human reviews concrete paths and decides,
+  without having to work out what a glob means.
 
 ## Configuration (YAML)
 
@@ -476,7 +484,8 @@ cannot activate some other policy. Only when neither is given:
 `$XDG_CONFIG_HOME/diskgc/config.yaml` (default `~/.config/...`), then
 `/etc/diskgc/config.yaml`. None found: exit 2, listing the paths tried. The
 binary ships built-in *profiles* but **no built-in tiers**; an example config
-ships as `docs/example.yaml`, and the NixOS module provides a default.
+ships as `docs/example.yaml`, which packages (and the NixOS module) install
+as the default.
 
 The config contains `version`, optional user `profiles`, optional
 `protect`, optional `owners` (only with `--allow-root`), and the tier
@@ -1031,9 +1040,10 @@ taken".
 - One reclaim per host at a time, via `flock` on the fixed path
   `/run/diskgc/lock`, opened read-only. Not configurable: two configs naming
   two lock files would silently break mutual exclusion.
-- The lock file is provisioned, not created by diskgc. tmpfiles.d drop-in
-  (the NixOS module ships it; CI installs the same file, since `/run` is
-  emptied on reboot):
+- The lock file is provisioned, not created by diskgc, by whatever installs
+  diskgc: on systemd machines a tmpfiles.d drop-in (shipped with the
+  package, the NixOS module and the CI install step alike, since `/run` is
+  emptied on reboot); elsewhere the equivalent boot-time step:
 
   ```
   d /run/diskgc      0755 root root -
@@ -1090,10 +1100,19 @@ apply whatever the profile.
 
 ## Deployment
 
-- One Rust binary (see Implementation), Linux 5.8 or newer.
-- NixOS module: renders the YAML, ships the tmpfiles rule for the lock, runs
-  `check` at build time, and starts one `diskgc watch` instance per
-  configured path as the configured user.
+- One Rust binary (see Implementation), Linux 5.8 or newer, any
+  distribution, built as a statically linked (musl) binary so it runs
+  without Nix or any particular libc. Nix, Docker and Cargo are optional: a
+  profile whose tool is not installed is skipped (`missing`), never an
+  error; a tool that is installed but whose daemon is unreachable (the
+  `docker` CLI without a running `dockerd`) is a backend error, reported,
+  and retried soon by `watch` (see Back-off).
+- Generic Linux: the binary, a systemd template unit for `watch` (user or
+  system), the tmpfiles drop-in for the lock file, and an example config.
+  Distribution packages can follow; the static binary works without them.
+- NixOS, as one option among others: a module that renders the YAML, ships
+  the tmpfiles rule, runs `check` at build time, and starts the `watch`
+  instances.
 - CI runners: binary, YAML, the tmpfiles drop-in, and
   `diskgc ensure --min-free 50G --target-free 80G "$CI_BUILDS_DIR"` in the
   pre-job hook.
@@ -1317,6 +1336,10 @@ processes and mounts from the developer's system.
   synchronous tally within `--tally-budget`.
 - **Signals, SIGKILL, deadlines, the CLI-hook use of `ensure`, `watch`
   running as a plain process** (no systemd in the container).
+- **Not only Nix:** the same tests also run in a container built from a
+  common non-Nix distribution image (e.g. Debian), with the static binary,
+  no Nix installed and a Docker-less variant, so nothing silently assumes
+  Nix, NixOS or a particular tool being present.
 
 The NixOS module is checked by evaluation in `nix flake check` (the
 generated unit, tmpfiles rules and YAML are asserted on), not by booting a
@@ -1347,9 +1370,11 @@ CI settings). Three layers:
    `just check` never compile it. It is built only into the test image.
 2. **Run-time**: the test binary refuses to run unless a marker file baked
    into the test image exists (`/.diskgc-test-sandbox`, holding a fixed
-   constant also compiled into the binary) and `systemd-detect-virt
-   --container` reports a container. (A kernel command-line token would not
-   work: a container sees the host's `/proc/cmdline`.)
+   constant also compiled into the binary) and Podman's own container
+   marker (`/run/.containerenv`) exists, which does not depend on systemd
+   being in the image (`systemd-detect-virt` is missing from slim
+   distribution images). (A kernel command-line token would not work: a
+   container sees the host's `/proc/cmdline`.)
 3. **Per operation**: every test asserts that the paths it touches are on
    the scratch tmpfs the harness mounted for it (checked by mount id), and
    aborts otherwise.
@@ -1358,7 +1383,7 @@ CI settings). Three layers:
 
 | `just` recipe | What | When |
 |---|---|---|
-| `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), in the dev shell | constantly; seconds |
+| `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), and `systemd-analyze verify` of the shipped systemd unit and tmpfiles drop-in, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus all container tests (builds the images with Nix, runs them with Podman) | **before every commit** (the gate); budget under 5 minutes, split the suite if it grows past that |
 | `e2e-one NAME` | one container test, keeping the container for inspection on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |
@@ -1460,7 +1485,8 @@ with `find` / `where` / `action` and the selection grammar; kinds `fs`,
 initial built-in profile library; user profiles and overrides; groups with
 `ordered` / `random` ranking and per-tier `order`; the index, background and
 synchronous tally, snapshot, `watch --tally-only`, `--tally-budget`,
-`--no-index`; `--json`; NixOS module; plain binary + YAML for CI.
+`--no-index`; `--json`; generic-Linux deployment (binary, systemd unit,
+tmpfiles drop-in), a NixOS module, and plain binary + YAML for CI.
 
 ## Non-goals
 
