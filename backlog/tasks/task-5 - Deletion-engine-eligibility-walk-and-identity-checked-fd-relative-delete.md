@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: 'Deletion engine: eligibility walk and identity-checked fd-relative delete'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 11:39'
+updated_date: '2026-10-17 13:42'
 labels:
   - wave-1
   - irreversible
@@ -26,13 +26,13 @@ Why: this is the code that removes files. Implement the eligibility walk (owners
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A mixed-owner tree is skipped as not_owner; a nested .diskgc-keep or Cargo target makes the candidate kept / contains_special (container tests)
-- [ ] #2 A 100k-entry, 30-level-deep tree is deleted without exceeding a low RLIMIT_NOFILE (e.g. 64)
-- [ ] #3 The deletion oracle shows nothing outside the candidate disappeared in every engine test
-- [ ] #4 An entry replaced between walk and unlink is never deleted and the candidate is changed (ModelHost event test, plus one container test using the pause wrapper)
-- [ ] #5 A mode-000 directory inside a candidate makes it ineligible (fail closed), never treated as empty
-- [ ] #6 A single directory with 200,000 entries and a tree deeper than PATH_MAX are deleted completely by a non-recursive walk
-- [ ] #7 A mount appearing inside a candidate mid-delete stops the delete there (EXDEV) and marks the candidate changed
+- [x] #1 A mixed-owner tree is skipped as not_owner; a nested .diskgc-keep or Cargo target makes the candidate kept / contains_special (container tests)
+- [x] #2 A 100k-entry, 30-level-deep tree is deleted without exceeding a low RLIMIT_NOFILE (e.g. 64)
+- [x] #3 The deletion oracle shows nothing outside the candidate disappeared in every engine test
+- [x] #4 An entry replaced between walk and unlink is never deleted and the candidate is changed (ModelHost event test, plus one container test using the pause wrapper)
+- [x] #5 A mode-000 directory inside a candidate makes it ineligible (fail closed), never treated as empty
+- [x] #6 A single directory with 200,000 entries and a tree deeper than PATH_MAX are deleted completely by a non-recursive walk
+- [x] #7 A mount appearing inside a candidate mid-delete stops the delete there (EXDEV) and marks the candidate changed
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -57,6 +57,56 @@ From task-50 round 3 (mped): the source scan (crates/diskgc-linux/src/source_sca
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: make the socket/FIFO rule (contains_ipc) a configurable policy. Today any socket or FIFO keeps its directory; on this machine stale pytest FIFO fixtures (pipe.json, nothing holds them open) block 13.2G across 193 nix-shell.* dirs. Policy values: block on any socket/FIFO (current), or block only on live ones (a FIFO some process holds open, visible to the in-use scan by dev:ino; a socket listed bound in /proc/net/unix). Default to be decided with task-15 (config schema); the conservative default is the current behaviour. Update docs/safety.md (eligibility walk) and docs/reference.md (config).
 
 From task-51: Host::read_dir(&Fd) -> Vec<OsString> exists (names only, no d_type: statx each name; LinuxHost reopens '.' O_RDONLY|O_DIRECTORY below the fd, so an O_PATH fd works and every call is a full listing; order is the filesystem's, ModelHost's is name order). The e2e test driver's 'delete' (diskgc-e2e/src/driver.rs) is a stand-in rm -r with a statx right before each unlinkat and no walk record, owner or in-use checks: when the engine lands, make the driver's delete call it, so the pause/kill container tests and race tests exercise the real engine.
+
+From task-51's review (mped): bound the listing size in the engine (a whole Vec is fine for 147k names, ~8-10 MB, but millions of entries or a fast writer on tmpfs could exhaust memory or keep listing); skip with a reason. ModelHost cannot fail a listing, so the 'listing failed -> skip the candidate' path needs a container test or a model error-injection event.
+
+Implementation (task-5, implementer): diskgc_core::engine.
+
+Design. Two steps the caller composes (flock and the in-use check go between them): engine::walk(host, &Candidate, &Rules, deadline) -> Result<WalkRecord, WalkStop>, and engine::delete(host, &Candidate, &WalkRecord, DeleteOptions) -> Deletion { removed_entries, removed_bytes, end: End }. A Candidate is (open parent fd, mount id, absolute path; the path is for reports and liveness only). The WalkRecord is a flat arena: one sorted listing per directory, each Entry = name, Identity (dev:ino, uid, file type), allocated bytes; objects() feeds the in-use check; newest_change() (None if any mtime/ctime unreported) feeds the idle filter; entries()/bytes().
+- Walk order of checks per entry: type/ino/uid/mnt_id answered (unsupported_fs) -> same mount (contains_mount) -> .diskgc-keep (kept) -> owner in Rules::owners (not_owner) -> socket/FIFO by IpcPolicy (contains_ipc) -> device node or unknown type, or Cargo recogniser (contains_special). First failure stops. Listing/open/statx failures are not_owner (fail closed, errno in the detail; EMFILE included); vanished/replaced during the walk is changed; candidate gone is missing; more than Rules::max_entries (DEFAULT_MAX_ENTRIES = 2,000,000) is too_many_entries, NEW reason added to docs/reference.md.
+- Recogniser: an entry matching .cargo-*lock* in directory P, where P's parent or grandparent inside the candidate (the candidate itself included) holds an entry named CACHEDIR.TAG (content not read: errs on keeping).
+- Delete: exactly the recorded entries, depth first, names sorted. Each unlink goes through checked_unlink (private, the ONLY caller of Delete::unlinkat, enforced by a GATED_ALLOWED Ungated entry): deadline check (now(), only when a deadline is set) -> statx(dir, name) -> compare full Identity -> unlinkat as the very next port call. ENOENT/EBUSY at unlinkat and any mismatch -> End::Changed and the delete STOPS (docs/safety.md now says so; it used to say "skips that entry"). Host errors -> End::Failed (ENOTEMPTY when something was created after the walk; never retried). Cause::SandboxGate -> End::GateRefused (separate variant: a run error, never a skip or changed). make_writable: fchmod(dir, perm|0o200) right after a directory is opened and matched, before anything in it is unlinked; never between statx and unlinkat.
+- Walk shape: explicit stack of frames (engine/frames.rs), never recursion, single names only. At most FD_WINDOW = 16 frames below the candidate hold an fd, plus the candidate (held for the whole step). A frame without fd is reopened from its nearest open ancestor one name at a time via open_beneath (BENEATH|NO_SYMLINKS|NO_XDEV) and matched by dev:ino; never "..". Cost quadratic in the depth of a single chain (measured: 1,500 levels deleted in ~0.5 s in the container).
+- IPC policy interface: IpcPolicy::{BlockAny (default), BlockLive(&dyn IpcLiveness)}; trait IpcLiveness { fn is_live(&self, &IpcEntry{kind, id: DevIno, path}) -> Result<bool, String> }; Err counts as live. Task-6 implements it; task-15 names it in the config.
+
+Port changes. Host::read_dir(fd, limit) -> DirListing::{Names(Vec), TooMany} (stops reading past the limit; mped's bound). Delete::fchmod(dir, perm) (directories; LinuxHost reopens "." O_RDONLY like read_dir; gated; fchmod_permitted takes the Permit). Source scan: chmod/fchmod/chmodat/set_permissions added to GATED; allowlist: fchmod_permitted (Permit), core engine/delete.rs checked_unlink and make_writable (Ungated, "calls Delete::..., which LinuxHost gates"). Errno gained EIO, EMFILE, NAMED and from_name. ModelHost: read_dir limit, fchmod, Op::Fchmod, a `fail: ERRNO` event action (op trigger, when: before; openat2/statx/read_dir/unlinkat/fchmod), peak_open_fds(); schema regenerated; docs/testing.md updated.
+
+Driver. diskgc-e2e-driver `delete [--make-writable] DIR` now runs the engine (owner = euid, BlockAny); one result line (removed / skip / changed / err). `--max-open-files N` sets RLIMIT_NOFILE. `walk` kept (plain recursive listing, one fd per level: the control for the fd-limit test). Existing driver container tests adapted (sorted order keeps call positions). Harness: snapshot reaches paths longer than PATH_MAX (chunked O_PATH opens); strace calls on dir fds strace cannot name (path > page) are kept as Unmatched::UnnamedDirFd instead of a parse error; Scratch gained mount_tmpfs/unmount/fifo/socket/deep_chain.
+
+Tests and bites (mutate -> run -> restore from a backup copy; all bit):
+- AC1: container engine_skips_a_mixed_owner_tree_as_not_owner, engine_skips_a_nested_keep_marker_or_cargo_target; model one_entry_of_another_user..., a_keep_marker_anywhere..., a_cargo_target_inside_is_contains_special, lock_names_without_the_target_layout_are_plain_files. Bites: owner check off, keep check off, recogniser off, triple layout dropped, recogniser too wide.
+- AC2: full-tier engine_deletes_a_100k_entry_30_deep_tree_under_rlimit_nofile_32 (control: the driver's one-fd-per-level walk hits EMFILE under the same limit); fast engine_deletes_a_tree_deeper_than_path_max under RLIMIT 64; model a_deep_tree_is_handled_with_a_bounded_number_of_open_fds (ModelHost peak fds). Bite: FD_WINDOW = 10_000 fails the model test and both container tests (EMFILE -> not_owner).
+- AC3: every engine container test judges its runs with the oracle (assert_clean).
+- AC4: model an_entry_replaced_between_walk_and_unlink_is_never_deleted..., a_directory_replaced_between_walk_and_delete_is_never_entered; container engine_never_deletes_an_entry_replaced_after_the_walk (pause at openat2:4 = walk/delete boundary, replace b). Accepted window pinned: model a_replacement_between_the_identity_check_and_the_unlink_is_the_accepted_window, container driver_delete_unlinks_what_replaced_an_entry_while_paused. Bites: identity compare off (model and container), dir reopen identity off.
+- AC5: container engine_fails_closed_on_a_mode_000_directory; model a_directory_that_cannot_be_listed_or_opened_is_not_owner_never_empty (fail: EACCES/EIO on read_dir, EACCES on openat2), an_entry_that_cannot_be_statted_is_not_owner; LinuxHost unit test the_engine_walks_here_but_its_delete_is_refused_by_the_gate (real mode-000 dir, real socket and FIFO on the dev host; delete -> GateRefused, nothing removed). Bites: listing failure treated as empty (model, and container: it then deleted 5 entries and hit ENOTEMPTY), unstattable skipped.
+- AC6: full-tier engine_deletes_a_200k_entry_directory; fast engine_deletes_a_tree_deeper_than_path_max (1,500 levels, ~4.5 KB paths).
+- AC7: container engine_stops_at_a_mount_that_appears_mid_delete (driver paused before unlinkat:1, harness as container root mounts a tmpfs on m/sub, resume -> changed with EXDEV, harness unmounts before the oracle snapshot); model a_mount_appearing_mid_delete_stops_it_there_as_changed (fail: EXDEV on the delete's openat2). Bites: EXDEV mapped to an error; walk mount check off (asserted by "never entered" on the trace).
+- Other model rules: RESOLVE flags (bite: beneath_how no_xdev false -> ModelHost check fails), identity-check order (bite: a now() between statx and unlinkat -> ModelHost check fails), deadline (bite: never passes), too_many_entries (bite: budget ignored), IPC BlockAny/BlockLive with a fake (bites: BlockAny not blocking, liveness error as dead, not-live still blocking), unsupported_fs (bite: uid defaulted), make_writable (bite: off), ENOTEMPTY reported (bite: swallowed as changed), gate refusal (bite: mapped to Failed, LinuxHost test).
+
+Limits (honest):
+- The accepted window between the identity statx and unlinkat remains (Linux has no unlink-by-inode).
+- not_owner is also the reason for fail-closed I/O errors (EIO, EMFILE...): the doc's choice; the errno is in the detail.
+- Reopen cost is quadratic in the depth of a single deep chain.
+- removed_bytes and record bytes count blocks per name (hard links counted per name).
+- The walk does not read mountinfo first (dead-FUSE hang protection is task-18's "mounts first"); a statx of a dead FUSE mount point inside a candidate could block.
+- No wall clock in the port, so the idle filter is the caller's (newest_change()).
+- The engine has no euid: the caller passes owners (the port has no getuid op yet).
+- (Superseded) The PRD's socket/FIFO wording was edited during the deep gate (Safety boundaries and What bad looks like now state the policy); see the round-2 note below.
+- Name sort costs O(n log n) per directory; chosen for reproducible call positions and identical traces on ModelHost and LinuxHost (differential tests, task-25).
+
+Round 2 (deep gate: Codex NO-GO, mped GO with should-fixes, QA GO; plus the user's decision on walk errors). Supersedes the round-1 note where they differ.
+- A (Codex blocker): LinuxHost listings no longer use rustix::fs::Dir, which turns getdents64's ENOENT into end-of-listing (a directory removed after it was opened read as empty). One helper, for_each_name, over rustix::fs::RawDir returns every getdents64 error; read_dir and ProcRoot::names (/proc pid and task listings) share it. A vanished /proc/<pid>/task listing is now an ENOENT error that task_ids maps to None via vanished_as_none (collect then asks the pidfd); the task-listing tests pass unchanged. Kernel regression test: host::tests::a_directory_removed_after_it_was_opened_is_an_error_not_empty (open, rmdir, list -> ENOENT; also pins that rustix's Dir still hides it).
+- USER DECISION (walk errors), one place (walk.rs host_failure): EACCES/EPERM -> new skip reason `unreadable` (added to docs/reference.md and safety.md); ENOENT mid-walk -> `changed` (a concurrent change; chosen and stated in safety.md); anything else (EMFILE, ENFILE, ENOMEM, EIO, Invalid) -> WalkStop::Failed { path, error }, an error of the run, never a skip. AC #5 now expects `unreadable` (model, LinuxHost unit test, container engine_fails_closed_on_a_mode_000_directory).
+- C: any entry named .cargo-lock/.cargo-build-lock/.cargo-artifact-lock anywhere, the candidate itself included, is contains_special (engine::CARGO_LOCK_NAMES), in addition to the structural recogniser for unknown .cargo-*lock* names under a tagged target. Task-53's per-entry plan is unaffected (note there).
+- D: IPC decision out of the walk: Rules { owners, block_ipc, max_entries }; block_ipc false records them, WalkRecord::ipc_entries() (kind, dev:ino, path below the candidate) for task-6. IpcPolicy/IpcLiveness/dyn removed. Task-6 note carries mped's guidance (FIFOs via objects(); /proc/net/unix is per-netns and by bind path; use sock_diag UDIAG_SHOW_VFS).
+- E: PRD and safety.md wording as the coordinator specified.
+- F: Stack::open checks the deadline before every (re)open, so an expired delete touches nothing (no open, no chmod) and a long reopen chain stops at the deadline.
+- G: Identity now includes btime (Identity::of(stat)); compared at every unlink and every directory (re)open. Limit text for inode-number reuse without btime in safety.md (separate from the statx->unlinkat window).
+- H: a frame's fd is closed before the next opens (window never exceeds FD_WINDOW; model peak <= FD_WINDOW + 2); EISDIR/ENOTDIR at unlinkat -> changed; paths built lazily; Candidate::new(&Resolved, path) so fd and mount id cannot disagree; the frame that failed to reopen is the reported path; End::GateRefused { path, error } and End::Failed carry the engine's path (HostError subjects still name fds; the path field is the one to report).
+- QA: make_writable's lasting side effect on a partial delete documented; safety.md no longer restates FD_WINDOW / DEFAULT_MAX_ENTRIES numbers (names the constants); stale notes on task-15 and task-5 corrected.
+- New model support: `chown` event, `type: char_device`, plus the earlier `fail`; schema regenerated, testing.md updated.
+- New/changed biting tests (all bit under their mutant, 37 mutants in scratchpad bites2.py): an_entry_chowned_between_walk_and_unlink_is_changed (dev:ino-only compare), an_unlink_that_finds_the_entry_gone_or_swapped_is_changed (ENOENT/EBUSY counted removed; EISDIR/ENOTDIR as failure), an_ancestor_swapped_above_the_window_stops_the_delete_when_reopened (only target frame checked), a_mount_met_opening_a_directory_in_the_walk_is_contains_mount, a_device_node_inside_is_contains_special, a_known_cargo_lock_name_anywhere_is_contains_special, without_block_ipc_sockets_and_fifos_are_recorded_for_the_caller, an_expired_delete_touches_nothing, reopening_a_long_chain_stops_at_the_deadline, a_process_level_error_fails_the_walk_instead_of_skipping, something_vanishing_mid_walk_is_changed, engine::tests::identity_is_device_inode_owner_type_and_birth_time (btime dropped), the LinuxHost ENOENT listing test.
+- Filed on task-61: quadratic deep-chain cost, a narrower Delete::fchmod, untested rename-out and bind-over-file scenarios, module docs restating safety.md.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

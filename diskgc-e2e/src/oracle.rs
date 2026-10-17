@@ -223,6 +223,10 @@ pub enum Unmatched {
     /// No ancestor is a directory in either snapshot (e.g. below a file, or
     /// below a mount the snapshot skips).
     NoKnownParent,
+    /// Relative to a directory fd strace could not name (its path is longer
+    /// than a page: a tree deeper than `PATH_MAX`); see
+    /// [`crate::strace::UNNAMED_FD_PREFIX`].
+    UnnamedDirFd,
 }
 
 impl std::fmt::Display for Unmatched {
@@ -235,6 +239,9 @@ impl std::fmt::Display for Unmatched {
                 write!(f, "reached through the symlink {}", link.display())
             }
             Unmatched::NoKnownParent => f.write_str("no ancestor directory in either snapshot"),
+            Unmatched::UnnamedDirFd => {
+                f.write_str("relative to a directory fd strace could not name (path too long)")
+            }
         }
     }
 }
@@ -275,6 +282,9 @@ pub fn classify_unmatched(
     // On the bytes: `Path::components` hides `.`, `//` and a trailing `/`,
     // which the snapshot's paths never have.
     let bytes = path.as_os_str().as_bytes();
+    if bytes.starts_with(crate::strace::UNNAMED_FD_PREFIX.as_bytes()) {
+        return Unmatched::UnnamedDirFd;
+    }
     let lexically_canonical = bytes == b"/"
         || bytes.strip_prefix(b"/").is_some_and(|rest| {
             rest.split(|b| *b == b'/')
@@ -676,6 +686,7 @@ mod tests {
                 Unmatched::SymlinkPrefix(PathBuf::from("/tmp/link")),
             ),
             ("/tmp/file/a", Unmatched::NoKnownParent),
+            ("<fd 4>/f", Unmatched::UnnamedDirFd),
         ];
         for (path, want) in cases {
             assert_eq!(

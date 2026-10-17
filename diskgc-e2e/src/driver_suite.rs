@@ -3,7 +3,9 @@
 //! harness pauses the driver at a chosen port call, changes the fixture
 //! while it waits, resumes it, and kills it at a chosen call. The driver
 //! runs as `tester` under strace like any code under test, and the deletion
-//! oracle judges every run, the killed ones included.
+//! oracle judges every run, the killed ones included. Its `delete` is the
+//! deletion engine (task-5), which handles each directory's names in sorted
+//! order, so call positions name the same entry on every run.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -127,17 +129,11 @@ pub fn driver_delete_pauses_and_resumes_at_a_host_call(ctx: &Ctx) -> TestResult 
     let verdict = oracle.judge(&run)?;
 
     run.expect_code(0)?;
-    let got: Vec<String> = results(&run)?
-        .iter()
-        .map(|l| l.split(" ino=").next().unwrap_or("").to_owned())
-        .collect();
-    let want = [
-        "0 unlinked \"d/a\"",
-        "1 unlinked \"d/b\"",
-        "2 unlinked \"d/c\"",
-        "3 unlinked \"d\"",
-    ];
-    ensure!(got == want, "delete reported {got:?}, expected {want:?}");
+    let got = results(&run)?;
+    ensure!(
+        matches!(got.as_slice(), [line] if line.starts_with("0 removed entries=4 ")),
+        "delete reported {got:?}, expected the 4 entries removed"
+    );
     ensure!(!exists(&s.path("d")), "d still exists after the delete");
     verdict.assert_clean()
 }
@@ -195,14 +191,17 @@ pub fn driver_delete_killed_at_a_host_call(ctx: &Ctx) -> TestResult {
         ),
         "expected one kill line at call {k} (the third unlinkat), got {said:?}"
     );
-    let got: Vec<String> = results(&victim)?
-        .iter()
-        .map(|l| l.split(" ino=").next().unwrap_or("").to_owned())
-        .collect();
+    let got = results(&victim)?;
     ensure!(
-        got == ["0 unlinked \"victim/a\"", "1 unlinked \"victim/b\""],
-        "the killed driver reported {got:?}"
+        got.is_empty(),
+        "the killed driver reported {got:?} (its result line comes at the end)"
     );
+    for name in ["a", "b"] {
+        ensure!(
+            !exists(&s.path(&format!("victim/{name}"))),
+            "victim/{name} is still there: the engine's first two unlinks are a and b"
+        );
+    }
     for name in ["c", "d"] {
         ensure!(
             exists(&s.path(&format!("victim/{name}"))),
@@ -246,10 +245,10 @@ pub fn driver_delete_unlinks_what_replaced_an_entry_while_paused(ctx: &Ctx) -> T
 
     run.expect_code(0)?;
     let got = results(&run)?;
-    let want_b = format!("1 unlinked \"r/b\" ino={checked}");
     ensure!(
-        got.get(1) == Some(&want_b),
-        "expected {want_b:?} (the identity statx saw the original), got {got:?}"
+        matches!(got.as_slice(), [line] if line.starts_with("0 removed entries=4 ")),
+        "the engine's identity check ran before the pause, so it saw the original and \
+         went on: expected all 4 entries removed, got {got:?}"
     );
     ensure!(
         !exists(&s.path("r")),

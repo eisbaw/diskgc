@@ -457,7 +457,7 @@ mod tests {
                 _ => panic!("resolve only statxes fds"),
             }
         }
-        fn read_dir(&self, _: &usize) -> Result<Vec<std::ffi::OsString>, HostError> {
+        fn read_dir(&self, _: &usize, _: usize) -> Result<crate::host::DirListing, HostError> {
             unreachable!()
         }
         fn statvfs(&self, _: &usize) -> Result<Space, HostError> {

@@ -258,6 +258,42 @@ fn unlinkat_of_a_path_fails_the_test() {
     assert!(message.contains("single name"), "{message}");
 }
 
+#[test]
+fn fchmod_sets_permission_bits_of_directories_only() {
+    let host = host(&tmp_yaml(""));
+    let a = dir(&host, "/tmp/a");
+    host.fchmod(&a.fd, 0o700).expect("fchmod");
+    assert_eq!(
+        host.stat_path(Path::new("/tmp/a")).and_then(|s| s.perm),
+        Some(0o700)
+    );
+    let f = open_f(&host);
+    let err = host.fchmod(&f, 0o600).expect_err("a file");
+    assert!(err.is(Errno::ENOTDIR), "{err}");
+    let message = failure(|| {
+        let _ = host.fchmod(&a.fd, 0o40_700);
+    });
+    assert!(message.contains(CHECK_FAILED), "{message}");
+}
+
+#[test]
+fn a_fail_event_makes_its_call_fail_without_acting() {
+    let host = host(&tmp_yaml(
+        "events:\n  - {at: {op: unlinkat, path: /tmp/a/f, when: before}, fail: EROFS}\n",
+    ));
+    let a = dir(&host, "/tmp/a");
+    host.statx(Base::Dir(&a.fd), Path::new("f")).expect("stat");
+    let err = host
+        .unlinkat(&a.fd, OsStr::new("f"), Unlink::NonDir)
+        .expect_err("injected");
+    assert!(err.is(Errno::EROFS), "{err}");
+    assert!(host.stat_path(Path::new("/tmp/a/f")).is_some(), "it acted");
+    // Once: the next call acts again.
+    host.statx(Base::Dir(&a.fd), Path::new("f")).expect("stat");
+    host.unlinkat(&a.fd, OsStr::new("f"), Unlink::NonDir)
+        .expect("unlinks");
+}
+
 // ---- Locks live exactly as long as their fds (AC #2) ----
 
 fn open_f(host: &diskgc_model::ModelHost) -> diskgc_model::ModelFd {

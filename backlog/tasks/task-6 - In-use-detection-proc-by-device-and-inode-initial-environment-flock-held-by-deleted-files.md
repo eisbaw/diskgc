@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 11:12'
+updated_date: '2026-10-17 13:17'
 labels:
   - wave-1
   - irreversible
@@ -59,6 +59,10 @@ Forward-carried from task-14: ModelHost answers the /proc readers from the model
 From task-14 (update): the empty-answer divergence is gone. ModelHost now reports an empty fd table, map or environment, or a missing exe, of a readable process as ProcError::Failed, like LinuxHost. Not modelled yet, filed on task-61 (3): spawn/fork events and fds shared between processes, which this task's fork handoff race needs.
 
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: narrow the unreadable-process rule. Read literally, safety.md's 'an unreadable same-user process makes every candidate it could use in_use' blocks all reclaim on any desktop: systemd --user, (sd-pam) and ssh-agent are non-dumpable (Denied), and sudo -i / fusermount3 are setuid root with real uid = user. New rule to write into docs/safety.md (In use) with tests: non-dumpable same-uid processes and setuid processes whose effective uid is not the user's are logged but do not block; any other unreadable same-user process still blocks. Define 'same user' explicitly (real vs effective uid). Measured on this machine: 486 processes scanned in 0.64 s, 176 of this user's readable, 6 Denied, 0 Failed, 1 Gone (exiting, pidfd-confirmed); no false in-use seen.
+
+From task-5 (deletion engine): the engine asks for socket/FIFO liveness through diskgc_core::engine::IpcLiveness { fn is_live(&self, entry: &IpcEntry) -> Result<bool, String> } with IpcEntry { kind: IpcKind::{Socket, Fifo}, id: DevIno, path: PathBuf (absolute, for /proc/net/unix which lists sockets by path; the socket inode there is sockfs's, not the file's) }. Ok(true) = live, Ok(false) = no visible process uses it, Err = cannot tell (the engine treats it as live). Used only under IpcPolicy::BlockLive (the user's dogfooding decision; default BlockAny). A FIFO held open is also caught by the general in-use check by dev:ino, since the walk records every entry: feed the in-use check from WalkRecord::objects() (candidate first). The in-use check runs between engine::walk and engine::delete (docs/safety.md, Deletion step 2); the freshness bound is measured to the start of engine::delete.
+
+From task-5 round 2 (deep gate, mped's guidance): the IPC policy moved out of the walk. engine::Rules { owners, block_ipc, max_entries }: block_ipc = true (the default policy) refuses the candidate at the first socket or FIFO (contains_ipc). With block_ipc = false the walk refuses nothing for them and records them; WalkRecord::ipc_entries() returns IpcEntry { kind: Socket|Fifo, id: DevIno, rel: path below the candidate }, and this task decides liveness with the same /proc scan it uses for in-use (no callback from the walk; the IpcLiveness trait is gone). Guidance: (1) a FIFO held open is already caught by the in-use check on WalkRecord::objects() (fds matched by dev:ino), so no extra FIFO check is needed; (2) /proc/net/unix is per network namespace and lists the path given at bind time, so absence there is no proof a socket is dead (a socket bound in another netns, or renamed/moved after bind, is not found by path); (3) use NETLINK_SOCK_DIAG with UNIX_DIAG_VFS (request flag UDIAG_SHOW_VFS), which reports the bound socket file's (dev, ino) for an exact match against IpcEntry::id; a socket not found there counts as live unless the scan is complete for diskgc's netns, and sockets of other netns are invisible (state it as a limit; the PRD now says 'a socket bound in diskgc's network namespace'). Any failure of that scan: treat every socket as live.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

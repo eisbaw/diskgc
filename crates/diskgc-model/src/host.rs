@@ -15,7 +15,12 @@
 //!   (a longer path would follow symlinks in its earlier components);
 //! - `unlinkat` removes a single name, and only right after a successful
 //!   `statx` of that name in that directory (the previous port call; through
-//!   any fd of the directory): the identity check (docs/safety.md, Deletion).
+//!   any fd of the directory): the identity check (docs/safety.md, Deletion);
+//! - `fchmod` sets permission bits only (of a directory, else `ENOTDIR`).
+//!
+//! A `fail` event makes the call it is addressed to fail with its errno,
+//! without acting (a listing that fails, an entry that cannot be statted).
+//! [`ModelHost::peak_open_fds`] tells how many fds diskgc held at once.
 //!
 //! Locks live on open file descriptions, exactly as long as some fd refers
 //! to them: a [`ModelFd`] (dropping it closes it) or a process's fd. The
@@ -34,9 +39,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, Delete, DevIno, Environ, Errno, Host, HostError, LinkTarget, LockMode, Locked,
-    MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat,
-    TryLock, Unlink, WaitLock, is_single_name,
+    Access, Base, Delete, DevIno, DirListing, Environ, Errno, Host, HostError, LinkTarget,
+    LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink,
+    Space, Stat, TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -92,6 +97,10 @@ struct Inner {
     /// Events that have not fired, in declaration order.
     pending: Vec<Event>,
     trace: Vec<Call>,
+    /// The errno a `fail` event made the current call return.
+    injected: Option<Errno>,
+    /// The most fds diskgc held open at once (`ModelFd`s alive).
+    peak_open_fds: usize,
 }
 
 /// A `Host` backed by a host model. Not `Send`: a run is one thread.
@@ -153,6 +162,8 @@ impl ModelHost {
                 state,
                 pending,
                 trace: Vec::new(),
+                injected: None,
+                peak_open_fds: 0,
             })),
         })
     }
@@ -229,6 +240,11 @@ impl ModelHost {
         self.inner.borrow().state.elapsed
     }
 
+    /// The most fds of this host that were open at the same time so far.
+    pub fn peak_open_fds(&self) -> usize {
+        self.inner.borrow().peak_open_fds
+    }
+
     // ---- Calls ----
 
     fn fd_ofd(&self, fd: &ModelFd) -> u64 {
@@ -281,6 +297,12 @@ impl ModelHost {
         let index = inner.trace.len() as u64 + 1;
         inner.fire_calls(index, op, path.as_deref(), When::Before);
         let (result, object, text) = run(&mut inner);
+        if let Some(errno) = inner.injected.take() {
+            model_error(format!(
+                "a 'fail: {errno}' event fired before call #{index} ({op}), which cannot fail \
+                 that way"
+            ));
+        }
         inner.trace.push(Call {
             index,
             op,
@@ -467,11 +489,16 @@ impl Inner {
             Action::Remove(path) => state.remove_path(path),
             Action::Rename { from, to } => state.rename_path(from, to),
             Action::Replace(path) => state.replace_path(path).map(drop),
+            Action::Chown { path, uid } => state.chown_path(path, *uid),
             Action::Open { pid, path } => state.proc_open(*pid, path, None).map(drop),
             Action::Close { pid, path } => state.proc_close(*pid, path),
             Action::Exit(pid) => state.proc_exit(*pid),
             Action::Advance(d) => {
                 state.elapsed += *d;
+                Ok(())
+            }
+            Action::Fail(errno) => {
+                self.injected = Some(*errno);
                 Ok(())
             }
         };
@@ -601,6 +628,13 @@ impl Host for ModelHost {
         let full = self.base_path(base, path);
         let shown = full.display().to_string();
         let opened = self.call(Op::Openat2, Some(full.clone()), Some(how), |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("openat2", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
             let state = &inner.state;
             let start = match start_ofd {
                 Some(ofd) => inner.loc_of(ofd),
@@ -636,6 +670,7 @@ impl Host for ModelHost {
                     let object = state.dev_ino(loc);
                     let ofd = inner.state.open_ofd(loc, full.clone(), how.access);
                     inner.state.own_ofds.insert(ofd);
+                    inner.peak_open_fds = inner.peak_open_fds.max(inner.state.own_ofds.len());
                     (Ok(ofd), Some(object), "ok".to_owned())
                 }
                 Err(Fault::Errno(e)) => (
@@ -670,6 +705,13 @@ impl Host for ModelHost {
         let shown = full.display().to_string();
         let entry = (!name.is_empty()).then(|| (self.fd_object(ofd), name.to_owned()));
         self.call_on(Op::Statx, Some(full), None, entry, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("statx", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
             let dir = inner.loc_of(ofd);
             let found = if name.is_empty() {
                 Ok(dir)
@@ -690,18 +732,28 @@ impl Host for ModelHost {
         })
     }
 
-    fn read_dir(&self, dir: &ModelFd) -> Result<Vec<OsString>, HostError> {
+    fn read_dir(&self, dir: &ModelFd, limit: usize) -> Result<DirListing, HostError> {
         let ofd = self.fd_ofd(dir);
         let path = self.base_path(Base::Dir(dir), Path::new(""));
         let shown = path.display().to_string();
         self.call(Op::ReadDir, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("getdents", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
             let loc = inner.loc_of(ofd);
             let object = Some(inner.state.dev_ino(loc));
             match inner.state.inode(loc).entries() {
+                Some(entries) if entries.len() > limit => {
+                    (Ok(DirListing::TooMany), object, "too many".to_owned())
+                }
                 // In name order (the model's), which callers must not rely
                 // on: the kernel's order is the filesystem's.
                 Some(entries) => (
-                    Ok(entries.keys().cloned().collect()),
+                    Ok(DirListing::Names(entries.keys().cloned().collect())),
                     object,
                     "ok".to_owned(),
                 ),
@@ -913,6 +965,13 @@ impl Delete for ModelHost {
                      that name in that directory as the previous call; docs/safety.md, Deletion)"
                     ));
                 }
+                if let Some(e) = inner.injected.take() {
+                    return (
+                        Err(HostError::errno("unlinkat", &shown, e)),
+                        None,
+                        errno_text(e),
+                    );
+                }
                 let dir_loc = inner.loc_of(ofd);
                 match inner.state.unlinkat(dir_loc, name, what == Unlink::Dir) {
                     Ok(loc) => (Ok(()), Some(inner.state.dev_ino(loc)), "ok".to_owned()),
@@ -924,5 +983,40 @@ impl Delete for ModelHost {
                 }
             },
         )
+    }
+
+    fn fchmod(&self, dir: &ModelFd, perm: u32) -> Result<(), HostError> {
+        let ofd = self.fd_ofd(dir);
+        if perm & !0o7777 != 0 {
+            violation(format!("fchmod with {perm:#o}: more than permission bits"));
+        }
+        let path = self.base_path(Base::Dir(dir), Path::new(""));
+        let shown = path.display().to_string();
+        self.call(Op::Fchmod, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("fchmod", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let loc = inner.loc_of(ofd);
+            let object = Some(inner.state.dev_ino(loc));
+            if inner.state.inode(loc).entries().is_none() {
+                // The port's fchmod is for directories (LinuxHost reopens
+                // `.` with O_DIRECTORY).
+                let e = Errno::ENOTDIR;
+                return (
+                    Err(HostError::errno("fchmod", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let now = inner.state.wall_now();
+            let inode = inner.state.inode_mut(loc);
+            inode.perm = perm;
+            inode.ctime = now;
+            (Ok(()), object, format!("{perm:04o}"))
+        })
     }
 }

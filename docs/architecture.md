@@ -267,9 +267,13 @@ is accepted until measured otherwise.
   keeps a virtual clock and delivers signals as events, so deadlines, exit
   codes 75 / 124 / 130 / 143 and the duty cycle are model-testable.
 - **Deleting operations are a trait of their own** (`Delete: Host`:
-  `unlinkat` so far, later the deleting `run`), so code given only a `Host`
-  cannot delete and the pre-release sandbox gate guards exactly those
-  methods.
+  `unlinkat`, `fchmod` for `make_writable`, later the deleting `run`), so
+  code given only a `Host` cannot delete or change permissions, and the
+  pre-release sandbox gate guards exactly those methods.
+- **Listings are bounded**: `read_dir` takes a limit and stops past it
+  (the deletion engine passes what is left of a candidate's entry budget),
+  so a huge directory, or one filled faster than it is read, cannot exhaust
+  memory or keep a listing going.
 - **`ModelHost` checks how it is called**: an `openat2` without the required
   `RESOLVE_*` flags, a `statx` of more than one name or from the root, or
   an `unlinkat` without an identity check right before it fails the test

@@ -1,6 +1,6 @@
 //! `LinuxHost`: the [`Host`] port on the running kernel.
 //!
-//! `openat2`, `statx`, `fstatvfs`, `flock`, `unlinkat`, `uname` and
+//! `openat2`, `statx`, `fstatvfs`, `flock`, `unlinkat`, `fchmod`, `uname` and
 //! `clock_gettime` go through rustix's `linux_raw` backend, i.e. raw
 //! syscalls without a libc wrapper, so the static musl build behaves exactly
 //! like the gnu build (and needs no libc support for `openat2` or `statx`).
@@ -30,9 +30,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, Delete, Environ, Errno, Host, HostError, LinkTarget, LockMode, Locked, MapEntry,
-    MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock, Unlink,
-    WaitLock, is_single_name,
+    Access, Base, Delete, DirListing, Environ, Errno, Host, HostError, LinkTarget, LockMode,
+    Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat,
+    TryLock, Unlink, WaitLock, is_single_name,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
@@ -167,10 +167,18 @@ impl ProcRoot<'_> {
         Ok(text)
     }
 
-    /// The names in directory `rel`, without `.` and `..`.
+    /// The names in directory `rel`, without `.` and `..`. A listing that
+    /// fails part-way (`ENOENT` for a directory removed meanwhile, such as a
+    /// task that exited) is that error, never a shorter listing.
     fn names(self, rel: &str) -> Result<Vec<Vec<u8>>, HostError> {
         let fd = self.open(rel, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        dir_names(fd).map_err(|e| HostError::errno("getdents", Self::shown(rel), errno_of(e)))
+        let mut names = Vec::new();
+        for_each_name(&fd, |name| {
+            names.push(name.to_vec());
+            true
+        })
+        .map_err(|e| HostError::errno("getdents", Self::shown(rel), errno_of(e)))?;
+        Ok(names)
     }
 
     /// A magic link: its text and the object it refers to (`statx`
@@ -188,20 +196,37 @@ impl ProcRoot<'_> {
     }
 }
 
-/// The names in the directory open (readable) as `fd`, without `.` and
-/// `..`: `getdents64` from the start to the end, on this fd only. The fd is
-/// consumed, so no other listing shares its position; `rustix`'s
-/// `Dir::new` takes it as is (`Dir::read_from` would reopen it, two
-/// syscalls more inside the window a `/proc` task listing must hold still).
-fn dir_names(fd: OwnedFd) -> Result<Vec<Vec<u8>>, rustix::io::Errno> {
-    let mut names = Vec::new();
-    for entry in rustix::fs::Dir::new(fd)? {
-        let name = entry?.file_name().to_bytes().to_vec();
-        if name != b"." && name != b".." {
-            names.push(name);
+/// The `getdents64` buffer of [`for_each_name`]: far larger than one entry
+/// (a name is at most 255 bytes), so it never fails with `EINVAL`.
+const DIRENT_BUFFER: usize = 32 * 1024;
+
+/// Calls `each` with every name in the directory open (readable) as `fd`,
+/// without `.` and `..`, from the fd's current position (a fresh fd: the
+/// start) to the end, until `each` returns `false`. Every `getdents64`
+/// error is returned, `ENOENT` (a directory removed after it was opened)
+/// included: `rustix::fs::Dir` turns that one into the end of the listing,
+/// which would read an unlistable directory as complete, so its raw form
+/// is used. The caller opens the fd for this listing alone, so no other
+/// listing shares its position.
+fn for_each_name(
+    fd: &OwnedFd,
+    mut each: impl FnMut(&[u8]) -> bool,
+) -> Result<(), rustix::io::Errno> {
+    let mut buf: Vec<u8> = Vec::with_capacity(DIRENT_BUFFER);
+    let mut entries = rustix::fs::RawDir::new(fd, buf.spare_capacity_mut());
+    loop {
+        match entries.next() {
+            None => return Ok(()),
+            Some(Err(rustix::io::Errno::INTR)) => continue,
+            Some(Err(e)) => return Err(e),
+            Some(Ok(entry)) => {
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." && !each(name) {
+                    return Ok(());
+                }
+            }
         }
     }
-    Ok(names)
 }
 
 /// The pid namespace check of [`LinuxHost::new`], on what reading
@@ -717,21 +742,25 @@ impl Host for LinuxHost {
             .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))
     }
 
-    fn read_dir(&self, dir: &LinuxFd) -> Result<Vec<OsString>, HostError> {
+    fn read_dir(&self, dir: &LinuxFd, limit: usize) -> Result<DirListing, HostError> {
         let subject = format!("{dir:?}");
-        // `.` below `dir` names `dir` itself: nothing is resolved, so no
-        // symlink or mount can be met. A fresh open gives this listing its
-        // own position (the fd's would be shared with any dup of it).
-        let readable = rustix::fs::openat(
-            dir,
-            ".",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|e| HostError::errno("open", format!("{subject}/."), errno_of(e)))?;
-        let names =
-            dir_names(readable).map_err(|e| HostError::errno("getdents", &subject, errno_of(e)))?;
-        Ok(names.into_iter().map(OsString::from_vec).collect())
+        let readable = reopen_readable(dir, &subject)?;
+        let mut names = Vec::new();
+        let mut too_many = false;
+        for_each_name(&readable, |name| {
+            if names.len() == limit {
+                too_many = true;
+                return false;
+            }
+            names.push(OsString::from_vec(name.to_vec()));
+            true
+        })
+        .map_err(|e| HostError::errno("getdents", &subject, errno_of(e)))?;
+        Ok(if too_many {
+            DirListing::TooMany
+        } else {
+            DirListing::Names(names)
+        })
     }
 
     fn statvfs(&self, fd: &LinuxFd) -> Result<Space, HostError> {
@@ -880,9 +909,9 @@ impl Host for LinuxHost {
     }
 }
 
-/// Every method runs [`gate`] first and hands its [`Permit`] to the one
-/// deleting syscall wrapper, [`unlinkat_permitted`], which cannot be called
-/// without one. A source scan of every production crate
+/// Every method runs [`gate`] first and hands its [`Permit`] to its one
+/// syscall wrapper ([`unlinkat_permitted`], [`fchmod_permitted`]), which
+/// cannot be called without one. A source scan of every production crate
 /// (`source_scan::tests::deleting_syscalls_only_behind_the_gate`) fails if a
 /// deleting, content-destroying, child-starting or namespace-changing call
 /// appears outside the allowlisted wrappers, so a future deleting method
@@ -905,6 +934,35 @@ impl Delete for LinuxHost {
         unlinkat_permitted(&permit, dir, name, flags)
             .map_err(|e| HostError::errno("unlinkat", &subject, errno_of(e)))
     }
+
+    fn fchmod(&self, dir: &LinuxFd, perm: u32) -> Result<(), HostError> {
+        let subject = format!("{dir:?}");
+        let permit = gate("fchmod", &subject)?;
+        if perm & !0o7777 != 0 {
+            return Err(HostError::invalid(
+                "fchmod",
+                &subject,
+                format!("{perm:#o} holds more than permission bits"),
+            ));
+        }
+        let readable = reopen_readable(dir, &subject)?;
+        fchmod_permitted(&permit, &readable, Mode::from_raw_mode(perm))
+            .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))
+    }
+}
+
+/// `dir` itself, opened anew `O_RDONLY | O_DIRECTORY`: `.` below `dir`
+/// names `dir`, so nothing is resolved and no symlink or mount can be met,
+/// and `dir` may be an `O_PATH` fd. A fresh open also gives a listing its own
+/// position (the fd's would be shared with any dup of it).
+fn reopen_readable(dir: &LinuxFd, subject: &str) -> Result<OwnedFd, HostError> {
+    rustix::fs::openat(
+        dir,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| HostError::errno("open", format!("{subject}/."), errno_of(e)))
 }
 
 /// The pre-release sandbox gate for deleting operation `op` on `subject`
@@ -925,6 +983,12 @@ fn unlinkat_permitted(
     flags: AtFlags,
 ) -> rustix::io::Result<()> {
     rustix::fs::unlinkat(dir, name, flags)
+}
+
+/// `fchmod(dir, mode)`: the only permission change in this crate. The
+/// [`Permit`] proves the gate allowed it.
+fn fchmod_permitted(_gate: &Permit, dir: &OwnedFd, mode: Mode) -> rustix::io::Result<()> {
+    rustix::fs::fchmod(dir, mode)
 }
 
 #[cfg(test)]
@@ -1347,20 +1411,74 @@ mod tests {
         let path_fd = resolve(&host, &dir.0, Want::Directory).expect("resolve").fd;
         let read_fd = open_dir(&host, &dir.0);
         for fd in [&path_fd, &read_fd, &path_fd] {
-            let mut got = host.read_dir(fd).expect("read_dir");
+            let DirListing::Names(mut got) = host.read_dir(fd, want.len()).expect("read_dir")
+            else {
+                panic!("a listing of exactly the limit is complete");
+            };
             got.sort();
             assert_eq!(got.len(), want.len());
             assert!(got == want, "listing differs from the directory");
         }
+        // One name over the limit stops the listing.
+        assert_eq!(
+            host.read_dir(&path_fd, want.len() - 1).expect("read_dir"),
+            DirListing::TooMany
+        );
 
         let empty = resolve(&host, &dir.0.join("sub"), Want::Directory).expect("resolve sub");
         assert_eq!(
-            host.read_dir(&empty.fd).expect("read_dir sub"),
-            Vec::<OsString>::new()
+            host.read_dir(&empty.fd, 0).expect("read_dir sub"),
+            DirListing::Names(Vec::new())
         );
         let file = resolve(&host, &dir.0.join(&want[0]), Want::Any).expect("resolve file");
-        let err = host.read_dir(&file.fd).unwrap_err();
+        let err = host.read_dir(&file.fd, 10).unwrap_err();
         assert!(err.is(Errno::ENOTDIR), "{err}");
+    }
+
+    /// A directory removed after it was opened fails its listing with
+    /// `ENOENT` (getdents64 on a dead directory), as an error, never as an
+    /// empty listing: the walk must fail closed there. `rustix::fs::Dir`
+    /// would end the listing quietly instead (task-5 review).
+    #[test]
+    fn a_directory_removed_after_it_was_opened_is_an_error_not_empty() {
+        let host = LinuxHost::new().expect("host setup");
+        let tmp = TempDir::new("read-dir-removed");
+        let doomed = tmp.0.join("doomed");
+        std::fs::create_dir(&doomed).expect("mkdir");
+        let readable = rustix::fs::open(
+            &doomed,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open");
+        let path_fd = resolve(&host, &doomed, Want::Directory)
+            .expect("resolve")
+            .fd;
+        std::fs::remove_dir(&doomed).expect("rmdir");
+
+        let err = for_each_name(&readable, |_| true).expect_err("a dead directory");
+        assert_eq!(err, rustix::io::Errno::NOENT);
+        let err = host
+            .read_dir(&path_fd, 10)
+            .expect_err("read_dir of a removed directory must fail");
+        assert!(err.is(Errno::ENOENT), "{err}");
+        // The control: rustix's Dir reads the same directory as empty.
+        let again = rustix::fs::open(&tmp.0, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
+            .expect("open tmp");
+        std::fs::create_dir(&doomed).expect("mkdir again");
+        let fd = rustix::fs::openat(
+            &again,
+            "doomed",
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .expect("open doomed");
+        std::fs::remove_dir(&doomed).expect("rmdir again");
+        let quiet: Vec<_> = rustix::fs::Dir::new(fd).expect("dir").collect();
+        assert!(
+            quiet.is_empty(),
+            "rustix's Dir no longer hides ENOENT: {quiet:?} (the raw listing is still right)"
+        );
     }
 
     #[test]
@@ -1872,6 +1990,16 @@ mod tests {
             .unlinkat(&dir, OsStr::new("../x"), Unlink::NonDir)
             .expect_err("refused");
         assert_eq!(err.cause, Cause::SandboxGate, "{err}");
+        // A permission change (make_writable) is gated like a deletion.
+        let mode_before = std::fs::metadata(&empty_dir).expect("stat").mode();
+        let sub = resolve(&host, &empty_dir, Want::Directory).expect("resolve");
+        let err = host.fchmod(&sub.fd, 0o700).expect_err("refused");
+        assert_eq!(err.cause, Cause::SandboxGate, "{err}");
+        assert_eq!(
+            std::fs::metadata(&empty_dir).expect("stat").mode(),
+            mode_before,
+            "the gate let a permission change through"
+        );
 
         assert_eq!(std::fs::read(&file).expect("file still there"), b"keep me");
         assert!(empty_dir.is_dir(), "the empty directory was deleted");
@@ -1895,6 +2023,97 @@ mod tests {
             .expect("openat2 after a refusal");
         host.statvfs(&sub).expect("statvfs after a refusal");
         host.mountinfo().expect("mountinfo after a refusal");
+    }
+
+    /// The deletion engine on the real kernel, on the developer's machine:
+    /// the eligibility walk reads a real tree (and refuses, fail closed, a
+    /// mode-000 directory, a socket and a FIFO inside), and the delete of an
+    /// eligible tree is refused by the sandbox gate at its first unlink, as a
+    /// gate refusal (a run error, never a skip or `changed`), with nothing
+    /// removed.
+    #[test]
+    fn the_engine_walks_here_but_its_delete_is_refused_by_the_gate() {
+        use diskgc_core::engine::{
+            Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, End, Reason, Rules, WalkStop, delete,
+            walk,
+        };
+        sandbox::check().expect_err("this test must run outside a diskgc test container");
+        let host = LinuxHost::new().expect("host setup");
+        let tmp = TempDir::new("engine");
+        let me = rustix::process::geteuid().as_raw();
+        let rules = Rules {
+            owners: &[me],
+            block_ipc: true,
+            max_entries: DEFAULT_MAX_ENTRIES,
+        };
+        let parent = resolve(&host, &tmp.0, Want::Directory).expect("resolve");
+        let walk_of = |name: &str| {
+            let path = tmp.0.join(name);
+            let candidate = Candidate::new(&parent, &path).expect("a name");
+            walk(&host, &candidate, &rules, None)
+        };
+        let reason_of = |name: &str| match walk_of(name) {
+            Err(WalkStop::Skipped(skip)) => skip.reason,
+            other => panic!("{name}: expected a skip, got {other:?}"),
+        };
+
+        let tree = tmp.0.join("tree");
+        std::fs::create_dir_all(tree.join("sub/deeper")).expect("mkdir");
+        std::fs::write(tree.join("a"), b"x").expect("write");
+        std::fs::write(tree.join("sub/deeper/b"), b"y").expect("write");
+        let path = tmp.0.join("tree");
+        let candidate = Candidate::new(&parent, &path).expect("a name");
+        let record = walk(&host, &candidate, &rules, None).expect("eligible");
+        assert_eq!(record.entries(), 5);
+        let done = delete(&host, &candidate, &record, DeleteOptions::default());
+        match &done.end {
+            End::GateRefused { path, error } => {
+                assert_eq!(error.cause, Cause::SandboxGate, "{error}");
+                assert_eq!(
+                    path,
+                    &tree.join("a"),
+                    "the refused unlink's path is reported"
+                );
+            }
+            other => panic!("expected the gate to refuse, got {other:?}"),
+        }
+        assert_eq!(done.removed_entries, 0);
+        assert!(tree.join("sub/deeper/b").exists() && tree.join("a").exists());
+
+        // Fail closed on a directory this user cannot list (AC #5 of
+        // task-5; root could list it, so only as an unprivileged user).
+        let locked = tmp.0.join("locked");
+        std::fs::create_dir_all(locked.join("unreadable")).expect("mkdir");
+        std::fs::write(locked.join("unreadable/f"), b"z").expect("write");
+        std::fs::set_permissions(
+            locked.join("unreadable"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .expect("chmod 000");
+        if me != 0 {
+            assert_eq!(reason_of("locked"), Reason::Unreadable);
+        }
+        std::fs::set_permissions(
+            locked.join("unreadable"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod back");
+
+        let ipc = tmp.0.join("ipc");
+        std::fs::create_dir(&ipc).expect("mkdir");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(ipc.join("socket")).expect("bind a socket");
+        assert_eq!(reason_of("ipc"), Reason::ContainsIpc);
+        std::fs::remove_file(ipc.join("socket")).expect("remove socket");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            ipc.join("fifo"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("mkfifo");
+        assert_eq!(reason_of("ipc"), Reason::ContainsIpc);
     }
 
     #[test]

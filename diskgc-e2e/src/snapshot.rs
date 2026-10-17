@@ -23,11 +23,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustix::fs::{AtFlags, CWD, FileType, StatxFlags};
+use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, StatxFlags};
 
 /// Filesystem types never walked (their mount point and everything below).
 pub const PSEUDO_FS_TYPES: &[&str] = &[
@@ -289,15 +290,72 @@ pub fn plan_walk(mounts: &[MountInfo]) -> WalkPlan {
     WalkPlan { skip, nested_roots }
 }
 
+/// Paths at least this long (bytes) are reached in steps ([`reach`]): the
+/// kernel refuses a path of `PATH_MAX` (4096) or more (`ENAMETOOLONG`), and
+/// the deletion engine's tests build trees deeper than that.
+const LONG_PATH: usize = 3072;
+
+/// `path` as a directory fd (`None`: the cwd) and the rest, for the `*at`
+/// calls: the whole path when it is short; otherwise an `O_PATH` fd of a
+/// prefix opened in steps shorter than [`LONG_PATH`], and the rest (shorter
+/// than that). Like a full path, the steps follow symlinks on the way; the
+/// walk only gets here through directories it recorded.
+fn reach(path: &Path) -> Result<(Option<OwnedFd>, PathBuf), String> {
+    if path.as_os_str().len() < LONG_PATH {
+        return Ok((None, path.to_path_buf()));
+    }
+    let mut dir: Option<OwnedFd> = None;
+    let mut chunk = PathBuf::new();
+    for component in path.components() {
+        let name = component.as_os_str();
+        if chunk.as_os_str().len() + name.len() + 1 >= LONG_PATH {
+            let base = dir.as_ref().map_or(CWD, |fd| fd.as_fd());
+            let opened = rustix::fs::openat(
+                base,
+                &chunk,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| format!("open a prefix of {}: {e}", path.display()))?;
+            dir = Some(opened);
+            chunk = PathBuf::new();
+        }
+        chunk.push(name);
+    }
+    Ok((dir, chunk))
+}
+
+/// The names in the directory at `path` (any length), without `.` and `..`.
+fn list(path: &Path) -> Result<Vec<OsString>, String> {
+    let (dir, rest) = reach(path)?;
+    let fd = rustix::fs::openat(
+        dir.as_ref().map_or(CWD, |fd| fd.as_fd()),
+        &rest,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("list {}: {e}", path.display()))?;
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::new(fd).map_err(|e| format!("list {}: {e}", path.display()))? {
+        let entry = entry.map_err(|e| format!("list {}: {e}", path.display()))?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            names.push(OsString::from_vec(name.to_vec()));
+        }
+    }
+    Ok(names)
+}
+
 /// Stats `path` (not following it) into an entry, its mount id and the type
 /// of the filesystem it is on.
 fn stat_entry(
     path: &Path,
     fs_types: &BTreeMap<u64, String>,
 ) -> Result<(Entry, u64, String), String> {
+    let (dir, rest) = reach(path)?;
     let stx = rustix::fs::statx(
-        CWD,
-        path,
+        dir.as_ref().map_or(CWD, |fd| fd.as_fd()),
+        &rest,
         AtFlags::SYMLINK_NOFOLLOW,
         StatxFlags::TYPE | StatxFlags::INO | StatxFlags::BTIME | StatxFlags::MNT_ID,
     )
@@ -399,16 +457,9 @@ pub fn take_from(root: &Path, mounts: &[MountInfo]) -> Result<Snapshot, String> 
             .entry(format!("{fs_type} {major}:{minor}"))
             .or_default() += 1;
         if entry.kind == Kind::Dir {
-            match std::fs::read_dir(&path) {
-                Ok(dir) => {
-                    for child in dir {
-                        match child {
-                            Ok(child) => pending.push(child.path()),
-                            Err(e) => errors.push(format!("list {}: {e}", path.display())),
-                        }
-                    }
-                }
-                Err(e) => errors.push(format!("list {}: {e}", path.display())),
+            match list(&path) {
+                Ok(names) => pending.extend(names.into_iter().map(|name| path.join(name))),
+                Err(e) => errors.push(e),
             }
         }
         entries.insert(path, entry);

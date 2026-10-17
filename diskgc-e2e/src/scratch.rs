@@ -304,6 +304,128 @@ impl Scratch {
             .map_err(|e| format!("remount {} read-only: {e}", target.display()))
     }
 
+    /// Mounts a fresh small tmpfs on the scratch directory `rel` (a mount
+    /// appearing inside a candidate). Fixture operations below it are
+    /// refused afterwards, as below any other mount.
+    pub fn mount_tmpfs(&self, rel: &str) -> Result<(), String> {
+        let target = self.for_existing("mount_tmpfs", rel);
+        rustix::mount::mount(
+            "diskgc-e2e-inner",
+            &target,
+            "tmpfs",
+            MountFlags::NOSUID | MountFlags::NODEV,
+            c"size=1m",
+        )
+        .map_err(|e| format!("mount tmpfs on {}: {e}", target.display()))
+    }
+
+    /// Unmounts the mount on the scratch directory `rel` (one made by
+    /// [`Scratch::mount_tmpfs`] or [`Scratch::bind_mount`]); refuses unless
+    /// what is there is a mount whose mount point lies on the scratch mount.
+    pub fn unmount(&self, rel: &str) -> Result<(), String> {
+        let target = self.join_checked("unmount", rel);
+        let parent = target.parent().expect("joined path has a parent");
+        self.require_on_scratch("unmount", parent, false);
+        if !is_mount_root(&target)? || mount_id(&target, false)? == self.mnt_id {
+            return Err(format!("unmount {}: not a mount", target.display()));
+        }
+        rustix::mount::unmount(&target, rustix::mount::UnmountFlags::empty())
+            .map_err(|e| format!("unmount {}: {e}", target.display()))
+    }
+
+    /// Creates the FIFO `rel` with `mode` and owner.
+    pub fn fifo(&self, rel: &str, mode: u32, owner: Owner) -> Result<PathBuf, String> {
+        let path = self.for_create("fifo", rel);
+        rustix::fs::mknodat(
+            CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(mode),
+            0,
+        )
+        .map_err(|e| format!("mkfifo {}: {e}", path.display()))?;
+        self.finish("fifo", &path, mode, owner)?;
+        Ok(path)
+    }
+
+    /// Creates the Unix socket file `rel` (bound, then the listener closed:
+    /// the file stays, as a crashed server's would) with owner.
+    pub fn socket(&self, rel: &str, owner: Owner) -> Result<PathBuf, String> {
+        let path = self.for_create("socket", rel);
+        drop(
+            std::os::unix::net::UnixListener::bind(&path)
+                .map_err(|e| format!("bind {}: {e}", path.display()))?,
+        );
+        self.finish("socket", &path, 0o755, owner)?;
+        Ok(path)
+    }
+
+    /// Creates a chain of `depth` nested directories, each called `name`,
+    /// below the existing scratch directory `rel`, each holding a file `f`,
+    /// all with owner. Works fd-relative, one level at a time, so the chain
+    /// can be deeper than `PATH_MAX`, which every path-based operation here
+    /// refuses; each new directory is checked to be on the scratch mount.
+    pub fn deep_chain(
+        &self,
+        rel: &str,
+        depth: usize,
+        name: &str,
+        owner: Owner,
+    ) -> Result<(), String> {
+        use std::os::fd::AsFd;
+        let start = self.for_existing("deep_chain", rel);
+        let open = |dir: rustix::fd::BorrowedFd<'_>, name: &str| {
+            rustix::fs::openat(
+                dir,
+                name,
+                rustix::fs::OFlags::PATH
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|e| format!("open {name} in the chain below {}: {e}", start.display()))
+        };
+        let uid = Some(rustix::process::Uid::from_raw(owner.uid));
+        let gid = Some(rustix::process::Gid::from_raw(owner.gid));
+        let mut dir = open(CWD, start.to_str().ok_or("non-UTF-8 fixture path")?)?;
+        for level in 0..depth {
+            let fail = |what: &str, e: rustix::io::Errno| {
+                format!("{what} at level {level} below {}: {e}", start.display())
+            };
+            let file = rustix::fs::openat(
+                &dir,
+                "f",
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::EXCL
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o644),
+            )
+            .map_err(|e| fail("create f", e))?;
+            rustix::fs::fchown(&file, uid, gid).map_err(|e| fail("chown f", e))?;
+            rustix::fs::mkdirat(&dir, name, rustix::fs::Mode::from_raw_mode(0o755))
+                .map_err(|e| fail("mkdir", e))?;
+            let next = open(dir.as_fd(), name)?;
+            rustix::fs::chownat(&dir, name, uid, gid, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|e| fail("chown", e))?;
+            let on = rustix::fs::statx(&next, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
+                .map_err(|e| fail("statx", e))?;
+            if on.stx_mnt_id != self.mnt_id {
+                interlock::abort_outside_scratch(
+                    "deep_chain",
+                    &start,
+                    &format!(
+                        "level {level} is on mount {}, not the scratch",
+                        on.stx_mnt_id
+                    ),
+                );
+            }
+            dir = next;
+        }
+        Ok(())
+    }
+
     /// Owner and mode for a freshly created entry, then a re-check that the
     /// created object really is on the scratch mount.
     fn finish(&self, op: &str, path: &Path, mode: u32, owner: Owner) -> Result<(), String> {

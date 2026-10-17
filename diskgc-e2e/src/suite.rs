@@ -22,7 +22,7 @@ use crate::scratch::{self, Scratch};
 use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
-use crate::{driver_suite, host_suite};
+use crate::{driver_suite, engine_suite, host_suite};
 
 /// Which gate runs a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +236,72 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: oracle_large_tree,
+    },
+    Test {
+        name: "engine_deletes_an_eligible_tree_and_nothing_else",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_deletes_an_eligible_tree_and_nothing_else,
+    },
+    Test {
+        name: "engine_skips_a_mixed_owner_tree_as_not_owner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_skips_a_mixed_owner_tree_as_not_owner,
+    },
+    Test {
+        name: "engine_skips_a_nested_keep_marker_or_cargo_target",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_skips_a_nested_keep_marker_or_cargo_target,
+    },
+    Test {
+        name: "engine_fails_closed_on_a_mode_000_directory",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_fails_closed_on_a_mode_000_directory,
+    },
+    Test {
+        name: "engine_skips_sockets_and_fifos",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_skips_sockets_and_fifos,
+    },
+    Test {
+        name: "engine_never_deletes_an_entry_replaced_after_the_walk",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_never_deletes_an_entry_replaced_after_the_walk,
+    },
+    Test {
+        name: "engine_stops_at_a_mount_that_appears_mid_delete",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_stops_at_a_mount_that_appears_mid_delete,
+    },
+    Test {
+        name: "engine_make_writable_deletes_a_read_only_tree",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_make_writable_deletes_a_read_only_tree,
+    },
+    Test {
+        name: "engine_deletes_a_tree_deeper_than_path_max",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_deletes_a_tree_deeper_than_path_max,
+    },
+    Test {
+        name: "engine_deletes_a_100k_entry_30_deep_tree_under_rlimit_nofile_32",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: engine_suite::engine_deletes_a_100k_entry_30_deep_tree_under_rlimit_nofile_32,
+    },
+    Test {
+        name: "engine_deletes_a_200k_entry_directory",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: engine_suite::engine_deletes_a_200k_entry_directory,
     },
 ];
 

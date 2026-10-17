@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 11:40'
+updated_date: '2026-10-17 12:50'
 labels:
   - wave-1
   - irreversible
@@ -45,6 +45,8 @@ Forward-carried from task-3 round 5: proc_environ returns Failed, not an empty E
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/): the probe's discovery skipped hidden dirs and so missed 6.1G of Cargo targets inside ~/.claude/worktrees/*/target (agent worktrees). Discovery must not skip hidden directories wholesale; consider an agent-worktree-target profile.
 
 From task-51: the race tests drive single operations through diskgc-e2e-driver (diskgc-e2e/src/driver.rs); add this task's operation (Cargo discovery / reclaim protocol) as a subcommand in driver::run, generic over H: Delete so its unit tests run on ModelHost, with indexed result lines. Every port call it makes is countable by the controlled wrapper (pause/kill points).
+
+From task-5 (deletion engine): the structural recogniser lives in the walk (diskgc-core engine/walk.rs): an entry matching .cargo-*lock* (is_cargo_lock_name; any lock name, known or not) in a directory P whose parent or grandparent INSIDE the candidate (the candidate itself included) holds an entry named CACHEDIR.TAG makes the candidate contains_special; the tag's signature is not read. Discovery (valid CACHEDIR.TAG, known lock allowlist) is this task's and stricter. Note the kind's own deletion (task-53) must not run the plain walk on the whole target (it would be contains_special by design): walk/delete the entries inside each locked profile directory as separate candidates.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

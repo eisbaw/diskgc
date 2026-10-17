@@ -16,21 +16,30 @@
 //!
 //! Output (stdout), one line per result, indexed from 0 in output order:
 //!
-//! - `walk`: `I <type> <path>` per entry, or `I err <tag> <path> -- <message>`;
-//! - `delete`: `I unlinked <path> ino=<inode from the identity statx>` per
-//!   entry, or `I err <tag> <path> -- <message>`;
+//! - `walk`: `I <type> <path>` per entry, or `I err <tag> <path> -- <message>`,
+//!   `<path>` relative to the walked directory;
+//! - `delete`: one line, the deletion engine's outcome (diskgc-core
+//!   `engine`): `0 removed entries=N bytes=B` when the candidate is gone,
+//!   `0 skip <reason> <path> -- <detail>` when the eligibility walk refused
+//!   it, `0 failed <tag> <path> -- <message>` when the walk hit an error of
+//!   the run (e.g. `EMFILE`), `0 changed <path> entries=N -- <detail>` or `0 err <tag> <path>
+//!   entries=N -- <message>` when the delete stopped (N entries removed
+//!   before), `<path>` absolute;
 //!
-//! where `<path>` is Rust's `{:?}` of the path relative to the operation's
-//! directory (`walk`) or to its parent (`delete`), and `<tag>` is the
-//! errno name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip
-//! reason of a failed traversal. Control lines ([`ControlLine`]) come in
-//! between; the last line is `done`. Exit code 0 when every entry
-//! succeeded and every planned point was reached, otherwise 1 (2: usage).
+//! where `<path>` is Rust's `{:?}` of the path, and `<tag>` is the errno
+//! name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip reason of
+//! a failed traversal. Control lines ([`ControlLine`]) come in between; the
+//! last line is `done`. Exit code 0 when every entry succeeded (`walk`) or
+//! the candidate was removed (`delete`) and every planned point was
+//! reached, otherwise 1 (2: usage).
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use diskgc_core::host::{Access, Base, Delete, FileType, Host, Unlink};
+use diskgc_core::engine::{
+    self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, End, Rules, WalkStop,
+};
+use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
 
@@ -40,46 +49,71 @@ use crate::host_probe::cause_tag;
 
 /// The driver's usage. Also a needle of the release check.
 pub const USAGE: &str = "\
-usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... OPERATION ARGS...
+usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-files N] OPERATION ARGS...
   POINT: K (the K-th port call, from 1) or OP:N (the N-th call of port
   operation OP, e.g. unlinkat:2); the action runs before that call
+  --max-open-files N: set RLIMIT_NOFILE to N first
   operations:
-    walk DIR     every entry below DIR, depth first, names sorted
-    delete DIR   DIR and everything below it, depth first, names sorted,
-                 each entry statx-ed right before its unlinkat
+    walk DIR                      every entry below DIR, depth first, names sorted
+    delete [--make-writable] DIR  the deletion engine on DIR: its eligibility
+                                  walk (owned by this user, any socket or FIFO
+                                  keeps it), then its identity-checked delete
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     pub plan: Plan,
+    /// `--max-open-files`: the `RLIMIT_NOFILE` to run under.
+    pub max_open_files: Option<u64>,
     pub operation: String,
     pub args: Vec<String>,
 }
 
-/// Parses `[--pause-at P | --kill-at P]... OPERATION ARGS...`.
+/// Parses `[--pause-at P | --kill-at P | --max-open-files N]... OPERATION
+/// ARGS...`.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let mut plan = Plan::new();
+    let mut max_open_files = None;
     let mut rest = args;
     loop {
-        let action = match rest.first().map(String::as_str) {
-            Some("--pause-at") => Action::Pause,
-            Some("--kill-at") => Action::Kill,
+        let flag = match rest.first().map(String::as_str) {
+            Some(flag @ ("--pause-at" | "--kill-at" | "--max-open-files")) => flag,
             Some(flag) if flag.starts_with("--") => return Err(format!("unknown flag {flag}")),
             _ => break,
         };
-        let point = rest
-            .get(1)
-            .ok_or_else(|| format!("{} needs a POINT", rest[0]))?;
-        plan = plan.at(Point::parse(point)?, action);
+        let value = rest.get(1).ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag {
+            "--pause-at" => plan = plan.at(Point::parse(value)?, Action::Pause),
+            "--kill-at" => plan = plan.at(Point::parse(value)?, Action::Kill),
+            _ => {
+                let n = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("--max-open-files {value:?}: not a positive number"))?;
+                max_open_files = Some(n);
+            }
+        }
         rest = &rest[2..];
     }
     let (operation, args) = rest.split_first().ok_or("no operation given")?;
     Ok(Invocation {
         plan,
+        max_open_files,
         operation: operation.clone(),
         args: args.to_vec(),
     })
+}
+
+/// Sets `RLIMIT_NOFILE` (soft and hard) to `n`.
+fn limit_open_files(n: u64) -> Result<(), String> {
+    let limit = rustix::process::Rlimit {
+        current: Some(n),
+        maximum: Some(n),
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, limit)
+        .map_err(|e| format!("setrlimit RLIMIT_NOFILE {n}: {e}"))
 }
 
 /// Entry point of `diskgc-e2e-driver` (after the interlock); returns the
@@ -92,6 +126,12 @@ pub fn main(args: &[String]) -> i32 {
             return exit::USAGE;
         }
     };
+    if let Some(n) = invocation.max_open_files
+        && let Err(e) = limit_open_files(n)
+    {
+        eprintln!("diskgc-e2e-driver: {e}");
+        return exit::FAIL;
+    }
     let linux = match LinuxHost::new() {
         Ok(host) => host,
         Err(e) => {
@@ -100,8 +140,10 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     let host = Controlled::new(linux, invocation.plan, Box::new(stdio_control));
+    let owner = rustix::process::geteuid().as_raw();
     let outcome = run(
         &host,
+        owner,
         &invocation.operation,
         &invocation.args,
         &mut |line| println!("{line}"),
@@ -143,11 +185,12 @@ pub struct Outcome {
     pub failed: usize,
 }
 
-/// Runs `operation` with `args` on `host`, handing each result line to
-/// `emit`. `Err` when the operation could not start (bad arguments, its
-/// directory unreachable).
+/// Runs `operation` with `args` on `host`, for the user `owner` (the user
+/// the driver runs as), handing each result line to `emit`. `Err` when the
+/// operation could not start (bad arguments, its directory unreachable).
 pub fn run<H: Delete>(
     host: &H,
+    owner: u32,
     operation: &str,
     args: &[String],
     emit: &mut dyn FnMut(String),
@@ -157,9 +200,16 @@ pub fn run<H: Delete>(
         next: 0,
         failed: 0,
     };
+    let options = |make_writable| DeleteOptions {
+        make_writable,
+        deadline: None,
+    };
     match (operation, args) {
         ("walk", [dir]) => walk(host, Path::new(dir), &mut out)?,
-        ("delete", [dir]) => delete(host, Path::new(dir), &mut out)?,
+        ("delete", [dir]) => delete(host, owner, Path::new(dir), options(false), &mut out)?,
+        ("delete", [flag, dir]) if flag == "--make-writable" => {
+            delete(host, owner, Path::new(dir), options(true), &mut out)?;
+        }
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
     Ok(Outcome { failed: out.failed })
@@ -186,6 +236,12 @@ impl Lines<'_> {
     fn resolve_err(&mut self, path: &Path, e: &ResolveError) {
         self.err(e.reason(), path, e);
     }
+
+    /// A result line that counts as a failure.
+    fn err_line(&mut self, text: String) {
+        self.failed += 1;
+        self.ok(text);
+    }
 }
 
 fn type_name(file_type: Option<FileType>) -> &'static str {
@@ -207,9 +263,17 @@ fn sorted_names<H: Host>(
     host: &H,
     fd: &H::Fd,
 ) -> Result<Vec<OsString>, diskgc_core::host::HostError> {
-    let mut names = host.read_dir(fd)?;
-    names.sort();
-    Ok(names)
+    match host.read_dir(fd, DEFAULT_MAX_ENTRIES)? {
+        DirListing::Names(mut names) => {
+            names.sort();
+            Ok(names)
+        }
+        DirListing::TooMany => Err(diskgc_core::host::HostError::invalid(
+            "read_dir",
+            format!("{fd:?}"),
+            format!("more than {DEFAULT_MAX_ENTRIES} entries"),
+        )),
+    }
 }
 
 /// `walk DIR`: every entry below DIR, depth first, each statx-ed (not
@@ -252,83 +316,66 @@ fn walk_below<H: Host>(host: &H, fd: &H::Fd, mount_id: u64, rel: &Path, out: &mu
     }
 }
 
-/// `delete DIR`: DIR and everything below it, depth first. Each entry is
-/// statx-ed right before its `unlinkat` (the identity check's position,
-/// docs/safety.md, Deletion), whose inode the result line reports. Not the
-/// deletion engine (task-5): no comparison with a walk record, no
-/// ownership or in-use checks.
-fn delete<H: Delete>(host: &H, dir: &Path, out: &mut Lines<'_>) -> Result<(), String> {
-    let (parent, name) = dir
-        .parent()
-        .zip(dir.file_name())
-        .ok_or_else(|| format!("{} has no parent directory", dir.display()))?;
-    let parent = resolve(host, parent, Want::Directory).map_err(|e| e.to_string())?;
-    delete_entry(
-        host,
-        &parent.fd,
-        parent.mount.id,
-        name.to_owned(),
-        PathBuf::from(name),
-        out,
-    );
-    Ok(())
-}
-
-fn delete_entry<H: Delete>(
+/// `delete DIR`: the deletion engine on DIR, as `fs` candidates will use
+/// it (the in-use check, task-6, is not run): the eligibility walk for the
+/// user `owner` with the default IPC policy (any socket or FIFO keeps the
+/// candidate), then the identity-checked delete of what it recorded.
+/// Prints one result line (see the module docs).
+fn delete<H: Delete>(
     host: &H,
-    dir: &H::Fd,
-    mount_id: u64,
-    name: OsString,
-    path: PathBuf,
+    owner: u32,
+    dir: &Path,
+    options: DeleteOptions,
     out: &mut Lines<'_>,
-) {
-    let first = match host.statx(Base::Dir(dir), Path::new(&name)) {
-        Ok(stat) => stat,
-        Err(e) => return out.err(&cause_tag(&e), &path, e),
+) -> Result<(), String> {
+    let parent_path = dir
+        .parent()
+        .filter(|_| dir.file_name().is_some())
+        .ok_or_else(|| format!("{} has no parent directory", dir.display()))?;
+    let parent = resolve(host, parent_path, Want::Directory).map_err(|e| e.to_string())?;
+    let candidate = Candidate::new(&parent, dir)
+        .ok_or_else(|| format!("{} does not end in a name", dir.display()))?;
+    let rules = Rules {
+        owners: &[owner],
+        block_ipc: true,
+        max_entries: DEFAULT_MAX_ENTRIES,
     };
-    let what = if first.file_type == Some(FileType::Directory) {
-        match open_beneath(
-            host,
-            dir,
-            mount_id,
-            Path::new(&name),
-            Access::Path,
-            Want::Directory,
-        ) {
-            Ok((sub, _)) => match sorted_names(host, &sub) {
-                Ok(names) => {
-                    for child in names {
-                        let child_path = path.join(&child);
-                        delete_entry(host, &sub, mount_id, child, child_path, out);
-                    }
-                }
-                Err(e) => out.err(&cause_tag(&e), &path, e),
-            },
-            Err(e) => return out.resolve_err(&path, &e),
+    let record = match engine::walk(host, &candidate, &rules, None) {
+        Ok(record) => record,
+        Err(WalkStop::Skipped(skip)) => {
+            out.err_line(format!(
+                "skip {} {:?} -- {}",
+                skip.reason, skip.path, skip.detail
+            ));
+            return Ok(());
         }
-        Unlink::Dir
-    } else {
-        Unlink::NonDir
-    };
-    // The identity check right before the unlink (for a file, the first
-    // statx was the call right before).
-    let checked = if what == Unlink::Dir {
-        match host.statx(Base::Dir(dir), Path::new(&name)) {
-            Ok(stat) => stat,
-            Err(e) => return out.err(&cause_tag(&e), &path, e),
+        Err(WalkStop::DeadlinePassed { path }) => {
+            out.err_line(format!("deadline {path:?}"));
+            return Ok(());
         }
-    } else {
-        first
+        Err(WalkStop::Failed { path, error }) => {
+            out.err_line(format!("failed {} {path:?} -- {error}", cause_tag(&error)));
+            return Ok(());
+        }
     };
-    match host.unlinkat(dir, &name, what) {
-        Ok(()) => out.ok(format!(
-            "unlinked {path:?} ino={}",
-            checked
-                .ino
-                .map_or("unanswered".to_owned(), |i| i.to_string())
+    let done = engine::delete(host, &candidate, &record, options);
+    let n = done.removed_entries;
+    match done.end {
+        End::Complete => out.ok(format!("removed entries={n} bytes={}", done.removed_bytes)),
+        End::Changed { path, detail } => {
+            out.err_line(format!("changed {path:?} entries={n} -- {detail}"));
+        }
+        End::DeadlinePassed { path } => out.err_line(format!("deadline {path:?} entries={n}")),
+        End::Failed { path, error } => out.err_line(format!(
+            "err {} {path:?} entries={n} -- {error}",
+            cause_tag(&error)
         )),
-        Err(e) => out.err(&cause_tag(&e), &path, e),
+        End::GateRefused { path, error } => out.err_line(format!(
+            "err {} {path:?} entries={n} -- {error}",
+            cause_tag(&error)
+        )),
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -360,7 +407,7 @@ tree:
 
     fn lines<H: Delete>(host: &H, op: &str, dir: &str) -> (Result<Outcome, String>, Vec<String>) {
         let mut got = Vec::new();
-        let outcome = run(host, op, &[dir.to_owned()], &mut |l| got.push(l));
+        let outcome = run(host, 1000, op, &[dir.to_owned()], &mut |l| got.push(l));
         (outcome, got)
     }
 
@@ -400,50 +447,70 @@ tree:
     }
 
     #[test]
-    fn delete_removes_a_tree_depth_first_with_an_identity_check_before_each_unlink() {
+    fn delete_runs_the_engine_and_reports_its_outcome() {
         let model = ModelHost::from_yaml(&MODEL.replace("    mnt: {.: {}}\n", "").replace(
             "  - {id: 31, at: /tmp/t/mnt, fs: tmpfs, dev: \"0:43\", size: 1M, parent: 30}\n",
             "",
         ))
         .unwrap_or_else(|e| panic!("{e}"));
         let (outcome, got) = lines(&model, "delete", "/tmp/t");
-        let names: Vec<&str> = got
-            .iter()
-            .map(|l| l.split(' ').nth(2).unwrap_or(""))
+        // t, "a b", b, link, sub, sub/c, sub/deeper, sub/deeper/d; three
+        // directories of 4 KiB in the model.
+        assert_eq!(got, ["0 removed entries=8 bytes=12288"]);
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }));
+        let unlinked: Vec<String> = model
+            .trace()
+            .into_iter()
+            .filter(|c| c.op == diskgc_model::spec::Op::Unlinkat)
+            .map(|c| c.path.expect("a path").display().to_string())
             .collect();
         assert_eq!(
-            names,
+            unlinked,
             [
-                "\"t/a",
-                "\"t/b\"",
-                "\"t/link\"",
-                "\"t/sub/c\"",
-                "\"t/sub/deeper/d\"",
-                "\"t/sub/deeper\"",
-                "\"t/sub\"",
-                "\"t\""
-            ],
-            "{got:?}"
+                "/tmp/t/a b",
+                "/tmp/t/b",
+                "/tmp/t/link",
+                "/tmp/t/sub/c",
+                "/tmp/t/sub/deeper/d",
+                "/tmp/t/sub/deeper",
+                "/tmp/t/sub",
+                "/tmp/t"
+            ]
         );
-        assert!(got.iter().all(|l| l.contains(" unlinked ")), "{got:?}");
-        assert_eq!(outcome, Ok(Outcome { failed: 0 }));
         assert!(model.stat_path(Path::new("/tmp/t")).is_none());
         assert!(model.stat_path(Path::new("/tmp/keep")).is_some());
     }
 
     #[test]
-    fn a_failed_entry_is_reported_and_the_rest_goes_on() {
-        // The mount below t cannot be entered: it is reported, and t itself
-        // is then not empty.
-        let (outcome, got) = lines(&model(), "delete", "/tmp/t");
-        let errors: Vec<&String> = got.iter().filter(|l| l.contains(" err ")).collect();
-        assert_eq!(errors.len(), 2, "{got:?}");
+    fn a_refused_candidate_is_reported_and_nothing_is_deleted() {
+        let model = model();
+        let (outcome, got) = lines(&model, "delete", "/tmp/t");
+        assert_eq!(got.len(), 1, "{got:?}");
         assert!(
-            errors[0].contains("err unsafe_path \"t/mnt\""),
-            "{errors:?}"
+            got[0].starts_with("0 skip contains_mount \"/tmp/t/mnt\" -- "),
+            "{got:?}"
         );
-        assert!(errors[1].contains("err ENOTEMPTY \"t\""), "{errors:?}");
-        assert_eq!(outcome, Ok(Outcome { failed: 2 }));
+        assert_eq!(outcome, Ok(Outcome { failed: 1 }));
+        assert!(
+            model
+                .trace()
+                .iter()
+                .all(|c| c.op != diskgc_model::spec::Op::Unlinkat)
+        );
+        // Another user's candidate: not_owner.
+        let mut got = Vec::new();
+        let outcome = run(
+            &model,
+            1001,
+            "delete",
+            &["/tmp/keep".to_owned()],
+            &mut |l| got.push(l),
+        );
+        assert_eq!(outcome, Ok(Outcome { failed: 1 }));
+        assert!(
+            got[0].starts_with("0 skip not_owner \"/tmp/keep\""),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -452,12 +519,15 @@ tree:
         let parsed = parse(&args(&[
             "--pause-at",
             "unlinkat:2",
+            "--max-open-files",
+            "32",
             "--kill-at",
             "9",
             "delete",
             "/tmp/x",
         ]))
         .expect("parses");
+        assert_eq!(parsed.max_open_files, Some(32));
         assert_eq!(
             parsed.plan,
             Plan::new()
@@ -476,12 +546,16 @@ tree:
             &["--pause-at"][..],
             &["--stop-at", "1", "walk", "/tmp"],
             &["--kill-at", "0", "walk", "/tmp"],
+            &["--max-open-files", "0", "walk", "/tmp"],
+            &["--max-open-files", "many", "walk", "/tmp"],
             &[],
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad:?} accepted");
         }
         let model = model();
-        assert!(run(&model, "walk", &[], &mut |_| {}).is_err());
-        assert!(run(&model, "rm", &["/tmp/t".to_owned()], &mut |_| {}).is_err());
+        assert!(run(&model, 1000, "walk", &[], &mut |_| {}).is_err());
+        assert!(run(&model, 1000, "rm", &["/tmp/t".to_owned()], &mut |_| {}).is_err());
+        let bad_flag = ["--force".to_owned(), "/tmp/t".to_owned()];
+        assert!(run(&model, 1000, "delete", &bad_flag, &mut |_| {}).is_err());
     }
 }

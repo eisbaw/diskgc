@@ -26,15 +26,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fmt;
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Base, Delete, Environ, Host, HostError, LinkTarget, LockMode, MapEntry, MonoTime, MountEntry,
-    OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock, Unlink, WaitLock,
+    Base, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode, MapEntry, MonoTime,
+    MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock, Unlink, WaitLock,
 };
 
 use crate::exit;
@@ -62,6 +62,7 @@ pub const OPS: &[&str] = &[
     "proc_maps",
     "proc_environ",
     "unlinkat",
+    "fchmod",
 ];
 
 /// A position on the port-call trace.
@@ -409,9 +410,9 @@ impl<H: Host> Host for Controlled<H> {
         self.host.statx(base, path)
     }
 
-    fn read_dir(&self, dir: &Self::Fd) -> Result<Vec<OsString>, HostError> {
+    fn read_dir(&self, dir: &Self::Fd, limit: usize) -> Result<DirListing, HostError> {
         self.before("read_dir");
-        self.host.read_dir(dir)
+        self.host.read_dir(dir, limit)
     }
 
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError> {
@@ -480,6 +481,11 @@ impl<H: Delete> Delete for Controlled<H> {
         self.before("unlinkat");
         self.host.unlinkat(dir, name, what)
     }
+
+    fn fchmod(&self, dir: &Self::Fd, perm: u32) -> Result<(), HostError> {
+        self.before("fchmod");
+        self.host.fchmod(dir, perm)
+    }
 }
 
 #[cfg(test)]
@@ -521,7 +527,7 @@ processes:
     /// Calls every port method once (and `statx` twice).
     fn call_everything<H: Delete>(host: &H) {
         let a = resolve(host, Path::new("/tmp/a"), Want::Directory).expect("resolve");
-        host.read_dir(&a.fd).expect("read_dir");
+        host.read_dir(&a.fd, 10).expect("read_dir");
         host.statvfs(&a.fd).expect("statvfs");
         let deadline = host.now().checked_add(Duration::from_secs(1));
         let lockable = || {
@@ -554,6 +560,7 @@ processes:
             .expect("statx");
         host.unlinkat(&a.fd, OsStr::new("sub"), Unlink::Dir)
             .expect("unlinkat");
+        host.fchmod(&a.fd, 0o755).expect("fchmod");
     }
 
     #[test]

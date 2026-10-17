@@ -85,9 +85,12 @@ kinds), and where those guarantees end. The protocols are in
 - Not if a visible process has any of the candidate's files open, mapped,
   as its working directory, or (heuristically) named in its initial
   environment; not if the candidate directory is `flock`ed by someone
-  else, nor if it contains a socket, a FIFO, a mount, a `.diskgc-keep`
-  file or a Cargo target (a locked *file* inside is only caught as an
-  open file of a visible process).
+  else (a locked *file* inside is only caught as an open file of a visible
+  process), nor if it contains a mount, a `.diskgc-keep` file or a Cargo
+  target, nor (by default) a socket or FIFO; a configurable policy may
+  block only live ones instead (a FIFO some visible process holds open, a
+  socket bound in diskgc's network namespace), so stale test fixtures do
+  not block forever.
 - Cargo targets only inside profile directories whose locks diskgc holds;
   no Cargo lock file is ever deleted or moved.
 - No symlink followed, no mount crossed.
@@ -151,7 +154,9 @@ when, and never as root.
   dir because of diskgc; anything outside locked profile directories
   deleted by the Cargo kind.
 - A filesystem candidate deleted while a visible process has one of its
-  files open, mapped or as working directory; a socket or FIFO deleted.
+  files open, mapped or as working directory; a socket or FIFO deleted
+  under the default policy, or, under any policy, one a visible process
+  holds open or has bound.
 - A Docker volume or container, a Nix GC root, profile or generation
   removed.
 - Deletion following a symlink or crossing into another mount.

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{dir, failure, host, tmp_yaml};
 use diskgc_core::host::{
-    Access, Base, Delete, Errno, FileType, Host, Pid, ProcError, ProcLink, Unlink,
+    Access, Base, Delete, DirListing, Errno, FileType, Host, Pid, ProcError, ProcLink, Unlink,
 };
 use diskgc_core::kernel::require_supported;
 use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
@@ -136,10 +136,19 @@ fn read_dir_lists_the_names_of_a_directory_inode() {
         "  /tmp/a/l: {symlink: f}\nevents:\n  - {at: {op: read_dir, path: /tmp/a, when: before}, create: /tmp/a/new}\n",
     ));
     let a = dir(&host, "/tmp/a");
-    let names = host.read_dir(&a.fd).expect("read_dir");
+    let names = host.read_dir(&a.fd, 4).expect("read_dir");
     assert_eq!(
         names,
-        ["f", "l", "new", "sub"].map(std::ffi::OsString::from)
+        DirListing::Names(
+            ["f", "l", "new", "sub"]
+                .map(std::ffi::OsString::from)
+                .to_vec()
+        )
+    );
+    // One over the limit: the listing stops.
+    assert_eq!(
+        host.read_dir(&a.fd, 3).expect("read_dir"),
+        DirListing::TooMany
     );
     let sub = open_beneath(
         &host,
@@ -151,9 +160,12 @@ fn read_dir_lists_the_names_of_a_directory_inode() {
     )
     .expect("opens sub")
     .0;
-    assert!(host.read_dir(&sub).expect("read_dir sub").is_empty());
+    assert_eq!(
+        host.read_dir(&sub, 0).expect("read_dir sub"),
+        DirListing::Names(Vec::new())
+    );
     let f = resolve(&host, Path::new("/tmp/a/f"), Want::Any).expect("resolve f");
-    let err = host.read_dir(&f.fd).unwrap_err();
+    let err = host.read_dir(&f.fd, 10).unwrap_err();
     assert!(err.is(Errno::ENOTDIR), "{err}");
 
     let listings: Vec<(Option<String>, String)> = host
@@ -166,6 +178,7 @@ fn read_dir_lists_the_names_of_a_directory_inode() {
         listings,
         [
             (Some("/tmp/a".to_owned()), "ok".to_owned()),
+            (Some("/tmp/a".to_owned()), "too many".to_owned()),
             (Some("/tmp/a/sub".to_owned()), "ok".to_owned()),
             (Some("/tmp/a/f".to_owned()), Errno::ENOTDIR.to_string()),
         ]

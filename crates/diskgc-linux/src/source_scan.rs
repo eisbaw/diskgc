@@ -858,6 +858,11 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Word("set_len"),
     Pattern::Word("ftruncate"),
     Pattern::Word("fallocate"),
+    // Changing permissions of user data (make_writable).
+    Pattern::Word("chmod"),
+    Pattern::Word("fchmod"),
+    Pattern::Word("chmodat"),
+    Pattern::Word("set_permissions"),
     // Child processes (prune, GC and command children).
     // std's Command can only be named through `process` (renames and
     // globs are refused), so a domain `Action::Command` is not matched.
@@ -885,12 +890,35 @@ pub(crate) const GATED: &[Pattern] = &[
 /// gated (takes the gate's `Permit`, checked by [`check_allowed`]) or
 /// ungated with its reason; adding one is a safety review point
 /// (docs/safety.md, Pre-release sandbox gate).
-pub(crate) const GATED_ALLOWED: &[Allowed] = &[Allowed {
-    file: "crates/diskgc-linux/src/host.rs",
-    function: "unlinkat_permitted",
-    gate: Gate::Permit,
-    matches: 1,
-}];
+pub(crate) const GATED_ALLOWED: &[Allowed] = &[
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "unlinkat_permitted",
+        gate: Gate::Permit,
+        matches: 1,
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "fchmod_permitted",
+        gate: Gate::Permit,
+        matches: 1,
+    },
+    // The deletion engine's one caller of each deleting port method: with
+    // these entries the scan also checks that nothing else in the core calls
+    // them (docs/safety.md, Deletion).
+    Allowed {
+        file: "crates/diskgc-core/src/engine/delete.rs",
+        function: "checked_unlink",
+        gate: Gate::Ungated("calls Delete::unlinkat, which LinuxHost gates"),
+        matches: 1,
+    },
+    Allowed {
+        file: "crates/diskgc-core/src/engine/delete.rs",
+        function: "make_writable",
+        gate: Gate::Ungated("calls Delete::fchmod, which LinuxHost gates"),
+        matches: 1,
+    },
+];
 
 /// Crates that reach the OS only through the `Host` port: they may not name
 /// `std::fs`, `std::os::unix::fs`, `rustix` or `libc` at all, and of
@@ -1366,6 +1394,10 @@ mod tests {
             "file.set_len(0);",
             "rustix::fs::ftruncate(fd, 0);",
             "rustix::fs::fallocate(fd, FallocateFlags::PUNCH_HOLE, 0, 1);",
+            "rustix::fs::chmod(p, m);",
+            "rustix::fs::fchmod(fd, m);",
+            "rustix::fs::chmodat(d, p, m, f);",
+            "std::fs::set_permissions(p, perm);",
             "std::process::Command::new(\"docker\");",
             "let pid = unsafe { fork() };",
             "let pid = unsafe { vfork() };",

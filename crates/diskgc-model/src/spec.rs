@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use diskgc_core::host::Dev;
+use diskgc_core::host::{Dev, Errno};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -131,7 +131,7 @@ pub enum NodeSpec {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileSpec {
-    /// `socket` or `fifo`; a regular file if absent.
+    /// `socket`, `fifo` or `char_device`; a regular file if absent.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub special: Option<Special>,
     /// A symlink with this target text (never followed by the model).
@@ -161,12 +161,14 @@ pub struct FileSpec {
     pub cachedir_tag: bool,
 }
 
-/// `socket` or `fifo`.
+/// `socket`, `fifo` or `char_device`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Special {
     Socket,
     Fifo,
+    /// A character device node (only its type is modelled).
+    CharDevice,
 }
 
 /// A directory: its own attributes and its entries.
@@ -302,6 +304,10 @@ pub struct EventSpec {
     /// directory, as if renamed away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace: Option<PathBuf>,
+    /// Change the owner of the object at a path (not following it); the
+    /// inode stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chown: Option<ChownSpec>,
     /// A process opens a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open: Option<ProcPath>,
@@ -315,6 +321,20 @@ pub struct EventSpec {
     /// The clock jumps forward (e.g. a suspend).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance: Option<Elapsed>,
+    /// The call the event is addressed to fails with this errno, given by
+    /// name (e.g. `EIO`, `EACCES`), without acting.
+    /// Only with an `op` trigger, `when: before`, and an op that can fail
+    /// this way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail: Option<ErrnoName>,
+}
+
+/// A path and its new owner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChownSpec {
+    pub path: PathBuf,
+    pub uid: u32,
 }
 
 /// Source and destination of a rename.
@@ -388,6 +408,7 @@ pub enum Op {
     ProcMaps,
     ProcEnviron,
     Unlinkat,
+    Fchmod,
 }
 
 impl Op {
@@ -408,6 +429,7 @@ impl Op {
             Self::ProcMaps => "proc_maps",
             Self::ProcEnviron => "proc_environ",
             Self::Unlinkat => "unlinkat",
+            Self::Fchmod => "fchmod",
         }
     }
 }
@@ -800,6 +822,35 @@ text_scalar!(
     "Mode",
     "^[0-7]{3,4}$",
     "Permission bits in octal, as a string, e.g. \"0755\"."
+);
+
+/// An errno by its symbolic name, e.g. `EACCES` (one diskgc knows:
+/// `Errno::NAMED`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrnoName(pub Errno);
+
+impl FromStr for ErrnoName {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        Errno::from_name(text).map(ErrnoName).ok_or_else(|| {
+            let known: Vec<&str> = Errno::NAMED.iter().filter_map(|e| e.name()).collect();
+            format!("{text:?} is not an errno name diskgc knows ({known:?})")
+        })
+    }
+}
+
+impl fmt::Display for ErrnoName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.name().expect("made from a name"))
+    }
+}
+
+text_scalar!(
+    ErrnoName,
+    "ErrnoName",
+    "^E[A-Z]+$",
+    "An errno by its symbolic name, e.g. \"EACCES\"."
 );
 
 /// The JSON Schema of the host-model format.

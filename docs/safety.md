@@ -49,11 +49,20 @@ Immediately before acting, diskgc walks the candidate's whole tree
 - **No keep marker** (`.diskgc-keep`) in the candidate, anywhere inside
   it, or in any directory between the profile root and the candidate
   (`kept`).
-- **No special content** (`contains_special`): nothing inside matches
-  diskgc's fixed **structural recogniser** for Cargo targets: a directory
-  with `CACHEDIR.TAG` whose profile directories (`<t>/<p>/` or
-  `<t>/<triple>/<p>/`) hold any file matching `.cargo-*lock*`, known or
-  unknown name alike.
+- **No special content** (`contains_special`):
+  - no entry anywhere in the candidate, the candidate itself included, has
+    a known Cargo lock file name (`.cargo-lock`, `.cargo-build-lock`,
+    `.cargo-artifact-lock`, the allowlist of `cargo-target` below),
+    whatever directory holds it: no Cargo lock file is ever deleted, also
+    when the candidate is a profile directory or lies inside a target;
+  - nothing inside matches diskgc's fixed **structural recogniser** for
+    Cargo targets: a directory with `CACHEDIR.TAG` whose profile
+    directories (`<t>/<p>/` or `<t>/<triple>/<p>/`) hold any file matching
+    `.cargo-*lock*`, known or unknown name alike. `<t>` is the candidate
+    itself or a directory inside it; any entry named `CACHEDIR.TAG` counts
+    (its signature is not read, which errs on the side of keeping);
+  - no device node and no object of a type Linux does not define: never
+    deleted.
 
   The recogniser is code, independent of the profile library, so adding or
   editing a profile never changes what a plain `delete` of an enclosing
@@ -61,17 +70,65 @@ Immediately before acting, diskgc walks the candidate's whole tree
   Go cache inside a deleted `/tmp` directory) is *not* protected by
   nesting; protect it with `protect:` or `!profile:` if it matters.
 - **No sockets or FIFOs** inside (`contains_ipc`): those belong to running
-  programs (agents, X11, tmux, ssh).
+  programs (agents, X11, tmux, ssh). Which ones count is a policy with two
+  values: *any* socket or FIFO keeps its candidate (the default: the walk
+  stops at the first), or only a *live* one does: a FIFO a visible process
+  holds open (by device and inode, as the in-use check sees it), a socket
+  bound in diskgc's network namespace. Under the second, the walk records
+  every socket and FIFO and the in-use check, which runs after the walk,
+  decides with the same scan; a stale one (a test fixture's FIFO nothing
+  holds open) is deleted with its candidate, and one whose liveness cannot
+  be told counts as live. Only the default is reachable until the
+  configuration schema defines the setting.
 - **Not protected or excluded** by overlap with a `protect` entry or a
   negated profile ([reference.md](reference.md#protect)).
 
-- **Fail closed on anything unreadable:** a directory the walk cannot
-  open or list (mode `000`, `EACCES`) makes the candidate ineligible
-  (`not_owner`); it is never treated as empty.
+- **Fail closed on anything unreadable**, never treating it as empty or as
+  nothing to check. A listing that fails part-way is that error, never a
+  shorter listing. By the error of opening or listing a directory, or of
+  `statx`ing an entry:
+  - `EACCES`, `EPERM` (e.g. the user's own mode-`000` directory): the
+    candidate is skipped as `unreadable`, the path and errno in the
+    message;
+  - `ENOENT` (the object vanished while the walk ran, a directory removed
+    after it was opened included): a concurrent change, `changed`;
+  - anything else (`EMFILE`, `ENFILE`, `ENOMEM`, `EIO`, ...): it says
+    nothing about this candidate and would hit the next one too, so it is
+    an error of the run (reported, exit 3 if the goal is not met), never a
+    skip: a low fd limit or a failing disk fails loudly instead of quietly
+    skipping every remaining candidate.
 
-The walk records every entry's (device, inode) for the in-use check. Its
-cost is proportional to the candidate's size: the index saves discovery and
-size tallying, not this walk.
+  A field the kernel does not report (type, inode, owner, mount id) is
+  `unsupported_fs`; an entry replaced while the walk runs is `changed`; a
+  mount inside (an entry on another mount, or `EXDEV` descending) is
+  `contains_mount`.
+- **Bounded:** a candidate of more entries than a fixed budget
+  (`DEFAULT_MAX_ENTRIES` in the engine) is skipped (`too_many_entries`) as
+  soon as a listing would exceed what is left of that budget, so neither
+  the record nor a listing of a directory that someone fills faster than it
+  is read can exhaust memory.
+
+The walk records every entry's identity, (device, inode), owner, type and
+birth time (where the filesystem reports one), for the in-use check and
+for the identity checks of the delete. Its cost is
+proportional to the candidate's size: the index saves discovery and size
+tallying, not this walk.
+
+**Shape of the walk and the delete.** Both are loops over an explicit stack
+of directories, never recursion, and use single names below an open
+directory only, so a tree deeper than `PATH_MAX` is walked and deleted like
+any other. Each directory's names are sorted, so the order of operations is
+the same on every filesystem and run. Only a small fixed window of
+directories below the candidate holds an fd at a time (`FD_WINDOW` in the
+engine; one is closed before the next opens), plus the candidate itself,
+its parent and the one fd a listing opens for itself; a directory whose fd
+was closed is reopened when it is needed again, from its nearest open
+ancestor one name at a time (`openat2`, see Path traversal), each one on
+the way matched against its recorded identity and preceded by a deadline
+check, never through `..`. Climbing back up a chain deeper than the window
+reopens up to its depth minus the window for every window's worth of
+levels: quadratic in the depth of a single chain, nothing for trees
+shallower than the window.
 
 ### In use
 
@@ -226,15 +283,23 @@ For the `delete` action:
    systemd-tmpfiles does, so cooperating tools see it is being removed.
 2. Under that lock, run the eligibility walk and the in-use check (above).
    Any failure: release, skip.
-3. Delete depth-first, reopening each directory relative to its parent
-   (`openat2`, see Path traversal) and checking its (device, inode) against
-   the walk's record, so at most one directory per level is open at a time
-   (no file-descriptor exhaustion on large trees). Before each `unlinkat`,
-   `fstatat(AT_SYMLINK_NOFOLLOW)` the name and compare its (device, inode,
-   owner) with what the walk recorded; a mismatch skips that
-   entry and marks the candidate `changed`. `make_writable` (if the profile
-   allows it) adds owner write permission to a directory here, after the
-   checks.
+3. Delete depth-first exactly the entries the walk recorded, reopening
+   each directory relative to its parent (`openat2`, see Path traversal)
+   and checking its identity against the walk's record, with a bounded
+   number of fds (the shape above). Before each `unlinkat`, check the
+   deadline, then `statx(AT_SYMLINK_NOFOLLOW)` the name and compare its
+   identity (device, inode, owner, type, birth time where reported) with
+   what the walk recorded; the `unlinkat` is the very next operation. A
+   mismatch (or the name gone, or a mount met on the way down, `EXDEV`, or
+   the `unlinkat` itself finding the name gone, mounted on or of another
+   type) stops the delete: nothing more is unlinked and the candidate is
+   `changed`; a later run walks it afresh.
+   `make_writable` (if the profile allows it) adds owner write permission
+   to a directory right after it is opened and matched, before anything in
+   it is unlinked, after all the checks (and never once the deadline has
+   passed). It is not undone: a delete that stops part-way (`changed`, an
+   error, the deadline) leaves the directories it entered with owner write
+   permission added.
 4. Release.
 
 **Scope** means *the objects the walk checked*. Every directory diskgc
@@ -242,11 +307,20 @@ descends into is matched by (device, inode) against the walk's record, and
 the candidate itself is held open while it is deleted, so if a checked
 directory is renamed elsewhere mid-delete, diskgc keeps deleting that same
 object (the cruft it checked), never whatever now sits at the old path.
-Two windows remain and are accepted: an entry replaced between the `fstatat` and the
+Two windows remain and are accepted: an entry replaced between the `statx` and the
 `unlinkat` of its name (Linux has no unlink-by-inode), and a file opened or
-created inside the candidate after step 2. A file created mid-delete makes
-the delete partial (`ENOTEMPTY`); that is reported as an error for the
-candidate, never retried silently.
+created inside the candidate after step 2. A third limit is separate from
+them: an object removed and recreated between the walk and its check with
+the same device, inode number, owner and type (inode number reuse) passes
+the identity check where the filesystem reports no birth time; where it
+reports one (tmpfs, ext4, btrfs, xfs), the birth time differs and the
+candidate is `changed`. The inode generation is not compared (`statx` does
+not report it). A file created mid-delete is
+never unlinked (the walk did not record it) and makes the delete partial
+(`ENOTEMPTY` on its directory); that is reported as an error for the
+candidate, never retried silently. So is any other refused unlink (e.g.
+`EACCES` in a read-only directory without `make_writable`): the delete
+stops there, partial.
 
 ### Other properties
 
@@ -551,24 +625,29 @@ delete real data on their own machines with a work-in-progress build.
 
 How it holds:
 
-- **Where:** `LinuxHost`'s `Delete` methods (`unlinkat` so far) ask the
-  gate before anything else; a refusal is a host error of its own kind
+- **Where:** `LinuxHost`'s `Delete` methods (`unlinkat`, and `fchmod` for
+  `make_writable`: changing permissions of user data is gated like
+  deleting it) ask the gate before anything else; a refusal is a host error of its own kind
   (`Cause::SandboxGate`: no errno, the detail names the marker that is
   missing or wrong) and nothing is attempted. `ModelHost` has no gate: it
   deletes nothing real and is test-only.
-- **Structure:** the one deleting syscall wrapper in `diskgc-linux` takes a
-  permit that only the gate can make. A source-scanning test
+- **Structure:** each gated syscall wrapper in `diskgc-linux` (one for
+  `unlinkat`, one for `fchmod`) takes a permit that only the gate can make. A source-scanning test
   (`diskgc-linux/src/source_scan.rs`) reads every production crate (every
   crate in `crates/` except the test-only `diskgc-model` and
   `diskgc-modelgen`, which may never be production dependencies):
   - outside an allowlisted wrapper, none may delete or rename a name, open
     for writing or truncating (also `File::create`, `File::create_new`,
     `File::options`, `OpenOptions`, `fs::write`, `fs::copy`, `set_len`,
-    flags built from numbers), punch holes, start a child process
+    flags built from numbers), punch holes, change permissions (`chmod`,
+    `fchmod`, `chmodat`, `set_permissions`), start a child process
     (`process::Command`, `fork`, `exec*`), change namespace or root, use
     `libc`, call `syscall`, or `include!` code. Each wrapper is marked
     gated (it must take the permit) or ungated with its reason; adding one
-    is a review point;
+    is a review point. The core's calls of the `Delete` methods are named
+    the same way, so the allowlist also makes the deletion engine's
+    `checked_unlink` (the identity check right before the unlink) the only
+    caller of `unlinkat`, and its `make_writable` the only one of `fchmod`;
   - the core and the CLI may not reach the OS at all (`std::fs`,
     `std::os::unix::fs`, `rustix`, `libc`; of `std::process` only
     `ExitCode`): everything goes through the `Host` port;

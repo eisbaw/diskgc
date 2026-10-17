@@ -36,6 +36,7 @@ check:
 # Commit gate: `check` plus the fast container tests, failing over 5 minutes.
 e2e: check
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix run -L .#e2e-runner -- run --suite fast --budget-secs 300
 
 # Every container test, fast and full tiers; the budget only guards hangs.

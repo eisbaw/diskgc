@@ -50,8 +50,10 @@ impl Errno {
     pub const ENOENT: Errno = Errno(2);
     pub const ESRCH: Errno = Errno(3);
     pub const EINTR: Errno = Errno(4);
+    pub const EIO: Errno = Errno(5);
     pub const ENXIO: Errno = Errno(6);
     pub const EBADF: Errno = Errno(9);
+    pub const ENOMEM: Errno = Errno(12);
     /// Also `EWOULDBLOCK`.
     pub const EAGAIN: Errno = Errno(11);
     pub const EACCES: Errno = Errno(13);
@@ -61,10 +63,43 @@ impl Errno {
     pub const ENOTDIR: Errno = Errno(20);
     pub const EISDIR: Errno = Errno(21);
     pub const EINVAL: Errno = Errno(22);
+    pub const ENFILE: Errno = Errno(23);
+    pub const EMFILE: Errno = Errno(24);
     pub const EROFS: Errno = Errno(30);
     pub const ENOSYS: Errno = Errno(38);
     pub const ENOTEMPTY: Errno = Errno(39);
     pub const ELOOP: Errno = Errno(40);
+
+    /// Every errno value with a [`Errno::name`].
+    pub const NAMED: &[Errno] = &[
+        Self::EPERM,
+        Self::ENOENT,
+        Self::ESRCH,
+        Self::EINTR,
+        Self::EIO,
+        Self::ENXIO,
+        Self::EBADF,
+        Self::ENOMEM,
+        Self::EAGAIN,
+        Self::EACCES,
+        Self::EBUSY,
+        Self::EEXIST,
+        Self::EXDEV,
+        Self::ENOTDIR,
+        Self::EISDIR,
+        Self::EINVAL,
+        Self::ENFILE,
+        Self::EMFILE,
+        Self::EROFS,
+        Self::ENOSYS,
+        Self::ENOTEMPTY,
+        Self::ELOOP,
+    ];
+
+    /// The errno called `name` (one of [`Errno::NAMED`]).
+    pub fn from_name(name: &str) -> Option<Errno> {
+        Self::NAMED.iter().copied().find(|e| e.name() == Some(name))
+    }
 
     /// The symbolic name of the errno values diskgc interprets.
     pub fn name(self) -> Option<&'static str> {
@@ -73,8 +108,10 @@ impl Errno {
             Self::ENOENT => "ENOENT",
             Self::ESRCH => "ESRCH",
             Self::EINTR => "EINTR",
+            Self::EIO => "EIO",
             Self::ENXIO => "ENXIO",
             Self::EBADF => "EBADF",
+            Self::ENOMEM => "ENOMEM",
             Self::EAGAIN => "EAGAIN",
             Self::EACCES => "EACCES",
             Self::EBUSY => "EBUSY",
@@ -83,6 +120,8 @@ impl Errno {
             Self::ENOTDIR => "ENOTDIR",
             Self::EISDIR => "EISDIR",
             Self::EINVAL => "EINVAL",
+            Self::ENFILE => "ENFILE",
+            Self::EMFILE => "EMFILE",
             Self::EROFS => "EROFS",
             Self::ENOSYS => "ENOSYS",
             Self::ENOTEMPTY => "ENOTEMPTY",
@@ -619,14 +658,18 @@ pub trait Host {
 
     /// The names in the open directory `dir` (`getdents64` until the end, on
     /// a fresh `O_RDONLY | O_DIRECTORY` open of `.` below `dir`, so `dir` may
-    /// be an `O_PATH` fd and every call is a complete listing of its own),
-    /// without `.` and `..`, in the order the filesystem returns them.
+    /// be an `O_PATH` fd and every call is a listing of its own), without
+    /// `.` and `..`, in the order the filesystem returns them; or
+    /// [`DirListing::TooMany`] as soon as more than `limit` names were read
+    /// (the listing stops there).
     ///
     /// Names only, deliberately: `d_type` can be `DT_UNKNOWN` and is stale
     /// by the time it is used, and every caller must `statx` each name
     /// anyway (identity, owner, type) before acting on it. Entries created
-    /// or removed while the listing runs may or may not appear.
-    fn read_dir(&self, dir: &Self::Fd) -> Result<Vec<OsString>, HostError>;
+    /// or removed while the listing runs may or may not appear. The limit
+    /// bounds memory and time against huge directories and against a writer
+    /// that creates entries faster than they are read.
+    fn read_dir(&self, dir: &Self::Fd, limit: usize) -> Result<DirListing, HostError>;
 
     /// `fstatvfs(fd)`.
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError>;
@@ -673,6 +716,15 @@ pub trait Host {
     fn proc_environ(&self, pid: Pid) -> Result<Environ, ProcError>;
 }
 
+/// The result of [`Host::read_dir`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirListing {
+    /// Every name (at most the limit).
+    Names(Vec<OsString>),
+    /// More names than the limit: the listing stopped.
+    TooMany,
+}
+
 /// What [`Delete::unlinkat`] removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unlink {
@@ -706,6 +758,14 @@ pub trait Delete: Host {
     /// as the previous port call (docs/safety.md, Deletion); `ModelHost`
     /// fails a test that does not.
     fn unlinkat(&self, dir: &Self::Fd, name: &OsStr, what: Unlink) -> Result<(), HostError>;
+
+    /// Sets the permission bits of the open **directory** `dir` to `perm`
+    /// (`fchmod`; `LinuxHost` opens `.` below `dir` read-only for it, so `dir`
+    /// may be an `O_PATH` fd, as for [`Host::read_dir`]). Changing the
+    /// permissions of user data is a modification, so it is gated like a
+    /// deletion. The deletion engine's `make_writable` is its only caller
+    /// (docs/reference.md, Actions; docs/safety.md, Deletion).
+    fn fchmod(&self, dir: &Self::Fd, perm: u32) -> Result<(), HostError>;
 }
 
 #[cfg(test)]
@@ -769,6 +829,23 @@ mod tests {
             "unlinkat /tmp/x: refused by the pre-release sandbox gate (docs/safety.md): marker \
              missing; until v1, diskgc deletes only inside a diskgc test container"
         );
+    }
+
+    #[test]
+    fn every_named_errno_reads_back_from_its_name() {
+        for errno in Errno::NAMED {
+            let name = errno.name().expect("named");
+            assert_eq!(Errno::from_name(name), Some(*errno));
+        }
+        assert_eq!(Errno::from_name("EWHATEVER"), None);
+        // Every value name() knows is listed.
+        for n in 0..200 {
+            assert_eq!(
+                Errno(n).name().is_some(),
+                Errno::NAMED.contains(&Errno(n)),
+                "{n}"
+            );
+        }
     }
 
     #[test]

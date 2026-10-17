@@ -151,6 +151,25 @@
         }
       ]
     },
+    "ChownSpec": {
+      "description": "A path and its new owner.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "uid"
+      ]
+    },
     "Dev": {
       "description": "A device number major:minor, e.g. \"254:1\".",
       "type": "string",
@@ -208,6 +227,11 @@
       "type": "string",
       "pattern": "^[0-9]+(ms|s|m|h|d)$"
     },
+    "ErrnoName": {
+      "description": "An errno by its symbolic name, e.g. \"EACCES\".",
+      "type": "string",
+      "pattern": "^E[A-Z]+$"
+    },
     "EventSpec": {
       "description": "A change to the model, applied when its trigger `at` is reached. Exactly\none action key besides `at`.",
       "type": "object",
@@ -225,6 +249,17 @@
         },
         "at": {
           "$ref": "#/$defs/At"
+        },
+        "chown": {
+          "description": "Change the owner of the object at a path (not following it); the\ninode stays.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChownSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "close": {
           "description": "A process closes every fd it opened on a path (releasing their\nlocks).",
@@ -252,6 +287,17 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "fail": {
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrnoName"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "mkdir": {
           "description": "Create a directory (and missing parents).",
@@ -418,7 +464,7 @@
           ]
         },
         "type": {
-          "description": "`socket` or `fifo`; a regular file if absent.",
+          "description": "`socket`, `fifo` or `char_device`; a regular file if absent.",
           "anyOf": [
             {
               "$ref": "#/$defs/Special"
@@ -574,7 +620,8 @@
         "proc_links",
         "proc_maps",
         "proc_environ",
-        "unlinkat"
+        "unlinkat",
+        "fchmod"
       ]
     },
     "ProcAccess": {
@@ -712,11 +759,20 @@
       ]
     },
     "Special": {
-      "description": "`socket` or `fifo`.",
-      "type": "string",
-      "enum": [
-        "socket",
-        "fifo"
+      "description": "`socket`, `fifo` or `char_device`.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "socket",
+            "fifo"
+          ]
+        },
+        {
+          "description": "A character device node (only its type is modelled).",
+          "type": "string",
+          "const": "char_device"
+        }
       ]
     },
     "StatxField": {

@@ -1,10 +1,10 @@
 ---
 id: TASK-51
 title: e2e test driver and Host wrapper for controlled pause and kill points
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 11:40'
+updated_date: '2026-10-17 12:01'
 labels:
   - wave-1
   - testing
@@ -25,7 +25,7 @@ Why: wave-1 container tests need a diskgc process before the ensure command exis
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
 
 ## Acceptance Criteria
@@ -56,4 +56,6 @@ Implementation (task-51):
 - Release check: flake check release-excludes-e2e runs diskgc-e2e-release-check on the shipped diskgc binary (needles: 'diskgc_e2e', v0-mangled '10Controlled', the control prefix, the driver's usage line), on cargo tree --package diskgc --edges normal,build (releaseDepTree), and on the driver binary as positive control (must contain every needle); also requires a symbol table in the shipped binary and diskgc-linux in the tree.
 - Bites (mutate, run, restore): pause that does not block -> all 4 driver tests FAIL (process ran on and exited); kill not delivered -> killed test FAIL (exit 0, victim/c,d deleted); wrapper acting after the call (read_dir, unlinkat) -> all 4 FAIL for their own reason; marker string in diskgc main -> release check FAIL; controlled.rs copied into crates/diskgc and wrapping LinuxHost -> release check FAIL on '10Controlled' and the prefix; diskgc depending on diskgc-e2e -> check FAIL on the dep tree (in nix the build itself fails first: diskgc-e2e is outside workspaceSrc); read_dir not counted -> 2 wrapper unit tests FAIL; stale needle (first guess Controlled$LT$, legacy mangling) caught by the positive control.
 - Limits: positions count port calls, not syscalls (no stop inside resolve or a /proc reader's rounds); the driver's delete is a stand-in, not the engine; positions are reproducible only because the driver sorts names; the source scan does not cover diskgc-e2e, so 'deletes only through Delete' rests on review; the release check is byte-needle based (a renamed and reworded copy of the wrapper in the product would pass it; review is the other line).
+
+Committed as e794479 (tree 9913aad) after qa-test-runner GO and mped-architect GO. mped's two should-fixes are applied in the working tree for the next commit: just e2e now builds release-excludes-e2e, and testing.md's limits sentence is corrected (resolve is several port calls and can be stopped between them; what cannot be stopped inside is one openat2's path walk and a /proc reader's rounds). The 'no stop inside resolve' remark above is wrong in the same way.
 <!-- SECTION:NOTES:END -->

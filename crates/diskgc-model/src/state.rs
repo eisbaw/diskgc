@@ -40,11 +40,15 @@ pub struct Loc {
 
 #[derive(Debug, Clone)]
 pub enum Kind {
-    File { cachedir_tag: bool },
+    File {
+        cachedir_tag: bool,
+    },
     Dir(BTreeMap<OsString, u64>),
     Symlink(PathBuf),
     Socket,
     Fifo,
+    /// A character device node (only its type is modelled).
+    CharDevice,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,7 @@ impl Inode {
             Kind::Symlink(_) => FileType::Symlink,
             Kind::Socket => FileType::Socket,
             Kind::Fifo => FileType::Fifo,
+            Kind::CharDevice => FileType::CharDevice,
         }
     }
 
@@ -107,7 +112,7 @@ impl Inode {
         match self.kind {
             Kind::File { .. } => self.size.div_ceil(BLOCK) * BLOCK,
             Kind::Dir(_) => BLOCK,
-            Kind::Symlink(_) | Kind::Socket | Kind::Fifo => 0,
+            Kind::Symlink(_) | Kind::Socket | Kind::Fifo | Kind::CharDevice => 0,
         }
     }
 }
@@ -835,6 +840,17 @@ impl State {
         Ok(())
     }
 
+    /// Changes the owner of the object at `path` (not following it), as
+    /// `chown` does: the inode stays, its ctime moves.
+    pub fn chown_path(&mut self, path: &Path, uid: u32) -> Result<(), Fault> {
+        let loc = self.lookup(path)?;
+        let now = self.wall_now();
+        let inode = self.inode_mut(loc);
+        inode.uid = uid;
+        inode.ctime = now;
+        Ok(())
+    }
+
     /// Replaces the object at `path` by a new, empty one of the same type.
     pub fn replace_path(&mut self, path: &Path) -> Result<Loc, Fault> {
         let (dir, name) = self.parent_of(path)?;
@@ -850,6 +866,7 @@ impl State {
             Kind::Symlink(target) => Kind::Symlink(target.clone()),
             Kind::Socket => Kind::Socket,
             Kind::Fifo => Kind::Fifo,
+            Kind::CharDevice => Kind::CharDevice,
         };
         if self.holds_mount(old) {
             return Err(Errno::EBUSY.into());

@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::host::{Access, Environ, LockMode};
+use diskgc_core::host::{Access, Environ, Errno, LockMode};
 
 use crate::spec::{
     At, DirAttrs, EventSpec, FileSpec, HostModel, LockModeSpec, NodeSpec, Op, Special, When,
@@ -78,12 +78,27 @@ pub enum Action {
     Create(PathBuf),
     Mkdir(PathBuf),
     Remove(PathBuf),
-    Rename { from: PathBuf, to: PathBuf },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
     Replace(PathBuf),
-    Open { pid: u32, path: PathBuf },
-    Close { pid: u32, path: PathBuf },
+    Chown {
+        path: PathBuf,
+        uid: u32,
+    },
+    Open {
+        pid: u32,
+        path: PathBuf,
+    },
+    Close {
+        pid: u32,
+        path: PathBuf,
+    },
     Exit(u32),
     Advance(Duration),
+    /// The call the event fires before fails with this errno.
+    Fail(Errno),
 }
 
 /// A validated event; `index` is its position in the model's `events`.
@@ -395,6 +410,7 @@ fn create_node(
                 (Some(target), None) => Kind::Symlink(target.clone()),
                 (None, Some(Special::Socket)) => Kind::Socket,
                 (None, Some(Special::Fifo)) => Kind::Fifo,
+                (None, Some(Special::CharDevice)) => Kind::CharDevice,
                 (None, None) => Kind::File {
                     cachedir_tag: spec.cachedir_tag,
                 },
@@ -669,6 +685,12 @@ fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
     if let Some(p) = &spec.replace {
         actions.push(Action::Replace(path(p)?));
     }
+    if let Some(c) = &spec.chown {
+        actions.push(Action::Chown {
+            path: path(&c.path)?,
+            uid: c.uid,
+        });
+    }
     if let Some(o) = &spec.open {
         actions.push(Action::Open {
             pid: known_pid(o.pid)?,
@@ -687,11 +709,30 @@ fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
     if let Some(d) = spec.advance {
         actions.push(Action::Advance(d.0));
     }
+    if let Some(errno) = spec.fail {
+        let fallible = [
+            Op::Openat2,
+            Op::Statx,
+            Op::ReadDir,
+            Op::Unlinkat,
+            Op::Fchmod,
+        ];
+        match (spec.at.op, spec.at.when) {
+            (Some(op), Some(When::Before)) if fallible.contains(&op) => {}
+            _ => {
+                return Err(format!(
+                    "'fail' needs an op trigger with 'when: before' on one of {:?}",
+                    fallible.map(Op::name)
+                ));
+            }
+        }
+        actions.push(Action::Fail(errno.0));
+    }
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
-            "no action (create, mkdir, remove, rename, replace, open, close, exit, \
-                  advance)"
+            "no action (create, mkdir, remove, rename, replace, chown, open, close, \
+                  exit, advance, fail)"
                 .to_owned(),
         ),
         _ => Err("more than one action; use one event per action".to_owned()),

@@ -17,6 +17,14 @@ use std::path::{Path, PathBuf};
 /// The syscalls the record covers (the list in docs/testing.md).
 pub const TRACED_SYSCALLS: &str = "unlink,unlinkat,rmdir,rename,renameat,renameat2";
 
+/// Starts the path of a call relative to a directory fd that strace printed
+/// without its path: `-y` names an fd by reading its `/proc` link, which
+/// fails for a path longer than a page (a tree deeper than `PATH_MAX`). The
+/// path is then `<fd N>/name`, which no snapshot path can match; the oracle
+/// classifies it ([`crate::oracle::Unmatched::UnnamedDirFd`]) and the
+/// snapshot view still judges the object.
+pub const UNNAMED_FD_PREFIX: &str = "<fd ";
+
 /// How a traced call ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -140,6 +148,9 @@ fn resolve(dir: Option<&Arg>, name: Option<&Arg>) -> Result<PathBuf, String> {
             name.display()
         )),
         Some(Arg::Fd(dir)) => Ok(Path::new(&OsString::from_vec(dir.clone())).join(name)),
+        Some(Arg::Other(fd)) if !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()) => {
+            Ok(Path::new(&format!("{UNNAMED_FD_PREFIX}{fd}>")).join(name))
+        }
         Some(other) => Err(format!(
             "relative path {} against an fd without a path: {other:?}",
             name.display()
@@ -343,7 +354,19 @@ mod tests {
     #[test]
     fn unparseable_lines_are_errors_not_silently_dropped() {
         assert!(parse_line(1, "unlink(\"plain\") = 0").is_err());
-        assert!(parse_line(1, "unlinkat(3, \"\\x61\", 0) = 0").is_err());
+        assert!(parse_line(1, "unlinkat(AT_FDCWD, \"\\x61\", 0) = 0").is_err());
+        assert!(parse_line(1, "unlinkat(F, \"\\x61\", 0) = 0").is_err());
         assert!(parse_line(1, "openat(AT_FDCWD, \"\\x61\", 0) = 3").is_err());
+    }
+
+    /// strace prints a bare fd when it cannot read the fd's path (longer
+    /// than a page): kept, marked, never dropped.
+    #[test]
+    fn a_dir_fd_strace_could_not_name_is_marked() {
+        let ev = parse_line(1, "unlinkat(4, \"\\x66\", 0) = 0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev.removed, vec![PathBuf::from("<fd 4>/f")]);
+        assert!(ev.took_effect());
     }
 }

@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 11:40'
+updated_date: '2026-10-17 13:18'
 labels:
   - wave-1
   - hardening
@@ -122,6 +122,16 @@ From task-50's final review (mped, QA). The scanner is frozen for task-50; switc
 (18) Kernel threads in ModelHost, and stdio fds for generated processes, are items (7) and (8) above.
 
 From task-51: the ProcRoot::names item (Dir::read_from reopen) is done: names and the new LinuxHost::read_dir share dir_names(OwnedFd), which uses rustix Dir::new on the fd it was given. Still open from that list: the procfs-relative paths in error messages, the PROC_SUPER_MAGIC check, the /proc-replaced regression test.
+
+From task-51's review (mped, QA):
+(19) LinuxHost::read_dir's fresh open should use O_NOATIME (retry without it on EPERM): listing updates atime under relatime, and a daily tally would keep /tmp subdirectories fresh and defeat systemd-tmpfiles age cleanup (which uses O_NOATIME for this reason). diskgc ignores atime.
+(20) Put the call's subject (name/path) in the driver's pause and kill control lines; once the driver's delete calls the real engine (filesystem order), unlinkat:N no longer identifies the entry.
+(21) Controlled is !Sync (Cell/RefCell); use AtomicU64 and a Mutex if a watch-style driver shares the host across threads.
+(22) diskgc-e2e under_test.rs: SYS_READ = 0 is x86_64 only; add cfg(not(target_arch = "x86_64")) compile_error!.
+(23) Spawned is dropped without kill/reap when wait_paused or resume errors; low impact (container teardown).
+(24) Two over-long lines in testing.md's Controlled pause and kill points bullets.
+
+Filed from task-5's deep gate (round 1; mped/Codex), for a later hardening pass: (1) the deletion engine's reopen cost is quadratic in the depth of a single deep chain (frames past the 16-fd window are reopened from the nearest open ancestor): consider checkpoint fds (e.g. keep every 16th ancestor) or a depth cap with a skip reason; (2) Delete::fchmod takes any permission bits, while its one caller only adds owner write: consider narrowing it to add_owner_write(dir) so the gated surface cannot remove permissions or set setuid bits; (3) untested scenarios: an entry renamed OUT of a candidate between walk and delete (expected: its checked_unlink finds ENOENT -> changed), and a bind mount over a FILE inside a candidate appearing after the walk (unlinkat EBUSY -> changed; a container test needs root to bind-mount while the driver is paused); (4) the engine module docs (diskgc-core/src/engine/mod.rs) restate safety.md's walk-shape paragraph: point to safety.md instead so the rule has one home.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

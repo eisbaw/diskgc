@@ -171,6 +171,27 @@ fn events_need_exactly_one_trigger_and_one_action() {
             "more than one action",
         ),
         ("{at: {elapsed: 1s}, create: tmp/x}", "not an absolute path"),
+        // A failure is injected into one call that can fail that way.
+        (
+            "{at: {elapsed: 1s}, fail: EIO}",
+            "'fail' needs an op trigger",
+        ),
+        (
+            "{at: {call: 3, when: before}, fail: EIO}",
+            "'fail' needs an op trigger",
+        ),
+        (
+            "{at: {op: statx, when: after}, fail: EIO}",
+            "'fail' needs an op trigger",
+        ),
+        (
+            "{at: {op: now, when: before}, fail: EIO}",
+            "'fail' needs an op trigger",
+        ),
+        (
+            "{at: {op: statx, when: before}, fail: EWHAT}",
+            "not an errno name",
+        ),
     ] {
         assert_error(&tmp_yaml(&format!("events:\n  - {event}\n")), &[wanted]);
     }

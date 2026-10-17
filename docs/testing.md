@@ -42,9 +42,11 @@ The strongest end-to-end checks; if these are green, diskgc genuinely works.
    inside daemons (Docker, Nix) are invisible to it and are covered by the
    filesystem snapshot only. A traced call whose path is not a snapshot path
    is logged with its reason, never dropped: created during the run
-   (counted), or reached through a symlink, written with `.` or `..`, or
-   relative to a deleted directory (each logged); the snapshot still judges
-   the object itself. The oracle is computed from the fixture's spec, never
+   (counted), or reached through a symlink, written with `.` or `..`,
+   relative to a deleted directory, or relative to a directory fd strace
+   could not name (its path longer than a page, in trees deeper than
+   `PATH_MAX`) (each logged); the snapshot still judges the object itself,
+   and reaches paths of any length. The oracle is computed from the fixture's spec, never
    from diskgc's output; the only allowlisted paths are diskgc's own state
    directory and the fixture's own concurrent writers (declared in the
    fixture). **Judging is mandatory:** every traced run of code under test
@@ -180,7 +182,7 @@ How the format reads (the schema documents every key):
 
 - **Tree:** keys are absolute paths; missing parents are created. A mapping
   of scalars is a file (`{}` is empty; `symlink:`, `link:` for a hard link,
-  `type: socket|fifo`); a mapping of mappings is a directory, with its own
+  `type: socket|fifo|char_device`); a mapping of mappings is a directory, with its own
   attributes under `.` (`{.: {}}` is an empty directory). Owners default
   to 1000, times to `clock`.
 - **Mounts** in mount order, each with a `parent` (a stacked mount's parent
@@ -194,10 +196,14 @@ How the format reads (the schema documents every key):
   process is never the answer there).
 - **Events:** `at: {op, path, nth, when}`, `at: {call: k, when}` or `at:
   {elapsed: 5s}`, and one action: `create`, `mkdir`, `remove`, `rename`,
-  `replace` (a new inode at the path), `open`, `close`, `exit`, `advance`
-  (a clock jump, e.g. a suspend). `remove` is `rm -r`: every entry below is
-  unlinked, and an object still open keeps only itself. An event that never
-  fires fails the test.
+  `replace` (a new inode at the path), `chown` (a new owner, same inode),
+  `open`, `close`, `exit`, `advance`
+  (a clock jump, e.g. a suspend), `fail` (the call fails with the named
+  errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
+  trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat` or
+  `fchmod`). `remove` is `rm -r`: every entry below is unlinked, and an
+  object still open keeps only itself. An event that never fires fails the
+  test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
   to the next timed event or its deadline) and `advance`.
 - **Checks** (`ModelHost` fails the test at the call): `openat2` without the
@@ -407,12 +413,15 @@ build, and the release build is checked not to contain it.
   `cargo tree` (normal and build edges) has no `diskgc-e2e`. The same
   needles must all be found in the driver binary, and the shipped binary
   must have a symbol table; otherwise the check fails as vacuous.
-- **Limits:** positions count port calls, not syscalls: a port call that
-  makes several syscalls (`resolve`'s steps, a `/proc` reader's rounds)
-  cannot be stopped inside. The driver's `delete` is not the deletion
-  engine (no walk record, ownership or in-use checks) and sorts names, so
-  positions are reproducible for a given tree; the engine's own order is
-  its task's to state.
+- **Limits:** positions count port calls, not syscalls. `resolve` is
+  several port calls and can be stopped between them, but one `openat2`'s
+  multi-component path walk and a `/proc` reader's rounds cannot be
+  stopped inside. The driver's `delete` is the deletion engine (its
+  eligibility walk, then its delete; no in-use check yet), which sorts each
+  directory's names, so positions are reproducible for a given tree; its
+  `walk` is a plain listing walk holding one fd per level (a control for
+  the fd-limit tests, which `--max-open-files N` runs under
+  `RLIMIT_NOFILE` N).
 
 ## Container setup
 

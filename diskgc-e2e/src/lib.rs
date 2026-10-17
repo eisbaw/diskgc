@@ -13,7 +13,8 @@
 //!   in [`host_suite`], driven through [`host_probe`]; those that pause or
 //!   kill diskgc at a chosen port call in [`driver_suite`], driven through
 //!   the test driver ([`driver`], binary `diskgc-e2e-driver`) and its
-//!   `Host` wrapper ([`controlled`]).
+//!   `Host` wrapper ([`controlled`]); those of the deletion engine, through
+//!   the same driver, in [`engine_suite`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -26,6 +27,7 @@
 pub mod controlled;
 pub mod driver;
 pub mod driver_suite;
+pub mod engine_suite;
 pub mod host_probe;
 pub mod host_suite;
 pub mod interlock;
