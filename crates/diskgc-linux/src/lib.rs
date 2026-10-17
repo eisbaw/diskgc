@@ -2,7 +2,16 @@
 //! A library because the differential contract tests use it
 //! (docs/architecture.md, Implementation).
 //!
-//! The host primitives land with task-3. For now it holds the test-sandbox
-//! markers shared by the e2e interlock and the pre-release sandbox gate.
+//! - [`host`]: [`LinuxHost`] over raw syscalls (rustix `linux_raw`).
+//! - [`mountinfo`], [`procfs`]: parsers for the `/proc` files it reads.
+//! - [`sandbox`]: the test-sandbox markers shared by the e2e interlock and
+//!   the pre-release sandbox gate.
 
+pub mod host;
+pub mod mountinfo;
+pub mod procfs;
 pub mod sandbox;
+mod stat;
+mod tasks;
+
+pub use host::{LinuxFd, LinuxHost};

@@ -16,7 +16,9 @@ version = "0.1.0"
 name = "diskgc-e2e"
 version = "0.0.0"
 dependencies = [
+ "diskgc-core",
  "diskgc-linux",
+ "libc",
  "rustix",
 ]
 
@@ -25,6 +27,7 @@ name = "diskgc-linux"
 version = "0.1.0"
 dependencies = [
  "diskgc-core",
+ "rustix",
 ]
 
 [[package]]

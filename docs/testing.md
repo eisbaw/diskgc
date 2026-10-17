@@ -77,7 +77,8 @@ implements it. A bullet without a test is a gap, filed as a task.
   has a **model test** (so it runs in the workspace) that fails when the
   check is removed. This is verified mechanically in the hardening blocks
   with mutation testing (`cargo-mutants`, workspace tests) on `diskgc-core`
-  and on `diskgc-linux`'s path resolution, mountinfo and `/proc` code: a
+  (which holds path resolution) and on `diskgc-linux`'s statx conversion,
+  mountinfo and `/proc` code: a
   surviving mutant in a safety check is a bug in the tests. Checks that can
   only be exercised against the real kernel (the container suite, which
   `cargo-mutants` does not run) get a one-off manual bite proof recorded in

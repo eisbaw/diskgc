@@ -93,8 +93,116 @@ convention systemd-tmpfiles also honours.
 **Unreadable or vanishing processes:** a process of the same user whose
 `fd` directory cannot be read (`EACCES`: non-dumpable processes such as
 `gpg-agent`, `ssh-agent` or setuid children) makes every candidate it could
-be using `in_use`, i.e. it is treated as using everything it might; a
-process that exits during the scan (`ESRCH`, `ENOENT`) is simply gone.
+be using `in_use`, i.e. it is treated as using everything it might. A
+process is gone only when the kernel says so through a pidfd for it: the
+pidfd cannot be opened because no task is left, or polling it reports a
+hang-up (the pid has no task left; Linux 6.9 and later), or polling it
+reports readable and a read of `/proc/<pid>/status` made after that poll
+shows the process as a zombie (`State: Z`) that is the only task of its
+group (`Threads: 1`). Readable alone is not enough: a poll racing a
+non-leader exec can find the old leader, a zombie the exec has just made a
+non-leader, and report readable while the process lives on. The status read
+is sound because it shows one task: its state, then, under the lock that
+guards every change of the thread count, the count of the group's tasks not
+yet released (0 once that task itself was released), so `Z` with 1 means no
+task of the group is live, and a group whose only task is a zombie never
+runs again. That holds on weakly ordered CPUs (arm64) too: the state is
+read before that lock is taken, and the lock's release orders it, so the
+zombie state seen held at the latest while the count was 1 (a task that has
+exited never runs again, also while a tracer reaps it). The old leader of an
+exec shows `Z` only while the exec'ing thread is still counted (2 or more).
+The poll only decides whether that read is made: the read alone shows that
+no task of the process is live, given a `/proc` of diskgc's own pid
+namespace and that the number still names the process. On Linux 5.8 to 6.8 polling never reports a
+hang-up; a process released during a scan then cannot be confirmed and is
+unreadable, never gone. No `/proc` listing and no `ENOENT` decides it: a
+lookup can race an exec, `hidepid` can hide a live process (a hidden zombie
+is unreadable, not gone), and an exec can briefly show the old leader as a
+zombie. A process that cannot be read for any of these reasons is
+unreadable, never gone. diskgc refuses to start when `/proc` is not that of
+its own pid namespace, or when `pidfd_open` is unavailable (blocked by
+seccomp or a sandbox), since without it no process could ever be confirmed
+gone. The namespace check reads the `NSpid` line of `/proc/self/status`,
+which lists diskgc's pid in every namespace from the one of the mounted
+`/proc` down to its own: it must hold exactly one pid, diskgc's own. More
+than one means the `/proc` of an ancestor namespace, even when diskgc has
+the same number in both (then `/proc/self` still names its own pid);
+every pid listed there would name another process, or none, when the
+pidfd is opened by that number in diskgc's namespace, so a live process
+could be taken for gone. A missing `/proc/self/status` (diskgc not visible
+in that `/proc`) or a missing `NSpid` line is refused too, so diskgc does
+not run on kernels built without `CONFIG_PID_NS`, which print no `NSpid`
+line. The check is made once, at startup, on a `/proc` directory that
+diskgc opens then and keeps open; every later `/proc` read goes through
+that open directory, never through the path `/proc`, so all of them reach
+the mount that was checked for as long as diskgc runs (a mount made on
+`/proc` afterwards, such as an ancestor namespace's procfs exposed by
+unmounting it, is never read).
+**Threads:** every task of a process is read (`/proc/<pid>/task/<tid>`),
+since a thread can hold files after the main thread exited and can have
+its own fd table or working directory. Reading goes in rounds, each one
+listing, the reads of its tasks, and a decision. The task list is not a
+snapshot: a listing stops early when a task it holds is released, even one
+it never showed, and a listing resumed part-way can skip entries. So each
+round lists the tasks, reads the kernel's thread count (`Threads:` in
+`/proc/<pid>/status`, which changes together with the thread list), and
+lists them again; the listing is complete when every task of the first
+listing is in the second one and their number equals the count (not zero),
+and then it holds every thread alive at the count (assuming no tid is
+reused within the round). A round is the answer when its listing is
+complete, every task in it gave a trustworthy read, and one task is live;
+otherwise another round follows, for a bounded number of rounds, after
+which the process is treated as unreadable. Only the answering round's
+reads are used; within it, results of tasks that exit meanwhile are kept. A
+task that is exiting (`PF_EXITING`) shows empty or missing entries while it
+releases them: it is never the source of the memory map or environment.
+A tid can also change hands: when a non-leader thread execs, it takes over
+the leader's tid once the old leader is a zombie, with the old leader's
+start time, so `stat` cannot tell the two apart; the exec'ing thread's old
+tid then shows the old leader, as a zombie (`Z`) for a moment (normally far
+below a microsecond) and dead (`X`) until it is released, and a lookup
+under `/proc/<pid>` made meanwhile can fail (`ENOENT`) or stay bound to the
+old leader until its release. Hence the leader's tid is read in every
+round, never carried over, and read once more at the end of a round in
+which another task was seen ended (`Z`, `X` or vanished), since the
+leader's tid may then name the survivor, whose private fd table or working
+directory would otherwise be missed. Each entry of a task is read in full
+from one task and one memory map: the environment in one read call, the
+memory map in two passes, each read to the end and confirmed still present,
+keeping the lines of both (a mapping moved below the read position during
+one pass is found by the other), the fd table in one directory read; a
+read that cannot be completed that way counts as finding nothing. A read
+that finds nothing from a live task is never taken as the answer: an empty
+memory map, environment or fd table of a live process counts as no
+trustworthy read, so a process whose environment or fd table really is
+empty (`env -i`, all fds closed) is treated as unreadable while it runs,
+which costs candidates. A live task that cannot be read is treated like an
+unreadable process, and so is a process that keeps creating and ending
+threads faster than a round completes (each round needs its listing to
+hold still from the first listing to the second); while that lasts it
+costs every candidate it could be using. Accepted limits (each needs an
+event outside diskgc's control at an unlucky moment, often several at
+once; none of them makes diskgc take a live process for gone):
+
+1. a thread started after a round's count is not read (also when it then
+   execs, and whatever it opens), the same race as a file opened after the
+   scan;
+2. a mapping moved below the read position in step with both passes (two
+   `mremap` calls, one during each pass) is missed;
+3. a privileged reader can, in a coincidence of several events (an exec
+   right after the first directory read of the exec'ing thread's fd table,
+   a table larger than one read, and that entry's own lookups bound to the
+   leader's tid), take a prefix of that table for the whole;
+4. the pidfd pins a process, not its number, and every read under
+   `/proc/<pid>` goes by number: when a listed process is released and
+   another one gets its number before a later read of the scan, the
+   newcomer may be missed (reported as not using files it uses) until the
+   next scan lists it;
+5. the check and the deletion are not atomic: a process that starts using
+   a candidate after its in-use check (including a thread that acquires
+   files after a round's count) is not seen. The check is kept fresh (see
+   Freshness below), not atomic with the deletion.
+
 **Overlay and btrfs:** `maps` can report a different (device, inode) than
 `stat` on overlayfs and btrfs subvolumes; diskgc matches both the reported
 pair and the underlying inode where the kernel exposes it, and the
@@ -325,25 +433,43 @@ candidate:
 
 1. In `/proc/self/mountinfo`, pick the deepest mount point that is a path
    prefix of the configured path (after unescaping `\040` and friends;
-   where mounts are stacked, the topmost one).
-2. Open it with `O_PATH | O_DIRECTORY | O_NOFOLLOW` and confirm with `statx`
-   that it is that mount: `STATX_ATTR_MOUNT_ROOT` set and `stx_mnt_id`
-   equal to the mountinfo id.
+   where mounts are stacked, the topmost one: the one no other mount at that
+   point is stacked on; if that is not exactly one mount, `unsafe_path`).
+2. Open it with `O_PATH | O_DIRECTORY | O_NOFOLLOW` and
+   `RESOLVE_NO_SYMLINKS`, and confirm with `statx` that it is that mount:
+   `STATX_ATTR_MOUNT_ROOT` set and `stx_mnt_id` equal to the mountinfo id.
+   Anything else is `unsafe_path`: a mount point shadowed by a later mount
+   over one of its parents, or a mount table that changed between reading
+   and opening (refused, not retried).
 3. Resolve the rest relative to it with
    `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)`; if the
-   path is the mount point itself, the rest is `.`.
+   path is the mount point itself, the rest is `.`. Without `O_NOFOLLOW`,
+   so a symlink as the last component is refused (`ELOOP`) rather than
+   opened. The opened object's `stx_mnt_id` must equal the mount's: a
+   second line behind `RESOLVE_NO_XDEV`.
 
-A `/home -> /var/home` symlink on the root filesystem fails in step 3
-(`ELOOP`) and becomes `unsafe_path`. This refuses symlinks and any mount
-crossing below the root, including a bind mount of the same filesystem,
-which a device comparison would miss. (`statx` on the full path is not used
-to find the mount: it follows symlinks in the middle of the path.)
+A configured path with `.` or `..` segments is `unsafe_path` before
+anything is opened. A `/home -> /var/home` symlink on the root filesystem
+fails in step 3 (`ELOOP`) and becomes `unsafe_path`. This refuses symlinks
+and any mount crossing below the root, including a bind mount of the same
+filesystem, which a device comparison would miss. A path that lies *on* a
+bind mount resolves on that mount (step 1 picks it), like any other mount.
+(`statx` on the full path is not used to find the mount: it follows
+symlinks in the middle of the path.)
 
 The walk and the deletion descend with
 `openat2(... RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS)`; `statx` results are
-trusted only when the attribute's bit is set in `stx_attributes_mask`, and a
-check the kernel cannot answer skips the candidate (`unsupported_fs`).
-Minimum kernel: Linux 5.8; older kernels exit 2 at startup.
+trusted only when the kernel says it answered them: each field only when
+its bit is set in `stx_mask`, each attribute only when its bit is set in
+`stx_attributes_mask`. A check the kernel cannot answer skips the candidate
+(`unsupported_fs`).
+
+Minimum kernel: Linux 5.8 (`STATX_MNT_ID` and `STATX_ATTR_MOUNT_ROOT`;
+`openat2` is 5.6); older kernels exit 2 at startup. Every command checks it
+except `--version`, `--help` and `check`, which touch nothing on the
+machine. The check reads `major.minor` of the `uname` release, so a vendor
+kernel numbered below 5.8 is refused even if it has these features
+backported, and an unparseable release is refused too.
 
 ## Validation
 
@@ -394,12 +520,20 @@ Minimum kernel: Linux 5.8; older kernels exit 2 at startup.
   and its children exit; a SIGKILLed diskgc never leaves a child deleting
   without it, at the cost that an orphaned child stalls other reclaims until
   it ends. diskgc releases the lock only by `close()`, never
-  `flock(LOCK_UN)`, which would release it for every inherited copy. Limits:
+  `flock(LOCK_UN)`, which would release it for every inherited copy, and
+  never calls `flock` again on a lock it holds (converting shared to
+  exclusive is not atomic: a failed conversion drops the lock). Limits:
   best-effort for command actions (tools such as `sudo` or `ssh` close
   inherited fds), and work inside daemons (a Nix GC, a Docker prune) keeps
   running after its client dies; overlapping prunes waste work but do no
   harm. (`PR_SET_PDEATHSIG` was rejected: it fires on parent *thread* death
   and does not reach grandchildren.)
+- Waiting for the lock (until the deadline) retries a non-blocking
+  `flock` every 10 to 100 ms rather than blocking in the kernel, so the
+  deadline holds without signals. Limits: after the holder releases, the
+  waiter can take up to 100 ms to notice, and waiters are not served in
+  order: one that retries at the wrong moments can lose to later arrivals
+  until its deadline.
 
 ## Pre-release sandbox gate
 

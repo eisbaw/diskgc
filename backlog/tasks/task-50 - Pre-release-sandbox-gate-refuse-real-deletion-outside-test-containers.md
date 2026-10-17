@@ -4,7 +4,7 @@ title: 'Pre-release sandbox gate: refuse real deletion outside test containers'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-16 23:48'
+updated_date: '2026-10-17 00:57'
 labels:
   - wave-1
   - irreversible
@@ -38,4 +38,6 @@ Why: from the first deleting code on, developers and AI agents could delete real
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-2: diskgc_linux::sandbox already holds MARKER_PATH, CONTAINERENV_PATH and MARKER_CONTENT (include_bytes! of crates/diskgc-linux/src/sandbox-marker, which the flake copies byte for byte into the e2e base image) plus check() -> Result<(), NotInSandbox>. The e2e interlock (diskgc-e2e/src/interlock.rs) uses it. The gate must reuse it, not define the markers a second time. check_under(root) is private and unit-tested; expose it (pub(crate) or cfg(test)) if the gate's tests need a fake root. Pattern for 'refuses outside a container': the runner runs diskgc-e2e-canary on the host before every e2e run and requires exit 86.
+
+Forward-carried from task-3: No deleting primitive exists yet. Add unlinkat/rmdir (and child spawning) as separate Host methods on LinuxHost and gate exactly those with diskgc_linux::sandbox::check(). The non-deleting primitives (openat2, statx, statvfs, flock, /proc readers) must keep working outside a container (AC #2). diskgc-linux's unit tests already exercise them on the dev machine read-only (a temp dir only for flock).
 <!-- SECTION:NOTES:END -->

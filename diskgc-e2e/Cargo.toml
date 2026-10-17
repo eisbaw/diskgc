@@ -27,8 +27,13 @@ name = "diskgc-e2e-canary"
 path = "src/bin/diskgc-e2e-canary.rs"
 
 [dependencies]
+diskgc-core = { path = "../crates/diskgc-core" }
 diskgc-linux = { path = "../crates/diskgc-linux" }
 # Pure Rust (linux_raw backend): statx with mount ids and birth times, mount,
 # getuid, and the raw setgroups/setresgid/setresuid that drop to tester.
 # Works the same under static musl; no C toolchain needed.
 rustix = { version = "1", features = ["fs", "mount", "process", "thread"] }
+# Only for personality(2), which rustix does not wrap: `uname-2.6` makes the
+# kernel report a 2.6 release to the code under test (an old kernel,
+# simulated by the kernel itself). Bindings only; std links libc anyway.
+libc = "0.2"

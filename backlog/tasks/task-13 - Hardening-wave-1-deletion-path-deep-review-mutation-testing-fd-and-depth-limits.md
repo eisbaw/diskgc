@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 23:54'
+updated_date: '2026-10-17 01:02'
 labels:
   - wave-1
   - hardening
@@ -15,6 +15,7 @@ dependencies:
   - TASK-52
   - TASK-58
   - TASK-60
+  - TASK-61
 references:
   - docs/testing.md
   - docs/safety.md

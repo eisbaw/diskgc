@@ -24,6 +24,10 @@ diskgc-core = { path = "crates/diskgc-core" }
 diskgc-linux = { path = "crates/diskgc-linux" }
 diskgc-model = { path = "crates/diskgc-model" }
 diskgc-modelgen = { path = "crates/diskgc-modelgen" }
+# Raw Linux syscalls without libc wrappers (linux_raw backend): openat2,
+# statx, statvfs, flock, uname, clock_gettime, pidfd_open and poll. Pure
+# Rust, so the static musl build needs no C toolchain.
+rustix = { version = "1.1.5", features = ["event", "fs", "process", "system", "time"] }
 
 # Line tables are enough for backtraces and keep incremental builds and
 # target/ small; dependencies carry no debug info at all.

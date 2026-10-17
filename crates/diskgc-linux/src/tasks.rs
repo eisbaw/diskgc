@@ -1,0 +1,1402 @@
+//! Reading a process through every one of its tasks (threads).
+//!
+//! `/proc/<pid>/{fd,cwd,root,exe,maps,environ}` show the thread-group
+//! leader only. That is not enough:
+//!
+//! - after the main thread exits (`pthread_exit`) while workers run, the
+//!   leader is a zombie: its `fd` listing is empty and `cwd`, `root`, `exe`
+//!   give `ENOENT`, although the process still uses its files;
+//! - a thread that called `unshare(CLONE_FILES)` or `unshare(CLONE_FS)` has
+//!   its own fd table or working directory, which the leader's entries do
+//!   not show.
+//!
+//! So the readers walk `/proc/<pid>/task/<tid>/...` for every task, in
+//! rounds. Each round stands on its own: one listing, a read of every task
+//! in it, and a decision ([`collect`]). The kernel facts behind it:
+//!
+//! - **The task listing is not a snapshot.** `readdir` walks the thread list
+//!   under RCU (fs/proc/base.c `first_tid`/`next_tid`): it stops when the
+//!   task it holds is released, even one it never emitted, and a `getdents`
+//!   resumed at an offset can skip or repeat entries. The kernel's thread
+//!   count (`signal->nr_threads`, `Threads:` in `/proc/<pid>/status`) changes
+//!   in the same critical section as thread-list membership and the pid
+//!   (`copy_process` in kernel/fork.c; `__exit_signal`/`__unhash_process`
+//!   in kernel/exit.c, under `tasklist_lock` and `siglock`). So a round lists
+//!   the tasks, reads the count, and lists them again. The listing is
+//!   complete when every task of the first listing is in the second one and
+//!   their number equals the count: each of them was attached before and
+//!   after the count, hence counted, so they are exactly the tasks alive at
+//!   the count ([`Listing::complete`]). `Threads: 0` proves nothing
+//!   (`task_sig` in fs/proc/array.c prints 0 when the task the `status` read
+//!   reached has no signal handlers any more).
+//! - **A task that is exiting** (`PF_EXITING`) still shows state `R` or `D`
+//!   while it releases its memory map, files, `cwd` and `exe`: reading it
+//!   gives `ENOENT` or empty results that say nothing about the process.
+//! - **A tid can change hands.** When a non-leader thread execs, `de_thread`
+//!   (fs/exec.c) waits until the old leader is a zombie, then, inside one
+//!   `write_lock_irq(&tasklist_lock)` section, swaps tids with it
+//!   (`exchange_tids`), makes it a non-leader (`exit_signal = -1`) and marks
+//!   it dead (`EXIT_DEAD`), and releases it after dropping the lock.
+//!   `start_time` is copied over, so `stat` cannot tell the two tasks apart.
+//!   Meanwhile the exec'ing thread's old tid shows the old leader (`Z` for
+//!   the moment between the swap and `EXIT_DEAD`, then `X`), and a cold
+//!   lookup of any entry under `/proc/<pid>` can fail (`ENOENT`) or stay
+//!   bound to the old leader until its release (`pid_revalidate` keeps an
+//!   entry while its pid has a task). Reads of the old leader find nothing
+//!   (no `mm`, `files`, `fs`).
+//!
+//! Hence, in every round:
+//!
+//! - the leader's tid is read like every other task, never carried over from
+//!   an earlier round: an unseen exec may have handed it to another task;
+//! - when a non-leader task is seen ended (`Z`, `X` or vanished), the
+//!   leader's tid is read once more, after every other read of the round:
+//!   that task may be the old leader under the exec'ing thread's old tid,
+//!   and the leader's tid may name the survivor, whose private fd table or
+//!   `cwd` would otherwise be missed. (Every exiting thread passes through
+//!   `Z` or `X` too, `exit_notify` in kernel/exit.c, so this also happens
+//!   without an exec; it is one more read.)
+//! - a read that found nothing (empty, or `ENOENT`) from a task its `stat`
+//!   then shows live is not trusted: a live userspace task always has a
+//!   memory map, so an empty one is never the answer. The same holds for an
+//!   empty environment and an empty fd table, which cannot be told apart
+//!   from such a misbound read: a process whose environment or fd table
+//!   really is empty (`env -i`, all fds closed) is reported as unreadable
+//!   (`Failed`), which costs candidates while it runs. The leader's own
+//!   entry vanishing is not trusted either.
+//!
+//! A round is the answer when its listing is complete, every task in it
+//! gave a trusted read, and one of them is live ([`shortfall`] says what a
+//! round lacks). Otherwise another round follows, up to [`MAX_ROUNDS`],
+//! then `Failed`. Only the answering round's reads are returned.
+//!
+//! **Gone** is never inferred from listings or `ENOENT`: a lookup can race
+//! an exec, `hidepid` hides live processes, and a stalled exec can keep
+//! showing `Z`. It comes only from the kernel's answer about the process
+//! itself, asked through its pidfd at the start and whenever a round finds
+//! nothing live or its listing vanished ([`has_exited`]; LinuxHost also says
+//! `Gone` when `pidfd_open` gives `ESRCH`):
+//!
+//! - **`POLLHUP`: the pid has no task.** `pidfd_poll` (fs/pidfs.c) reports
+//!   `EPOLLHUP` only when `pid_task(pid, PIDTYPE_PID)` is `NULL`, i.e. the
+//!   process was released. A live process never shows no task: the exec
+//!   swap moves the task lists with `hlists_swap_heads_rcu`
+//!   (include/linux/rculist.h), which never leaves a head empty.
+//! - **`POLLIN` alone is not enough.** `pidfd_poll` reports `EPOLLIN` when
+//!   the task it found has `exit_state` set and is not a leader waiting for
+//!   its threads (`!delay_group_leader`). A poll that found the old leader
+//!   (a zombie) of a non-leader exec just before `exchange_tids` and reads
+//!   it after `de_thread` set `leader->exit_signal = -1` sees a zombie that
+//!   is no leader (`thread_group_leader` is `exit_signal >= 0`,
+//!   include/linux/sched/signal.h), and reports readable while the process
+//!   lives on. So `POLLIN` counts only when one read of
+//!   `/proc/<pid>/status` taken **after** the poll shows `State: Z` and
+//!   `Threads: 1`.
+//! - **Why `Z` and `Threads: 1` in one read is sound.** `proc_pid_status`
+//!   (fs/proc/array.c) shows one task: `task_state` prints its state, then
+//!   `task_sig` prints `signal->nr_threads` under `lock_task_sighand`, or 0
+//!   once the task was released. The count goes up in `copy_process` and
+//!   down in `__exit_signal` (which also clears the task's `sighand`), both
+//!   under that `siglock`. So `Threads: 1` means the task shown is the only
+//!   unreleased task of its group; every live task is unreleased, so none is
+//!   live, and a group whose only task is a zombie never runs again. The old
+//!   leader of a non-leader exec shows `Z` only while the exec'ing thread is
+//!   still counted (`Threads:` 2 or more), and 0 once released. This does
+//!   not depend on the poll coming first: one such read alone shows that no
+//!   task of the process is live, given a `/proc` of diskgc's own pid
+//!   namespace (checked when the host is set up) and that the number still
+//!   names the process (see the limits below). The poll only decides
+//!   whether the extra read is made.
+//! - **Memory ordering.** The state is read before `lock_task_sighand`, the
+//!   count inside it. On a weakly ordered CPU (arm64) the state load may be
+//!   satisfied late, but never after the `siglock` release that ends
+//!   `task_sig` (a release orders every earlier access), and no task can
+//!   join or leave the group while that lock is held. So the zombie state
+//!   seen held at the latest while the count was 1, and the task never runs
+//!   again: once set, `exit_state` is never cleared (it can go from zombie
+//!   to `EXIT_TRACE` and back while a tracer reaps the task, then to dead;
+//!   kernel/exit.c `wait_task_zombie`). The other order (count read before the
+//!   state, outside one lock section) would not be sound: a lone live task
+//!   could start a thread and exit in between.
+//! - **Kernels.** `EPOLLHUP` for a pid without a task came with fs/pidfs.c
+//!   in Linux 6.9. On 5.8 to 6.8 (kernel/fork.c `pidfd_poll`,
+//!   `thread_group_exited`) a released process gives `POLLIN` alone; its
+//!   `status` then cannot be read (`ENOENT`), and it ends as `Failed`, never
+//!   as a false `Gone`. The `status` read and its order are the same on
+//!   those kernels.
+//!
+//! A read of one task's entry must also come from one task and one memory
+//! map in full; [`crate::host`] makes sure of that with the helpers in
+//! [`crate::procfs`]: `environ` in one `read` call; `maps` in two passes on
+//! separate opens, each read to the end and confirmed by reading again on
+//! the same file (the memory map captured at open still exists), keeping
+//! the lines of both (a mapping moved below a pass's read position by
+//! `mremap` is found by the other pass); the fd table from one `getdents`
+//! call.
+//!
+//! Assumptions and limits: no tid is reused within one round; the window in
+//! which an exec'ing thread's old tid shows the old leader as `Z` is
+//! normally sub-microsecond (it lies inside `de_thread`'s locked section),
+//! and while it lasts the process is not settled, never gone. A thread
+//! started after a round's count is not read (also when it then execs), the
+//! same race as a process opening a file after the check. The `status` read
+//! goes by pid number: if the process was released and its number reused
+//! before that read, the read shows the new process, and `Gone` is still
+//! true. Every read under `/proc/<pid>` goes by number too, while the pidfd
+//! pins the process itself, not its number: when the process is released
+//! and another one gets its number before a later read, the readers may
+//! read the newcomer in its place or miss it (it may be using files and be
+//! reported as not using them, until the next scan lists it under its own
+//! number). A zombie whose `status` is hidden (`hidepid`) is `Failed`, not
+//! `Gone`.
+//!
+//! The decisions are made here without I/O ([`collect`] takes the reads as
+//! closures; [`has_exited`], [`shortfall`], [`task_status`] and
+//! [`parse_task_stat`] are pure) so they are unit-tested; [`crate::host`]
+//! supplies the actual reads.
+
+use std::collections::BTreeMap;
+
+use diskgc_core::host::{Errno, HostError, ProcError};
+
+use crate::procfs::StatusFields;
+
+/// What a task's `stat` says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TaskStat {
+    /// The state letter (`R`, `S`, `D`, `Z`, `X`, ...).
+    pub state: char,
+    /// `PF_EXITING`: the task is exiting and releasing what it holds.
+    pub exiting: bool,
+    /// `PF_KTHREAD`: a kernel thread, which has no memory map or `exe`.
+    pub kernel_thread: bool,
+}
+
+/// `PF_EXITING` and `PF_KTHREAD` in the flags field of `stat`.
+const PF_EXITING: u64 = 0x0000_0004;
+const PF_KTHREAD: u64 = 0x0020_0000;
+
+/// The most rounds [`collect`] makes (each one confirmed listing and the
+/// reads of its tasks) before it gives up on a process that does not settle.
+pub(crate) const MAX_ROUNDS: usize = 16;
+
+/// Parses `/proc/<pid>/task/<tid>/stat`. The command name (field 2) is in
+/// parentheses and may itself contain spaces and `)`, so the fields after
+/// it are found from the **last** `)`.
+pub(crate) fn parse_task_stat(text: &[u8]) -> Result<TaskStat, String> {
+    let shown = || String::from_utf8_lossy(text).into_owned();
+    let close = text
+        .iter()
+        .rposition(|b| *b == b')')
+        .ok_or_else(|| format!("task stat without ')': {}", shown()))?;
+    let rest = std::str::from_utf8(&text[close + 1..])
+        .map_err(|_| format!("non-UTF-8 task stat: {}", shown()))?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After the name: state(3) ppid(4) pgrp(5) session(6) tty_nr(7)
+    // tpgid(8) flags(9).
+    let state = fields
+        .first()
+        .and_then(|s| {
+            let mut chars = s.chars();
+            chars.next().filter(|_| chars.next().is_none())
+        })
+        .ok_or_else(|| format!("no state in task stat: {}", shown()))?;
+    let flags: u64 = fields
+        .get(6)
+        .and_then(|f| f.parse().ok())
+        .ok_or_else(|| format!("no flags in task stat: {}", shown()))?;
+    Ok(TaskStat {
+        state,
+        exiting: flags & PF_EXITING != 0,
+        kernel_thread: flags & PF_KTHREAD != 0,
+    })
+}
+
+/// A task as [`collect`] judges it, after reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Status {
+    Live,
+    /// Alive, but has no memory map, `exe` or files of its own to show.
+    KernelThread,
+    /// Releasing what it holds (`PF_EXITING`, not yet a zombie): what it
+    /// shows is incomplete.
+    Exiting,
+    /// A zombie (`Z`) or dead but not yet released (`X`).
+    Exited,
+    /// Its entry is gone (`ENOENT`, `ESRCH`).
+    Vanished,
+}
+
+impl Status {
+    /// A read from this task can be the answer.
+    fn usable(self) -> bool {
+        matches!(self, Self::Live | Self::KernelThread)
+    }
+
+    /// The task has exited, or is the old leader of a non-leader exec under
+    /// the exec'ing thread's old tid (see the module docs).
+    fn ended(self) -> bool {
+        matches!(self, Self::Exited | Self::Vanished)
+    }
+}
+
+/// Classifies a task from the result of reading its `stat`. Any error other
+/// than the entry's disappearance is passed on, so the caller stays
+/// conservative.
+pub(crate) fn task_status(stat: &Result<TaskStat, HostError>) -> Result<Status, HostError> {
+    match stat {
+        Ok(s) if matches!(s.state, 'Z' | 'X' | 'x') => Ok(Status::Exited),
+        Ok(s) if s.exiting => Ok(Status::Exiting),
+        Ok(s) if s.kernel_thread => Ok(Status::KernelThread),
+        Ok(_) => Ok(Status::Live),
+        Err(e) if is_vanished(e) => Ok(Status::Vanished),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// How many results [`collect`] wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Want {
+    /// One result per task (fd tables, cwd and root can differ per task).
+    EveryTask,
+    /// One result from a task that is live after the read (memory map and
+    /// environment, shared by all tasks of a process).
+    FirstLiveTask,
+}
+
+pub(crate) fn is_vanished(e: &HostError) -> bool {
+    e.is(Errno::ENOENT) || e.is(Errno::ESRCH)
+}
+
+/// One listing of a process's tasks: `/proc/<pid>/task` read, then the
+/// kernel's thread count (`Threads:` in `/proc/<pid>/status`, i.e.
+/// `signal->nr_threads`), then `/proc/<pid>/task` read again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listing {
+    /// Sorted, without duplicates (a `readdir` resumed at an offset can
+    /// repeat an entry).
+    tids: Vec<u32>,
+    threads: usize,
+    /// Every task of the first listing is in the second one.
+    confirmed: bool,
+}
+
+impl Listing {
+    /// `tids`, the count read right after them, and `again`, the listing
+    /// made right after the count.
+    pub(crate) fn new(mut tids: Vec<u32>, threads: usize, again: &[u32]) -> Self {
+        tids.sort_unstable();
+        tids.dedup();
+        let confirmed = tids.iter().all(|tid| again.contains(tid));
+        Self {
+            tids,
+            threads,
+            confirmed,
+        }
+    }
+
+    /// The listing is exactly the set of tasks alive at the count: every
+    /// task of the first listing is in the second one, so each was attached
+    /// before and after the count, hence counted, and their number equals
+    /// the count. The count changes together with the thread list (see the
+    /// module docs). `Threads: 0` proves nothing (`task_sig` prints 0 when
+    /// the task the `status` read reached has no signal handlers any more).
+    fn complete(&self) -> bool {
+        self.confirmed && self.threads > 0 && self.tids.len() == self.threads
+    }
+}
+
+/// What `poll` on a process's pidfd reported (fs/pidfs.c `pidfd_poll`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PidfdPoll {
+    /// Not readable: the task found is running, or is a leader waiting for
+    /// its threads.
+    Running,
+    /// `POLLIN` without `POLLHUP`: the task the poll found had exited and
+    /// did not look like a leader with threads. Not proof by itself (see
+    /// the module docs).
+    Readable,
+    /// `POLLHUP`: the pid has no task left; the process was released.
+    Hangup,
+}
+
+/// The decision rule for `Gone` (see the module docs): `Hangup` is final;
+/// `Readable` counts only when `status_after`, one read of
+/// `/proc/<pid>/status` made after the poll (`None` when it could not be
+/// found), shows a zombie that is the only task of its group.
+pub(crate) fn has_exited(
+    poll: PidfdPoll,
+    status_after: impl FnOnce() -> Result<Option<StatusFields>, ProcError>,
+) -> Result<bool, ProcError> {
+    Ok(match poll {
+        PidfdPoll::Running => false,
+        PidfdPoll::Hangup => true,
+        PidfdPoll::Readable => {
+            status_after()?.is_some_and(|status| status.state == 'Z' && status.threads == 1)
+        }
+    })
+}
+
+/// What [`Process::list`], [`Process::poll`] and [`Process::status`] give.
+pub(crate) type Listed = Result<Option<Listing>, ProcError>;
+pub(crate) type Polled = Result<PidfdPoll, ProcError>;
+pub(crate) type StatusRead = Result<Option<StatusFields>, ProcError>;
+
+/// How [`collect`] reaches one process.
+pub(crate) struct Process<L, P, G> {
+    /// The process id, also the leader's tid.
+    pub pid: u32,
+    /// Makes one [`Listing`]; `None` when a lookup under `/proc/<pid>` said
+    /// `ENOENT`, which alone proves nothing.
+    pub list: L,
+    /// Polls the process's pidfd.
+    pub poll: P,
+    /// Reads `/proc/<pid>/status` once; `None` when it said `ENOENT`.
+    pub status: G,
+}
+
+/// How [`collect`] reaches the tasks of one process.
+pub(crate) struct Tasks<R, E, S> {
+    /// What a read gives, for messages ("fd table", "environment", ...).
+    pub what: &'static str,
+    /// Reads one task's entry.
+    pub read: R,
+    /// Whether a successful read found nothing (an empty fd table, memory
+    /// map or environment).
+    pub is_empty: E,
+    /// Reads one task's `stat`.
+    pub stat: S,
+}
+
+/// What one read of one task says, for the round's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// A read the round can stand on, and the task's status right after it.
+    Trusted(Status),
+    /// The task is live, yet its read was empty: maybe bound to another
+    /// task (see the module docs).
+    Empty,
+    /// The task is live, yet its read said `ENOENT`.
+    Missing,
+    /// The leader's own entry vanished: a lookup can race a non-leader exec.
+    LeaderVanished,
+}
+
+impl Seen {
+    fn usable(self) -> bool {
+        matches!(self, Self::Trusted(status) if status.usable())
+    }
+}
+
+/// Reads task `tid` and judges it by its `stat` read right after, so a task
+/// that died during the read is seen.
+///
+/// The value worth keeping: for [`Want::EveryTask`] every successful read,
+/// also from a task that exits meanwhile or an untrusted one (reporting too
+/// much in use is the safe side); for [`Want::FirstLiveTask`] only a
+/// trusted read from a live task or a kernel thread.
+fn observe<T>(
+    pid: u32,
+    tid: u32,
+    tasks: &mut Tasks<
+        impl FnMut(u32) -> Result<T, HostError>,
+        impl Fn(&T) -> bool,
+        impl FnMut(u32) -> Result<TaskStat, HostError>,
+    >,
+    want: Want,
+) -> Result<(Option<T>, Seen), ProcError> {
+    let result = (tasks.read)(tid);
+    let status = task_status(&(tasks.stat)(tid)).map_err(ProcError::from_host)?;
+    let seen = match &result {
+        _ if tid == pid && status == Status::Vanished => Seen::LeaderVanished,
+        Ok(value) if status == Status::Live && (tasks.is_empty)(value) => Seen::Empty,
+        Err(e) if status == Status::Live && is_vanished(e) => Seen::Missing,
+        _ => Seen::Trusted(status),
+    };
+    let value = match result {
+        Ok(value) if want == Want::EveryTask || seen.usable() => Some(value),
+        Ok(_) => None,
+        Err(e) if is_vanished(&e) => None,
+        Err(e) => return Err(ProcError::from_host(e)),
+    };
+    Ok((value, seen))
+}
+
+/// What one round of [`collect`] has read so far.
+struct Round<T> {
+    results: Vec<T>,
+    seen: BTreeMap<u32, Seen>,
+}
+
+impl<T> Round<T> {
+    /// Reads task `tid` into the round (see [`observe`]); true when the
+    /// round is done: [`Want::FirstLiveTask`] got its read.
+    fn read(
+        &mut self,
+        pid: u32,
+        tid: u32,
+        tasks: &mut Tasks<
+            impl FnMut(u32) -> Result<T, HostError>,
+            impl Fn(&T) -> bool,
+            impl FnMut(u32) -> Result<TaskStat, HostError>,
+        >,
+        want: Want,
+    ) -> Result<bool, ProcError> {
+        let (value, seen) = observe(pid, tid, tasks, want)?;
+        self.seen.insert(tid, seen);
+        let kept = value.map(|value| self.results.push(value)).is_some();
+        Ok(kept && want == Want::FirstLiveTask)
+    }
+}
+
+/// Why a round is not the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shortfall {
+    /// A task of the first listing was missing from the second.
+    Changed,
+    /// The listing and the count disagree (or the count is 0).
+    Miscounted { listed: usize, counted: usize },
+    /// A task's read cannot be trusted.
+    Untrusted { tid: u32, seen: Seen },
+    /// No task of a complete listing was live.
+    NothingLive,
+}
+
+impl Shortfall {
+    /// Says what the round lacked; `what` names what a read gives.
+    fn describe(self, what: &str) -> String {
+        match self {
+            Self::Changed => "its task listing changed between reads".to_owned(),
+            Self::Miscounted { listed, counted } => {
+                format!("its task listing was not complete ({listed} tasks, {counted} counted)")
+            }
+            Self::Untrusted { tid, seen } => match seen {
+                Seen::Empty => format!(
+                    "task {tid} is live but its {what} was empty (an empty one cannot be told \
+                     from a read bound to another task)"
+                ),
+                Seen::Missing => format!("task {tid} is live but its {what} said ENOENT"),
+                Seen::LeaderVanished => format!("the leader's entry (task {tid}) vanished"),
+                Seen::Trusted(_) => format!("task {tid} gave no trustworthy read"),
+            },
+            Self::NothingLive => "no task of a complete listing was live".to_owned(),
+        }
+    }
+}
+
+/// What a round lacks to be the answer, or `None` when it is the answer:
+/// its listing is [complete](Listing::complete), every task it read gave a
+/// trusted read, and one of them is live.
+fn shortfall(listing: &Listing, seen: &BTreeMap<u32, Seen>) -> Option<Shortfall> {
+    if !listing.confirmed {
+        Some(Shortfall::Changed)
+    } else if !listing.complete() {
+        Some(Shortfall::Miscounted {
+            listed: listing.tids.len(),
+            counted: listing.threads,
+        })
+    } else if let Some((&tid, &seen)) = seen
+        .iter()
+        .find(|(_, seen)| !matches!(seen, Seen::Trusted(_)))
+    {
+        Some(Shortfall::Untrusted { tid, seen })
+    } else if !seen.values().any(|seen| seen.usable()) {
+        Some(Shortfall::NothingLive)
+    } else {
+        None
+    }
+}
+
+/// Reads the tasks of one process, in rounds. `Gone` only by
+/// [`has_exited`], asked at the start, when a round finds nothing live and
+/// when the listing vanished; no listing and no `ENOENT` decide it.
+///
+/// Each round makes one [`Listing`] and reads every task in it, the
+/// leader's tid included (nothing is carried over from an earlier round). If
+/// a non-leader task is seen ended (`Z`, `X` or vanished), the leader's tid
+/// is read once more, after every other read of the round. The round is the
+/// answer unless [`shortfall`] says what it lacks; then the next round
+/// follows. After [`MAX_ROUNDS`] rounds: `Failed`, saying what the last
+/// round lacked.
+///
+/// Per task: `EACCES`/`EPERM` is `Denied`; any error other than `ENOENT` /
+/// `ESRCH` is `Failed`; an error reading `stat` other than the entry's
+/// disappearance is passed on. [`Want::FirstLiveTask`] returns the first
+/// usable read at once.
+pub(crate) fn collect<T>(
+    mut process: Process<
+        impl FnMut() -> Listed,
+        impl FnMut() -> Polled,
+        impl FnMut() -> StatusRead,
+    >,
+    mut tasks: Tasks<
+        impl FnMut(u32) -> Result<T, HostError>,
+        impl Fn(&T) -> bool,
+        impl FnMut(u32) -> Result<TaskStat, HostError>,
+    >,
+    want: Want,
+) -> Result<Vec<T>, ProcError> {
+    let pid = process.pid;
+    let mut exited = || has_exited((process.poll)()?, &mut process.status);
+    if exited()? {
+        return Err(ProcError::Gone);
+    }
+    let mut lacked = String::new();
+    for _ in 0..MAX_ROUNDS {
+        let Some(listing) = (process.list)()? else {
+            if exited()? {
+                return Err(ProcError::Gone);
+            }
+            lacked = "its task listing vanished".to_owned();
+            continue;
+        };
+        let mut round = Round {
+            results: Vec::new(),
+            seen: BTreeMap::new(),
+        };
+        for &tid in &listing.tids {
+            if round.read(pid, tid, &mut tasks, want)? {
+                return Ok(round.results);
+            }
+        }
+        // A non-leader seen ended may be the old leader under the exec'ing
+        // thread's old tid: the leader's tid may name the survivor now.
+        let thread_ended = round
+            .seen
+            .iter()
+            .any(|(&tid, how)| tid != pid && matches!(how, Seen::Trusted(s) if s.ended()));
+        if thread_ended && round.read(pid, pid, &mut tasks, want)? {
+            return Ok(round.results);
+        }
+        match shortfall(&listing, &round.seen) {
+            None => return Ok(round.results),
+            Some(Shortfall::NothingLive) if exited()? => return Err(ProcError::Gone),
+            Some(lack) => lacked = lack.describe(tasks.what),
+        }
+    }
+    Err(ProcError::Failed(HostError::invalid(
+        "read",
+        format!("process {pid}"),
+        format!("no trustworthy read in {MAX_ROUNDS} rounds: {lacked}"),
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn errno(e: Errno) -> HostError {
+        HostError::errno("read", "/proc/1/task/2/fd", e)
+    }
+
+    fn task(state: char, exiting: bool, kernel_thread: bool) -> Result<TaskStat, HostError> {
+        Ok(TaskStat {
+            state,
+            exiting,
+            kernel_thread,
+        })
+    }
+
+    fn live() -> Result<TaskStat, HostError> {
+        task('S', false, false)
+    }
+
+    fn zombie() -> Result<TaskStat, HostError> {
+        task('Z', false, false)
+    }
+
+    fn dead() -> Result<TaskStat, HostError> {
+        task('X', false, false)
+    }
+
+    /// State `R` with `PF_EXITING`: releasing its map, files, cwd.
+    fn exiting() -> Result<TaskStat, HostError> {
+        task('R', true, false)
+    }
+
+    /// A listing the kernel would give for these tasks: counted and
+    /// confirmed.
+    fn complete(tids: &[u32]) -> Listing {
+        Listing::new(tids.to_vec(), tids.len(), tids)
+    }
+
+    /// A confirmed listing with the kernel's count `threads` (which exceeds
+    /// the listing when tasks were missed).
+    fn counted(tids: &[u32], threads: usize) -> Listing {
+        Listing::new(tids.to_vec(), threads, tids)
+    }
+
+    /// Scripted listings, one per round (the last repeats).
+    fn rounds(script: Vec<Listing>) -> impl FnMut() -> Result<Option<Listing>, ProcError> {
+        let mut next = 0;
+        move || {
+            let listing = script[next.min(script.len() - 1)].clone();
+            next += 1;
+            Ok(Some(listing))
+        }
+    }
+
+    /// Scripted answers of `poll` on the pidfd, in turn (the last repeats).
+    fn polls(script: Vec<PidfdPoll>) -> impl FnMut() -> Result<PidfdPoll, ProcError> {
+        let mut next = 0;
+        move || {
+            let poll = script[next.min(script.len() - 1)];
+            next += 1;
+            Ok(poll)
+        }
+    }
+
+    /// One `status` read showing `state` and `threads`.
+    fn status(state: char, threads: usize) -> Result<Option<StatusFields>, ProcError> {
+        Ok(Some(StatusFields { state, threads }))
+    }
+
+    /// The process's `status` must not be read: the poll did not say readable.
+    fn no_status() -> Result<Option<StatusFields>, ProcError> {
+        panic!("status read without a readable poll")
+    }
+
+    /// [`collect`] over string results (`""` is an empty read) for a process
+    /// whose pidfd never says readable.
+    fn scan(
+        pid: u32,
+        list: impl FnMut() -> Result<Option<Listing>, ProcError>,
+        read: impl FnMut(u32) -> Result<&'static str, HostError>,
+        stat: impl FnMut(u32) -> Result<TaskStat, HostError>,
+        want: Want,
+    ) -> Result<Vec<&'static str>, ProcError> {
+        let pidfd = Pidfd {
+            poll: || Ok(PidfdPoll::Running),
+            status: no_status,
+        };
+        scan_exited(pid, list, pidfd, read, stat, want)
+    }
+
+    /// The process's own answers: its pidfd's `poll`, and its `status`.
+    struct Pidfd<P, G> {
+        poll: P,
+        status: G,
+    }
+
+    /// [`scan`] with scripted answers of the process's pidfd.
+    fn scan_exited(
+        pid: u32,
+        list: impl FnMut() -> Result<Option<Listing>, ProcError>,
+        pidfd: Pidfd<
+            impl FnMut() -> Result<PidfdPoll, ProcError>,
+            impl FnMut() -> Result<Option<StatusFields>, ProcError>,
+        >,
+        read: impl FnMut(u32) -> Result<&'static str, HostError>,
+        stat: impl FnMut(u32) -> Result<TaskStat, HostError>,
+        want: Want,
+    ) -> Result<Vec<&'static str>, ProcError> {
+        let is_empty = |v: &&'static str| v.is_empty();
+        let process = Process {
+            pid,
+            list,
+            poll: pidfd.poll,
+            status: pidfd.status,
+        };
+        collect(
+            process,
+            Tasks {
+                what: "table",
+                read,
+                is_empty,
+                stat,
+            },
+            want,
+        )
+    }
+
+    /// The reads of one tid, in turn (the last repeats).
+    type ReadScript = Vec<Result<&'static str, HostError>>;
+
+    fn reads(script: Vec<(u32, ReadScript)>) -> impl FnMut(u32) -> Result<&'static str, HostError> {
+        let mut script: BTreeMap<u32, (usize, ReadScript)> =
+            script.into_iter().map(|(t, r)| (t, (0, r))).collect();
+        move |tid| {
+            let (n, results) = script.get_mut(&tid).expect("scripted tid");
+            let result = results[(*n).min(results.len() - 1)].clone();
+            *n += 1;
+            result
+        }
+    }
+
+    fn failed(got: &Result<Vec<&'static str>, ProcError>) -> bool {
+        matches!(got, Err(ProcError::Failed(_)))
+    }
+
+    fn failed_saying(got: &Result<Vec<&'static str>, ProcError>, text: &str) -> bool {
+        matches!(got, Err(ProcError::Failed(e)) if e.detail.contains(text))
+    }
+
+    #[test]
+    fn task_stat_is_parsed_from_the_last_parenthesis() {
+        let s = parse_task_stat(b"42 (a b) c)) S 1 42 42 0 -1 4194560 0 0 0").unwrap();
+        assert_eq!((s.state, s.exiting, s.kernel_thread), ('S', false, false));
+        let k = parse_task_stat(b"2 (kthreadd) S 0 0 0 0 -1 2129984 0 0").unwrap();
+        assert!(k.kernel_thread, "2129984 has PF_KTHREAD");
+        let x = parse_task_stat(b"7 (w) R 1 7 7 0 -1 4194372 0 0").unwrap();
+        assert!(x.exiting && x.state == 'R', "4194372 has PF_EXITING");
+        for bad in [
+            &b"42 (x S 1"[..],
+            b"42 (x) ",
+            b"42 (x) SS 1 2 3 4 5 6",
+            b"42 (x) S 1 2",
+        ] {
+            assert!(
+                parse_task_stat(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        let own = std::fs::read(format!("/proc/self/task/{}/stat", std::process::id())).unwrap();
+        assert!(parse_task_stat(&own).is_ok());
+    }
+
+    #[test]
+    fn statuses_are_classified_from_stat() {
+        assert_eq!(task_status(&zombie()), Ok(Status::Exited));
+        assert_eq!(task_status(&dead()), Ok(Status::Exited));
+        assert_eq!(task_status(&exiting()), Ok(Status::Exiting));
+        assert_eq!(task_status(&live()), Ok(Status::Live));
+        assert_eq!(
+            task_status(&task('S', false, true)),
+            Ok(Status::KernelThread)
+        );
+        assert_eq!(
+            task_status(&Err(errno(Errno::ENOENT))),
+            Ok(Status::Vanished)
+        );
+        assert_eq!(task_status(&Err(errno(Errno::ESRCH))), Ok(Status::Vanished));
+        for e in [Errno::EACCES, Errno::EPERM, Errno(12), Errno::EINVAL] {
+            assert_eq!(task_status(&Err(errno(e))), Err(errno(e)), "{e}");
+        }
+        assert!(Status::Exited.ended() && Status::Vanished.ended());
+        assert!(!Status::Exiting.ended() && !Status::Live.ended());
+        assert!(Status::Live.usable() && Status::KernelThread.usable());
+        assert!(!Status::Exiting.usable() && !Status::Exited.usable());
+    }
+
+    #[test]
+    fn listings_are_complete_only_when_counted_and_confirmed() {
+        assert!(complete(&[10, 11]).complete());
+        assert!(!counted(&[10], 2).complete(), "a task missed");
+        assert!(
+            !Listing::new(vec![10, 11], 2, &[10]).complete(),
+            "11 released after the count"
+        );
+        assert!(!complete(&[]).complete(), "a count of 0 proves nothing");
+        assert!(
+            Listing::new(vec![11, 10, 10], 2, &[10, 11, 12]).complete(),
+            "duplicates and late tasks"
+        );
+    }
+
+    #[test]
+    fn a_worker_is_read_when_the_main_thread_exited() {
+        let read = |t| Ok(if t == 11 { "held" } else { "" });
+        let stat = |t| if t == 10 { zombie() } else { live() };
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            read,
+            stat,
+            Want::EveryTask,
+        );
+        assert!(got.as_ref().is_ok_and(|v| v.contains(&"held")), "{got:?}");
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            read,
+            stat,
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["held"]));
+    }
+
+    #[test]
+    fn results_of_tasks_that_exit_during_the_scan_are_kept() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |t| Ok(if t == 11 { "held" } else { "x" }),
+            |t| if t == 11 { zombie() } else { live() },
+            Want::EveryTask,
+        );
+        assert!(got.as_ref().is_ok_and(|v| v.contains(&"held")), "{got:?}");
+    }
+
+    /// An exiting leader (state R, `PF_EXITING`) shows an empty map; the
+    /// worker that still maps the file is the source.
+    #[test]
+    fn an_exiting_task_is_never_the_source_of_the_memory_map() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |t| Ok(if t == 10 { "empty" } else { "maps" }),
+            |t| if t == 10 { exiting() } else { live() },
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["maps"]));
+    }
+
+    #[test]
+    fn every_task_exiting_is_failed_not_gone() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok("partial"),
+            |_| exiting(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, "no task of a complete listing was live"),
+            "{got:?}"
+        );
+    }
+
+    /// The decision rule for Gone: `POLLHUP` is final, `POLLIN` only with a
+    /// later `status` read showing a zombie alone in its group, and the
+    /// `status` read is made after the poll, never without a readable one.
+    #[test]
+    fn exited_only_on_hangup_or_a_readable_poll_confirmed_by_status() {
+        let never = || -> Result<Option<StatusFields>, ProcError> { panic!("status read") };
+        assert_eq!(has_exited(PidfdPoll::Running, never), Ok(false));
+        assert_eq!(has_exited(PidfdPoll::Hangup, never), Ok(true));
+        let readable = |shown| has_exited(PidfdPoll::Readable, || shown);
+        assert_eq!(readable(status('Z', 1)), Ok(true), "a zombie alone");
+        for (shown, why) in [
+            (
+                status('Z', 2),
+                "the old leader of an exec, the exec'ing thread counted",
+            ),
+            (status('Z', 0), "a task already released"),
+            (status('X', 1), "not a zombie"),
+            (status('S', 1), "the survivor of an exec"),
+            (status('R', 2), "live"),
+            // Both seen on the real kernel during exec loops (mped, round 10).
+            (status('R', 0), "a running task whose count was read as 0"),
+            (status('D', 2), "uninterruptible, with a thread counted"),
+            (Ok(None), "status gone: released (before 6.9) or hidden"),
+        ] {
+            assert_eq!(readable(shown), Ok(false), "{why}");
+        }
+        let denied = ProcError::Denied(errno(Errno::EACCES));
+        assert_eq!(readable(Err(denied.clone())), Err(denied));
+    }
+
+    /// Gone comes only from the process's pidfd: at the start, or when a
+    /// complete listing holds nothing live, or when the listing vanished.
+    #[test]
+    fn gone_only_when_the_pidfd_says_so() {
+        let hangup = Pidfd {
+            poll: || Ok(PidfdPoll::Hangup),
+            status: no_status,
+        };
+        let got = scan_exited(
+            10,
+            || panic!("no listing"),
+            hangup,
+            |_| panic!("no read"),
+            |_| panic!("no stat"),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Err(ProcError::Gone));
+        // A zombie group: the leader is all that is left.
+        let zombie_alone = Pidfd {
+            poll: polls(vec![PidfdPoll::Running, PidfdPoll::Readable]),
+            status: || status('Z', 1),
+        };
+        let got = scan_exited(
+            10,
+            rounds(vec![complete(&[10])]),
+            zombie_alone,
+            |_| Ok(""),
+            |_| zombie(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Err(ProcError::Gone));
+        // The same listing, but the pidfd never says readable: never Gone.
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Ok(""),
+            |_| zombie(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+        // The listing vanished and the process was released.
+        let released = Pidfd {
+            poll: polls(vec![PidfdPoll::Running, PidfdPoll::Hangup]),
+            status: no_status,
+        };
+        let got = scan_exited(
+            10,
+            || Ok(None),
+            released,
+            |_| Ok(""),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Err(ProcError::Gone));
+    }
+
+    /// Round 9 (Codex, mped): `pidfd_poll` can say readable while the process
+    /// lives, when it found the old leader of a non-leader exec just before
+    /// the swap. One such poll at the start, with the live survivor's
+    /// `status` read after it, is never Gone.
+    #[test]
+    fn one_transient_readable_poll_is_never_gone() {
+        let transient = Pidfd {
+            poll: polls(vec![PidfdPoll::Readable, PidfdPoll::Running]),
+            status: || status('S', 1),
+        };
+        let got = scan_exited(
+            10,
+            rounds(vec![complete(&[10])]),
+            transient,
+            |_| Ok("held"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec!["held"]));
+        // Readable in every round while the old leader shows Z with the
+        // exec'ing thread still counted: Failed, not Gone.
+        let window = Pidfd {
+            poll: || Ok(PidfdPoll::Readable),
+            status: || status('Z', 2),
+        };
+        let got = scan_exited(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            window,
+            |_| Ok(""),
+            |_| zombie(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    /// Codex 1 (round 8): a stalled exec CPU keeps the swap window open, and
+    /// both tids keep showing the old leader as Z. The process lives on.
+    #[test]
+    fn a_zombie_window_held_open_is_never_gone() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok(""),
+            |_| zombie(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    /// Codex 2 (round 8): [10] with a count of 1, then [10] with a count of 2
+    /// (U created and released while listed, V created and never listed).
+    #[test]
+    fn a_later_count_above_the_listing_is_never_gone() {
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 1), counted(&[10], 2)]),
+            |_| Ok(""),
+            |_| zombie(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    /// Codex 3 (round 8): hidepid=2 and PR_SET_DUMPABLE(0): every lookup says
+    /// ENOENT and the pid is gone from /proc, but the process lives.
+    #[test]
+    fn invisible_in_proc_is_never_gone() {
+        let got = scan(10, || Ok(None), |_| Ok(""), |_| live(), Want::EveryTask);
+        assert!(failed_saying(&got, "its task listing vanished"), "{got:?}");
+    }
+
+    #[test]
+    fn an_incomplete_listing_is_never_the_answer() {
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 2)]),
+            |_| Ok("x"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, "not complete (1 tasks, 2 counted)"),
+            "{got:?}"
+        );
+        let got = scan(
+            10,
+            rounds(vec![Listing::new(vec![10, 11], 2, &[10])]),
+            |_| Ok("x"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, "its task listing changed between reads"),
+            "unconfirmed: {got:?}"
+        );
+        let got = scan(
+            10,
+            rounds(vec![complete(&[]), complete(&[10])]),
+            |_| Ok("held"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec!["held"]), "a count of 0, then a real listing");
+    }
+
+    /// mped (round 4): listings cut short (a task released before it was
+    /// emitted); the count exposes them, and thread 13 is read once listed.
+    #[test]
+    fn a_listing_shorter_than_the_thread_count_is_not_trusted() {
+        let got = scan(
+            10,
+            rounds(vec![
+                counted(&[10, 11], 3),
+                counted(&[10, 11], 3),
+                complete(&[10, 11, 13]),
+            ]),
+            |tid| Ok(if tid == 13 { "private" } else { "shared" }),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            got.as_ref().is_ok_and(|v| v.contains(&"private")),
+            "{got:?}"
+        );
+    }
+
+    /// mped (round 8): the exec'ing thread is never listed (the first count
+    /// exposes it; later listings are [10] with a count of 1) and the
+    /// leader's tid was read before the swap. The leader is read again in
+    /// every round, so the stale read is never the whole answer.
+    #[test]
+    fn a_leader_read_is_never_carried_across_an_unseen_exec() {
+        let swapped = Cell::new(false);
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 2), complete(&[10])]),
+            |_| {
+                Ok(if swapped.get() {
+                    "survivor's private table"
+                } else {
+                    "old leader's table"
+                })
+            },
+            |_| {
+                swapped.set(true);
+                live()
+            },
+            Want::EveryTask,
+        );
+        assert!(
+            got.as_ref()
+                .is_ok_and(|v| v.contains(&"survivor's private table")),
+            "{got:?}"
+        );
+    }
+
+    /// The in-round leader re-read (Codex, round 7): the round listed a third
+    /// thread 20, which the exec killed (`de_thread` waits for every other
+    /// thread before the swap), so it has vanished when read. The leader's
+    /// tid is read live before the swap, the exec'ing thread's old tid 11 in
+    /// the swap window (Z). The round's listing is complete, so without
+    /// reading the leader's tid again in this round the old leader's read
+    /// would be the answer and the survivor's private table missed.
+    #[test]
+    fn a_thread_seen_ended_makes_the_leader_be_read_again_in_the_round() {
+        let swapped = Cell::new(false);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11, 20])]),
+            |tid| match (tid, swapped.get()) {
+                (10, false) => Ok("old leader's data"),
+                (10, true) => Ok("survivor's private table"),
+                (20, _) => Err(errno(Errno::ENOENT)),
+                _ => Ok(""),
+            },
+            |tid| match tid {
+                11 => {
+                    swapped.set(true);
+                    zombie()
+                }
+                20 => Err(errno(Errno::ENOENT)),
+                _ => live(),
+            },
+            Want::EveryTask,
+        );
+        assert!(
+            got.as_ref()
+                .is_ok_and(|v| v.contains(&"survivor's private table")),
+            "{got:?}"
+        );
+    }
+
+    /// The same with the old leader already marked dead (X).
+    #[test]
+    fn a_thread_seen_dead_makes_the_leader_be_read_again_in_the_round() {
+        let swapped = Cell::new(false);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |tid| {
+                Ok(if tid == 10 && swapped.get() {
+                    "survivor's table"
+                } else {
+                    "old leader's table"
+                })
+            },
+            |tid| {
+                if tid == 10 {
+                    live()
+                } else {
+                    swapped.set(true);
+                    dead()
+                }
+            },
+            Want::EveryTask,
+        );
+        assert!(
+            got.as_ref().is_ok_and(|v| v.contains(&"survivor's table")),
+            "{got:?}"
+        );
+    }
+
+    /// A non-leader exec seen from the start: the leader's tid shows the old
+    /// leader as Z, the exec'ing thread's old tid then shows it too (swap
+    /// window), and the leader's tid read again is the survivor.
+    #[test]
+    fn a_tid_taken_over_by_exec_is_read_as_the_survivor() {
+        let swapped = Cell::new(false);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |tid| {
+                Ok(if tid == 10 && swapped.get() {
+                    "survivor's table"
+                } else {
+                    ""
+                })
+            },
+            |tid| match tid {
+                10 if swapped.get() => live(),
+                10 => zombie(),
+                _ => {
+                    swapped.set(true);
+                    zombie()
+                }
+            },
+            Want::EveryTask,
+        );
+        assert!(
+            got.as_ref().is_ok_and(|v| v.contains(&"survivor's table")),
+            "{got:?}"
+        );
+    }
+
+    /// Round 5: during a non-leader exec, maps of the leader's tid can be
+    /// bound to the dead old leader (empty) while its stat shows the live
+    /// exec'ing thread. An empty map is never the answer; once released, the
+    /// survivor's map is read.
+    #[test]
+    fn an_empty_memory_map_of_a_live_task_is_never_the_answer() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11]), complete(&[10])]),
+            reads(vec![
+                (10, vec![Ok(""), Ok(""), Ok("mapping")]),
+                (11, vec![Ok("")]),
+            ]),
+            |tid| if tid == 10 { live() } else { dead() },
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["mapping"]));
+    }
+
+    /// The cost of that rule for the environment: a process whose environment
+    /// is really empty (`env -i`) is Failed, and the error says why.
+    #[test]
+    fn an_empty_environment_is_never_the_answer() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Ok(""),
+            |_| live(),
+            Want::FirstLiveTask,
+        );
+        assert!(
+            failed_saying(&got, "task 10 is live but its table was empty"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_live_task_that_cannot_be_inspected_is_failed_not_gone() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            reads(vec![
+                (10, vec![Err(errno(Errno::ENOENT))]),
+                (11, vec![Ok("x")]),
+            ]),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    /// The leader's entry vanishing (a lookup racing a non-leader exec) is
+    /// not trusted; the next round reads it.
+    #[test]
+    fn the_leaders_entry_vanishing_is_read_again() {
+        let stats = Cell::new(0);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Ok("held"),
+            |_| {
+                stats.set(stats.get() + 1);
+                if stats.get() == 1 {
+                    Err(errno(Errno::ENOENT))
+                } else {
+                    live()
+                }
+            },
+            Want::EveryTask,
+        );
+        assert!(got.as_ref().is_ok_and(|v| v.contains(&"held")), "{got:?}");
+    }
+
+    #[test]
+    fn a_stat_error_propagates_instead_of_meaning_exited() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok("x"),
+            |tid| {
+                if tid == 11 {
+                    Err(errno(Errno::EACCES))
+                } else {
+                    live()
+                }
+            },
+            Want::EveryTask,
+        );
+        assert!(matches!(got, Err(ProcError::Denied(_))), "{got:?}");
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Ok("x"),
+            |_| Err(errno(Errno(5))),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    #[test]
+    fn permission_errors_are_denied_and_kernel_threads_hold_nothing() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Err(errno(Errno::EACCES)),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(matches!(got, Err(ProcError::Denied(_))), "{got:?}");
+        let got = scan(
+            2,
+            rounds(vec![complete(&[2])]),
+            |_| Err(errno(Errno::ENOENT)),
+            |_| task('S', false, true),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec![]));
+    }
+
+    /// Dead (`X`) is never final: neither the answer's source nor "exited".
+    #[test]
+    fn a_dead_task_is_never_final() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok(""),
+            |_| dead(),
+            Want::EveryTask,
+        );
+        assert!(failed(&got), "{got:?}");
+    }
+
+    #[test]
+    fn a_task_list_that_never_settles_is_failed_after_the_bound() {
+        let calls = Cell::new(0);
+        let got = scan(
+            10,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(Some(counted(&[10], 2)))
+            },
+            |_| Ok("x"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, &format!("no trustworthy read in {MAX_ROUNDS} rounds")),
+            "{got:?}"
+        );
+        assert_eq!(calls.get(), MAX_ROUNDS);
+    }
+
+    /// Only the answering round's reads are returned: a read from an
+    /// earlier, incomplete round is not carried into the answer.
+    #[test]
+    fn only_the_answering_rounds_reads_are_returned() {
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 2), complete(&[10])]),
+            reads(vec![(10, vec![Ok("first round"), Ok("second round")])]),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec!["second round"]));
+    }
+
+    #[test]
+    fn a_round_says_what_it_lacks() {
+        let trusted = |tids: &[u32]| -> BTreeMap<u32, Seen> {
+            tids.iter()
+                .map(|&t| (t, Seen::Trusted(Status::Live)))
+                .collect()
+        };
+        assert_eq!(shortfall(&complete(&[10, 11]), &trusted(&[10, 11])), None);
+        assert_eq!(
+            shortfall(&Listing::new(vec![10, 11], 2, &[10]), &trusted(&[10, 11])),
+            Some(Shortfall::Changed)
+        );
+        assert_eq!(
+            shortfall(&counted(&[10], 2), &trusted(&[10])),
+            Some(Shortfall::Miscounted {
+                listed: 1,
+                counted: 2
+            })
+        );
+        let mut seen = trusted(&[10, 11]);
+        seen.insert(11, Seen::Empty);
+        assert_eq!(
+            shortfall(&complete(&[10, 11]), &seen),
+            Some(Shortfall::Untrusted {
+                tid: 11,
+                seen: Seen::Empty
+            })
+        );
+        let ended: BTreeMap<u32, Seen> = [(10, Seen::Trusted(Status::Exited))].into();
+        assert_eq!(
+            shortfall(&complete(&[10]), &ended),
+            Some(Shortfall::NothingLive)
+        );
+    }
+}

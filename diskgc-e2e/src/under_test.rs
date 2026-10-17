@@ -251,6 +251,34 @@ pub fn exec_as_tester(argv: &[String]) -> i32 {
     exit::FAIL
 }
 
+/// `personality(2)` flag that makes `uname` report a 2.6 release
+/// (`UNAME26` in linux/personality.h). Podman's default seccomp profile
+/// allows exactly this value.
+const UNAME26: libc::c_ulong = 0x0020000;
+
+/// `diskgc-e2e uname-2.6 -- PROGRAM ARGS...`: sets the `UNAME26`
+/// personality, which survives `exec`, and execs PROGRAM. The kernel then
+/// reports release `2.6.<60 + minor>` to it: an old kernel, simulated by the
+/// kernel, with no hook in the code under test. Returns only on failure.
+pub fn exec_with_uname26(argv: &[String]) -> i32 {
+    let [program, args @ ..] = argv else {
+        eprintln!("diskgc-e2e uname-2.6: no program given");
+        return exit::USAGE;
+    };
+    // SAFETY: personality(2) takes a plain integer and touches no memory.
+    let previous = unsafe { libc::personality(UNAME26) };
+    if previous == -1 {
+        eprintln!(
+            "diskgc-e2e uname-2.6: personality(UNAME26): {}",
+            std::io::Error::last_os_error()
+        );
+        return exit::FAIL;
+    }
+    let error = Command::new(program).args(args).exec();
+    eprintln!("diskgc-e2e uname-2.6: exec {program}: {error}");
+    exit::FAIL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

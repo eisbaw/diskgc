@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:54'
+updated_date: '2026-10-17 03:33'
 labels:
   - wave-1
   - irreversible
@@ -34,6 +34,14 @@ Why: Cargo targets are the biggest cache on the target machines. Implement disco
 - [ ] #2 Discovery finds targets by CACHEDIR.TAG plus a known lock file, refuses network filesystems, never follows symlinks or crosses mounts (model and container tests)
 - [ ] #3 A running test binary, a cargo process in the project dir, and CARGO_TARGET_DIR in a process's initial environment each make the target in_use (container tests)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-3: Discovery must reach roots with diskgc_core::resolve::resolve (deepest mount, statx-confirmed) and descend with open_beneath (NO_SYMLINKS|NO_XDEV + mount-id check). The mount's fs_type for the network-filesystem refusal is on Resolved.mount (MountEntry from mountinfo). Stat fields are Option (mask-checked); a None mtime on a last-build check is unanswerable, so fail closed.
+
+Forward-carried from task-3 round 5: proc_environ returns Failed, not an empty Environ, for a live process whose environment is empty (env -i); the empty read cannot be told apart from one bound to a dead old leader during a non-leader exec. So the CARGO_TARGET_DIR initial-environment heuristic gets Failed for such processes; treat it per task-6's rule for unreadable processes (conservative: in_use).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -2,4 +2,9 @@
 //! derivation, the pure planner, and the tally and executor over the `Host`
 //! port. No syscalls of its own (docs/architecture.md, Implementation).
 //!
-//! Empty until the tasks that introduce these parts land.
+//! So far: the [`host`] port, path traversal over it ([`resolve`]) and the
+//! minimum-kernel check ([`kernel`]).
+
+pub mod host;
+pub mod kernel;
+pub mod resolve;

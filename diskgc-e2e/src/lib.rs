@@ -9,7 +9,8 @@
 //!   as uid 1000 under strace ([`under_test`]), and the deletion oracle
 //!   ([`snapshot`], [`strace`], [`oracle`]). [`probe`] holds deliberately
 //!   misbehaving stand-ins for code under test that prove the checks bite.
-//!   The tests themselves are in [`suite`].
+//!   The tests themselves are in [`suite`]; those of the `Host` primitives
+//!   in [`host_suite`], driven through [`host_probe`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -17,6 +18,8 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod host_probe;
+pub mod host_suite;
 pub mod interlock;
 pub mod oracle;
 pub mod probe;

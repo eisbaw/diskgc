@@ -7,3 +7,9 @@ publish.workspace = true
 
 [dependencies]
 diskgc-core.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+# unshare(CLONE_FILES | CLONE_FS) and many mappings in test helper processes;
+# mount for the /proc of a test's own pid namespace.
+rustix = { workspace = true, features = ["mm", "mount", "thread"] }

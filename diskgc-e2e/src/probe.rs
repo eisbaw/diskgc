@@ -34,6 +34,14 @@ pub fn main(args: &[String]) -> i32 {
         [cmd, path] if cmd == "rename-over" => rename_over(Path::new(path)),
         [cmd, case] if cmd == "escape" => escape(case),
         [cmd, dir, count, stats] if cmd == "churn" => churn(Path::new(dir), count, stats),
+        [cmd, file, cwd] if cmd == "hold" => {
+            crate::host_probe::hold(Path::new(file), Path::new(cwd))
+        }
+        [cmd] if cmd == "hold-exit-slowly" => crate::host_probe::hold_exit_slowly(),
+        [cmd, file, cwd, mode] if cmd == "hold-thread" => {
+            crate::host_probe::hold_thread(Path::new(file), Path::new(cwd), mode)
+        }
+        [cmd, rest @ ..] if cmd.starts_with("host-") => crate::host_probe::main(cmd, rest),
         _ => {
             eprintln!("diskgc-e2e probe: unknown probe {args:?}");
             return exit::USAGE;

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use crate::host_suite;
 use crate::oracle::{Change, Fixture, Oracle, Unmatched};
 use crate::probe::{ESCAPE_CASES, ESCAPE_TARGET_DIR, ESCAPED_NAME};
 use crate::scratch::{self, Scratch};
@@ -145,6 +146,60 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: strace_seccomp_bpf_churn_within_bound,
+    },
+    Test {
+        name: "host_resolve_refuses_symlinks",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_resolve_refuses_symlinks,
+    },
+    Test {
+        name: "host_resolve_refuses_mount_crossings",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_resolve_refuses_mount_crossings,
+    },
+    Test {
+        name: "host_statx_and_statvfs_on_a_real_kernel",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_statx_and_statvfs_on_a_real_kernel,
+    },
+    Test {
+        name: "host_flock_release_only_by_close",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_flock_release_only_by_close,
+    },
+    Test {
+        name: "host_proc_readers",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_proc_readers,
+    },
+    Test {
+        name: "host_proc_readers_see_threads_after_main_exits",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_proc_readers_see_threads_after_main_exits,
+    },
+    Test {
+        name: "host_proc_readers_see_threads_with_own_fd_table",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_proc_readers_see_threads_with_own_fd_table,
+    },
+    Test {
+        name: "host_proc_maps_while_the_leader_exits_slowly",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_proc_maps_while_the_leader_exits_slowly,
+    },
+    Test {
+        name: "host_kernel_older_than_5_8_exits_2",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_kernel_older_than_5_8_exits_2,
     },
     Test {
         name: "oracle_large_tree",

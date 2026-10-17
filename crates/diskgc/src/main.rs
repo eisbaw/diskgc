@@ -6,7 +6,10 @@
 
 use std::process::ExitCode;
 
-/// Exit code for usage errors (docs/reference.md, Exit codes).
+use diskgc_linux::LinuxHost;
+
+/// Exit code for usage, config and provisioning errors, including a kernel
+/// older than the minimum (docs/reference.md, Exit codes).
 const EXIT_USAGE: u8 = 2;
 
 const USAGE: &str = "\
@@ -35,9 +38,26 @@ fn parse(args: &[String]) -> Invocation {
     }
 }
 
+/// Startup checks for every invocation that may touch the machine:
+/// `--version` and `--help` are exempt (they only print), and so must be
+/// `check`, which is machine-independent (docs/reference.md, check).
+fn startup() -> Result<(), String> {
+    let host = LinuxHost::new().map_err(|e| e.to_string())?;
+    diskgc_core::kernel::require_supported(&host)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match parse(&args) {
+    let invocation = parse(&args);
+    if !matches!(invocation, Invocation::Version | Invocation::Help)
+        && let Err(why) = startup()
+    {
+        eprintln!("diskgc: {why}");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    match invocation {
         Invocation::Version => {
             println!("diskgc {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS

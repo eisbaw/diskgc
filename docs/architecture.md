@@ -250,13 +250,23 @@ is accepted until measured otherwise.
   keeps a virtual clock and delivers signals as events, so deadlines, exit
   codes 75 / 124 / 130 / 143 and the duty cycle are model-testable.
 - **`ModelHost` checks how it is called**: an `openat2` without the required
-  `RESOLVE_*` flags, a lock released with `LOCK_UN`, or an `unlinkat`
-  without a preceding identity check fails the test.
+  `RESOLVE_*` flags, or an `unlinkat` without a preceding identity check
+  fails the test. Releasing or re-locking a held lock cannot be expressed:
+  the lock calls take the fd by value and return a `Locked` handle that
+  lends the fd out by reference only and closes it when dropped, and there
+  is no unlock operation.
+- **statx fields are optional in the port**: a field the kernel did not
+  mark as answered (`stx_mask`, `stx_attributes_mask`) is absent, so the
+  core cannot use it by accident and `ModelHost` can model a filesystem
+  that does not answer.
 
 ## Deployment
 
 - One statically linked Rust binary, Linux 5.8 or newer, any distribution.
-  Nix, Docker and Cargo are optional.
+  Nix, Docker and Cargo are optional. It needs the `/proc` of its own pid
+  namespace and `pidfd_open` (not blocked by seccomp), and refuses to start
+  otherwise ([safety.md](safety.md#in-use), unreadable or vanishing
+  processes).
 - **Generic Linux:** the binary, a systemd template unit for `watch` (user
   or system), the tmpfiles drop-in for the host lock file, and an example
   config. Distribution packages can follow.

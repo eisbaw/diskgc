@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:55'
+updated_date: '2026-10-17 01:02'
 labels:
   - wave-2
   - config
@@ -34,6 +34,14 @@ Why: the YAML schema is frozen once users deploy it. Implement config lookup (ex
 - [ ] #6 An invalid config exits 2 and deletes nothing, and check reports the same error
 - [ ] #7 check works outside a container (the sandbox gate only guards deletion)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Forward-carried from task-3: crates/diskgc/src/main.rs runs the minimum-kernel check (startup()) for every invocation except --version/--help. docs/safety.md (Path traversal, Minimum kernel) also exempts 'check', which is machine-independent. Add 'check' (and 'profiles', if it stays machine-independent) to the exemption when they land, with a test.
+
+Forward-carried from task-3 review (mped): main.rs currently applies the kernel >= 5.8 check to every command; docs/safety.md says check is machine-independent, so check must be exempt from the kernel check.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
