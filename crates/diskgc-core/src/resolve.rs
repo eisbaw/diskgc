@@ -224,7 +224,7 @@ fn unsafe_path(path: &Path, why: Unsafe) -> ResolveError {
 
 /// Maps an `openat2` failure on `path` to its skip reason.
 fn open_error(path: &Path, e: HostError) -> ResolveError {
-    match e.errno {
+    match e.kernel_errno() {
         Some(Errno::ELOOP) => unsafe_path(path, Unsafe::Symlink),
         Some(Errno::EXDEV) => unsafe_path(path, Unsafe::CrossesMount),
         Some(errno @ (Errno::ENOENT | Errno::ENOTDIR)) => ResolveError::Missing {

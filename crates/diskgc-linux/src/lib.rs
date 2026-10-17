@@ -6,6 +6,8 @@
 //! - [`mountinfo`], [`procfs`]: parsers for the `/proc` files it reads.
 //! - [`sandbox`]: the test-sandbox markers shared by the e2e interlock and
 //!   the pre-release sandbox gate.
+//! - `source_scan` (tests only): source scans of the production crates that
+//!   keep deleting operations behind the gate and `/proc` behind its fd.
 
 pub mod host;
 pub mod mountinfo;
@@ -13,5 +15,8 @@ pub mod procfs;
 pub mod sandbox;
 mod stat;
 mod tasks;
+
+#[cfg(test)]
+mod source_scan;
 
 pub use host::{LinuxFd, LinuxHost};

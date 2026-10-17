@@ -4,11 +4,12 @@
 //! `LinuxHost` with the core's traversal, driven as `tester` (uid 1000, no
 //! capabilities) by the host probes ([`crate::host_probe`]), and the
 //! `diskgc` binary for the kernel check. Every traced run is judged by the
-//! deletion oracle; none may delete anything.
+//! deletion oracle; none may delete anything except the unlink test's
+//! eligible entries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -695,6 +696,69 @@ pub fn host_proc_maps_while_the_leader_exits_slowly(ctx: &Ctx) -> TestResult {
         count("with") > 0,
         "proc_maps never found the mapping: {}",
         watch.stdout
+    );
+    verdict.assert_clean()
+}
+
+/// `LinuxHost::unlinkat` inside the sandbox (task-50): the pre-release
+/// sandbox gate lets it through, a file and an empty directory are really
+/// deleted, a non-empty directory is a kernel refusal (`ENOTEMPTY`, not the
+/// gate), and nothing else changes. Two oracles judge the same run: one with
+/// exactly the two entries eligible must be clean, one with nothing eligible
+/// must flag exactly those two, in the snapshot and in the strace record.
+pub fn host_unlinkat_deletes_inside_the_sandbox(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("del", 0o755, TESTER)?;
+    let file = s.write_file("del/file", b"file", 0o644, TESTER)?;
+    let empty_dir = s.mkdir("del/empty-dir", 0o755, TESTER)?;
+    s.mkdir("del/full-dir", 0o755, TESTER)?;
+    let inner = s.write_file("del/full-dir/inner", b"inner", 0o644, TESTER)?;
+    let sibling = s.write_file("del/sibling", b"sibling", 0o644, TESTER)?;
+    let deleted: BTreeSet<PathBuf> = [file.clone(), empty_dir.clone()].into();
+
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(file.clone())
+            .eligible(empty_dir.clone()),
+    )?;
+    let strict = Oracle::arm(Fixture::new())?;
+    let run = ctx.probe_as_tester(&[
+        "host-unlink",
+        "/tmp/del",
+        "file:file",
+        "empty-dir:dir",
+        "full-dir:dir",
+    ])?;
+    let verdict = oracle.judge(&run)?;
+    let strict_verdict = strict.judge(&run)?;
+
+    run.expect_code(0)?;
+    info!("host-unlink:\n{}", run.stdout);
+    let lines = indexed(&run.stdout)?;
+    for (i, want) in [(0, "ok"), (1, "ok"), (2, "err ENOTEMPTY ")] {
+        let got = lines.get(&i).map(String::as_str).unwrap_or("");
+        ensure!(
+            got.starts_with(want),
+            "entry {i}: expected {want:?}, got {got:?}"
+        );
+    }
+    for gone in &deleted {
+        ensure!(
+            std::fs::symlink_metadata(gone).is_err(),
+            "{} still exists",
+            gone.display()
+        );
+    }
+    for kept in [&inner, &sibling] {
+        ensure!(kept.exists(), "{} was deleted", kept.display());
+    }
+    ensure!(
+        strict_verdict.snapshot_paths() == deleted && strict_verdict.traced_paths() == deleted,
+        "the oracle with nothing eligible should flag exactly {deleted:?}: snapshot {:?}, \
+         traced {:?}\n{}",
+        strict_verdict.snapshot_paths(),
+        strict_verdict.traced_paths(),
+        strict_verdict.report()
     );
     verdict.assert_clean()
 }

@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 08:41'
+updated_date: '2026-10-17 10:59'
 labels:
   - wave-1
   - hardening
@@ -92,6 +92,24 @@ ModelHost follow-ups from task-14's commit review (mped), deferred, do not block
 (4) A test that the yaml block of docs/testing.md (Model tests) equals crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml (docs/ is not a flake build input today; the test would need it or run outside the sandbox).
 (5) NodeSpec doc caveat: file attributes must never take mapping values, because a misspelled attribute with a mapping value silently becomes a directory entry (a mapping of mappings is a directory).
 (6) Event paths are only syntax-checked at load (whether they exist depends on the run); a wrong path surfaces as a 'host model error' panic when the event fires.
+
+From task-14's final review (mped):
+(7) Kernel threads: LinuxHost answers PF_KTHREAD processes with an empty Ok for fds, maps, environ and exe; the model has no kernel threads. Add a kernel_thread: true flag and note the exception in testing.md Limits.
+(8) Generated processes often lack stdio fds (subsequence(files, 0..=2)), so about a third read as Failed; with the Denied/Failed share about half of generated processes are uninspectable. Give them fds 0-2 on a /dev/null in the tree.
+(9) The replace event's description (spec.rs, schema) says the old object is 'detached, as if renamed away'; it is unlinked (nlink 0) and a held old directory keeps statable entries, a state Linux cannot have. Fix the wording, or make a directory replace follow remove's rm -r.
+(10) Pin serde-saphyr exactly (2.0.0 and granit-parser 2.0.0 were published 2026-10-13); revisit before task-25.
+
+From task-50: procfs_is_reached_only_through_the_held_fd (diskgc-linux host.rs) lists its source files by hand, so a new module escapes it. deleting_syscalls_only_behind_the_gate lists them from the src directory instead; switch the /proc scan to that, and consider sharing code_only (it blanks out comments and string literals) so a /proc path in a comment cannot cause a false positive and one in a string still counts.
+
+Correction to the note above: code_only blanks string literals, so the /proc string-literal check cannot use it as is. Only the PROC identifier check can.
+
+From task-50's review (deferred hardening):
+- H3: ModelHost should be able to inject a Cause::SandboxGate refusal on unlinkat (a model event or a host-model flag), so task-5 can test that a refusal is an error for the candidate and the run, not a skip or 'changed'.
+- H4: expose the cached gate status without a Permit (sandbox::status()), so ensure/watch without --dry-run fail fast at startup and 'diskgc check' can report 'sandbox gate: closed (reason)'. Noted on task-10.
+- permit() returns &'static str and drops the structured NotInSandbox. It could cache and return the structured reason (e.g. &'static NotInSandbox, with io::Error kept as its kind and message) so callers can match on which marker failed.
+- The flag test sandbox_gate_flag_is_enabled_nowhere scans .cargo/config(.toml) only at the repository root. A crates/*/.cargo/config.toml (or diskgc-e2e/.cargo/config.toml) could set features or rustflags unseen; scan those too.
+
+From task-50 round 3 (mped): consider replacing the hand lexer in crates/diskgc-linux/src/source_scan.rs with a syn visitor (a dev-dependency; syn is already in Cargo.lock) if it needs another fix. It has had two lexer bugs fixed so far (raw C strings, the '\'' char escape). Symlinks under src/ are already refused (fixed in task-50 rather than filed).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -28,8 +28,9 @@
 //! - **Deleting operations live in a trait of their own**, [`Delete`], so
 //!   code that holds only a [`Host`] (survey, tally, planner) cannot delete,
 //!   and the pre-release sandbox gate (docs/safety.md) guards exactly those
-//!   methods. `ModelHost` implements it; `LinuxHost` gets it with the
-//!   deletion engine (task-5), behind the gate (task-50).
+//!   methods. `LinuxHost` implements it behind the gate (a refusal is a
+//!   [`Cause::SandboxGate`] error); `ModelHost`, test-only and deleting
+//!   nothing real, implements it without one.
 //!
 //! The trait is tentative (PRD, Irreversibility map); the path-resolution and
 //! lock semantics it serves are not.
@@ -106,6 +107,23 @@ impl fmt::Display for Errno {
     }
 }
 
+/// Why a host operation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// The kernel refused it with this errno.
+    Errno(Errno),
+    /// It produced something diskgc cannot use (a malformed `/proc` file, an
+    /// overflowing value, a misuse of the port); [`HostError::detail`] says
+    /// what.
+    Invalid,
+    /// The pre-release sandbox gate refused a deleting operation outside a
+    /// diskgc test container (docs/safety.md, Pre-release sandbox gate);
+    /// [`HostError::detail`] names the marker that is missing or wrong. Never
+    /// a kernel answer, so it can never be mistaken for one (or retried as
+    /// one): nothing was attempted.
+    SandboxGate,
+}
+
 /// A failed host operation: which operation, on what, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostError {
@@ -113,9 +131,8 @@ pub struct HostError {
     pub op: &'static str,
     /// What it was applied to (usually a path), for the message.
     pub subject: String,
-    /// The errno, if the kernel returned one.
-    pub errno: Option<Errno>,
-    /// Further explanation (always set when `errno` is `None`).
+    pub cause: Cause,
+    /// Further explanation (always set unless `cause` is [`Cause::Errno`]).
     pub detail: String,
 }
 
@@ -125,7 +142,7 @@ impl HostError {
         Self {
             op,
             subject: subject.to_string(),
-            errno: Some(errno),
+            cause: Cause::Errno(errno),
             detail: String::new(),
         }
     }
@@ -140,24 +157,50 @@ impl HostError {
         Self {
             op,
             subject: subject.to_string(),
-            errno: None,
+            cause: Cause::Invalid,
             detail: detail.into(),
+        }
+    }
+
+    /// The pre-release sandbox gate refused `op` on `subject`; `why` says
+    /// which sandbox marker is missing or wrong.
+    pub fn sandbox_gate(
+        op: &'static str,
+        subject: impl fmt::Display,
+        why: impl fmt::Display,
+    ) -> Self {
+        Self {
+            op,
+            subject: subject.to_string(),
+            cause: Cause::SandboxGate,
+            detail: format!(
+                "refused by the pre-release sandbox gate (docs/safety.md): {why}; until v1, \
+                 diskgc deletes only inside a diskgc test container"
+            ),
+        }
+    }
+
+    /// The errno, if the kernel returned one.
+    pub fn kernel_errno(&self) -> Option<Errno> {
+        match self.cause {
+            Cause::Errno(errno) => Some(errno),
+            Cause::Invalid | Cause::SandboxGate => None,
         }
     }
 
     /// Whether the kernel returned exactly `errno`.
     pub fn is(&self, errno: Errno) -> bool {
-        self.errno == Some(errno)
+        self.cause == Cause::Errno(errno)
     }
 }
 
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}: ", self.op, self.subject)?;
-        match (self.errno, self.detail.is_empty()) {
-            (Some(errno), true) => write!(f, "{errno}"),
-            (Some(errno), false) => write!(f, "{errno}: {}", self.detail),
-            (None, _) => f.write_str(&self.detail),
+        match (self.cause, self.detail.is_empty()) {
+            (Cause::Errno(errno), true) => write!(f, "{errno}"),
+            (Cause::Errno(errno), false) => write!(f, "{errno}: {}", self.detail),
+            (Cause::Invalid | Cause::SandboxGate, _) => f.write_str(&self.detail),
         }
     }
 }
@@ -530,7 +573,7 @@ impl ProcError {
     /// it proves nothing (a lookup can race an exec, `hidepid` hides live
     /// processes), so the readers handle it before it gets this far.
     pub fn from_host(e: HostError) -> Self {
-        match e.errno {
+        match e.kernel_errno() {
             Some(Errno::EACCES | Errno::EPERM) => Self::Denied(e),
             _ => Self::Failed(e),
         }
@@ -628,12 +671,26 @@ pub enum Unlink {
     Dir,
 }
 
+/// Whether `name` is a single path component: not empty, no `/`, not `.`
+/// or `..`. Only such a name can be unlinked safely: `unlinkat` follows
+/// symlinks in every earlier component of a longer path.
+pub fn is_single_name(name: &OsStr) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(n)), None) if n == name
+    )
+}
+
 /// The deleting operations of the port (see the module docs: they are kept
 /// apart from [`Host`] so that only code given a `Delete` can delete).
+/// Outside a diskgc test container, `LinuxHost` refuses every one of them
+/// with a [`Cause::SandboxGate`] error until v1 (docs/safety.md,
+/// Pre-release sandbox gate).
 pub trait Delete: Host {
     /// `unlinkat(dir, name, flags)`: removes the entry `name` of the open
-    /// directory `dir`. `name` is a single component (no `/`, not `.` or
-    /// `..`). Linux has no unlink-by-inode, so callers check the entry's
+    /// directory `dir`. `name` is a single component ([`is_single_name`]:
+    /// no `/`, not `.` or `..`). Linux has no unlink-by-inode, so callers check the entry's
     /// identity with [`Host::statx`]`(Base::Dir(dir), name)` right before,
     /// as the previous port call (docs/safety.md, Deletion); `ModelHost`
     /// fails a test that does not.
@@ -672,6 +729,35 @@ mod tests {
             ProcError::from_host(e(Errno::EINVAL)),
             ProcError::Failed(_)
         ));
+    }
+
+    #[test]
+    fn single_names_exclude_paths_and_dot_entries() {
+        for ok in ["f", "a b", ".hidden", "..x", "x.."] {
+            assert!(is_single_name(OsStr::new(ok)), "{ok:?}");
+        }
+        // "a/" and "./a" normalise to one component that differs from the
+        // name, so they are refused too.
+        for bad in ["", ".", "..", "a/b", "/a", "a/", "./a", "/"] {
+            assert!(!is_single_name(OsStr::new(bad)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_gate_refusal_is_not_a_kernel_answer() {
+        let gate = HostError::sandbox_gate("unlinkat", "/tmp/x", "marker missing");
+        assert_eq!(gate.cause, Cause::SandboxGate);
+        assert_eq!(gate.kernel_errno(), None);
+        assert!(!gate.is(Errno::EPERM) && !gate.is(Errno::EACCES));
+        assert_ne!(
+            gate.cause,
+            HostError::invalid("unlinkat", "/tmp/x", "x").cause
+        );
+        assert_eq!(
+            gate.to_string(),
+            "unlinkat /tmp/x: refused by the pre-release sandbox gate (docs/safety.md): marker \
+             missing; until v1, diskgc deletes only inside a diskgc test container"
+        );
     }
 
     #[test]

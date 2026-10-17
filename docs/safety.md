@@ -549,6 +549,72 @@ build flag set in one place, by the release task), so it cannot be dropped
 by accident during development, and developers and AI agents cannot
 delete real data on their own machines with a work-in-progress build.
 
+How it holds:
+
+- **Where:** `LinuxHost`'s `Delete` methods (`unlinkat` so far) ask the
+  gate before anything else; a refusal is a host error of its own kind
+  (`Cause::SandboxGate`: no errno, the detail names the marker that is
+  missing or wrong) and nothing is attempted. `ModelHost` has no gate: it
+  deletes nothing real and is test-only.
+- **Structure:** the one deleting syscall wrapper in `diskgc-linux` takes a
+  permit that only the gate can make. A source-scanning test
+  (`diskgc-linux/src/source_scan.rs`) reads every production crate (every
+  crate in `crates/` except the test-only `diskgc-model` and
+  `diskgc-modelgen`, which may never be production dependencies):
+  - outside an allowlisted wrapper, none may delete or rename a name, open
+    for writing or truncating (also `File::create`, `File::create_new`,
+    `File::options`, `OpenOptions`, `fs::write`, `fs::copy`, `set_len`,
+    flags built from numbers), punch holes, start a child process
+    (`process::Command`, `fork`, `exec*`), change namespace or root, use
+    `libc`, call `syscall`, or `include!` code. Each wrapper is marked
+    gated (it must take the permit) or ungated with its reason; adding one
+    is a review point;
+  - the core and the CLI may not reach the OS at all (`std::fs`,
+    `std::os::unix::fs`, `rustix`, `libc`; of `std::process` only
+    `ExitCode`): everything goes through the `Host` port;
+  - no import renames, glob imports or `#[path]` modules, so names cannot
+    be hidden from the scan; no build script and no target outside `src/`;
+    no symlinks under `src/`;
+  - the dependencies and features of each production crate are a reviewed
+    list in the test (editing it is a review point), and nothing overrides
+    a dependency's source (`[patch]`, `[replace]`).
+
+  It walks each `src/` tree, skips only test modules (any other
+  `#[cfg(test)]` fails it), and refuses source it cannot read with
+  confidence (block comments, raw strings). `diskgc-e2e` is not scanned: it
+  is test infrastructure outside the product build that deletes only
+  inside test containers, behind its own interlock
+  ([testing.md](testing.md#safety-interlock-for-destructive-tests)).
+  Child processes are of two kinds ([architecture.md](architecture.md#the-host-port)):
+  read-only queries, ungated, and deleting runs (prune, GC, every command
+  action), gated; each has one allowlisted wrapper.
+- **Once per process:** the gate decides at the first deleting call and
+  keeps the answer, a refusal included; the markers do not change while
+  diskgc runs. This assumes diskgc never changes its mount namespace or
+  root (`setns`, `unshare`, `chroot`, `pivot_root`); the scan forbids those
+  calls, so adding one fails it.
+- **The flag** is the cargo feature `release-without-sandbox-gate` of
+  `diskgc-linux`. A test fails if it is a default feature, or if any Cargo
+  manifest, `flake.nix` or the justfile names it or uses `--all-features`;
+  the release task changes that test when it sets the flag.
+- **Limits:** the gate is an accident guard, not a security boundary.
+  - A user who can create both markers (root on the host) defeats it.
+  - It authenticates the image, not isolation: the marked test image run
+    with a writable bind mount of host data (by hand, e.g.
+    `podman run -v ~/src:/src ...`, or by a harness change) passes the gate
+    and can delete host data through that mount. The runner mounts only the
+    binaries under test, read-only.
+  - It cannot see a feature enabled from outside the repository (a
+    `cargo --features` typed by hand).
+  - The scan is a tripwire against ordinary mistakes, not a proof. It does
+    not see: a deleting or overwriting function of an allowlisted
+    dependency under a name it does not list (rustix has many); flags or
+    syscalls reached in other numeric ways (`from_raw`, a transmute);
+    deliberate obfuscation (a macro that builds a name, an `unsafe` cast);
+    code shapes the text scan does not model.
+  - The shipped binary contains no deleting code yet, so no test inspects
+    the binary itself; the configuration is what is checked.
+
 ## Privileges
 
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;

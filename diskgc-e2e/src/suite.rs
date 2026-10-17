@@ -202,6 +202,12 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_kernel_older_than_5_8_exits_2,
     },
     Test {
+        name: "host_unlinkat_deletes_inside_the_sandbox",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_unlinkat_deletes_inside_the_sandbox,
+    },
+    Test {
         name: "oracle_large_tree",
         tier: Tier::Full,
         expect: Expect::Pass,

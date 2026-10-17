@@ -1,10 +1,10 @@
 ---
 id: TASK-14
 title: 'ModelHost: YAML host model, virtual clock, events on the call trace'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 08:42'
+updated_date: '2026-10-17 08:57'
 labels:
   - wave-1
   - testing
@@ -53,9 +53,11 @@ Review round 1 (mped NO-GO, one blocker) fixed:
 - An empty fd table, maps or environment, or no exe, of a readable process is ProcError::Failed, as on LinuxHost. Test behaviour.rs an_empty_proc_answer_is_failed_as_linuxhost_reports_it (failed on the old code; bite: never empty -> fails). Generated processes run and map /usr/bin/tool with PATH set; the sketch's pid 4242 maps its exe and has an environment.
 - Bytes schema description fixed and schema regenerated; testing.md Limits completed; architecture.md names the statx-from-root check.
 - Deferred items filed on task-61; mped's checked_unlink idea on task-5; distinct gate error on task-50.
+
+Committed as e5efcf4 (tree 4a54478) after qa-test-runner GO and mped-architect GO (one NO-GO round fixed: stale identity check, rm -r, empty /proc answers).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

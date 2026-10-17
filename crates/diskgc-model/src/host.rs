@@ -36,7 +36,7 @@ use std::time::Duration;
 use diskgc_core::host::{
     Access, Base, Delete, DevIno, Environ, Errno, Host, HostError, LinkTarget, LockMode, Locked,
     MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat,
-    TryLock, Unlink, WaitLock,
+    TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -142,15 +142,6 @@ fn tidy(path: &Path) -> PathBuf {
     path.components()
         .filter(|c| *c != Component::CurDir)
         .collect()
-}
-
-/// Whether `name` is one normal path component.
-fn single_name(name: &OsStr) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(Component::Normal(n)), None) if n == name
-    )
 }
 
 impl ModelHost {
@@ -668,7 +659,7 @@ impl Host for ModelHost {
         };
         let ofd = self.fd_ofd(fd);
         let name = path.as_os_str();
-        if !name.is_empty() && !single_name(name) {
+        if !name.is_empty() && !is_single_name(name) {
             violation(format!(
                 "statx of {} below a directory: only an empty path or a single name is safe \
                  (earlier components would follow symlinks)",
@@ -871,7 +862,7 @@ impl Host for ModelHost {
 impl Delete for ModelHost {
     fn unlinkat(&self, dir: &ModelFd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
         let ofd = self.fd_ofd(dir);
-        if !single_name(name) {
+        if !is_single_name(name) {
             violation(format!(
                 "unlinkat of {name:?}: only a single name can be unlinked safely"
             ));

@@ -241,7 +241,7 @@ fn unlinkat_answers_like_the_kernel() {
         host.statx(Base::Dir(fd), Path::new(name)).expect("stat");
         host.unlinkat(fd, OsStr::new(name), what)
             .expect_err("refused")
-            .errno
+            .kernel_errno()
     };
     assert_eq!(errno(&a.fd, "sub", Unlink::NonDir), Some(Errno::EISDIR));
     assert_eq!(errno(&a.fd, "f", Unlink::Dir), Some(Errno::ENOTDIR));
@@ -316,7 +316,7 @@ fn flock_on_an_o_path_fd_is_ebadf() {
     let err = host
         .flock_try(a.fd, LockMode::Exclusive)
         .expect_err("O_PATH fds cannot be locked");
-    assert_eq!(err.errno, Some(Errno::EBADF));
+    assert_eq!(err.kernel_errno(), Some(Errno::EBADF));
 }
 
 /// Pid 7 holds an exclusive lock on /tmp/a/f; `events` are appended.

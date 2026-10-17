@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 08:25'
+updated_date: '2026-10-17 09:35'
 labels:
   - wave-2
   - irreversible
@@ -38,6 +38,10 @@ Why: split from the executor task; deadlines and signals decide what happens mid
 Forward-carried from task-3: LinuxHost::flock_wait polls LOCK_NB with sleeps (10-100 ms) and handles no signals. The SIGTERM-interruptible host-lock wait (reference.md, watch) needs a signal flag checked between polls, or a port-level cancellation. Host::now() is CLOCK_BOOTTIME.
 
 From task-14: ModelHost has a virtual clock (now starts at UPTIME_AT_START; sleep, flock_wait and advance events move it; timed events at {elapsed: d}). Signals are not modelled because the port has no signal operation yet; when this task adds one, add a deliver-signal event action in diskgc-model load.rs Action.
+
+From task-50 (sandbox gate): starting a prune, GC or command child is a deleting operation (docs/safety.md, Pre-release sandbox gate). Put it on diskgc_core::host::Delete, not Host. In LinuxHost (crates/diskgc-linux/src/host.rs), take a Permit from gate(op, subject) first and pass it to a new *_permitted wrapper that is the only place the child is started; the source scan deleting_syscalls_only_behind_the_gate forbids Command/spawn/fork/exec anywhere else in diskgc-linux. Extend its allowlist by that one wrapper, do not weaken it. A refusal is HostError with cause Cause::SandboxGate (kernel_errno() None): report it as an error, never as a skip or a retry. ModelHost implements the method without a gate.
+
+CORRECTION from task-50's review (supersedes the earlier task-50 note): process-group handling, the SIGTERM/SIGKILL sequence and child waits serve two run operations (docs/architecture.md, The Host port): a query run on Host (ungated, argv from constants) and a deleting run on Delete (gated; prune, GC, every command action). Starting either happens only in its one allowlisted LinuxHost wrapper (scan: crates/diskgc-linux/src/source_scan.rs). Signals and waits on an already started child are not gated.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

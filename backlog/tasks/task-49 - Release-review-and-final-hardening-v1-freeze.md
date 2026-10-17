@@ -4,7 +4,7 @@ title: 'Release review and final hardening: v1 freeze'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:55'
+updated_date: '2026-10-17 09:12'
 labels:
   - wave-5
   - review
@@ -33,6 +33,12 @@ Why: v1 freezes the CLI, JSON and YAML contracts for users. Final deep review (m
 - [ ] #5 The provisional schema parts (command actions, Docker, Nix) are frozen or changed after review
 - [ ] #6 Built-in profile names shipped in wave 4 are reviewed and frozen (their meaning never changes under a name)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-50: the v1 release package, and only it, enables the cargo feature release-without-sandbox-gate of diskgc-linux, set in one place (e.g. the diskgc package's cargoExtraArgs in flake.nix). Update the test sandbox_gate_flag_is_enabled_nowhere (crates/diskgc-linux/src/sandbox.rs) to allow exactly that line. The e2e binaries, the test driver and every check must stay gated. Remove the 'Until v1 is released' bullet from PRD Safety boundaries and update docs/safety.md, Pre-release sandbox gate. Today the shipped binary links no deleting code, so nothing checks the binary itself. Once it does, consider a flake check that the non-release package contains the marker path /.diskgc-test-sandbox (sandbox::check linked in) and the release package does not.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

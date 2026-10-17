@@ -1,9 +1,9 @@
 //! `LinuxHost`: the [`Host`] port on the running kernel.
 //!
-//! `openat2`, `statx`, `fstatvfs`, `flock`, `uname` and `clock_gettime` go
-//! through rustix's `linux_raw` backend, i.e. raw syscalls without a libc
-//! wrapper, so the static musl build behaves exactly like the gnu build
-//! (and needs no libc support for `openat2` or `statx`).
+//! `openat2`, `statx`, `fstatvfs`, `flock`, `unlinkat`, `uname` and
+//! `clock_gettime` go through rustix's `linux_raw` backend, i.e. raw
+//! syscalls without a libc wrapper, so the static musl build behaves exactly
+//! like the gnu build (and needs no libc support for `openat2` or `statx`).
 //!
 //! An fd is an [`OwnedFd`] and nothing else: dropping a [`LinuxFd`] closes
 //! it, which is the only way a lock taken on it is ever released. No code
@@ -16,9 +16,13 @@
 //! ([`ProcRoot`]), so all of them reach the mount that was checked, for the
 //! life of the host, whatever is mounted on `/proc` later. A source-scanning
 //! test keeps any other `/proc` path out of this crate.
+//!
+//! The deleting operations ([`Delete`]) run the pre-release sandbox gate
+//! (`sandbox::permit`) before anything else; see `impl Delete for
+//! LinuxHost`.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
@@ -26,9 +30,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, Environ, Errno, Host, HostError, LinkTarget, LockMode, Locked, MapEntry,
-    MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock,
-    WaitLock,
+    Access, Base, Delete, Environ, Errno, Host, HostError, LinkTarget, LockMode, Locked, MapEntry,
+    MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock, Unlink,
+    WaitLock, is_single_name,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
@@ -38,6 +42,7 @@ use crate::procfs::{
     StatusFields, list_in_one_call, parse_environ, parse_maps, parse_status, read_confirmed,
     read_in_one_call, read_two_passes,
 };
+use crate::sandbox::{self, Permit};
 use crate::stat::{STATX_MASK, stat_from_statx};
 use crate::tasks::{
     Listed, Listing, PidfdPoll, Polled, Process, StatusRead, TaskStat, Tasks, Want, collect,
@@ -145,6 +150,9 @@ impl ProcRoot<'_> {
         format!("{PROC}/{rel}")
     }
 
+    /// Opens `rel` with `flags`, which are only ever read-only flags:
+    /// production code names no write, create or truncate flag outside the
+    /// allowlisted wrappers (`source_scan::GATED`, `GATED_ALLOWED`).
     fn open(self, rel: &str, flags: OFlags) -> Result<OwnedFd, HostError> {
         rustix::fs::openat(self.0, rel, flags | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| HostError::errno("open", Self::shown(rel), errno_of(e)))
@@ -848,6 +856,53 @@ impl Host for LinuxHost {
     }
 }
 
+/// Every method runs [`gate`] first and hands its [`Permit`] to the one
+/// deleting syscall wrapper, [`unlinkat_permitted`], which cannot be called
+/// without one. A source scan of every production crate
+/// (`source_scan::tests::deleting_syscalls_only_behind_the_gate`) fails if a
+/// deleting, content-destroying, child-starting or namespace-changing call
+/// appears outside the allowlisted wrappers, so a future deleting method
+/// cannot skip the gate.
+impl Delete for LinuxHost {
+    fn unlinkat(&self, dir: &LinuxFd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
+        let subject = shown(&Base::Dir(dir), Path::new(name));
+        let permit = gate("unlinkat", &subject)?;
+        if !is_single_name(name) {
+            return Err(HostError::invalid(
+                "unlinkat",
+                &subject,
+                "only a single name can be unlinked (not empty, no '/', not '.' or '..')",
+            ));
+        }
+        let flags = match what {
+            Unlink::NonDir => AtFlags::empty(),
+            Unlink::Dir => AtFlags::REMOVEDIR,
+        };
+        unlinkat_permitted(&permit, dir, name, flags)
+            .map_err(|e| HostError::errno("unlinkat", &subject, errno_of(e)))
+    }
+}
+
+/// The pre-release sandbox gate for deleting operation `op` on `subject`
+/// (docs/safety.md, Pre-release sandbox gate): a [`Permit`] inside a diskgc
+/// test container, otherwise a [`diskgc_core::host::Cause::SandboxGate`]
+/// error naming the marker that is missing or wrong. Nothing is attempted
+/// after a refusal.
+fn gate(op: &'static str, subject: &str) -> Result<Permit, HostError> {
+    sandbox::permit().map_err(|why| HostError::sandbox_gate(op, subject, why))
+}
+
+/// `unlinkat(dir, name, flags)`: the only deleting syscall in this crate.
+/// The [`Permit`] proves the gate allowed it.
+fn unlinkat_permitted(
+    _gate: &Permit,
+    dir: &LinuxFd,
+    name: &OsStr,
+    flags: AtFlags,
+) -> rustix::io::Result<()> {
+    rustix::fs::unlinkat(dir, name, flags)
+}
+
 #[cfg(test)]
 mod tests {
     //! Checks against the machine the tests run on (dev shell or Nix build
@@ -856,6 +911,7 @@ mod tests {
     //! and a main thread that exits need the container tests (diskgc-e2e).
 
     use super::*;
+    use diskgc_core::host::Cause;
     use diskgc_core::resolve::{Want, resolve};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::MetadataExt;
@@ -1682,42 +1738,32 @@ mod tests {
 
     /// The grep check: outside its tests, the crate never names `/proc` as a
     /// path except where [`LinuxHost::new`] opens it and in messages
-    /// ([`ProcRoot::shown`]), so nothing bypasses the held fd.
+    /// ([`ProcRoot::shown`]), so nothing bypasses the held fd. Every source
+    /// file of the crate is scanned, test modules excluded by module
+    /// ([`crate::source_scan`]).
     #[test]
     fn procfs_is_reached_only_through_the_held_fd() {
-        let sources = [
-            ("host.rs", include_str!("host.rs")),
-            ("tasks.rs", include_str!("tasks.rs")),
-            ("procfs.rs", include_str!("procfs.rs")),
-            ("mountinfo.rs", include_str!("mountinfo.rs")),
-            ("stat.rs", include_str!("stat.rs")),
-            ("sandbox.rs", include_str!("sandbox.rs")),
-            ("lib.rs", include_str!("lib.rs")),
-        ];
-        let literal = ["\"", "/proc"].concat();
+        use crate::source_scan::{repo_root, rust_files, scan_crate};
+        let files = rust_files(&repo_root(), Path::new("crates/diskgc-linux/src"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let scanned = scan_crate(&files).unwrap_or_else(|e| panic!("{e}"));
+        assert!(scanned.iter().any(|s| s.path.ends_with("host.rs")));
+        let literal: Vec<char> = ["\"", "/proc"].concat().chars().collect();
         let mut found = Vec::new();
-        for (name, source) in sources {
-            let code = source.split("#[cfg(test)]").next().expect("code");
-            let mut function = "";
-            for (n, line) in code.lines().enumerate() {
-                let line = line.trim_start();
-                if line.starts_with("//") {
-                    continue;
-                }
-                if let Some(rest) = line.split("fn ").nth(1)
-                    && (line.starts_with("fn ") || line.contains(" fn "))
+        for file in &scanned {
+            let view = &file.source.with_strings;
+            for pos in 0..view.len().saturating_sub(literal.len()) {
+                if view[pos..pos + literal.len()] == literal[..]
+                    && !file.is_excluded(pos)
+                    && !file.line_text(pos).starts_with("const PROC: &str =")
                 {
-                    function = rest.split(['(', '<']).next().unwrap_or("");
+                    found.push(file.at(pos));
                 }
-                let named_constant = line.starts_with("const PROC: &str =");
-                if line.contains(&literal) && !named_constant {
-                    found.push(format!("{name}:{}: {line}", n + 1));
-                }
-                let uses_proc = line
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .any(|word| word == "PROC");
-                if uses_proc && !named_constant && !matches!(function, "new" | "shown") {
-                    found.push(format!("{name}:{} (in fn {function}): {line}", n + 1));
+            }
+            for t in file.tokens.iter().filter(|t| t.word == "PROC") {
+                let defined = t.previous.as_deref() == Some("const");
+                if !defined && !matches!(file.enclosing_fn(t.pos), Some("new" | "shown")) {
+                    found.push(file.at(t.pos));
                 }
             }
         }
@@ -1726,6 +1772,66 @@ mod tests {
             "procfs reached by path:\n{}",
             found.join("\n")
         );
+    }
+
+    /// AC #1 and #2 of task-50, on the developer's machine (never a test
+    /// container): unlinking a file and an empty directory this test made
+    /// itself is refused by the sandbox gate, with an error that is not a
+    /// kernel answer and names the missing marker, and both stay; the
+    /// read-only primitives keep working in the same process afterwards.
+    #[test]
+    fn deleting_outside_a_container_is_refused_by_the_gate() {
+        let why = sandbox::check()
+            .expect_err("this test must run outside a diskgc test container")
+            .to_string();
+        let host = LinuxHost::new().expect("host setup");
+        let tmp = TempDir::new("sandbox-gate");
+        let file = tmp.0.join("file");
+        let empty_dir = tmp.0.join("empty-dir");
+        std::fs::write(&file, b"keep me").expect("write test file");
+        std::fs::create_dir(&empty_dir).expect("create test dir");
+        let dir = open_dir(&host, &tmp.0);
+
+        for (name, what) in [("file", Unlink::NonDir), ("empty-dir", Unlink::Dir)] {
+            let err = host
+                .unlinkat(&dir, OsStr::new(name), what)
+                .expect_err("the sandbox gate must refuse outside a test container");
+            assert_eq!(err.cause, Cause::SandboxGate, "{err}");
+            assert_eq!(err.kernel_errno(), None, "{err}");
+            assert!(
+                err.detail.contains("pre-release sandbox gate") && err.detail.contains(&why),
+                "the refusal must name the gate and the marker ({why}): {err}"
+            );
+        }
+        // The gate comes first: even a name the primitive would reject is
+        // refused by the gate.
+        let err = host
+            .unlinkat(&dir, OsStr::new("../x"), Unlink::NonDir)
+            .expect_err("refused");
+        assert_eq!(err.cause, Cause::SandboxGate, "{err}");
+
+        assert_eq!(std::fs::read(&file).expect("file still there"), b"keep me");
+        assert!(empty_dir.is_dir(), "the empty directory was deleted");
+
+        // AC #2: the non-deleting primitives work here, after the refusal.
+        let stat = host
+            .statx(Base::Dir(&dir), Path::new("file"))
+            .expect("statx after a refusal");
+        assert_eq!(stat.size, Some(7));
+        let sub = host
+            .openat2(
+                Base::Dir(&dir),
+                Path::new("empty-dir"),
+                OpenHow {
+                    access: Access::Read,
+                    directory: true,
+                    nofollow: true,
+                    resolve: Default::default(),
+                },
+            )
+            .expect("openat2 after a refusal");
+        host.statvfs(&sub).expect("statvfs after a refusal");
+        host.mountinfo().expect("mountinfo after a refusal");
     }
 
     #[test]

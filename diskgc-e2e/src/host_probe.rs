@@ -9,14 +9,19 @@
 //! - `I err <reason> <tag> -- <message>`: `reason` is the skip reason
 //!   (`unsafe_path`, `unsupported_fs`, `missing`, `error`), `tag` names the
 //!   cause (see [`tag`]).
+//! - `host-unlink`: `I ok` or `I err <cause> -- <message>`, `cause` being
+//!   the errno name, `invalid` or `sandbox_gate` ([`cause_tag`]).
 
 use std::io::{BufRead, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use std::ffi::OsStr;
+
 use diskgc_core::host::{
-    Access, Host, LockMode, Pid, ProcError, ProcLink, Stat, TryLock, WaitLock,
+    Access, Base, Cause, Delete, Host, HostError, LockMode, Pid, ProcError, ProcLink, Stat,
+    TryLock, Unlink, WaitLock,
 };
 use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
 use diskgc_linux::{LinuxFd, LinuxHost};
@@ -35,8 +40,47 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-proc", [pid]) => proc_readers(&host, pid),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
+        ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
         _ => Err(format!("bad host probe arguments: {cmd} {args:?}")),
     }
+}
+
+/// A short, stable name for why a host call failed.
+pub fn cause_tag(e: &HostError) -> String {
+    match e.cause {
+        Cause::Errno(errno) => errno
+            .name()
+            .map_or_else(|| format!("errno{}", errno.0), str::to_owned),
+        Cause::Invalid => "invalid".to_owned(),
+        Cause::SandboxGate => "sandbox_gate".to_owned(),
+    }
+}
+
+/// `host-unlink DIR NAME:file|dir...`: resolves `DIR`, then for each entry
+/// checks its identity (`statx` of the name, as the deletion engine does
+/// right before every unlink) and unlinks it through `LinuxHost`, so through
+/// the pre-release sandbox gate.
+fn unlink(host: &LinuxHost, dir: &str, entries: &[String]) -> Result<(), String> {
+    let dir = resolve(host, Path::new(dir), Want::Directory).map_err(|e| e.to_string())?;
+    for (i, entry) in entries.iter().enumerate() {
+        let (name, what) = match entry.rsplit_once(':') {
+            Some((name, "file")) => (name, Unlink::NonDir),
+            Some((name, "dir")) => (name, Unlink::Dir),
+            _ => {
+                return Err(format!(
+                    "entry must be NAME:file or NAME:dir, not {entry:?}"
+                ));
+            }
+        };
+        let unlinked = host
+            .statx(Base::Dir(&dir.fd), Path::new(name))
+            .and_then(|_| host.unlinkat(&dir.fd, OsStr::new(name), what));
+        match unlinked {
+            Ok(()) => println!("{i} ok"),
+            Err(e) => println!("{i} err {} -- {e}", cause_tag(&e)),
+        }
+    }
+    Ok(())
 }
 
 fn want(text: &str) -> Result<Want, String> {

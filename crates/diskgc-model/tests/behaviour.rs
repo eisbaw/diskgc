@@ -373,11 +373,11 @@ fn remove_of_a_held_directory_empties_it_like_rm_r() {
     let err = host
         .statx(Base::Dir(&a.fd), Path::new("f"))
         .expect_err("f was removed");
-    assert_eq!(err.errno, Some(Errno::ENOENT));
+    assert_eq!(err.kernel_errno(), Some(Errno::ENOENT));
     let err = host
         .statx(Base::Dir(&sub.fd), Path::new("g"))
         .expect_err("g was removed");
-    assert_eq!(err.errno, Some(Errno::ENOENT));
+    assert_eq!(err.kernel_errno(), Some(Errno::ENOENT));
     assert_eq!(
         host.statx(Base::Dir(&a.fd), Path::new("")).unwrap().nlink,
         Some(0),

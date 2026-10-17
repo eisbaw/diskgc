@@ -4,7 +4,7 @@ title: 'Deletion engine: eligibility walk and identity-checked fd-relative delet
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 08:41'
+updated_date: '2026-10-17 10:59'
 labels:
   - wave-1
   - irreversible
@@ -47,6 +47,12 @@ Forward-carried from task-3: (1) Descend with diskgc_core::resolve::open_beneath
 Forward-carried from task-14: (1) The deleting port op exists: diskgc_core::host::Delete (a trait of its own over Host) with unlinkat(dir_fd, name, Unlink::NonDir|Dir). Take H: Delete only in the deletion engine. LinuxHost does not implement it yet: add it here, behind the task-50 gate. (2) ModelHost fails the test (panics, 'ModelHost call check failed') on an unlinkat unless the previous port call was a successful statx(Base::Dir(dir), name) of that name in that directory (any fd of it): the identity check must come right before each unlinkat, so a statx from the walk, or one followed by descending into the directory, does not count, on unlinkat/statx of more than one name, and on openat2 without the step-2/3 flags. (3) Model events for this task's ACs: replace: <path> (new inode at the name; the old one detached), remove, rename, mkdir, at {op: unlinkat, path, nth, when: before}. diskgc-model tests/behaviour.rs an_entry_replaced_between_its_identity_check_and_its_unlink_is_the_one_unlinked shows the accepted window on the trace (Call.object of the unlinkat is the replacement). (4) The port still has no read_dir; when you add it, ModelHost needs it too (entries of Kind::Dir in diskgc-model state.rs; mounts on entries are crossed by State::child). (5) Not modelled: permissions (mode-000 dirs: container test), mounts appearing mid-run (no mount event yet; add one to diskgc-model load.rs Action if AC #7 needs a model test).
 
 From mped's review of task-14: make one core helper, checked_unlink(host, dir, name, expected) -> Removed | Changed, the only caller of Delete::unlinkat (statx of the name right before, compare (dev, ino, owner) with the walk's record, then unlinkat), and enforce that with module visibility or a grep test. Also from task-14: the model's remove event is rm -r (every entry below is unlinked; a directory still held open stays, empty), which fits the 'concurrent rm -rf of a candidate' scenario.
+
+From task-14's final review (mped): the model's identity check requires that the PREVIOUS port call is the successful statx of the same entry. Any port call in between voids it, including now() (a deadline check). So order the per-entry loop as: deadline check, statx, compare, unlinkat. A future chmod for make_writable must also not fall between statx and unlinkat. Separately, task-5's note (2) runs two lists together ('does not count, on unlinkat/statx of more than one name, and on openat2 ...'); read it as two separate rules.
+
+From task-50: LinuxHost now implements Delete::unlinkat behind the sandbox gate. Outside a test container it returns HostError { cause: Cause::SandboxGate, .. } (kernel_errno() None) before any syscall, decided once per process. The engine must surface that as an error, not as 'changed' or a skip: every later delete in the process is refused too. HostError's errno field is now cause: Cause {Errno, Invalid, SandboxGate}; use kernel_errno() or is(errno). diskgc_core::host::is_single_name is the shared single-name rule (ModelHost and LinuxHost use it; LinuxHost returns Cause::Invalid for a bad name, after the gate). The diskgc-e2e probe host-unlink and the test host_unlinkat_deletes_inside_the_sandbox show LinuxHost deleting in the container under both oracles.
+
+From task-50 round 3 (mped): the source scan (crates/diskgc-linux/src/source_scan.rs) runs GATED on every production crate, so core's checked_unlink calling h.unlinkat is flagged, which is correct. Give it a GATED_ALLOWED entry, file crates/diskgc-core/src/..., function checked_unlink, gate Gate::Ungated("calls Delete::unlinkat, which LinuxHost gates"), with its exact match count. That entry is the "only caller of Delete::unlinkat" check mped asked for. Core may not name std::fs, rustix or libc at all (os_access rule); everything goes through the port.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

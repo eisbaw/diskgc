@@ -4,7 +4,7 @@ title: e2e test driver and Host wrapper for controlled pause and kill points
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 00:57'
+updated_date: '2026-10-17 09:36'
 labels:
   - wave-1
   - testing
@@ -42,4 +42,8 @@ Forward-carried from task-2: (1) Binaries reach containers through e2eUnderTest 
 Forward-carried from task-59: (1) Judging is mandatory. The spawn/pause/kill variant of run_as_tester must enter its run in ctx.ledger (under_test::Ledger), record Run::started before spawning, and the test must pass the finished Run to Oracle::judge_runs. A run killed at call k is judged like any other; its strace record may end in '= ?' (Outcome::Unknown, counted as possibly effective). An oracle armed after a run started refuses it. (2) strace runs with --seccomp-bpf (under_test::STRACE_OPTIONS), which needs -f; a 'strace: ...seccomp...' stderr line fails the run, so keep -f in any new invocation. (3) Bite tests can be registered with suite::Expect::FailWith(text): the test passes only if it fails with that text. (4) Traced paths that do not match the before snapshot are classified and logged (oracle::Unmatched). A driver that renames or reopens directories will show SymlinkPrefix, NonCanonical or DeletedDirectory lines; those are diagnostics, and the snapshot diff is the verdict.
 
 Forward-carried from task-3: diskgc-e2e now depends on diskgc-core directly as well as diskgc-linux. Keep diskgc-e2e/Cargo.lock in sync (cargo metadata --locked). A pausing or killing Host wrapper can be generic over H: Host and delegate to LinuxHost; every port call is a method, so call positions are countable. Probe pattern: diskgc-e2e/src/host_probe.rs runs LinuxHost as tester, prints indexed result lines, and host_suite.rs judges every run with the oracle.
+
+From task-50: the test driver and the Host wrapper must delete only through LinuxHost's Delete methods, so through the sandbox gate. The source scan deleting_syscalls_only_behind_the_gate covers diskgc-linux only, so a raw unlinkat in the driver would not be caught: do not add one. The wrapper forwards Delete calls and adds pause/kill points; it must not mint permits.
+
+Update from task-50's review: the scan (crates/diskgc-linux/src/source_scan.rs) now covers every production crate in crates/, but still not diskgc-e2e, where the test driver lives. A raw unlinkat in the driver would still not be caught; the driver must delete only through LinuxHost's Delete methods.
 <!-- SECTION:NOTES:END -->

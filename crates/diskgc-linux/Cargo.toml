@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Removes the pre-release sandbox gate (docs/safety.md): deleting primitives
+# then act outside diskgc test containers. Only the v1 release package may
+# enable it, in one place (the release task); a test
+# (sandbox_gate_flag_is_enabled_nowhere) fails if any manifest, the flake or
+# the justfile names it, or if it becomes a default feature.
+release-without-sandbox-gate = []
+
 [dependencies]
 diskgc-core.workspace = true
 rustix.workspace = true
