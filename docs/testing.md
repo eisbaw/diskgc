@@ -322,10 +322,11 @@ filesystem, processes and mounts from the developer's system.
 
 - **Cargo race tests**, each with real Cargo processes, against every
   supported Cargo version (at least the oldest supported stable and one
-  dated nightly), on fixture projects with no registry dependencies,
-  offline. Races are made deterministic (a helper holding `.cargo-lock`
-  makes Cargo take `.cargo-build-lock` and block; a `build.rs` waits on a
-  control file; a `runner` wrapper pauses between compile and run):
+  dated nightly; the pinned set is in Cargo toolchains under test), on
+  fixture projects with no registry dependencies, offline. Races are made
+  deterministic (a helper holding `.cargo-lock` makes Cargo take
+  `.cargo-build-lock` and block; a `build.rs` waits on a control file; a
+  `runner` wrapper pauses between compile and run):
   1. a build holding the lock: its target is skipped;
   2. a build that starts during deletion waits, then succeeds;
   3. one build blocked on the lock plus another started right after the
@@ -382,6 +383,88 @@ privileges, and is a large extra moving part.
 
 Container tests cannot run inside the Nix build sandbox, so they run from
 `just e2e`, not as `nix flake check` checks.
+
+## Cargo toolchains under test
+
+The race tests run against these toolchains, pinned from the locked
+rust-overlay input (flake.lock) and separate from the product toolchain
+(`rust-toolchain.toml`); `cargoUnderTest` in flake.nix is the single list:
+
+| Toolchain | Tier | Why |
+|---|---|---|
+| `1.90.0` | full | oldest supported stable, the version the protocol was first measured on (only `.cargo-lock`) |
+| `1.99.1` | fast | newest stable in the lock, the product toolchain; holds every lock file the allowlist knows, so the lock assertions are not vacuous on every commit |
+| `nightly-2026-10-16` | full | newest dated nightly in the lock: lock and layout changes show before they reach stable |
+
+What each one locks, and the layouts they produce, is measured in
+[safety.md](safety.md#lock-files). The supported range is not fixed by
+version: these three are the oldest stable the docs name, the newest
+stable and a nightly. A Cargo older than 1.90 with a 1.90-like lock set
+(Debian 13 ships 1.85, Ubuntu 24.04 ships 1.75) is acted on but untested;
+refusing unknown lock names only protects against newer versions. A new
+toolchain is a new entry in the list (and a new base image); its tests
+appear by themselves.
+
+- **Layout.** Minimal profiles (rustc, cargo, the host's rust-std; no docs,
+  no rust-src) and one C toolchain (the linker, nixpkgs' `stdenv.cc`) are
+  base-image inputs: `/opt/cargo-under-test/NAME` and
+  `/opt/cargo-under-test/cc` link into the image's `/nix/store`, and the
+  manifest `/opt/cargo-under-test/toolchains` lists `NAME VERSION TIER` per
+  toolchain. The harness bind-mounts `/nix/store` read-only over itself in
+  every container, so the deletion oracle's snapshot does not walk it
+  ("mounts not walked: ... /nix/store (read-only)"). Nothing is baked under
+  `/home/tester` (a fresh tmpfs per test): `CARGO_HOME` defaults to
+  `/home/tester/.cargo` and starts empty. The three toolchains make the
+  base image about 2.8 GB (from 80 MB); loading it after a change takes
+  about 30 s, once.
+- **Per-toolchain tests.** Each Cargo test runs once per toolchain in the
+  manifest, listed as `NAME@TOOLCHAIN` (`just e2e-one
+  cargo_smoke@1.99.1`), in the tier the list gives its toolchain (the
+  manifest's third column). A missing or empty manifest, or one without a
+  fast toolchain, fails the listing, so the Cargo tests never silently
+  vanish.
+- **Smoke first.** Before every Cargo test's body the suite runs the smoke
+  check of its toolchain: `cargo --version` and `rustc --version` print the
+  manifest's release, and a no-dependency fixture builds offline and its
+  binary runs (as `tester`, untraced, on a tmpfs of its own that is
+  unmounted afterwards). If it fails, the test is reported as `TOOLCHAIN`
+  (exit 3, counted apart in the runner's summary), not as `FAIL`: a broken
+  toolchain is never mistaken for a race failure. The run still fails.
+- **Offline.** Fixture projects (`diskgc-e2e/fixtures/cargo/`) have no
+  dependencies and their own `[workspace]`; they are compiled into the
+  harness and written to a scratch tmpfs per test. Cargo runs with
+  `CARGO_NET_OFFLINE=true` in a container with `--network=none`.
+- **Helpers** (fixtures, not code under test; `diskgc-e2e probe ...`):
+  the lock holder `flock-hold FILE...` (exclusive, or `--shared`; fails
+  rather than wait); the race fixture's `build.rs`, which waits at the gate
+  named by `DISKGC_E2E_BUILD_GATE`; the runner wrapper `cargo-runner`, set
+  as the host target's runner, which waits at the gate named by
+  `DISKGC_E2E_RUNNER_GATE` and then execs the binary. A gate is a pair of
+  control files on the scratch mount: the helper writes its pid to
+  `GATE.waiting` and waits for `GATE.go` (failing after 300 s). `cargo run`
+  execs its runner in its own process (same pid, the wrapper's
+  executable); `cargo test` starts it as a child.
+- **Checked by `/proc/locks`**, never by what Cargo prints: while the
+  holder holds `.cargo-lock`, a build waits for it (holding
+  `.cargo-build-lock` where the version has one); while the build script
+  waits, Cargo holds every lock file of the profile directory and waits for
+  none; while the runner waits, no process holds any of them. The sampler
+  takes `/proc/locks` in a single `read(2)`: seq_file restarts each read at
+  an index into the host-wide lock list, which other containers change all
+  the time, so a text read in pieces can repeat or skip lines (seen under
+  a parallel run).
+- **A traced Cargo build** (code-under-test strace, `--seccomp-bpf`) of the
+  smoke fixture must cost at most 60 % of the ptrace stops (voluntary
+  context switches of the whole process tree) of the same build under the
+  same strace without `--seccomp-bpf`, measured in the same container, and
+  at most 120 s (a hang guard). Measured: 36 % on 1.90.0, 44 % on 1.99.1
+  and the nightly; the untraced build switches far less than either.
+  Limit: `--seccomp-bpf` saves less on a build than on the single-process
+  churn above, because strace 7.2 restarts every new process and thread
+  with `PTRACE_SYSCALL` until its first traced syscall (it cannot know
+  whether the new task carries the filter), and most of a build's
+  processes and threads never unlink; so the bound is relative to the full
+  trace rather than per traced call.
 
 ## Controlled pause and kill points
 
@@ -468,7 +551,9 @@ Podman is not used). Toolchains, tools, users, markers and the mount points
 live in a base image (`dockerTools.streamLayeredImage`) tagged by
 its Nix hash and reused when an image with that tag is loaded; the binaries
 under test are bind-mounted read-only, so a code change does not rebuild
-or reload the base. The container root must be Podman's native overlayfs:
+or reload the base. The harness bind-mounts the image's `/nix/store`
+read-only over itself in every container, so the snapshot skips the
+toolchains (Cargo toolchains under test). The container root must be Podman's native overlayfs:
 the runner checks `podman info` before starting anything and each test
 checks its root mount, and both refuse fuse-overlayfs or another storage
 driver, whose inode numbers and birth times the snapshot keys were not
@@ -498,7 +583,7 @@ CI settings). Three layers:
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, a Cargo smoke on one toolchain | before every commit (the gate); budget under 5 minutes for the container phase (canary, image check, every test), durations reported per test; over budget it fails, and tests still running at the deadline are killed |
+| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, the Cargo toolchain tests on the fast toolchain | before every commit (the gate); budget under 5 minutes for the container phase (canary, image check, every test), durations reported per test; over budget it fails, and tests still running at the deadline are killed |
 | `e2e-full` | every container test, fast and full tiers: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, the Debian variant, differential tests | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; a 1-hour deadline only guards against hangs |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |

@@ -6,107 +6,14 @@
 //! [`crate::inuse_probe`], started untraced. The deletion oracle judges
 //! every run: only what a test declares eligible may disappear.
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::controlled::ControlLine;
+use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
 use crate::under_test::Run;
 use crate::{TESTER, ensure, info};
-
-/// A fixture process that printed `ready`; it ends when dropped (its stdin
-/// closes).
-struct Holder {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-    what: String,
-}
-
-impl Holder {
-    /// `diskgc-e2e probe ARGS` as tester (through `as-tester`), with only
-    /// `PATH` and `env` in its environment.
-    fn tester(ctx: &Ctx, args: &[&str], env: &[(&str, &str)]) -> Result<Self, String> {
-        let mut cmd = Command::new(&ctx.self_exe);
-        cmd.args(["as-tester", "--"])
-            .arg(&ctx.self_exe)
-            .arg("probe")
-            .args(args);
-        Self::start(cmd, args, env)
-    }
-
-    /// `diskgc-e2e probe ARGS` as container root (it drops privileges or
-    /// sets up a namespace itself).
-    fn root(ctx: &Ctx, args: &[&str]) -> Result<Self, String> {
-        let mut cmd = Command::new(&ctx.self_exe);
-        cmd.arg("probe").args(args);
-        Self::start(cmd, args, &[])
-    }
-
-    fn start(mut cmd: Command, args: &[&str], env: &[(&str, &str)]) -> Result<Self, String> {
-        let what = args.join(" ");
-        let mut child = cmd
-            .env_clear()
-            .env("PATH", "/bin")
-            .envs(env.iter().copied())
-            .current_dir("/")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn {what}: {e}"))?;
-        let stdin = child.stdin.take();
-        let stdout = BufReader::new(child.stdout.take().ok_or("holder stdout")?);
-        let mut holder = Self {
-            child,
-            stdin,
-            stdout,
-            what,
-        };
-        let ready = holder.line()?;
-        ensure!(ready == "ready", "{} said {ready:?}", holder.what);
-        info!("fixture {} is pid {}", holder.what, holder.pid());
-        Ok(holder)
-    }
-
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
-    fn line(&mut self) -> Result<String, String> {
-        let mut line = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut line)
-            .map_err(|e| format!("read {}: {e}", self.what))?;
-        ensure!(n > 0, "{} ended early", self.what);
-        Ok(line.trim_end().to_owned())
-    }
-
-    fn send(&mut self, line: &str) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or("holder stdin closed")?;
-        writeln!(stdin, "{line}").map_err(|e| format!("write {}: {e}", self.what))
-    }
-
-    /// Closes its stdin and requires a clean exit.
-    fn finish(mut self) -> TestResult {
-        drop(self.stdin.take());
-        let status = self
-            .child
-            .wait()
-            .map_err(|e| format!("wait {}: {e}", self.what))?;
-        ensure!(status.success(), "{} exited with {status}", self.what);
-        Ok(())
-    }
-}
-
-impl Drop for Holder {
-    fn drop(&mut self) {
-        drop(self.stdin.take());
-        let _ = self.child.wait();
-    }
-}
 
 /// The driver's single result line (control lines left out).
 fn outcome(run: &Run) -> Result<String, String> {

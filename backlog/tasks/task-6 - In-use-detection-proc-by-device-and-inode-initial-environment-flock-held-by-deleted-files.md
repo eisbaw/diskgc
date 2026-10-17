@@ -3,10 +3,10 @@ id: TASK-6
 title: >-
   In-use detection: /proc by device and inode, initial environment, flock;
   held-by-deleted-files
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 16:33'
+updated_date: '2026-10-17 16:42'
 labels:
   - wave-1
   - irreversible
@@ -32,7 +32,7 @@ Why: deleting files in use is the worst failure. Implement the in-use checks: op
 - [x] #3 A process in another mount namespace (an unshare helper bind-mounting the scratch dir at a different path) is matched by device and inode
 - [x] #4 A running binary mapping its shared library from an overlayfs scratch dir is detected (overlay maps-inode mismatch)
 - [x] #5 The one-second freshness bound holds across a simulated suspend (model test with a monotonic clock including suspend time)
-- [ ] #6 Unreadable same-user processes follow the narrowed rule (user decision 2026-10-17): non-dumpable all-same-uid, setuid, and refused-because-more-privileged processes are logged and do not block; any other unreadable same-user process (e.g. a refused dumpable process with another group) makes candidates in_use; processes exiting mid-scan (ESRCH/ENOENT) do not abort the scan
+- [x] #6 Unreadable same-user processes follow the narrowed rule (user decision 2026-10-17): non-dumpable all-same-uid, setuid, and refused-because-more-privileged processes are logged and do not block; any other unreadable same-user process (e.g. a refused dumpable process with another group) makes candidates in_use; processes exiting mid-scan (ESRCH/ENOENT) do not abort the scan
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -112,9 +112,11 @@ QA X1: unit row in scan.rs (denied, uids 1000 1000 0 1000, fd owner Some(0) -> N
 mped 1: only listings that bring new pids count against MAX_LISTINGS (re-read-only listings are bounded by the re-reads per process); only_listings_with_new_pids_count_against_the_bound (mped's probe: settles for k = 1, 13, 15 growing listings, unsettled at 16). mped 2: consistent() takes OtherUser when it is the LAST excuse (only a Denied read of a process none of whose uids is the user's gives it); unit cases [SetUid, OtherUser] -> OtherUser, [OtherUser, SetUid] -> None. mped 3: Clear carries the walk record root's identity, is neither Copy nor Clone; delete_cleared returns NotCleared::{Expired(Clear), OtherCandidate}; a_clear_for_one_candidate_does_not_delete_another. mped 4: docs (scan.rs module/Privileged/gather comment, MAX_LISTINGS, safety.md non-dumpable owner = any uid other than the euid, testing.md dumpable/access events, own_uid_map, uid_map none, and the 'nix flake check can build nothing' caveat), task-20 SUPERSEDED note, AC renumbering correction, task-61 correction. mped 5: ProcStatus.uid_map is UidMap::{Map, Absent (ENOENT only), Unreadable(reason)}, the reason shown in the notes; no excuse needs it beyond Privileged. Codex's mixed-outcome note: refusals counted on their own (four status reads even after environment-only failures), new model 'access' event, a_late_refusal_gets_every_classification.
 Bites: X1, fix 1 (count every listing), fix 2 (no last-OtherUser exception; OtherUser anywhere), fix 3 (clear accepted for any record), refusals sharing attempts: each fails its tests. mped 5 has no bite (it only changes what the notes say; the excuse outcome is the same for absent and unreadable maps).
 Gates: nix flake check 0; --rebuild workspace-tests 0 (275 passed), workspace-clippy 0, e2e-tests 0 (50 passed), e2e-clippy 0; just check 0; just e2e 0 twice (45/45); just e2e-full 0 (48/48).
+
+Committed as 403c530 (tree 0dbc96d) after the deep gate's fourth round: qa-test-runner, mped-architect and Codex all GO. AC #6 (narrowed unreadable rule) checked after QA confirmed every clause has a biting test. Post-commit (rides with the next commit): safety.md's last-OtherUser exception moved after the privilege-boundary list with its limit stated; NotCleared::OtherCandidate doc no longer claims it catches a re-walk.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

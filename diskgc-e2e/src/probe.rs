@@ -26,6 +26,11 @@ pub const ESCAPE_CASES: &[&str] = &["absolute", "dotdot", "symlink", "bind-mount
 
 /// Runs probe `args[0]` with the remaining arguments; returns the exit code.
 pub fn main(args: &[String]) -> i32 {
+    if let [cmd, rest @ ..] = args
+        && crate::cargo_probe::PROBES.contains(&cmd.as_str())
+    {
+        return crate::cargo_probe::main(cmd, rest);
+    }
     let result = match args {
         [cmd] if cmd == "whoami" => whoami(),
         [cmd, path] if cmd == "read-dir" => read_dir(Path::new(path)),

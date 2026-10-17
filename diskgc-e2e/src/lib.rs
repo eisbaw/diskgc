@@ -16,7 +16,10 @@
 //!   `Host` wrapper ([`controlled`]); those of the deletion engine, through
 //!   the same driver, in [`engine_suite`]; those of the in-use check and
 //!   the deletion step around it in [`inuse_suite`], with the fixture
-//!   processes of [`inuse_probe`].
+//!   processes of [`inuse_probe`] (started through [`holder`]); those of
+//!   the Cargo toolchains under test and the Cargo race helpers in
+//!   [`cargo_suite`], with [`cargo_under_test`], the helper processes of
+//!   [`cargo_probe`] and the `/proc/locks` sampler [`proc_locks`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -26,10 +29,14 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod cargo_probe;
+pub mod cargo_suite;
+pub mod cargo_under_test;
 pub mod controlled;
 pub mod driver;
 pub mod driver_suite;
 pub mod engine_suite;
+pub mod holder;
 pub mod host_probe;
 pub mod host_suite;
 pub mod interlock;
@@ -37,6 +44,7 @@ pub mod inuse_probe;
 pub mod inuse_suite;
 pub mod oracle;
 pub mod probe;
+pub mod proc_locks;
 pub mod release_check;
 pub mod runner;
 pub mod scratch;
@@ -52,6 +60,9 @@ pub mod exit {
     pub const PASS: i32 = 0;
     /// The test ran and failed.
     pub const FAIL: i32 = 1;
+    /// A Cargo test did not run because its toolchain under test failed the
+    /// smoke check: a toolchain problem, not a failure of what it tests.
+    pub const TOOLCHAIN: i32 = 3;
     /// Bad command line.
     pub const USAGE: i32 = 2;
     /// The interlock refused to run (layer 2) or aborted an operation outside

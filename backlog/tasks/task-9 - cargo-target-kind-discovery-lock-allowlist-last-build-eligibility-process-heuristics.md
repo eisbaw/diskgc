@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 14:58'
+updated_date: '2026-10-17 18:01'
 labels:
   - wave-1
   - irreversible
@@ -49,6 +49,10 @@ From task-51: the race tests drive single operations through diskgc-e2e-driver (
 From task-5 (deletion engine): the structural recogniser lives in the walk (diskgc-core engine/walk.rs): an entry matching .cargo-*lock* (is_cargo_lock_name; any lock name, known or not) in a directory P whose parent or grandparent INSIDE the candidate (the candidate itself included) holds an entry named CACHEDIR.TAG makes the candidate contains_special; the tag's signature is not read. Discovery (valid CACHEDIR.TAG, known lock allowlist) is this task's and stricter. Note the kind's own deletion (task-53) must not run the plain walk on the whole target (it would be contains_special by design): walk/delete the entries inside each locked profile directory as separate candidates.
 
 From task-6 (in-use check, diskgc-core inuse): the cargo process heuristics (exe or cwd in the target, a cargo* process with cwd in the project dir, CARGO_TARGET_DIR) should read the same scan, not a second one. inuse::Scan today exposes uses by (dev, ino) (fd, cwd, root, exe, maps), initial-environment paths (values split at ':', absolute components) and per-pid commands (last name of exe); 'exe or cwd inside the target' is already covered by matching the walked target's objects. Missing for this task: per process, its cwd (dev, ino and link text) and exe name in a form the cargo rules can query (cwd inside the project dir = the project dir's walked objects, or path text as a heuristic). Add an accessor on Scan rather than storing derived state. Unreadable processes follow the narrowed rule in docs/safety.md (In use); a Failed environment alone is no environ evidence (task-6 decision), so CARGO_TARGET_DIR of an env -i cargo is invisible.
+
+From task-4: measured in containers (docs/safety.md, Lock files): Cargo 1.99.1 and nightly-2026-10-16 create .cargo-build-lock, .cargo-artifact-lock and .cargo-lock with a plain build and hold .cargo-lock SHARED during a build (the other two exclusive); 1.90.0 holds only .cargo-lock, exclusive. All three names are in CARGO_LOCK_NAMES. The 'running test binary' and 'cargo in the project dir' container tests can use the race fixture and the runner gate of diskgc-e2e/src/cargo_under_test.rs; note that during a cargo run pause the paused process is the runner wrapper (cargo's pid, exe diskgc-e2e), not a process named cargo (see task-11 note).
+
+From the task-4 review (mped, reproduced by task-4; docs/safety.md, Lock files and Known gaps): (1) Last build reads .fingerprint/ and deps/, which nightly-2026-10-16's default new build-dir layout does not have (build/<package>/<hash>/{fingerprint,out} instead); revise the measure with task-53. (2) With CARGO_BUILD_BUILD_DIR (1.99.1, nightly; 1.90.0 ignores it) the build-dir is a second CACHEDIR.TAG directory holding only .cargo-build-lock, and cargo test runs test binaries from it. The rule 'a cargo* process with cwd in the target's project directory (its parent)' does not cover a build-dir outside the project; the running test binary itself is still caught by exe-inside-target. A rule on CARGO_MANIFEST_DIR in the initial environment (task-11 note (7)) would partly cover it.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

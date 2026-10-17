@@ -243,9 +243,12 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
 
 ## Weak assumptions & risks
 
-- **Cargo lock coverage.** Verified for Cargo 1.90 and a 1.96 nightly;
-  unknown lock names are refused, so new Cargo versions are skipped rather
-  than endangered. The race tests decide what is supported.
+- **Cargo lock coverage.** Lock sets measured for the versions in
+  [safety.md](docs/safety.md) (Lock files); the race tests run on the
+  toolchains pinned in [testing.md](docs/testing.md). A Cargo older than
+  1.90 with a 1.90-like lock set (Debian 13 ships 1.85, Ubuntu 24.04 ships
+  1.75) is acted on but untested; refusing unknown lock names only protects
+  against newer versions.
 - **Process heuristics.** Running binaries, dormant shells and Cargo's
   compile-to-run gap are protected by `/proc` heuristics with known blind
   spots (other users' processes, `--manifest-path`, variables exported after

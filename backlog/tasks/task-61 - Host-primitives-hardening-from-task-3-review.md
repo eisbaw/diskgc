@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 16:30'
+updated_date: '2026-10-17 16:42'
 labels:
   - wave-1
   - hardening
@@ -150,6 +150,12 @@ From task-6's deep gate round 2 (deferred, filed by the coordinator): (1) proc_s
 
 Correction to 'From task-6 (1)' (the first task-6 note here): round-9 H1 is no longer absorbed by 'non-dumpable ones are re-read before excused' alone; since task-6 round 3 every refused process of the user is re-read and an excuse needs every one of its status reads (four, counted apart from environment-only failures) to agree, with one exception (a last read finding another user's process). Item (2) there (kcmp dedup) stands.
 From task-6's deep gate round 3 (deferred, filed by the coordinator): (1) pid reuse within a scan is detected only by 'found gone, listed again' (once per pid); identify a process by pid plus start time or by a held pidfd; (2) a live read-only test asserting that systemd --user, when refused, is excused as more capable (environment-dependent today: the live scan only prints notes); (3) rename engine::delete to delete_unchecked or narrow its visibility, and make inuse::Checker::with_options non-public or guarded; (4) a non-dumpable process caught exiting on its 4th status read gives a false in_use (safe, costs reclaim); (5) pull gather's scheduler (due times, listing budget) into its own struct; (6) QA: on this machine 'nix flake check' can report all checks passed while building nothing; docs/testing.md (Commands) now says gates build checks explicitly; make 'just ci' build them explicitly with --rebuild; (7) Codex's mixed-outcome note is fixed in task-6 round 4 (refusals counted on their own, a_late_refusal_gets_every_classification).
+
+From task-6's final review:
+(32) Bind a Clear to its exact WalkRecord (a record serial stored in the Clear, or Clear<'r> borrowing the record so delete_cleared takes the record from it), so a re-walk or a hard-linked candidate cannot be mixed up by type (mped, Codex).
+(33) The consistent() test rows [other, SetUid] / [other, None] test sequences gather cannot produce (it stops at OtherUser); comment that they are properties of the function.
+(34) The seteuid-to-another-user path (a privileged process switching all uids to another user while keeping the user's files) is excused by the last-OtherUser exception; documented as a limit in safety.md (Codex reproduced it).
+(35) safety.md 'Every process, and only once settled': the reason '(a process it did not read could have inherited anything)' now follows the re-read sentence instead of the in_use claim it explains; reorder.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -426,9 +426,11 @@ pub struct Clear {
 pub enum NotCleared {
     /// The clear is no longer fresh: check again.
     Expired(Clear),
-    /// The clear was made for another walk record (another candidate, or
-    /// the same name walked again and found another object): a bug of the
-    /// caller.
+    /// The clear was made for another object (another candidate's root
+    /// identity): a bug of the caller. Only the root's identity is
+    /// compared, so walking the same object again between the check and
+    /// the delete, or a hard-linked file candidate, is not caught here;
+    /// delete with the record that was checked.
     OtherCandidate,
 }
 

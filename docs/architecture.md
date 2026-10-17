@@ -221,8 +221,8 @@ is accepted until measured otherwise.
     and tests), with source filtering so that editing docs rebuilds nothing;
   - product toolchain from **rust-overlay**, pinned by `rust-toolchain.toml`;
     the binary is statically linked (musl) so it runs on any distribution;
-  - *Cargo under test* is separate: dated, pinned toolchains (oldest
-    supported stable and one dated nightly) installed in the test image;
+  - *Cargo under test* is separate: pinned toolchains from the same locked
+    rust-overlay, in the test image ([testing.md](testing.md#cargo-toolchains-under-test));
   - outputs: `packages.default`, `nixosModules.default`,
     `devShells.default`, `checks` (fast checks and evaluation of the NixOS
     module), and the container images for the e2e tests.

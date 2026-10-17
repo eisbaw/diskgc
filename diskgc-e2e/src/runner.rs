@@ -478,11 +478,7 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     if Instant::now() >= deadline {
         return finish(Outcome::NotRun);
     }
-    let container = format!(
-        "diskgc-e2e-{}-{}",
-        std::process::id(),
-        test.name.replace('_', "-")
-    );
+    let container = container_name(std::process::id(), &test.name);
     let spawned = File::create(&log)
         .and_then(|f| Ok((f.try_clone()?, f)))
         .map_err(|e| format!("create log {}: {e}", log.display()))
@@ -549,10 +545,28 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     finish(outcome)
 }
 
+/// A Podman container name for `test` (names allow `[a-zA-Z0-9_.-]` only;
+/// Cargo tests are listed as `NAME@TOOLCHAIN`).
+pub fn container_name(runner_pid: u32, test: &str) -> String {
+    let safe: String = test
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("diskgc-e2e-{runner_pid}-{safe}")
+}
+
 fn outcome_label(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Pass => "PASS".to_owned(),
         Outcome::Fail(Some(code)) if *code == exit::INTERLOCK => "INTERLOCK".to_owned(),
+        // The test's Cargo toolchain under test failed its smoke check.
+        Outcome::Fail(Some(code)) if *code == exit::TOOLCHAIN => "TOOLCHAIN".to_owned(),
         Outcome::Fail(_) => "FAIL".to_owned(),
         Outcome::TimedOut => "TIMEOUT".to_owned(),
         Outcome::NotRun => "NOT-RUN".to_owned(),
@@ -605,6 +619,16 @@ fn report(results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i
         .filter(|r| r.outcome == Outcome::Pass)
         .count();
     let code = verdict(results, elapsed, budget);
+    let broken_toolchain = results
+        .iter()
+        .filter(|r| r.outcome == Outcome::Fail(Some(exit::TOOLCHAIN)))
+        .count();
+    if broken_toolchain > 0 {
+        eprintln!(
+            "\ne2e: {broken_toolchain} test(s) not run because their Cargo toolchain under test \
+             failed its smoke check (TOOLCHAIN): a toolchain problem, not a race failure"
+        );
+    }
     let budget_text = match budget {
         Some(b) if elapsed > b => format!("; BUDGET EXCEEDED: {elapsed:.1?} > {b:?}"),
         Some(b) => format!(" (budget {b:?})"),
@@ -662,6 +686,22 @@ mod tests {
                 budget: Duration::from_secs(300),
                 jobs: 3
             }
+        );
+    }
+
+    #[test]
+    fn container_names_carry_only_allowed_characters() {
+        assert_eq!(
+            container_name(7, "cargo_smoke@nightly-2026-10-16"),
+            "diskgc-e2e-7-cargo-smoke-nightly-2026-10-16"
+        );
+        assert_eq!(
+            container_name(7, "cargo_smoke@1.90.0"),
+            "diskgc-e2e-7-cargo-smoke-1.90.0"
+        );
+        assert_eq!(
+            container_name(7, "sandbox_trivial"),
+            "diskgc-e2e-7-sandbox-trivial"
         );
     }
 

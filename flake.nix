@@ -163,15 +163,40 @@
         }
       );
 
+      # Cargo under test (docs/testing.md, Cargo toolchains under test): the
+      # toolchains the Cargo race tests run against, pinned by the locked
+      # rust-overlay input (flake.lock), separate from the product toolchain
+      # (rust-toolchain.toml). Minimal profile: rustc, cargo, the host's
+      # rust-std; no docs, no rust-src. `tier` is the gate that runs each
+      # toolchain's Cargo tests: "fast" (`just e2e` and `just e2e-full`) or
+      # "full" (`just e2e-full` only); at least one must be fast. Why each
+      # is pinned: docs/testing.md, Cargo toolchains under test.
+      cargoUnderTest = [
+        {
+          name = "1.90.0";
+          toolchain = pkgs.rust-bin.stable."1.90.0".minimal;
+          tier = "full";
+        }
+        {
+          name = "1.99.1";
+          toolchain = pkgs.rust-bin.stable."1.99.1".minimal;
+          tier = "fast";
+        }
+        {
+          name = "nightly-2026-10-16";
+          toolchain = pkgs.rust-bin.nightly."2026-10-16".minimal;
+          tier = "full";
+        }
+      ];
+      # The C toolchain (linker) every toolchain above links with.
+      cargoUnderTestCc = pkgs.stdenv.cc;
+
       # The base image: userland, tools, users, markers and mount points (the
-      # harness provisions the host lock per test, on a tmpfs).
+      # harness provisions the host lock per test, on a tmpfs), and the Cargo
+      # toolchains under test.
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
       # do, and the runner reuses a loaded image with that tag.
-      #
-      # Extension point (task-4): Cargo-under-test toolchains and their C
-      # toolchain go into `contents` (e.g. under /opt/cargo-under-test);
-      # they are base-image inputs, not code under test.
       e2eBaseImage = pkgs.dockerTools.streamLayeredImage {
         name = "localhost/diskgc-e2e-base";
         contents = [
@@ -208,6 +233,11 @@
           chown -R 1000:1000 srv/tester
           chmod 0755 srv/tester
 
+          # Mount point of the Cargo smoke check's own tmpfs (SMOKE_MOUNT in
+          # diskgc-e2e/src/cargo_under_test.rs), unmounted after each check.
+          mkdir -p srv/cargo-smoke
+          chmod 0755 srv/cargo-smoke
+
           # Mount points. The harness mounts tmpfs on /tmp (scratch), on
           # /run/diskgc (the host lock, provisioned there as the tmpfiles
           # lines of docs/safety.md do on a host whose /run is a tmpfs), on
@@ -218,6 +248,21 @@
           chmod 1777 tmp var/tmp
           chmod 0755 run/diskgc
           chmod 0700 run/diskgc-e2e
+
+          # Cargo under test (diskgc-e2e/src/cargo_under_test.rs): one
+          # symlink per toolchain and one to the C toolchain, into the
+          # image's /nix/store, which the harness bind-mounts read-only so
+          # the deletion oracle's snapshot does not walk it; the manifest
+          # lists `NAME VERSION TIER` per toolchain, in the order above. Nothing
+          # under /home/tester: the harness mounts a fresh tmpfs there.
+          mkdir -p opt/cargo-under-test
+          ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
+          ${lib.concatMapStrings (t: ''
+            ln -s ${t.toolchain} opt/cargo-under-test/${t.name}
+          '') cargoUnderTest}
+          printf '%s\n' ${
+            lib.escapeShellArgs (map (t: "${t.name} ${t.toolchain.version} ${t.tier}") cargoUnderTest)
+          } > opt/cargo-under-test/toolchains
         '';
         config = {
           Cmd = [ "/bin/sh" ];

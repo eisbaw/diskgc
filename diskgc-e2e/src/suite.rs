@@ -10,19 +10,28 @@
 //!
 //! Tiers: `fast` tests run in `just e2e` (the commit gate, 5-minute budget);
 //! `full` tests run only in `just e2e-full`.
+//!
+//! Besides [`TESTS`], the Cargo tests ([`crate::cargo_suite`]) run once per
+//! Cargo toolchain under test, listed as `NAME@TOOLCHAIN`; each first runs
+//! its toolchain's smoke check, and a test whose toolchain fails it is
+//! reported as `TOOLCHAIN` (exit [`exit::TOOLCHAIN`]), not as `FAIL`.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use rustix::mount::MountFlags;
+
+use crate::cargo_under_test::{self, Toolchain, ToolchainBroken};
 use crate::oracle::{Change, Fixture, Oracle, Unmatched};
 use crate::probe::{ESCAPE_CASES, ESCAPE_TARGET_DIR, ESCAPED_NAME};
 use crate::scratch::{self, Scratch};
 use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
-use crate::{driver_suite, engine_suite, host_suite, inuse_suite};
+use crate::{cargo_suite, driver_suite, engine_suite, host_suite, inuse_suite};
 
 /// Which gate runs a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +241,12 @@ pub static TESTS: &[Test] = &[
         run: driver_suite::driver_delete_unlinks_what_replaced_an_entry_while_paused,
     },
     Test {
+        name: "cargo_smoke_reports_a_broken_toolchain_as_a_toolchain_failure",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cargo_suite::cargo_smoke_reports_a_broken_toolchain_as_a_toolchain_failure,
+    },
+    Test {
         name: "oracle_large_tree",
         tier: Tier::Full,
         expect: Expect::Pass,
@@ -371,39 +386,115 @@ pub static TESTS: &[Test] = &[
     },
 ];
 
-/// Prints `name<TAB>tier` per test (read by the runner).
+/// Prints `name<TAB>tier` per test (read by the runner): [`TESTS`], then
+/// every Cargo test per toolchain in the image. Without a readable
+/// toolchain manifest the listing fails: the Cargo tests never silently
+/// vanish.
 pub fn list() -> i32 {
+    let toolchains = match Toolchain::all() {
+        Ok(toolchains) => toolchains,
+        Err(why) => {
+            eprintln!("diskgc-e2e list: {why}");
+            return exit::FAIL;
+        }
+    };
     for test in TESTS {
         println!("{}\t{}", test.name, test.tier.as_str());
     }
+    for (name, tier) in cargo_suite::listing(&toolchains) {
+        println!("{name}\t{}", tier.as_str());
+    }
     exit::PASS
+}
+
+/// A test resolved from its listed name.
+enum Resolved {
+    Plain(&'static Test),
+    /// A Cargo test on one toolchain; its smoke check runs first.
+    Cargo(&'static cargo_suite::CargoTest, Toolchain),
+}
+
+impl Resolved {
+    fn find(name: &str) -> Result<Self, String> {
+        if let Some(test) = TESTS.iter().find(|t| t.name == name) {
+            return Ok(Self::Plain(test));
+        }
+        match cargo_suite::find(name) {
+            Some(found) => found.map(|(test, toolchain)| Self::Cargo(test, toolchain)),
+            None => Err(format!("no test named {name:?}")),
+        }
+    }
+
+    fn expect(&self) -> Expect {
+        match self {
+            Self::Plain(test) => test.expect,
+            Self::Cargo(..) => Expect::Pass,
+        }
+    }
+
+    /// Runs the body; a Cargo test's smoke check first, recording a broken
+    /// toolchain in `ctx`.
+    fn run(&self, ctx: &Ctx) -> TestResult {
+        match self {
+            Self::Plain(test) => (test.run)(ctx),
+            Self::Cargo(test, toolchain) => {
+                cargo_under_test::smoke(ctx, toolchain)
+                    .map_err(|broken| ctx.toolchain_broken(&broken))?;
+                (test.run)(ctx, toolchain)
+            }
+        }
+    }
 }
 
 /// Sets up the context, runs test `name`, applies the teardown rules and
 /// prints its result.
 pub fn run(name: &str) -> i32 {
-    let Some(test) = TESTS.iter().find(|t| t.name == name) else {
-        eprintln!("diskgc-e2e: no test named {name:?}");
-        return exit::USAGE;
+    let test = match Resolved::find(name) {
+        Ok(test) => test,
+        Err(why) => {
+            eprintln!("diskgc-e2e: {why}");
+            return exit::USAGE;
+        }
     };
     let started = Instant::now();
-    let outcome = match Ctx::setup() {
+    let (outcome, toolchain) = match Ctx::setup() {
         Ok(ctx) => {
-            let body = (test.run)(&ctx);
-            judge_expectation(test.expect, body, ctx.teardown())
+            let body = test.run(&ctx);
+            let outcome = judge_expectation(test.expect(), body, ctx.teardown());
+            (outcome, ctx.toolchain_failure.get().cloned())
         }
-        Err(why) => Err(format!("setup failed: {why}")),
+        Err(why) => (Err(format!("setup failed: {why}")), None),
     };
-    let took = started.elapsed();
-    match outcome {
-        Ok(note) => {
-            println!("PASS {name} ({took:.2?} in container){note}");
-            exit::PASS
-        }
-        Err(why) => {
-            println!("FAIL {name} ({took:.2?} in container): {why}");
-            exit::FAIL
-        }
+    let (line, code) = result_line(name, started.elapsed(), outcome, toolchain);
+    println!("{line}");
+    code
+}
+
+/// The result line and exit code of a test: `PASS`, `FAIL`, or `TOOLCHAIN`
+/// when it failed and a toolchain under test it needed had failed its smoke
+/// check (a toolchain problem, not a failure of what the test checks).
+pub fn result_line(
+    name: &str,
+    took: Duration,
+    outcome: Result<String, String>,
+    toolchain_failure: Option<String>,
+) -> (String, i32) {
+    match (outcome, toolchain_failure) {
+        (Ok(note), _) => (
+            format!("PASS {name} ({took:.2?} in container){note}"),
+            exit::PASS,
+        ),
+        (Err(why), Some(broken)) => (
+            format!(
+                "TOOLCHAIN {name} ({took:.2?} in container): not run, its toolchain is broken: \
+                 {broken}\n(test result: {why})"
+            ),
+            exit::TOOLCHAIN,
+        ),
+        (Err(why), None) => (
+            format!("FAIL {name} ({took:.2?} in container): {why}"),
+            exit::FAIL,
+        ),
     }
 }
 
@@ -457,6 +548,9 @@ pub struct Ctx {
     pub ledger: Ledger,
     pub bin_dir: PathBuf,
     pub self_exe: PathBuf,
+    /// Set when a Cargo toolchain under test failed its smoke check
+    /// ([`Ctx::toolchain_broken`]).
+    toolchain_failure: OnceLock<String>,
 }
 
 /// The host lock (docs/safety.md, Host lock).
@@ -473,6 +567,7 @@ impl Ctx {
             "the harness must run as container root to build fixtures, runs as uid {uid}"
         );
         require_native_overlay_root()?;
+        bind_read_only(NIX_STORE)?;
         let records = Scratch::mount("/run/diskgc-e2e", "0700", ROOT)?;
         let scratch = Scratch::mount("/tmp", "1777", ROOT)?;
         // The tmpfiles lines of docs/safety.md (Host lock):
@@ -492,7 +587,17 @@ impl Ctx {
             ledger: Ledger::new(),
             bin_dir: PathBuf::from(UNDER_TEST_BIN_DIR),
             self_exe,
+            toolchain_failure: OnceLock::new(),
         })
+    }
+
+    /// Records that a Cargo toolchain under test failed its smoke check, so
+    /// the test is reported as `TOOLCHAIN`; returns the message.
+    pub fn toolchain_broken(&self, broken: &ToolchainBroken) -> String {
+        let message = broken.to_string();
+        // The first broken toolchain is the one reported.
+        let _ = self.toolchain_failure.set(message.clone());
+        message
     }
 
     /// The rules every test obeys, checked after its body: every traced run
@@ -542,6 +647,19 @@ impl Ctx {
             .output()
             .map_err(|e| format!("spawn probe {args:?}: {e}"))
     }
+}
+
+/// The image's store: busybox, strace and the Cargo toolchains under test.
+pub const NIX_STORE: &str = "/nix/store";
+
+/// Bind-mounts `path` (a directory of the image) read-only over itself, so
+/// the deletion oracle's snapshot skips it like every read-only mount
+/// (docs/testing.md, Grounding): the Cargo toolchains under test are
+/// several 10,000 files on the overlay root, which nothing deletes.
+fn bind_read_only(path: &str) -> Result<(), String> {
+    rustix::mount::mount_bind(path, path).map_err(|e| format!("bind mount {path}: {e}"))?;
+    rustix::mount::mount_remount(path, MountFlags::BIND | MountFlags::RDONLY, c"")
+        .map_err(|e| format!("remount {path} read-only: {e}"))
 }
 
 /// The snapshot's key rules (docs/testing.md, Grounding) are validated on
@@ -1035,7 +1153,8 @@ fn oracle_logs_unmatched_strace_removals(ctx: &Ctx) -> TestResult {
 }
 
 /// Read-only mounts are not walked by the snapshot (the binaries under
-/// test, a read-only bind mount in scratch), objects stay visible through a
+/// test, the image's store with the Cargo toolchains under test, a
+/// read-only bind mount in scratch), objects stay visible through a
 /// writable path to the same filesystem, and a writable mount nested below
 /// a read-only one is still walked.
 fn snapshot_skips_read_only_mounts(ctx: &Ctx) -> TestResult {
@@ -1055,7 +1174,11 @@ fn snapshot_skips_read_only_mounts(ctx: &Ctx) -> TestResult {
         snap.took,
         snap.skipped
     );
-    for ro in [Path::new(UNDER_TEST_BIN_DIR), &s.path("ro-dst")] {
+    for ro in [
+        Path::new(UNDER_TEST_BIN_DIR),
+        Path::new(NIX_STORE),
+        &s.path("ro-dst"),
+    ] {
         ensure!(
             snap.skipped.get(ro) == Some(&Skip::ReadOnly),
             "{} not skipped as read-only: {:?}",
@@ -1279,6 +1402,26 @@ mod tests {
                 .unwrap_err()
                 .contains("does not bite")
         );
+    }
+
+    #[test]
+    fn a_broken_toolchain_is_reported_as_such() {
+        let took = Duration::from_millis(5);
+        let broken = Some("Cargo toolchain under test 1.90.0 failed its smoke check".to_owned());
+        let (line, code) = result_line("cargo_smoke@1.90.0", took, Err("x".into()), broken.clone());
+        assert_eq!(code, exit::TOOLCHAIN);
+        assert!(line.starts_with("TOOLCHAIN cargo_smoke@1.90.0"), "{line}");
+        assert!(line.contains("failed its smoke check"), "{line}");
+        let (line, code) = result_line("t", took, Err("boom".into()), None);
+        assert_eq!(code, exit::FAIL);
+        assert!(
+            line.starts_with("FAIL t") && line.contains("boom"),
+            "{line}"
+        );
+        // A recorded failure never turns a pass into anything else.
+        let (line, code) = result_line("t", took, Ok(String::new()), broken);
+        assert_eq!(code, exit::PASS);
+        assert!(line.starts_with("PASS t"), "{line}");
     }
 
     #[test]

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 16:30'
+updated_date: '2026-10-17 18:01'
 labels:
   - wave-1
   - irreversible
@@ -49,6 +49,12 @@ From task-6 round 2: Checker::check now re-checks against a new scan itself when
 From task-6 round 3 (SUPERSEDES the two earlier task-6 notes on this task, which contradicted each other on freshness): the API is settled. Build one checker with inuse::Checker::new(&rules, inuse::REUSE_LIMIT) from the Rules of the entries' walks. For each entry of a locked profile dir: engine::walk, then checker.check(host, &candidate, &record) -> Result<Result<Clear, Skip>, HostError> (a Clear is made only there and only if its scan is fresh after the verdict; the checker itself rescans once otherwise), then inuse::delete_cleared(host, clear, &candidate, &record, options) -> Result<Deletion, Clear>, which refuses an expired Clear (Err: call checker.forget() and check again, once). Do not call engine::delete directly for checked candidates; delete_cleared is the deletion entry point.
 
 From task-6 round 4 (amends the round-3 note): inuse::delete_cleared now returns Result<Deletion, NotCleared>: NotCleared::Expired(Clear) (forget and check again, once) or NotCleared::OtherCandidate (the Clear was made for another walk record: a bug). Clear is not Copy or Clone and carries the record root's identity.
+
+CORRECTION (task-6 final review, mped and Codex): NotCleared::OtherCandidate compares only the walk root's identity. It does NOT catch walking the same object again between check and delete, nor a hard-linked file candidate. Always delete with the exact record that was checked.
+
+From task-4: Cargo 1.99.1 and the 2026-10-16 nightly hold .cargo-lock shared (not exclusive) during a build, with .cargo-build-lock and .cargo-artifact-lock exclusive (docs/safety.md, Lock files). Step 1's exclusive non-blocking flock of every known lock fails against a shared holder too, so the protocol is unaffected; a model test of 'locked' should include a shared holder.
+
+From the task-4 review (mped, reproduced by task-4; docs/safety.md, Lock files and Known gaps): nightly-2026-10-16 uses Cargo's new build-dir layout by default: the profile directory has no .fingerprint/ and no deps/; each unit gets build/<package>/<hash>/{fingerprint,out}; lock files as 1.99.1. Reclaim step 3's 'delete .fingerprint/ first' and the Last build measure (.fingerprint/, deps/) do not work on that layout; revise both (e.g. the per-unit fingerprint directories under build/ first, and Last build over build/ and incremental/). Also: with CARGO_BUILD_BUILD_DIR, 1.99.1 and the nightly split the lock set between target/<profile>/ (.cargo-artifact-lock exclusive, .cargo-lock shared) and the build-dir's <profile>/ (.cargo-build-lock), each half with its own CACHEDIR.TAG, so each half is a target of its own for discovery and locking.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

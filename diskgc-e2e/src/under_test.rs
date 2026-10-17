@@ -173,6 +173,30 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
     spawn_as_tester(ledger, records, cwd, program, args)?.wait()
 }
 
+/// The environment of code under test run as `tester`: a minimal fixed set
+/// (no variable of the harness's own environment leaks through). Callers
+/// that need more (a Cargo under test's `PATH`) add to it, later entries
+/// overriding earlier ones.
+pub const TESTER_ENV: &[(&str, &str)] = &[
+    ("PATH", "/bin"),
+    ("HOME", "/home/tester"),
+    ("USER", TESTER_NAME),
+    ("LOGNAME", TESTER_NAME),
+    ("LANG", "C.UTF-8"),
+];
+
+/// [`run_as_tester`] with `env` added to [`TESTER_ENV`].
+pub fn run_as_tester_with_env<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    env: &[(String, String)],
+    program: &Path,
+    args: &[S],
+) -> Result<Run, String> {
+    spawn_as_tester_with_env(ledger, records, cwd, env, program, args)?.wait()
+}
+
 /// How long [`Spawned`] waits for the code under test to print a control
 /// line or answer a check. Generous: a loaded machine runs many containers.
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -228,6 +252,18 @@ pub fn spawn_as_tester<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
 ) -> Result<Spawned, String> {
+    spawn_as_tester_with_env(ledger, records, cwd, &[], program, args)
+}
+
+/// [`spawn_as_tester`] with `env` added to [`TESTER_ENV`].
+pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    env: &[(String, String)],
+    program: &Path,
+    args: &[S],
+) -> Result<Spawned, String> {
     let n = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let record_dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
     let argv: Vec<String> = std::iter::once(program.display().to_string())
@@ -254,11 +290,8 @@ pub fn spawn_as_tester<S: AsRef<OsStr>>(
         .arg(program)
         .args(args)
         .env_clear()
-        .env("PATH", "/bin")
-        .env("HOME", "/home/tester")
-        .env("USER", TESTER_NAME)
-        .env("LOGNAME", TESTER_NAME)
-        .env("LANG", "C.UTF-8")
+        .envs(TESTER_ENV.iter().copied())
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,0 +1,11 @@
+# Cargo smoke fixture (diskgc-e2e/src/cargo_under_test.rs): the least a
+# toolchain under test must build, link and run, offline. No dependencies.
+# Written to a scratch tmpfs per test; never built in this repository.
+[package]
+name = "diskgc-e2e-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace root, so no parent manifest is ever taken for one.
+[workspace]

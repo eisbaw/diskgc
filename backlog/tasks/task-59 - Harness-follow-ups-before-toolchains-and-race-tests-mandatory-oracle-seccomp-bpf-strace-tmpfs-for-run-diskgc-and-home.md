@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@mped-architect'
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-17 00:28'
+updated_date: '2026-10-17 18:22'
 labels:
   - wave-1
   - testing
@@ -71,6 +71,10 @@ Honest limits: the ledger only covers runs through under_test::run_as_tester wit
 Review fix (coordinator, GO with one fix): judge_expectation no longer lets a FailWith bite proof pass when the test body itself failed. Before, teardown appended the unjudged message to the body's error, the expected text still matched, and the body's own checks were masked. Now suite::run passes the body result and the rules result (Ctx::teardown(), the ledger check only) separately. FailWith passes only if the body returned Ok and the rules failed with the expected text; a failing body reports 'its body failed, so the rule was not what failed it' plus the rule message. Unit test expectations_pass_and_fail_as_declared covers all eight combinations. Bite proof: temporarily changed the bite test's run.expect_code(0) to expect_code(3). The test then FAILed: 'bite proof for "never judged by the deletion oracle": its body failed ... exited with Some(0), expected 3 (also: 1 traced run(s) ... never judged ...)'. Reverted. Gates after the fix: just check exit 0 (9 passed); just e2e exit 0 (11/11, 1.4 s container phase); just e2e-full exit 0 (12/12, 3.6 s). Hardening follow-ups from the review (wall-time flake risk, let_underscore_must_use, CreatedDuringRun is inferred) went to task-60.
 
 Orchestrator gate: qa-test-runner re-ran after the self-test fix: nix flake check exit 0; just check 9/9; just e2e 11/11; just e2e-full 12/12; diskgc-e2e unit tests 34/34 incl. expectations_pass_and_fail_as_declared. mped-architect: GO. Committed with the code; task stays In Progress until AC#2's traced-cargo-build half is demonstrated in task-4.
+
+From task-4: AC #2's traced-cargo-build half is demonstrated by the container test cargo_traced_build_within_bound (fast on 1.90.0, full on 1.99.1 and nightly-2026-10-16; diskgc-e2e/src/cargo_suite.rs). Stated bound (docs/testing.md, Cargo toolchains under test): a Cargo build traced by the harness's strace (--seccomp-bpf) costs at most 60% of the voluntary context switches of the same build under the same strace without --seccomp-bpf, measured in the same container; tracee seccomp filters = harness + 1; wall time <= 120 s; oracle clean. Measured ~7,400 of ~20,200 (1.90.0), ~10,000 of ~23,200 (1.99.1). Bite: --seccomp-bpf removed -> 20,205 > 12,124 and the test fails. Not per traced call as the churn test: strace 7.2 steps every new process/thread with PTRACE_SYSCALL until its first traced syscall, so about a third of the full trace's stops remain on a multi-process build.
+
+CORRECTION (task-4 final gate): the tiers changed after the note above. cargo_traced_build_within_bound runs in the fast tier on 1.99.1 and in the full tier on 1.90.0 and nightly-2026-10-16 (cargoUnderTest's explicit tier attribute in flake.nix).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

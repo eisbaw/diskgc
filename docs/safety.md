@@ -228,9 +228,7 @@ reclaim on any desktop):
   swapping a dead leader and its survivor under one tid can make one read
   show a false non-dumpable owner) is not enough. A process refused gets
   four status reads of its own (reads that failed only for its
-  environment do not use them up). One exception: when the last read
-  finds it another user's (refused, none of its uids the user's: a `sudo`
-  or `su` child after its `setresuid`), that stands:
+  environment do not use them up). The privilege boundaries are:
   - **setuid**: its effective uid is not the user's (`sudo -i`,
     `fusermount3`);
   - **more capable**: it holds a permitted capability that diskgc's
@@ -252,7 +250,13 @@ reclaim on any desktop):
     live task's `fd` directory is owned by another uid than its effective
     one (root, or the overflow uid 65534 where root is not mapped into
     diskgc's namespace) (`ssh-agent`, `gpg-agent`, `(sd-pam)`); when no
-    live task can be found, it is not excused;
+    live task can be found, it is not excused.
+
+  One exception to "every read": when the last read finds it another
+  user's (refused, none of its uids the user's: a `sudo` or `su` child
+  after its `setresuid`), that stands, as for any other user's process.
+  Limit: a privileged process that switches all its uids to another user
+  while keeping the user's files open is then not seen;
 - any other unreadable process of the user makes every candidate `in_use`:
   one whose reads fail for another reason (also another user's: a failed
   read says nothing about who may read it), one whose status cannot be
@@ -478,17 +482,39 @@ steps.
 ### Lock files
 
 Cargo's lock set changes between versions. Measured on 2026-10-15 by
-sampling `/proc/locks` during real Cargo commands:
+sampling `/proc/locks` during real Cargo commands, and on 2026-10-17 by the
+Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchains-under-test)):
 
 - Cargo 1.90 (stable) holds an exclusive `flock` on `<profile>/.cargo-lock`
   during a build.
 - Cargo 1.96 (nightly) holds `.cargo-build-lock` *and* `.cargo-lock` during
   a build; a second build waits on `.cargo-build-lock` first; `cargo check`
   waits behind a running build.
-- **Neither holds any lock while the program runs** under `cargo run` or
-  `cargo test`, for the whole runtime of the binary.
-- `.cargo-artifact-lock` exists in some targets on the development machine,
-  but neither version created it with plain `build` / `run` / `test`.
+- Cargo 1.99.1 (stable) and the 2026-10-16 nightly (1.101) create all
+  three lock files with a plain `build`, and while a build script runs hold
+  `.cargo-build-lock` and `.cargo-artifact-lock` exclusively and
+  `.cargo-lock` *shared*. With `.cargo-lock` held exclusively by another
+  process, a build waits for it holding `.cargo-build-lock`.
+- **No lock is held while the program runs** under `cargo run` or
+  `cargo test`: measured for 1.90 and the 1.96 nightly over the whole
+  runtime of the binary, and for the toolchains pinned in
+  [testing.md](testing.md#cargo-toolchains-under-test) between compilation
+  and the start of the binary (their locks during the binary's runtime
+  were not sampled).
+- `.cargo-artifact-lock` exists in some targets on the development machine;
+  1.90 and the 1.96 nightly did not create it with plain `build` / `run` /
+  `test`.
+- **Separate build directory** (`CARGO_BUILD_BUILD_DIR` or
+  `build.build-dir`): 1.99.1 and the 2026-10-16 nightly split the lock set.
+  The target's profile directory keeps `.cargo-artifact-lock` (exclusive),
+  `.cargo-lock` (shared) and the final artifacts; the build directory's
+  `debug/` holds only `.cargo-build-lock`, next to the intermediate files;
+  both directories get a `CACHEDIR.TAG`. `cargo test` runs the test
+  binaries from the build directory. 1.90 ignores the setting.
+- **New build-dir layout:** the 2026-10-16 nightly uses it by default. The
+  profile directory has no `.fingerprint/` and no `deps/`; each unit gets
+  `build/<package>/<hash>/` holding its `fingerprint` and `out`. The lock
+  files are those of 1.99.1.
 
 diskgc has an explicit **allowlist of known lock file names** (`.cargo-lock`,
 `.cargo-build-lock`, `.cargo-artifact-lock`). A profile directory containing
@@ -510,6 +536,19 @@ any other `.cargo-*lock*` file is an unknown layout: the target is skipped
   checks still protect visible running work.
 - **Empty:** a target whose profile directories hold nothing but lock files
   is `empty` and not re-listed on every run.
+- **Known gap, the new build-dir layout** (Lock files): there is no
+  `.fingerprint/` for Reclaim protocol step 3 to delete first, and Last
+  build reads `.fingerprint/` and `deps/`, which are absent; race test 6
+  ([testing.md](testing.md)), which rests on both, has not run on it. These
+  rules are unverified on that layout until revised (task-53, task-9,
+  task-11).
+- **Known gap, a separate build directory** (Lock files): each half is a
+  directory with a `CACHEDIR.TAG` and a known lock file, so discovery finds
+  both. The process rule "a `cargo*` process with its working directory in
+  the target's project directory" does not cover a build directory outside
+  the project, from which `cargo test` runs its test binaries (task-9); a
+  running test binary is still caught by its executable inside the build
+  directory.
 
 ### In use
 

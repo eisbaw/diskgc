@@ -1,0 +1,13 @@
+# Cargo race fixture (diskgc-e2e/src/cargo_under_test.rs): a binary with a
+# test and a build script that can wait on a control file, so a build can be
+# paused while Cargo holds its locks. No dependencies, builds offline.
+# Written to a scratch tmpfs per test; never built in this repository.
+[package]
+name = "diskgc-e2e-race"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# Its own workspace root, so no parent manifest is ever taken for one.
+[workspace]
