@@ -190,18 +190,30 @@ How the format reads (the schema documents every key):
   not answer. One device per mount: bind mounts are not modelled yet.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
-  `/proc` read errors; a pid that exits is `Gone`. `locks` give their holder
-  an fd of its own. As on `LinuxHost`, an empty fd table, map or
-  environment, or no `exe`, reads as `Failed` (an empty read of a live
-  process is never the answer there).
+  `/proc` read errors; a pid that exits is `Gone`. What `status` shows,
+  readable whatever `proc` says: `name`, `uid` (all four), `euid` (effective
+  and saved, as after a setuid exec), `gid`, `non_dumpable: true` (its `fd`
+  directory owned by root), `privileged: true` (holds a capability diskgc
+  lacks), `uid_map` (the text diskgc reads; default the initial
+  namespace's; `none`: absent). The top-level `own_uid_map` is diskgc's
+  own (same default, `none` too). `locks` give their holder an fd of its own. As on
+  `LinuxHost`, an empty fd table, map or environment, or no `exe`, reads
+  as `Failed` (an
+  empty read of a live process is never the answer there). diskgc itself
+  is listed too (`own_pid`, default 65000): its fds are those the code
+  under test holds open, its other entries read as `Failed`. A socket file
+  can be `bound: true` (reported by the socket diagnostics).
 - **Events:** `at: {op, path, nth, when}`, `at: {call: k, when}` or `at:
   {elapsed: 5s}`, and one action: `create`, `mkdir`, `remove`, `rename`,
   `replace` (a new inode at the path), `chown` (a new owner, same inode),
-  `open`, `close`, `exit`, `advance`
+  `open`, `close`, `exit`, `fork` (`{pid, child}`: a copy sharing the
+  parent's open file descriptions), `dumpable` (`{pid, value}`: what its
+  `fd` directory's owner shows from then on), `access` (`{pid, proc}`: how
+  its `/proc` reads go from then on), `advance`
   (a clock jump, e.g. a suspend), `fail` (the call fails with the named
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
-  trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat` or
-  `fchmod`). `remove` is `rm -r`: every entry below is unlinked, and an
+  trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat`,
+  `fchmod` or `bound_unix_sockets`). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the
   test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
@@ -222,12 +234,13 @@ How the format reads (the schema documents every key):
   - `/proc` link text is the path at open time (Linux follows renames);
   - mtime, ctime and birth time are equal at load, so "ctime newer than
     mtime" cannot be expressed;
-  - one task per process; diskgc itself is not among the pids;
+  - one task per process; diskgc's own process has only its fds;
   - no signals (the port has none yet); `read_dir` lists names in name
     order, while the kernel's order is the filesystem's, so callers must
     not rely on it;
-  - processes are fixed at load: no spawn or fork event, and no open file
-    description shared between processes;
+  - processes come from the model or a `fork` event (no exec); memory
+    maps show the mapped file's own device (a layer's device, as overlayfs
+    can show, is modelled with a second filesystem);
   - lookups cost time linear in the model, so 100,000-entry models need
     indexes first.
 
@@ -241,7 +254,10 @@ Model scenarios required by [safety.md](safety.md) and
   the checked object only;
 - a user-owned directory containing another user's file: `not_owner`;
 - a bucket whose later member is opened by a process after an earlier
-  member was deleted: the later member is skipped (`in_use`);
+  member was deleted: the later member is skipped (`in_use`) when the scan
+  used for the earlier member is older than the reuse limit or the bucket
+  spans a suspend ([safety.md](safety.md#in-use), Freshness); an open within
+  the reuse window is the accepted limit 5 and is pinned as such;
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must;
@@ -489,6 +505,12 @@ CI settings). Three layers:
 | `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |
 | `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
 | `ci` | `nix flake check -L` plus `just e2e-full` | CI |
+
+`nix flake check` can report every check passed while building nothing
+(its outputs are already in the store from an earlier build of the same
+inputs, or were never scheduled); a gate that must prove the tests ran
+builds each check explicitly with `nix build -L --no-link --rebuild
+.#checks.x86_64-linux.<name>` (task-61 tracks making `just ci` do that).
 
 Requirements for `just e2e`: Nix and rootless Podman on the host (native
 overlay storage driver, see Container setup), with a

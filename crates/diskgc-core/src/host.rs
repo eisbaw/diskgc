@@ -590,6 +590,167 @@ impl Environ {
     }
 }
 
+/// The four user ids, or the four group ids, of a process: the `Uid:` or
+/// `Gid:` line of `/proc/<pid>/status` (real, effective, saved set,
+/// filesystem).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ids {
+    pub real: u32,
+    pub effective: u32,
+    pub saved: u32,
+    pub fs: u32,
+}
+
+impl Ids {
+    /// The same id four times.
+    pub fn same(id: u32) -> Self {
+        Self {
+            real: id,
+            effective: id,
+            saved: id,
+            fs: id,
+        }
+    }
+
+    /// The four ids, in `status` order.
+    pub fn all(self) -> [u32; 4] {
+        [self.real, self.effective, self.saved, self.fs]
+    }
+}
+
+impl fmt::Display for Ids {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {} {}",
+            self.real, self.effective, self.saved, self.fs
+        )
+    }
+}
+
+/// What every visible process shows about itself, also when its other
+/// `/proc` entries cannot be read (a non-dumpable process, another user's):
+/// `/proc/<pid>/status` is world-readable, and so are the owners of the
+/// entries below `/proc/<pid>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcStatus {
+    /// `Name:`: the command name (at most 15 bytes, as the kernel keeps it).
+    pub name: OsString,
+    /// `Uid:`.
+    pub uid: Ids,
+    /// `Gid:`.
+    pub gid: Ids,
+    /// `CapPrm:`: the permitted capability set (bit n is capability n).
+    pub cap_permitted: u64,
+    /// `CapEff:`: the effective capability set. The kernel shows a
+    /// process's fds and maps to a reader of the same user namespace only
+    /// if the reader's effective set includes the process's permitted set
+    /// (`cap_ptrace_access_check` with `PTRACE_MODE_READ_FSCREDS`), even
+    /// when both have the same uid (`systemd --user` holds
+    /// `CAP_WAKE_ALARM`).
+    pub cap_effective: u64,
+    /// `/proc/<pid>/uid_map` (readable for every process), shown relative
+    /// to the reader's user namespace. The text is no identity:
+    /// two sibling namespaces can show the same mapping. Only the full
+    /// identity map (`0 0 4294967295`) is telling, read by a reader whose
+    /// own map is that too: the initial user namespace, or a child of it
+    /// that only real root can create.
+    pub uid_map: UidMap,
+    /// The owner of `/proc/<pid>/task/<tid>/fd` for a **live** task of the
+    /// process (its `stat`, read before and after, shows it neither ended
+    /// nor exiting): the effective uid while the process is dumpable, root
+    /// of its memory map's user namespace (0, or the overflow uid 65534
+    /// where diskgc's namespace does not map it) while it is not
+    /// (fs/proc/base.c `task_dump_owner`). The leader's own entry is not
+    /// enough: a leader that called `pthread_exit` has no memory map and
+    /// shows root on some kernels while its live threads are dumpable.
+    /// `None` when no live task could be found or the owner not read.
+    pub fd_dir_owner: Option<u32>,
+}
+
+/// What reading `/proc/<pid>/uid_map` gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UidMap {
+    /// Its text.
+    Map(String),
+    /// It does not exist (`ENOENT`: a kernel without user namespaces).
+    Absent,
+    /// It could not be read for another reason (kept for the notes).
+    Unreadable(String),
+}
+
+impl UidMap {
+    /// The text, if it was read.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Map(text) => Some(text),
+            Self::Absent | Self::Unreadable(_) => None,
+        }
+    }
+}
+
+/// An AF_UNIX socket bound to a filesystem name, as the kernel's socket
+/// diagnostics report it (`NETLINK_SOCK_DIAG`, `UNIX_DIAG_VFS`): the device
+/// and inode of the socket **file** (not of the sockfs inode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BoundSocket {
+    pub dev: Dev,
+    /// The low 32 bits of the inode number: the kernel reports it as a
+    /// `__u32` (`struct unix_diag_vfs`), so callers compare the low 32 bits
+    /// of their own (a coincidence of those bits makes a socket file look
+    /// bound: the conservative side).
+    pub ino: u32,
+}
+
+impl BoundSocket {
+    /// Whether this may be the socket file `id`: by the low 32 bits of its
+    /// inode number alone, whatever the device. The kernel reports the
+    /// superblock's device, which `statx` does not show on btrfs
+    /// subvolumes (an anonymous device per subvolume) or on an overlay of
+    /// several filesystems, so devices are not comparable; ignoring them
+    /// only adds matches (a stale socket kept as live), the safe side.
+    pub fn is(&self, id: DevIno) -> bool {
+        u64::from(self.ino) == id.ino & u64::from(u32::MAX)
+    }
+}
+
+/// Everything the in-use check reads of one process ([`read_proc_view`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcView {
+    pub fds: Vec<ProcFd>,
+    pub maps: Vec<MapEntry>,
+    pub cwd: Vec<LinkTarget>,
+    pub root: Vec<LinkTarget>,
+    pub exe: Vec<LinkTarget>,
+    /// The environment, or why it could not be read (kept: the in-use
+    /// check decides what a failed environment means).
+    pub environ: Result<Environ, ProcError>,
+}
+
+/// Reads one process for the in-use check through the readers of `host`:
+/// fds, memory map, cwd, root, exe, then environment. The first reader
+/// that fails, other than the environment's, is the result: the others are
+/// not asked (a process of another user costs one refused read).
+pub fn read_proc_view<H: Host + ?Sized>(host: &H, pid: Pid) -> Result<ProcView, ProcError> {
+    let fds = host.proc_fds(pid)?;
+    let maps = host.proc_maps(pid)?;
+    let cwd = host.proc_links(pid, ProcLink::Cwd)?;
+    let root = host.proc_links(pid, ProcLink::Root)?;
+    let exe = host.proc_links(pid, ProcLink::Exe)?;
+    let environ = match host.proc_environ(pid) {
+        Err(ProcError::Gone) => return Err(ProcError::Gone),
+        other => other,
+    };
+    Ok(ProcView {
+        fds,
+        maps,
+        cwd,
+        root,
+        exe,
+        environ,
+    })
+}
+
 /// Why a `/proc/<pid>` reader returned nothing (docs/safety.md, In use:
 /// unreadable or vanishing processes). Callers treat everything except
 /// `Ok` and `Gone` as "may be using anything".
@@ -714,6 +875,39 @@ pub trait Host {
 
     /// The process's initial environment, read through a live task.
     fn proc_environ(&self, pid: Pid) -> Result<Environ, ProcError>;
+
+    /// [`read_proc_view`] of every pid in `pids`, results in the same
+    /// order. The provided method reads them one after another through the
+    /// readers above (so a model or a wrapper sees every reader call);
+    /// `LinuxHost` reads several processes at once. Each process is read on
+    /// its own, so the order and overlap of reads of different processes
+    /// changes nothing about any one result.
+    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
+        pids.iter().map(|pid| read_proc_view(self, *pid)).collect()
+    }
+
+    /// diskgc's own process id (`getpid`), as [`Host::pids`] lists it.
+    fn own_pid(&self) -> Pid;
+
+    /// What the in-use check needs to judge a process whose other entries
+    /// cannot be read (docs/safety.md, In use), all readable for every
+    /// process: one read of `/proc/<pid>/status` (`Name:`, `Uid:`, `Gid:`,
+    /// `CapPrm:`, `CapEff:`), `/proc/<pid>/uid_map` (optional), and the
+    /// owner of the `fd` directory of a live task (`statx`, not followed;
+    /// see [`ProcStatus::fd_dir_owner`]).
+    fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError>;
+
+    /// Every AF_UNIX socket bound to a filesystem name in diskgc's network
+    /// namespace: the union of two complete `NETLINK_SOCK_DIAG` dumps of
+    /// `AF_UNIX` sockets in every state with `UDIAG_SHOW_VFS` (a read-only
+    /// query). One dump is not a snapshot: the kernel resumes it by
+    /// position within a hash bucket, so a socket closed meanwhile can make
+    /// it skip a stable one, without marking the dump interrupted; missing
+    /// a socket in both takes such a close during each. Sockets without a
+    /// filesystem name (abstract, unnamed) are left out; sockets of other
+    /// network namespaces are invisible. A dump that fails, is cut short or
+    /// holds a truncated datagram is an error, never a shorter list.
+    fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError>;
 }
 
 /// The result of [`Host::read_dir`].
@@ -846,6 +1040,33 @@ mod tests {
                 "{n}"
             );
         }
+    }
+
+    /// The kernel reports a bound socket file's inode as 32 bits and its
+    /// superblock's device: the match compares the low 32 bits of the
+    /// file's inode, on any device.
+    #[test]
+    fn a_bound_socket_matches_by_the_low_32_bits_on_any_device() {
+        let dev = Dev {
+            major: 0,
+            minor: 42,
+        };
+        let socket = BoundSocket { dev, ino: 7 };
+        assert!(socket.is(DevIno { dev, ino: 7 }));
+        assert!(socket.is(DevIno {
+            dev,
+            ino: (1 << 32) | 7
+        }));
+        assert!(!socket.is(DevIno { dev, ino: 8 }));
+        // statx on a btrfs subvolume or a mixed overlay shows another
+        // device than the superblock's the kernel reports: still bound.
+        assert!(socket.is(DevIno {
+            dev: Dev {
+                major: 0,
+                minor: 43
+            },
+            ino: 7
+        }));
     }
 
     #[test]

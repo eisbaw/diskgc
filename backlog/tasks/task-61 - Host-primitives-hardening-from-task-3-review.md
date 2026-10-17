@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 13:18'
+updated_date: '2026-10-17 16:30'
 labels:
   - wave-1
   - hardening
@@ -132,6 +132,24 @@ From task-51's review (mped, QA):
 (24) Two over-long lines in testing.md's Controlled pause and kill points bullets.
 
 Filed from task-5's deep gate (round 1; mped/Codex), for a later hardening pass: (1) the deletion engine's reopen cost is quadratic in the depth of a single deep chain (frames past the 16-fd window are reopened from the nearest open ancestor): consider checkpoint fds (e.g. keep every 16th ancestor) or a depth cap with a skip reason; (2) Delete::fchmod takes any permission bits, while its one caller only adds owner write: consider narrowing it to add_owner_write(dir) so the gated surface cannot remove permissions or set setuid bits; (3) untested scenarios: an entry renamed OUT of a candidate between walk and delete (expected: its checked_unlink finds ENOENT -> changed), and a bind mount over a FILE inside a candidate appearing after the walk (unlinkat EBUSY -> changed; a container test needs root to bind-mount while the driver is paused); (4) the engine module docs (diskgc-core/src/engine/mod.rs) restate safety.md's walk-shape paragraph: point to safety.md instead so the rule has one home.
+
+From task-5's final review (Codex, mped, QA):
+(25) Deadline check immediately before make_writable's fchmod: the deadline can expire during a directory open or its identity statx, after which delete calls make_writable without another check, contradicting safety.md's 'never once the deadline has passed'. Cover with a model clock advance after the open.
+(26) LinuxHost statx without AT_NO_AUTOMOUNT: statx(2) triggers automount on the last name unless the flag is passed, so the walk would mount an autofs point inside a candidate (a dead NFS one could hang). One-line fix; openat2 with RESOLVE_NO_XDEV already returns EXDEV before automounting. Untested reasoning from fs/stat.c.
+(27) Model support for inode reuse (a replace that keeps the inode number) so type and birth-time compares are pinned at both comparison sites; a test that chowns a directory to pin the owner check at reopen.
+(28) A listing test with a 255-byte name, pinning that the RawDir buffer never yields EINVAL.
+(29) Dead match arm in the walk's open_failure (inner ResolveError::Host(_) => Changed); restructure so removing the earlier arm cannot turn host errors into changed.
+(30) Stale text: the task-51 note here says listings use dir_names over rustix Dir::new; they now use for_each_name over RawDir (task-5). safety.md 'Scope' says directories are matched by (device, inode); the identity is (device, inode, owner, type, birth time).
+(31) block_ipc false has no enforcement that the caller consults ipc_entries(); documented in Rules and the task-6 note.
+
+From task-6: (1) round-9 H1 (transient Denied/Failed while a process execs) is absorbed by task-6's re-reads (2, 8, 30 ms) of unreadable processes whose status gives no lasting reason; a process mid-exec looks non-dumpable for a moment, so non-dumpable ones are re-read before they are excused. (2) Scan cost: on a desktop the fd tables of multi-threaded processes dominate (proc_fds reads every task's table; a browser with 44 threads x 470 fds was 93 ms of a 0.9 s single-threaded scan). task-6 added LinuxHost::proc_views (8 threads; about 0.2 s for 500 processes under load). A further cut, if needed: read a task's fd table only when it is not shared with an already-read task, e.g. kcmp(KCMP_FILES) made AFTER the representative's read (sharing is never re-joined, so equal-after-read means equal throughout); rustix has no kcmp wrapper and the source scan forbids raw syscall, so it would need a reviewed wrapper.
+
+From task-6's deep gate round 1 (deferred, filed by the coordinator): (1) held_by_deleted_files on btrfs (device of deleted files vs the requested filesystem's statx device) and bytes double-counted when several processes hold the same deleted file; (2) never reuse an unsettled scan in inuse::Checker; (3) measure how the 16-listing bound (inuse::scan::MAX_LISTINGS) converges under configure/make -j fork rates; (4) the environ heuristic could also split values at whitespace and '=' (only adds matches); (5) docs/safety.md limit 4 should also cover pid reuse after a process was read; (6) add bcachefs to inuse MAPS_BY_INODE; (7) make the in_use message for a newgrp/sg shell (dumpable, same uid, other group) read well: it currently says 'cannot be inspected', which hides why.
+
+From task-6's deep gate round 2 (deferred, filed by the coordinator): (1) proc_status does more work than needed for other users' processes (uid_map, task listing and live-task owner are only needed for the user's own); (2) LinuxHost::proc_views swallows reader-thread spawn failures without logging (the work still gets done by the remaining threads); (3) inuse::Scan::processes() counts gone and unreadable entries too (every entry with a read map), name or split it; (4) Codex's non-blocking note on per-process retry spacing is covered by task-6's per-pid due times (each_process_is_read_again_on_its_own_schedule).
+
+Correction to 'From task-6 (1)' (the first task-6 note here): round-9 H1 is no longer absorbed by 'non-dumpable ones are re-read before excused' alone; since task-6 round 3 every refused process of the user is re-read and an excuse needs every one of its status reads (four, counted apart from environment-only failures) to agree, with one exception (a last read finding another user's process). Item (2) there (kcmp dedup) stands.
+From task-6's deep gate round 3 (deferred, filed by the coordinator): (1) pid reuse within a scan is detected only by 'found gone, listed again' (once per pid); identify a process by pid plus start time or by a held pidfd; (2) a live read-only test asserting that systemd --user, when refused, is excused as more capable (environment-dependent today: the live scan only prints notes); (3) rename engine::delete to delete_unchecked or narrow its visibility, and make inuse::Checker::with_options non-public or guarded; (4) a non-dumpable process caught exiting on its 4th status read gives a false in_use (safe, costs reclaim); (5) pull gather's scheduler (due times, listing budget) into its own struct; (6) QA: on this machine 'nix flake check' can report all checks passed while building nothing; docs/testing.md (Commands) now says gates build checks explicitly; make 'just ci' build them explicitly with --rebuild; (7) Codex's mixed-outcome note is fixed in task-6 round 4 (refusals counted on their own, a_late_refusal_gets_every_classification).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

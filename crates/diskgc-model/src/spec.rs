@@ -48,6 +48,15 @@ pub struct HostModel {
     /// The visible processes other than diskgc itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub processes: Vec<ProcessSpec>,
+    /// diskgc's own pid (`own_pid`; default 65000). It is listed among the
+    /// pids; its fds are the ones the code under test holds open, its other
+    /// `/proc` entries read as `Failed` (not modelled), its uid is 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_pid: Option<u32>,
+    /// diskgc's own `uid_map` as it reads it; default the initial user
+    /// namespace's (`none`: unreadable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_uid_map: Option<String>,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
@@ -159,6 +168,10 @@ pub struct FileSpec {
     /// Holds a valid `CACHEDIR.TAG` signature.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cachedir_tag: bool,
+    /// Only with `type: socket`: a socket is bound to this file in
+    /// diskgc's network namespace (`bound_unix_sockets` reports it).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bound: bool,
 }
 
 /// `socket`, `fifo` or `char_device`.
@@ -241,6 +254,34 @@ pub struct ProcessSpec {
     /// How reading its `/proc` entry goes.
     #[serde(default, skip_serializing_if = "ProcAccess::is_readable")]
     pub proc: ProcAccess,
+    /// Its command name (`Name:` in `status`); default: the last name of
+    /// `exe`, or `?`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its real, saved and filesystem uid; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// Its effective uid (and saved, as after a setuid exec); default
+    /// `uid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub euid: Option<u32>,
+    /// Its four gids; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// Not dumpable: its `/proc/<pid>/fd` is owned by root (0) instead of
+    /// its effective uid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub non_dumpable: bool,
+    /// Its `/proc/<pid>/uid_map` as diskgc reads it; default the initial
+    /// user namespace's, diskgc's own (another text: a user namespace of
+    /// its own, e.g. `"0 1000 1"` after `unshare -r`; `none`: unreadable,
+    /// as on a kernel without user namespaces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid_map: Option<String>,
+    /// Holds a permitted capability (`CAP_WAKE_ALARM`, as `systemd --user`
+    /// does) that diskgc lacks.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub privileged: bool,
 }
 
 /// The outcome of every `/proc/<pid>` read of a process.
@@ -318,15 +359,51 @@ pub struct EventSpec {
     /// A process exits: its fds close and its pid is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<u32>,
+    /// A process forks: a new process `child`, a copy of `pid` whose fds
+    /// share `pid`'s open file descriptions (and their locks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkSpec>,
+    /// A process becomes dumpable (`true`) or not (`false`): what the owner
+    /// of its `fd` directory shows from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dumpable: Option<DumpableSpec>,
+    /// How reading a process's `/proc` entry goes from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AccessSpec>,
     /// The clock jumps forward (e.g. a suspend).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance: Option<Elapsed>,
     /// The call the event is addressed to fails with this errno, given by
     /// name (e.g. `EIO`, `EACCES`), without acting.
     /// Only with an `op` trigger, `when: before`, and an op that can fail
-    /// this way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`.
+    /// this way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`,
+    /// `bound_unix_sockets`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,
+}
+
+/// A process and how reading its `/proc` entry goes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessSpec {
+    pub pid: u32,
+    pub proc: ProcAccess,
+}
+
+/// A process and whether it is dumpable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DumpableSpec {
+    pub pid: u32,
+    pub value: bool,
+}
+
+/// A process and the pid of the child it forks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSpec {
+    pub pid: u32,
+    pub child: u32,
 }
 
 /// A path and its new owner.
@@ -407,6 +484,9 @@ pub enum Op {
     ProcLinks,
     ProcMaps,
     ProcEnviron,
+    OwnPid,
+    ProcStatus,
+    BoundUnixSockets,
     Unlinkat,
     Fchmod,
 }
@@ -428,6 +508,9 @@ impl Op {
             Self::ProcLinks => "proc_links",
             Self::ProcMaps => "proc_maps",
             Self::ProcEnviron => "proc_environ",
+            Self::OwnPid => "own_pid",
+            Self::ProcStatus => "proc_status",
+            Self::BoundUnixSockets => "bound_unix_sockets",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",
         }

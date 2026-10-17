@@ -33,8 +33,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Base, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode, MapEntry, MonoTime,
-    MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat, TryLock, Unlink, WaitLock,
+    Base, BoundSocket, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode,
+    MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
+    ProcView, Space, Stat, TryLock, Unlink, WaitLock,
 };
 
 use crate::exit;
@@ -61,6 +62,10 @@ pub const OPS: &[&str] = &[
     "proc_links",
     "proc_maps",
     "proc_environ",
+    "proc_views",
+    "own_pid",
+    "proc_status",
+    "bound_unix_sockets",
     "unlinkat",
     "fchmod",
 ];
@@ -272,6 +277,17 @@ impl<H> Controlled<H> {
         }
     }
 
+    /// Whether a planned point names a `/proc` reader, or a call by number
+    /// (which could fall on one): then the readers must be called one by
+    /// one through this wrapper.
+    fn targets_readers(&self) -> bool {
+        const READERS: [&str; 4] = ["proc_fds", "proc_links", "proc_maps", "proc_environ"];
+        self.plan.iter().any(|(point, _, _)| match point {
+            Point::Call(_) => true,
+            Point::Nth { op, .. } => READERS.contains(op),
+        })
+    }
+
     /// Port calls made so far.
     pub fn calls(&self) -> u64 {
         self.calls.get()
@@ -474,6 +490,36 @@ impl<H: Host> Host for Controlled<H> {
         self.before("proc_environ");
         self.host.proc_environ(pid)
     }
+
+    /// The inner host's own (`LinuxHost`: several processes at once), as
+    /// one call, unless a planned point names a `/proc` reader or a call by
+    /// number: then the provided method, one reader call after another,
+    /// each counted and pausable.
+    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
+        if self.targets_readers() {
+            return pids
+                .iter()
+                .map(|pid| diskgc_core::host::read_proc_view(self, *pid))
+                .collect();
+        }
+        self.before("proc_views");
+        self.host.proc_views(pids)
+    }
+
+    fn own_pid(&self) -> Pid {
+        self.before("own_pid");
+        self.host.own_pid()
+    }
+
+    fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
+        self.before("proc_status");
+        self.host.proc_status(pid)
+    }
+
+    fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError> {
+        self.before("bound_unix_sockets");
+        self.host.bound_unix_sockets()
+    }
 }
 
 impl<H: Delete> Delete for Controlled<H> {
@@ -556,6 +602,13 @@ processes:
         host.proc_links(Pid(42), ProcLink::Cwd).expect("proc_links");
         host.proc_maps(Pid(42)).expect("proc_maps");
         host.proc_environ(Pid(42)).expect("proc_environ");
+        // Delegated as one call: the model's provided method then reads
+        // the readers itself (not counted here); one pid, five readers
+        // plus the environment.
+        assert_eq!(host.proc_views(&[Pid(42)]).len(), 1);
+        host.own_pid();
+        host.proc_status(Pid(42)).expect("proc_status");
+        host.bound_unix_sockets().expect("bound_unix_sockets");
         host.statx(Base::Dir(&a.fd), Path::new("sub"))
             .expect("statx");
         host.unlinkat(&a.fd, OsStr::new("sub"), Unlink::Dir)
@@ -574,8 +627,9 @@ processes:
             "every operation counted: {ops:?}"
         );
         assert!(OPS.iter().all(|op| ops.contains_key(op)), "{ops:?}");
-        // The model records each port call on its trace: one count each.
-        assert_eq!(host.calls(), host.host.trace().len() as u64);
+        // The model records each port call on its trace: one count each,
+        // except the delegated proc_views, one count for its 6 reader calls.
+        assert_eq!(host.calls() + 5, host.host.trace().len() as u64);
         assert_eq!(ops.values().sum::<u64>(), host.calls());
         assert!(hits.borrow().is_empty());
         assert!(host.unreached().is_empty());
@@ -583,6 +637,35 @@ processes:
 
     /// A kill stands in for death by panicking; the model's trace then
     /// shows whether the killed call was performed.
+    /// `proc_views` goes to the inner host as one call unless a point
+    /// names a `/proc` reader or a call number; then each reader call is
+    /// made (and counted, and pausable) here.
+    #[test]
+    fn proc_views_is_delegated_unless_a_point_targets_a_reader() {
+        let (host, _) = recorded(Plan::new().at(
+            Point::Nth {
+                op: "statx",
+                nth: 99,
+            },
+            Action::Pause,
+        ));
+        host.proc_views(&[Pid(42)]);
+        assert_eq!(host.calls_per_op().get("proc_views"), Some(&1));
+        assert_eq!(host.calls_per_op().get("proc_fds"), None);
+        for point in [
+            Point::Nth {
+                op: "proc_maps",
+                nth: 99,
+            },
+            Point::Call(999),
+        ] {
+            let (host, _) = recorded(Plan::new().at(point, Action::Pause));
+            host.proc_views(&[Pid(42)]);
+            assert_eq!(host.calls_per_op().get("proc_views"), None, "{point}");
+            assert_eq!(host.calls_per_op().get("proc_fds"), Some(&1), "{point}");
+        }
+    }
+
     #[test]
     fn a_point_acts_before_its_call_and_a_kill_stops_the_run_there() {
         // Call 5 is resolve's second statx (of the opened /tmp/a); the

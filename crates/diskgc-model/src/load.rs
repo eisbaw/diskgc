@@ -8,12 +8,18 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::host::{Access, Environ, Errno, LockMode};
+use diskgc_core::host::{Access, Environ, Errno, Ids, LockMode};
 
 use crate::spec::{
     At, DirAttrs, EventSpec, FileSpec, HostModel, LockModeSpec, NodeSpec, Op, Special, When,
 };
-use crate::state::{Fault, Fs, Kind, Loc, Mount, Proc, Ref, State, normal_names, timestamp};
+use crate::state::{
+    DEFAULT_ID, Fault, Fs, Kind, Loc, Mount, Proc, Ref, State, normal_names, timestamp,
+};
+
+/// The capability a `privileged: true` process holds (as `systemd --user`
+/// does).
+const CAP_WAKE_ALARM: u32 = 35;
 
 /// The kernel release a model reports unless it says otherwise.
 pub const DEFAULT_KERNEL: &str = "6.12.0-model";
@@ -96,6 +102,18 @@ pub enum Action {
         path: PathBuf,
     },
     Exit(u32),
+    Fork {
+        pid: u32,
+        child: u32,
+    },
+    Dumpable {
+        pid: u32,
+        value: bool,
+    },
+    Access {
+        pid: u32,
+        proc: crate::spec::ProcAccess,
+    },
     Advance(Duration),
     /// The call the event fires before fails with this errno.
     Fail(Errno),
@@ -131,6 +149,14 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         .clone()
         .unwrap_or_else(|| DEFAULT_KERNEL.to_owned());
     let mut state = State::new(model.clock.0, kernel);
+    if let Some(pid) = model.own_pid {
+        state.own_pid = pid;
+    }
+    match model.own_uid_map.as_deref() {
+        None => {}
+        Some("none") => state.own_uid_map = None,
+        Some(map) => state.own_uid_map = Some(map.to_owned()),
+    }
     load_mounts(&mut state, model)?;
     let deferred = load_tree(&mut state, model)?;
     load_processes(&mut state, model)?;
@@ -421,9 +447,16 @@ fn create_node(
                     "only regular files have a size or a CACHEDIR.TAG signature",
                 ));
             }
+            if spec.bound && !matches!(kind, Kind::Socket) {
+                return Err(LoadError::new(at, "only a socket can be 'bound'"));
+            }
             let loc = state
                 .create_in(dir, name.as_ref(), kind)
                 .map_err(|f| LoadError::fault(at, f))?;
+            if spec.bound {
+                let id = state.dev_ino(loc);
+                state.bound_sockets.insert(id);
+            }
             let mtime = timestamp(spec.mtime.map_or(model.clock.0, |t| t.0));
             let inode = state.inode_mut(loc);
             inode.size = spec.size.map_or(0, |s| s.0);
@@ -510,6 +543,20 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
             .iter()
             .map(|p| reference(state, &format!("{at}.maps"), p))
             .collect::<Result<_, _>>()?;
+        if spec.pid == state.own_pid {
+            return Err(LoadError::new(at, "is diskgc's own pid (own_pid)"));
+        }
+        let uid = spec.uid.unwrap_or(DEFAULT_ID);
+        let euid = spec.euid.unwrap_or(uid);
+        let name = spec.name.clone().map_or_else(
+            || {
+                spec.exe
+                    .as_ref()
+                    .and_then(|e| e.file_name())
+                    .map_or_else(|| "?".into(), ToOwned::to_owned)
+            },
+            Into::into,
+        );
         state.procs.insert(
             spec.pid,
             Proc {
@@ -520,6 +567,25 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
                 fds: BTreeMap::new(),
                 maps,
                 access: spec.proc,
+                name,
+                uid: Ids {
+                    real: uid,
+                    effective: euid,
+                    saved: euid,
+                    fs: euid,
+                },
+                gid: Ids::same(spec.gid.unwrap_or(DEFAULT_ID)),
+                dumpable: !spec.non_dumpable,
+                uid_map: match spec.uid_map.as_deref() {
+                    None => Some(crate::state::INIT_UID_MAP.to_owned()),
+                    Some("none") => None,
+                    Some(map) => Some(map.to_owned()),
+                },
+                cap_permitted: if spec.privileged {
+                    1 << CAP_WAKE_ALARM
+                } else {
+                    0
+                },
             },
         );
         for fd in &spec.fds {
@@ -599,6 +665,13 @@ fn remove_deleted(state: &mut State, model: &HostModel) -> Result<(), LoadError>
 }
 
 fn load_events(state: &State, model: &HostModel) -> Result<Vec<Event>, LoadError> {
+    // Children forked by events may be named by any event (events fire in
+    // trace order, not in declaration order).
+    let forked: BTreeSet<u32> = model
+        .events
+        .iter()
+        .filter_map(|e| e.fork.as_ref().map(|f| f.child))
+        .collect();
     model
         .events
         .iter()
@@ -608,7 +681,7 @@ fn load_events(state: &State, model: &HostModel) -> Result<Vec<Event>, LoadError
             Ok(Event {
                 index,
                 trigger: trigger(&spec.at).map_err(|m| LoadError::new(format!("{at}.at"), m))?,
-                action: action(state, spec).map_err(|m| LoadError::new(&at, m))?,
+                action: action(state, spec, &forked).map_err(|m| LoadError::new(&at, m))?,
             })
         })
         .collect()
@@ -653,12 +726,14 @@ fn trigger(at: &At) -> Result<Trigger, String> {
     }
 }
 
-fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
+fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Action, String> {
     let known_pid = |pid: u32| {
-        if state.procs.contains_key(&pid) {
+        if state.procs.contains_key(&pid) || forked.contains(&pid) {
             Ok(pid)
         } else {
-            Err(format!("pid {pid} is not one of the processes"))
+            Err(format!(
+                "pid {pid} is not one of the processes (or a child an earlier event forks)"
+            ))
         }
     };
     let path = |p: &PathBuf| {
@@ -706,6 +781,24 @@ fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
     if let Some(pid) = spec.exit {
         actions.push(Action::Exit(known_pid(pid)?));
     }
+    if let Some(a) = &spec.access {
+        actions.push(Action::Access {
+            pid: known_pid(a.pid)?,
+            proc: a.proc,
+        });
+    }
+    if let Some(d) = &spec.dumpable {
+        actions.push(Action::Dumpable {
+            pid: known_pid(d.pid)?,
+            value: d.value,
+        });
+    }
+    if let Some(f) = &spec.fork {
+        actions.push(Action::Fork {
+            pid: known_pid(f.pid)?,
+            child: f.child,
+        });
+    }
     if let Some(d) = spec.advance {
         actions.push(Action::Advance(d.0));
     }
@@ -716,6 +809,7 @@ fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
             Op::ReadDir,
             Op::Unlinkat,
             Op::Fchmod,
+            Op::BoundUnixSockets,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}
@@ -732,7 +826,7 @@ fn action(state: &State, spec: &EventSpec) -> Result<Action, String> {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
             "no action (create, mkdir, remove, rename, replace, chown, open, close, \
-                  exit, advance, fail)"
+                  exit, fork, dumpable, access, advance, fail)"
                 .to_owned(),
         ),
         _ => Err("more than one action; use one event per action".to_owned()),

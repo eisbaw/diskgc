@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 13:31'
+updated_date: '2026-10-17 15:40'
 labels:
   - wave-2
   - config
@@ -45,6 +45,10 @@ Forward-carried from task-3 review (mped): main.rs currently applies the kernel 
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/): the config schema needs the socket/FIFO policy decided on task-5 (block on any vs only live ones). Also, the example config's idle thresholds were the only ones the dogfood probe could use (the catalog defines no defaults); the simulated reclaim moved from 27G to 120G between idle 30d and 1d, so the defaults matter.
 
 From task-5 (deletion engine): the user's dogfooding decision made contains_ipc a policy, now a flag of the walk: diskgc_core::engine::Rules::block_ipc (true, the default: any socket or FIFO keeps its candidate; false: the walk records them in WalkRecord::ipc_entries() and the in-use check of task-6 refuses the live ones). docs/safety.md (eligibility walk) describes both and says only the default is reachable until the schema defines the setting: name the key here (in docs/reference.md, Configuration), default = block any. The PRD already carries the wording (Safety boundaries and What bad looks like, edited during task-5's review: a socket or FIFO deleted under the default policy, or, under any policy, one a visible process holds open or has bound); keep the config text consistent with it.
+
+From task-6: the IPC policy maps to two values the config must set together: engine::Rules::block_ipc (walk) and inuse::Options::sockets (ask the kernel's socket diagnostics). 'live only' = block_ipc false + sockets true. inuse::Options::users must be the same list as Rules::owners (diskgc's uid, or owners: under --allow-root): it decides which unreadable processes are 'the user's' (docs/safety.md, In use).
+
+From task-6 round 2: use inuse::Options::from_rules(&rules) rather than setting users/sockets by hand; delete_unused refuses options that disagree with the walk's rules.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

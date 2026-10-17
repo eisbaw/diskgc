@@ -73,6 +73,8 @@ pub const DEFAULT_MAX_ENTRIES: usize = 2_000_000;
 pub struct Candidate<'a, F> {
     parent: &'a F,
     mount_id: u64,
+    /// The filesystem type of the candidate's mount (mountinfo).
+    fs_type: &'a str,
     path: &'a Path,
     name: &'a OsStr,
 }
@@ -87,6 +89,7 @@ impl<'a, F> Candidate<'a, F> {
         crate::host::is_single_name(name).then_some(Self {
             parent: &parent.fd,
             mount_id: parent.mount.id,
+            fs_type: &parent.mount.fs_type,
             path,
             name,
         })
@@ -102,6 +105,17 @@ impl<'a, F> Candidate<'a, F> {
 
     pub fn mount_id(&self) -> u64 {
         self.mount_id
+    }
+
+    /// The filesystem type of the mount the candidate is on (the walk never
+    /// leaves it).
+    pub fn fs_type(&self) -> &str {
+        self.fs_type
+    }
+
+    /// The parent directory's fd (for opening the candidate below it).
+    pub fn parent(&self) -> &F {
+        self.parent
     }
 }
 
@@ -236,6 +250,24 @@ impl WalkRecord {
         found
     }
 
+    /// The path, relative to the candidate's (empty: the candidate itself),
+    /// of the first entry in record order whose (device, inode) is `id`; for
+    /// messages about a match.
+    pub fn path_of(&self, id: DevIno) -> Option<PathBuf> {
+        let mut todo = vec![(&self.root, PathBuf::new())];
+        while let Some((entry, rel)) = todo.pop() {
+            if entry.identity.id == id {
+                return Some(rel);
+            }
+            if let Some(listing) = entry.listing {
+                for child in self.listings[listing].iter().rev() {
+                    todo.push((child, rel.join(&child.name)));
+                }
+            }
+        }
+        None
+    }
+
     fn listing(&self, index: usize) -> &[Entry] {
         &self.listings[index]
     }
@@ -269,6 +301,13 @@ pub enum Reason {
     Changed,
     /// More entries than [`Rules::max_entries`].
     TooManyEntries,
+    /// A visible process uses one of the candidate's objects, names a path
+    /// inside it in its initial environment, or could be using it (an
+    /// unreadable process, an incomplete process scan): the in-use check
+    /// (docs/safety.md, In use; [`crate::inuse`]).
+    InUse,
+    /// The candidate directory is `flock`ed by someone else.
+    Locked,
 }
 
 impl Reason {
@@ -285,6 +324,8 @@ impl Reason {
             Self::UnsupportedFs => "unsupported_fs",
             Self::Changed => "changed",
             Self::TooManyEntries => "too_many_entries",
+            Self::InUse => "in_use",
+            Self::Locked => "locked",
         }
     }
 }
@@ -304,7 +345,7 @@ pub struct Skip {
 }
 
 impl Skip {
-    fn new(reason: Reason, path: PathBuf, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(reason: Reason, path: PathBuf, detail: impl Into<String>) -> Self {
         Self {
             reason,
             path,

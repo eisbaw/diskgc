@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 13:17'
+updated_date: '2026-10-17 16:30'
 labels:
   - wave-1
   - irreversible
@@ -41,6 +41,14 @@ From task-51: the race tests drive single operations through diskgc-e2e-driver (
 From task-5 (deletion engine): delete inside each locked profile directory by running engine::walk + engine::delete per entry (a Candidate is an open parent fd, its mount id and the entry's path): .fingerprint/ first, then every other entry except the lock files (never make a lock file a candidate). The recogniser only looks inside a candidate, so entries of a profile directory are not contains_special. The engine stops at the first identity mismatch (End::Changed) and reports End::Failed { ENOTEMPTY } when Cargo created something after the walk; End::GateRefused is a run error. Call positions are reproducible (names sorted per directory), which race test 6's seeded kill positions can rely on.
 
 From task-5 round 2 (deep gate): the engine now refuses (contains_special) any candidate holding an entry with a known Cargo lock name (.cargo-lock, .cargo-build-lock, .cargo-artifact-lock) anywhere, the candidate itself included, so a profile directory can never be a plain-delete candidate. This task's plan is unaffected: its candidates are the entries of a locked profile directory except the lock files (.fingerprint/, deps/, build/, incremental/, binaries), which hold no lock files in the layouts measured (Cargo 1.90 and 1.96 put them at the profile root). If one ever does, the engine refuses that entry (contains_special), which is the conservative outcome (treat as unsupported_layout here). Candidate::new now takes the parent's &Resolved plus the entry's path.
+
+From task-6: the Cargo protocol holds the Cargo lock files, not a flock on each entry, so do not use inuse::delete_unused for the entries of a locked profile dir; use inuse::Checker::check(host, &candidate, &record) after the walk of each entry and start engine::delete before the returned Clear.fresh_until (re-check with a new scan, checker.forget(), when it passed). The Cargo-specific process heuristics (task-9) run on the same scan. A suspend between check and delete is handled by fresh_until (CLOCK_BOOTTIME).
+
+From task-6 round 2: Checker::check now re-checks against a new scan itself when the scan is stale after the verdict; call it right before each engine::delete and start the delete at once (Clear::fresh_until is the hard limit). Build the Checker with Options::from_rules of the entry walk's Rules.
+
+From task-6 round 3 (SUPERSEDES the two earlier task-6 notes on this task, which contradicted each other on freshness): the API is settled. Build one checker with inuse::Checker::new(&rules, inuse::REUSE_LIMIT) from the Rules of the entries' walks. For each entry of a locked profile dir: engine::walk, then checker.check(host, &candidate, &record) -> Result<Result<Clear, Skip>, HostError> (a Clear is made only there and only if its scan is fresh after the verdict; the checker itself rescans once otherwise), then inuse::delete_cleared(host, clear, &candidate, &record, options) -> Result<Deletion, Clear>, which refuses an expired Clear (Err: call checker.forget() and check again, once). Do not call engine::delete directly for checked candidates; delete_cleared is the deletion entry point.
+
+From task-6 round 4 (amends the round-3 note): inuse::delete_cleared now returns Result<Deletion, NotCleared>: NotCleared::Expired(Clear) (forget and check again, once) or NotCleared::OtherCandidate (the Clear was made for another walk record: a bug). Clear is not Copy or Clone and carries the record root's identity.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -815,7 +815,7 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "diskgc-core.workspace = true",
             "workspace: diskgc-core = { path = \"crates/diskgc-core\" }",
             "rustix.workspace = true",
-            "workspace: rustix = { version = \"1.1.5\", features = [\"event\", \"fs\", \"process\", \"system\", \"time\"] }",
+            "workspace: rustix = { version = \"1.1.5\", features = [\"event\", \"fs\", \"net\", \"process\", \"system\", \"time\"] }",
         ],
     ),
 ];
@@ -872,6 +872,11 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Word("execve"),
     Pattern::Word("execveat"),
     Pattern::Word("posix_spawn"),
+    // Creating a name: binding an AF_UNIX socket to a path makes a socket
+    // file (rustix's `net` feature, std's `UnixListener::bind`). The `net`
+    // feature is there for one read-only query, the socket diagnostics of
+    // `bound_unix_sockets` (task-6), which binds nothing.
+    Pattern::Word("bind"),
     // Namespace or root changes.
     Pattern::Word("setns"),
     Pattern::Word("unshare"),
@@ -901,6 +906,15 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         file: "crates/diskgc-linux/src/host.rs",
         function: "fchmod_permitted",
         gate: Gate::Permit,
+        matches: 1,
+    },
+    // `RecvFlags::TRUNC` (MSG_TRUNC) is a receive flag of the socket
+    // diagnostics query: it reports a datagram's real length so a cut-short
+    // one is detected. It truncates nothing on disk.
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "recv_datagram",
+        gate: Gate::Ungated("MSG_TRUNC on a netlink recv; reads only, no file is opened"),
         matches: 1,
     },
     // The deletion engine's one caller of each deleting port method: with
@@ -1090,7 +1104,7 @@ mod tests {
             (
                 "a rustix feature in the workspace",
                 manifest.clone(),
-                workspace.replace("\"fs\", \"process\"", "\"fs\", \"mount\", \"process\""),
+                workspace.replace("\"net\", \"process\"", "\"net\", \"mount\", \"process\""),
             ),
             (
                 "a feature of a dependency",
@@ -1398,6 +1412,7 @@ mod tests {
             "rustix::fs::fchmod(fd, m);",
             "rustix::fs::chmodat(d, p, m, f);",
             "std::fs::set_permissions(p, perm);",
+            "rustix::net::bind(fd, &addr);",
             "std::process::Command::new(\"docker\");",
             "let pid = unsafe { fork() };",
             "let pid = unsafe { vfork() };",

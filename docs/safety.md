@@ -78,8 +78,22 @@ Immediately before acting, diskgc walks the candidate's whole tree
   every socket and FIFO and the in-use check, which runs after the walk,
   decides with the same scan; a stale one (a test fixture's FIFO nothing
   holds open) is deleted with its candidate, and one whose liveness cannot
-  be told counts as live. Only the default is reachable until the
-  configuration schema defines the setting.
+  be told counts as live. A FIFO is live when a visible process has it open
+  (`in_use`). A socket is live when the kernel's socket diagnostics
+  (`NETLINK_SOCK_DIAG` with `UDIAG_SHOW_VFS`, read-only) report a socket
+  bound to that file, matched by the low 32 bits of its inode on any device
+  (`contains_ipc`): the kernel's inode field is 32 bits, and its device is
+  the superblock's, which `statx` does not show on a btrfs subvolume or an
+  overlay of several filesystems; a coincidence counts as bound. One dump
+  is not a snapshot (the kernel resumes it by position in a hash bucket, so
+  one socket closed meanwhile can make it skip a stable one, and it does not
+  say so), so a scan takes two complete dumps and uses their union: missing
+  a socket that stays bound takes such a close during each, two timed
+  events (an accepted limit). A dump that fails, is cut short or holds a
+  truncated datagram makes every socket live. Sockets bound in another
+  network namespace are not seen, so a socket file used only from another
+  network namespace looks stale and is deleted. Only the default is reachable until
+  the configuration schema defines the setting.
 - **Not protected or excluded** by overlap with a `protect` entry or a
   negated profile ([reference.md](reference.md#protect)).
 
@@ -142,16 +156,116 @@ A candidate is skipped (`in_use`) if a visible process:
 - has, in its **initial** environment (`/proc/<pid>/environ`), a variable
   whose value is a path inside the candidate (e.g. `TMPDIR` of a dormant
   `nix develop` shell). This is a heuristic: `environ` shows the environment
-  at `exec`, so a variable changed later by `export` is invisible.
+  at `exec`, so a variable changed later by `export` is invisible. A value
+  counts component by component when it is a `:` list (`PATH`), each
+  absolute component compared with the candidate's path as written and with
+  `.` and `..` resolved lexically; relative values, symlinked paths and
+  paths of other mount namespaces are not recognised. A process whose
+  environment cannot be read while its other entries can (`Failed`: an
+  empty environment, as after `env -i`, which cannot be told apart from a
+  read racing an exec) is read again like any unreadable process; if it
+  stays so, the heuristic has no evidence from it and it is noted, but it
+  does not block: its fds, mappings and directories still count, an empty
+  environment names nothing, and a read caught by an exec clears on the
+  re-reads.
 
 Or it is a directory locked with `flock` by someone else (`locked`), the
-convention systemd-tmpfiles also honours.
+convention systemd-tmpfiles also honours: diskgc opens the candidate
+directory below its parent and takes an exclusive `flock` without waiting
+(Deletion, step 1); a lock held by anyone else, shared or exclusive, makes
+that fail. The walk then runs under the lock and must find the locked
+directory (same device and inode): a directory replaced between the open and
+the walk is `changed`. Only directories are locked; a candidate that is a
+single file is not.
 
-**Unreadable or vanishing processes:** a process of the same user whose
-`fd` directory cannot be read (`EACCES`: non-dumpable processes such as
-`gpg-agent`, `ssh-agent` or setuid children) makes every candidate it could
-be using `in_use`, i.e. it is treated as using everything it might. A
-process is gone only when the kernel says so through a pidfd for it: the
+**Every process, and only once settled.** The scan works in rounds: it
+lists the processes, then reads every one it has not read yet and every
+one that is due to be read again (below), and lists them again, until a
+listing calls for no read. A process that forks a child (which inherits
+its fds, working directory and mappings) and then closes a file before
+diskgc reads it shows nothing of that file, but the child was born before
+that read, so it is in a later listing and is read there; re-reads, and the
+status reads that can find a process gone, are made before a listing too,
+never after the last one. Every read only adds: a use any read of a process
+found counts, also when a later read of it fails or finds it gone. A pid
+found gone and listed again was reused (or is a zombie not yet reaped): it
+is read again as a new process, once per scan. After 16
+listings that each brought new pids the scan is unsettled, and every
+candidate is `in_use`; listings made only for re-reads do not count (they
+are bounded by the re-reads each process gets) (a process it did not read could have inherited
+anything); a machine that keeps starting processes faster than the scan
+reads them costs reclaim that way. diskgc's own process is never counted:
+it holds the candidate open and locked while it checks it.
+
+**Unreadable or vanishing processes:** a process that cannot be read is
+read again, each process on its own schedule: 2 ms after its first read, 8
+ms after its second, 30 ms after its third (an exiting process is gone by
+then, one caught in an exec readable), and so is a readable one whose
+environment could not be read. What stays unreadable is judged by what
+every process shows of itself: `/proc/<pid>/status` (its `Uid:` real,
+effective, saved and filesystem uid, `Gid:`, `CapPrm:`, `CapEff:`), its
+`uid_map` (absent on a kernel without user namespaces), and the owner of
+the `fd` directory of a live task of it (`/proc/<pid>/task/<tid>/fd`, for
+a task whose `stat` shows it neither ended nor exiting before and after),
+which is the effective uid while the process is dumpable and root while it
+is not. The leader's own entries do
+not tell: `/proc/<pid>` always shows the effective uid, and a leader that
+called `pthread_exit` has no memory map and shows root on some kernels
+while its live threads are dumpable. *The user* means the users whose
+files candidates may hold: diskgc's own uid, or the `owners:` under
+`--allow-root`; a process is the user's when any of its four uids is.
+Then (user decision 2026-10-17: read literally, the earlier rule, every
+unreadable same-user process makes every candidate `in_use`, blocks all
+reclaim on any desktop):
+
+- another user's process (refused, `EACCES` or `EPERM`, and none of its
+  uids is the user's) is invisible (Visibility, below) and never blocks;
+  it is the only one not read again;
+- a process the kernel refuses is noted and does not block when its
+  status explains the refusal as a privilege boundary on **every** read of
+  it in the scan (its status is read with each of its failed reads); one
+  read without that explanation and it blocks, so that one event (an exec
+  swapping a dead leader and its survivor under one tid can make one read
+  show a false non-dumpable owner) is not enough. A process refused gets
+  four status reads of its own (reads that failed only for its
+  environment do not use them up). One exception: when the last read
+  finds it another user's (refused, none of its uids the user's: a `sudo`
+  or `su` child after its `setresuid`), that stands:
+  - **setuid**: its effective uid is not the user's (`sudo -i`,
+    `fusermount3`);
+  - **more capable**: it holds a permitted capability that diskgc's
+    *effective* set lacks, and both diskgc's `uid_map` and its own read as
+    the full identity map (`0 0 4294967295`), taken as both being in the
+    initial user namespace: the kernel shows a process of the reader's
+    user namespace only to a reader whose effective set includes its
+    permitted set (`systemd --user` holds `CAP_WAKE_ALARM`). Equal map
+    text alone proves nothing (two sibling namespaces can both show
+    `1000 1000 1`), and the namespace itself cannot be read without the
+    access that was refused. So when diskgc runs in another user namespace
+    (a rootless container), or a map does not exist (no user namespaces in
+    the kernel) or cannot be read (noted with its reason), this excuse
+    never applies. Limit: a child namespace with the full identity map, which
+    only real root can make, is taken as the initial one. A process in a
+    user namespace diskgc's user created (`unshare -r`) is readable
+    whatever it holds there, so a refusal of it is something else;
+  - **non-dumpable**: every one of its four uids is the user's and the
+    live task's `fd` directory is owned by another uid than its effective
+    one (root, or the overflow uid 65534 where root is not mapped into
+    diskgc's namespace) (`ssh-agent`, `gpg-agent`, `(sd-pam)`); when no
+    live task can be found, it is not excused;
+- any other unreadable process of the user makes every candidate `in_use`:
+  one whose reads fail for another reason (also another user's: a failed
+  read says nothing about who may read it), one whose status cannot be
+  read, and one refused although it is dumpable, unprivileged and the
+  user's (a shell started with `newgrp` or `sg`: the kernel also compares
+  groups).
+
+The cost of the noted ones is stated plainly: their open files, mappings
+and working directories are not seen, so a candidate one of them uses can
+be deleted under it. A process in the middle of an exec is briefly
+non-dumpable or refused, which is why every refused process of the user is
+read again before it is excused. A process is gone only when the kernel
+says so through a pidfd for it: the
 pidfd cannot be opened because no task is left, or polling it reports a
 hang-up (the pid has no task left; Linux 6.9 and later), or polling it
 reports readable and a read of `/proc/<pid>/status` made after that poll
@@ -258,22 +372,41 @@ once; none of them makes diskgc take a live process for gone):
 5. the check and the deletion are not atomic: a process that starts using
    a candidate after its in-use check (including a thread that acquires
    files after a round's count) is not seen. The check is kept fresh (see
-   Freshness below), not atomic with the deletion.
+   Freshness below), not atomic with the deletion;
+6. a file handed to a process that was already read (an fd passed over a
+   Unix socket, `SCM_RIGHTS`) is a new use of the same kind, and an fd in
+   flight in a socket's queue belongs to no process at all: neither is
+   seen.
 
 **Overlay and btrfs:** `maps` can report a different (device, inode) than
-`stat` on overlayfs and btrfs subvolumes; diskgc matches both the reported
-pair and the underlying inode where the kernel exposes it, and the
-differential tests cover overlay.
+`stat` on overlayfs and btrfs subvolumes (the layer's or volume's device,
+and on older kernels the layer's inode). For a candidate on one of them, a
+mapping therefore also matches an object by inode number alone, on any
+device: more matches, the conservative side. Fds, working directories and
+executables are statted through their links and match exactly. Linux 7.2
+reports the overlay's own pair in `maps` (the container test logs it); the
+inode-only match is exercised by the model only. Limit: where overlayfs
+composes its inode numbers from the layer's (`xino`) and the kernel shows
+the layer's inode in `maps`, a mapping alone does not match.
 
 **Freshness:** the `/proc` scan used for a candidate is never older than one
 second (monotonic clock including suspend time) when that candidate's
-deletion starts. Buckets
+deletion starts. A scan is as old as its first read. One scan serves the
+candidates checked within half a second of its start. The check that
+clears a candidate looks at the clock as its last step before the
+deletion starts; if its scan is no longer fresh then (a suspend during the
+scan or right after it, a slow scan), the candidate is checked again
+against a new scan, and if that one is not fresh either, it is an error of
+the run, not a skip. Refusing needs no freshness. Buckets
 ([architecture.md](architecture.md#the-index)) only group candidates for
-scheduling; each member gets its own check under this bound.
+scheduling; each member gets its own check under this bound, which a scan
+less than half a second old may answer: a use that starts after that scan
+is limit 5 above.
 
 **Visibility:** without root, other users' `/proc/<pid>/fd` cannot be read,
-so their use of *your* files is not seen. Fine for one-user machines and
-runners; weaker on shared hosts.
+so their use of *your* files is not seen; nor is the use of the user's own
+processes noted above as unreadable (setuid, more capable, non-dumpable).
+Fine for one-user machines and runners; weaker on shared hosts.
 
 ### Deletion
 
@@ -328,8 +461,10 @@ stops there, partial.
   nothing; the signed `avail_delta` shows that.
 - **Deleted but open:** a file deleted while still open keeps its space
   until the process closes it. Every report lists such files on the
-  requested filesystem (`held_by_deleted_files`). diskgc never kills
-  processes.
+  requested filesystem (`held_by_deleted_files`): the open fds of visible
+  processes on regular files with link count 0, per process, each file's
+  allocated bytes counted once. A deleted file that is only mapped (its fd
+  closed) is not listed. diskgc never kills processes.
 - **tmpfs:** if `/tmp` is a tmpfs, profiles under it only help a request for
   that tmpfs (filesystem matching), which is correct: it frees memory, not
   disk.

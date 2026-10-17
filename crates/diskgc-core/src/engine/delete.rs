@@ -223,7 +223,7 @@ enum Unlinked {
 }
 
 /// The identity-checked unlink (docs/safety.md, Deletion): `statx` of
-/// `name` in `dir`, its (device, inode, owner, type) compared with
+/// `name` in `dir`, its (device, inode, owner, type, birth time) compared with
 /// `expected`, then `unlinkat` as the very next port call. The only caller
 /// of `Delete::unlinkat` in production code (a source-scan allowlist entry
 /// enforces it), so no unlink can skip the check.

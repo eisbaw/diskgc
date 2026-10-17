@@ -39,9 +39,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, Delete, DevIno, DirListing, Environ, Errno, Host, HostError, LinkTarget,
-    LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink,
-    Space, Stat, TryLock, Unlink, WaitLock, is_single_name,
+    Access, Base, BoundSocket, Delete, DevIno, DirListing, Environ, Errno, Host, HostError, Ids,
+    LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
+    ProcLink, ProcStatus, Space, Stat, TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -338,6 +338,18 @@ impl ModelHost {
         let path = PathBuf::from(format!("/proc/{pid}/{what}"));
         let shown = path.display().to_string();
         self.call(op, Some(path), None, |inner| {
+            if pid.0 == inner.state.own_pid {
+                let error = HostError::invalid(
+                    "read",
+                    &shown,
+                    "diskgc's own process: only its fds are modelled",
+                );
+                return (
+                    Err(ProcError::Failed(error)),
+                    None,
+                    "failed (own)".to_owned(),
+                );
+            }
             let Some(proc) = inner.state.procs.get(&pid.0) else {
                 return (Err(ProcError::Gone), None, "gone".to_owned());
             };
@@ -493,6 +505,25 @@ impl Inner {
             Action::Open { pid, path } => state.proc_open(*pid, path, None).map(drop),
             Action::Close { pid, path } => state.proc_close(*pid, path),
             Action::Exit(pid) => state.proc_exit(*pid),
+            Action::Fork { pid, child } => state.proc_fork(*pid, *child),
+            Action::Access { pid, proc } => match state.procs.get_mut(pid) {
+                Some(p) => {
+                    p.access = *proc;
+                    Ok(())
+                }
+                None => Err(crate::state::Fault::Model(format!(
+                    "access: no process {pid}"
+                ))),
+            },
+            Action::Dumpable { pid, value } => match state.procs.get_mut(pid) {
+                Some(proc) => {
+                    proc.dumpable = *value;
+                    Ok(())
+                }
+                None => Err(crate::state::Fault::Model(format!(
+                    "dumpable: no process {pid}"
+                ))),
+            },
             Action::Advance(d) => {
                 state.elapsed += *d;
                 Ok(())
@@ -856,14 +887,42 @@ impl Host for ModelHost {
         })
     }
 
+    /// The processes and diskgc's own pid, sorted.
     fn pids(&self) -> Result<Vec<Pid>, HostError> {
         self.call(Op::Pids, None, None, |inner| {
-            let pids = inner.state.procs.keys().map(|p| Pid(*p)).collect();
+            let mut pids: Vec<Pid> = inner.state.procs.keys().map(|p| Pid(*p)).collect();
+            pids.push(Pid(inner.state.own_pid));
+            pids.sort_unstable();
             (Ok(pids), None, "ok".to_owned())
         })
     }
 
+    /// For diskgc's own pid: the fds the code under test holds open.
     fn proc_fds(&self, pid: Pid) -> Result<Vec<ProcFd>, ProcError> {
+        let own = self.inner.borrow().state.own_pid;
+        if pid.0 == own {
+            let path = PathBuf::from(format!("/proc/{pid}/fd"));
+            return self.call(Op::ProcFds, Some(path), None, |inner| {
+                let state = &inner.state;
+                let fds = state
+                    .own_ofds
+                    .iter()
+                    .zip(3..)
+                    .map(|(ofd, fd)| {
+                        let ofd = &state.ofds[ofd];
+                        let r = Ref {
+                            loc: ofd.loc,
+                            path: ofd.path.clone(),
+                        };
+                        ProcFd {
+                            fd,
+                            target: link_target(state, &r),
+                        }
+                    })
+                    .collect();
+                (Ok(fds), None, "ok (own)".to_owned())
+            });
+        }
         self.proc_call(
             Op::ProcFds,
             pid,
@@ -932,6 +991,69 @@ impl Host for ModelHost {
             |_, proc| proc.environ.clone(),
             |env| env.vars.is_empty() && env.without_equals.is_empty(),
         )
+    }
+
+    fn own_pid(&self) -> Pid {
+        self.call(Op::OwnPid, None, None, |inner| {
+            let pid = Pid(inner.state.own_pid);
+            (pid, None, pid.to_string())
+        })
+    }
+
+    /// Readable for every process, whatever its `proc:` says (as on Linux,
+    /// where `status` is world-readable). diskgc itself is uid 1000.
+    fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
+        let path = PathBuf::from(format!("/proc/{pid}/status"));
+        self.call(Op::ProcStatus, Some(path), None, |inner| {
+            if pid.0 == inner.state.own_pid {
+                let status = ProcStatus {
+                    name: "diskgc".into(),
+                    uid: Ids::same(crate::state::DEFAULT_ID),
+                    gid: Ids::same(crate::state::DEFAULT_ID),
+                    cap_permitted: 0,
+                    cap_effective: 0,
+                    uid_map: crate::state::uid_map(inner.state.own_uid_map.as_deref()),
+                    fd_dir_owner: Some(crate::state::DEFAULT_ID),
+                };
+                return (Ok(status), None, "ok (own)".to_owned());
+            }
+            let Some(proc) = inner.state.procs.get(&pid.0) else {
+                return (Err(ProcError::Gone), None, "gone".to_owned());
+            };
+            let status = ProcStatus {
+                name: proc.name.clone(),
+                uid: proc.uid,
+                gid: proc.gid,
+                cap_permitted: proc.cap_permitted,
+                cap_effective: 0,
+                uid_map: crate::state::uid_map(proc.uid_map.as_deref()),
+                fd_dir_owner: Some(if proc.dumpable { proc.uid.effective } else { 0 }),
+            };
+            (Ok(status), None, "ok".to_owned())
+        })
+    }
+
+    fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError> {
+        self.call(Op::BoundUnixSockets, None, None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("sock_diag", "AF_UNIX sockets", errno)),
+                    None,
+                    errno_text(errno),
+                );
+            }
+            let sockets = inner
+                .state
+                .bound_sockets
+                .iter()
+                .map(|id| BoundSocket {
+                    dev: id.dev,
+                    // The kernel reports the low 32 bits.
+                    ino: (id.ino & u64::from(u32::MAX)) as u32,
+                })
+                .collect();
+            (Ok(sockets), None, "ok".to_owned())
+        })
     }
 }
 

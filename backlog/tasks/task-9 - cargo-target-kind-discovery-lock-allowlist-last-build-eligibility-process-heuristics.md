@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 12:50'
+updated_date: '2026-10-17 14:58'
 labels:
   - wave-1
   - irreversible
@@ -47,6 +47,8 @@ Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp
 From task-51: the race tests drive single operations through diskgc-e2e-driver (diskgc-e2e/src/driver.rs); add this task's operation (Cargo discovery / reclaim protocol) as a subcommand in driver::run, generic over H: Delete so its unit tests run on ModelHost, with indexed result lines. Every port call it makes is countable by the controlled wrapper (pause/kill points).
 
 From task-5 (deletion engine): the structural recogniser lives in the walk (diskgc-core engine/walk.rs): an entry matching .cargo-*lock* (is_cargo_lock_name; any lock name, known or not) in a directory P whose parent or grandparent INSIDE the candidate (the candidate itself included) holds an entry named CACHEDIR.TAG makes the candidate contains_special; the tag's signature is not read. Discovery (valid CACHEDIR.TAG, known lock allowlist) is this task's and stricter. Note the kind's own deletion (task-53) must not run the plain walk on the whole target (it would be contains_special by design): walk/delete the entries inside each locked profile directory as separate candidates.
+
+From task-6 (in-use check, diskgc-core inuse): the cargo process heuristics (exe or cwd in the target, a cargo* process with cwd in the project dir, CARGO_TARGET_DIR) should read the same scan, not a second one. inuse::Scan today exposes uses by (dev, ino) (fd, cwd, root, exe, maps), initial-environment paths (values split at ':', absolute components) and per-pid commands (last name of exe); 'exe or cwd inside the target' is already covered by matching the walked target's objects. Missing for this task: per process, its cwd (dev, ino and link text) and exe name in a form the cargo rules can query (cwd inside the project dir = the project dir's walked objects, or path text as a heuristic). Add an accessor on Scan rather than storing derived state. Unreadable processes follow the narrowed rule in docs/safety.md (In use); a Failed environment alone is no environ evidence (task-6 decision), so CARGO_TARGET_DIR of an env -i cargo is invisible.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

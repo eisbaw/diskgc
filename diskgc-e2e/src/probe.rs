@@ -42,6 +42,22 @@ pub fn main(args: &[String]) -> i32 {
             crate::host_probe::hold_thread(Path::new(file), Path::new(cwd), mode)
         }
         [cmd, rest @ ..] if cmd.starts_with("host-") => crate::host_probe::main(cmd, rest),
+        [cmd, file] if cmd == "hold-map" => crate::inuse_probe::hold_map(Path::new(file)),
+        [cmd, var, value] if cmd == "hold-export" => crate::inuse_probe::hold_export(var, value),
+        [cmd, file] if cmd == "hold-fork" => crate::inuse_probe::hold_fork(Path::new(file)),
+        [cmd, fifo] if cmd == "hold-fifo" => crate::inuse_probe::hold_fifo(Path::new(fifo)),
+        [cmd, path] if cmd == "bind-socket" => crate::inuse_probe::bind_socket(Path::new(path)),
+        [cmd, file, cwd] if cmd == "hold-nondumpable" => {
+            crate::inuse_probe::hold_nondumpable(Path::new(file), Path::new(cwd))
+        }
+        [cmd, ruid, euid, gid, sep, argv @ ..] if cmd == "exec-as" && sep == "--" => {
+            crate::inuse_probe::exec_as(ruid, euid, gid, argv)
+        }
+        [cmd, file] if cmd == "hold-userns" => crate::inuse_probe::hold_userns(Path::new(file)),
+        [cmd, file] if cmd == "hold-capable" => crate::inuse_probe::hold_capable(Path::new(file)),
+        [cmd, src, dst, file] if cmd == "ns-hold" => {
+            crate::inuse_probe::ns_hold(Path::new(src), Path::new(dst), file)
+        }
         _ => {
             eprintln!("diskgc-e2e probe: unknown probe {args:?}");
             return exit::USAGE;

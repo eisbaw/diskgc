@@ -27,7 +27,7 @@ diskgc-modelgen = { path = "crates/diskgc-modelgen" }
 # Raw Linux syscalls without libc wrappers (linux_raw backend): openat2,
 # statx, statvfs, flock, uname, clock_gettime, pidfd_open and poll. Pure
 # Rust, so the static musl build needs no C toolchain.
-rustix = { version = "1.1.5", features = ["event", "fs", "process", "system", "time"] }
+rustix = { version = "1.1.5", features = ["event", "fs", "net", "process", "system", "time"] }
 # Test-only crates (diskgc-model, diskgc-modelgen) so far: the host-model
 # format (YAML through serde, a JSON Schema for editors), its timestamps and
 # the property-test strategies.

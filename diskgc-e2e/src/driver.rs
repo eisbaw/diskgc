@@ -25,6 +25,13 @@
 //!   the run (e.g. `EMFILE`), `0 changed <path> entries=N -- <detail>` or `0 err <tag> <path>
 //!   entries=N -- <message>` when the delete stopped (N entries removed
 //!   before), `<path>` absolute;
+//! - `reclaim`: one line like `delete`'s, for the whole deletion step of
+//!   diskgc-core `inuse::delete_unused` (lock, walk, in-use check,
+//!   delete): also `0 skip in_use|locked|contains_ipc ...`, and `0 failed
+//!   <tag> <dir> -- <message>` for an error of the run; the scan's notes
+//!   (unreadable processes and why they do or do not block) go to stderr;
+//! - `held`: `I held pid=<pid> command=<command> bytes=<bytes>` per process
+//!   holding deleted files open on DIR's filesystem;
 //!
 //! where `<path>` is Rust's `{:?}` of the path, and `<tag>` is the errno
 //! name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip reason of
@@ -37,9 +44,10 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use diskgc_core::engine::{
-    self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, End, Rules, WalkStop,
+    self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Rules, WalkStop,
 };
 use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
+use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT, Stop, delete_unused};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
 
@@ -58,6 +66,12 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
     delete [--make-writable] DIR  the deletion engine on DIR: its eligibility
                                   walk (owned by this user, any socket or FIFO
                                   keeps it), then its identity-checked delete
+    reclaim [--ipc-live] DIR      the deletion step: flock DIR (locked if
+                                  someone holds one), the walk, the in-use
+                                  check of every visible process, the delete;
+                                  --ipc-live: only live sockets and FIFOs keep it
+    held DIR                      processes holding deleted files open on
+                                  DIR's filesystem, with their bytes
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -210,6 +224,11 @@ pub fn run<H: Delete>(
         ("delete", [flag, dir]) if flag == "--make-writable" => {
             delete(host, owner, Path::new(dir), options(true), &mut out)?;
         }
+        ("reclaim", [dir]) => reclaim(host, owner, Path::new(dir), false, &mut out)?,
+        ("reclaim", [flag, dir]) if flag == "--ipc-live" => {
+            reclaim(host, owner, Path::new(dir), true, &mut out)?;
+        }
+        ("held", [dir]) => held(host, owner, Path::new(dir), &mut out)?,
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
     Ok(Outcome { failed: out.failed })
@@ -328,11 +347,7 @@ fn delete<H: Delete>(
     options: DeleteOptions,
     out: &mut Lines<'_>,
 ) -> Result<(), String> {
-    let parent_path = dir
-        .parent()
-        .filter(|_| dir.file_name().is_some())
-        .ok_or_else(|| format!("{} has no parent directory", dir.display()))?;
-    let parent = resolve(host, parent_path, Want::Directory).map_err(|e| e.to_string())?;
+    let parent = parent_of(host, dir)?;
     let candidate = Candidate::new(&parent, dir)
         .ok_or_else(|| format!("{} does not end in a name", dir.display()))?;
     let rules = Rules {
@@ -342,23 +357,31 @@ fn delete<H: Delete>(
     };
     let record = match engine::walk(host, &candidate, &rules, None) {
         Ok(record) => record,
-        Err(WalkStop::Skipped(skip)) => {
-            out.err_line(format!(
-                "skip {} {:?} -- {}",
-                skip.reason, skip.path, skip.detail
-            ));
-            return Ok(());
-        }
-        Err(WalkStop::DeadlinePassed { path }) => {
-            out.err_line(format!("deadline {path:?}"));
-            return Ok(());
-        }
-        Err(WalkStop::Failed { path, error }) => {
-            out.err_line(format!("failed {} {path:?} -- {error}", cause_tag(&error)));
+        Err(stop) => {
+            walk_stopped(stop, out);
             return Ok(());
         }
     };
-    let done = engine::delete(host, &candidate, &record, options);
+    deleted(engine::delete(host, &candidate, &record, options), out);
+    Ok(())
+}
+
+/// The result line of a walk that ended without a record.
+fn walk_stopped(stop: WalkStop, out: &mut Lines<'_>) {
+    match stop {
+        WalkStop::Skipped(skip) => out.err_line(format!(
+            "skip {} {:?} -- {}",
+            skip.reason, skip.path, skip.detail
+        )),
+        WalkStop::DeadlinePassed { path } => out.err_line(format!("deadline {path:?}")),
+        WalkStop::Failed { path, error } => {
+            out.err_line(format!("failed {} {path:?} -- {error}", cause_tag(&error)));
+        }
+    }
+}
+
+/// The result line of a delete.
+fn deleted(done: Deletion, out: &mut Lines<'_>) {
     let n = done.removed_entries;
     match done.end {
         End::Complete => out.ok(format!("removed entries={n} bytes={}", done.removed_bytes)),
@@ -374,6 +397,95 @@ fn delete<H: Delete>(
             "err {} {path:?} entries={n} -- {error}",
             cause_tag(&error)
         )),
+    }
+}
+
+/// The parent of `dir`, resolved, for a candidate at `dir`.
+fn parent_of<H: Host>(
+    host: &H,
+    dir: &Path,
+) -> Result<diskgc_core::resolve::Resolved<H::Fd>, String> {
+    let parent_path = dir
+        .parent()
+        .filter(|_| dir.file_name().is_some())
+        .ok_or_else(|| format!("{} has no parent directory", dir.display()))?;
+    resolve(host, parent_path, Want::Directory).map_err(|e| e.to_string())
+}
+
+/// `reclaim [--ipc-live] DIR`: the deletion step of diskgc-core
+/// (`inuse::delete_unused`): lock DIR, walk it for the user `owner`, check
+/// it against a scan of every visible process, delete it. With
+/// `ipc_live`, sockets and FIFOs keep it only when live. Prints one result
+/// line, and the scan's notes on stderr.
+fn reclaim<H: Delete>(
+    host: &H,
+    owner: u32,
+    dir: &Path,
+    ipc_live: bool,
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let parent = parent_of(host, dir)?;
+    let candidate = Candidate::new(&parent, dir)
+        .ok_or_else(|| format!("{} does not end in a name", dir.display()))?;
+    let owners = [owner];
+    let rules = Rules {
+        owners: &owners,
+        block_ipc: !ipc_live,
+        max_entries: DEFAULT_MAX_ENTRIES,
+    };
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let result = delete_unused(
+        host,
+        &mut checker,
+        &candidate,
+        &rules,
+        DeleteOptions::default(),
+    );
+    if let Some(scan) = checker.latest() {
+        eprintln!(
+            "diskgc-e2e-driver: scan of {} processes ({} listings, {} gone) took {:?}",
+            scan.processes(),
+            scan.listings(),
+            scan.gone(),
+            scan.took()
+        );
+        for note in scan.notes() {
+            eprintln!("diskgc-e2e-driver: note: {note}");
+        }
+    }
+    match result {
+        Ok(done) => deleted(done, out),
+        Err(Stop::Skipped(skip)) => out.err_line(format!(
+            "skip {} {:?} -- {}",
+            skip.reason, skip.path, skip.detail
+        )),
+        Err(Stop::Walk(stop)) => walk_stopped(stop, out),
+        Err(Stop::Failed(error)) => {
+            out.err_line(format!("failed {} {dir:?} -- {error}", cause_tag(&error)));
+        }
+    }
+    Ok(())
+}
+
+/// `held DIR`: the processes holding deleted files open on DIR's
+/// filesystem (`held_by_deleted_files`), one line each.
+fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Result<(), String> {
+    let at = resolve(host, dir, Want::Directory).map_err(|e| e.to_string())?;
+    let scan = inuse::scan(
+        host,
+        &Options {
+            users: &[owner],
+            sockets: false,
+        },
+    )
+    .map_err(|e| format!("scan: {e}"))?;
+    for h in scan.held_by_deleted_files(at.stat.dev) {
+        out.ok(format!(
+            "held pid={} command={} bytes={}",
+            h.pid,
+            h.command.to_string_lossy(),
+            h.bytes
+        ));
     }
     Ok(())
 }
@@ -511,6 +623,36 @@ tree:
             got[0].starts_with("0 skip not_owner \"/tmp/keep\""),
             "{got:?}"
         );
+    }
+
+    /// `reclaim` runs the deletion step: a candidate a process uses is
+    /// skipped `in_use` (nothing unlinked), a free one is removed; `held`
+    /// lists a process holding a deleted file on the filesystem.
+    #[test]
+    fn reclaim_checks_in_use_and_held_lists_deleted_open_files() {
+        let model = format!(
+            "{MODEL}  /tmp/gone: {{size: 8K}}
+processes:
+  - {{pid: 42, exe: /tmp/keep, maps: [/tmp/keep], environ: [A=1], cwd: /tmp/t/sub,
+     fds: [{{path: /tmp/gone, deleted: true}}]}}
+"
+        );
+        let host = ModelHost::from_yaml(&model).unwrap_or_else(|e| panic!("{e}"));
+        let (outcome, got) = lines(&host, "reclaim", "/tmp/t/sub");
+        assert_eq!(outcome, Ok(Outcome { failed: 1 }));
+        assert!(
+            got[0].starts_with(
+                "0 skip in_use \"/tmp/t/sub\" -- pid 42 (keep) has it as its \
+                                working directory"
+            ),
+            "{got:?}"
+        );
+        let (outcome, got) = lines(&host, "reclaim", "/tmp/t/a b");
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }));
+        assert_eq!(got, ["0 removed entries=1 bytes=0"]);
+        let (outcome, got) = lines(&host, "held", "/tmp");
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }));
+        assert_eq!(got, ["0 held pid=42 command=keep bytes=8192"]);
     }
 
     #[test]

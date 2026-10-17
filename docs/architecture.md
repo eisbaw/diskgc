@@ -251,6 +251,17 @@ is accepted until measured otherwise.
   `run(argv, env, deadline)` on `Delete`, behind the pre-release sandbox
   gate. Each has one wrapper in `LinuxHost`, allowlisted by the source scan
   ([safety.md](safety.md#pre-release-sandbox-gate)).
+- **What the in-use check reads** ([safety.md](safety.md#in-use)): the
+  `/proc` readers; per process its `status`, `uid_map` and the owner of a
+  live task's `fd` directory (`proc_status`, readable for every process);
+  diskgc's own pid; and two socket-diagnostics dumps of the Unix sockets
+  bound in diskgc's network namespace (`bound_unix_sockets`, a read-only
+  `NETLINK_SOCK_DIAG` query: ungated, like the query runs). Reading a list
+  of processes is a provided method (`proc_views`) that calls the readers
+  one process after another, so `ModelHost` sees every reader call;
+  `LinuxHost` reads several processes at once, each on its own, and the
+  test driver's wrapper passes the call through to it unless a pause or
+  kill point names a reader.
 - **diskgc's own state** (the index snapshot) is written through one port
   operation that takes only a typed key (no fd or name from the caller):
   `LinuxHost` opens the state directory itself, creates the temporary file

@@ -581,6 +581,37 @@ pub(crate) fn collect<T>(
     )))
 }
 
+/// The owner of a live task's `fd` directory (see `ProcStatus::fd_dir_owner`
+/// in diskgc-core): the first of `tids` whose `stat` shows it live (not
+/// ended, not exiting, not a kernel thread) both before and after `owner`
+/// reads its directory's owner. `PF_EXITING` is set before a task releases
+/// its memory map and is never cleared, so a task live after the read had
+/// its memory map during it, and the owner reflects the process's
+/// dumpability. A task that ends or vanishes on the way is passed over;
+/// `None` when no task qualifies (the caller then cannot tell dumpability).
+/// An exited leader (`pthread_exit`) has no memory map and shows root on
+/// some kernels while live threads are dumpable: it is never the answer.
+pub(crate) fn owner_through_live_task(
+    tids: &[u32],
+    mut stat: impl FnMut(u32) -> Result<TaskStat, HostError>,
+    mut owner: impl FnMut(u32) -> Result<Option<u32>, HostError>,
+) -> Result<Option<u32>, HostError> {
+    for &tid in tids {
+        if task_status(&stat(tid))? != Status::Live {
+            continue;
+        }
+        let found = match owner(tid) {
+            Ok(found) => found,
+            Err(e) if is_vanished(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        if task_status(&stat(tid))? == Status::Live {
+            return Ok(found);
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,5 +1429,50 @@ mod tests {
             shortfall(&complete(&[10]), &ended),
             Some(Shortfall::NothingLive)
         );
+    }
+
+    /// The owner comes from a task that is live before and after the
+    /// read: an exited leader (root-owned, no memory map) is passed over
+    /// for a live worker; a task that starts exiting during the read is
+    /// not trusted; with no live task there is no answer.
+    #[test]
+    fn the_fd_owner_comes_from_a_task_live_around_the_read() {
+        // Leader 10 exited (pthread_exit): root-owned; worker 11 live.
+        let got = owner_through_live_task(
+            &[10, 11],
+            |tid| if tid == 10 { zombie() } else { live() },
+            |tid| Ok(Some(if tid == 10 { 0 } else { 1000 })),
+        );
+        assert_eq!(got, Ok(Some(1000)));
+        // The only task starts exiting while its owner is read.
+        let calls = Cell::new(0);
+        let got = owner_through_live_task(
+            &[10],
+            |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 { live() } else { exiting() }
+            },
+            |_| Ok(Some(0)),
+        );
+        assert_eq!(got, Ok(None), "an owner read during exit is not trusted");
+        // Nothing live: no answer; vanished tasks are passed over.
+        assert_eq!(
+            owner_through_live_task(&[10, 11], |_| dead(), |_| Ok(Some(0))),
+            Ok(None)
+        );
+        let got = owner_through_live_task(
+            &[10, 11],
+            |_| live(),
+            |tid| {
+                if tid == 10 {
+                    Err(errno(Errno::ENOENT))
+                } else {
+                    Ok(Some(1000))
+                }
+            },
+        );
+        assert_eq!(got, Ok(Some(1000)));
+        // Any other error is passed on.
+        assert!(owner_through_live_task(&[10], |_| live(), |_| Err(errno(Errno::EIO))).is_err());
     }
 }

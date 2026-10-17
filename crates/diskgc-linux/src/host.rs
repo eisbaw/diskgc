@@ -30,23 +30,25 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, Delete, DirListing, Environ, Errno, Host, HostError, LinkTarget, LockMode,
-    Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, Space, Stat,
-    TryLock, Unlink, WaitLock, is_single_name,
+    Access, Base, BoundSocket, Delete, DirListing, Environ, Errno, Host, HostError, LinkTarget,
+    LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink,
+    ProcStatus, ProcView, Space, Stat, TryLock, UidMap, Unlink, WaitLock, is_single_name,
+    read_proc_view,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
 
 use crate::mountinfo::parse_mountinfo;
 use crate::procfs::{
-    StatusFields, list_in_one_call, parse_environ, parse_maps, parse_status, read_confirmed,
-    read_in_one_call, read_two_passes,
+    StatusFields, list_in_one_call, parse_environ, parse_maps, parse_status, parse_status_ids,
+    read_confirmed, read_in_one_call, read_two_passes,
 };
 use crate::sandbox::{self, Permit};
+use crate::sockdiag;
 use crate::stat::{STATX_MASK, stat_from_statx};
 use crate::tasks::{
     Listed, Listing, PidfdPoll, Polled, Process, StatusRead, TaskStat, Tasks, Want, collect,
-    is_vanished, parse_task_stat,
+    is_vanished, owner_through_live_task, parse_task_stat,
 };
 
 /// Where procfs is expected. Named only where [`LinuxHost::new`] opens it
@@ -179,6 +181,14 @@ impl ProcRoot<'_> {
         })
         .map_err(|e| HostError::errno("getdents", Self::shown(rel), errno_of(e)))?;
         Ok(names)
+    }
+
+    /// The owner of `rel` itself (`statx`, not followed); `None` if the
+    /// kernel did not report it.
+    fn owner(self, rel: &str) -> Result<Option<u32>, HostError> {
+        rustix::fs::statx(self.0, rel, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+            .map(|x| stat_from_statx(&x).uid)
+            .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))
     }
 
     /// A magic link: its text and the object it refers to (`statx`
@@ -907,7 +917,203 @@ impl Host for LinuxHost {
         })?;
         Ok(parse_environ(&bytes))
     }
+
+    /// Reads the processes on up to [`PROC_READERS`] threads (this one
+    /// included), each taking the next unread pid: a scan of a desktop is
+    /// dominated by multi-threaded processes whose every task's fd table is
+    /// read (task-6 measured about 0.8 s for 480 processes on one thread).
+    /// A helper thread that cannot be started leaves its share to the
+    /// others; a reader that panics is a bug and panics here too.
+    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(PROC_READERS)
+            .min(pids.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let work = || {
+            let mut done = Vec::new();
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(pid) = pids.get(i) else {
+                    return done;
+                };
+                done.push((i, read_proc_view(self, *pid)));
+            }
+        };
+        let mut slots: Vec<Option<Result<ProcView, ProcError>>> = vec![None; pids.len()];
+        std::thread::scope(|scope| {
+            let helpers: Vec<_> = (1..threads)
+                .filter_map(|_| {
+                    std::thread::Builder::new()
+                        .name("diskgc-proc".into())
+                        .spawn_scoped(scope, work)
+                        .ok()
+                })
+                .collect();
+            let mut all = work();
+            for helper in helpers {
+                all.extend(helper.join().expect("a /proc reader thread panicked"));
+            }
+            for (i, view) in all {
+                slots[i] = Some(view);
+            }
+        });
+        slots
+            .into_iter()
+            .map(|slot| slot.expect("every pid was read by one thread"))
+            .collect()
+    }
+
+    fn own_pid(&self) -> Pid {
+        Pid(rustix::process::getpid()
+            .as_raw_nonzero()
+            .get()
+            .cast_unsigned())
+    }
+
+    /// `status`, `uid_map` and the `fd` directory of a live task are read by
+    /// number while the pidfd pins the process; a lookup that vanished
+    /// (`ENOENT`) is `Gone` only when the pidfd then reports a hang-up,
+    /// otherwise `Failed`. The live task is chosen by
+    /// [`crate::tasks::owner_through_live_task`].
+    fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let read = || -> Result<ProcStatus, ProcError> {
+            let path = format!("{pid}/status");
+            let text = proc.read(&path).map_err(ProcError::from_host)?;
+            let ids = parse_status_ids(&text).map_err(|e| {
+                ProcError::Failed(HostError::invalid("parse", ProcRoot::shown(&path), e))
+            })?;
+            // Optional: absent without user namespaces; then no excuse
+            // that needs it.
+            let uid_map = match proc.read(&format!("{pid}/uid_map")) {
+                Ok(bytes) => String::from_utf8(bytes)
+                    .map_or_else(|_| UidMap::Unreadable("not UTF-8".into()), UidMap::Map),
+                Err(e) if e.is(Errno::ENOENT) => UidMap::Absent,
+                Err(e) => UidMap::Unreadable(e.to_string()),
+            };
+            let fd_dir_owner = match task_ids(proc, pid)? {
+                None => None,
+                Some(tids) => owner_through_live_task(
+                    &tids,
+                    |tid| read_task_stat(proc, pid, tid),
+                    |tid| proc.owner(&task_path(pid, tid, "fd")),
+                )
+                .map_err(ProcError::from_host)?,
+            };
+            Ok(ProcStatus {
+                name: ids.name,
+                uid: ids.uid,
+                gid: ids.gid,
+                cap_permitted: ids.cap_permitted,
+                cap_effective: ids.cap_effective,
+                uid_map,
+                fd_dir_owner,
+            })
+        };
+        match read() {
+            Ok(status) => Ok(status),
+            Err(ProcError::Failed(e)) if is_vanished(&e) => match poll_pidfd(pid, &pidfd)? {
+                PidfdPoll::Hangup => Err(ProcError::Gone),
+                PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::Failed(e)),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Two complete dumps, each over a fresh `NETLINK_SOCK_DIAG` socket,
+    /// and their union (see [`crate::sockdiag`] for the request, the
+    /// answer and what fails it, and `Host::bound_unix_sockets` for why
+    /// one dump is not enough). Reads, never writes: the socket is not
+    /// bound to any name. A receive timeout bounds a kernel that never
+    /// answers.
+    fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError> {
+        sockdiag::union_of_two(sock_diag_dump)
+    }
 }
+
+/// What the socket dumps say in messages.
+const SOCK_DIAG_SUBJECT: &str = "AF_UNIX sockets of this network namespace";
+
+/// One complete socket-diagnostics dump of the bound AF_UNIX sockets.
+fn sock_diag_dump() -> Result<Vec<BoundSocket>, HostError> {
+    use rustix::net::{
+        AddressFamily, SendFlags, SocketFlags, SocketType, netlink, sockopt::Timeout,
+    };
+    let subject = SOCK_DIAG_SUBJECT;
+    let failed = |op: &'static str| move |e| HostError::errno(op, subject, errno_of(e));
+    let fd = rustix::net::socket_with(
+        AddressFamily::NETLINK,
+        SocketType::DGRAM,
+        SocketFlags::CLOEXEC,
+        Some(netlink::SOCK_DIAG),
+    )
+    .map_err(failed("socket"))?;
+    rustix::net::sockopt::set_socket_timeout(&fd, Timeout::Recv, Some(SOCK_DIAG_TIMEOUT))
+        .map_err(failed("setsockopt"))?;
+    let request = sockdiag::request(SOCK_DIAG_SEQ);
+    let sent = loop {
+        match rustix::net::send(&fd, &request, SendFlags::empty()) {
+            Err(rustix::io::Errno::INTR) => continue,
+            other => break other.map_err(failed("send"))?,
+        }
+    };
+    if sent != request.len() {
+        return Err(HostError::invalid(
+            "send",
+            subject,
+            format!("sent {sent} of {} bytes", request.len()),
+        ));
+    }
+    let mut sockets = Vec::new();
+    let mut buf = vec![0u8; SOCK_DIAG_BUFFER];
+    loop {
+        let len = recv_datagram(&fd, &mut buf)?;
+        if len == 0 {
+            return Err(HostError::invalid(
+                "recv",
+                subject,
+                "the dump ended without NLMSG_DONE",
+            ));
+        }
+        let part = sockdiag::parse(&buf[..len], SOCK_DIAG_SEQ)
+            .map_err(|e| HostError::invalid("sock_diag", subject, e))?;
+        sockets.extend(part.sockets);
+        if part.done {
+            return Ok(sockets);
+        }
+    }
+}
+
+/// One datagram of a dump into `buf`; its length. `MSG_TRUNC` makes the
+/// kernel return a datagram's real length even when it did not fit, so a
+/// truncated datagram is an error rather than a shorter answer (the flag
+/// truncates nothing on disk: it is a receive flag).
+fn recv_datagram(fd: &OwnedFd, buf: &mut [u8]) -> Result<usize, HostError> {
+    let (_, len) = loop {
+        match rustix::net::recv(fd, &mut *buf, rustix::net::RecvFlags::TRUNC) {
+            Err(rustix::io::Errno::INTR) => continue,
+            other => {
+                break other
+                    .map_err(|e| HostError::errno("recv", SOCK_DIAG_SUBJECT, errno_of(e)))?;
+            }
+        }
+    };
+    sockdiag::whole_datagram(len, buf.len())
+        .map_err(|e| HostError::invalid("recv", SOCK_DIAG_SUBJECT, e))
+}
+
+/// The most threads [`LinuxHost`]'s `proc_views` reads processes on.
+const PROC_READERS: usize = 8;
+
+/// The socket-diagnostics dump: its sequence number, its receive buffer
+/// (larger than any datagram the kernel sends for a dump, which it caps at
+/// 32 KiB; a larger one is detected, [`recv_datagram`]), and how long one receive
+/// may wait.
+const SOCK_DIAG_SEQ: u32 = 1;
+const SOCK_DIAG_BUFFER: usize = 64 * 1024;
+const SOCK_DIAG_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Every method runs [`gate`] first and hands its [`Permit`] to its one
 /// syscall wrapper ([`unlinkat_permitted`], [`fchmod_permitted`]), which
@@ -999,7 +1205,7 @@ mod tests {
     //! and a main thread that exits need the container tests (diskgc-e2e).
 
     use super::*;
-    use diskgc_core::host::Cause;
+    use diskgc_core::host::{Cause, Ids};
     use diskgc_core::resolve::{Want, resolve};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::MetadataExt;
@@ -1157,6 +1363,13 @@ mod tests {
         };
         match mode.as_str() {
             "plain" => hold(),
+            "nondumpable" => {
+                rustix::process::set_dumpable_behavior(
+                    rustix::process::DumpableBehavior::NotDumpable,
+                )
+                .expect("prctl(PR_SET_DUMPABLE, 0)");
+                hold();
+            }
             "big" => {
                 // Many fds and many mappings, kept until the holder ends.
                 let (soft, hard) = {
@@ -1549,6 +1762,163 @@ mod tests {
             cwds.iter().any(|c| c.stat.ino == Some(dir_id)),
             "the worker's cwd is missing: {cwds:?}"
         );
+    }
+
+    /// `proc_status` shows the ids of a process and whether it is dumpable
+    /// (the owner of its `fd` directory): the effective uid while it is,
+    /// root (or the overflow uid) once it is not, when its fds are `Denied`
+    /// to the same user. A
+    /// process that has exited and was reaped is `Gone`.
+    #[test]
+    fn proc_status_shows_ids_and_dumpability() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("status");
+        let file = dir.0.join("held");
+        std::fs::write(&file, b"held").expect("write");
+        let uid = rustix::process::getuid().as_raw();
+        let euid = rustix::process::geteuid().as_raw();
+
+        let plain = Holder::spawn("plain", &file, &dir.0);
+        let status = host.proc_status(plain.pid()).expect("status");
+        assert_eq!(status.uid.real, uid, "{status:?}");
+        assert_eq!(status.uid.effective, euid, "{status:?}");
+        assert_eq!(status.fd_dir_owner, Some(euid), "dumpable: {status:?}");
+        assert!(!status.name.is_empty(), "{status:?}");
+        assert!(host.proc_fds(plain.pid()).is_ok());
+
+        let hidden = Holder::spawn("nondumpable", &file, &dir.0);
+        let status = host.proc_status(hidden.pid()).expect("status");
+        assert_eq!(status.uid, Ids::same(uid), "{status:?}");
+        assert_eq!(status.uid.effective, euid, "{status:?}");
+        if euid != 0 {
+            // Root, or the overflow uid where root is not mapped (the Nix
+            // build sandbox): not the effective uid, either way.
+            assert!(
+                status.fd_dir_owner.is_some_and(|o| o != euid),
+                "non-dumpable: {status:?}"
+            );
+            assert!(
+                matches!(host.proc_fds(hidden.pid()), Err(ProcError::Denied(_))),
+                "a non-dumpable process's fds are denied to its own user"
+            );
+        }
+
+        let gone = {
+            let _fd_table = fd_table_guard();
+            let mut child = Command::new("/proc/self/exe")
+                .arg("--help")
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn");
+            let pid = Pid(child.id());
+            child.wait().expect("wait");
+            pid
+        };
+        assert!(
+            matches!(host.proc_status(gone), Err(ProcError::Gone)),
+            "a reaped process is gone"
+        );
+    }
+
+    /// The socket diagnostics report a socket bound to a file by the file's
+    /// (device, inode), and no longer once the socket is closed (the file
+    /// stays: a stale socket file).
+    #[test]
+    fn bound_unix_sockets_reports_a_bound_socket_file_until_it_closes() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("sockets");
+        let path = dir.0.join("live.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind a socket");
+        let meta = std::fs::symlink_metadata(&path).expect("stat the socket file");
+        let id = diskgc_core::host::DevIno {
+            dev: diskgc_core::host::Dev {
+                major: rustix::fs::major(meta.dev()),
+                minor: rustix::fs::minor(meta.dev()),
+            },
+            ino: meta.ino(),
+        };
+        let bound = host.bound_unix_sockets().expect("sock_diag dump");
+        assert!(
+            bound.iter().any(|s| s.is(id)),
+            "{id} is not among {} bound sockets",
+            bound.len()
+        );
+        drop(listener);
+        assert!(path.exists(), "closing a socket leaves its file");
+        let bound = host.bound_unix_sockets().expect("sock_diag dump");
+        assert!(
+            !bound.iter().any(|s| s.is(id)),
+            "{id} is still reported after the socket closed"
+        );
+    }
+
+    /// The in-use check on this machine, read-only: a candidate directory
+    /// holding a file a helper process keeps open is `in_use`, by that
+    /// process's pid; the same directory's sibling is clear. Prints what the
+    /// scan of the live `/proc` found and how long it took (the freshness
+    /// bound needs it well under a second).
+    #[test]
+    fn the_in_use_check_finds_a_holder_on_this_machine() {
+        use diskgc_core::engine::{Candidate, DEFAULT_MAX_ENTRIES, Reason, Rules, walk};
+        use diskgc_core::inuse::{Options, scan};
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("inuse");
+        let used = dir.0.join("used");
+        let free = dir.0.join("free");
+        std::fs::create_dir(&used).expect("mkdir");
+        std::fs::create_dir(&free).expect("mkdir");
+        let file = used.join("held");
+        std::fs::write(&file, b"held").expect("write");
+        std::fs::write(free.join("f"), b"f").expect("write");
+        let holder = Holder::spawn("plain", &file, &dir.0);
+
+        let uid = rustix::process::geteuid().as_raw();
+        let parent = resolve(&host, &dir.0, Want::Directory).expect("resolve");
+        let rules = Rules {
+            owners: &[uid],
+            block_ipc: true,
+            max_entries: DEFAULT_MAX_ENTRIES,
+        };
+        let scan = scan(
+            &host,
+            &Options {
+                users: &[uid],
+                sockets: true,
+            },
+        )
+        .expect("scan");
+        eprintln!(
+            "live scan: {} processes read, {} gone, {} unreadable ({} blocking), {} listings, \
+             took {:?}",
+            scan.processes(),
+            scan.gone(),
+            scan.unreadable().len(),
+            scan.unreadable()
+                .iter()
+                .filter(|u| u.excuse.is_none())
+                .count(),
+            scan.listings(),
+            scan.took()
+        );
+        for note in scan.notes() {
+            eprintln!("  note: {note}");
+        }
+        let used_candidate = Candidate::new(&parent, &used).expect("a name");
+        let record = walk(&host, &used_candidate, &rules, None).expect("walk");
+        let skip = scan
+            .check(&used_candidate, &record)
+            .expect_err("a held file makes its candidate in use");
+        assert_eq!(skip.reason, Reason::InUse, "{skip}");
+        if scan.unreadable().iter().all(|u| u.excuse.is_some()) {
+            assert!(
+                skip.detail.starts_with(&format!("pid {} ", holder.pid())),
+                "{skip}"
+            );
+            assert_eq!(skip.path, file, "{skip}");
+            let free_candidate = Candidate::new(&parent, &free).expect("a name");
+            let record = walk(&host, &free_candidate, &rules, None).expect("walk");
+            assert_eq!(scan.check(&free_candidate, &record), Ok(()));
+        }
     }
 
     #[test]

@@ -498,6 +498,15 @@ mod tests {
         fn proc_environ(&self, _: Pid) -> Result<Environ, ProcError> {
             unreachable!()
         }
+        fn own_pid(&self) -> Pid {
+            unreachable!()
+        }
+        fn proc_status(&self, _: Pid) -> Result<crate::host::ProcStatus, ProcError> {
+            unreachable!()
+        }
+        fn bound_unix_sockets(&self) -> Result<Vec<crate::host::BoundSocket>, HostError> {
+            unreachable!()
+        }
     }
 
     /// `/` (id 1) and a tmpfs at `/tmp` (id 30): `/tmp` opens as fd 0, and

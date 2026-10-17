@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: 'Deletion engine: eligibility walk and identity-checked fd-relative delete'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 13:42'
+updated_date: '2026-10-17 14:00'
 labels:
   - wave-1
   - irreversible
@@ -107,9 +107,11 @@ Round 2 (deep gate: Codex NO-GO, mped GO with should-fixes, QA GO; plus the user
 - New model support: `chown` event, `type: char_device`, plus the earlier `fail`; schema regenerated, testing.md updated.
 - New/changed biting tests (all bit under their mutant, 37 mutants in scratchpad bites2.py): an_entry_chowned_between_walk_and_unlink_is_changed (dev:ino-only compare), an_unlink_that_finds_the_entry_gone_or_swapped_is_changed (ENOENT/EBUSY counted removed; EISDIR/ENOTDIR as failure), an_ancestor_swapped_above_the_window_stops_the_delete_when_reopened (only target frame checked), a_mount_met_opening_a_directory_in_the_walk_is_contains_mount, a_device_node_inside_is_contains_special, a_known_cargo_lock_name_anywhere_is_contains_special, without_block_ipc_sockets_and_fifos_are_recorded_for_the_caller, an_expired_delete_touches_nothing, reopening_a_long_chain_stops_at_the_deadline, a_process_level_error_fails_the_walk_instead_of_skipping, something_vanishing_mid_walk_is_changed, engine::tests::identity_is_device_inode_owner_type_and_birth_time (btime dropped), the LinuxHost ENOENT listing test.
 - Filed on task-61: quadratic deep-chain cost, a narrower Delete::fchmod, untested rename-out and bind-over-file scenarios, module docs restating safety.md.
+
+Committed as 50208a1 (tree 0cbe8a3) after the deep gate's second round: qa-test-runner, mped-architect and Codex all GO. Where the round-1 note and the round-2 note differ, round 2 is current (I/O errors are unreadable / changed / WalkStop::Failed, not not_owner; Rules.block_ipc replaces IpcPolicy).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

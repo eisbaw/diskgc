@@ -100,8 +100,11 @@ kinds), and where those guarantees end. The protocols are in
   so work-in-progress builds cannot delete real data.
 
 Limits, stated plainly: diskgc only sees the caller's own processes without
-root; Cargo holds no lock while a program runs, so running binaries are
-protected by process heuristics only; Linux has no unlink-by-inode, so an
+root, and not even those of them the kernel will not show it (setuid, more
+capable or non-dumpable ones such as `sudo`, `systemd --user`,
+`ssh-agent`), whose use of a candidate is therefore not seen; Cargo holds
+no lock while a program runs, so running binaries are protected by process
+heuristics only; Linux has no unlink-by-inode, so an
 entry replaced between diskgc's identity check and its unlink can be
 deleted (diskgc is not a defence against a hostile local user racing it);
 a `command` action can delete whatever its author wrote, so command actions
@@ -156,7 +159,7 @@ when, and never as root.
 - A filesystem candidate deleted while a visible process has one of its
   files open, mapped or as working directory; a socket or FIFO deleted
   under the default policy, or, under any policy, one a visible process
-  holds open or has bound.
+  holds open or has bound in diskgc's network namespace.
 - A Docker volume or container, a Nix GC root, profile or generation
   removed.
 - Deletion following a symlink or crossing into another mount.

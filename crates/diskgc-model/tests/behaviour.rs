@@ -14,6 +14,7 @@ use diskgc_core::host::{
 };
 use diskgc_core::kernel::require_supported;
 use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
+use diskgc_model::ModelHost;
 use diskgc_model::harness::{Outcome, run};
 use diskgc_model::host::UPTIME_AT_START;
 use diskgc_model::load::parse_yaml;
@@ -224,7 +225,7 @@ fn a_process_opening_a_file_mid_run_shows_in_its_fds() {
     let host = host(&tmp_yaml(
         "processes:\n  - {pid: 7, cwd: /tmp/a}\nevents:\n  - {at: {op: pids, when: after}, open: {pid: 7, path: /tmp/a/f}}\n",
     ));
-    assert_eq!(host.pids().unwrap(), [Pid(7)]);
+    assert_eq!(host.pids().unwrap(), [Pid(7), host.own_pid()]);
     let fds = host.proc_fds(Pid(7)).unwrap();
     assert_eq!(fds.len(), 1);
     assert_eq!(fds[0].fd, 3);
@@ -345,12 +346,122 @@ fn unreadable_and_gone_processes_answer_with_their_error() {
     assert!(matches!(host.proc_fds(Pid(7)), Err(ProcError::Denied(e)) if e.is(Errno::EACCES)));
     assert!(matches!(host.proc_maps(Pid(8)), Err(ProcError::Failed(_))));
     assert!(matches!(host.proc_fds(Pid(9)), Err(ProcError::Gone)));
-    assert_eq!(host.pids().unwrap(), [Pid(7), Pid(8)]);
+    assert_eq!(host.pids().unwrap(), [Pid(7), Pid(8), host.own_pid()]);
     let last = host
         .trace()
         .into_iter()
         .find(|c| c.op == Op::ProcFds && c.result == "gone");
     assert!(last.is_some());
+}
+
+/// diskgc itself is among the pids (`own_pid`, 65000 unless the model
+/// says otherwise); its fds are the ones the code under test holds open,
+/// its other entries are not modelled (`Failed`), its status is uid 1000.
+#[test]
+fn diskgc_itself_is_listed_with_the_fds_it_holds() {
+    let host = host(&tmp_yaml(
+        "own_pid: 50
+processes:
+  - {pid: 7, cwd: /tmp/a}
+",
+    ));
+    let own = host.own_pid();
+    assert_eq!(own, Pid(50));
+    assert_eq!(host.pids().unwrap(), [Pid(7), own]);
+    assert_eq!(host.proc_fds(own).unwrap(), []);
+    let a = dir(&host, "/tmp/a");
+    let fds = host.proc_fds(own).unwrap();
+    assert_eq!(fds.len(), 1);
+    assert_eq!(fds[0].target.stat.dev_ino(), a.stat.dev_ino());
+    drop(a);
+    assert_eq!(host.proc_fds(own).unwrap(), []);
+    assert!(matches!(host.proc_maps(own), Err(ProcError::Failed(_))));
+    assert_eq!(host.proc_status(own).unwrap().uid.effective, 1000);
+    let clash = diskgc_model::load::parse_yaml(&tmp_yaml(
+        "own_pid: 7\nprocesses:\n  - {pid: 7, cwd: /tmp/a}\n",
+    ))
+    .unwrap();
+    assert!(
+        ModelHost::new(&clash)
+            .err()
+            .is_some_and(|e| e.message.contains("own pid")),
+        "a process with diskgc's own pid is refused"
+    );
+}
+
+/// `status` answers for every process, readable or not: ids, the command
+/// name, and the owner of its fd directory (root when not dumpable).
+#[test]
+fn every_process_shows_its_status() {
+    let host = host(&tmp_yaml(
+        "processes:
+  - {pid: 7, proc: denied, uid: 1000, euid: 0, gid: 100, name: sudo}
+  - {pid: 8, proc: denied, non_dumpable: true, privileged: true, exe: /tmp/a/f}
+",
+    ));
+    let s = host.proc_status(Pid(7)).unwrap();
+    assert_eq!((s.uid.real, s.uid.effective, s.uid.saved), (1000, 0, 0));
+    assert_eq!((s.gid.real, s.name.to_str()), (100, Some("sudo")));
+    assert_eq!(s.fd_dir_owner, Some(0), "dumpable: owned by its euid 0");
+    let s = host.proc_status(Pid(8)).unwrap();
+    assert_eq!((s.uid.effective, s.fd_dir_owner), (1000, Some(0)));
+    assert_eq!((s.name.to_str(), s.cap_permitted), (Some("f"), 1 << 35));
+}
+
+/// A fork copies the process, sharing its open file descriptions: the
+/// child keeps a file its parent closes afterwards, and a lock held through
+/// a shared description stays held.
+#[test]
+fn a_forked_child_shares_its_parents_open_files() {
+    let host = host(&tmp_yaml(
+        "processes:
+  - {pid: 7, cwd: /tmp/a, fds: [{path: /tmp/a/f}]}
+events:
+  - {at: {op: pids, when: after}, fork: {pid: 7, child: 9}}
+  - {at: {op: pids, when: after}, close: {pid: 7, path: /tmp/a/f}}
+  - {at: {op: proc_fds, path: /proc/9/fd, when: after}, exit: 9}
+",
+    ));
+    // The fork and the close happen right after the first listing.
+    assert_eq!(host.pids().unwrap(), [Pid(7), host.own_pid()]);
+    assert_eq!(host.pids().unwrap(), [Pid(7), Pid(9), host.own_pid()]);
+    // The parent's only fd is closed: an empty table, Failed as on Linux.
+    assert!(matches!(host.proc_fds(Pid(7)), Err(ProcError::Failed(_))));
+    let fds = host.proc_fds(Pid(9)).unwrap();
+    assert_eq!(fds[0].target.text, "/tmp/a/f");
+    assert!(matches!(host.proc_fds(Pid(9)), Err(ProcError::Gone)));
+}
+
+/// The bound sockets: those the model marks `bound`, by device and inode.
+#[test]
+fn bound_sockets_are_the_ones_the_model_marks() {
+    let host = host(&tmp_yaml(
+        "  /tmp/s: {type: socket, bound: true}
+  /tmp/t: {type: socket}
+",
+    ));
+    let s = host
+        .stat_path(Path::new("/tmp/s"))
+        .unwrap()
+        .dev_ino()
+        .unwrap();
+    let t = host
+        .stat_path(Path::new("/tmp/t"))
+        .unwrap()
+        .dev_ino()
+        .unwrap();
+    let bound = host.bound_unix_sockets().unwrap();
+    assert!(bound.iter().any(|b| b.is(s)) && !bound.iter().any(|b| b.is(t)));
+    assert!(
+        diskgc_model::load::parse_yaml(&tmp_yaml(
+            "  /tmp/u: {bound: true}
+"
+        ))
+        .ok()
+        .and_then(|m| ModelHost::new(&m).err())
+        .is_some_and(|e| e.message.contains("only a socket")),
+        "bound on a regular file is refused"
+    );
 }
 
 // ---- Derived space ----

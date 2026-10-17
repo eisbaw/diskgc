@@ -19,7 +19,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Dev, DevIno, Environ, Errno, FileType, LockMode, MountEntry, Space, Stat, Timestamp,
+    Access, Dev, DevIno, Environ, Errno, FileType, Ids, LockMode, MountEntry, Space, Stat,
+    Timestamp,
 };
 
 use crate::spec::{ProcAccess, StatxField};
@@ -210,7 +211,29 @@ pub struct Proc {
     pub fds: BTreeMap<u32, u64>,
     pub maps: Vec<Ref>,
     pub access: ProcAccess,
+    /// What `status` shows (and who owns `/proc/<pid>/fd`).
+    pub name: OsString,
+    pub uid: Ids,
+    pub gid: Ids,
+    pub dumpable: bool,
+    pub cap_permitted: u64,
+    /// `/proc/<pid>/uid_map` as diskgc reads it (`None`: unreadable).
+    pub uid_map: Option<String>,
 }
+
+/// What reading a modelled `uid_map` gives (`None`: it does not exist).
+pub fn uid_map(text: Option<&str>) -> diskgc_core::host::UidMap {
+    text.map_or(diskgc_core::host::UidMap::Absent, |t| {
+        diskgc_core::host::UidMap::Map(t.to_owned())
+    })
+}
+
+/// The `uid_map` of the initial user namespace, as `/proc` prints it:
+/// diskgc's own, and every process's unless the model says otherwise.
+pub const INIT_UID_MAP: &str = "         0          0 4294967295\n";
+
+/// diskgc's own pid when the model does not give one.
+pub const DEFAULT_OWN_PID: u32 = 65000;
 
 /// Why a model operation failed: an errno for the code under test, or a
 /// mistake in the fixture or test (never returned to the code under test).
@@ -246,6 +269,13 @@ pub struct State {
     /// The open file descriptions diskgc itself holds (one per `ModelFd`).
     pub own_ofds: BTreeSet<u64>,
     pub procs: BTreeMap<u32, Proc>,
+    /// diskgc's own pid (listed with the processes, see `ModelHost`).
+    pub own_pid: u32,
+    /// diskgc's own `uid_map` (`None`: unreadable).
+    pub own_uid_map: Option<String>,
+    /// The socket files a socket is bound to (in diskgc's network
+    /// namespace).
+    pub bound_sockets: BTreeSet<DevIno>,
     pub kernel: String,
     pub wall_start: jiff::Timestamp,
     /// Virtual time since the start of the run.
@@ -260,6 +290,9 @@ impl State {
             ofds: BTreeMap::new(),
             own_ofds: BTreeSet::new(),
             procs: BTreeMap::new(),
+            own_pid: DEFAULT_OWN_PID,
+            own_uid_map: Some(INIT_UID_MAP.to_owned()),
+            bound_sockets: BTreeSet::new(),
             kernel,
             wall_start,
             elapsed: Duration::ZERO,
@@ -666,6 +699,21 @@ impl State {
             self.procs.get_mut(&pid).expect("checked").fds.remove(&fd);
             self.release_if_unused(ofd);
         }
+        Ok(())
+    }
+
+    /// Process `pid` forks `child`: a copy whose fds refer to the same
+    /// open file descriptions.
+    pub fn proc_fork(&mut self, pid: u32, child: u32) -> Result<(), Fault> {
+        if self.procs.contains_key(&child) || child == self.own_pid {
+            return Err(Fault::Model(format!("fork: pid {child} exists")));
+        }
+        let copy = self
+            .procs
+            .get(&pid)
+            .ok_or_else(|| Fault::Model(format!("fork: no process {pid}")))?
+            .clone();
+        self.procs.insert(child, copy);
         Ok(())
     }
 

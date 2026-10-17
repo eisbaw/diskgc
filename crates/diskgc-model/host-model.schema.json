@@ -53,6 +53,22 @@
         "$ref": "#/$defs/MountSpec"
       }
     },
+    "own_pid": {
+      "description": "diskgc's own pid (`own_pid`; default 65000). It is listed among the\npids; its fds are the ones the code under test holds open, its other\n`/proc` entries read as `Failed` (not modelled), its uid is 1000.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "own_uid_map": {
+      "description": "diskgc's own `uid_map` as it reads it; default the initial user\nnamespace's (`none`: unreadable).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "processes": {
       "description": "The visible processes other than diskgc itself.",
       "type": "array",
@@ -75,6 +91,25 @@
     "mounts"
   ],
   "$defs": {
+    "AccessSpec": {
+      "description": "A process and how reading its `/proc` entry goes.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "proc": {
+          "$ref": "#/$defs/ProcAccess"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "proc"
+      ]
+    },
     "At": {
       "description": "When an event fires: at the `nth` call of `op` (on `path`, if given), at\nthe `call`-th call of any kind, or once the clock has run `elapsed`\nsince the start. Call triggers need `when`.",
       "type": "object",
@@ -222,6 +257,25 @@
       },
       "additionalProperties": false
     },
+    "DumpableSpec": {
+      "description": "A process and whether it is dumpable.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "value"
+      ]
+    },
     "Elapsed": {
       "description": "A duration: digits and ms, s, m, h or d.",
       "type": "string",
@@ -236,6 +290,17 @@
       "description": "A change to the model, applied when its trigger `at` is reached. Exactly\none action key besides `at`.",
       "type": "object",
       "properties": {
+        "access": {
+          "description": "How reading a process's `/proc` entry goes from then on.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccessSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "advance": {
           "description": "The clock jumps forward (e.g. a suspend).",
           "anyOf": [
@@ -279,6 +344,17 @@
             "null"
           ]
         },
+        "dumpable": {
+          "description": "A process becomes dumpable (`true`) or not (`false`): what the owner\nof its `fd` directory shows from then on.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DumpableSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "exit": {
           "description": "A process exits: its fds close and its pid is gone.",
           "type": [
@@ -289,10 +365,21 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`.",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`,\n`bound_unix_sockets`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fork": {
+          "description": "A process forks: a new process `child`, a copy of `pid` whose fds\nshare `pid`'s open file descriptions (and their locks).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ForkSpec"
             },
             {
               "type": "null"
@@ -403,6 +490,10 @@
       "description": "A non-directory: regular file (default), symlink, hard link, socket or\nFIFO.",
       "type": "object",
       "properties": {
+        "bound": {
+          "description": "Only with `type: socket`: a socket is bound to this file in\ndiskgc's network namespace (`bound_unix_sockets` reports it).",
+          "type": "boolean"
+        },
         "cachedir_tag": {
           "description": "Holds a valid `CACHEDIR.TAG` signature.",
           "type": "boolean"
@@ -485,6 +576,27 @@
         }
       },
       "additionalProperties": false
+    },
+    "ForkSpec": {
+      "description": "A process and the pid of the child it forks.",
+      "type": "object",
+      "properties": {
+        "child": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "child"
+      ]
     },
     "LockModeSpec": {
       "description": "`shared` or `exclusive`.",
@@ -620,6 +732,9 @@
         "proc_links",
         "proc_maps",
         "proc_environ",
+        "own_pid",
+        "proc_status",
+        "bound_unix_sockets",
         "unlinkat",
         "fchmod"
       ]
@@ -681,6 +796,15 @@
             "type": "string"
           }
         },
+        "euid": {
+          "description": "Its effective uid (and saved, as after a setuid exec); default\n`uid`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "exe": {
           "description": "Its executable (`/proc/<pid>/exe`); none if absent.",
           "type": [
@@ -695,6 +819,15 @@
             "$ref": "#/$defs/FdSpec"
           }
         },
+        "gid": {
+          "description": "Its four gids; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "maps": {
           "description": "Files it has mapped.",
           "type": "array",
@@ -702,10 +835,25 @@
             "type": "string"
           }
         },
+        "name": {
+          "description": "Its command name (`Name:` in `status`); default: the last name of\n`exe`, or `?`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "non_dumpable": {
+          "description": "Not dumpable: its `/proc/<pid>/fd` is owned by root (0) instead of\nits effective uid.",
+          "type": "boolean"
+        },
         "pid": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "privileged": {
+          "description": "Holds a permitted capability (`CAP_WAKE_ALARM`, as `systemd --user`\ndoes) that diskgc lacks.",
+          "type": "boolean"
         },
         "proc": {
           "description": "How reading its `/proc` entry goes.",
@@ -713,6 +861,22 @@
         },
         "root": {
           "description": "Root directory; default `/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uid": {
+          "description": "Its real, saved and filesystem uid; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "uid_map": {
+          "description": "Its `/proc/<pid>/uid_map` as diskgc reads it; default the initial\nuser namespace's, diskgc's own (another text: a user namespace of\nits own, e.g. `\"0 1000 1\"` after `unshare -r`; `none`: unreadable,\nas on a kernel without user namespaces).",
           "type": [
             "string",
             "null"

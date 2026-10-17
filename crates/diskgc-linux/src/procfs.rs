@@ -1,10 +1,11 @@
-//! Parsers for `/proc/<pid>/maps` and `/proc/<pid>/environ` (proc(5)). The
-//! readers that open these files are in [`crate::host`].
+//! Parsers for `/proc/<pid>/maps`, `/proc/<pid>/environ` and
+//! `/proc/<pid>/status` (proc(5)). The readers that open these files are in
+//! [`crate::host`].
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
-use diskgc_core::host::{Dev, Environ, MapEntry};
+use diskgc_core::host::{Dev, Environ, Ids, MapEntry};
 
 /// Parses `maps`:
 ///
@@ -230,6 +231,61 @@ pub fn parse_status(text: &[u8]) -> Result<StatusFields, String> {
     Ok(StatusFields { state, threads })
 }
 
+/// What [`parse_status_ids`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusIds {
+    pub name: OsString,
+    pub uid: Ids,
+    pub gid: Ids,
+    pub cap_permitted: u64,
+    pub cap_effective: u64,
+}
+
+/// `Name:`, `Uid:`, `Gid:`, `CapPrm:` and `CapEff:` of one read of
+/// `/proc/<pid>/status` (the owner of its `fd` directory comes from a
+/// `statx`, not from here).
+pub fn parse_status_ids(text: &[u8]) -> Result<StatusIds, String> {
+    let line = |name: &[u8]| {
+        text.split(|b| *b == b'\n')
+            .find_map(|line| line.strip_prefix(name))
+            .ok_or_else(|| format!("no {} line in status", String::from_utf8_lossy(name)))
+    };
+    let ids = |name: &[u8]| -> Result<Ids, String> {
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let text = std::str::from_utf8(line(name)?)
+            .map_err(|_| format!("non-UTF-8 {shown} line in status"))?;
+        let values: Vec<u32> = text
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("bad {shown} line in status: {text:?}"))?;
+        match values[..] {
+            [real, effective, saved, fs] => Ok(Ids {
+                real,
+                effective,
+                saved,
+                fs,
+            }),
+            _ => Err(format!("bad {shown} line in status: {text:?}")),
+        }
+    };
+    let name = line(b"Name:")?;
+    let name = name.strip_prefix(b"\t").unwrap_or(name);
+    let caps = |name: &[u8]| -> Result<u64, String> {
+        std::str::from_utf8(line(name)?)
+            .ok()
+            .and_then(|t| u64::from_str_radix(t.trim(), 16).ok())
+            .ok_or_else(|| format!("bad {} line in status", String::from_utf8_lossy(name)))
+    };
+    Ok(StatusIds {
+        name: OsString::from_vec(name.to_vec()),
+        uid: ids(b"Uid:")?,
+        gid: ids(b"Gid:")?,
+        cap_permitted: caps(b"CapPrm:")?,
+        cap_effective: caps(b"CapEff:")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +384,52 @@ mod tests {
         let own = std::fs::read("/proc/thread-self/status").expect("read own status");
         let own = parse_status(&own).expect("own status");
         assert!(own.threads >= 1 && own.state == 'R', "{own:?}");
+    }
+
+    #[test]
+    fn name_and_ids_are_read_from_status() {
+        let text = b"Name:\tsudo -i x\nUmask:\t0022\nState:\tS (sleeping)\n\
+Uid:\t1000\t0\t0\t0\nGid:\t100\t100\t100\t100\nThreads:\t1\n\
+CapInh:\t0000000000000000\nCapPrm:\t0000000800000000\nCapEff:\t0000000000000020\n";
+        let StatusIds {
+            name,
+            uid,
+            gid,
+            cap_permitted,
+            cap_effective,
+        } = parse_status_ids(text).expect("parses");
+        assert_eq!(cap_effective, 1 << 5);
+        assert_eq!(name, OsString::from("sudo -i x"));
+        assert_eq!(cap_permitted, 1 << 35);
+        assert_eq!(
+            uid,
+            Ids {
+                real: 1000,
+                effective: 0,
+                saved: 0,
+                fs: 0
+            }
+        );
+        assert_eq!(gid, Ids::same(100));
+        for bad in [
+            &b"Name:\tx\nGid:\t1\t1\t1\t1\nCapPrm:\t0\nCapEff:\t0\n"[..],
+            b"Name:\tx\nUid:\t1\t1\t1\nGid:\t1\t1\t1\t1\nCapPrm:\t0\nCapEff:\t0\n",
+            b"Name:\tx\nUid:\t1\t1\t1\tz\nGid:\t1\t1\t1\t1\nCapPrm:\t0\nCapEff:\t0\n",
+            b"Uid:\t1\t1\t1\t1\nGid:\t1\t1\t1\t1\nCapPrm:\t0\nCapEff:\t0\n",
+            b"Name:\tx\nUid:\t1\t1\t1\t1\nGid:\t1\t1\t1\t1\n",
+            b"Name:\tx\nUid:\t1\t1\t1\t1\nGid:\t1\t1\t1\t1\nCapPrm:\tzz\nCapEff:\t0\n",
+            b"Name:\tx\nUid:\t1\t1\t1\t1\nGid:\t1\t1\t1\t1\nCapPrm:\t0\n",
+        ] {
+            assert!(
+                parse_status_ids(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // This process: its real uid is the one it runs as.
+        let own = std::fs::read("/proc/self/status").expect("read own status");
+        let own = parse_status_ids(&own).expect("own status");
+        assert_eq!(own.uid.real, rustix::process::getuid().as_raw());
     }
 
     #[test]

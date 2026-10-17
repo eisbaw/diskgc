@@ -319,6 +319,43 @@ impl Scratch {
         .map_err(|e| format!("mount tmpfs on {}: {e}", target.display()))
     }
 
+    /// Mounts an overlay on the scratch directory `target_rel`, of the
+    /// scratch directories `lower_rel` (read-only layer), `upper_rel` and
+    /// `work_rel`. Fixture operations below it are refused afterwards.
+    pub fn mount_overlay(
+        &self,
+        lower_rel: &str,
+        upper_rel: &str,
+        work_rel: &str,
+        target_rel: &str,
+    ) -> Result<(), String> {
+        let [lower, upper, work, target] = [lower_rel, upper_rel, work_rel, target_rel]
+            .map(|rel| self.for_existing("mount_overlay", rel));
+        let options = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        );
+        let options =
+            std::ffi::CString::new(options).map_err(|_| "overlay options hold a NUL".to_owned())?;
+        rustix::mount::mount(
+            "diskgc-e2e-overlay",
+            &target,
+            "overlay",
+            MountFlags::NOSUID | MountFlags::NODEV,
+            options.as_c_str(),
+        )
+        .map_err(|e| format!("mount overlay on {}: {e}", target.display()))
+    }
+
+    /// Removes the file `rel` (a fixture change, e.g. deleting a file a
+    /// process keeps open).
+    pub fn remove_file(&self, rel: &str) -> Result<(), String> {
+        let path = self.for_existing("remove_file", rel);
+        std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))
+    }
+
     /// Unmounts the mount on the scratch directory `rel` (one made by
     /// [`Scratch::mount_tmpfs`] or [`Scratch::bind_mount`]); refuses unless
     /// what is there is a mount whose mount point lies on the scratch mount.

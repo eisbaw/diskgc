@@ -22,7 +22,7 @@ use crate::scratch::{self, Scratch};
 use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
-use crate::{driver_suite, engine_suite, host_suite};
+use crate::{driver_suite, engine_suite, host_suite, inuse_suite};
 
 /// Which gate runs a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +302,72 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: engine_suite::engine_deletes_a_200k_entry_directory,
+    },
+    Test {
+        name: "inuse_a_held_file_cwd_mapping_or_environment_keeps_the_candidate",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_held_file_cwd_mapping_or_environment_keeps_the_candidate,
+    },
+    Test {
+        name: "inuse_a_flocked_directory_is_locked",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_flocked_directory_is_locked,
+    },
+    Test {
+        name: "inuse_an_export_after_exec_is_invisible",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_an_export_after_exec_is_invisible,
+    },
+    Test {
+        name: "inuse_a_process_in_another_mount_namespace_is_matched",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_process_in_another_mount_namespace_is_matched,
+    },
+    Test {
+        name: "inuse_unreadable_processes_block_unless_their_status_explains_them",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_unreadable_processes_block_unless_their_status_explains_them,
+    },
+    Test {
+        name: "inuse_only_live_sockets_and_fifos_keep_their_candidate",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_only_live_sockets_and_fifos_keep_their_candidate,
+    },
+    Test {
+        name: "inuse_a_child_forked_before_its_parent_was_read_is_found",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_child_forked_before_its_parent_was_read_is_found,
+    },
+    Test {
+        name: "inuse_held_by_deleted_files_lists_open_deleted_files",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_held_by_deleted_files_lists_open_deleted_files,
+    },
+    Test {
+        name: "inuse_a_mapping_through_overlayfs_is_matched",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_mapping_through_overlayfs_is_matched,
+    },
+    Test {
+        name: "inuse_a_process_in_its_own_user_namespace_is_read",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_process_in_its_own_user_namespace_is_read,
+    },
+    Test {
+        name: "inuse_a_more_capable_process_blocks_outside_the_initial_namespace",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_a_more_capable_process_blocks_outside_the_initial_namespace,
     },
 ];
 

@@ -173,6 +173,13 @@ pub fn process(
                 .collect(),
             maps: vec![PathBuf::from(EXE)],
             proc,
+            name: None,
+            uid: None,
+            euid: None,
+            gid: None,
+            non_dumpable: false,
+            privileged: false,
+            uid_map: None,
         })
 }
 
@@ -255,6 +262,8 @@ pub fn host_model(
                 ]),
                 locks: Vec::new(),
                 processes: procs.into_iter().take(live).collect(),
+                own_pid: None,
+                own_uid_map: None,
                 events: Vec::new(),
                 expect: None,
             }
