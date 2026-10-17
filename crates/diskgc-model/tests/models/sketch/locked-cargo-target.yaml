@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../../../host-model.schema.json
+# The sketch in docs/testing.md (Model tests), run by tests/sketch.rs.
+host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /,     fs: ext4, dev: "254:1", size: 1000G, other_used: 980G}
+  - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 900G,  other_used: 880G, parent: 1}
+tree:
+  /home/mark/src/app/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug:
+      .cargo-lock: {}
+      deps: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+  /nix/store/x-cargo/bin/cargo: {}
+locks:
+  - {path: /home/mark/src/app/target/debug/.cargo-lock, holder: 4242, mode: exclusive}
+processes:
+  - pid: 4242
+    exe: /nix/store/x-cargo/bin/cargo
+    cwd: /home/mark/src/app
+    maps: [/nix/store/x-cargo/bin/cargo]
+    environ: [HOME=/home/mark, PATH=/nix/store/x-cargo/bin]
+events:
+  - at: {op: flock, path: /home/mark/src/app/target/debug/.cargo-lock, nth: 1, when: after}
+    create: /home/mark/src/app/target/release/.cargo-lock
+expect:
+  exit: 1
+  skipped: [{candidate: /home/mark/src/app/target, reason: locked}]

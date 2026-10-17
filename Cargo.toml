@@ -28,6 +28,15 @@ diskgc-modelgen = { path = "crates/diskgc-modelgen" }
 # statx, statvfs, flock, uname, clock_gettime, pidfd_open and poll. Pure
 # Rust, so the static musl build needs no C toolchain.
 rustix = { version = "1.1.5", features = ["event", "fs", "process", "system", "time"] }
+# Test-only crates (diskgc-model, diskgc-modelgen) so far: the host-model
+# format (YAML through serde, a JSON Schema for editors), its timestamps and
+# the property-test strategies.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "2"
+schemars = "1"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+proptest = "1"
 
 # Line tables are enough for backtraces and keep incremental builds and
 # target/ small; dependencies carry no debug info at all.

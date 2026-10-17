@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 06:59'
+updated_date: '2026-10-17 08:42'
 labels:
   - wave-1
   - irreversible
@@ -51,6 +51,12 @@ Forward-carried from task-3 (the reader contract after round 9; replaces every e
 (6) LinuxHost::new() is fallible: it refuses a /proc of another pid namespace (the NSpid line of /proc/self/status must hold exactly one pid, equal to getpid(); a missing file or line is refused) and an unavailable pidfd_open. diskgc's startup turns that into exit code 2. Every /proc read goes by pid number while the pidfd pins the process: a process whose number is taken over by another one mid-scan may be missed until the next scan (docs/safety.md, Threads limits).
 (7) Gotchas: /proc/<pid> is owned by root for non-dumpable processes, so 'same user but unreadable' needs the Uid line of /proc/<pid>/status (no reader for that yet). /proc/<pid>/environ is the environment block's memory, which a process can overwrite in place (setproctitle), not only change via export. Host::now() is CLOCK_BOOTTIME (includes suspend), for the 1 s freshness bound. Assumed: no tid reuse within one round. Limits: docs/safety.md (In use, Threads).
 (8) Fixtures: in the container, 'probe hold FILE CWD' (prints ready, exits on stdin EOF) and 'probe hold-thread FILE CWD main-exits|unshare' (diskgc-e2e/src/host_probe.rs), started untraced as tester. diskgc-linux unit tests that copy the fd table (spawn, unshare CLONE_FILES) take fd_table_guard() in the host.rs tests.
+
+From task-3's commit review (mped): process-level handoff race. diskgc lists P; P forks C (C inherits P's fd on X); P closes X; diskgc reads P and misses X; C was not in the pid listing, so X looks unused while C holds it. One timed event from diskgc's side, so it is NOT covered by the accepted check-vs-delete limit. The scan needs the process-level analogue of the per-task rule: after reading, list pids again, read any new pid, repeat until a listing adds nothing (bounded; give up as Failed for the affected candidates). Also exclude diskgc's own pid (its flock fd holds candidates).
+
+Forward-carried from task-14: ModelHost answers the /proc readers from the model's process table: proc: readable|denied|failed per process (Denied is EACCES, Failed a HostError::invalid), Gone once the pid left the model (exit event). Differences from LinuxHost: an empty fd table, map or environment is answered as Ok(empty) (LinuxHost: Failed; say proc: failed to model that), one task per process (proc_links returns one target), no uid, and diskgc itself is not among the pids (the port has no getpid op; if this task adds one, add the self process to ModelHost so the own-pid exclusion is model-testable). Suspend for AC #6: event advance: <dur> jumps the clock (CLOCK_BOOTTIME includes suspend); events at {elapsed: <dur>} fire during sleep/flock_wait.
+
+From task-14 (update): the empty-answer divergence is gone. ModelHost now reports an empty fd table, map or environment, or a missing exe, of a readable process as ProcError::Failed, like LinuxHost. Not modelled yet, filed on task-61 (3): spawn/fork events and fds shared between processes, which this task's fork handoff race needs.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

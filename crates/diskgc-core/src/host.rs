@@ -25,9 +25,11 @@
 //!   is `unsupported_fs` (docs/safety.md, Path traversal).
 //! - **No final symlink is followed** by [`Host::statx`], and every fd is
 //!   opened close-on-exec.
-//! - **Deleting operations are separate methods** (added with the deletion
-//!   engine, task-5), so the pre-release sandbox gate (task-50) can guard
-//!   exactly those. Nothing in this port deletes.
+//! - **Deleting operations live in a trait of their own**, [`Delete`], so
+//!   code that holds only a [`Host`] (survey, tally, planner) cannot delete,
+//!   and the pre-release sandbox gate (docs/safety.md) guards exactly those
+//!   methods. `ModelHost` implements it; `LinuxHost` gets it with the
+//!   deletion engine (task-5), behind the gate (task-50).
 //!
 //! The trait is tentative (PRD, Irreversibility map); the path-resolution and
 //! lock semantics it serves are not.
@@ -47,14 +49,20 @@ impl Errno {
     pub const ENOENT: Errno = Errno(2);
     pub const ESRCH: Errno = Errno(3);
     pub const EINTR: Errno = Errno(4);
+    pub const ENXIO: Errno = Errno(6);
     pub const EBADF: Errno = Errno(9);
     /// Also `EWOULDBLOCK`.
     pub const EAGAIN: Errno = Errno(11);
     pub const EACCES: Errno = Errno(13);
+    pub const EBUSY: Errno = Errno(16);
+    pub const EEXIST: Errno = Errno(17);
     pub const EXDEV: Errno = Errno(18);
     pub const ENOTDIR: Errno = Errno(20);
+    pub const EISDIR: Errno = Errno(21);
     pub const EINVAL: Errno = Errno(22);
+    pub const EROFS: Errno = Errno(30);
     pub const ENOSYS: Errno = Errno(38);
+    pub const ENOTEMPTY: Errno = Errno(39);
     pub const ELOOP: Errno = Errno(40);
 
     /// The symbolic name of the errno values diskgc interprets.
@@ -64,13 +72,19 @@ impl Errno {
             Self::ENOENT => "ENOENT",
             Self::ESRCH => "ESRCH",
             Self::EINTR => "EINTR",
+            Self::ENXIO => "ENXIO",
             Self::EBADF => "EBADF",
             Self::EAGAIN => "EAGAIN",
             Self::EACCES => "EACCES",
+            Self::EBUSY => "EBUSY",
+            Self::EEXIST => "EEXIST",
             Self::EXDEV => "EXDEV",
             Self::ENOTDIR => "ENOTDIR",
+            Self::EISDIR => "EISDIR",
             Self::EINVAL => "EINVAL",
+            Self::EROFS => "EROFS",
             Self::ENOSYS => "ENOSYS",
+            Self::ENOTEMPTY => "ENOTEMPTY",
             Self::ELOOP => "ELOOP",
             _ => return None,
         })
@@ -603,6 +617,27 @@ pub trait Host {
 
     /// The process's initial environment, read through a live task.
     fn proc_environ(&self, pid: Pid) -> Result<Environ, ProcError>;
+}
+
+/// What [`Delete::unlinkat`] removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unlink {
+    /// Anything but a directory (flags 0).
+    NonDir,
+    /// An empty directory (`AT_REMOVEDIR`).
+    Dir,
+}
+
+/// The deleting operations of the port (see the module docs: they are kept
+/// apart from [`Host`] so that only code given a `Delete` can delete).
+pub trait Delete: Host {
+    /// `unlinkat(dir, name, flags)`: removes the entry `name` of the open
+    /// directory `dir`. `name` is a single component (no `/`, not `.` or
+    /// `..`). Linux has no unlink-by-inode, so callers check the entry's
+    /// identity with [`Host::statx`]`(Base::Dir(dir), name)` right before,
+    /// as the previous port call (docs/safety.md, Deletion); `ModelHost`
+    /// fails a test that does not.
+    fn unlinkat(&self, dir: &Self::Fd, name: &OsStr, what: Unlink) -> Result<(), HostError>;
 }
 
 #[cfg(test)]

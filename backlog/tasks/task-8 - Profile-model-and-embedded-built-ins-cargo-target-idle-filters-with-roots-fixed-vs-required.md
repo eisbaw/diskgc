@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 23:13'
+updated_date: '2026-10-17 08:25'
 labels:
   - wave-1
   - config
@@ -34,6 +34,8 @@ Why: the first end-to-end path needs profiles to select Cargo targets. Implement
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-1: the flake's source filter is an allowlist (workspaceFiles in flake.nix): root Cargo.toml/Cargo.lock plus .rs/.toml files under crates/. Embedded or test YAML (include_str! built-in profiles, host models, golden sets, insta snapshots) is NOT a build input until added, e.g. lib.fileset.fileFilter (f: f.hasExt "yaml") ./crates. Without that, the dev shell works but nix build / nix flake check fail with a missing-file error. Add it in the same change that adds the first such file.
+
+From task-14: diskgc-model loads YAML with serde-saphyr 2 (workspace dependency; serde_yaml is deprecated). Its errors carry line/column and a snippet, and deny_unknown_fields works through it. Reuse it for product YAML unless there is a reason not to. Test YAML under crates/ is already a flake build input (fileFilter on .yaml in flake.nix).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

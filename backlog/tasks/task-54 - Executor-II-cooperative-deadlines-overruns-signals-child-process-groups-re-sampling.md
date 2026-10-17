@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 00:58'
+updated_date: '2026-10-17 08:25'
 labels:
   - wave-2
   - irreversible
@@ -36,6 +36,8 @@ Why: split from the executor task; deadlines and signals decide what happens mid
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-3: LinuxHost::flock_wait polls LOCK_NB with sleeps (10-100 ms) and handles no signals. The SIGTERM-interruptible host-lock wait (reference.md, watch) needs a signal flag checked between polls, or a port-level cancellation. Host::now() is CLOCK_BOOTTIME.
+
+From task-14: ModelHost has a virtual clock (now starts at UPTIME_AT_START; sleep, flock_wait and advance events move it; timed events at {elapsed: d}). Signals are not modelled because the port has no signal operation yet; when this task adds one, add a deliver-signal event action in diskgc-model load.rs Action.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

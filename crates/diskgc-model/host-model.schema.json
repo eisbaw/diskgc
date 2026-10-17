@@ -1,0 +1,754 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostModel",
+  "description": "A host model: the machine a model test runs against.",
+  "type": "object",
+  "properties": {
+    "clock": {
+      "description": "Wall-clock time when the run starts (RFC 3339, e.g.\n`2026-10-15T03:00:00Z`). Default time stamp of tree entries.",
+      "$ref": "#/$defs/WallTime"
+    },
+    "events": {
+      "description": "Changes applied between two `Host` calls, or at a point in time.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EventSpec"
+      }
+    },
+    "expect": {
+      "description": "What the scenario must produce (checked by the harness).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Expect"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "host_model": {
+      "description": "Format version; must be 1.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "kernel": {
+      "description": "What `uname -r` reports.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "locks": {
+      "description": "`flock`s held by processes (each through an fd of its own).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LockSpec"
+      }
+    },
+    "mounts": {
+      "description": "The mount table, in mount order (the order of mountinfo lines).\nExactly one mount, at `/`, has no parent.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MountSpec"
+      }
+    },
+    "processes": {
+      "description": "The visible processes other than diskgc itself.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProcessSpec"
+      }
+    },
+    "tree": {
+      "description": "Files and directories, keyed by absolute path. Missing parent\ndirectories are created with default attributes; a key below another\nkey adds entries to that directory.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Node"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "host_model",
+    "clock",
+    "mounts"
+  ],
+  "$defs": {
+    "At": {
+      "description": "When an event fires: at the `nth` call of `op` (on `path`, if given), at\nthe `call`-th call of any kind, or once the clock has run `elapsed`\nsince the start. Call triggers need `when`.",
+      "type": "object",
+      "properties": {
+        "call": {
+          "description": "The index of the call in the whole trace, from 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "elapsed": {
+          "description": "Time since the start of the run.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Elapsed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nth": {
+          "description": "Which matching call, from 1; default 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "op": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Op"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "The path the call acts on (an fd's path joined with the call's\nrelative path).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/When"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Bytes": {
+      "description": "A size: digits and an optional K, M, G or T (powers of 1024), or a number of bytes.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9]+[KMGT]?$"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "Dev": {
+      "description": "A device number major:minor, e.g. \"254:1\".",
+      "type": "string",
+      "pattern": "^[0-9]+:[0-9]+$"
+    },
+    "DirAttrs": {
+      "description": "A directory's own attributes (the `.` key).",
+      "type": "object",
+      "properties": {
+        "gid": {
+          "description": "Group; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "description": "Permission bits in octal; default `\"0755\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Mode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mtime": {
+          "description": "Modification time (also ctime and birth time); default `clock`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "description": "Owner; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Elapsed": {
+      "description": "A duration: digits and ms, s, m, h or d.",
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d)$"
+    },
+    "EventSpec": {
+      "description": "A change to the model, applied when its trigger `at` is reached. Exactly\none action key besides `at`.",
+      "type": "object",
+      "properties": {
+        "advance": {
+          "description": "The clock jumps forward (e.g. a suspend).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Elapsed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/At"
+        },
+        "close": {
+          "description": "A process closes every fd it opened on a path (releasing their\nlocks).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "create": {
+          "description": "Create an empty regular file (and missing parent directories).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exit": {
+          "description": "A process exits: its fds close and its pid is gone.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mkdir": {
+          "description": "Create a directory (and missing parents).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "open": {
+          "description": "A process opens a file.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remove": {
+          "description": "Remove a name and, for a directory, every entry below it (`rm -r`).\nAn object still open or mapped keeps existing, but only itself: an\nopen directory stays, empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rename": {
+          "description": "`rename(from, to)`: `to` may exist if both are files, or both\ndirectories and `to` is empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenameSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replace": {
+          "description": "Replace the object at the path by a new, empty one of the same type\n(a new inode). The old one is detached from every modelled\ndirectory, as if renamed away.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at"
+      ]
+    },
+    "Expect": {
+      "description": "What a scenario must produce. Only the keys given are checked.",
+      "type": "object",
+      "properties": {
+        "exit": {
+          "description": "The exit code.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "skipped": {
+          "description": "The skipped candidates, in report order.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Skipped"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FdSpec": {
+      "description": "An open file of a process.",
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "description": "The file was deleted after it was opened: its name is removed when\nthe model loads, and it keeps its space while it is open.",
+          "type": "boolean"
+        },
+        "fd": {
+          "description": "The fd number; default: the lowest free one from 3.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "FileSpec": {
+      "description": "A non-directory: regular file (default), symlink, hard link, socket or\nFIFO.",
+      "type": "object",
+      "properties": {
+        "cachedir_tag": {
+          "description": "Holds a valid `CACHEDIR.TAG` signature.",
+          "type": "boolean"
+        },
+        "gid": {
+          "description": "Group; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "link": {
+          "description": "A hard link: another name of the file at this absolute path (same\nfilesystem). Takes no other attributes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Permission bits in octal, e.g. `\"0644\"` (the default).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Mode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mtime": {
+          "description": "Modification time (also ctime and birth time); default `clock`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "description": "File size; allocated space is the size rounded up to 4 KiB.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symlink": {
+          "description": "A symlink with this target text (never followed by the model).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "`socket` or `fifo`; a regular file if absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Special"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "description": "Owner; default 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "LockModeSpec": {
+      "description": "`shared` or `exclusive`.",
+      "type": "string",
+      "enum": [
+        "shared",
+        "exclusive"
+      ]
+    },
+    "LockSpec": {
+      "description": "A `flock` held by a process.",
+      "type": "object",
+      "properties": {
+        "holder": {
+          "description": "The pid holding it; must be one of `processes`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/LockModeSpec"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "holder",
+        "mode"
+      ]
+    },
+    "Mode": {
+      "description": "Permission bits in octal, as a string, e.g. \"0755\".",
+      "type": "string",
+      "pattern": "^[0-7]{3,4}$"
+    },
+    "MountSpec": {
+      "description": "One mount.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Mount point.",
+          "type": "string"
+        },
+        "dev": {
+          "description": "Device number `major:minor`. One filesystem per device: bind mounts\nare not modelled yet.",
+          "$ref": "#/$defs/Dev"
+        },
+        "fs": {
+          "description": "Filesystem type, e.g. `ext4`, `tmpfs`, `nfs`, `btrfs`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Mount id (mountinfo, `stx_mnt_id`); unique, not 0.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "other_used": {
+          "description": "Space used by things outside the model; available space is `size -\nother_used -` the blocks of every live inode.",
+          "$ref": "#/$defs/Bytes"
+        },
+        "parent": {
+          "description": "The mount this one is mounted on (stacked mounts: the mount at the\nsame point it covers). Required except for the mount at `/`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "read_only": {
+          "type": "boolean"
+        },
+        "size": {
+          "description": "Filesystem size.",
+          "$ref": "#/$defs/Bytes"
+        },
+        "statx_missing": {
+          "description": "`statx` fields the filesystem does not answer (kernel capabilities):\nthey come back as `None`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatxField"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "fs",
+        "dev",
+        "size"
+      ]
+    },
+    "Node": {
+      "description": "A file (a mapping of attributes; {} is an empty file) or a directory (a mapping of entry names to nodes, with its own attributes under '.'; {.: {}} is an empty directory).",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FileSpec"
+        },
+        {
+          "type": "object",
+          "properties": {
+            ".": {
+              "$ref": "#/$defs/DirAttrs"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/Node"
+          },
+          "minProperties": 1
+        }
+      ]
+    },
+    "Op": {
+      "description": "A `Host` operation, named after its syscall (`flock` covers both lock\ncalls).",
+      "type": "string",
+      "enum": [
+        "mountinfo",
+        "openat2",
+        "statx",
+        "statvfs",
+        "flock",
+        "now",
+        "sleep",
+        "kernel_release",
+        "pids",
+        "proc_fds",
+        "proc_links",
+        "proc_maps",
+        "proc_environ",
+        "unlinkat"
+      ]
+    },
+    "ProcAccess": {
+      "description": "The outcome of every `/proc/<pid>` read of a process.",
+      "oneOf": [
+        {
+          "description": "Answered from the model. As on `LinuxHost`, an empty fd table,\nmemory map or environment, or no exe, is `ProcError::Failed`.",
+          "type": "string",
+          "const": "readable"
+        },
+        {
+          "description": "`ProcError::Denied` (`EACCES`): another user's or a non-dumpable\nprocess.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "`ProcError::Failed`: a live process that could not be inspected.",
+          "type": "string",
+          "const": "failed"
+        }
+      ]
+    },
+    "ProcPath": {
+      "description": "A process and a path.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "path"
+      ]
+    },
+    "ProcessSpec": {
+      "description": "A process, as its `/proc` entry shows it.",
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "Working directory; default `/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environ": {
+          "description": "Initial environment, as `NAME=value` entries in order (an entry\nwithout `=` is kept as such).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exe": {
+          "description": "Its executable (`/proc/<pid>/exe`); none if absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fds": {
+          "description": "Open files (`flock`s held go in `locks`, which add fds of their own).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FdSpec"
+          }
+        },
+        "maps": {
+          "description": "Files it has mapped.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "proc": {
+          "description": "How reading its `/proc` entry goes.",
+          "$ref": "#/$defs/ProcAccess"
+        },
+        "root": {
+          "description": "Root directory; default `/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid"
+      ]
+    },
+    "RenameSpec": {
+      "description": "Source and destination of a rename.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "Skipped": {
+      "description": "A skipped candidate and its reason (docs/reference.md, JSON output).",
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "candidate",
+        "reason"
+      ]
+    },
+    "Special": {
+      "description": "`socket` or `fifo`.",
+      "type": "string",
+      "enum": [
+        "socket",
+        "fifo"
+      ]
+    },
+    "StatxField": {
+      "description": "A `statx` field that can be missing from the answer.",
+      "type": "string",
+      "enum": [
+        "type",
+        "mode",
+        "nlink",
+        "uid",
+        "gid",
+        "ino",
+        "size",
+        "blocks",
+        "mtime",
+        "ctime",
+        "btime",
+        "mnt_id",
+        "mount_root"
+      ]
+    },
+    "WallTime": {
+      "description": "A time in RFC 3339, e.g. 2026-10-15T03:00:00Z.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    },
+    "When": {
+      "description": "Before the call runs, or after it ran (before it returns).",
+      "type": "string",
+      "enum": [
+        "before",
+        "after"
+      ]
+    }
+  }
+}

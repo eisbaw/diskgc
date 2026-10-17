@@ -4,7 +4,7 @@ title: 'Index: units, buckets, identity, path trie, memory budget, queue derivat
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:50'
+updated_date: '2026-10-17 08:25'
 labels:
   - wave-3
   - architecture
@@ -27,6 +27,12 @@ Why: freeing space must not wait for a survey. Implement the index per docs/arch
 - [ ] #2 best-fit picks the smallest covering unit, else the largest (unit tests)
 - [ ] #3 98,000 tiny rc dirs fit in at most 10 bucket units (model test)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-14: ModelHost recomputes derived values (reachability for nlink and space, path_of for mount points and messages) from scratch, so each stat or lookup is linear in the filesystem's size. AC #3's 98,000-dir model test would be quadratic: add indexes to diskgc-model state.rs (e.g. a parent map and cached reachability invalidated on change) before writing it, and measure.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

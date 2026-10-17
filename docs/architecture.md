@@ -249,12 +249,18 @@ is accepted until measured otherwise.
   and the tally's batch timing and sleeps are port operations; `ModelHost`
   keeps a virtual clock and delivers signals as events, so deadlines, exit
   codes 75 / 124 / 130 / 143 and the duty cycle are model-testable.
+- **Deleting operations are a trait of their own** (`Delete: Host`,
+  `unlinkat` so far), so code given only a `Host` cannot delete and the
+  pre-release sandbox gate guards exactly those methods.
 - **`ModelHost` checks how it is called**: an `openat2` without the required
-  `RESOLVE_*` flags, or an `unlinkat` without a preceding identity check
-  fails the test. Releasing or re-locking a held lock cannot be expressed:
+  `RESOLVE_*` flags, a `statx` of more than one name or from the root, or
+  an `unlinkat` without an identity check right before it fails the test
+  ([testing.md](testing.md#2-model-tests-a-yaml-host-model-instead-of-a-real-disk)).
+  Releasing or re-locking a held lock cannot be expressed:
   the lock calls take the fd by value and return a `Locked` handle that
   lends the fd out by reference only and closes it when dropped, and there
-  is no unlock operation.
+  is no unlock operation; the model keeps each lock exactly as long as an
+  fd refers to its open file description.
 - **statx fields are optional in the port**: a field the kernel did not
   mark as answered (`stx_mask`, `stx_attributes_mask`) is absent, so the
   core cannot use it by accident and `ModelHost` can model a filesystem

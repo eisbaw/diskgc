@@ -1,0 +1,923 @@
+//! The loaded model: an inode graph per filesystem, the mounts that attach
+//! them, open file descriptions (with their `flock`s) and processes. Plain
+//! data with the operations `ModelHost` and events need; nothing here knows
+//! about calls, traces or checks.
+//!
+//! Derived, never stored: link counts, available space (allocated blocks
+//! of every live inode, each counted once), which locks are held, mount
+//! point paths. An inode is live while a directory reaches it or anything
+//! (an open file, a process's cwd, root, exe or mapping) refers to it.
+//!
+//! Limit: derived values are recomputed from scratch, so a stat or a path
+//! lookup costs time linear in the size of its filesystem. Fine for
+//! hand-written and generated models (hundreds of entries); a model of
+//! 100,000 entries needs indexes first.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use diskgc_core::host::{
+    Access, Dev, DevIno, Environ, Errno, FileType, LockMode, MountEntry, Space, Stat, Timestamp,
+};
+
+use crate::spec::{ProcAccess, StatxField};
+
+/// Allocation unit: files take their size rounded up to it, directories one.
+pub const BLOCK: u64 = 4096;
+
+/// Default owner and group of tree entries.
+pub const DEFAULT_ID: u32 = 1000;
+
+/// An object as reached through a mount: the mount id and the inode number
+/// on that mount's filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Loc {
+    pub mnt: u64,
+    pub ino: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum Kind {
+    File { cachedir_tag: bool },
+    Dir(BTreeMap<OsString, u64>),
+    Symlink(PathBuf),
+    Socket,
+    Fifo,
+}
+
+#[derive(Debug, Clone)]
+pub struct Inode {
+    pub kind: Kind,
+    pub uid: u32,
+    pub gid: u32,
+    pub perm: u32,
+    pub size: u64,
+    pub mtime: Timestamp,
+    pub ctime: Timestamp,
+    pub btime: Timestamp,
+}
+
+impl Inode {
+    pub fn new(kind: Kind, now: Timestamp) -> Self {
+        let perm = if matches!(kind, Kind::Dir(_)) {
+            0o755
+        } else {
+            0o644
+        };
+        Self {
+            kind,
+            uid: DEFAULT_ID,
+            gid: DEFAULT_ID,
+            perm,
+            size: 0,
+            mtime: now,
+            ctime: now,
+            btime: now,
+        }
+    }
+
+    pub fn file_type(&self) -> FileType {
+        match self.kind {
+            Kind::File { .. } => FileType::Regular,
+            Kind::Dir(_) => FileType::Directory,
+            Kind::Symlink(_) => FileType::Symlink,
+            Kind::Socket => FileType::Socket,
+            Kind::Fifo => FileType::Fifo,
+        }
+    }
+
+    pub fn entries(&self) -> Option<&BTreeMap<OsString, u64>> {
+        match &self.kind {
+            Kind::Dir(entries) => Some(entries),
+            _ => None,
+        }
+    }
+
+    fn entries_mut(&mut self) -> Option<&mut BTreeMap<OsString, u64>> {
+        match &mut self.kind {
+            Kind::Dir(entries) => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Allocated bytes.
+    pub fn allocated(&self) -> u64 {
+        match self.kind {
+            Kind::File { .. } => self.size.div_ceil(BLOCK) * BLOCK,
+            Kind::Dir(_) => BLOCK,
+            Kind::Symlink(_) | Kind::Socket | Kind::Fifo => 0,
+        }
+    }
+}
+
+/// One filesystem (one device).
+#[derive(Debug, Clone)]
+pub struct Fs {
+    pub dev: Dev,
+    pub fs_type: String,
+    pub size: u64,
+    pub other_used: u64,
+    pub missing: BTreeSet<StatxField>,
+    pub root: u64,
+    pub inodes: BTreeMap<u64, Inode>,
+}
+
+impl Fs {
+    pub fn new(dev: Dev, fs_type: String, size: u64, other_used: u64, now: Timestamp) -> Self {
+        let root = 2;
+        Self {
+            dev,
+            fs_type,
+            size,
+            other_used,
+            missing: BTreeSet::new(),
+            root,
+            inodes: BTreeMap::from([(root, Inode::new(Kind::Dir(BTreeMap::new()), now))]),
+        }
+    }
+
+    fn add(&mut self, inode: Inode) -> u64 {
+        let ino = self.inodes.keys().next_back().map_or(2, |last| last + 1);
+        self.inodes.insert(ino, inode);
+        ino
+    }
+
+    /// Inodes reachable from the root through directory entries.
+    fn reachable(&self) -> BTreeSet<u64> {
+        self.closure([self.root])
+    }
+
+    /// `start` and everything below the directories among them.
+    fn closure(&self, start: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
+        let mut seen = BTreeSet::new();
+        let mut todo: Vec<u64> = start.into_iter().collect();
+        while let Some(ino) = todo.pop() {
+            if !seen.insert(ino) {
+                continue;
+            }
+            if let Some(entries) = self.inodes.get(&ino).and_then(Inode::entries) {
+                todo.extend(entries.values().copied());
+            }
+        }
+        seen
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Mount {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub dev: Dev,
+    /// The directory this mount covers, on its parent mount.
+    pub on: Option<Loc>,
+    pub read_only: bool,
+}
+
+/// An open file description: what `open` creates and `flock` locks. Shared
+/// by every fd that refers to it; gone (with its lock) when the last one
+/// closes.
+#[derive(Debug, Clone)]
+pub struct Ofd {
+    pub loc: Loc,
+    /// The path it was opened by (for messages and event matching; not
+    /// updated by renames).
+    pub path: PathBuf,
+    pub access: Access,
+    pub lock: Option<LockMode>,
+}
+
+/// A process's reference to an object (cwd, root, exe, a mapping).
+#[derive(Debug, Clone)]
+pub struct Ref {
+    pub loc: Loc,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct Proc {
+    pub exe: Option<Ref>,
+    pub cwd: Ref,
+    pub root: Ref,
+    pub environ: Environ,
+    /// fd number -> open file description id.
+    pub fds: BTreeMap<u32, u64>,
+    pub maps: Vec<Ref>,
+    pub access: ProcAccess,
+}
+
+/// Why a model operation failed: an errno for the code under test, or a
+/// mistake in the fixture or test (never returned to the code under test).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    Errno(Errno),
+    Model(String),
+}
+
+impl From<Errno> for Fault {
+    fn from(e: Errno) -> Self {
+        Fault::Errno(e)
+    }
+}
+
+/// How a path walk treats symlinks and mounts (the `openat2` flags that
+/// matter to lookup).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WalkRules {
+    pub beneath: bool,
+    pub no_symlinks: bool,
+    pub no_xdev: bool,
+    /// `O_PATH | O_NOFOLLOW`: a trailing symlink is opened, not refused.
+    pub open_trailing_symlink: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct State {
+    /// In mount order.
+    pub mounts: Vec<Mount>,
+    pub fss: BTreeMap<Dev, Fs>,
+    pub ofds: BTreeMap<u64, Ofd>,
+    /// The open file descriptions diskgc itself holds (one per `ModelFd`).
+    pub own_ofds: BTreeSet<u64>,
+    pub procs: BTreeMap<u32, Proc>,
+    pub kernel: String,
+    pub wall_start: jiff::Timestamp,
+    /// Virtual time since the start of the run.
+    pub elapsed: Duration,
+}
+
+impl State {
+    pub fn new(wall_start: jiff::Timestamp, kernel: String) -> Self {
+        Self {
+            mounts: Vec::new(),
+            fss: BTreeMap::new(),
+            ofds: BTreeMap::new(),
+            own_ofds: BTreeSet::new(),
+            procs: BTreeMap::new(),
+            kernel,
+            wall_start,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    // ---- Time ----
+
+    /// Wall-clock time now, as statx reports it.
+    pub fn wall_now(&self) -> Timestamp {
+        let now = self
+            .wall_start
+            .checked_add(jiff::SignedDuration::try_from(self.elapsed).unwrap_or_default())
+            .unwrap_or(self.wall_start);
+        timestamp(now)
+    }
+
+    // ---- Mounts ----
+
+    pub fn mount(&self, id: u64) -> &Mount {
+        self.mounts
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("model bug: no mount {id}"))
+    }
+
+    pub fn root_mount(&self) -> &Mount {
+        self.mounts
+            .iter()
+            .find(|m| m.parent.is_none())
+            .expect("model bug: no root mount")
+    }
+
+    pub fn fs(&self, mnt: u64) -> &Fs {
+        &self.fss[&self.mount(mnt).dev]
+    }
+
+    fn fs_mut(&mut self, mnt: u64) -> &mut Fs {
+        let dev = self.mount(mnt).dev;
+        self.fss.get_mut(&dev).expect("model bug: mount without fs")
+    }
+
+    pub fn mount_root(&self, mnt: u64) -> Loc {
+        Loc {
+            mnt,
+            ino: self.fs(mnt).root,
+        }
+    }
+
+    pub fn inode(&self, loc: Loc) -> &Inode {
+        self.fs(loc.mnt)
+            .inodes
+            .get(&loc.ino)
+            .unwrap_or_else(|| panic!("model bug: no inode {loc:?}"))
+    }
+
+    pub fn inode_mut(&mut self, loc: Loc) -> &mut Inode {
+        self.fs_mut(loc.mnt)
+            .inodes
+            .get_mut(&loc.ino)
+            .unwrap_or_else(|| panic!("model bug: no inode {loc:?}"))
+    }
+
+    pub fn dev_ino(&self, loc: Loc) -> DevIno {
+        DevIno {
+            dev: self.mount(loc.mnt).dev,
+            ino: loc.ino,
+        }
+    }
+
+    /// The topmost mount covering `loc`, if any (a later mount on the same
+    /// directory covers an earlier one).
+    fn mounted_on(&self, loc: Loc) -> Option<&Mount> {
+        self.mounts.iter().rev().find(|m| m.on == Some(loc))
+    }
+
+    /// `loc`, or the root of the topmost stack of mounts on it.
+    fn through_mounts(&self, mut loc: Loc) -> (Loc, bool) {
+        let mut crossed = false;
+        while let Some(m) = self.mounted_on(loc) {
+            loc = self.mount_root(m.id);
+            crossed = true;
+        }
+        (loc, crossed)
+    }
+
+    /// The path of an object, as the process's root sees it (`None` if no
+    /// directory reaches it any more).
+    pub fn path_of(&self, loc: Loc) -> Option<PathBuf> {
+        let mount = self.mount(loc.mnt);
+        let fs = self.fs(loc.mnt);
+        if loc.ino == fs.root {
+            return match mount.on {
+                None => Some(PathBuf::from("/")),
+                Some(on) => self.path_of(on),
+            };
+        }
+        let (parent, name) = fs.inodes.iter().find_map(|(ino, inode)| {
+            let entries = inode.entries()?;
+            let (name, _) = entries.iter().find(|(_, child)| **child == loc.ino)?;
+            Some((*ino, name))
+        })?;
+        Some(
+            self.path_of(Loc {
+                mnt: loc.mnt,
+                ino: parent,
+            })?
+            .join(name),
+        )
+    }
+
+    pub fn mountinfo(&self) -> Vec<MountEntry> {
+        self.mounts
+            .iter()
+            .map(|m| {
+                let fs = &self.fss[&m.dev];
+                MountEntry {
+                    id: m.id,
+                    parent_id: m.parent.unwrap_or(0),
+                    dev: m.dev,
+                    fs_root: PathBuf::from("/"),
+                    mount_point: m
+                        .on
+                        .map_or(Some(PathBuf::from("/")), |on| self.path_of(on))
+                        .unwrap_or_else(|| PathBuf::from("/(detached)")),
+                    fs_type: fs.fs_type.clone(),
+                    source: fs.fs_type.clone(),
+                    read_only: m.read_only,
+                }
+            })
+            .collect()
+    }
+
+    // ---- Lookup ----
+
+    /// Walks `path` from `start` (a directory) under `rules`. `.` stays;
+    /// `..` is refused under `beneath` (`EXDEV`) and not modelled
+    /// otherwise. Symlinks are never followed.
+    pub fn walk(&self, start: Loc, path: &Path, rules: WalkRules) -> Result<Loc, Fault> {
+        let names: Vec<&OsStr> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(name) => Some(Ok(name)),
+                Component::CurDir | Component::RootDir => None,
+                Component::ParentDir => Some(Err(())),
+                Component::Prefix(_) => unreachable!("no path prefixes on Linux"),
+            })
+            .collect::<Result<_, ()>>()
+            .map_err(|()| {
+                if rules.beneath {
+                    Fault::Errno(Errno::EXDEV)
+                } else {
+                    Fault::Model(format!("'..' in {} is not modelled", path.display()))
+                }
+            })?;
+        let mut here = start;
+        for (i, name) in names.iter().enumerate() {
+            let last = i + 1 == names.len();
+            let entries = self.inode(here).entries().ok_or(Errno::ENOTDIR)?;
+            let child = *entries.get(*name).ok_or(Errno::ENOENT)?;
+            let (next, crossed) = self.through_mounts(Loc {
+                mnt: here.mnt,
+                ino: child,
+            });
+            if crossed && rules.no_xdev {
+                return Err(Errno::EXDEV.into());
+            }
+            if matches!(self.inode(next).kind, Kind::Symlink(_)) {
+                if last && rules.open_trailing_symlink {
+                    return Ok(next);
+                }
+                if rules.no_symlinks {
+                    return Err(Errno::ELOOP.into());
+                }
+                return Err(Fault::Model(format!(
+                    "symlink at {} in {}: the model does not follow symlinks",
+                    name.display(),
+                    path.display()
+                )));
+            }
+            here = next;
+        }
+        Ok(here)
+    }
+
+    /// Looks up an absolute path from the root, crossing mounts and refusing
+    /// symlinks: how fixtures and events name objects.
+    pub fn lookup(&self, path: &Path) -> Result<Loc, Fault> {
+        let (root, _) = self.through_mounts(self.mount_root(self.root_mount().id));
+        self.walk(
+            root,
+            path,
+            WalkRules {
+                no_symlinks: true,
+                ..WalkRules::default()
+            },
+        )
+    }
+
+    /// The single entry `name` of directory `dir`, through mounts on it, not
+    /// following a symlink.
+    pub fn child(&self, dir: Loc, name: &OsStr) -> Result<Loc, Errno> {
+        let entries = self.inode(dir).entries().ok_or(Errno::ENOTDIR)?;
+        let ino = *entries.get(name).ok_or(Errno::ENOENT)?;
+        Ok(self.through_mounts(Loc { mnt: dir.mnt, ino }).0)
+    }
+
+    // ---- Derived attributes ----
+
+    /// Every live inode of a filesystem: reachable, or held by an open
+    /// file, a process or a mount (and what lies below those).
+    fn live(&self, dev: Dev) -> BTreeSet<u64> {
+        let fs = &self.fss[&dev];
+        let on_dev = |loc: &Loc| (self.mount(loc.mnt).dev == dev).then_some(loc.ino);
+        let held = self
+            .ofds
+            .values()
+            .map(|o| o.loc)
+            .chain(self.procs.values().flat_map(|p| {
+                p.exe
+                    .iter()
+                    .chain([&p.cwd, &p.root])
+                    .chain(&p.maps)
+                    .map(|r| r.loc)
+            }))
+            .chain(self.mounts.iter().filter_map(|m| m.on))
+            .filter_map(|loc| on_dev(&loc));
+        let mut live = fs.reachable();
+        live.extend(fs.closure(held));
+        live
+    }
+
+    pub fn space(&self, mnt: u64) -> Space {
+        let fs = self.fs(mnt);
+        let allocated: u64 = self
+            .live(fs.dev)
+            .iter()
+            .map(|ino| fs.inodes[ino].allocated())
+            .sum();
+        Space {
+            avail_bytes: fs
+                .size
+                .saturating_sub(fs.other_used)
+                .saturating_sub(allocated),
+            size_bytes: fs.size,
+        }
+    }
+
+    /// Link count: directory entries naming it among reachable directories
+    /// (for a directory: 2 plus its subdirectories, 0 once detached).
+    fn nlink(&self, loc: Loc) -> u32 {
+        let fs = self.fs(loc.mnt);
+        let reachable = fs.reachable();
+        let named = reachable
+            .iter()
+            .filter_map(|ino| fs.inodes[ino].entries())
+            .flat_map(|entries| entries.values())
+            .filter(|child| **child == loc.ino)
+            .count();
+        let count = match self.inode(loc).entries() {
+            Some(entries) => {
+                if loc.ino != fs.root && named == 0 {
+                    0
+                } else {
+                    let subdirs = entries
+                        .values()
+                        .filter(|ino| fs.inodes[*ino].entries().is_some())
+                        .count();
+                    2 + subdirs
+                }
+            }
+            None => named,
+        };
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    pub fn is_linked(&self, loc: Loc) -> bool {
+        let fs = self.fs(loc.mnt);
+        loc.ino == fs.root || fs.reachable().contains(&loc.ino)
+    }
+
+    pub fn stat(&self, loc: Loc) -> Stat {
+        let fs = self.fs(loc.mnt);
+        let inode = self.inode(loc);
+        fn when<T>(fs: &Fs, field: StatxField, value: T) -> Option<T> {
+            (!fs.missing.contains(&field)).then_some(value)
+        }
+        Stat {
+            dev: fs.dev,
+            file_type: when(fs, StatxField::Type, inode.file_type()),
+            perm: when(fs, StatxField::Mode, inode.perm),
+            nlink: when(fs, StatxField::Nlink, self.nlink(loc)),
+            uid: when(fs, StatxField::Uid, inode.uid),
+            gid: when(fs, StatxField::Gid, inode.gid),
+            ino: when(fs, StatxField::Ino, loc.ino),
+            size: when(fs, StatxField::Size, inode.size),
+            blocks: when(fs, StatxField::Blocks, inode.allocated() / 512),
+            mtime: when(fs, StatxField::Mtime, inode.mtime),
+            ctime: when(fs, StatxField::Ctime, inode.ctime),
+            btime: when(fs, StatxField::Btime, inode.btime),
+            mnt_id: when(fs, StatxField::MntId, loc.mnt),
+            mount_root: when(fs, StatxField::MountRoot, loc.ino == fs.root),
+        }
+    }
+
+    // ---- Locks ----
+
+    /// Whether `ofd` could take `mode` now: no other open file description
+    /// of the same object holds a conflicting lock.
+    pub fn lock_free(&self, ofd: u64, mode: LockMode) -> bool {
+        let loc = self.ofds[&ofd].loc;
+        let me = self.dev_ino(loc);
+        !self.ofds.iter().any(|(id, other)| {
+            *id != ofd
+                && self.dev_ino(other.loc) == me
+                && match (other.lock, mode) {
+                    (None, _) => false,
+                    (Some(LockMode::Shared), LockMode::Shared) => false,
+                    (Some(_), _) => true,
+                }
+        })
+    }
+
+    // ---- Open file descriptions ----
+
+    pub fn open_ofd(&mut self, loc: Loc, path: PathBuf, access: Access) -> u64 {
+        let id = self.ofds.keys().next_back().map_or(1, |last| last + 1);
+        self.ofds.insert(
+            id,
+            Ofd {
+                loc,
+                path,
+                access,
+                lock: None,
+            },
+        );
+        id
+    }
+
+    /// Drops an open file description no fd refers to any more (with its
+    /// lock).
+    fn release_if_unused(&mut self, ofd: u64) {
+        let used = self.own_ofds.contains(&ofd)
+            || self
+                .procs
+                .values()
+                .any(|p| p.fds.values().any(|o| *o == ofd));
+        if !used {
+            self.ofds.remove(&ofd);
+        }
+    }
+
+    /// diskgc closed an fd.
+    pub fn close_own(&mut self, ofd: u64) {
+        self.own_ofds.remove(&ofd);
+        self.release_if_unused(ofd);
+    }
+
+    /// A process opens `path` (lowest free fd from 3, unless given).
+    pub fn proc_open(&mut self, pid: u32, path: &Path, fd: Option<u32>) -> Result<u32, Fault> {
+        let loc = self.lookup(path)?;
+        let ofd = self.open_ofd(loc, path.to_owned(), Access::Read);
+        self.proc_attach(pid, ofd, fd)
+    }
+
+    /// Gives process `pid` an fd on `ofd`.
+    pub fn proc_attach(&mut self, pid: u32, ofd: u64, fd: Option<u32>) -> Result<u32, Fault> {
+        let proc = self
+            .procs
+            .get_mut(&pid)
+            .ok_or_else(|| Fault::Model(format!("no process {pid}")))?;
+        let fd = match fd {
+            Some(fd) if proc.fds.contains_key(&fd) => {
+                return Err(Fault::Model(format!("process {pid} has fd {fd} twice")));
+            }
+            Some(fd) => fd,
+            None => (3..)
+                .find(|n| !proc.fds.contains_key(n))
+                .expect("fewer than 2^32 fds"),
+        };
+        proc.fds.insert(fd, ofd);
+        Ok(fd)
+    }
+
+    /// A process closes every fd it opened by `path`.
+    pub fn proc_close(&mut self, pid: u32, path: &Path) -> Result<(), Fault> {
+        let proc = self
+            .procs
+            .get(&pid)
+            .ok_or_else(|| Fault::Model(format!("close: no process {pid}")))?;
+        let closing: Vec<(u32, u64)> = proc
+            .fds
+            .iter()
+            .filter(|(_, ofd)| self.ofds[*ofd].path == path)
+            .map(|(fd, ofd)| (*fd, *ofd))
+            .collect();
+        if closing.is_empty() {
+            return Err(Fault::Model(format!(
+                "close: process {pid} has no fd opened by {}",
+                path.display()
+            )));
+        }
+        for (fd, ofd) in closing {
+            self.procs.get_mut(&pid).expect("checked").fds.remove(&fd);
+            self.release_if_unused(ofd);
+        }
+        Ok(())
+    }
+
+    pub fn proc_exit(&mut self, pid: u32) -> Result<(), Fault> {
+        let proc = self
+            .procs
+            .remove(&pid)
+            .ok_or_else(|| Fault::Model(format!("exit: no process {pid}")))?;
+        for ofd in proc.fds.into_values() {
+            self.release_if_unused(ofd);
+        }
+        Ok(())
+    }
+
+    // ---- Changes to the tree ----
+
+    /// Splits an absolute path into its parent directory (looked up) and
+    /// last name.
+    fn parent_of<'p>(&self, path: &'p Path) -> Result<(Loc, &'p OsStr), Fault> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Fault::Model(format!("{} has no last name", path.display())))?;
+        let parent = path.parent().expect("a path with a file name has a parent");
+        Ok((self.lookup(parent)?, name))
+    }
+
+    /// Adds entry `name` -> `ino` to directory `dir`, stamping it as
+    /// changed now.
+    pub fn link(&mut self, dir: Loc, name: &OsStr, ino: u64) -> Result<(), Fault> {
+        let now = self.wall_now();
+        let parent = self.inode_mut(dir);
+        let entries = parent.entries_mut().ok_or(Errno::ENOTDIR)?;
+        if entries.contains_key(name) {
+            return Err(Errno::EEXIST.into());
+        }
+        entries.insert(name.to_owned(), ino);
+        parent.mtime = now;
+        parent.ctime = now;
+        Ok(())
+    }
+
+    /// Removes entry `name` from directory `dir` (stamping it), returning
+    /// the inode it named.
+    fn unlink_entry(&mut self, dir: Loc, name: &OsStr) -> Result<u64, Fault> {
+        let now = self.wall_now();
+        let parent = self.inode_mut(dir);
+        let entries = parent.entries_mut().ok_or(Errno::ENOTDIR)?;
+        let ino = entries.remove(name).ok_or(Errno::ENOENT)?;
+        parent.mtime = now;
+        parent.ctime = now;
+        Ok(ino)
+    }
+
+    /// Creates a new inode as entry `name` of `dir`.
+    pub fn create_in(&mut self, dir: Loc, name: &OsStr, kind: Kind) -> Result<Loc, Fault> {
+        let now = self.wall_now();
+        let ino = self.fs_mut(dir.mnt).add(Inode::new(kind, now));
+        self.link(dir, name, ino)?;
+        Ok(Loc { mnt: dir.mnt, ino })
+    }
+
+    /// Creates `path` (and missing parent directories) as `kind`. An
+    /// existing directory is fine when a directory is wanted.
+    pub fn create_path(&mut self, path: &Path, kind: Kind) -> Result<Loc, Fault> {
+        let want_dir = matches!(kind, Kind::Dir(_));
+        let mut here = self.lookup(Path::new("/"))?;
+        let names: Vec<&OsStr> = normal_names(path)?;
+        for (i, name) in names.iter().enumerate() {
+            let last = i + 1 == names.len();
+            match self.child(here, name) {
+                Ok(_) if last && !want_dir => {
+                    return Err(Fault::Model(format!("{} exists already", path.display())));
+                }
+                Ok(next) => {
+                    if self.inode(next).entries().is_none() {
+                        return Err(Errno::ENOTDIR.into());
+                    }
+                    here = next;
+                }
+                Err(Errno::ENOENT) if last => return self.create_in(here, name, kind),
+                Err(Errno::ENOENT) => {
+                    here = self.create_in(here, name, Kind::Dir(BTreeMap::new()))?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(here)
+    }
+
+    /// Whether a mount sits on `loc` or anywhere below it.
+    fn holds_mount(&self, loc: Loc) -> bool {
+        let below = self.fs(loc.mnt).closure([loc.ino]);
+        self.mounts
+            .iter()
+            .filter_map(|m| m.on)
+            .any(|on| on.mnt == loc.mnt && below.contains(&on.ino))
+    }
+
+    /// `rm -r`: unlinks every entry below a directory, then its name. An
+    /// object something still holds open keeps only itself alive, empty.
+    pub fn remove_path(&mut self, path: &Path) -> Result<(), Fault> {
+        let (dir, name) = self.parent_of(path)?;
+        let entries = self.inode(dir).entries().ok_or(Errno::ENOTDIR)?;
+        let ino = *entries.get(name).ok_or(Errno::ENOENT)?;
+        let top = Loc { mnt: dir.mnt, ino };
+        if self.holds_mount(top) {
+            return Err(Errno::EBUSY.into());
+        }
+        let now = self.wall_now();
+        for below in self.fs(top.mnt).closure([top.ino]) {
+            let inode = self.inode_mut(Loc {
+                mnt: top.mnt,
+                ino: below,
+            });
+            if let Some(entries) = inode.entries_mut()
+                && !entries.is_empty()
+            {
+                entries.clear();
+                inode.mtime = now;
+                inode.ctime = now;
+            }
+        }
+        self.unlink_entry(dir, name)?;
+        Ok(())
+    }
+
+    /// `rename(from, to)` within one filesystem.
+    pub fn rename_path(&mut self, from: &Path, to: &Path) -> Result<(), Fault> {
+        if to.starts_with(from) {
+            return Err(Errno::EINVAL.into());
+        }
+        let (from_dir, from_name) = self.parent_of(from)?;
+        let (to_dir, to_name) = self.parent_of(to)?;
+        if self.mount(from_dir.mnt).dev != self.mount(to_dir.mnt).dev {
+            return Err(Errno::EXDEV.into());
+        }
+        let moving = *self
+            .inode(from_dir)
+            .entries()
+            .and_then(|e| e.get(from_name))
+            .ok_or(Errno::ENOENT)?;
+        let moving_is_dir = self
+            .inode(Loc {
+                mnt: from_dir.mnt,
+                ino: moving,
+            })
+            .entries()
+            .is_some();
+        let existing = self
+            .inode(to_dir)
+            .entries()
+            .ok_or(Errno::ENOTDIR)?
+            .get(to_name)
+            .copied();
+        if let Some(old) = existing {
+            let old_inode = self.inode(Loc {
+                mnt: to_dir.mnt,
+                ino: old,
+            });
+            match (moving_is_dir, old_inode.entries()) {
+                (true, Some(entries)) if !entries.is_empty() => {
+                    return Err(Errno::ENOTEMPTY.into());
+                }
+                (true, None) => return Err(Errno::ENOTDIR.into()),
+                (false, Some(_)) => return Err(Errno::EISDIR.into()),
+                _ => {}
+            }
+            self.unlink_entry(to_dir, to_name)?;
+        }
+        self.unlink_entry(from_dir, from_name)?;
+        self.link(to_dir, to_name, moving)?;
+        Ok(())
+    }
+
+    /// Replaces the object at `path` by a new, empty one of the same type.
+    pub fn replace_path(&mut self, path: &Path) -> Result<Loc, Fault> {
+        let (dir, name) = self.parent_of(path)?;
+        let old = self.child(dir, name)?;
+        if old.mnt != dir.mnt {
+            return Err(Errno::EBUSY.into());
+        }
+        let kind = match &self.inode(old).kind {
+            Kind::File { .. } => Kind::File {
+                cachedir_tag: false,
+            },
+            Kind::Dir(_) => Kind::Dir(BTreeMap::new()),
+            Kind::Symlink(target) => Kind::Symlink(target.clone()),
+            Kind::Socket => Kind::Socket,
+            Kind::Fifo => Kind::Fifo,
+        };
+        if self.holds_mount(old) {
+            return Err(Errno::EBUSY.into());
+        }
+        self.unlink_entry(dir, name)?;
+        self.create_in(dir, name, kind)
+    }
+
+    /// `unlinkat(dir, name, what)` as the kernel does it.
+    pub fn unlinkat(&mut self, dir: Loc, name: &OsStr, remove_dir: bool) -> Result<Loc, Errno> {
+        let entries = self.inode(dir).entries().ok_or(Errno::ENOTDIR)?;
+        let ino = *entries.get(name).ok_or(Errno::ENOENT)?;
+        let target = Loc { mnt: dir.mnt, ino };
+        if self.mounted_on(target).is_some() {
+            return Err(Errno::EBUSY);
+        }
+        if self.mount(dir.mnt).read_only {
+            return Err(Errno::EROFS);
+        }
+        match (self.inode(target).entries(), remove_dir) {
+            (Some(_), false) => return Err(Errno::EISDIR),
+            (None, true) => return Err(Errno::ENOTDIR),
+            (Some(entries), true) if !entries.is_empty() => return Err(Errno::ENOTEMPTY),
+            _ => {}
+        }
+        self.unlink_entry(dir, name).map_err(|fault| match fault {
+            Fault::Errno(e) => e,
+            Fault::Model(m) => panic!("model bug: {m}"),
+        })?;
+        Ok(target)
+    }
+}
+
+/// The normal components of an absolute path; `.` and `..` are fixture
+/// mistakes.
+pub fn normal_names(path: &Path) -> Result<Vec<&OsStr>, Fault> {
+    if !path.is_absolute() {
+        return Err(Fault::Model(format!(
+            "{} is not an absolute path",
+            path.display()
+        )));
+    }
+    path.components()
+        .filter(|c| *c != Component::RootDir)
+        .map(|c| match c {
+            Component::Normal(name) => Ok(name),
+            _ => Err(Fault::Model(format!(
+                "{} has '.' or '..' components",
+                path.display()
+            ))),
+        })
+        .collect()
+}
+
+/// A wall-clock time as statx reports it.
+pub fn timestamp(t: jiff::Timestamp) -> Timestamp {
+    let secs = t.as_second();
+    let nanos = t.subsec_nanosecond();
+    // jiff gives a negative fraction for times before 1970.
+    if nanos < 0 {
+        Timestamp {
+            secs: secs - 1,
+            nanos: u32::try_from(nanos + 1_000_000_000).expect("in range"),
+        }
+    } else {
+        Timestamp {
+            secs,
+            nanos: u32::try_from(nanos).expect("non-negative"),
+        }
+    }
+}

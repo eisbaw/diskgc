@@ -43,16 +43,21 @@
       # only when the marker itself changes.
       sandboxMarker = ./crates/diskgc-linux/src/sandbox-marker;
 
-      # Source allowlist: only Cargo manifests, the lock file and Rust/TOML
-      # files under the crate directories reach the build. docs/, backlog/,
-      # *.md, flake.nix and the justfile are not build inputs, so editing them
-      # never changes an output path.
+      # Source allowlist: only Cargo manifests, the lock file, Rust/TOML
+      # files under the crate directories and the crates' listed data files
+      # reach the build. docs/, backlog/, *.md, flake.nix and the justfile are
+      # not build inputs, so editing them never changes an output path.
       workspaceFiles = lib.fileset.unions [
         ./Cargo.toml
         ./Cargo.lock
         (craneLib.fileset.commonCargoSources ./crates)
         # Non-Rust inputs of the crates, listed one by one.
         sandboxMarker
+        # YAML read by tests (host-model fixtures; later built-in profiles and
+        # golden sets) and the committed host-model JSON Schema, which a
+        # diskgc-model test compares with the generated one.
+        (lib.fileset.fileFilter (f: f.hasExt "yaml") ./crates)
+        ./crates/diskgc-model/host-model.schema.json
       ];
       workspaceSrc = lib.fileset.toSource {
         root = ./.;

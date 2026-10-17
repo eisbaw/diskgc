@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
+updated_date: '2026-10-17 08:25'
 labels:
   - wave-1
   - irreversible
@@ -29,6 +30,12 @@ Why: split from the Cargo kind task; this is the step that deletes. Implement th
 - [ ] #2 target/doc, target/tmp, target/criterion and CACHEDIR.TAG are never touched
 - [ ] #3 A new lock file or a newer build appearing between discovery and locking yields changed (model test with an event on the call trace)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-14: the testing.md sketch (crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml, expect exit 1 and skipped locked) runs through a stand-in Cargo lock check in crates/diskgc-model/tests/sketch.rs. Once this protocol and the executor exist, run the fixture through them and delete the stand-in.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

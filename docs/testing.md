@@ -133,7 +133,8 @@ The model is data, not a second Linux:
   deleted files, memory mappings), kernel capabilities (`statx` masks,
   `openat2`), scripted `docker` / `nix-store`, clock, delayed freeing.
 - **Strict loading**: unknown keys are errors, references must resolve, and
-  a JSON Schema is generated for editors.
+  a JSON Schema is generated for editors
+  (`crates/diskgc-model/host-model.schema.json`, kept current by a test).
 - **Events on the call trace.** A race is an event between two `Host` calls,
   addressed by the call (`at: {op: unlinkat, path: <…>, nth: 1, when:
   before}`), not by a hook in the product. Property tests place an event
@@ -152,10 +153,15 @@ tree:
     debug:
       .cargo-lock: {}
       deps: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+  /nix/store/x-cargo/bin/cargo: {}
 locks:
   - {path: /home/mark/src/app/target/debug/.cargo-lock, holder: 4242, mode: exclusive}
 processes:
-  - {pid: 4242, exe: /nix/store/x-cargo/bin/cargo, cwd: /home/mark/src/app}
+  - pid: 4242
+    exe: /nix/store/x-cargo/bin/cargo
+    cwd: /home/mark/src/app
+    maps: [/nix/store/x-cargo/bin/cargo]
+    environ: [HOME=/home/mark, PATH=/nix/store/x-cargo/bin]
 events:
   - at: {op: flock, path: /home/mark/src/app/target/debug/.cargo-lock, nth: 1, when: after}
     create: /home/mark/src/app/target/release/.cargo-lock
@@ -166,7 +172,56 @@ expect:
 
 Fixtures live in `tests/models/<area>/<case>.yaml`, one named test per file;
 JSON reports are snapshot-tested with durations, timestamps and seed
-redacted.
+redacted. The sketch above is the fixture
+`crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml`; until
+the executor exists, a stand-in for the Cargo lock check runs it.
+
+How the format reads (the schema documents every key):
+
+- **Tree:** keys are absolute paths; missing parents are created. A mapping
+  of scalars is a file (`{}` is empty; `symlink:`, `link:` for a hard link,
+  `type: socket|fifo`); a mapping of mappings is a directory, with its own
+  attributes under `.` (`{.: {}}` is an empty directory). Owners default
+  to 1000, times to `clock`.
+- **Mounts** in mount order, each with a `parent` (a stacked mount's parent
+  is the mount it covers); `statx_missing` lists fields the filesystem does
+  not answer. One device per mount: bind mounts are not modelled yet.
+- **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
+  for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
+  `/proc` read errors; a pid that exits is `Gone`. `locks` give their holder
+  an fd of its own. As on `LinuxHost`, an empty fd table, map or
+  environment, or no `exe`, reads as `Failed` (an empty read of a live
+  process is never the answer there).
+- **Events:** `at: {op, path, nth, when}`, `at: {call: k, when}` or `at:
+  {elapsed: 5s}`, and one action: `create`, `mkdir`, `remove`, `rename`,
+  `replace` (a new inode at the path), `open`, `close`, `exit`, `advance`
+  (a clock jump, e.g. a suspend). `remove` is `rm -r`: every entry below is
+  unlinked, and an object still open keeps only itself. An event that never
+  fires fails the test.
+- **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
+  to the next timed event or its deadline) and `advance`.
+- **Checks** (`ModelHost` fails the test at the call): `openat2` without the
+  `RESOLVE_*` and `O_*` flags of
+  [safety.md](safety.md#path-traversal) steps 2 and 3; `statx` of anything
+  but an empty path or a single name below a directory fd; `unlinkat` of a
+  name unless the previous port call was a successful `statx` of that name
+  in that directory (the identity check right before the unlink,
+  [safety.md](safety.md#deletion)). Locks live on open file descriptions
+  exactly as long as an fd refers to them.
+- **Limits:**
+  - symlinks are never followed (every allowed call refuses them); `..` is
+    not modelled; permissions are not checked;
+  - inode numbers are never reused, so a replacement that reuses the freed
+    inode number cannot be modelled;
+  - `/proc` link text is the path at open time (Linux follows renames);
+  - mtime, ctime and birth time are equal at load, so "ctime newer than
+    mtime" cannot be expressed;
+  - one task per process; diskgc itself is not among the pids;
+  - no directory listing and no signals (the port has neither yet);
+  - processes are fixed at load: no spawn or fork event, and no open file
+    description shared between processes;
+  - lookups cost time linear in the model, so 100,000-entry models need
+    indexes first.
 
 Model scenarios required by [safety.md](safety.md) and
 [architecture.md](architecture.md), among others:

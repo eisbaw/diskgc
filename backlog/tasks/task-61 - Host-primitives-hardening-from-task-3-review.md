@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 06:59'
+updated_date: '2026-10-17 08:41'
 labels:
   - wave-1
   - hardening
@@ -73,6 +73,25 @@ From task-3 round 10:
 (1) When a round finds nothing live and the pidfd is not yet readable, poll the pidfd with a short bounded timeout before the next round, so that an exiting process becomes Gone instead of Failed after MAX_ROUNDS back-to-back rounds (the cargo workload's Failed reads were all exiting processes).
 (2) startup() in crates/diskgc/src/main.rs builds LinuxHost, and so refuses to start, for every command except --version/--help, including commands that never read /proc (profiles, check). Decide in the CLI task which commands need the /proc checks.
 (3) The equal-pid namespace test (the_host_is_refused_under_an_ancestors_proc_with_an_equal_pid) relies on ns_last_pid in a user namespace and a fresh /proc mount; if a future CI sandbox forbids mounting proc, it fails rather than skips. Decide then whether to move it to the container suite.
+
+From task-3's final commit gate:
+- ProcRoot::names uses rustix Dir::read_from, which does fcntl_getfl + openat(fd, ".") per listing; use Dir::new(fd) (takes ownership, no reopen). Two extra syscalls inside the window where a task listing must hold still; QA measured slightly higher Failed under heavy churn than round 10.
+- Error messages from Kernel::list_once, fd_numbers and read_environ print the procfs-relative path (e.g. 1234/task/1234/fd); route them through ProcRoot::shown like the other sites.
+- LinuxHost::new: require fstatfs(proc).f_type == PROC_SUPER_MAGIC so a non-procfs /proc is refused directly rather than via a missing self/status.
+- Add a real-kernel regression test for /proc replaced after startup (mount over /proc, and lazy umount exposing an ancestor procfs), next to the equal-pid namespace test; mped's probe r12_proc_swap and QA's remount.rs show it catches the round-11 code.
+- procfs_is_reached_only_through_the_held_fd: derive its file list from src/ instead of a hard-coded list, and limit the exemption to LinuxHost::new rather than any fn named new. Being grep-based, it cannot catch a deliberately obfuscated path (QA showed format!("/{}/...", "proc") passes).
+- docs/architecture.md: the /proc readers return the result of the per-task round algorithm in diskgc-linux, not syscall-shaped calls; say so.
+- a_process_execing_from_a_thread_in_a_loop_is_never_gone: its 20-exec viability threshold flakes above load ~70 (5/720 in QA's stability run, also seen in round 11); never the safety assertion. Lower the threshold or scale it with the time budget.
+
+From task-14: diskgc-model's ModelHost builds Locked with Locked::granted in flock_try and flock_wait (another crate), so restricting granted must leave a way for Host implementations outside diskgc-core.
+
+ModelHost follow-ups from task-14's commit review (mped), deferred, do not block wave 1:
+(1) Derive /proc link text with State::path_of instead of storing the open-time path in Ofd.path / Ref.path (Linux follows renames; the stored text is stale after one).
+(2) An optional per-node ctime (today mtime = ctime = btime at load, so 'ctime newer than mtime' cannot be expressed), and an inode-reuse variant of the replace event (inode numbers are never reused, so the reused-inode replacement window cannot be modelled).
+(3) A spawn/fork event and open file descriptions shared between processes. Task-6 needs these for the fork handoff race; tasks 10 and 54 need children inheriting diskgc's fds (the host lock).
+(4) A test that the yaml block of docs/testing.md (Model tests) equals crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml (docs/ is not a flake build input today; the test would need it or run outside the sandbox).
+(5) NodeSpec doc caveat: file attributes must never take mapping values, because a misspelled attribute with a mapping value silently becomes a directory entry (a mapping of mappings is a directory).
+(6) Event paths are only syntax-checked at load (whether they exist depends on the run); a wrong path surfaces as a 'host model error' panic when the event fires.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

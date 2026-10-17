@@ -3,11 +3,11 @@ id: TASK-3
 title: >-
   Host port and LinuxHost primitives: mounts, openat2 resolution, statx,
   statvfs, flock, /proc readers
-status: In Progress
+status: Done
 assignee:
   - '@mped-architect'
 created_date: '2026-10-16 22:39'
-updated_date: '2026-10-17 07:28'
+updated_date: '2026-10-17 07:48'
 labels:
   - wave-1
   - irreversible
@@ -294,6 +294,8 @@ Final (round 11; convergence policy from the user: the check-vs-delete TOCTOU an
 - Bites: four mutants each revert one reader to the old path-based access (pids, task_ids, group_status, mountinfo), and each FAILs both new tests. No full real-kernel remount test: the seam test pins the fd use, as the coordinator allowed.
 - Docs: the host.rs module doc and safety.md (checked once at startup on a /proc that diskgc keeps open; every later read goes through it). The safety.md limits are now 'accepted limits', and limit 5 is the check-vs-delete window (including a thread acquiring after a round's count). Limits 1-4 already covered the late thread, the mapping moved below both passes, the large fd-table prefix with misbound lookups, and pid-number replacement.
 - Gates (final staged tree): nix flake check exit 0; nix build --rebuild of workspace-tests, e2e-tests, workspace-clippy and e2e-clippy exit 0 (72 passed). just check exit 0. just e2e twice exit 0 (20/20 each). just e2e-full exit 0 (21/21). Stability: 660 parallel runs, 660 pass.
+
+Committed as 22f29d9 (tree 34d52bb) after the deep gate's final round: qa-test-runner, mped-architect and Codex all GO. Verification note on refs/notes/verification.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
@@ -313,5 +315,5 @@ The diskgc binary exits 2 at startup on kernels below 5.8 or when the host setup
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

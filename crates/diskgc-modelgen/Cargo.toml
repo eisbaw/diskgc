@@ -6,4 +6,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+diskgc-core.workspace = true
 diskgc-model.workspace = true
+proptest.workspace = true

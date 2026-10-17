@@ -1,0 +1,853 @@
+//! The host-model format (docs/testing.md, Model tests): what a YAML fixture
+//! says, as plain serde data. Every struct denies unknown keys. References
+//! (pids, paths, mount parents) are resolved by [`crate::load`], which turns
+//! a [`HostModel`] into the state `ModelHost` answers from.
+//!
+//! The JSON Schema for editors is generated from these types
+//! ([`json_schema`]) and committed as `host-model.schema.json` next to this
+//! crate's manifest.
+
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
+
+use diskgc_core::host::Dev;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// The only format version so far (`host_model: 1`).
+pub const FORMAT_VERSION: u32 = 1;
+
+/// A host model: the machine a model test runs against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostModel {
+    /// Format version; must be 1.
+    pub host_model: u32,
+    /// Wall-clock time when the run starts (RFC 3339, e.g.
+    /// `2026-10-15T03:00:00Z`). Default time stamp of tree entries.
+    pub clock: WallTime,
+    /// What `uname -r` reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    /// The mount table, in mount order (the order of mountinfo lines).
+    /// Exactly one mount, at `/`, has no parent.
+    pub mounts: Vec<MountSpec>,
+    /// Files and directories, keyed by absolute path. Missing parent
+    /// directories are created with default attributes; a key below another
+    /// key adds entries to that directory.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tree: BTreeMap<PathBuf, NodeSpec>,
+    /// `flock`s held by processes (each through an fd of its own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<LockSpec>,
+    /// The visible processes other than diskgc itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessSpec>,
+    /// Changes applied between two `Host` calls, or at a point in time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventSpec>,
+    /// What the scenario must produce (checked by the harness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<Expect>,
+}
+
+impl HostModel {
+    /// The model as YAML (how property tests print a shrunk failing case,
+    /// to be saved under `tests/regressions/`).
+    pub fn to_yaml(&self) -> String {
+        serde_saphyr::to_string(self).expect("a host model always serialises")
+    }
+}
+
+/// One mount.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MountSpec {
+    /// Mount id (mountinfo, `stx_mnt_id`); unique, not 0.
+    pub id: u64,
+    /// Mount point.
+    pub at: PathBuf,
+    /// Filesystem type, e.g. `ext4`, `tmpfs`, `nfs`, `btrfs`.
+    pub fs: String,
+    /// Device number `major:minor`. One filesystem per device: bind mounts
+    /// are not modelled yet.
+    pub dev: DevSpec,
+    /// Filesystem size.
+    pub size: Bytes,
+    /// Space used by things outside the model; available space is `size -
+    /// other_used -` the blocks of every live inode.
+    #[serde(default, skip_serializing_if = "Bytes::is_zero")]
+    pub other_used: Bytes,
+    /// The mount this one is mounted on (stacked mounts: the mount at the
+    /// same point it covers). Required except for the mount at `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    /// `statx` fields the filesystem does not answer (kernel capabilities):
+    /// they come back as `None`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statx_missing: Vec<StatxField>,
+}
+
+/// A `statx` field that can be missing from the answer.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StatxField {
+    Type,
+    Mode,
+    Nlink,
+    Uid,
+    Gid,
+    Ino,
+    Size,
+    Blocks,
+    Mtime,
+    Ctime,
+    Btime,
+    MntId,
+    MountRoot,
+}
+
+/// A tree node. A mapping of scalars is a file (its attributes; `{}` is an
+/// empty file); a mapping of mappings is a directory (its entries, plus its
+/// own attributes under the key `.`, which no entry can be called; `{.:
+/// {}}` is an empty directory). Mixing both is an error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeSpec {
+    File(FileSpec),
+    Dir(DirSpec),
+}
+
+/// A non-directory: regular file (default), symlink, hard link, socket or
+/// FIFO.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSpec {
+    /// `socket` or `fifo`; a regular file if absent.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub special: Option<Special>,
+    /// A symlink with this target text (never followed by the model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink: Option<PathBuf>,
+    /// A hard link: another name of the file at this absolute path (same
+    /// filesystem). Takes no other attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<PathBuf>,
+    /// File size; allocated space is the size rounded up to 4 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Bytes>,
+    /// Modification time (also ctime and birth time); default `clock`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<WallTime>,
+    /// Owner; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// Group; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// Permission bits in octal, e.g. `"0644"` (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
+    /// Holds a valid `CACHEDIR.TAG` signature.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cachedir_tag: bool,
+}
+
+/// `socket` or `fifo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Special {
+    Socket,
+    Fifo,
+}
+
+/// A directory: its own attributes and its entries.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DirSpec {
+    pub attrs: DirAttrs,
+    pub entries: BTreeMap<String, NodeSpec>,
+}
+
+/// A directory's own attributes (the `.` key).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DirAttrs {
+    /// Modification time (also ctime and birth time); default `clock`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<WallTime>,
+    /// Owner; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// Group; default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// Permission bits in octal; default `"0755"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
+}
+
+/// A `flock` held by a process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LockSpec {
+    pub path: PathBuf,
+    /// The pid holding it; must be one of `processes`.
+    pub holder: u32,
+    pub mode: LockModeSpec,
+}
+
+/// `shared` or `exclusive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LockModeSpec {
+    Shared,
+    Exclusive,
+}
+
+/// A process, as its `/proc` entry shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSpec {
+    pub pid: u32,
+    /// Its executable (`/proc/<pid>/exe`); none if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<PathBuf>,
+    /// Working directory; default `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Root directory; default `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PathBuf>,
+    /// Initial environment, as `NAME=value` entries in order (an entry
+    /// without `=` is kept as such).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environ: Vec<String>,
+    /// Open files (`flock`s held go in `locks`, which add fds of their own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fds: Vec<FdSpec>,
+    /// Files it has mapped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maps: Vec<PathBuf>,
+    /// How reading its `/proc` entry goes.
+    #[serde(default, skip_serializing_if = "ProcAccess::is_readable")]
+    pub proc: ProcAccess,
+}
+
+/// The outcome of every `/proc/<pid>` read of a process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcAccess {
+    /// Answered from the model. As on `LinuxHost`, an empty fd table,
+    /// memory map or environment, or no exe, is `ProcError::Failed`.
+    #[default]
+    Readable,
+    /// `ProcError::Denied` (`EACCES`): another user's or a non-dumpable
+    /// process.
+    Denied,
+    /// `ProcError::Failed`: a live process that could not be inspected.
+    Failed,
+}
+
+impl ProcAccess {
+    fn is_readable(&self) -> bool {
+        *self == Self::Readable
+    }
+}
+
+/// An open file of a process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FdSpec {
+    /// The fd number; default: the lowest free one from 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd: Option<u32>,
+    pub path: PathBuf,
+    /// The file was deleted after it was opened: its name is removed when
+    /// the model loads, and it keeps its space while it is open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
+}
+
+/// A change to the model, applied when its trigger `at` is reached. Exactly
+/// one action key besides `at`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EventSpec {
+    pub at: At,
+    /// Create an empty regular file (and missing parent directories).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<PathBuf>,
+    /// Create a directory (and missing parents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mkdir: Option<PathBuf>,
+    /// Remove a name and, for a directory, every entry below it (`rm -r`).
+    /// An object still open or mapped keeps existing, but only itself: an
+    /// open directory stays, empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove: Option<PathBuf>,
+    /// `rename(from, to)`: `to` may exist if both are files, or both
+    /// directories and `to` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<RenameSpec>,
+    /// Replace the object at the path by a new, empty one of the same type
+    /// (a new inode). The old one is detached from every modelled
+    /// directory, as if renamed away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<PathBuf>,
+    /// A process opens a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<ProcPath>,
+    /// A process closes every fd it opened on a path (releasing their
+    /// locks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<ProcPath>,
+    /// A process exits: its fds close and its pid is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<u32>,
+    /// The clock jumps forward (e.g. a suspend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance: Option<Elapsed>,
+}
+
+/// Source and destination of a rename.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenameSpec {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// A process and a path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcPath {
+    pub pid: u32,
+    pub path: PathBuf,
+}
+
+/// When an event fires: at the `nth` call of `op` (on `path`, if given), at
+/// the `call`-th call of any kind, or once the clock has run `elapsed`
+/// since the start. Call triggers need `when`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct At {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<Op>,
+    /// The path the call acts on (an fd's path joined with the call's
+    /// relative path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Which matching call, from 1; default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth: Option<u32>,
+    /// The index of the call in the whole trace, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<u64>,
+    /// Time since the start of the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed: Option<Elapsed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<When>,
+}
+
+/// Before the call runs, or after it ran (before it returns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum When {
+    Before,
+    After,
+}
+
+/// A `Host` operation, named after its syscall (`flock` covers both lock
+/// calls).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Op {
+    Mountinfo,
+    Openat2,
+    Statx,
+    Statvfs,
+    Flock,
+    Now,
+    Sleep,
+    KernelRelease,
+    Pids,
+    ProcFds,
+    ProcLinks,
+    ProcMaps,
+    ProcEnviron,
+    Unlinkat,
+}
+
+impl Op {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mountinfo => "mountinfo",
+            Self::Openat2 => "openat2",
+            Self::Statx => "statx",
+            Self::Statvfs => "statvfs",
+            Self::Flock => "flock",
+            Self::Now => "now",
+            Self::Sleep => "sleep",
+            Self::KernelRelease => "kernel_release",
+            Self::Pids => "pids",
+            Self::ProcFds => "proc_fds",
+            Self::ProcLinks => "proc_links",
+            Self::ProcMaps => "proc_maps",
+            Self::ProcEnviron => "proc_environ",
+            Self::Unlinkat => "unlinkat",
+        }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// What a scenario must produce. Only the keys given are checked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Expect {
+    /// The exit code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    /// The skipped candidates, in report order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Vec<Skipped>>,
+}
+
+/// A skipped candidate and its reason (docs/reference.md, JSON output).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Skipped {
+    pub candidate: PathBuf,
+    pub reason: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+// ---- Tree nodes: mappings of scalars or of mappings ----
+
+impl NodeSpec {
+    /// Classifies a parsed mapping (see [`NodeSpec`]).
+    fn from_value(value: serde_json::Value) -> Result<Self, String> {
+        let serde_json::Value::Object(map) = value else {
+            return Err(format!(
+                "a tree node must be a mapping (file attributes such as {{size: 1G}}, or \
+                 directory entries), found {value}"
+            ));
+        };
+        let nested = map.values().filter(|v| v.is_object()).count();
+        if nested == 0 {
+            return serde_json::from_value(serde_json::Value::Object(map))
+                .map(NodeSpec::File)
+                .map_err(|e| e.to_string());
+        }
+        if nested != map.len() {
+            let scalars: Vec<&str> = map
+                .iter()
+                .filter(|(_, v)| !v.is_object())
+                .map(|(k, _)| k.as_str())
+                .collect();
+            return Err(format!(
+                "mixes file attributes {scalars:?} with directory entries; a directory's own \
+                 attributes go under the key '.'"
+            ));
+        }
+        let mut dir = DirSpec::default();
+        for (name, value) in map {
+            if name == "." {
+                dir.attrs = serde_json::from_value(value).map_err(|e| format!(".: {e}"))?;
+                continue;
+            }
+            if name.is_empty() || name == ".." || name.contains('/') {
+                return Err(format!(
+                    "{name:?} is not a directory entry name (one component, not '..')"
+                ));
+            }
+            let node = Self::from_value(value).map_err(|e| format!("{name}: {e}"))?;
+            dir.entries.insert(name, node);
+        }
+        Ok(NodeSpec::Dir(dir))
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        NodeSpec::from_value(value).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for NodeSpec {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            NodeSpec::File(file) => file.serialize(s),
+            NodeSpec::Dir(dir) => {
+                // An empty directory still needs '.' to read back as one.
+                let attrs = dir.attrs != DirAttrs::default() || dir.entries.is_empty();
+                let mut map = s.serialize_map(Some(dir.entries.len() + usize::from(attrs)))?;
+                if attrs {
+                    map.serialize_entry(".", &dir.attrs)?;
+                }
+                for (name, node) in &dir.entries {
+                    map.serialize_entry(name, node)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl JsonSchema for NodeSpec {
+    fn schema_name() -> Cow<'static, str> {
+        "Node".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let file = generator.subschema_for::<FileSpec>();
+        let attrs = generator.subschema_for::<DirAttrs>();
+        let node = generator.subschema_for::<NodeSpec>();
+        json_schema!({
+            "description": "A file (a mapping of attributes; {} is an empty file) or a directory \
+                (a mapping of entry names to nodes, with its own attributes under '.'; {.: {}} \
+                is an empty directory).",
+            "oneOf": [
+                file,
+                {
+                    "type": "object",
+                    "properties": { ".": attrs },
+                    "additionalProperties": node,
+                    "minProperties": 1
+                }
+            ]
+        })
+    }
+}
+
+// ---- Scalars written as text ----
+
+/// Implements serde and JSON Schema for a type written as a string, through
+/// its `FromStr` and `Display`.
+macro_rules! text_scalar {
+    ($ty:ident, $name:literal, $pattern:literal, $description:literal) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(d)?;
+                text.parse().map_err(D::Error::custom)
+            }
+        }
+
+        impl Serialize for $ty {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_str(self)
+            }
+        }
+
+        impl JsonSchema for $ty {
+            fn schema_name() -> Cow<'static, str> {
+                $name.into()
+            }
+
+            fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                json_schema!({
+                    "type": "string",
+                    "pattern": $pattern,
+                    "description": $description
+                })
+            }
+        }
+    };
+}
+
+/// A byte count: an integer with an optional unit `K`, `M`, `G` or `T`
+/// (powers of 1024, as in docs/reference.md).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Bytes(pub u64);
+
+const UNITS: [(char, u32); 4] = [('T', 40), ('G', 30), ('M', 20), ('K', 10)];
+
+impl Bytes {
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl FromStr for Bytes {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("{text:?} is not a size (digits and an optional K, M, G or T)");
+        let (digits, shift) = match UNITS.iter().find(|(unit, _)| text.ends_with(*unit)) {
+            Some((_, shift)) => (&text[..text.len() - 1], *shift),
+            None => (text, 0),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        n.checked_mul(1 << shift)
+            .map(Bytes)
+            .ok_or_else(|| format!("{text:?} overflows 64 bits"))
+    }
+}
+
+impl fmt::Display for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (unit, shift) in UNITS {
+            if self.0 != 0 && self.0.is_multiple_of(1 << shift) {
+                return write!(f, "{}{unit}", self.0 >> shift);
+            }
+        }
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A size is text (`8G`) or a plain integer (bytes).
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Count(u64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Count(n) => Ok(Bytes(n)),
+            Raw::Text(text) => text.parse().map_err(D::Error::custom),
+        }
+    }
+}
+
+impl Serialize for Bytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl JsonSchema for Bytes {
+    fn schema_name() -> Cow<'static, str> {
+        "Bytes".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "A size: digits and an optional K, M, G or T (powers of 1024), or a number of bytes.",
+            "anyOf": [
+                { "type": "string", "pattern": "^[0-9]+[KMGT]?$" },
+                { "type": "integer", "minimum": 0 }
+            ]
+        })
+    }
+}
+
+/// A duration: an integer and a unit `ms`, `s`, `m`, `h` or `d`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Elapsed(pub Duration);
+
+const DURATION_UNITS: [(&str, u64); 5] = [
+    ("d", 86_400_000),
+    ("h", 3_600_000),
+    ("m", 60_000),
+    ("s", 1_000),
+    ("ms", 1),
+];
+
+impl FromStr for Elapsed {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("{text:?} is not a duration (digits and ms, s, m, h or d)");
+        let split = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
+        let (digits, unit) = text.split_at(split);
+        let millis = DURATION_UNITS
+            .iter()
+            .find(|(name, _)| *name == unit)
+            .map(|(_, millis)| *millis)
+            .ok_or_else(bad)?;
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        n.checked_mul(millis)
+            .map(|ms| Elapsed(Duration::from_millis(ms)))
+            .ok_or_else(|| format!("{text:?} overflows"))
+    }
+}
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let millis = self.0.as_millis();
+        for (unit, per) in DURATION_UNITS {
+            let per = u128::from(per);
+            if millis != 0 && millis.is_multiple_of(per) {
+                return write!(f, "{}{unit}", millis / per);
+            }
+        }
+        write!(f, "0s")
+    }
+}
+
+text_scalar!(
+    Elapsed,
+    "Elapsed",
+    "^[0-9]+(ms|s|m|h|d)$",
+    "A duration: digits and ms, s, m, h or d."
+);
+
+/// A point in wall-clock time, written in RFC 3339.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WallTime(pub jiff::Timestamp);
+
+impl FromStr for WallTime {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        text.parse()
+            .map(WallTime)
+            .map_err(|e| format!("{text:?} is not an RFC 3339 time: {e}"))
+    }
+}
+
+impl fmt::Display for WallTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+text_scalar!(
+    WallTime,
+    "WallTime",
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T",
+    "A time in RFC 3339, e.g. 2026-10-15T03:00:00Z."
+);
+
+/// A device number written `major:minor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DevSpec(pub Dev);
+
+impl FromStr for DevSpec {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("{text:?} is not a device number major:minor");
+        let (major, minor) = text.split_once(':').ok_or_else(bad)?;
+        let number = |s: &str| -> Result<u32, String> {
+            if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            s.parse().map_err(|_| bad())
+        };
+        Ok(DevSpec(Dev {
+            major: number(major)?,
+            minor: number(minor)?,
+        }))
+    }
+}
+
+impl fmt::Display for DevSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+text_scalar!(
+    DevSpec,
+    "Dev",
+    "^[0-9]+:[0-9]+$",
+    "A device number major:minor, e.g. \"254:1\"."
+);
+
+/// Permission bits, written in octal as a string (`"0755"`), since YAML
+/// versions disagree on what a leading zero means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mode(pub u32);
+
+impl FromStr for Mode {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("{text:?} is not an octal mode such as \"0755\"");
+        if !(3..=4).contains(&text.len()) || !text.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return Err(bad());
+        }
+        u32::from_str_radix(text, 8).map(Mode).map_err(|_| bad())
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04o}", self.0)
+    }
+}
+
+text_scalar!(
+    Mode,
+    "Mode",
+    "^[0-7]{3,4}$",
+    "Permission bits in octal, as a string, e.g. \"0755\"."
+);
+
+/// The JSON Schema of the host-model format.
+pub fn json_schema() -> Schema {
+    schemars::schema_for!(HostModel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_parse_in_powers_of_1024_and_print_back() {
+        assert_eq!("8G".parse::<Bytes>(), Ok(Bytes(8 << 30)));
+        assert_eq!("1000".parse::<Bytes>(), Ok(Bytes(1000)));
+        assert_eq!("3K".parse::<Bytes>(), Ok(Bytes(3072)));
+        for bad in ["", "G", "8GB", "-1", "1.5G", "8 G", "99999999999T"] {
+            assert!(bad.parse::<Bytes>().is_err(), "{bad:?}");
+        }
+        for text in ["8G", "1000", "3K", "0", "1025"] {
+            assert_eq!(text.parse::<Bytes>().unwrap().to_string(), text);
+        }
+    }
+
+    #[test]
+    fn durations_modes_and_devices_parse() {
+        assert_eq!("5s".parse::<Elapsed>(), Ok(Elapsed(Duration::from_secs(5))));
+        assert_eq!(
+            "250ms".parse::<Elapsed>(),
+            Ok(Elapsed(Duration::from_millis(250)))
+        );
+        assert_eq!("90s".parse::<Elapsed>().unwrap().to_string(), "90s");
+        assert_eq!("120s".parse::<Elapsed>().unwrap().to_string(), "2m");
+        for bad in ["5", "s", "5x", "1.5s", "-1s"] {
+            assert!(bad.parse::<Elapsed>().is_err(), "{bad:?}");
+        }
+        assert_eq!("0755".parse::<Mode>(), Ok(Mode(0o755)));
+        assert_eq!("644".parse::<Mode>(), Ok(Mode(0o644)));
+        for bad in ["0855", "75", "07555", "rwx"] {
+            assert!(bad.parse::<Mode>().is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            "254:1".parse::<DevSpec>(),
+            Ok(DevSpec(Dev {
+                major: 254,
+                minor: 1
+            }))
+        );
+        for bad in ["254", "254:", ":1", "a:b", "1:2:3"] {
+            assert!(bad.parse::<DevSpec>().is_err(), "{bad:?}");
+        }
+    }
+}
