@@ -240,17 +240,17 @@ is accepted until measured otherwise.
 ### The `Host` port
 
 - **Two shapes of operation.** Files and locks are syscall-shaped
-  (`openat2`, `statx`, `flock`, `unlinkat`, `statvfs`, `mountinfo`, `/proc`
-  reads), so the safety logic (flags, ordering, rechecks) lives in the core
-  where the model can test it. Docker and Nix are domain-shaped:
-  `run(argv, env, deadline)`, in two operations. A **query** run (`docker
-  context`/`builder`/`info`, `nix store info --json`) is on `Host`: not
-  gated, so `survey`, `--dry-run` and `--tally-only` work anywhere; it
-  takes a closed enum of queries that `LinuxHost` maps to argv, never argv
-  from the caller or from config. A **deleting**
-  run (a prune, a GC, every command action) is on `Delete`, behind the
-  pre-release sandbox gate. Each has one wrapper in `LinuxHost`, allowlisted
-  by the source scan ([safety.md](safety.md#pre-release-sandbox-gate)).
+  (`openat2`, `statx`, `getdents` (names only), `flock`, `unlinkat`,
+  `statvfs`, `mountinfo`, `/proc` reads), so the safety logic (flags,
+  ordering, rechecks) lives in the core where the model can test it. Docker and Nix are domain-shaped, in two
+  operations. A **query** run (`docker context`/`builder`/`info`, `nix
+  store info --json`) is on `Host`: not gated, so `survey`, `--dry-run` and
+  `--tally-only` work anywhere; it takes a closed enum of queries that
+  `LinuxHost` maps to argv, never argv from the caller or from config. A
+  **deleting** run (a prune, a GC, every command action) is
+  `run(argv, env, deadline)` on `Delete`, behind the pre-release sandbox
+  gate. Each has one wrapper in `LinuxHost`, allowlisted by the source scan
+  ([safety.md](safety.md#pre-release-sandbox-gate)).
 - **diskgc's own state** (the index snapshot) is written through one port
   operation that takes only a typed key (no fd or name from the caller):
   `LinuxHost` opens the state directory itself, creates the temporary file
@@ -258,8 +258,9 @@ is accepted until measured otherwise.
   renames only onto `index-<fs>`; `ModelHost` checks the same shape. It is
   not gated (it is diskgc's
   cache, not user data, and `watch --tally-only` must work anywhere). It
-  will be the only write or rename the scan allows outside `Delete`; until
-  the snapshot exists, the scan allows none.
+  and the creation of its lock file (`index-<fs>.lock`, decided in the
+  snapshot task) will be the only writes or renames the scan allows
+  outside `Delete`; until the snapshot exists, the scan allows none.
 - **Time is part of the port.** The clock, every blocking operation (host
   lock wait, child wait, the SIGTERM → 10 s → SIGKILL sequence, re-sampling)
   and the tally's batch timing and sleeps are port operations; `ModelHost`

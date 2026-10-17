@@ -1,10 +1,10 @@
 ---
 id: TASK-50
 title: 'Pre-release sandbox gate: refuse real deletion outside test containers'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 11:02'
+updated_date: '2026-10-17 11:12'
 labels:
   - wave-1
   - irreversible
@@ -24,7 +24,7 @@ Why: from the first deleting code on, developers and AI agents could delete real
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
 
 ## Acceptance Criteria
@@ -93,4 +93,6 @@ Bites (mutate, run, restore from staged copies; all failed as expected):
 - Scanner: dropping File::options, create_new or from_bits_retain fails every_gated_operation_is_caught. Tolerating renames, globs or #[path] fails the hiding-forms control. Tolerating build.rs, a build key or a '..' target path fails the layout control. Pinning only plain [dependencies], or not resolving workspace entries, or ignoring [patch] fails the boundary control. Accepting cr"..", or the old char-escape step, fails the lexer control. Command, include or syscall as bare words fail the look-alike control. Not checking for a Permit fails the allowlist control. Allowing std::process or std::fs in core/CLI fails the os_access control. Walking past symlinks fails the walk control.
 - Real sources: a `use std::fs as filesystem` in mountinfo.rs, a #[path] module in diskgc-core, and File::options truncation in LinuxHost each fail deleting_syscalls_only_behind_the_gate. A rustix "mount" feature in the workspace manifest fails production_dependencies_are_the_reviewed_ones. `use std::fs` in diskgc-core fails core_and_cli_reach_the_os_only_through_the_port. A build.rs in diskgc-core fails production_crates_compile_only_what_the_scan_reads.
 Gates round 3: just check exit 0 (diskgc-linux 101 passed, 1 ignored); nix flake check -L exit 0 (the 22 source_scan tests ran in the musl build); nix build --rebuild of the four checks exit 0 (101 and 34 re-ran); just e2e twice exit 0 (21 of 21 each); just e2e-full exit 0 (22 of 22).
+
+Committed as 6206cf4 (tree f331ca9) after the deep gate's third round: qa-test-runner, mped-architect and Codex all GO.
 <!-- SECTION:NOTES:END -->

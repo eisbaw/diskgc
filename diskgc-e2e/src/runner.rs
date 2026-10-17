@@ -49,7 +49,8 @@ pub struct Config {
     pub image_stream: PathBuf,
     /// `name:tag` of the base image, the tag being its Nix hash.
     pub image_ref: String,
-    /// Directory with `bin/diskgc`, `bin/diskgc-e2e`, `bin/diskgc-e2e-canary`.
+    /// Directory with `bin/diskgc`, `bin/diskgc-e2e`, `bin/diskgc-e2e-canary`
+    /// and `bin/diskgc-e2e-driver`.
     pub under_test: PathBuf,
     /// Where per-test logs go (on the host).
     pub log_dir: PathBuf,

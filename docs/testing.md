@@ -217,7 +217,9 @@ How the format reads (the schema documents every key):
   - mtime, ctime and birth time are equal at load, so "ctime newer than
     mtime" cannot be expressed;
   - one task per process; diskgc itself is not among the pids;
-  - no directory listing and no signals (the port has neither yet);
+  - no signals (the port has none yet); `read_dir` lists names in name
+    order, while the kernel's order is the filesystem's, so callers must
+    not rely on it;
   - processes are fixed at load: no spawn or fork event, and no open file
     description shared between processes;
   - lookups cost time linear in the model, so 100,000-entry models need
@@ -365,12 +367,52 @@ Some tests must stop diskgc at an exact point (race test 5 pauses it
 between discovery and locking; race test 6 kills it at seeded call
 positions; the replace-between-walk-and-unlink test needs the replacement
 at one exact moment). In the model these are events on the `Host` call
-trace. In containers, the e2e image uses a **test-only `Host` wrapper**
-(compiled only into the e2e build of the binary, never into the release
-package) that pauses or aborts at a call position given by the harness.
-This is the one sanctioned exception to "no hooks in the product": it lives
-outside the product build, and the release build is checked not to contain
-it.
+trace. In containers, a **test driver** (`diskgc-e2e-driver`, built from
+`diskgc-e2e` only) runs single diskgc operations on a fixture (`walk`,
+`delete`; later tasks add the in-use check and the Cargo operations) over
+`LinuxHost` wrapped in a **test-only `Host` wrapper** that pauses or kills
+it at a call position given by the harness. This is the one sanctioned
+exception to "no hooks in the product": it lives outside the product
+build, and the release build is checked not to contain it.
+
+- **Positions.** The wrapper counts every port call, `Host` and `Delete`
+  methods alike, with one counter from 1. The harness names a call as `K`
+  (the K-th call) or `OP:N` (the N-th call of the port method named `OP`,
+  e.g. `unlinkat:2`; unlike the model's `flock`, `flock_try` and
+  `flock_wait` are counted apart), with `--pause-at` or `--kill-at`; the action runs before
+  the call. A planned position the run never reaches fails the run.
+- **Pause** is a handshake on the driver's stdio: it prints a control line
+  (`diskgc-e2e-control: pause call=K op=OP nth=N pid=P`) and blocks
+  reading a line from stdin; the harness checks in `/proc` that the
+  process is a child of its strace, sleeping, inside `read(0)`, then
+  changes the fixture and writes a line to resume it. Closing stdin while
+  it is paused makes it exit with a failure instead of carrying on.
+  `SIGSTOP` is not used: under strace a stopped tracee shows `t (tracing
+  stop)` and `wchan` `ptrace_stop` alike in the transient
+  signal-delivery-stop, in the group-stop and at every traced syscall
+  (observed under strace with `--seccomp-bpf -f`), so the harness cannot tell when it is stopped for good, and
+  a `SIGCONT` sent during the signal-delivery-stop is consumed before
+  strace re-injects the `SIGSTOP`, which then never ends (kernel reading,
+  not reproduced).
+- **Kill**: the driver prints a control line and sends itself `SIGKILL`;
+  strace then ends itself with the same signal. The killed run is judged
+  by the oracle like any other.
+- **Deleting** goes only through the wrapped host's `Delete` methods, so
+  the pre-release sandbox gate applies; the wrapper only forwards and makes
+  no permit. The source scan does not cover `diskgc-e2e`, so this rests on
+  review.
+- **Release check** (flake check `release-excludes-e2e`): the shipped
+  `diskgc` binary contains no symbol of `diskgc-e2e`, none of the
+  wrapper's type, control-line prefix or the driver's usage line, and its
+  `cargo tree` (normal and build edges) has no `diskgc-e2e`. The same
+  needles must all be found in the driver binary, and the shipped binary
+  must have a symbol table; otherwise the check fails as vacuous.
+- **Limits:** positions count port calls, not syscalls: a port call that
+  makes several syscalls (`resolve`'s steps, a `/proc` reader's rounds)
+  cannot be stopped inside. The driver's `delete` is not the deletion
+  engine (no walk record, ownership or in-use checks) and sorts names, so
+  positions are reproducible for a given tree; the engine's own order is
+  its task's to state.
 
 ## Container setup
 

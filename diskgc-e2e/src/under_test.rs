@@ -12,6 +12,12 @@
 //! A refused filter (strace prints why and carries on without it) fails the
 //! run rather than silently making it slow.
 //!
+//! [`run_as_tester`] waits for the run to end. [`spawn_as_tester`] returns
+//! at once with a [`Spawned`], for runs the harness must pause at a chosen
+//! port call, change the fixture while they wait, resume, or see killed
+//! there (the test driver and its controlled `Host` wrapper,
+//! [`crate::controlled`]); both are the same traced run underneath.
+//!
 //! Every traced run is entered in the test's [`Ledger`]; the deletion oracle
 //! marks the runs it judged, and a test that leaves a traced run unjudged
 //! fails (docs/testing.md, Grounding, acceptance signal 1).
@@ -31,16 +37,19 @@
 //!   when it drops to uid 1000.
 
 use std::ffi::OsStr;
-use std::os::unix::process::CommandExt;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Gid, Uid};
 
+use crate::controlled::ControlLine;
 use crate::scratch::Scratch;
 use crate::strace::{self, Event};
 use crate::{TESTER, TESTER_NAME, exit, info};
@@ -58,6 +67,9 @@ pub const STRACE_OPTIONS: &[&str] = &["--seccomp-bpf", "-f", "-ff", "-qq", "-y",
 pub struct Run {
     pub argv: Vec<String>,
     pub code: Option<i32>,
+    /// The signal that ended strace, which ends itself with the signal
+    /// that ended the code under test (a controlled kill: `SIGKILL`).
+    pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
     pub events: Vec<Event>,
@@ -76,8 +88,9 @@ impl Run {
             Ok(self)
         } else {
             Err(format!(
-                "{:?} exited with {:?}, expected {code}\n--- stdout\n{}--- stderr\n{}",
-                self.argv, self.code, self.stdout, self.stderr
+                "{:?} exited with {:?} (signal {:?}), expected {code}\n--- stdout\n{}--- \
+                 stderr\n{}",
+                self.argv, self.code, self.signal, self.stdout, self.stderr
             ))
         }
     }
@@ -149,7 +162,7 @@ fn seccomp_refusals(stderr: &str) -> Vec<&str> {
 
 /// Runs `program args...` as `tester` under strace, with a minimal fixed
 /// environment and `cwd` as working directory, collects the record and
-/// enters the run in `ledger`.
+/// enters the run in `ledger`. Its stdin is at end of file.
 pub fn run_as_tester<S: AsRef<OsStr>>(
     ledger: &Ledger,
     records: &Scratch,
@@ -157,9 +170,66 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
 ) -> Result<Run, String> {
+    spawn_as_tester(ledger, records, cwd, program, args)?.wait()
+}
+
+/// How long [`Spawned`] waits for the code under test to print a control
+/// line or answer a check. Generous: a loaded machine runs many containers.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// x86_64 `read(2)`: the syscall a paused driver is blocked in, as the
+/// first field of `/proc/<pid>/syscall` (the flake builds x86_64 only).
+const SYS_READ: &str = "0";
+
+/// A traced run of code under test that is still going, from
+/// [`spawn_as_tester`]: the harness reads its stdout line by line, and can
+/// wait until it pauses at a controlled point ([`Spawned::wait_paused`]),
+/// resume it ([`Spawned::resume`]) and collect the finished [`Run`]
+/// ([`Spawned::wait`]), which the oracle must judge like any other.
+///
+/// Its stdin is a pipe the harness holds: the controlled `Host` wrapper
+/// (crate::controlled) blocks reading it at a pause point, and a line
+/// written to it resumes the code under test. Closing it (as `wait` does
+/// first) makes a paused driver exit with a failure rather than carry on.
+pub struct Spawned {
+    argv: Vec<String>,
+    strace: Child,
+    stdin: Option<ChildStdin>,
+    lines: Receiver<String>,
+    stdout: JoinHandle<String>,
+    stderr: JoinHandle<String>,
+    record_dir: PathBuf,
+    started: Instant,
+    judged: Arc<AtomicBool>,
+}
+
+/// Where the code under test paused, as its control line says, after the
+/// harness checked that the process really is blocked there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paused {
+    /// The port call it paused before, from 1.
+    pub call: u64,
+    pub op: String,
+    /// The call's position among calls of `op`, from 1.
+    pub nth: u64,
+    pub pid: u32,
+}
+
+/// Prefix of strace's per-process record files (`-ff` adds `.PID`).
+const RECORD_PREFIX: &str = "trace";
+
+/// Starts `program args...` as `tester` under strace (as [`run_as_tester`]
+/// does) and returns at once. The run is entered in `ledger` and its start
+/// time recorded before anything is spawned.
+pub fn spawn_as_tester<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    program: &Path,
+    args: &[S],
+) -> Result<Spawned, String> {
     let n = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
-    let prefix = "trace";
+    let record_dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
     let argv: Vec<String> = std::iter::once(program.display().to_string())
         .chain(
             args.iter()
@@ -172,12 +242,12 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
     let judged = ledger.enter(&argv);
 
     let started = Instant::now();
-    let output = Command::new(STRACE)
+    let mut strace = Command::new(STRACE)
         .args(STRACE_OPTIONS)
         .arg("-e")
         .arg(format!("trace={}", strace::TRACED_SYSCALLS))
         .arg("-o")
-        .arg(dir.join(prefix))
+        .arg(record_dir.join(RECORD_PREFIX))
         .arg("--")
         .arg(&self_exe)
         .args(["as-tester", "--"])
@@ -190,32 +260,226 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
         .env("LOGNAME", TESTER_NAME)
         .env("LANG", "C.UTF-8")
         .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("spawn {STRACE}: {e}"))?;
-    let took = started.elapsed();
-
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let refusals = seccomp_refusals(&stderr);
-    if !refusals.is_empty() {
-        return Err(format!(
-            "strace ran {argv:?} without its seccomp filter (every syscall would stop the \
-             tracee): {refusals:?}"
-        ));
-    }
-    let events = strace::read_record(&dir, prefix)
-        .map_err(|e| format!("{e}\n--- strace exit {:?}, stderr\n{stderr}", output.status))?;
-    Ok(Run {
+    let stdin = strace.stdin.take();
+    let out = strace.stdout.take().ok_or("strace has no stdout pipe")?;
+    let err = strace.stderr.take().ok_or("strace has no stderr pipe")?;
+    let (sender, lines) = mpsc::channel();
+    let stdout = std::thread::spawn(move || {
+        let mut reader = BufReader::new(out);
+        let mut all = String::new();
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    all.push_str(&format!("[harness: reading stdout failed: {e}]\n"));
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&raw);
+            let line = line.strip_suffix('\n').unwrap_or(&line).to_owned();
+            all.push_str(&line);
+            all.push('\n');
+            // The receiver may be gone (nobody waits for lines); the text
+            // is kept in `all` either way.
+            let _ = sender.send(line);
+        }
+        all
+    });
+    let stderr = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let _ = BufReader::new(err).read_to_end(&mut all);
+        String::from_utf8_lossy(&all).into_owned()
+    });
+    Ok(Spawned {
         argv,
-        code: output.status.code(),
+        strace,
+        stdin,
+        lines,
         stdout,
         stderr,
-        events,
+        record_dir,
         started,
-        took,
         judged,
     })
+}
+
+impl Spawned {
+    /// The pid of strace, the parent of the code under test.
+    fn strace_pid(&self) -> u32 {
+        self.strace.id()
+    }
+
+    /// The next control line on stdout (result lines are skipped; they stay
+    /// in the run's stdout), within [`CONTROL_TIMEOUT`].
+    fn next_control(&self, waiting_for: &str) -> Result<ControlLine, String> {
+        let deadline = Instant::now() + CONTROL_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    if let Some(control) = ControlLine::parse(&line)? {
+                        return Ok(control);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "{:?}: no {waiting_for} line within {CONTROL_TIMEOUT:?}",
+                        self.argv
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "{:?} closed its stdout before printing a {waiting_for} line",
+                        self.argv
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Waits until the code under test pauses at a controlled point and
+    /// checks that it is blocked there: its parent is this run's strace, it
+    /// sleeps (`S`), and it is inside `read(0, ...)` on the stdin pipe
+    /// (`/proc/<pid>/syscall`), so nothing after the paused call can run
+    /// until [`Spawned::resume`].
+    pub fn wait_paused(&mut self) -> Result<Paused, String> {
+        let paused = match self.next_control("pause")? {
+            ControlLine::Pause { call, op, nth, pid } => Paused { call, op, nth, pid },
+            other => return Err(format!("{:?}: expected a pause, got {other}", self.argv)),
+        };
+        let not_blocked = |e: String| {
+            format!(
+                "pid {} printed a pause before port call {} but is not blocked reading its \
+                 stdin: {e}",
+                paused.pid, paused.call
+            )
+        };
+        let parent = proc_field(paused.pid, "status", |text| {
+            text.lines()
+                .find_map(|l| l.strip_prefix("PPid:"))
+                .map(|v| v.trim().to_owned())
+        })
+        .map_err(not_blocked)?;
+        if parent != self.strace_pid().to_string() {
+            return Err(format!(
+                "pid {} named by the pause line has parent {parent}, not this run's strace ({})",
+                paused.pid,
+                self.strace_pid()
+            ));
+        }
+        let deadline = Instant::now() + CONTROL_TIMEOUT;
+        loop {
+            let state = proc_field(paused.pid, "stat", |text| {
+                text.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    .map(str::to_owned)
+            })
+            .map_err(not_blocked)?;
+            let syscall = proc_field(paused.pid, "syscall", |text| {
+                let mut fields = text.split_whitespace();
+                Some(format!(
+                    "{} {}",
+                    fields.next().unwrap_or(""),
+                    fields.next().unwrap_or("")
+                ))
+            })
+            .map_err(not_blocked)?;
+            if state == "S" && syscall == format!("{SYS_READ} 0x0") {
+                info!(
+                    "{:?} paused before port call {} ({} #{}): pid {} blocked in read(0)",
+                    self.argv, paused.call, paused.op, paused.nth, paused.pid
+                );
+                return Ok(paused);
+            }
+            if Instant::now() >= deadline {
+                return Err(not_blocked(format!(
+                    "after {CONTROL_TIMEOUT:?} it is in state {state}, syscall {syscall:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Resumes code under test paused at `paused` and waits until it says
+    /// so (its next step is the paused call).
+    pub fn resume(&mut self, paused: &Paused) -> Result<(), String> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or("the code under test's stdin is already closed")?;
+        stdin
+            .write_all(b"resume\n")
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("write to {:?}'s stdin: {e}", self.argv))?;
+        match self.next_control("resume")? {
+            ControlLine::Resume { call } if call == paused.call => Ok(()),
+            other => Err(format!(
+                "{:?}: expected the resume of call {}, got {other}",
+                self.argv, paused.call
+            )),
+        }
+    }
+
+    /// Closes stdin, waits for strace (and so the code under test) to exit,
+    /// and collects the record. A run that ended by a signal (a controlled
+    /// kill) has `code` `None` and the signal in `signal`.
+    pub fn wait(mut self) -> Result<Run, String> {
+        drop(self.stdin.take());
+        let status = self
+            .strace
+            .wait()
+            .map_err(|e| format!("wait for {STRACE}: {e}"))?;
+        let took = self.started.elapsed();
+        let stdout = self
+            .stdout
+            .join()
+            .map_err(|_| "the stdout reader panicked".to_owned())?;
+        let stderr = self
+            .stderr
+            .join()
+            .map_err(|_| "the stderr reader panicked".to_owned())?;
+        let argv = self.argv;
+        let refusals = seccomp_refusals(&stderr);
+        if !refusals.is_empty() {
+            return Err(format!(
+                "strace ran {argv:?} without its seccomp filter (every syscall would stop the \
+                 tracee): {refusals:?}"
+            ));
+        }
+        let events = strace::read_record(&self.record_dir, RECORD_PREFIX)
+            .map_err(|e| format!("{e}\n--- strace exit {status:?}, stderr\n{stderr}"))?;
+        Ok(Run {
+            argv,
+            code: status.code(),
+            signal: status.signal(),
+            stdout,
+            stderr,
+            events,
+            started: self.started,
+            took,
+            judged: self.judged,
+        })
+    }
+}
+
+/// Reads `/proc/<pid>/<file>` (as container root, with CAP_SYS_PTRACE) and
+/// extracts a value from it.
+fn proc_field(
+    pid: u32,
+    file: &str,
+    extract: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, String> {
+    let path = format!("/proc/{pid}/{file}");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+    extract(&text).ok_or_else(|| format!("unexpected {path}: {text:?}"))
 }
 
 /// `diskgc-e2e as-tester -- PROGRAM ARGS...`: drops from container root to

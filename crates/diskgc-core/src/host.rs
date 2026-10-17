@@ -2,7 +2,7 @@
 //!
 //! Everything diskgc learns about or does to the machine goes through
 //! [`Host`]. File and lock operations are **syscall-shaped** (`openat2`,
-//! `statx`, `flock`, `statvfs`, mountinfo, `/proc` reads), so the safety
+//! `statx`, `getdents`, `flock`, `statvfs`, mountinfo, `/proc` reads), so the safety
 //! logic that chooses flags, orders calls and re-checks results lives in
 //! `diskgc-core`, where `ModelHost` can test it. Time and every blocking
 //! operation are port operations too, so a model can run them on a virtual
@@ -616,6 +616,17 @@ pub trait Host {
     /// callers pass a single name or an empty path below an fd reached by
     /// [`crate::resolve`].
     fn statx(&self, base: Base<'_, Self::Fd>, path: &Path) -> Result<Stat, HostError>;
+
+    /// The names in the open directory `dir` (`getdents64` until the end, on
+    /// a fresh `O_RDONLY | O_DIRECTORY` open of `.` below `dir`, so `dir` may
+    /// be an `O_PATH` fd and every call is a complete listing of its own),
+    /// without `.` and `..`, in the order the filesystem returns them.
+    ///
+    /// Names only, deliberately: `d_type` can be `DT_UNKNOWN` and is stale
+    /// by the time it is used, and every caller must `statx` each name
+    /// anyway (identity, owner, type) before acting on it. Entries created
+    /// or removed while the listing runs may or may not appear.
+    fn read_dir(&self, dir: &Self::Fd) -> Result<Vec<OsString>, HostError>;
 
     /// `fstatvfs(fd)`.
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError>;

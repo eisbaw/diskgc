@@ -262,6 +262,17 @@ impl Scratch {
             .map_err(|e| format!("chmod {}: {e}", path.display()))
     }
 
+    /// Renames the existing entry `from_rel` (not following it) to `to_rel`,
+    /// replacing what is there (`rename(2)`): same path, new object.
+    pub fn rename(&self, from_rel: &str, to_rel: &str) -> Result<(), String> {
+        let from = self.for_existing("rename", from_rel);
+        let to = self.for_create("rename", to_rel);
+        std::fs::rename(&from, &to)
+            .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))?;
+        self.require_on_scratch("rename", &to, false);
+        Ok(())
+    }
+
     /// Changes the owner of the existing entry `rel` (not following it).
     pub fn chown(&self, rel: &str, owner: Owner) -> Result<(), String> {
         let path = self.for_existing("chown", rel);

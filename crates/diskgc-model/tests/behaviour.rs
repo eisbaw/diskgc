@@ -128,6 +128,51 @@ fn stat_answers_from_the_inode_graph() {
     assert_eq!(s.file_type, Some(FileType::Socket));
 }
 
+#[test]
+fn read_dir_lists_the_names_of_a_directory_inode() {
+    // An entry created right before the listing (an event on the call) is
+    // listed; a file is not a directory.
+    let host = host(&tmp_yaml(
+        "  /tmp/a/l: {symlink: f}\nevents:\n  - {at: {op: read_dir, path: /tmp/a, when: before}, create: /tmp/a/new}\n",
+    ));
+    let a = dir(&host, "/tmp/a");
+    let names = host.read_dir(&a.fd).expect("read_dir");
+    assert_eq!(
+        names,
+        ["f", "l", "new", "sub"].map(std::ffi::OsString::from)
+    );
+    let sub = open_beneath(
+        &host,
+        &a.fd,
+        a.mount.id,
+        Path::new("sub"),
+        Access::Read,
+        Want::Directory,
+    )
+    .expect("opens sub")
+    .0;
+    assert!(host.read_dir(&sub).expect("read_dir sub").is_empty());
+    let f = resolve(&host, Path::new("/tmp/a/f"), Want::Any).expect("resolve f");
+    let err = host.read_dir(&f.fd).unwrap_err();
+    assert!(err.is(Errno::ENOTDIR), "{err}");
+
+    let listings: Vec<(Option<String>, String)> = host
+        .trace()
+        .into_iter()
+        .filter(|c| c.op == Op::ReadDir)
+        .map(|c| (c.path.map(|p| p.display().to_string()), c.result))
+        .collect();
+    assert_eq!(
+        listings,
+        [
+            (Some("/tmp/a".to_owned()), "ok".to_owned()),
+            (Some("/tmp/a/sub".to_owned()), "ok".to_owned()),
+            (Some("/tmp/a/f".to_owned()), Errno::ENOTDIR.to_string()),
+        ]
+    );
+    assert!(host.unfired_events().is_empty());
+}
+
 // ---- Events on the call trace ----
 
 #[test]

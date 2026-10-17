@@ -122,8 +122,10 @@
       # ---- Container e2e harness (docs/testing.md, Container setup) ----
 
       # The diskgc-e2e binaries: the in-container harness and tests, the
-      # do-nothing interlock canary, and the host-side runner. Static musl, so
-      # they run in any image and on the host.
+      # do-nothing interlock canary, the test driver (code under test that can
+      # be paused or killed at a chosen port call), the host-side runner and
+      # the release check. Static musl, so they run in any image and on the
+      # host.
       e2eBins = craneLib.buildPackage (
         e2eArgs
         // {
@@ -140,8 +142,26 @@
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
         cp ${lib.getExe diskgc} $out/bin/diskgc
-        cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary $out/bin/
+        cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
+          ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
       '';
+
+      # The release package's dependency tree as built (--locked, normal and
+      # build edges), one package per line, for the release-excludes-e2e
+      # check: the product must never depend on diskgc-e2e.
+      releaseDepTree = craneLib.mkCargoDerivation (
+        workspaceArgs
+        // {
+          pname = "diskgc-release-dep-tree";
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          buildPhaseCargoCommand = ''
+            cargo tree --locked --offline --package diskgc --edges normal,build \
+              --prefix none --format '{p}' > dep-tree.txt
+          '';
+          installPhaseCommand = "cp dep-tree.txt $out";
+        }
+      );
 
       # The base image: userland, tools, users, markers and mount points (the
       # harness provisions the host lock per test, on a tmpfs).
@@ -256,6 +276,19 @@
               fi
               touch $out
             '';
+
+        # The test driver and the controlled Host wrapper (diskgc-e2e) are
+        # not in the release package: neither their symbols nor their strings
+        # are in the shipped binary, and its dependency tree has no
+        # diskgc-e2e. The driver binary itself must be flagged by the same
+        # needles (diskgc-e2e/src/release_check.rs).
+        release-excludes-e2e = pkgs.runCommand "diskgc-release-excludes-e2e" { } ''
+          ${e2eBins}/bin/diskgc-e2e-release-check \
+            --shipped ${lib.getExe diskgc} \
+            --dep-tree ${releaseDepTree} \
+            --control ${e2eBins}/bin/diskgc-e2e-driver
+          touch $out
+        '';
 
         workspace-fmt = craneLib.cargoFmt workspaceArgs;
 

@@ -10,19 +10,28 @@
 //!   ([`snapshot`], [`strace`], [`oracle`]). [`probe`] holds deliberately
 //!   misbehaving stand-ins for code under test that prove the checks bite.
 //!   The tests themselves are in [`suite`]; those of the `Host` primitives
-//!   in [`host_suite`], driven through [`host_probe`].
+//!   in [`host_suite`], driven through [`host_probe`]; those that pause or
+//!   kill diskgc at a chosen port call in [`driver_suite`], driven through
+//!   the test driver ([`driver`], binary `diskgc-e2e-driver`) and its
+//!   `Host` wrapper ([`controlled`]).
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
-//!   per-test durations and enforces the time budget.
+//!   per-test durations and enforces the time budget. [`release_check`]
+//!   (`diskgc-e2e-release-check`, a flake check) proves the release
+//!   package contains neither the driver nor the wrapper.
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod controlled;
+pub mod driver;
+pub mod driver_suite;
 pub mod host_probe;
 pub mod host_suite;
 pub mod interlock;
 pub mod oracle;
 pub mod probe;
+pub mod release_check;
 pub mod runner;
 pub mod scratch;
 pub mod snapshot;

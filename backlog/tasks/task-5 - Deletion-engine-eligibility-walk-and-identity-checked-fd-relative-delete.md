@@ -4,7 +4,7 @@ title: 'Deletion engine: eligibility walk and identity-checked fd-relative delet
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 10:59'
+updated_date: '2026-10-17 11:39'
 labels:
   - wave-1
   - irreversible
@@ -53,6 +53,10 @@ From task-14's final review (mped): the model's identity check requires that the
 From task-50: LinuxHost now implements Delete::unlinkat behind the sandbox gate. Outside a test container it returns HostError { cause: Cause::SandboxGate, .. } (kernel_errno() None) before any syscall, decided once per process. The engine must surface that as an error, not as 'changed' or a skip: every later delete in the process is refused too. HostError's errno field is now cause: Cause {Errno, Invalid, SandboxGate}; use kernel_errno() or is(errno). diskgc_core::host::is_single_name is the shared single-name rule (ModelHost and LinuxHost use it; LinuxHost returns Cause::Invalid for a bad name, after the gate). The diskgc-e2e probe host-unlink and the test host_unlinkat_deletes_inside_the_sandbox show LinuxHost deleting in the container under both oracles.
 
 From task-50 round 3 (mped): the source scan (crates/diskgc-linux/src/source_scan.rs) runs GATED on every production crate, so core's checked_unlink calling h.unlinkat is flagged, which is correct. Give it a GATED_ALLOWED entry, file crates/diskgc-core/src/..., function checked_unlink, gate Gate::Ungated("calls Delete::unlinkat, which LinuxHost gates"), with its exact match count. That entry is the "only caller of Delete::unlinkat" check mped asked for. Core may not name std::fs, rustix or libc at all (os_access rule); everything goes through the port.
+
+Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: make the socket/FIFO rule (contains_ipc) a configurable policy. Today any socket or FIFO keeps its directory; on this machine stale pytest FIFO fixtures (pipe.json, nothing holds them open) block 13.2G across 193 nix-shell.* dirs. Policy values: block on any socket/FIFO (current), or block only on live ones (a FIFO some process holds open, visible to the in-use scan by dev:ino; a socket listed bound in /proc/net/unix). Default to be decided with task-15 (config schema); the conservative default is the current behaviour. Update docs/safety.md (eligibility walk) and docs/reference.md (config).
+
+From task-51: Host::read_dir(&Fd) -> Vec<OsString> exists (names only, no d_type: statx each name; LinuxHost reopens '.' O_RDONLY|O_DIRECTORY below the fd, so an O_PATH fd works and every call is a full listing; order is the filesystem's, ModelHost's is name order). The e2e test driver's 'delete' (diskgc-e2e/src/driver.rs) is a stand-in rm -r with a statx right before each unlinkat and no walk record, owner or in-use checks: when the engine lands, make the driver's delete call it, so the pause/kill container tests and race tests exercise the real engine.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

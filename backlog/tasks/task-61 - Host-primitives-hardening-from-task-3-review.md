@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 10:59'
+updated_date: '2026-10-17 11:40'
 labels:
   - wave-1
   - hardening
@@ -110,6 +110,18 @@ From task-50's review (deferred hardening):
 - The flag test sandbox_gate_flag_is_enabled_nowhere scans .cargo/config(.toml) only at the repository root. A crates/*/.cargo/config.toml (or diskgc-e2e/.cargo/config.toml) could set features or rustflags unseen; scan those too.
 
 From task-50 round 3 (mped): consider replacing the hand lexer in crates/diskgc-linux/src/source_scan.rs with a syn visitor (a dev-dependency; syn is already in Cargo.lock) if it needs another fix. It has had two lexer bugs fixed so far (raw C strings, the '\'' char escape). Symlinks under src/ are already refused (fixed in task-50 rather than filed).
+
+From task-50's final review (mped, QA). The scanner is frozen for task-50; switch to syn on the next lexer bug.
+(11) #[cfg_attr(..., path = "...")] mod x; passes the scan: in hiding_forms flag a path identifier followed by = anywhere inside an attribute's brackets.
+(12) pinned_lines reads only the first line of a workspace dependency, so a reviewed multi-line rustix entry is no longer checked: return a 'spans lines, unsupported' string when brackets are unbalanced so the test fails.
+(13) Document that gated names must appear inside the allowlisted function (fully qualified or a use in its body); a module-level use std::process::Command cannot be allowlisted. Fix the failure message of deleting_syscalls_only_behind_the_gate, which says 'route them through the sandbox gate' even for Ungated entries.
+(14) use<'a> precise capturing is falsely reported as a glob import; skip a use followed by <.
+(15) Within the documented limits but cheap: OFlags::all(), !OFlags::..., OFlags::from_name, type F = std::fs::File; F::create, rustix destructive calls not on the list (e.g. fremovexattr), .cargo/config.toml [patch]/[source], os_access reading only the first name after std::process.
+(16) The gate refusal's subject prints LinuxFd(OwnedFd { fd: 4 })/victim (shown() in host.rs); show the path instead.
+(17) Housekeeping: the earlier item about procfs_is_reached_only_through_the_held_fd listing files by hand is done by task-50 (shared source_scan); its 'code_only' correction note is obsolete. Still open: the /proc exemption matches any fn named new, not only LinuxHost::new.
+(18) Kernel threads in ModelHost, and stdio fds for generated processes, are items (7) and (8) above.
+
+From task-51: the ProcRoot::names item (Dir::read_from reopen) is done: names and the new LinuxHost::read_dir share dir_names(OwnedFd), which uses rustix Dir::new on the fd it was given. Still open from that list: the procfs-relative paths in error messages, the PROC_SUPER_MAGIC check, the /proc-replaced regression test.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

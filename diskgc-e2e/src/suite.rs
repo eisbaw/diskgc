@@ -16,13 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use crate::host_suite;
 use crate::oracle::{Change, Fixture, Oracle, Unmatched};
 use crate::probe::{ESCAPE_CASES, ESCAPE_TARGET_DIR, ESCAPED_NAME};
 use crate::scratch::{self, Scratch};
 use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
+use crate::{driver_suite, host_suite};
 
 /// Which gate runs a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +208,30 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_unlinkat_deletes_inside_the_sandbox,
     },
     Test {
+        name: "driver_walk_sees_a_change_made_while_paused",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: driver_suite::driver_walk_sees_a_change_made_while_paused,
+    },
+    Test {
+        name: "driver_delete_pauses_and_resumes_at_a_host_call",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: driver_suite::driver_delete_pauses_and_resumes_at_a_host_call,
+    },
+    Test {
+        name: "driver_delete_killed_at_a_host_call",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: driver_suite::driver_delete_killed_at_a_host_call,
+    },
+    Test {
+        name: "driver_delete_unlinks_what_replaced_an_entry_while_paused",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: driver_suite::driver_delete_unlinks_what_replaced_an_entry_while_paused,
+    },
+    Test {
         name: "oracle_large_tree",
         tier: Tier::Full,
         expect: Expect::Pass,
@@ -353,6 +377,21 @@ impl Ctx {
     /// Runs `program args...` as `tester` under strace, from `/`.
     pub fn run_as_tester(&self, program: &Path, args: &[&str]) -> Result<Run, String> {
         under_test::run_as_tester(&self.ledger, &self.records, Path::new("/"), program, args)
+    }
+
+    /// The test driver under test (crate::driver).
+    pub fn driver(&self) -> PathBuf {
+        self.bin_dir.join("diskgc-e2e-driver")
+    }
+
+    /// Starts `program args...` as `tester` under strace, from `/`, and
+    /// returns while it runs (to pause, resume or see it killed).
+    pub fn spawn_as_tester(
+        &self,
+        program: &Path,
+        args: &[&str],
+    ) -> Result<under_test::Spawned, String> {
+        under_test::spawn_as_tester(&self.ledger, &self.records, Path::new("/"), program, args)
     }
 
     /// Runs a probe as the code under test (`tester`, traced).

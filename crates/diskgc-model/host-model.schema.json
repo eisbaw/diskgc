@@ -563,6 +563,7 @@
         "mountinfo",
         "openat2",
         "statx",
+        "read_dir",
         "statvfs",
         "flock",
         "now",

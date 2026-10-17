@@ -690,6 +690,30 @@ impl Host for ModelHost {
         })
     }
 
+    fn read_dir(&self, dir: &ModelFd) -> Result<Vec<OsString>, HostError> {
+        let ofd = self.fd_ofd(dir);
+        let path = self.base_path(Base::Dir(dir), Path::new(""));
+        let shown = path.display().to_string();
+        self.call(Op::ReadDir, Some(path), None, |inner| {
+            let loc = inner.loc_of(ofd);
+            let object = Some(inner.state.dev_ino(loc));
+            match inner.state.inode(loc).entries() {
+                // In name order (the model's), which callers must not rely
+                // on: the kernel's order is the filesystem's.
+                Some(entries) => (
+                    Ok(entries.keys().cloned().collect()),
+                    object,
+                    "ok".to_owned(),
+                ),
+                None => (
+                    Err(HostError::errno("getdents", &shown, Errno::ENOTDIR)),
+                    None,
+                    errno_text(Errno::ENOTDIR),
+                ),
+            }
+        })
+    }
+
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         let ofd = self.fd_ofd(fd);
         let path = self.base_path(Base::Dir(fd), Path::new(""));

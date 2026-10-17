@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 08:42'
+updated_date: '2026-10-17 11:12'
 labels:
   - wave-1
   - irreversible
@@ -57,6 +57,8 @@ From task-3's commit review (mped): process-level handoff race. diskgc lists P; 
 Forward-carried from task-14: ModelHost answers the /proc readers from the model's process table: proc: readable|denied|failed per process (Denied is EACCES, Failed a HostError::invalid), Gone once the pid left the model (exit event). Differences from LinuxHost: an empty fd table, map or environment is answered as Ok(empty) (LinuxHost: Failed; say proc: failed to model that), one task per process (proc_links returns one target), no uid, and diskgc itself is not among the pids (the port has no getpid op; if this task adds one, add the self process to ModelHost so the own-pid exclusion is model-testable). Suspend for AC #6: event advance: <dur> jumps the clock (CLOCK_BOOTTIME includes suspend); events at {elapsed: <dur>} fire during sleep/flock_wait.
 
 From task-14 (update): the empty-answer divergence is gone. ModelHost now reports an empty fd table, map or environment, or a missing exe, of a readable process as ProcError::Failed, like LinuxHost. Not modelled yet, filed on task-61 (3): spawn/fork events and fds shared between processes, which this task's fork handoff race needs.
+
+Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: narrow the unreadable-process rule. Read literally, safety.md's 'an unreadable same-user process makes every candidate it could use in_use' blocks all reclaim on any desktop: systemd --user, (sd-pam) and ssh-agent are non-dumpable (Denied), and sudo -i / fusermount3 are setuid root with real uid = user. New rule to write into docs/safety.md (In use) with tests: non-dumpable same-uid processes and setuid processes whose effective uid is not the user's are logged but do not block; any other unreadable same-user process still blocks. Define 'same user' explicitly (real vs effective uid). Measured on this machine: 486 processes scanned in 0.64 s, 176 of this user's readable, 6 Denied, 0 Failed, 1 Gone (exiting, pidfd-confirmed); no false in-use seen.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

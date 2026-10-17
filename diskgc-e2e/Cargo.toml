@@ -26,6 +26,19 @@ path = "src/bin/diskgc-e2e-runner.rs"
 name = "diskgc-e2e-canary"
 path = "src/bin/diskgc-e2e-canary.rs"
 
+# In the container, as the code under test: single diskgc operations over
+# LinuxHost wrapped in the controlled Host (pause or SIGKILL at a chosen port
+# call). Behind the same interlock; never in the release package.
+[[bin]]
+name = "diskgc-e2e-driver"
+path = "src/bin/diskgc-e2e-driver.rs"
+
+# In the Nix build (flake check release-excludes-e2e): proves the release
+# package holds neither the driver nor the wrapper. Reads files only.
+[[bin]]
+name = "diskgc-e2e-release-check"
+path = "src/bin/diskgc-e2e-release-check.rs"
+
 [dependencies]
 diskgc-core = { path = "../crates/diskgc-core" }
 diskgc-linux = { path = "../crates/diskgc-linux" }
@@ -37,3 +50,8 @@ rustix = { version = "1", features = ["fs", "mount", "process", "thread"] }
 # kernel report a 2.6 release to the code under test (an old kernel,
 # simulated by the kernel itself). Bindings only; std links libc anyway.
 libc = "0.2"
+
+[dev-dependencies]
+# Unit tests run the driver's operations and the controlled wrapper on the
+# host model (pure, in-process); test-only, like diskgc-model itself.
+diskgc-model = { path = "../crates/diskgc-model" }

@@ -170,16 +170,7 @@ impl ProcRoot<'_> {
     /// The names in directory `rel`, without `.` and `..`.
     fn names(self, rel: &str) -> Result<Vec<Vec<u8>>, HostError> {
         let fd = self.open(rel, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        let failed = |e| HostError::errno("getdents", Self::shown(rel), errno_of(e));
-        let mut names = Vec::new();
-        for entry in rustix::fs::Dir::read_from(&fd).map_err(failed)? {
-            let entry = entry.map_err(failed)?;
-            let name = entry.file_name().to_bytes();
-            if name != b"." && name != b".." {
-                names.push(name.to_vec());
-            }
-        }
-        Ok(names)
+        dir_names(fd).map_err(|e| HostError::errno("getdents", Self::shown(rel), errno_of(e)))
     }
 
     /// A magic link: its text and the object it refers to (`statx`
@@ -195,6 +186,22 @@ impl ProcRoot<'_> {
             stat,
         })
     }
+}
+
+/// The names in the directory open (readable) as `fd`, without `.` and
+/// `..`: `getdents64` from the start to the end, on this fd only. The fd is
+/// consumed, so no other listing shares its position; `rustix`'s
+/// `Dir::new` takes it as is (`Dir::read_from` would reopen it, two
+/// syscalls more inside the window a `/proc` task listing must hold still).
+fn dir_names(fd: OwnedFd) -> Result<Vec<Vec<u8>>, rustix::io::Errno> {
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::new(fd)? {
+        let name = entry?.file_name().to_bytes().to_vec();
+        if name != b"." && name != b".." {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// The pid namespace check of [`LinuxHost::new`], on what reading
@@ -708,6 +715,23 @@ impl Host for LinuxHost {
         rustix::fs::statx(dir, path, flags, STATX_MASK)
             .map(|x| stat_from_statx(&x))
             .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))
+    }
+
+    fn read_dir(&self, dir: &LinuxFd) -> Result<Vec<OsString>, HostError> {
+        let subject = format!("{dir:?}");
+        // `.` below `dir` names `dir` itself: nothing is resolved, so no
+        // symlink or mount can be met. A fresh open gives this listing its
+        // own position (the fd's would be shared with any dup of it).
+        let readable = rustix::fs::openat(
+            dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| HostError::errno("open", format!("{subject}/."), errno_of(e)))?;
+        let names =
+            dir_names(readable).map_err(|e| HostError::errno("getdents", &subject, errno_of(e)))?;
+        Ok(names.into_iter().map(OsString::from_vec).collect())
     }
 
     fn statvfs(&self, fd: &LinuxFd) -> Result<Space, HostError> {
@@ -1298,6 +1322,45 @@ mod tests {
         let root = resolve(&host, Path::new("/"), Want::Directory).expect("resolve /");
         let space = host.statvfs(&root.fd).expect("statvfs");
         assert!(space.avail_bytes <= space.size_bytes, "{space:?}");
+    }
+
+    /// `read_dir` lists every name of a directory, from an `O_PATH` fd (as
+    /// `resolve` returns) or a readable one, once per call (a second call
+    /// is a complete listing again, not the end of the first), including a
+    /// directory larger than one `getdents` buffer; a non-directory is
+    /// `ENOTDIR`.
+    #[test]
+    fn read_dir_lists_every_name_on_each_call() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("read-dir");
+        let mut want: Vec<OsString> = (0..3000)
+            .map(|i| OsString::from(format!("entry with a fairly long name {i:05}")))
+            .collect();
+        for name in &want {
+            std::fs::write(dir.0.join(name), b"").expect("create file");
+        }
+        std::fs::create_dir(dir.0.join("sub")).expect("create dir");
+        std::os::unix::fs::symlink("nowhere", dir.0.join("link")).expect("create symlink");
+        want.extend(["sub".into(), "link".into()]);
+        want.sort();
+
+        let path_fd = resolve(&host, &dir.0, Want::Directory).expect("resolve").fd;
+        let read_fd = open_dir(&host, &dir.0);
+        for fd in [&path_fd, &read_fd, &path_fd] {
+            let mut got = host.read_dir(fd).expect("read_dir");
+            got.sort();
+            assert_eq!(got.len(), want.len());
+            assert!(got == want, "listing differs from the directory");
+        }
+
+        let empty = resolve(&host, &dir.0.join("sub"), Want::Directory).expect("resolve sub");
+        assert_eq!(
+            host.read_dir(&empty.fd).expect("read_dir sub"),
+            Vec::<OsString>::new()
+        );
+        let file = resolve(&host, &dir.0.join(&want[0]), Want::Any).expect("resolve file");
+        let err = host.read_dir(&file.fd).unwrap_err();
+        assert!(err.is(Errno::ENOTDIR), "{err}");
     }
 
     #[test]
