@@ -551,9 +551,8 @@ Podman is not used). Toolchains, tools, users, markers and the mount points
 live in a base image (`dockerTools.streamLayeredImage`) tagged by
 its Nix hash and reused when an image with that tag is loaded; the binaries
 under test are bind-mounted read-only, so a code change does not rebuild
-or reload the base. The harness bind-mounts the image's `/nix/store`
-read-only over itself in every container, so the snapshot skips the
-toolchains (Cargo toolchains under test). The container root must be Podman's native overlayfs:
+or reload the base; the toolchains' `/nix/store` is mounted read-only too
+(Cargo toolchains under test). The container root must be Podman's native overlayfs:
 the runner checks `podman info` before starting anything and each test
 checks its root mount, and both refuse fuse-overlayfs or another storage
 driver, whose inode numbers and birth times the snapshot keys were not

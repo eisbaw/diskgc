@@ -401,22 +401,36 @@ A tier selects candidates with an expression over **qualified** names:
 ```
 expr    := term | union
 union   := uterm ( '||' uterm )+
-uterm   := profile | '(' term ')'
-term    := sources ( '&&' factor )*
-sources := profile | '(' profile ( '||' profile )* ')'
+uterm   := profile | '(' nterm ')'
+term    := profile | nterm
+nterm   := sources ( '&&' factor )+
+sources := profile | '(' profile ( '||' profile )+ ')'
 factor  := filter | '!' filter | '!' profile
 profile := 'profile:' NAME
 filter  := 'filter:' NAME
+NAME    := [a-z0-9] [a-z0-9_-]*
 ```
 
-Examples:
+Whitespace between tokens is ignored; a qualifier and its name are one
+token (`profile:a`, not `profile: a`). Every profile name is a `NAME`:
+lowercase letters, digits, `-` and `_`, starting with a letter or a digit.
+Every parenthesis has a purpose: a group holds two or more profiles and is
+followed by `&&`, and a parenthesised union member contains `&&`, so
+parentheses are never optional.
 
-```
-profile:pytest-tmp && filter:idle-10d
-(profile:pytest-tmp || profile:nix-shell-rc) && filter:idle-3d
-profile:tmp-entry && filter:idle-2d && !filter:idle-30d       # idle 2 to 30 days
-profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp
-```
+Examples, with the normalised form that `check` prints (groups
+distributed, the terms of a union that have factors in parentheses; it
+parses back to the same expression):
+
+| Expression | Normalised | Selects |
+|---|---|---|
+| `profile:pytest-tmp && filter:idle-10d` | `profile:pytest-tmp && filter:idle-10d` | pytest temp dirs idle for 10 days |
+| `(profile:pytest-tmp \|\| profile:nix-shell-rc) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-3d)` | either, idle for 3 days |
+| `profile:tmp-entry && filter:idle-2d && !filter:idle-30d` | `profile:tmp-entry && filter:idle-2d && !filter:idle-30d` | idle for 2 to 30 days |
+| `profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp` | `profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp` | idle for 2 days, except what overlaps Claude Code's session dirs |
+| `profile:pytest-tmp \|\| profile:nix-shell-rc` | `profile:pytest-tmp \|\| profile:nix-shell-rc` | either, at any age |
+| `(profile:pytest-tmp && filter:idle-3d) \|\| profile:nix-shell-rc` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:nix-shell-rc` | pytest dirs idle for 3 days, nix-shell rc dirs at any age |
+| `((profile:pytest-tmp \|\| profile:nix-shell-rc) && filter:idle-3d) \|\| (profile:tmp-entry && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-3d) \|\| (profile:tmp-entry && filter:idle-30d)` | the first two idle for 3 days, any `/tmp` entry idle for 30 |
 
 - **Qualifiers are required.** A term without a `profile:` is rejected by
   the parser; a wrong qualifier (`filter:pytest-tmp`) is a load-time error
@@ -428,9 +442,10 @@ profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp
   `a` unfiltered. A parenthesised group of profiles distributes:
   `(profile:a || profile:b) && filter:f` means
   `(profile:a && filter:f) || (profile:b && filter:f)`. Parentheses do not
-  nest beyond that, filters cannot appear inside a profile group, and `!`
-  applies to one name: `!(profile:a || profile:b)` is written
-  `!profile:a && !profile:b`.
+  nest beyond that: the only nesting is a profile group at the start of a
+  parenthesised union member (the last example above). Filters cannot
+  appear inside a profile group, and `!` applies to one name:
+  `!(profile:a || profile:b)` is written `!profile:a && !profile:b`.
 - **One source per term** (after distribution). Intersecting two source
   profiles that find at different depths matches only by accident.
 - **`||` is a union**; all source profiles in one expression share one kind
@@ -446,10 +461,43 @@ profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp
   action".
 - **Non-`fs` kinds** allow only `profile:NAME` (`docker-images`,
   `nix-store`) or `profile:NAME` / `profile:NAME && filter:idle-*`
-  (`docker-build-cache`): they have no per-candidate enumeration.
+  (`docker-build-cache`), as the whole expression (one term, never in a
+  union): they have no per-candidate enumeration.
 - Filters are evaluated from the index where it already knows the answer,
   and always re-evaluated at deletion time. A candidate that fails a filter
   is reported as skipped with that filter's reason (`not_idle`, `has_not`).
+
+Errors. A rejected expression is a load-time error (exit 2). The report
+starts with `invalid selection`, the expression as written and, for a
+syntax error, the column; then the message. The rules that depend on what a name is
+report every broken rule, separated by `;`. Where a message suggests a
+rewrite, the rewrite is one diskgc accepts; a suggestion that would itself
+be rejected is left out (`filter:nix-garbage` below: `!profile:nix-garbage`
+is rejected too). The messages, with the built-in profiles plus
+`a`, `b` (kind `fs`, action `delete`) and `f` (`idle_for`):
+
+| Expression | Message |
+|---|---|
+| `profile:a \|\| profile:b && filter:f` | `\|\|` and `&&` cannot be mixed without parentheses; write `(profile:a \|\| profile:b) && filter:f` or `profile:a \|\| (profile:b && filter:f)` |
+| `profile:a && filter:f \|\| profile:b` | `\|\|` and `&&` cannot be mixed without parentheses; write `(profile:a && filter:f) \|\| profile:b` |
+| `(profile:a \|\| profile:b) \|\| profile:tmp-entry` | a profile group must be followed by `&&`: parentheses group profiles only to share factors; write `profile:a \|\| profile:b \|\| profile:tmp-entry` |
+| `((profile:a \|\| profile:b)) \|\| profile:tmp-entry` | a profile group must be followed by `&&`: parentheses group profiles only to share factors; write `profile:a \|\| profile:b \|\| profile:tmp-entry` |
+| `(profile:a) && filter:f` | parentheses around one profile have no purpose: write `profile:a && filter:f` |
+| `profile:tmp-entry && !(profile:a \|\| profile:b)` | `!` applies to one name, not a group: write `!profile:a && !profile:b` |
+| `profile:tmp-entry && profile:a` | one source per term: `profile:a` cannot follow `&&`; to exclude its matches write `!profile:a`, to add them write a union with `\|\|` |
+| `!profile:a && filter:f` | `!` only narrows: a term starts with a `profile:`, and `!` follows `&&` (`profile:… && !profile:…`) |
+| `profile:tmp-entry && tag:old` | unknown qualifier `tag:`: names are written `profile:NAME` or `filter:NAME` |
+| `profile:Tmp-entry` | `Tmp-entry` is not a valid name: a name is lowercase letters, digits, `-` and `_`, starting with a letter or a digit |
+| `filter:pytest-tmp` | `filter:pytest-tmp`: `pytest-tmp` is a source profile of kind fs, not a filter; write `profile:pytest-tmp` |
+| `profile:tmp-entry && !filter:claude-code-tmp` | `!filter:claude-code-tmp`: `claude-code-tmp` is a source profile of kind fs, not a filter; write `!profile:claude-code-tmp` |
+| `profile:a && filter:nix-garbage` | `filter:nix-garbage`: `nix-garbage` is a source profile of kind nix-store, not a filter |
+| `profile:tmp-entry && filter:nope` | `filter:nope`: no profile or filter is named `nope` |
+| `profile:pytest-tmp \|\| profile:cargo-target` | `profile:pytest-tmp` is of kind fs but `profile:cargo-target` is of kind cargo-target: the sources of one expression share one kind; select them in separate tiers |
+| `profile:pytest-tmp \|\| profile:pip-cache` | `profile:pytest-tmp` removes with `delete` but `profile:pip-cache` with `command`: the sources of one expression share one action; select them in separate tiers |
+| `profile:cargo-target && filter:has-cachedir-tag` | `filter:has-cachedir-tag` uses `has`, which kind cargo-target does not support (`has` works on: fs) |
+| `profile:nix-garbage \|\| profile:nix-garbage` | kind nix-store acts on everything it finds at once (no per-candidate enumeration), so its expression has one term, not a union of 2; select each in its own tier |
+| `profile:nix-garbage && filter:idle-7d` | kind nix-store takes only `profile:NAME`, so `filter:idle-7d` cannot narrow it: it has no per-candidate enumeration |
+| `profile:tmp-entry && !profile:docker-dangling` | `!profile:docker-dangling`: a negated profile must be of kind fs or cargo-target, and `docker-dangling` is of kind docker-images |
 
 ### Actions
 
@@ -502,7 +550,7 @@ v1 *target*; until verified it is listed as planned, not shipped.
 | embedded | `platformio-cache` | PlatformIO's `.cache` (roots required) | `delete` |
 | generic | `tmp-entry` | any top-level entry of `/tmp`, `/var/tmp` | `delete` |
 | generic | `mktemp-dir` | `/tmp/tmp.*` | `delete` |
-| filters | `idle-1h`, `idle-1d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
+| filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
 
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs

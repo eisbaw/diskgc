@@ -1,10 +1,10 @@
 ---
 id: TASK-4
 title: Cargo-under-test toolchains and deterministic race helpers in the test image
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:39'
-updated_date: '2026-10-17 18:01'
+updated_date: '2026-10-17 18:23'
 labels:
   - wave-1
   - testing
@@ -62,9 +62,11 @@ Gates (exit codes): just check 0 (275 workspace tests); nix build (then --rebuil
 Limits: the image is 2.84 GB (old base tags are not pruned; task-60). Gates are polled files (10 ms). The runner wrapper is diskgc-e2e, so during a `cargo run` pause the paused process is not named cargo (see task-11 note). Helpers time out after 300 s; harness waits 120 s.
 
 Review round (mped GO, conditional S1-S2; S3-S5 done too): S1 measured facts added to docs/safety.md and reproduced on the image: nightly-2026-10-16's default new build-dir layout (no .fingerprint/ or deps/) and the split lock set with CARGO_BUILD_BUILD_DIR (1.90.0 ignores it), as Known gaps under Discovery; forwarded to task-53, task-9, task-11. S2 PRD 'Cargo lock coverage' rewritten to point at safety.md and testing.md, plus the older-than-1.90 statement (also in testing.md). S3 the tier is an explicit attribute of each cargoUnderTest entry (manifest NAME VERSION TIER; a manifest without a fast toolchain fails the listing); fast is now 1.99.1, so the notes above saying 'fast on 1.90.0' are superseded. The lock-holder test logs its .cargo-build-lock check as not applicable on 1.90.0 instead of passing silently. S4 fixture comments name SMOKE.output / RACE.output; testing.md keeps percentages only; the safety.md no-lock-while-running sentence is split by what was measured. S5 task-11 note (7) replaced with mped's guidance (no cargo-* wrapper copy; assert cargo test on the existing heuristic; CARGO_MANIFEST_DIR rule for cargo run via task-11 AC #3), plus a correction of the task-59 seccomp note there. H1-H6 filed in task-60.
+
+Committed as 5092d1c (tree c18fd45; code identical to the QA-gated bd32f2d) after qa-test-runner conditional GO and mped-architect GO. The first workspace-tests build in QA's gate hit a pre-existing flaky task-6 test (bound_unix_sockets_..., 1/5 in the nix sandbox); recorded in the verification note, fix in progress. Post-commit: PRD Cargo coverage line reduced to links, duplicate /nix/store sentence in testing.md removed (mped).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

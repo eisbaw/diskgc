@@ -46,7 +46,8 @@
       # Source allowlist: only Cargo manifests, the lock file, Rust/TOML
       # files under the crate directories and the crates' listed data files
       # reach the build. docs/, backlog/, *.md, flake.nix and the justfile are
-      # not build inputs, so editing them never changes an output path.
+      # not build inputs, so editing them never changes an output path (the
+      # one exception is workspaceTestSrc below, for workspace-tests only).
       workspaceFiles = lib.fileset.unions [
         ./Cargo.toml
         ./Cargo.lock
@@ -62,6 +63,17 @@
       workspaceSrc = lib.fileset.toSource {
         root = ./.;
         fileset = workspaceFiles;
+      };
+      # The workspace tests also read docs/reference.md: the selection
+      # grammar's examples and messages are tested from the doc's tables
+      # (diskgc-core, select::tests), so the doc and the code cannot drift.
+      # Only this check sees it; the package and clippy do not.
+      workspaceTestSrc = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          workspaceFiles
+          ./docs/reference.md
+        ];
       };
       # diskgc-e2e path-depends on workspace crates, which inherit fields from
       # the root manifest, so its source is the workspace plus its directory.
@@ -348,6 +360,7 @@
         workspace-tests = craneLib.cargoTest (
           workspaceArgs
           // {
+            src = workspaceTestSrc;
             cargoArtifacts = workspaceDeps;
             cargoTestExtraArgs = "--workspace";
           }

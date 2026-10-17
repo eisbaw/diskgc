@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 16:42'
+updated_date: '2026-10-17 19:31'
 labels:
   - wave-1
   - hardening
@@ -156,6 +156,10 @@ From task-6's final review:
 (33) The consistent() test rows [other, SetUid] / [other, None] test sequences gather cannot produce (it stops at OtherUser); comment that they are properties of the function.
 (34) The seteuid-to-another-user path (a privileged process switching all uids to another user while keeping the user's files) is excused by the last-OtherUser exception; documented as a limit in safety.md (Codex reproduced it).
 (35) safety.md 'Every process, and only once settled': the reason '(a process it did not read could have inherited anything)' now follows the re-read sentence instead of the in_use claim it explains; reorder.
+
+From the task-6 follow-up (socket test flake): the diskgc-linux test guard fd_table_guard() now covers bound sockets as well as flock locks. A test that closes an fd and then asserts what the close released (a lock no longer held, a socket no longer in the socket diagnostics) must hold the guard from before the fd is opened until after the assertion, because a child forked by another test keeps a copy of every fd until its exec. Both sides must take the guard: it excludes nothing for a test that does not. bound_unix_sockets_reports_a_bound_socket_file_until_it_closes lacked it and failed about 3% of parallel runs (10 of 320); with the guard, 0 of 320, and 6 sandbox builds of workspace-tests passed. Item (2) of the round-2 task-3 note ('add a note at the top of the test module that tests which fork must take fd_table_guard') is partly done by the guard's doc comment.
+
+From the task-7 review (H10): host.rs tests spawn helper processes in several places; add one guarded-spawn helper (kill and reap on drop, bounded wait) and use it everywhere.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

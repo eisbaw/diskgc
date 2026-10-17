@@ -1217,9 +1217,14 @@ mod tests {
     /// Serialises the tests that copy this process's fd table (spawning a
     /// child: `Holder::spawn`, `a_process_that_is_gone_is_gone`; any test
     /// that forks or unshares `CLONE_FILES` in this process) with the tests
-    /// that judge `flock` locks: a copied table holds an extra reference to
-    /// a lock fd that a lock test just closed, so the lock would seem not to
-    /// be released. (The holder's own `unshare` happens in its process.)
+    /// that judge what closing an fd releases: a `flock` lock, or a bound
+    /// socket (which stays bound, and in the socket diagnostics, while any
+    /// copy of its fd is open). A child holds a copy of every fd from its
+    /// fork until its exec closes them (close-on-exec), so a test that
+    /// closes an fd and then asserts its release must hold this guard from
+    /// before the fd is opened to after the assertion. Both sides must take
+    /// it: it excludes nothing for a test that does not. (The holder's own
+    /// `unshare` happens in its process.)
     static FD_TABLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fd_table_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -1825,6 +1830,10 @@ mod tests {
     /// stays: a stale socket file).
     #[test]
     fn bound_unix_sockets_reports_a_bound_socket_file_until_it_closes() {
+        // A child of another test, forked while the listener is open and
+        // not yet exec'd, keeps a copy of its fd: the socket would stay
+        // bound past `drop` (see `fd_table_guard`).
+        let _fd_table = fd_table_guard();
         let host = LinuxHost::new().expect("host setup");
         let dir = TempDir::new("sockets");
         let path = dir.0.join("live.sock");

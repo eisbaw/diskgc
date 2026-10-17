@@ -3,11 +3,11 @@ id: TASK-59
 title: >-
   Harness follow-ups before toolchains and race tests: mandatory oracle,
   seccomp-bpf strace, tmpfs for /run/diskgc and home
-status: In Progress
+status: Done
 assignee:
   - '@mped-architect'
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-17 18:22'
+updated_date: '2026-10-17 18:23'
 labels:
   - wave-1
   - testing
@@ -25,7 +25,7 @@ Why: findings from the task-2 review that would make later e2e results untrustwo
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A traced diskgc run without an oracle judgement fails the test (proved once)
-- [ ] #2 strace runs with --seccomp-bpf; a traced cargo build in a container stays within a stated time bound
+- [x] #2 strace runs with --seccomp-bpf; a traced cargo build in a container stays within a stated time bound
 - [x] #3 /run/diskgc and /home/tester are tmpfs in every container; the lock file is provisioned there
 - [x] #4 A non-native overlay storage driver makes the runner fail fast with a clear message
 - [x] #5 Unmatched strace removals are logged; read-only mounts are skipped by the snapshot
@@ -75,9 +75,11 @@ Orchestrator gate: qa-test-runner re-ran after the self-test fix: nix flake chec
 From task-4: AC #2's traced-cargo-build half is demonstrated by the container test cargo_traced_build_within_bound (fast on 1.90.0, full on 1.99.1 and nightly-2026-10-16; diskgc-e2e/src/cargo_suite.rs). Stated bound (docs/testing.md, Cargo toolchains under test): a Cargo build traced by the harness's strace (--seccomp-bpf) costs at most 60% of the voluntary context switches of the same build under the same strace without --seccomp-bpf, measured in the same container; tracee seccomp filters = harness + 1; wall time <= 120 s; oracle clean. Measured ~7,400 of ~20,200 (1.90.0), ~10,000 of ~23,200 (1.99.1). Bite: --seccomp-bpf removed -> 20,205 > 12,124 and the test fails. Not per traced call as the churn test: strace 7.2 steps every new process/thread with PTRACE_SYSCALL until its first traced syscall, so about a third of the full trace's stops remain on a multi-process build.
 
 CORRECTION (task-4 final gate): the tiers changed after the note above. cargo_traced_build_within_bound runs in the fast tier on 1.99.1 and in the full tier on 1.90.0 and nightly-2026-10-16 (cargoUnderTest's explicit tier attribute in flake.nix).
+
+AC #2 demonstrated by task-4's cargo_traced_build_within_bound (committed 5092d1c); task-59 closed.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

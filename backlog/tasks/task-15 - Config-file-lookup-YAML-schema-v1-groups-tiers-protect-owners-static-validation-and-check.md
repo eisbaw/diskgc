@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 15:40'
+updated_date: '2026-10-17 19:31'
 labels:
   - wave-2
   - config
@@ -49,6 +49,10 @@ From task-5 (deletion engine): the user's dogfooding decision made contains_ipc 
 From task-6: the IPC policy maps to two values the config must set together: engine::Rules::block_ipc (walk) and inuse::Options::sockets (ask the kernel's socket diagnostics). 'live only' = block_ipc false + sockets true. inuse::Options::users must be the same list as Rules::owners (diskgc's uid, or owners: under --allow-root): it decides which unreadable processes are 'the user's' (docs/safety.md, In use).
 
 From task-6 round 2: use inuse::Options::from_rules(&rules) rather than setting users/sockets by hand; delete_unused refuses options that disagree with the walk's rules.
+
+From task-7 (selection grammar): each tier's select (and --select) goes through diskgc_core::select::compile(text, &catalog) -> Result<Checked, SelectError>; the catalog is task-8's implementation of select::Catalog. SelectError Display is the full message (syntax: 'invalid selection `EXPR` at column N: ...'; rules: 'invalid selection `EXPR`: e1; e2'); prefix it with the tier name. check prints Checked::expr() (Display is the normalised form, docs/reference.md examples table) and can list the profiles from expr().terms (source and NotProfile factors). Checked::kind() is the expression's one kind. YAML caveat: a select value starting with '!' or '&' is a YAML tag/anchor; such expressions are invalid anyway (a term starts with profile:), but the YAML error will come first. Roots (tier roots apply only to roots: required sources; NotProfile takes the tier's roots) are not checked by select; that is task-8/15.
+
+From the task-7 review (H7): config/--select errors in --json need stable error codes (one per Syntax and CheckError variant); document in docs/reference.md that machines match codes, not text. Also: compile errors now quote the expression as written (CheckErrors.expr), so prefix with the tier name only.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
