@@ -1,8 +1,10 @@
 //! Scratch mounts and the fixture operations that touch them (docs/testing.md,
 //! Safety interlock, layer 3).
 //!
-//! Each test gets a fresh tmpfs at the container's `/tmp` (where diskgc's
-//! filesystem profiles look), plus a private records tmpfs for the harness.
+//! Each test gets fresh tmpfs mounts at the container's `/tmp` (where
+//! diskgc's filesystem profiles look), `/run/diskgc` (the host lock) and
+//! `/home/tester`, plus a private records tmpfs for the harness: objects on a
+//! tmpfs have stable inode numbers and birth times, unlike the overlay root.
 //! Every fixture operation goes through [`Scratch`], which checks **by mount
 //! id** that the path it is about to touch lies on that mount and aborts the
 //! test process otherwise ([`interlock::abort_outside_scratch`]). The mount id
@@ -76,11 +78,13 @@ pub struct Scratch {
 
 impl Scratch {
     /// Mounts a fresh tmpfs over the existing directory `root` (baked into
-    /// the image) with the given octal `mode` for its root directory.
-    pub fn mount(root: &str, mode: &str) -> Result<Self, String> {
+    /// the image) with the given octal `mode` and `owner` for its root
+    /// directory.
+    pub fn mount(root: &str, mode: &str, owner: Owner) -> Result<Self, String> {
         let root = PathBuf::from(root);
         let covered = mount_id(&root, false)?;
-        let data = CString::new(format!("mode={mode}")).expect("mode has no NUL");
+        let data = CString::new(format!("mode={mode},uid={},gid={}", owner.uid, owner.gid))
+            .expect("mount options have no NUL");
         rustix::mount::mount(
             "diskgc-e2e-scratch",
             &root,
@@ -278,6 +282,15 @@ impl Scratch {
                 target.display()
             )
         })
+    }
+
+    /// Like [`Scratch::bind_mount`], then makes the new mount read-only
+    /// (a bind remount, so the scratch filesystem itself stays writable).
+    pub fn bind_mount_read_only(&self, source_rel: &str, target_rel: &str) -> Result<(), String> {
+        self.bind_mount(source_rel, target_rel)?;
+        let target = self.join_checked("bind_mount_read_only", target_rel);
+        rustix::mount::mount_remount(&target, MountFlags::BIND | MountFlags::RDONLY, c"")
+            .map_err(|e| format!("remount {} read-only: {e}", target.display()))
     }
 
     /// Owner and mode for a freshly created entry, then a re-check that the

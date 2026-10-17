@@ -6,6 +6,16 @@
 //! ([`exec_as_tester`]) and execs the program. The trace files go to the
 //! root-only records mount, where the code under test cannot touch them.
 //!
+//! strace runs with `--seccomp-bpf`: a seccomp filter installed before the
+//! exec stops the tracee only at the traced syscalls, instead of at every
+//! syscall, so a traced Cargo build costs little more than an untraced one.
+//! A refused filter (strace prints why and carries on without it) fails the
+//! run rather than silently making it slow.
+//!
+//! Every traced run is entered in the test's [`Ledger`]; the deletion oracle
+//! marks the runs it judged, and a test that leaves a traced run unjudged
+//! fails (docs/testing.md, Grounding, acceptance signal 1).
+//!
 //! Two kernel rules shape this:
 //!
 //! - `strace -u tester` changes the child's uid before strace attaches,
@@ -24,7 +34,10 @@ use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rustix::process::{Gid, Uid};
 
@@ -35,6 +48,11 @@ use crate::{TESTER, TESTER_NAME, exit, info};
 /// strace in the base image.
 pub const STRACE: &str = "/bin/strace";
 
+/// strace options, before `-e trace=...` and `-o`: follow forks (required by
+/// `--seccomp-bpf`) into one file per process, no attach/exit noise, fd
+/// paths, every string hex-escaped (see [`crate::strace`]).
+pub const STRACE_OPTIONS: &[&str] = &["--seccomp-bpf", "-f", "-ff", "-qq", "-y", "-xx"];
+
 /// What a traced run of the code under test produced.
 #[derive(Debug)]
 pub struct Run {
@@ -43,6 +61,12 @@ pub struct Run {
     pub stdout: String,
     pub stderr: String,
     pub events: Vec<Event>,
+    /// When strace was started (the oracle refuses runs that started before
+    /// it took its "before" snapshot).
+    pub started: Instant,
+    /// Wall time from starting strace to its exit.
+    pub took: Duration,
+    judged: Arc<AtomicBool>,
 }
 
 impl Run {
@@ -57,13 +81,77 @@ impl Run {
             ))
         }
     }
+
+    /// Called by the deletion oracle once it judged this run.
+    pub(crate) fn mark_judged(&self) {
+        self.judged.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The traced runs of one test and whether the oracle judged each. Shared
+/// by reference with every run; thread-safe so tests may run code under
+/// test from several threads.
+#[derive(Debug, Default)]
+pub struct Ledger {
+    runs: Mutex<Vec<(Vec<String>, Arc<AtomicBool>)>>,
+}
+
+impl Ledger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn enter(&self, argv: &[String]) -> Arc<AtomicBool> {
+        let judged = Arc::new(AtomicBool::new(false));
+        self.runs
+            .lock()
+            .expect("ledger lock")
+            .push((argv.to_vec(), Arc::clone(&judged)));
+        judged
+    }
+
+    /// The argv of every run the oracle has not judged.
+    pub fn unjudged(&self) -> Vec<Vec<String>> {
+        self.runs
+            .lock()
+            .expect("ledger lock")
+            .iter()
+            .filter(|(_, judged)| !judged.load(Ordering::SeqCst))
+            .map(|(argv, _)| argv.clone())
+            .collect()
+    }
+
+    /// Fails unless the oracle judged every traced run.
+    pub fn require_all_judged(&self) -> Result<(), String> {
+        let unjudged = self.unjudged();
+        if unjudged.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} traced run(s) of code under test never judged by the deletion oracle \
+                 (arm an Oracle before the run and judge it after): {unjudged:?}",
+                unjudged.len()
+            ))
+        }
+    }
 }
 
 static RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Lines in which strace says it could not install its seccomp filter (it
+/// then traces every syscall, much slower, and carries on).
+fn seccomp_refusals(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("strace: ") && l.contains("seccomp"))
+        .collect()
+}
+
 /// Runs `program args...` as `tester` under strace, with a minimal fixed
-/// environment and `cwd` as working directory, and collects the record.
+/// environment and `cwd` as working directory, collects the record and
+/// enters the run in `ledger`.
 pub fn run_as_tester<S: AsRef<OsStr>>(
+    ledger: &Ledger,
     records: &Scratch,
     cwd: &Path,
     program: &Path,
@@ -81,9 +169,11 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
     let self_exe =
         std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
     info!("running as {TESTER_NAME} under strace: {argv:?}");
+    let judged = ledger.enter(&argv);
 
+    let started = Instant::now();
     let output = Command::new(STRACE)
-        .args(["-f", "-ff", "-qq", "-y", "-xx"])
+        .args(STRACE_OPTIONS)
         .arg("-e")
         .arg(format!("trace={}", strace::TRACED_SYSCALLS))
         .arg("-o")
@@ -103,9 +193,17 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("spawn {STRACE}: {e}"))?;
+    let took = started.elapsed();
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let refusals = seccomp_refusals(&stderr);
+    if !refusals.is_empty() {
+        return Err(format!(
+            "strace ran {argv:?} without its seccomp filter (every syscall would stop the \
+             tracee): {refusals:?}"
+        ));
+    }
     let events = strace::read_record(&dir, prefix)
         .map_err(|e| format!("{e}\n--- strace exit {:?}, stderr\n{stderr}", output.status))?;
     Ok(Run {
@@ -114,6 +212,9 @@ pub fn run_as_tester<S: AsRef<OsStr>>(
         stdout,
         stderr,
         events,
+        started,
+        took,
+        judged,
     })
 }
 
@@ -148,4 +249,38 @@ pub fn exec_as_tester(argv: &[String]) -> i32 {
     let error = Command::new(program).args(args).exec();
     eprintln!("diskgc-e2e as-tester: exec {program}: {error}");
     exit::FAIL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ledger_names_every_run_the_oracle_did_not_judge() {
+        let ledger = Ledger::new();
+        assert!(ledger.require_all_judged().is_ok(), "no runs, nothing owed");
+        let first = ledger.enter(&["/bin/diskgc".into(), "--version".into()]);
+        let _second = ledger.enter(&["/bin/diskgc".into(), "survey".into()]);
+        first.store(true, Ordering::SeqCst);
+        assert_eq!(
+            ledger.unjudged(),
+            vec![vec!["/bin/diskgc".to_owned(), "survey".to_owned()]]
+        );
+        let err = ledger.require_all_judged().unwrap_err();
+        assert!(err.contains("never judged by the deletion oracle"), "{err}");
+        assert!(err.contains("survey"), "{err}");
+    }
+
+    #[test]
+    fn a_refused_seccomp_filter_is_detected_in_strace_stderr() {
+        let stderr = "\
+strace: --seccomp-bpf cannot be used without -f/--follow-forks, disabling
+diskgc: seccomp in a program's own message is not strace's
+";
+        assert_eq!(
+            seccomp_refusals(stderr),
+            vec!["strace: --seccomp-bpf cannot be used without -f/--follow-forks, disabling"]
+        );
+        assert!(seccomp_refusals("diskgc 0.1.0\n").is_empty());
+    }
 }

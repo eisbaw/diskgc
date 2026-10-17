@@ -14,9 +14,17 @@
 //! own state directory ([`DISKGC_STATE_DIR`]) and the concurrent writers the
 //! fixture declares. Objects that appear are not violations (Cargo creates
 //! files); objects created and removed within the run are not either.
+//! Traced calls on paths the before snapshot does not have are classified
+//! and logged ([`Unmatched`]), never dropped silently.
+//!
+//! Judging is mandatory: every traced run is entered in its test's
+//! [`crate::under_test::Ledger`], [`Oracle::judge_runs`] marks the runs it
+//! judged, and the test fails if one is left unjudged (`suite::run`).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::info;
 use crate::snapshot::{self, Entry, Kind, Snapshot};
@@ -193,11 +201,180 @@ pub fn traced_violations(
     found
 }
 
+/// Why a traced removal or replacement names a path that is not in the
+/// "before" snapshot. Only [`Unmatched::CreatedDuringRun`] is expected; the
+/// others mean the strace view could not check the call by path (the
+/// snapshot view still judges the object), so they are logged one by one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unmatched {
+    /// The nearest ancestor the snapshots know is a directory: the object
+    /// was created during the run (objects created and removed within a run
+    /// are not violations).
+    CreatedDuringRun,
+    /// Relative, or with `.` or `..` components: not the path the snapshot
+    /// keys the object by.
+    NonCanonical,
+    /// A directory component carries the ` (deleted)` suffix strace's `-y`
+    /// prints for an fd whose directory was removed.
+    DeletedDirectory,
+    /// The nearest ancestor the snapshots know is this symlink: the object
+    /// was reached through it and is keyed by its target path.
+    SymlinkPrefix(PathBuf),
+    /// No ancestor is a directory in either snapshot (e.g. below a file, or
+    /// below a mount the snapshot skips).
+    NoKnownParent,
+}
+
+impl std::fmt::Display for Unmatched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unmatched::CreatedDuringRun => f.write_str("created during the run"),
+            Unmatched::NonCanonical => f.write_str("non-canonical path (relative, . or ..)"),
+            Unmatched::DeletedDirectory => f.write_str("directory fd of a deleted directory"),
+            Unmatched::SymlinkPrefix(link) => {
+                write!(f, "reached through the symlink {}", link.display())
+            }
+            Unmatched::NoKnownParent => f.write_str("no ancestor directory in either snapshot"),
+        }
+    }
+}
+
+/// A traced call that took effect on a path the "before" snapshot does not
+/// have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmatchedRemoval {
+    pub path: PathBuf,
+    pub pid: u32,
+    pub syscall: String,
+    /// `removed` or `replaced`, as in [`TracedViolation`].
+    pub how: &'static str,
+    pub why: Unmatched,
+}
+
+impl std::fmt::Display for UnmatchedRemoval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "UNMATCHED {} {} by pid {} ({}): {}",
+            self.how,
+            self.path.display(),
+            self.pid,
+            self.syscall,
+            self.why
+        )
+    }
+}
+
+/// Classifies a path that is in neither snapshot's key set (see
+/// [`Unmatched`]).
+pub fn classify_unmatched(
+    path: &Path,
+    before: &BTreeMap<PathBuf, Entry>,
+    after: &BTreeMap<PathBuf, Entry>,
+) -> Unmatched {
+    // On the bytes: `Path::components` hides `.`, `//` and a trailing `/`,
+    // which the snapshot's paths never have.
+    let bytes = path.as_os_str().as_bytes();
+    let lexically_canonical = bytes == b"/"
+        || bytes.strip_prefix(b"/").is_some_and(|rest| {
+            rest.split(|b| *b == b'/')
+                .all(|seg| !matches!(seg, b"" | b"." | b".."))
+        });
+    if !lexically_canonical {
+        return Unmatched::NonCanonical;
+    }
+    let deleted_dir = path.parent().is_some_and(|parent| {
+        parent
+            .components()
+            .any(|c| c.as_os_str().as_bytes().ends_with(b" (deleted)"))
+    });
+    if deleted_dir {
+        return Unmatched::DeletedDirectory;
+    }
+    for ancestor in path.ancestors().skip(1) {
+        let known = before.get(ancestor).or_else(|| after.get(ancestor));
+        match known.map(|e| e.kind) {
+            None => continue,
+            Some(Kind::Dir) => return Unmatched::CreatedDuringRun,
+            Some(Kind::Symlink) => return Unmatched::SymlinkPrefix(ancestor.to_path_buf()),
+            Some(Kind::File | Kind::Other) => return Unmatched::NoKnownParent,
+        }
+    }
+    Unmatched::NoKnownParent
+}
+
+/// Traced calls that took effect on paths the "before" snapshot does not
+/// have, classified. They are not violations: the snapshot diff judges the
+/// objects; this only makes sure no traced call is dropped unexplained.
+pub fn unmatched_removals(
+    events: &[Event],
+    before: &BTreeMap<PathBuf, Entry>,
+    after: &BTreeMap<PathBuf, Entry>,
+) -> Vec<UnmatchedRemoval> {
+    let mut found = Vec::new();
+    for event in events.iter().filter(|e| e.took_effect()) {
+        let changed = event
+            .removed
+            .iter()
+            .map(|p| (p, "removed"))
+            .chain(event.replaced.iter().map(|p| (p, "replaced")));
+        for (path, how) in changed.filter(|(p, _)| !before.contains_key(*p)) {
+            found.push(UnmatchedRemoval {
+                path: path.clone(),
+                pid: event.pid,
+                syscall: event.syscall.clone(),
+                how,
+                why: classify_unmatched(path, before, after),
+            });
+        }
+    }
+    found
+}
+
+/// How many suspicious unmatched calls are logged one by one.
+const UNMATCHED_LOG_LIMIT: usize = 50;
+
+/// Log lines for the unmatched calls: every suspicious one (up to
+/// [`UNMATCHED_LOG_LIMIT`], then a count), and the expected ones
+/// ([`Unmatched::CreatedDuringRun`]) as a count with a few examples.
+pub fn unmatched_log(unmatched: &[UnmatchedRemoval]) -> Vec<String> {
+    let (created, suspicious): (Vec<_>, Vec<_>) = unmatched
+        .iter()
+        .partition(|u| u.why == Unmatched::CreatedDuringRun);
+    let mut lines: Vec<String> = suspicious
+        .iter()
+        .take(UNMATCHED_LOG_LIMIT)
+        .map(|u| u.to_string())
+        .collect();
+    if suspicious.len() > UNMATCHED_LOG_LIMIT {
+        lines.push(format!(
+            "... and {} more unmatched traced calls not shown",
+            suspicious.len() - UNMATCHED_LOG_LIMIT
+        ));
+    }
+    if !created.is_empty() {
+        let examples: Vec<String> = created
+            .iter()
+            .take(3)
+            .map(|u| u.path.display().to_string())
+            .collect();
+        lines.push(format!(
+            "{} traced calls on objects created during the run (not in the before snapshot), e.g. {examples:?}",
+            created.len()
+        ));
+    }
+    lines
+}
+
 /// The oracle's judgement of one run.
+#[must_use = "a verdict nobody asserts on judges nothing"]
 #[derive(Debug, Clone)]
 pub struct Verdict {
     pub snapshot: Vec<Violation>,
     pub traced: Vec<TracedViolation>,
+    /// Traced calls on paths the before snapshot does not have (logged, not
+    /// violations).
+    pub unmatched: Vec<UnmatchedRemoval>,
 }
 
 impl Verdict {
@@ -245,6 +422,9 @@ impl Verdict {
 pub struct Oracle {
     fixture: Fixture,
     before: Snapshot,
+    /// When the before snapshot was complete; runs judged by this oracle
+    /// must have started after it.
+    armed_at: Instant,
 }
 
 impl Oracle {
@@ -252,12 +432,13 @@ impl Oracle {
     /// (a fixture typo would otherwise make the eligible set silently empty).
     pub fn arm(fixture: Fixture) -> Result<Self, String> {
         let before = snapshot::take()?;
+        let armed_at = Instant::now();
         info!(
-            "oracle armed: {} objects in {:?}; {}; skipped pseudo mounts {:?}",
+            "oracle armed: {} objects in {:?}; {}; mounts not walked: {}",
             before.entries.len(),
             before.took,
             before.key_stats,
-            before.skipped
+            skipped_text(&before)
         );
         let missing: Vec<_> = fixture
             .eligible
@@ -269,7 +450,11 @@ impl Oracle {
                 "fixture declares eligible paths that do not exist: {missing:?}"
             ));
         }
-        Ok(Self { fixture, before })
+        Ok(Self {
+            fixture,
+            before,
+            armed_at,
+        })
     }
 
     /// Takes the "after" snapshot and judges the run.
@@ -278,8 +463,21 @@ impl Oracle {
     }
 
     /// Takes the "after" snapshot and judges several runs of code under test
-    /// that happened since [`Oracle::arm`].
+    /// that happened since [`Oracle::arm`], and marks them judged in their
+    /// test's ledger. Fails for a run that started before the oracle was
+    /// armed: its deletions could predate the before snapshot.
     pub fn judge_runs(&self, runs: &[&Run]) -> Result<Verdict, String> {
+        let early: Vec<&Vec<String>> = runs
+            .iter()
+            .filter(|r| r.started < self.armed_at)
+            .map(|r| &r.argv)
+            .collect();
+        if !early.is_empty() {
+            return Err(format!(
+                "deletion oracle: run(s) started before the oracle was armed cannot be judged \
+                 by it: {early:?}"
+            ));
+        }
         let after = snapshot::take()?;
         let events: Vec<Event> = runs.iter().flat_map(|r| r.events.iter().cloned()).collect();
         let argvs: Vec<&Vec<String>> = runs.iter().map(|r| &r.argv).collect();
@@ -292,14 +490,31 @@ impl Oracle {
         let verdict = Verdict {
             snapshot: diff(&self.before.entries, &after.entries, &self.fixture),
             traced: traced_violations(&events, &self.before.entries, &self.fixture),
+            unmatched: unmatched_removals(&events, &self.before.entries, &after.entries),
         };
+        for line in unmatched_log(&verdict.unmatched) {
+            info!("oracle: {line}");
+        }
         info!(
             "oracle verdict ({} traced calls): {}",
             events.len(),
             verdict.report()
         );
+        for run in runs {
+            run.mark_judged();
+        }
         Ok(verdict)
     }
+}
+
+/// `path (why), ...` for the mounts a snapshot did not walk.
+fn skipped_text(snapshot: &Snapshot) -> String {
+    snapshot
+        .skipped
+        .iter()
+        .map(|(path, why)| format!("{} ({why})", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -420,6 +635,132 @@ mod tests {
                 (PathBuf::from("/tmp/keep"), "removed"),
                 (PathBuf::from("/tmp/dst"), "replaced")
             ]
+        );
+    }
+
+    fn of_kind(kind: Kind, ino: u64) -> Entry {
+        Entry {
+            kind,
+            ..entry(ino, None)
+        }
+    }
+
+    #[test]
+    fn unmatched_paths_are_classified_not_dropped() {
+        let before = tree(&[
+            ("/", of_kind(Kind::Dir, 1)),
+            ("/tmp", of_kind(Kind::Dir, 2)),
+            ("/tmp/real", of_kind(Kind::Dir, 3)),
+            ("/tmp/real/a", of_kind(Kind::File, 4)),
+            ("/tmp/link", of_kind(Kind::Symlink, 5)),
+            ("/tmp/file", of_kind(Kind::File, 6)),
+        ]);
+        let after = tree(&[("/tmp/made", of_kind(Kind::Dir, 7))]);
+        let cases = [
+            ("/tmp/real/new", Unmatched::CreatedDuringRun),
+            // Parent created during the run too (and still there, or gone).
+            ("/tmp/made/x", Unmatched::CreatedDuringRun),
+            ("/tmp/gone/deeper/x", Unmatched::CreatedDuringRun),
+            ("/tmp/real/../real/a", Unmatched::NonCanonical),
+            ("/tmp/./real/a", Unmatched::NonCanonical),
+            ("tmp/real/a", Unmatched::NonCanonical),
+            ("/tmp//real/a", Unmatched::NonCanonical),
+            ("/tmp/real/a/", Unmatched::NonCanonical),
+            ("/tmp/old (deleted)/a", Unmatched::DeletedDirectory),
+            (
+                "/tmp/link/a",
+                Unmatched::SymlinkPrefix(PathBuf::from("/tmp/link")),
+            ),
+            (
+                "/tmp/link/sub/a",
+                Unmatched::SymlinkPrefix(PathBuf::from("/tmp/link")),
+            ),
+            ("/tmp/file/a", Unmatched::NoKnownParent),
+        ];
+        for (path, want) in cases {
+            assert_eq!(
+                classify_unmatched(Path::new(path), &before, &after),
+                want,
+                "{path}"
+            );
+        }
+        // A file literally named "x (deleted)" is a matched path, never
+        // classified; only directory components count.
+        assert_eq!(
+            classify_unmatched(Path::new("/tmp/real/x (deleted)"), &before, &after),
+            Unmatched::CreatedDuringRun
+        );
+    }
+
+    #[test]
+    fn unmatched_removals_skip_matched_and_failed_calls() {
+        let before = tree(&[
+            ("/tmp", of_kind(Kind::Dir, 2)),
+            ("/tmp/link", of_kind(Kind::Symlink, 5)),
+            ("/tmp/keep", of_kind(Kind::File, 6)),
+        ]);
+        let events = [
+            event(&["/tmp/keep"], &[], Outcome::Ok),
+            event(&["/tmp/link/x"], &[], Outcome::Ok),
+            event(&["/tmp/link/y"], &[], Outcome::Failed("ENOENT".into())),
+            event(&["/tmp/new.tmp"], &["/tmp/new"], Outcome::Ok),
+        ];
+        let got: Vec<_> = unmatched_removals(&events, &before, &BTreeMap::new())
+            .into_iter()
+            .map(|u| (u.path, u.how, u.why))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    PathBuf::from("/tmp/link/x"),
+                    "removed",
+                    Unmatched::SymlinkPrefix(PathBuf::from("/tmp/link"))
+                ),
+                (
+                    PathBuf::from("/tmp/new.tmp"),
+                    "removed",
+                    Unmatched::CreatedDuringRun
+                ),
+                (
+                    PathBuf::from("/tmp/new"),
+                    "replaced",
+                    Unmatched::CreatedDuringRun
+                ),
+            ]
+        );
+    }
+
+    fn unmatched(path: &str, why: Unmatched) -> UnmatchedRemoval {
+        UnmatchedRemoval {
+            path: PathBuf::from(path),
+            pid: 1,
+            syscall: "unlinkat".into(),
+            how: "removed",
+            why,
+        }
+    }
+
+    #[test]
+    fn the_unmatched_log_lists_suspicious_calls_and_counts_expected_ones() {
+        let mut all: Vec<UnmatchedRemoval> = (0..1000)
+            .map(|i| unmatched(&format!("/tmp/churn/f{i}"), Unmatched::CreatedDuringRun))
+            .collect();
+        all.push(unmatched("/tmp/a/../b", Unmatched::NonCanonical));
+        let lines = unmatched_log(&all);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("UNMATCHED removed /tmp/a/../b"));
+        assert!(lines[0].contains("non-canonical"));
+        assert!(lines[1].starts_with("1000 traced calls on objects created during the run"));
+
+        let many: Vec<UnmatchedRemoval> = (0..UNMATCHED_LOG_LIMIT + 7)
+            .map(|i| unmatched(&format!("/x/../{i}"), Unmatched::NonCanonical))
+            .collect();
+        let lines = unmatched_log(&many);
+        assert_eq!(lines.len(), UNMATCHED_LOG_LIMIT + 1);
+        assert_eq!(
+            lines.last().unwrap(),
+            "... and 7 more unmatched traced calls not shown"
         );
     }
 }

@@ -25,16 +25,31 @@ The strongest end-to-end checks; if these are green, diskgc genuinely works.
    deleted, keeps the overlay inode number but gives the object a new
    birth time. Limit: there, a replacement that reuses the freed inode
    number is invisible to the snapshot; the strace record still shows it
-   for traced processes. Pseudo filesystems (`/proc`, `/sys`, `devpts`,
-   cgroups, ...) are not walked; any other unreadable path fails the
+   for traced processes. Objects the harness creates therefore live on
+   tmpfs mounts (`/tmp`, `/run/diskgc`, `/home/tester`; Container setup),
+   where the full key applies. Pseudo filesystems (`/proc`, `/sys`,
+   `devpts`, cgroups, ...) and read-only mounts (the binaries under test,
+   toolchains) are not walked, decided by each object's mount id; nothing
+   can be deleted through a read-only mount, and a writable mount nested
+   below one is still walked. Limit: an object reachable only through a
+   read-only mount of a filesystem that some other process writes to
+   elsewhere is not snapshotted. Any other unreadable path fails the
    snapshot rather than leaving a blind spot. A second, independent record
    comes from
-   `strace -f -e unlink,unlinkat,rmdir,rename,renameat,renameat2` on diskgc
-   and its children; deletions done inside daemons (Docker, Nix) are
-   invisible to it and are covered by the filesystem snapshot only. The
-   oracle is computed from the fixture's spec, never from diskgc's output;
-   the only allowlisted paths are diskgc's own state directory and the
-   fixture's own concurrent writers (declared in the fixture).
+   `strace --seccomp-bpf -f -e unlink,unlinkat,rmdir,rename,renameat,renameat2`
+   on diskgc and its children (the seccomp filter stops the traced process
+   only at those calls; a refused filter fails the run); deletions done
+   inside daemons (Docker, Nix) are invisible to it and are covered by the
+   filesystem snapshot only. A traced call whose path is not a snapshot path
+   is logged with its reason, never dropped: created during the run
+   (counted), or reached through a symlink, written with `.` or `..`, or
+   relative to a deleted directory (each logged); the snapshot still judges
+   the object itself. The oracle is computed from the fixture's spec, never
+   from diskgc's output; the only allowlisted paths are diskgc's own state
+   directory and the fixture's own concurrent writers (declared in the
+   fixture). **Judging is mandatory:** every traced run of code under test
+   is recorded, and a test that leaves one unjudged by the oracle (or judges
+   it with an oracle armed after the run started) fails.
 2. **Cargo race tests 1–9** (below) green on every supported Cargo version.
 3. **Model property suite** green: never-delete invariants on the call
    trace, the index is never an authority, selection semantics equal the
@@ -308,22 +323,33 @@ parallel) with `--cap-add SYS_ADMIN` (effective only inside the user
 namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
 `--cap-add SYS_PTRACE` (container root's strace needs it to resolve the
 code under test's fds for `-y`; the code under test has no capabilities)
-and `--network=none`. The harness runs as container root to set up fixtures
-on a fresh scratch tmpfs at `/tmp`, and keeps its own records (strace
-output) on a second, root-only tmpfs;
+and `--network=none`. The harness runs as container root and mounts a fresh
+tmpfs per test at `/tmp` (the scratch for fixtures), at `/run/diskgc`
+(0755 root, where it provisions the host lock `/run/diskgc/lock`, 0644
+root, as the tmpfiles lines in [safety.md](safety.md#host-lock) do on a
+host whose `/run` is a tmpfs) and at `/home/tester` (0755 tester); it keeps
+its own records (strace output) on a further, root-only tmpfs. Objects the
+harness creates thus get stable inode numbers and birth times; only what
+the image itself ships stays on the overlay root.
 **diskgc itself runs as an unprivileged container user (uid 1000)**, so
 permission checks, `/proc` access limits and diskgc's own refusal to run as
 root behave as on a real machine; other owners use mapped subuids (uid 1001
 in the image). strace attaches first and the traced process then drops to
-uid 1000 (groups, gid, uid) before exec. A second
+uid 1000 (groups, gid, uid) before exec; with `--seccomp-bpf` it stops only
+at the traced calls, which the suite checks against a stated bound (a
+20,000-file create/stat/unlink churn: one seccomp filter more than the
+harness, at most 4 ptrace stops per file, at most 10 s). A second
 mount namespace for the "other namespace" tests is made with an `unshare`
 helper that bind-mounts the scratch directory at a different path (nested
-Podman is not used). Toolchains, tools, users, markers and the host lock
-(`/run/diskgc/lock`, as the tmpfiles lines in [safety.md](safety.md#host-lock)
-make it) live in a base image (`dockerTools.streamLayeredImage`) tagged by
+Podman is not used). Toolchains, tools, users, markers and the mount points
+live in a base image (`dockerTools.streamLayeredImage`) tagged by
 its Nix hash and reused when an image with that tag is loaded; the binaries
 under test are bind-mounted read-only, so a code change does not rebuild
-or reload the base.
+or reload the base. The container root must be Podman's native overlayfs:
+the runner checks `podman info` before starting anything and each test
+checks its root mount, and both refuse fuse-overlayfs or another storage
+driver, whose inode numbers and birth times the snapshot keys were not
+validated on.
 
 ## Safety interlock for destructive tests
 
@@ -357,7 +383,8 @@ CI settings). Three layers:
 | `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
 | `ci` | `nix flake check -L` plus `just e2e-full` | CI |
 
-Requirements for `just e2e`: Nix and rootless Podman on the host, with a
+Requirements for `just e2e`: Nix and rootless Podman on the host (native
+overlay storage driver, see Container setup), with a
 subuid range covering uids 1000 and 1001 (the dev shell does not provide
 Podman; CI runners that are themselves containers need nested Podman).
 Each test's tier is declared in `diskgc-e2e/src/suite.rs`. Coverage of unit and model tests

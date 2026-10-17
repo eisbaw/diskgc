@@ -5,15 +5,18 @@
 //!
 //! 1. Runs the do-nothing interlock canary on the host and requires it to
 //!    refuse (exit [`exit::INTERLOCK`]); anything else stops the run.
-//! 2. Makes sure the base image is loaded: `podman image exists` on its tag
+//! 2. Requires Podman's native overlay storage driver (`podman info`); with
+//!    fuse-overlayfs or another driver the snapshot's key rules are not
+//!    validated, so the run stops with a clear message.
+//! 3. Makes sure the base image is loaded: `podman image exists` on its tag
 //!    (the tag is the Nix hash of the image, so it changes only when the
 //!    image's inputs change); only when missing is the Nix stream script
 //!    piped into `podman load`.
-//! 3. Lists the tests from inside a container (`diskgc-e2e list`).
-//! 4. Runs one container per selected test, in parallel, with
-//!    `--cap-add SYS_ADMIN --network=none`, the binaries under test mounted
-//!    read-only, and records each test's duration and log.
-//! 5. Reports, and fails when a test failed or the run exceeded its budget.
+//! 4. Lists the tests from inside a container (`diskgc-e2e list`).
+//! 5. Runs one container per selected test, in parallel, with
+//!    `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --network=none`, the binaries
+//!    under test mounted read-only, and records each test's duration and log.
+//! 6. Reports, and fails when a test failed or the run exceeded its budget.
 //!    The budget is also a deadline: tests still running at it are killed.
 //!
 //! The Nix flake's `e2e-runner` package wraps this binary with the image and
@@ -146,6 +149,7 @@ pub fn main(args: &[String]) -> i32 {
 fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
     let started = Instant::now();
     check_canary_refuses_on_host(config)?;
+    require_native_overlay_storage()?;
     ensure_base_image(config)?;
     std::fs::create_dir_all(&config.log_dir)
         .map_err(|e| format!("create {}: {e}", config.log_dir.display()))?;
@@ -213,6 +217,56 @@ fn check_canary_refuses_on_host(config: &Config) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     }
+}
+
+/// Fails fast unless Podman stores containers with its native overlay
+/// driver. Under fuse-overlayfs (overlay with a `mount_program`) or another
+/// driver (vfs, btrfs, ...) the container root is a different filesystem
+/// whose inode numbers and birth times the deletion oracle's snapshot keys
+/// were not validated on (false REPLACED, or replacements missed).
+fn require_native_overlay_storage() -> Result<(), String> {
+    let out = Command::new("podman")
+        .args([
+            "info",
+            "--format",
+            "{{.Store.GraphDriverName}}\n{{json .Store.GraphOptions}}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("spawn podman (rootless Podman is a host requirement): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "podman info failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (driver, options) = text.split_once('\n').unwrap_or((text.trim(), ""));
+    check_storage_driver(driver.trim(), options.trim())?;
+    info!("podman storage driver: native {driver}");
+    Ok(())
+}
+
+/// The decision of [`require_native_overlay_storage`] on `podman info`'s
+/// driver name and its graph options as JSON.
+pub fn check_storage_driver(driver: &str, options_json: &str) -> Result<(), String> {
+    let fix = "the e2e harness needs Podman's native overlay driver (rootless needs Linux \
+               5.13+): driver = \"overlay\" without mount_program in storage.conf \
+               (changing the driver of an existing store needs `podman system reset`, \
+               which deletes all its images and containers; docs/testing.md, Commands)";
+    if driver != "overlay" {
+        return Err(format!(
+            "podman storage driver is {driver:?}, not native overlay; {fix}"
+        ));
+    }
+    if options_json.contains("mount_program") {
+        return Err(format!(
+            "podman storage driver is overlay through a mount program (fuse-overlayfs?): \
+             {options_json}; {fix}"
+        ));
+    }
+    Ok(())
 }
 
 /// Loads the base image unless an image with its tag (its Nix hash) exists.
@@ -680,5 +734,18 @@ mod tests {
             );
         }
         assert_eq!(verdict(&[], d, None), exit::FAIL);
+    }
+
+    #[test]
+    fn only_the_native_overlay_driver_is_accepted() {
+        assert!(check_storage_driver("overlay", "{}").is_ok());
+        let fuse = r#"{"overlay.mount_program":{"Executable":"/usr/bin/fuse-overlayfs","Package":"fuse-overlayfs-1.13","Version":"fusermount3 version: 3.16.2"}}"#;
+        let err = check_storage_driver("overlay", fuse).unwrap_err();
+        assert!(err.contains("mount program"), "{err}");
+        assert!(err.contains("fuse-overlayfs"), "{err}");
+        for other in ["vfs", "btrfs", "zfs", ""] {
+            let err = check_storage_driver(other, "{}").unwrap_err();
+            assert!(err.contains("not native overlay"), "{other}: {err}");
+        }
     }
 }

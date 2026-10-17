@@ -138,7 +138,8 @@
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary $out/bin/
       '';
 
-      # The base image: userland, tools, users, markers and the host lock.
+      # The base image: userland, tools, users, markers and mount points (the
+      # harness provisions the host lock per test, on a tmpfs).
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
       # do, and the runner reuses a loaded image with that tag.
@@ -171,25 +172,26 @@
           printf '%s\n' 'passwd: files' 'group: files' > etc/nsswitch.conf
           mkdir -p root home/tester home/other
           chmod 0700 root
-          printf '# tester profile\n' > home/tester/.profile
-          chown -R 1000:1000 home/tester
           chown -R 1001:1001 home/other
           chmod 0755 home/tester home/other
 
-          # The host lock, as the tmpfiles lines of docs/safety.md (Host lock)
-          # provision it:
-          #   d /run/diskgc      0755 root root -
-          #   f /run/diskgc/lock 0644 root root -
-          mkdir -p run/diskgc
-          chmod 0755 run/diskgc
-          touch run/diskgc/lock
-          chmod 0644 run/diskgc/lock
+          # A tester-owned file on the overlay root, outside every scratch
+          # mount (TESTER_OVERLAY_FILE in diskgc-e2e/src/suite.rs): the
+          # oracle tests delete it to prove the snapshot covers the overlay.
+          mkdir -p srv/tester
+          printf 'on the overlay root\n' > srv/tester/on-overlay
+          chown -R 1000:1000 srv/tester
+          chmod 0755 srv/tester
 
-          # Mount points: the harness mounts tmpfs on /tmp (scratch) and on
-          # /run/diskgc-e2e (its records); the runner mounts the binaries
-          # under test on /opt/diskgc-e2e/bin.
-          mkdir -p tmp var/tmp run/diskgc-e2e opt/diskgc-e2e/bin
+          # Mount points. The harness mounts tmpfs on /tmp (scratch), on
+          # /run/diskgc (the host lock, provisioned there as the tmpfiles
+          # lines of docs/safety.md do on a host whose /run is a tmpfs), on
+          # /home/tester (tester's home) and on /run/diskgc-e2e (its
+          # records); the runner mounts the binaries under test on
+          # /opt/diskgc-e2e/bin.
+          mkdir -p tmp var/tmp run/diskgc run/diskgc-e2e opt/diskgc-e2e/bin
           chmod 1777 tmp var/tmp
+          chmod 0755 run/diskgc
           chmod 0700 run/diskgc-e2e
         '';
         config = {

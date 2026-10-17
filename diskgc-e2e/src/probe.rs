@@ -33,6 +33,7 @@ pub fn main(args: &[String]) -> i32 {
         [cmd, path] if cmd == "recreate" => recreate(Path::new(path)),
         [cmd, path] if cmd == "rename-over" => rename_over(Path::new(path)),
         [cmd, case] if cmd == "escape" => escape(case),
+        [cmd, dir, count, stats] if cmd == "churn" => churn(Path::new(dir), count, stats),
         _ => {
             eprintln!("diskgc-e2e probe: unknown probe {args:?}");
             return exit::USAGE;
@@ -156,5 +157,66 @@ fn escape(case: &str) -> Result<(), String> {
         other => return Err(format!("unknown escape case {other:?}")),
     };
     println!("NOT ABORTED: created {}", attempted.display());
+    Ok(())
+}
+
+/// A syscall-heavy stand-in for a build: creates `count` files in `dir`
+/// (open, write, close), stats each `stats` times (a build stats far more
+/// than it deletes), lists the directory, then unlinks every file. Only the
+/// unlinks are traced syscalls. Prints this process's `Seccomp_filters`
+/// count first (the test compares it with the harness's to prove strace's
+/// filter is installed), then `churned N`, then its
+/// `voluntary_ctxt_switches` (about one per ptrace stop).
+fn churn(dir: &Path, count: &str, stats: &str) -> Result<(), String> {
+    let number = |text: &str, what: &str| -> Result<usize, String> {
+        text.parse()
+            .map_err(|_| format!("churn: bad {what} {text:?}"))
+    };
+    let count = number(count, "file count")?;
+    let stats = number(stats, "stats per file")?;
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("read /proc/self/status: {e}"))?;
+    let filters = status
+        .lines()
+        .find(|l| l.starts_with("Seccomp_filters:"))
+        .ok_or("no Seccomp_filters line in /proc/self/status (needs Linux 5.9+)")?;
+    println!("{filters}");
+    let names: Vec<PathBuf> = (0..count).map(|i| dir.join(format!("f{i:06}"))).collect();
+    for path in &names {
+        create_with(path, b"x")?;
+        for _ in 0..stats {
+            let meta = std::fs::symlink_metadata(path)
+                .map_err(|e| format!("lstat {}: {e}", path.display()))?;
+            if meta.len() != 1 {
+                return Err(format!(
+                    "{}: size {} after writing 1 byte",
+                    path.display(),
+                    meta.len()
+                ));
+            }
+        }
+    }
+    let listed = std::fs::read_dir(dir)
+        .map_err(|e| format!("list {}: {e}", dir.display()))?
+        .count();
+    if listed < count {
+        return Err(format!(
+            "{} lists {listed} entries, created {count}",
+            dir.display()
+        ));
+    }
+    for path in &names {
+        std::fs::remove_file(path).map_err(|e| format!("unlink {}: {e}", path.display()))?;
+    }
+    println!("churned {count}");
+    // Every ptrace stop puts the tracee to sleep once: its voluntary
+    // context switches count the stops, independent of machine load.
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("read /proc/self/status: {e}"))?;
+    let switches = status
+        .lines()
+        .find(|l| l.starts_with("voluntary_ctxt_switches:"))
+        .ok_or("no voluntary_ctxt_switches line in /proc/self/status")?;
+    println!("{switches}");
     Ok(())
 }

@@ -6,6 +6,12 @@
 //! to the identity of the object there: (device, inode, birth time). Pseudo
 //! filesystems (`/proc`, `/sys`, cgroups, `devpts`, ...) are skipped: they
 //! hold no files diskgc could delete and their contents change on their own.
+//! Read-only mounts (per mount or per superblock; e.g. the binaries under
+//! test, later the toolchains) are skipped too: nothing can be deleted
+//! through them, and walking them would only make every snapshot slower.
+//! Writable mounts nested below a skipped read-only mount are still walked.
+//! Which mount an object is on is decided by its `statx` mount id, so a mount
+//! stacked over another at the same path is judged by the one on top.
 //! Symlinks are recorded, never followed.
 //!
 //! The key falls back to (device, inode) where the filesystem reports no
@@ -140,18 +146,39 @@ impl std::fmt::Display for KeyStats {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub entries: BTreeMap<PathBuf, Entry>,
-    /// Mount points not walked (pseudo filesystems).
-    pub skipped: BTreeSet<PathBuf>,
+    /// Mount points not walked, and why.
+    pub skipped: BTreeMap<PathBuf, Skip>,
     pub key_stats: KeyStats,
     pub took: Duration,
+}
+
+/// Why a mount is not walked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// A pseudo filesystem ([`PSEUDO_FS_TYPES`]).
+    Pseudo,
+    /// Mounted read-only (mount or superblock option `ro`).
+    ReadOnly,
+}
+
+impl std::fmt::Display for Skip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Skip::Pseudo => "pseudo",
+            Skip::ReadOnly => "read-only",
+        })
+    }
 }
 
 /// One line of `/proc/self/mountinfo`, reduced to what the snapshot needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountInfo {
     pub mount_id: u64,
+    pub parent_id: u64,
     pub mount_point: PathBuf,
     pub fs_type: String,
+    /// `ro` among the per-mount options or the superblock options.
+    pub read_only: bool,
 }
 
 /// Parses `/proc/self/mountinfo` text (proc(5)). Mount points have spaces,
@@ -165,15 +192,23 @@ pub fn parse_mountinfo(text: &str) -> Result<Vec<MountInfo>, String> {
                 .iter()
                 .position(|f| *f == "-")
                 .ok_or_else(|| format!("mountinfo line without ' - ' separator: {line}"))?;
-            if sep < 6 || fields.len() < sep + 2 {
+            // Fields: id parent major:minor root mount-point mount-options
+            // [optional...] - fs-type source super-options.
+            if sep < 6 || fields.len() < sep + 4 {
                 return Err(format!("malformed mountinfo line: {line}"));
             }
-            Ok(MountInfo {
-                mount_id: fields[0]
+            let id = |field: &str| {
+                field
                     .parse()
-                    .map_err(|_| format!("bad mount id in mountinfo line: {line}"))?,
+                    .map_err(|_| format!("bad mount id {field:?} in mountinfo line: {line}"))
+            };
+            let has_ro = |options: &str| options.split(',').any(|o| o == "ro");
+            Ok(MountInfo {
+                mount_id: id(fields[0])?,
+                parent_id: id(fields[1])?,
                 mount_point: PathBuf::from(OsString::from_vec(unescape_octal(fields[4])?)),
                 fs_type: fields[sep + 1].to_owned(),
+                read_only: has_ro(fields[5]) || has_ro(fields[sep + 3]),
             })
         })
         .collect()
@@ -204,17 +239,62 @@ fn unescape_octal(field: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Mount points of pseudo filesystems, which the snapshot does not walk.
-pub fn pseudo_mount_points(mounts: &[MountInfo]) -> BTreeSet<PathBuf> {
-    mounts
-        .iter()
-        .filter(|m| PSEUDO_FS_TYPES.contains(&m.fs_type.as_str()))
-        .map(|m| m.mount_point.clone())
-        .collect()
+/// Which mounts the walk does not enter, by mount id, and the writable mounts
+/// nested below a skipped read-only mount, whose mount points the walk must
+/// start from separately (it never reaches them from `/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WalkPlan {
+    pub skip: BTreeMap<u64, Skip>,
+    pub nested_roots: BTreeSet<PathBuf>,
 }
 
-/// Stats `path` (not following it) into an entry and the type of the
-/// filesystem (by mount id) it is on.
-fn stat_entry(path: &Path, fs_types: &BTreeMap<u64, String>) -> Result<(Entry, String), String> {
+/// Plans the walk over `mounts`: pseudo filesystems and read-only mounts are
+/// skipped. A mount below a pseudo filesystem is never walked (as before:
+/// `/proc/sys` and friends); a writable, non-pseudo mount whose nearest
+/// skipped ancestor is read-only is a nested root.
+pub fn plan_walk(mounts: &[MountInfo]) -> WalkPlan {
+    let by_id: BTreeMap<u64, &MountInfo> = mounts.iter().map(|m| (m.mount_id, m)).collect();
+    let skip_of = |m: &MountInfo| {
+        if PSEUDO_FS_TYPES.contains(&m.fs_type.as_str()) {
+            Some(Skip::Pseudo)
+        } else if m.read_only {
+            Some(Skip::ReadOnly)
+        } else {
+            None
+        }
+    };
+    let skip: BTreeMap<u64, Skip> = mounts
+        .iter()
+        .filter_map(|m| skip_of(m).map(|s| (m.mount_id, s)))
+        .collect();
+    let nearest_skipped_ancestor = |m: &MountInfo| {
+        let mut seen = BTreeSet::new();
+        let mut parent = m.parent_id;
+        // The root mount's parent lies outside the namespace (not in the
+        // table); `seen` guards against a malformed cyclic table.
+        while let Some(p) = by_id.get(&parent).filter(|_| seen.insert(parent)) {
+            if let Some(s) = skip.get(&p.mount_id) {
+                return Some(*s);
+            }
+            parent = p.parent_id;
+        }
+        None
+    };
+    let nested_roots = mounts
+        .iter()
+        .filter(|m| !skip.contains_key(&m.mount_id))
+        .filter(|m| nearest_skipped_ancestor(m) == Some(Skip::ReadOnly))
+        .map(|m| m.mount_point.clone())
+        .collect();
+    WalkPlan { skip, nested_roots }
+}
+
+/// Stats `path` (not following it) into an entry, its mount id and the type
+/// of the filesystem it is on.
+fn stat_entry(
+    path: &Path,
+    fs_types: &BTreeMap<u64, String>,
+) -> Result<(Entry, u64, String), String> {
     let stx = rustix::fs::statx(
         CWD,
         path,
@@ -257,7 +337,7 @@ fn stat_entry(path: &Path, fs_types: &BTreeMap<u64, String>) -> Result<(Entry, S
             btime,
         },
     };
-    Ok((entry, fs_type))
+    Ok((entry, stx.stx_mnt_id, fs_type))
 }
 
 /// Snapshots the whole filesystem visible to this process. Fails on any
@@ -270,32 +350,45 @@ pub fn take() -> Result<Snapshot, String> {
 }
 
 /// Snapshots the tree at `root` with the mount table `mounts`, not
-/// descending into pseudo filesystems.
+/// descending into pseudo filesystems or read-only mounts ([`plan_walk`]).
 pub fn take_from(root: &Path, mounts: &[MountInfo]) -> Result<Snapshot, String> {
-    let skip = pseudo_mount_points(mounts);
+    let plan = plan_walk(mounts);
     let fs_types: BTreeMap<u64, String> = mounts
         .iter()
         .map(|m| (m.mount_id, m.fs_type.clone()))
         .collect();
     let started = Instant::now();
     let mut entries = BTreeMap::new();
-    let mut skipped = BTreeSet::new();
+    let mut skipped = BTreeMap::new();
     let mut key_stats = KeyStats::default();
     let mut errors = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
+    let mut pending: Vec<PathBuf> = std::iter::once(root.to_path_buf())
+        .chain(
+            plan.nested_roots
+                .iter()
+                .filter(|p| p.starts_with(root))
+                .cloned(),
+        )
+        .collect();
 
     while let Some(path) = pending.pop() {
-        if skip.contains(&path) {
-            skipped.insert(path);
+        if entries.contains_key(&path) || skipped.contains_key(&path) {
+            // A nested root that is also reachable through the walk.
             continue;
         }
-        let (entry, fs_type) = match stat_entry(&path, &fs_types) {
+        let (entry, mnt_id, fs_type) = match stat_entry(&path, &fs_types) {
             Ok(found) => found,
             Err(e) => {
                 errors.push(e);
                 continue;
             }
         };
+        if let Some(why) = plan.skip.get(&mnt_id) {
+            // Only reached at a mount's root: the walk never descends into a
+            // skipped mount.
+            skipped.insert(path, *why);
+            continue;
+        }
         let counter = if entry.key.btime.is_some() {
             &mut key_stats.with_btime
         } else {
@@ -362,25 +455,80 @@ mod tests {
         assert_eq!(mounts[0].mount_point, PathBuf::from("/"));
         assert_eq!(mounts[0].fs_type, "overlay");
         assert_eq!(mounts[0].mount_id, 1362);
+        assert_eq!(mounts[0].parent_id, 1156);
+        assert!(!mounts[0].read_only);
         // Optional fields ("shared:9 master:1") before the separator.
         assert_eq!(mounts[4].fs_type, "cgroup2");
+        assert!(mounts[4].read_only);
         assert_eq!(mounts[5].mount_point, PathBuf::from("/tmp/with space"));
+    }
+
+    fn ids(plan: &WalkPlan, why: Skip) -> Vec<u64> {
+        plan.skip
+            .iter()
+            .filter(|(_, s)| **s == why)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     #[test]
     fn pseudo_filesystems_are_skipped_real_ones_are_not() {
-        let skip = pseudo_mount_points(&parse_mountinfo(SAMPLE).unwrap());
-        let expected: BTreeSet<PathBuf> = ["/proc", "/dev/pts", "/sys/fs/cgroup"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
-        assert_eq!(skip, expected);
+        let plan = plan_walk(&parse_mountinfo(SAMPLE).unwrap());
+        // /proc, /dev/pts, /sys/fs/cgroup (pseudo wins over its ro option).
+        assert_eq!(ids(&plan, Skip::Pseudo), vec![1363, 1366, 1368]);
+        assert!(ids(&plan, Skip::ReadOnly).is_empty());
+        assert!(plan.nested_roots.is_empty());
+    }
+
+    /// Read-only per mount or per superblock is skipped; a writable mount
+    /// below a read-only one is walked from its own mount point; nothing
+    /// below a pseudo filesystem is (podman's masks of /proc paths).
+    const WITH_READ_ONLY: &str = "\
+1 0 0:90 / / rw,relatime - overlay overlay rw
+2 1 0:98 / /proc rw,nosuid - proc proc rw
+3 2 0:98 /sys /proc/sys ro,nosuid - proc proc rw
+4 2 0:70 /crun/.empty-directory /proc/acpi ro,nosuid - tmpfs tmpfs rw
+5 2 0:71 / /proc/rw-tmpfs rw - tmpfs tmpfs rw
+10 1 254:1 /nix/store/x-under-test/bin /opt/diskgc-e2e/bin ro,nosuid,nodev - ext4 /dev/dm-1 rw
+11 1 254:2 / /opt/toolchains rw,relatime - ext4 /dev/dm-2 ro,errors=remount-ro
+12 11 0:120 / /opt/toolchains/scratch rw - tmpfs tmpfs rw
+13 12 0:121 / /opt/toolchains/scratch/ro-again ro - tmpfs tmpfs rw
+14 13 0:122 / /opt/toolchains/scratch/ro-again/rw-deep rw - tmpfs tmpfs rw
+";
+
+    #[test]
+    fn read_only_mounts_are_skipped_and_writable_mounts_below_them_walked() {
+        let mounts = parse_mountinfo(WITH_READ_ONLY).unwrap();
+        assert!(mounts[6].read_only, "superblock ro counts");
+        let plan = plan_walk(&mounts);
+        assert_eq!(ids(&plan, Skip::Pseudo), vec![2, 3]);
+        assert_eq!(ids(&plan, Skip::ReadOnly), vec![4, 10, 11, 13]);
+        let expected: BTreeSet<PathBuf> = [
+            "/opt/toolchains/scratch",
+            "/opt/toolchains/scratch/ro-again/rw-deep",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(plan.nested_roots, expected);
+    }
+
+    #[test]
+    fn a_cyclic_mount_table_does_not_hang_the_plan() {
+        let mounts =
+            parse_mountinfo("1 2 0:1 / /a rw - tmpfs t rw\n2 1 0:2 / /b rw - tmpfs t rw\n")
+                .unwrap();
+        let plan = plan_walk(&mounts);
+        assert!(plan.skip.is_empty() && plan.nested_roots.is_empty());
     }
 
     #[test]
     fn malformed_mountinfo_is_an_error() {
         assert!(parse_mountinfo("1 2 0:1 / /x rw overlay\n").is_err());
         assert!(parse_mountinfo("1 2 0:1 / /x\\04 rw - tmpfs t rw\n").is_err());
+        // No superblock options.
+        assert!(parse_mountinfo("1 2 0:1 / /x rw - tmpfs t\n").is_err());
+        assert!(parse_mountinfo("1 x 0:1 / /x rw - tmpfs t rw\n").is_err());
     }
 
     #[test]
