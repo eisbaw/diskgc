@@ -95,6 +95,10 @@ dependencies = [
 [[package]]
 name = "diskgc-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde-saphyr",
+]
 
 [[package]]
 name = "diskgc-e2e"

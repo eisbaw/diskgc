@@ -174,7 +174,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | protected | excluded | not_owner | has_not | stale | too_many_entries | unreadable"}],
+  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -323,8 +323,9 @@ that is a protected match, lies inside one, or contains one is skipped
 `roots: required` name is a load-time error, so protection never depends on
 which tier happens to supply roots. Only kinds `fs` and `cargo-target` can be
 protected (Docker images and Nix paths are protected by Docker's and Nix's
-own means: running containers, GC roots). The example config protects
-`claude-code-tmp`.
+own means: running containers, GC roots). Like `!profile:`, a protected
+profile covers everything its `find` finds and ignores its `where`. The
+example config protects `claude-code-tmp`.
 
 ### Protection marker
 
@@ -374,6 +375,27 @@ profiles apply and when.
   Structural recognition (markers, Cargo layouts) is covered by fixtures in
   the test suite, not by path examples.
 
+Fields (an unknown key anywhere in a profile is a load-time error):
+
+| Field | On | Meaning |
+|---|---|---|
+| `name` | every profile | A `NAME` (see Selection grammar), unique among built-in and user profiles. |
+| `category`, `description` | every profile; required on built-ins | Free text, shown by `profiles list`. |
+| `kind` | sources | Default `fs`. |
+| `find.roots` | sources | A list of absolute directories, or `required`. |
+| `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. |
+| `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a symlink candidate could only be refused (`unsafe_path`), and `tmp-entry` would report every symlink in `/tmp`. |
+| `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `idle_for`: when something is old enough is the tier's choice, written with a `filter:` (Key decisions: what vs when). |
+| `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
+| `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). |
+| `verified_with` | built-in sources, required | The tool version the profile was checked against. |
+| `override` | user profiles | See User profiles. |
+
+`cargo-target` recognises Cargo target directories by their structure
+([safety.md](safety.md#discovery-idleness-eligibility)), so its `find` has
+only `roots`, and it takes no `examples`: `{kind: cargo-target, find: {roots:
+required}}`.
+
 ### Predicates (`where`)
 
 | Predicate | Meaning | Kinds |
@@ -381,8 +403,15 @@ profiles apply and when.
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`) | `fs` |
 
-A predicate on a kind that does not support it is a load-time error. Two
-`idle_for` in one term combine to the longest. Ownership is not a
+In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations) or
+`where: {has: CACHEDIR.TAG}` (one file name); each predicate at most once
+per profile, all of a profile's predicates must hold. A predicate on a kind
+that does not support it is a load-time error. Two `idle_for` in one term
+(its `filter:`s) combine to the longest; a `!filter:` is a complement and
+does not combine. When the measure cannot tell a candidate's age (the
+kernel did not answer a timestamp, or the last use lies in the future),
+the candidate passes neither `filter:` nor `!filter:` on `idle_for`: it is
+skipped (`unsupported_fs`, `future_time`). Ownership is not a
 predicate: it is an always-on check ([safety.md](safety.md)).
 
 | Kind | `idle_for` means |
@@ -460,19 +489,21 @@ parses back to the same expression):
   roots if it needs them, and does not count towards "one kind and one
   action".
 - **Non-`fs` kinds** allow only `profile:NAME` (`docker-images`,
-  `nix-store`) or `profile:NAME` / `profile:NAME && filter:idle-*`
-  (`docker-build-cache`), as the whole expression (one term, never in a
+  `nix-store`) or `profile:NAME`, optionally followed by `&&` filters whose
+  predicates are all `idle_for` (`docker-build-cache`), as the whole expression (one term, never in a
   union): they have no per-candidate enumeration.
 - Filters are evaluated from the index where it already knows the answer,
   and always re-evaluated at deletion time. A candidate that fails a filter
-  is reported as skipped with that filter's reason (`not_idle`, `has_not`).
+  is reported as skipped with that filter's reason (`not_idle`, `has_not`,
+  or why its age is unknown: `unsupported_fs`, `future_time`).
 
 Errors. A rejected expression is a load-time error (exit 2). The report
 starts with `invalid selection`, the expression as written and, for a
 syntax error, the column; then the message. The rules that depend on what a name is
 report every broken rule, separated by `;`. Where a message suggests a
-rewrite, the rewrite is one diskgc accepts; a suggestion that would itself
-be rejected is left out (`filter:nix-garbage` below: `!profile:nix-garbage`
+rewrite, the rewrite fixes that error without breaking another rule (if the
+expression has other errors, they still need fixing); a suggestion that would
+itself be rejected is left out (`filter:nix-garbage` below: `!profile:nix-garbage`
 is rejected too). The messages, with the built-in profiles plus
 `a`, `b` (kind `fs`, action `delete`) and `f` (`idle_for`):
 
@@ -493,7 +524,7 @@ is rejected too). The messages, with the built-in profiles plus
 | `profile:a && filter:nix-garbage` | `filter:nix-garbage`: `nix-garbage` is a source profile of kind nix-store, not a filter |
 | `profile:tmp-entry && filter:nope` | `filter:nope`: no profile or filter is named `nope` |
 | `profile:pytest-tmp \|\| profile:cargo-target` | `profile:pytest-tmp` is of kind fs but `profile:cargo-target` is of kind cargo-target: the sources of one expression share one kind; select them in separate tiers |
-| `profile:pytest-tmp \|\| profile:pip-cache` | `profile:pytest-tmp` removes with `delete` but `profile:pip-cache` with `command`: the sources of one expression share one action; select them in separate tiers |
+| `profile:pytest-tmp \|\| profile:pip-cache` | `profile:pytest-tmp` removes with `delete` but `profile:pip-cache` with `command ["pip", "--cache-dir", "{path}", "cache", "purge"], cwd: candidate`: the sources of one expression share one action; select them in separate tiers |
 | `profile:cargo-target && filter:has-cachedir-tag` | `filter:has-cachedir-tag` uses `has`, which kind cargo-target does not support (`has` works on: fs) |
 | `profile:nix-garbage \|\| profile:nix-garbage` | kind nix-store acts on everything it finds at once (no per-candidate enumeration), so its expression has one term, not a union of 2; select each in its own tier |
 | `profile:nix-garbage && filter:idle-7d` | kind nix-store takes only `profile:NAME`, so `filter:idle-7d` cannot narrow it: it has no per-candidate enumeration |
@@ -507,10 +538,26 @@ is rejected too). The messages, with the built-in profiles plus
 | `command` | an argv list run per candidate, e.g. `[env, "GOCACHE={path}", go, clean, -cache]`. Trusted, arbitrary command execution; never run as root. See [safety.md](safety.md#command-actions). |
 | kind actions | Cargo lock protocol, Docker prune, Nix GC: fixed by the kind ([safety.md](safety.md#cargo-target)). |
 
+In YAML:
+
+```yaml
+action: delete
+action: {delete: {make_writable: true}}
+action: {command: [env, "GOCACHE={path}", go, clean, -cache], cwd: parent}
+```
+
 Command action fields: `command` (argv; `{path}` is replaced by the
 candidate path as one argument or inside one, never through a shell; use
-`[sh, -c, "..."]` explicitly if a shell is wanted), `cwd` (`candidate`, the
-default for directories, or `parent`), `timeout`. Environment passed:
+`[sh, -c, "..."]` explicitly if a shell is wanted) and `cwd` (`candidate` or
+`parent`; the default is `candidate` for `type: dir`, `parent` for `type:
+file`, and for `type: any` decided per candidate the same way; `cwd:
+candidate` with `type: file` or `type: any` is a load-time error). The
+program (`command[0]`) is a name or path without `{path}`: it is resolved
+and shown before anything runs ([safety.md](safety.md#command-actions)),
+so it is never the candidate. The tier's `timeout`
+bounds it (Tier fields). Two sources have the same action only if the
+action and every option are equal; the "one action" error shows a command
+action as its quoted argv and `cwd`. Environment passed:
 `DISKGC_PATH`, `DISKGC_NEED_BYTES`, `DISKGC_MOUNT`, `DISKGC_PROFILE`. Most
 cleaners pick their cache from their own config or environment, not from
 the working directory, so the command must name the location explicitly
@@ -575,6 +622,8 @@ profile was renamed.
 - The config's `profiles:` list adds profiles. A user profile with the name
   of a built-in must say `override: true`; otherwise it is a load-time
   error, so nobody shadows a built-in by accident.
+- A user profile of kind `fs` carries `examples` with at least one
+  `match`, like a built-in: the examples are what `profiles test` checks.
 - `diskgc profiles test` runs every profile's `examples` against an
   in-memory model, so a profile is checked before it touches a disk.
 - `check` warns about a user profile whose last path segment is only

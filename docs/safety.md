@@ -671,8 +671,8 @@ elsewhere. Lix and other Nix variants are not verified.
   in the report (for `[env, GOCACHE={path}, go, ...]` that includes `go`,
   not only `env`). A tool that is not installed makes the profile `missing`
   (skipped), not an error.
-- Runs in its own process group; killed after `timeout`; inherits the host
-  lock (below).
+- Runs in its own process group; killed after the tier's `timeout`;
+  inherits the host lock (below).
 
 ## Path traversal
 

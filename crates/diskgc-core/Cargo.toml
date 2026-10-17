@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde-saphyr.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

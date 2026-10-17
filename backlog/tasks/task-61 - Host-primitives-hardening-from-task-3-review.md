@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 19:31'
+updated_date: '2026-10-17 22:44'
 labels:
   - wave-1
   - hardening
@@ -160,6 +160,18 @@ From task-6's final review:
 From the task-6 follow-up (socket test flake): the diskgc-linux test guard fd_table_guard() now covers bound sockets as well as flock locks. A test that closes an fd and then asserts what the close released (a lock no longer held, a socket no longer in the socket diagnostics) must hold the guard from before the fd is opened until after the assertion, because a child forked by another test keeps a copy of every fd until its exec. Both sides must take the guard: it excludes nothing for a test that does not. bound_unix_sockets_reports_a_bound_socket_file_until_it_closes lacked it and failed about 3% of parallel runs (10 of 320); with the guard, 0 of 320, and 6 sandbox builds of workspace-tests passed. Item (2) of the round-2 task-3 note ('add a note at the top of the test module that tests which fork must take fd_table_guard') is partly done by the guard's doc comment.
 
 From the task-7 review (H10): host.rs tests spawn helper processes in several places; add one guarded-spawn helper (kill and reap on drop, bounded wait) and use it everywhere.
+
+From task-7's QA gate:
+(36) Test gap: nothing tests that compile drops a mixing suggestion the static rules reject. Mutant survived: for profile:a || profile:nix-garbage && filter:idle-1d it would suggest (profile:a || profile:nix-garbage) && filter:idle-1d (mixes kinds). Add that case to compile_drops_syntax_suggestions_the_rules_reject.
+(37) a_lock_conflicts_until_its_fd_is_closed failed 1/600 at -j4 (0/400 alone); unexplained interaction with another test despite fd_table_guard on every spawn site and O_CLOEXEC. Investigate before claiming the guard fully covers flock.
+(38) the_in_use_check_finds_a_holder_on_this_machine fails under heavy machine load ('process list still growing after 16 listings'; 7/600 at -j4, also on HEAD; 53/200 at -j20). A liveness property of task-6's bound under load, not a safety bug; decide whether the test should tolerate an unsettled scan.
+
+From task-8's commit review (mped), hardening:
+(39) Static root normalisation: reject or normalise '..', '//', '.' segments and duplicates in find.roots, tier roots and --roots at load (today only absolute / no ~ / {uid}-only placeholders are checked; '..' becomes unsafe_path at run time per safety.md), and dedupe overlapping roots by identity (same mount and inode) at run time, so one target is not found twice (notes on task-9 and task-16).
+(40) Replace the transitive-crate list in the PRODUCTION_DEPENDENCIES review comment (diskgc-linux source_scan.rs, diskgc-core entry) with a test over cargo metadata or Cargo.lock that pins the release's full normal-edge crate set; proc-macro crates (serde_derive, proc-macro2, quote, syn, unicode-ident, multiversion_no_op) run at build time only and should be marked as such.
+(41) idle_for: 0s is accepted today (it makes every known-age candidate idle); reject it at load or document it in docs/reference.md (Predicates).
+(42) has / has_not take one file name; west-build needs CMakeCache.txt plus a zephyr/ directory (an entry, not a file, and two of them): decide a list form and 'entry' wording when west-build is verified (task-41).
+(43) Binary size: the release binary is 585,320 bytes at a7bce15 and 585,616 with task-8 (the profile code is not yet called, so it is linked out). With a temporary call to profile::Library::builtin() in main the static musl binary is 2,272,040 bytes (+1.69 MB, about 3.9x), measured 2026-10-18 through the flake package. The YAML stack (serde-saphyr deserialize: granit-parser, annotate-snippets, encoding_rs via encoding_rs_io) is the likely bulk; measure per crate (e.g. cargo-bloat) and decide whether that is acceptable before task-10 wires it in.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

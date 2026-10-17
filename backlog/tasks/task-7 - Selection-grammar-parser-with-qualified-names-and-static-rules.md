@@ -1,10 +1,10 @@
 ---
 id: TASK-7
 title: Selection grammar parser with qualified names and static rules
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 19:31'
+updated_date: '2026-10-17 20:42'
 labels:
   - wave-1
   - config
@@ -49,9 +49,11 @@ S2: non-enumerating kinds (docker-images, nix-store, docker-build-cache) take ex
 S3: check-level fixes kept only if the rewrite adds no new broken rule; requalified fixes only if the rewritten text is accepted; compile also drops parser suggestions the static rules reject. Properties compile_suggestions_compile_on_surface_forms / _on_token_soup (2048 cases each) plus rejected_fixes_are_not_suggested (mped's 6 cases) and compile_drops_syntax_suggestions_the_rules_reject. Bites: check fixes never dropped -> 3 failures; requalified not verified -> 2; syntax suggestions not re-checked -> 0 failures at first (the soup rarely hits it), so the deterministic test was added, then 2 failures.
 S4: compile errors quote the text as written (CheckErrors.expr); bare check keeps the normalised form. Test compile_errors_quote_the_text_as_written.
 H6 done: Kind and PredicateName (renamed from Predicate) live in the leaf module diskgc_core::kind, re-exported from select. H8 a-c done: the exact code-block expression list, one doc path constant, and a section split that ignores headings inside code blocks.
+
+Committed as a7bce15 (tree 9a1c9f6) after qa-test-runner GO and mped-architect GO (two rounds). User decisions applied: strict parentheses; NAME is [a-z0-9][a-z0-9_-]* (the earlier note's 'ASCII letters, digits, - and _' and the '(one)' surface form in Properties are superseded). Post-commit (rides with the next commit): reference.md says a suggested rewrite fixes its error without breaking another rule; docker-build-cache wording says it takes idle_for filters (several allowed); the PROSE list in select/tests.rs updated.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

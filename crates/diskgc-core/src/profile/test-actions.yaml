@@ -1,0 +1,42 @@
+# Sources that differ only in their action, for the action-equality tests
+# of diskgc-core's profile module (profile/tests.rs).
+- name: del
+  find: {roots: [/tmp], paths: ["d-*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/d-1]}
+- name: del-2
+  find: {roots: [/var/tmp], paths: ["d2-*"], type: dir}
+  action: {delete: {}}
+  examples: {match: [/var/tmp/d2-1]}
+- name: del-w
+  find: {roots: [/tmp], paths: ["w-*"], type: dir}
+  action: {delete: {make_writable: true}}
+  examples: {match: [/tmp/w-1]}
+- name: go
+  find: {roots: required, paths: [go-build], type: dir}
+  action: {command: [env, "GOCACHE={path}", go, clean, -cache]}
+  examples: {match: [/home/u/go-build]}
+- name: go-2
+  find: {roots: required, paths: [gocache], type: dir}
+  action: {command: [env, "GOCACHE={path}", go, clean, -cache], cwd: candidate}
+  examples: {match: [/home/u/gocache]}
+- name: go-parent
+  find: {roots: required, paths: [go], type: dir}
+  action: {command: [env, "GOCACHE={path}", go, clean, -cache], cwd: parent}
+  examples: {match: [/home/u/go]}
+- name: go-modcache
+  find: {roots: required, paths: [gomod], type: dir}
+  action: {command: [env, "GOMODCACHE={path}", go, clean, -modcache]}
+  examples: {match: [/home/u/gomod]}
+- name: spaced
+  find: {roots: required, paths: [sp], type: dir}
+  action: {command: [env, "GOCACHE={path}", go, clean, "-cache "]}
+  examples: {match: [/home/u/sp]}
+- name: any-cmd
+  find: {roots: [/tmp], paths: ["x-*"], type: any}
+  action: {command: [cleanup, "{path}"]}
+  examples: {match: [/tmp/x-1]}
+- name: file-cmd
+  find: {roots: [/tmp], paths: ["f-*"], type: file}
+  action: {command: [cleanup, "{path}"]}
+  examples: {match: [/tmp/f-1]}

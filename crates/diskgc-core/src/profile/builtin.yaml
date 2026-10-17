@@ -1,0 +1,52 @@
+# The built-in profile library (docs/reference.md, Built-in profile library),
+# compiled into the binary. The schema is docs/reference.md, Profiles.
+#
+# A built-in profile's matching set never changes under its name: any change
+# to what one matches, narrower or broader, ships under a new name.
+#
+# diskgc-core's tests load this file (profile::tests), so a broken entry
+# fails `just check` and the flake's workspace-tests check.
+
+- name: cargo-target
+  category: rust
+  description: >-
+    Cargo target directories: a CACHEDIR.TAG and a profile directory holding
+    a known Cargo lock file
+  kind: cargo-target
+  find: {roots: required}
+  verified_with: cargo 1.90.0, 1.99.1 and nightly-2026-10-16 (lock files, docs/safety.md)
+
+- name: idle-1h
+  category: filters
+  description: not used or changed for an hour, as the source's kind measures it
+  where: {idle_for: 1h}
+
+- name: idle-1d
+  category: filters
+  description: not used or changed for a day, as the source's kind measures it
+  where: {idle_for: 1d}
+
+- name: idle-2d
+  category: filters
+  description: not used or changed for 2 days, as the source's kind measures it
+  where: {idle_for: 2d}
+
+- name: idle-3d
+  category: filters
+  description: not used or changed for 3 days, as the source's kind measures it
+  where: {idle_for: 3d}
+
+- name: idle-7d
+  category: filters
+  description: not used or changed for 7 days, as the source's kind measures it
+  where: {idle_for: 7d}
+
+- name: idle-10d
+  category: filters
+  description: not used or changed for 10 days, as the source's kind measures it
+  where: {idle_for: 10d}
+
+- name: idle-30d
+  category: filters
+  description: not used or changed for 30 days, as the source's kind measures it
+  where: {idle_for: 30d}

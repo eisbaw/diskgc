@@ -1,0 +1,57 @@
+# Test profiles for diskgc-core's select tests (select/tests.rs), loaded
+# with the real loader as user profiles: the abstract `a`, `b`, `f` of the
+# grammar's prose (docs/reference.md: `a`, `b` of kind fs with action delete,
+# `f` with idle_for), the example config's `zephyr-run`, and STAND-INS for
+# rows of the built-in library table that are not built in yet (wave 4).
+# When the real one ships, its name collides with the stand-in here and the
+# test catalog fails to load: delete the stand-in then.
+- name: a
+  find: {roots: [/tmp], paths: ["a-*"], type: any}
+  action: delete
+  examples: {match: [/tmp/a-1]}
+- name: b
+  find: {roots: [/tmp], paths: ["b-*"], type: any}
+  action: delete
+  examples: {match: [/tmp/b-1]}
+- name: f
+  where: {idle_for: 1d}
+- name: zephyr-run
+  find: {roots: [/tmp], paths: ["zephyr-*-run.*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH]}
+
+# Stand-ins, not built in yet.
+- name: pytest-tmp
+  find: {roots: [/tmp, /var/tmp], paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/pytest-of-mark]}
+- name: pytest-cache
+  find: {roots: required, paths: [.pytest_cache], type: dir}
+  action: delete
+  examples: {match: [/home/mark/src/app/.pytest_cache]}
+- name: nix-shell-rc
+  find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/nix-shell-1144586-3257819220]}
+- name: nix-shell-tmpdir
+  find: {roots: [/tmp], paths: ["nix-shell.*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/nix-shell.8raHjU]}
+- name: claude-code-tmp
+  find: {roots: [/tmp], paths: ["claude-{uid}/*/*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/claude-1000/proj/session]}
+- name: tmp-entry
+  find: {roots: [/tmp, /var/tmp], paths: ["*"], type: any}
+  action: delete
+  examples: {match: [/tmp/anything]}
+- name: mktemp-dir
+  find: {roots: [/tmp], paths: ["tmp.*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/tmp.AbC123]}
+- name: pip-cache
+  find: {roots: required, paths: [pip], type: dir}
+  action: {command: [pip, --cache-dir, "{path}", cache, purge]}
+  examples: {match: [/home/mark/.cache/pip]}
+- name: has-cachedir-tag
+  where: {has: CACHEDIR.TAG}

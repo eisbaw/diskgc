@@ -28,12 +28,16 @@ diskgc-modelgen = { path = "crates/diskgc-modelgen" }
 # statx, statvfs, flock, uname, clock_gettime, pidfd_open and poll. Pure
 # Rust, so the static musl build needs no C toolchain.
 rustix = { version = "1.1.5", features = ["event", "fs", "net", "process", "system", "time"] }
-# Test-only crates (diskgc-model, diskgc-modelgen) so far: the host-model
-# format (YAML through serde, a JSON Schema for editors), its timestamps and
-# the property-test strategies.
+# YAML through serde: the profile schema in diskgc-core (built-in profiles,
+# later the config file) and the test-only host-model format. serde-saphyr
+# is pinned exactly (2.0.0 and its parser granit-parser 2.0.0 were published
+# on 2026-10-13; task-61) and built without its serializer and comment
+# support; crates that serialise add the `serialize` feature.
 serde = { version = "1", features = ["derive"] }
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+# Test-only crates (diskgc-model, diskgc-modelgen) so far: a JSON Schema for
+# the host model, its timestamps and the property-test strategies.
 serde_json = "1"
-serde-saphyr = "2"
 schemars = "1"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 proptest = "1"

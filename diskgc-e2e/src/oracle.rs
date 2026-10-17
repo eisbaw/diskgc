@@ -505,6 +505,16 @@ impl Oracle {
         for line in unmatched_log(&verdict.unmatched) {
             info!("oracle: {line}");
         }
+        let unnamed: Vec<&crate::strace::Unnamed> =
+            runs.iter().flat_map(|r| r.unnamed_calls.iter()).collect();
+        if !unnamed.is_empty() {
+            info!(
+                "oracle: {} call(s) strace could not name (no path to check; the snapshot view \
+                 judges their effect): {:?}",
+                unnamed.len(),
+                unnamed.iter().take(5).collect::<Vec<_>>()
+            );
+        }
         info!(
             "oracle verdict ({} traced calls): {}",
             events.len(),

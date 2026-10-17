@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 18:01'
+updated_date: '2026-10-17 23:20'
 labels:
   - wave-1
   - irreversible
@@ -53,6 +53,11 @@ From task-6 (in-use check, diskgc-core inuse): the cargo process heuristics (exe
 From task-4: measured in containers (docs/safety.md, Lock files): Cargo 1.99.1 and nightly-2026-10-16 create .cargo-build-lock, .cargo-artifact-lock and .cargo-lock with a plain build and hold .cargo-lock SHARED during a build (the other two exclusive); 1.90.0 holds only .cargo-lock, exclusive. All three names are in CARGO_LOCK_NAMES. The 'running test binary' and 'cargo in the project dir' container tests can use the race fixture and the runner gate of diskgc-e2e/src/cargo_under_test.rs; note that during a cargo run pause the paused process is the runner wrapper (cargo's pid, exe diskgc-e2e), not a process named cargo (see task-11 note).
 
 From the task-4 review (mped, reproduced by task-4; docs/safety.md, Lock files and Known gaps): (1) Last build reads .fingerprint/ and deps/, which nightly-2026-10-16's default new build-dir layout does not have (build/<package>/<hash>/{fingerprint,out} instead); revise the measure with task-53. (2) With CARGO_BUILD_BUILD_DIR (1.99.1, nightly; 1.90.0 ignores it) the build-dir is a second CACHEDIR.TAG directory holding only .cargo-build-lock, and cargo test runs test binaries from it. The rule 'a cargo* process with cwd in the target's project directory (its parent)' does not cover a build-dir outside the project; the running test binary itself is still caught by exe-inside-target. A rule on CARGO_MANIFEST_DIR in the initial environment (task-11 note (7)) would partly cover it.
+
+[Superseded in part by the task-8 review round below: IdleFor::admits, the hand-written visitors and a source's own idle_for are gone.]
+From task-8 (profile model): the built-in cargo-target profile is {kind: cargo-target, find: {roots: required}} (diskgc-core profile/builtin.yaml); its Source.finds is Finds::CargoTargets and its action Action::CargoLockProtocol. Roots come from Library::bind_roots(&checked, tier roots or --roots) -> map name -> roots. The idle measure is profile::IdleMeasure::LastBuild ('last build', the name for reports); compute the last-build Timestamp here (None when any needed mtime is unanswered: fail closed) and pass it to IdleFor::admits(last_use, now), with the term's requirement from Library::idle_for(&term) (longest of the source's own and its filter:s). The Host port has no realtime clock yet; 'now' must come from somewhere (a port op). verified_with currently names the Cargo versions whose lock sets were measured; update it when discovery and the race tests (task-11) are verified.
+
+From task-8's review: IdleFor::admits is replaced by IdleFor::verdict(last_use, now) -> Idleness (Idle / NotIdle / Unknown); pass None when a last-build mtime is unanswered (Unknown::Unanswered, skip unsupported_fs), and a future last build is Unknown::InFuture (skip future_time). Overlapping roots (one target reachable from two given roots) are not deduped by the profile layer; dedupe by identity in discovery (task-61 (39)).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -4,7 +4,7 @@ title: 'Minimal ensure: thresholds, host lock, exit codes, --select/--roots for 
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 14:00'
+updated_date: '2026-10-17 21:24'
 labels:
   - wave-1
   - cli
@@ -52,4 +52,6 @@ From task-50's review (H4): ensure without --dry-run should fail fast at startup
 From task-5 (deletion engine): diskgc_core::engine is ready for the executor: walk(host, &Candidate::new(parent_fd, mount_id, path), &Rules { owners, ipc: IpcPolicy::BlockAny, max_entries: DEFAULT_MAX_ENTRIES }, deadline) then delete(host, &candidate, &record, DeleteOptions { make_writable, deadline }). Map outcomes to the report: WalkStop::Skipped(skip) -> skipped with skip.reason.as_str() (missing, not_owner, kept, contains_special, contains_ipc, contains_mount, unsupported_fs, changed, too_many_entries); WalkStop::DeadlinePassed and End::DeadlinePassed -> the deadline path; End::Changed -> skipped 'changed' (partial: removed_entries may be > 0); End::Failed -> an error for the candidate (ENOTEMPTY, EACCES...); End::GateRefused -> an error of the whole run (stop deleting: every later delete is refused too). The port has no getuid: owners must come from somewhere (add a Host op for the effective uid, or pass it from the binary). removed_bytes is an estimate; avail_delta is the measure.
 
 CORRECTION after task-5's commit (50208a1): the earlier task-5 note here is stale. Current API: Candidate::new(&Resolved parent, path); Rules { owners, block_ipc, max_entries } (no IpcPolicy); skip reasons include unreadable and too_many_entries; WalkStop::Failed { path, error } and End::Failed / End::GateRefused { path, error } are RUN ERRORS the executor must report as failures, never as skips. Report End's path field, not the HostError text (which names an fd).
+
+From task-8: for --select, build the catalog with profile::Library::builtin() (an Err there is a bug in the shipped YAML: exit 2 naming it), select::compile(expr, &library), then library.bind_roots(&checked, Some(&roots) / None) for --roots (RootsError Missing/Unused/Empty/Path are usage errors, exit 2). units::parse_duration (integer + s m h d w, no months, bare number rejected) exists; sizes do not yet.
 <!-- SECTION:NOTES:END -->

@@ -116,16 +116,30 @@ pub(crate) fn blank(name: &str, text: &str) -> Result<Source, String> {
             ('/', Some('*')) => {
                 return Err(format!("{name}: block comment: the scan cannot read it"));
             }
-            // r"..", r#".."#, br"..", cr"..", and raw identifiers r#name.
+            // A raw identifier r#name is the identifier name: blank the
+            // `r#` (whitespace does not end a `::` path in the tokenizer),
+            // so `fs::r#rename` is read as `fs::rename`.
+            ('r', Some('#'))
+                if (i == 0 || !is_ident(chars[i - 1]))
+                    && chars
+                        .get(i + 2)
+                        .is_some_and(|&n| n.is_alphabetic() || n == '_') =>
+            {
+                for j in [i, i + 1] {
+                    blank_at(&mut code, j);
+                    blank_at(&mut with_strings, j);
+                }
+                i += 2;
+                continue;
+            }
+            // r"..", r#".."#, br"..", cr"..": raw strings.
             ('r', Some('"' | '#'))
                 if i == 0
                     || !is_ident(chars[i - 1])
                     || (matches!(chars[i - 1], 'b' | 'c')
                         && (i == 1 || !is_ident(chars[i - 2]))) =>
             {
-                return Err(format!(
-                    "{name}: raw string or identifier: the scan cannot read it"
-                ));
+                return Err(format!("{name}: raw string: the scan cannot read it"));
             }
             ('"', _) => {
                 // Blank the contents (in the code view) up to the closing quote.
@@ -805,7 +819,26 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: diskgc-linux = { path = \"crates/diskgc-linux\" }",
         ],
     ),
-    ("diskgc-core", &["[dependencies]"]),
+    // Reviewed for task-8 (YAML profile schema): serde (derive) and
+    // serde-saphyr 2.0.0 with only `deserialize`. They parse strings and
+    // touch no files or processes: serde-saphyr's filesystem code
+    // (`include_fs`, its CLI) and its serializer are features left off, and
+    // no crate below names std::fs, std::process or OpenOptions outside
+    // docs. What `cargo tree -p diskgc -e normal` gained: serde, serde_core,
+    // serde_derive, proc-macro2, quote, syn, unicode-ident, serde-saphyr,
+    // granit-parser, arraydeque, smallvec, annotate-snippets, anstyle,
+    // unicode-width, num-traits, encoding_rs_io, encoding_rs and its
+    // cfg-if, core_detect, multiversion_no_op, scopeguard, simdutf8.
+    (
+        "diskgc-core",
+        &[
+            "[dependencies]",
+            "serde.workspace = true",
+            "workspace: serde = { version = \"1\", features = [\"derive\"] }",
+            "serde-saphyr.workspace = true",
+            "workspace: serde-saphyr = { version = \"=2.0.0\", default-features = false, features = [\"deserialize\"] }",
+        ],
+    ),
     (
         "diskgc-linux",
         &[
@@ -1505,6 +1538,26 @@ mod tests {
         ] {
             assert_eq!(gated_in(text).expect(text), Vec::<String>::new(), "{text}");
         }
+    }
+
+    /// A raw identifier is read as the identifier, so it hides nothing
+    /// (serde field names such as `r#where` need it).
+    #[test]
+    fn raw_identifiers_are_read_as_identifiers() {
+        for (text, caught) in [
+            ("fn f() { std::fs::r#rename(a, b); }\n", "rename"),
+            ("fn f() { rustix::fs::r#unlinkat(d, n, f); }\n", "unlinkat"),
+            ("fn f() { r#std::r#fs::r#remove_file(p); }\n", "remove_file"),
+        ] {
+            let found = gated_in(text).expect(text);
+            assert_eq!(found.len(), 1, "{text}: {found:?}");
+            assert!(found[0].contains(caught), "{text}: {found:?}");
+        }
+        let text = "fn f() { std::r#fs::read(p); }\n";
+        let scanned = scan_crate(&[file("src/lib.rs", text)]).expect("scan");
+        assert_eq!(os_access(&scanned).len(), 1, "{text}");
+        let text = "struct S { r#where: u8, r#type: u8, r#match: u8 }\n";
+        assert_eq!(gated_in(text).expect(text), Vec::<String>::new());
     }
 
     #[test]

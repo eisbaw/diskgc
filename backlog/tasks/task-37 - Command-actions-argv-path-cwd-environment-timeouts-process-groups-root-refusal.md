@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 11:12'
+updated_date: '2026-10-17 21:24'
 labels:
   - wave-4
   - irreversible
@@ -43,6 +43,8 @@ CORRECTION from task-50's review (supersedes the earlier task-50 note): child pr
 From task-50 round 3 (mped): never drop Command from the scan's patterns to get a domain name through. The pattern is already the path process::Command (std's Command can only be named that way, since import renames and globs are refused), so an Action::Command variant in core passes. A control in source_scan.rs (command_include_and_syscall_match_only_their_real_forms) proves it. The deleting run's wrapper in diskgc-linux is the one GATED_ALLOWED entry for it, marked Gate::Permit.
 
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: podman (docker here is a podman shim, no docker.sock) is covered by a user-configured command action, not a typed kind, e.g. podman image prune -f --filter until=168h. This revisits the PRD non-goal on command actions for container runtimes: update PRD.md and docs/reference.md to say so, and ship an example profile. On this machine podman holds 6.1G reclaimable images in ~/.local/share/containers.
+
+From task-8: a command action has no timeout of its own any more (docs/reference.md, Actions: the tier's timeout bounds it; the old text listed both with no precedence). Action::Command { argv, cwd: Option<Cwd> }: cwd is resolved at load (type dir -> candidate, file -> parent; None only for type any, decided per candidate: candidate for a directory, parent otherwise); cwd: candidate with type file is a load error. argv is non-empty with a non-empty program; {path} substitution is not checked at load.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

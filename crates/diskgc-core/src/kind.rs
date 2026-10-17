@@ -24,7 +24,7 @@ impl Kind {
     ];
 
     /// The name used in YAML and messages.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Fs => "fs",
             Self::CargoTarget => "cargo-target",

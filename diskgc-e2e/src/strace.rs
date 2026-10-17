@@ -3,12 +3,28 @@
 //!
 //! The code under test runs under
 //! `strace -f -ff -qq -y -xx -e trace=unlink,unlinkat,rmdir,rename,renameat,renameat2`.
-//! `-ff` writes one file per process, so no line is ever split into
-//! "unfinished"/"resumed" halves; `-y` annotates every fd argument (including
+//! `-ff` writes one file per process, so calls of different processes never
+//! interleave; `-y` annotates every fd argument (including
 //! `AT_FDCWD`) with the path it refers to; `-xx` hex-escapes every string and
 //! path, so parsing never has to guess about quotes or odd bytes. Deletions
 //! done inside daemons (Docker, Nix) are invisible here and covered by the
 //! filesystem snapshot only.
+//!
+//! Besides complete calls (`NAME(ARGS) = RET`), a file can hold (strace.c,
+//! `printleader` and `droptcb`):
+//! - `--- SIG... ---`, `+++ exited with N +++`, `+++ killed by SIG... +++`,
+//!   `+++ superseded by execve +++`: not calls;
+//! - `NAME(ARGS <unfinished ...>` and later `<... NAME resumed>) = RET`: one
+//!   call cut in two when something was printed for the same process in
+//!   between (a signal, or a kill after the entry). [`parse_file`] joins
+//!   them; a call never resumed may have taken effect (`= ?`);
+//! - `NAME(ARGS <detached ...>`: strace detached the process inside the
+//!   call (strace ending under load); the call can still complete after the
+//!   detach, so it counts as `= ?`, with its paths;
+//! - `???( <detached ...>` (any line naming `???`): a call strace could not
+//!   name, typically a process dying as strace reads its registers. No name,
+//!   no arguments: nothing to attribute to a path. Kept as [`Unnamed`] and
+//!   logged; the snapshot view judges every object whatever made the call.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
@@ -66,13 +82,124 @@ enum Arg {
     Other(String),
 }
 
-/// Parses one line of an strace `-ff` output file of process `pid`.
-/// Returns `Ok(None)` for lines that are not traced calls (signals, exits).
-pub fn parse_line(pid: u32, line: &str) -> Result<Option<Event>, String> {
+/// A call strace printed as `???`: no name, no arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unnamed {
+    pub pid: u32,
+    pub line: String,
+}
+
+/// What one line of an strace `-ff` file is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A complete traced call, or one cut off by a detach (`= ?`).
+    Call(Event),
+    /// `NAME(ARGS <unfinished ...>`: the entry half (`NAME(ARGS`).
+    Unfinished { syscall: String, entry: String },
+    /// `<... NAME resumed>REST`: the exit half (`REST`, e.g. `) = 0`).
+    Resumed { syscall: String, rest: String },
+    /// `???(...`: a call strace could not name.
+    Unnamed(Unnamed),
+    /// A signal, an exit, a kill, an exec, or an empty line.
+    NotACall,
+}
+
+const DETACHED: &str = " <detached ...>";
+const UNFINISHED: &str = " <unfinished ...>";
+
+/// Classifies one line of an strace `-ff` output file of process `pid`.
+/// Anything it does not recognise is an error, never dropped.
+pub fn parse_line(pid: u32, line: &str) -> Result<Line, String> {
     let line = line.trim_end();
     if line.is_empty() || line.starts_with("---") || line.starts_with("+++") {
-        return Ok(None);
+        return Ok(Line::NotACall);
     }
+    if line.starts_with("???(") {
+        return Ok(Line::Unnamed(Unnamed {
+            pid,
+            line: line.to_owned(),
+        }));
+    }
+    if let Some(head) = line.strip_suffix(DETACHED) {
+        // Detached inside the call: it may complete after the detach.
+        return call(pid, &format!("{head}) = ?")).map(Line::Call);
+    }
+    if let Some(entry) = line.strip_suffix(UNFINISHED) {
+        let open = entry
+            .find('(')
+            .ok_or_else(|| format!("strace line without '(': {line}"))?;
+        return Ok(Line::Unfinished {
+            syscall: entry[..open].to_owned(),
+            entry: entry.to_owned(),
+        });
+    }
+    if let Some(resumed) = line.strip_prefix("<... ") {
+        let (syscall, rest) = resumed
+            .split_once(" resumed>")
+            .ok_or_else(|| format!("strace resumed line without ' resumed>': {line}"))?;
+        return Ok(Line::Resumed {
+            syscall: syscall.to_owned(),
+            rest: rest.to_owned(),
+        });
+    }
+    call(pid, line).map(Line::Call)
+}
+
+/// Every call in the text of one strace `-ff` file of process `pid`:
+/// complete calls, joined unfinished/resumed halves, and calls cut off
+/// (unfinished and never resumed, or detached) as `= ?`.
+pub fn parse_file(pid: u32, text: &str) -> Result<Record, String> {
+    let mut record = Record::default();
+    let mut pending: Option<(String, String)> = None;
+    // A call left unfinished may have taken effect.
+    let cut_off = |record: &mut Record, entry: String| -> Result<(), String> {
+        record.events.push(call(pid, &format!("{entry}) = ?"))?);
+        Ok(())
+    };
+    for line in text.lines() {
+        match parse_line(pid, line)? {
+            Line::NotACall => {}
+            Line::Unnamed(unnamed) => record.unnamed.push(unnamed),
+            Line::Call(event) => {
+                if let Some((_, entry)) = pending.take() {
+                    cut_off(&mut record, entry)?;
+                }
+                record.events.push(event);
+            }
+            Line::Unfinished { syscall, entry } => {
+                if let Some((_, entry)) = pending.replace((syscall, entry)) {
+                    cut_off(&mut record, entry)?;
+                }
+            }
+            Line::Resumed { syscall, rest } => match pending.take() {
+                Some((name, entry)) if name == syscall => {
+                    record.events.push(call(pid, &format!("{entry}{rest}"))?);
+                }
+                other => {
+                    return Err(format!(
+                        "strace line resumes {syscall:?}, but the unfinished call is \
+                         {:?}: {line}",
+                        other.map(|(name, _)| name)
+                    ));
+                }
+            },
+        }
+    }
+    if let Some((_, entry)) = pending {
+        cut_off(&mut record, entry)?;
+    }
+    Ok(record)
+}
+
+/// The calls of every process of one traced run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Record {
+    pub events: Vec<Event>,
+    pub unnamed: Vec<Unnamed>,
+}
+
+/// A complete call line: `NAME(ARGS) = RET`.
+fn call(pid: u32, line: &str) -> Result<Event, String> {
     let open = line
         .find('(')
         .ok_or_else(|| format!("strace line without '(': {line}"))?;
@@ -124,13 +251,13 @@ pub fn parse_line(pid: u32, line: &str) -> Result<Option<Event>, String> {
         }
         other => return Err(format!("untraced syscall {other:?} in strace line: {line}")),
     };
-    Ok(Some(Event {
+    Ok(Event {
         pid,
         syscall: syscall.to_owned(),
         removed,
         replaced,
         outcome,
-    }))
+    })
 }
 
 /// Joins a path argument with its directory fd's `-y` path when relative.
@@ -207,8 +334,8 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
 
 /// Reads every per-process file `<prefix>.<pid>` that strace `-ff -o prefix`
 /// wrote into `dir`.
-pub fn read_record(dir: &Path, prefix: &str) -> Result<Vec<Event>, String> {
-    let mut events = Vec::new();
+pub fn read_record(dir: &Path, prefix: &str) -> Result<Record, String> {
+    let mut record = Record::default();
     let mut files = 0;
     let listing = std::fs::read_dir(dir).map_err(|e| format!("list {}: {e}", dir.display()))?;
     for entry in listing {
@@ -226,11 +353,10 @@ pub fn read_record(dir: &Path, prefix: &str) -> Result<Vec<Event>, String> {
             .map_err(|_| format!("unexpected strace output file {name:?}"))?;
         let text = std::fs::read_to_string(entry.path())
             .map_err(|e| format!("read {}: {e}", entry.path().display()))?;
-        for line in text.lines() {
-            if let Some(event) = parse_line(pid, line)? {
-                events.push(event);
-            }
-        }
+        let file =
+            parse_file(pid, &text).map_err(|e| format!("{}: {e}", entry.path().display()))?;
+        record.events.extend(file.events);
+        record.unnamed.extend(file.unnamed);
         files += 1;
     }
     if files == 0 {
@@ -239,12 +365,20 @@ pub fn read_record(dir: &Path, prefix: &str) -> Result<Vec<Event>, String> {
             dir.display()
         ));
     }
-    Ok(events)
+    Ok(record)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The call on `line`, which must be one.
+    fn event(line: &str) -> Event {
+        match parse_line(1, line).unwrap() {
+            Line::Call(event) => event,
+            other => panic!("not a call: {other:?}"),
+        }
+    }
 
     fn hex(s: &str) -> String {
         s.bytes().map(|b| format!("\\x{b:02x}")).collect()
@@ -257,7 +391,9 @@ mod tests {
             hex("/tmp/work"),
             hex("d/a")
         );
-        let ev = parse_line(7, &line).unwrap().unwrap();
+        let Line::Call(ev) = parse_line(7, &line).unwrap() else {
+            panic!("not a call");
+        };
         assert_eq!(ev.removed, vec![PathBuf::from("/tmp/work/d/a")]);
         assert!(ev.replaced.is_empty());
         assert_eq!(ev.outcome, Outcome::Ok);
@@ -271,7 +407,7 @@ mod tests {
             hex("/tmp/a b"),
             hex("sub\"dir")
         );
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert_eq!(ev.removed, vec![PathBuf::from("/tmp/a b/sub\"dir")]);
     }
 
@@ -282,7 +418,7 @@ mod tests {
             hex("/"),
             hex("/nope")
         );
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert_eq!(ev.outcome, Outcome::Failed("ENOENT".into()));
         assert!(!ev.took_effect());
         assert_eq!(ev.removed, vec![PathBuf::from("/nope")]);
@@ -296,12 +432,12 @@ mod tests {
             hex("x"),
             c = hex("/tmp")
         );
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert_eq!(ev.removed, vec![PathBuf::from("/tmp/x.new")]);
         assert_eq!(ev.replaced, vec![PathBuf::from("/tmp/x")]);
 
         let plain = format!("rename(\"{}\", \"{}\") = 0", hex("/a"), hex("/b"));
-        let ev = parse_line(1, &plain).unwrap().unwrap();
+        let ev = event(&plain);
         assert_eq!(ev.removed, vec![PathBuf::from("/a")]);
         assert_eq!(ev.replaced, vec![PathBuf::from("/b")]);
     }
@@ -314,7 +450,7 @@ mod tests {
             hex("b"),
             c = hex("/t")
         );
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert!(ev.removed.is_empty());
         assert_eq!(
             ev.replaced,
@@ -325,7 +461,7 @@ mod tests {
     #[test]
     fn killed_mid_call_counts_as_possibly_effective() {
         let line = format!("unlink(\"{}\") = ?", hex("/tmp/x"));
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert_eq!(ev.outcome, Outcome::Unknown);
         assert!(ev.took_effect());
     }
@@ -337,18 +473,143 @@ mod tests {
             hex("/tmp/cand"),
             hex("a")
         );
-        let ev = parse_line(1, &line).unwrap().unwrap();
+        let ev = event(&line);
         assert_eq!(ev.removed, vec![PathBuf::from("/tmp/cand/a")]);
         assert_eq!(ev.outcome, Outcome::Ok);
     }
 
     #[test]
     fn signal_and_exit_lines_are_not_events() {
+        for line in [
+            "--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED} ---",
+            "+++ exited with 0 +++",
+            "+++ killed by SIGKILL +++",
+            "+++ killed by SIGKILL (core dumped) +++",
+            "+++ superseded by execve +++",
+            "",
+        ] {
+            assert_eq!(parse_line(1, line).unwrap(), Line::NotACall, "{line}");
+        }
+    }
+
+    /// The QA flake (cargo_traced_build_within_bound under load): a call
+    /// strace could not name, cut off by a detach. Kept, not a removal.
+    #[test]
+    fn an_unnamed_detached_call_is_kept_apart_not_dropped() {
+        let line = "???( <detached ...>";
         assert_eq!(
-            parse_line(1, "--- SIGCHLD {si_signo=SIGCHLD} ---").unwrap(),
-            None
+            parse_line(9, line).unwrap(),
+            Line::Unnamed(Unnamed {
+                pid: 9,
+                line: line.to_owned()
+            })
         );
-        assert_eq!(parse_line(1, "+++ exited with 0 +++").unwrap(), None);
+        let record = parse_file(9, &format!("{line}\n+++ killed by SIGKILL +++\n")).unwrap();
+        assert!(record.events.is_empty(), "{record:?}");
+        assert_eq!(record.unnamed.len(), 1);
+    }
+
+    /// A named call detached mid-call may complete after the detach: it
+    /// counts like `= ?`, with its paths.
+    #[test]
+    fn a_named_call_detached_mid_call_is_possibly_effective() {
+        for (line, removed, replaced) in [
+            (
+                format!(
+                    "unlinkat(AT_FDCWD<{}>, \"{}\", 0 <detached ...>",
+                    hex("/t"),
+                    hex("a")
+                ),
+                vec!["/t/a"],
+                vec![],
+            ),
+            (
+                format!("unlink(\"{}\" <detached ...>", hex("/t/b")),
+                vec!["/t/b"],
+                vec![],
+            ),
+            (
+                format!(
+                    "renameat2(AT_FDCWD<{0}>, \"{1}\", AT_FDCWD<{0}>, \"{2}\", 0 <detached ...>",
+                    hex("/t"),
+                    hex("s"),
+                    hex("d")
+                ),
+                vec!["/t/s"],
+                vec!["/t/d"],
+            ),
+        ] {
+            let ev = event(&line);
+            assert_eq!(ev.outcome, Outcome::Unknown, "{line}");
+            assert!(ev.took_effect(), "{line}");
+            assert_eq!(
+                ev.removed,
+                removed.iter().map(PathBuf::from).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                ev.replaced,
+                replaced.iter().map(PathBuf::from).collect::<Vec<_>>()
+            );
+        }
+        // Cut off before strace could print the path: an error, not a guess.
+        assert!(parse_line(1, "unlinkat(AT_FDCWD<\\x2f>, <detached ...>").is_err());
+    }
+
+    /// `<unfinished ...>` and `<... NAME resumed>` in one -ff file are one
+    /// call; a signal may come between them.
+    #[test]
+    fn unfinished_and_resumed_halves_are_joined() {
+        let text = format!(
+            "unlinkat(AT_FDCWD<{}>, \"{}\", 0 <unfinished ...>\n\
+             --- SIGCHLD {{si_signo=SIGCHLD}} ---\n\
+             <... unlinkat resumed>) = 0\n\
+             unlink(\"{}\" <unfinished ...>\n\
+             <... unlink resumed>)   = -1 ENOENT (No such file or directory)\n",
+            hex("/t"),
+            hex("a"),
+            hex("/t/b")
+        );
+        let record = parse_file(1, &text).unwrap();
+        let summary: Vec<(String, Outcome)> = record
+            .events
+            .iter()
+            .map(|e| (e.removed[0].display().to_string(), e.outcome.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("/t/a".to_owned(), Outcome::Ok),
+                ("/t/b".to_owned(), Outcome::Failed("ENOENT".into())),
+            ]
+        );
+        // A resumed half that does not match the unfinished call is an error.
+        let text = format!(
+            "unlink(\"{}\" <unfinished ...>\n<... rmdir resumed>) = 0\n",
+            hex("/t/b")
+        );
+        assert!(parse_file(1, &text).is_err());
+        assert!(parse_file(1, "<... unlink resumed>) = 0\n").is_err());
+    }
+
+    /// An unfinished call never resumed (killed, detached, or followed by
+    /// another call) may have taken effect.
+    #[test]
+    fn an_unfinished_call_never_resumed_is_possibly_effective() {
+        let a = format!("unlink(\"{}\" <unfinished ...>", hex("/t/a"));
+        let b = format!("rmdir(\"{}\") = 0", hex("/t/d"));
+        for (text, outcomes) in [
+            (
+                format!("{a}\n+++ killed by SIGKILL +++\n"),
+                vec![Outcome::Unknown],
+            ),
+            (format!("{a}\n"), vec![Outcome::Unknown]),
+            (format!("{a}\n{b}\n"), vec![Outcome::Unknown, Outcome::Ok]),
+        ] {
+            let record = parse_file(1, &text).unwrap();
+            let got: Vec<Outcome> = record.events.iter().map(|e| e.outcome.clone()).collect();
+            assert_eq!(got, outcomes, "{text}");
+            assert_eq!(record.events[0].removed, vec![PathBuf::from("/t/a")]);
+        }
     }
 
     #[test]
@@ -363,9 +624,7 @@ mod tests {
     /// than a page): kept, marked, never dropped.
     #[test]
     fn a_dir_fd_strace_could_not_name_is_marked() {
-        let ev = parse_line(1, "unlinkat(4, \"\\x66\", 0) = 0")
-            .unwrap()
-            .unwrap();
+        let ev = event("unlinkat(4, \"\\x66\", 0) = 0");
         assert_eq!(ev.removed, vec![PathBuf::from("<fd 4>/f")]);
         assert!(ev.took_effect());
     }

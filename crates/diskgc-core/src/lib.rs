@@ -6,13 +6,20 @@
 //! minimum-kernel check ([`kernel`]), the deletion [`engine`] for
 //! filesystem candidates (eligibility walk and identity-checked delete) and
 //! the [`inuse`] check that goes between them, the selection grammar
-//! ([`select`]: parser, normalised AST and static rules) and the profile
-//! [`kind`]s it checks against.
+//! ([`select`]: parser, normalised AST and static rules), the profile
+//! [`kind`]s it checks against, and the [`profile`] model with the built-in
+//! library (YAML through serde), which the grammar checks names against.
+//! [`units`] parses durations.
 
 pub mod engine;
 pub mod host;
 pub mod inuse;
 pub mod kernel;
 pub mod kind;
+pub mod profile;
 pub mod resolve;
 pub mod select;
+pub mod units;
+
+#[cfg(test)]
+mod doc;

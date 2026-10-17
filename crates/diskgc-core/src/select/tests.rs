@@ -1,4 +1,5 @@
-//! The selection grammar against docs/reference.md and a fake catalog.
+//! The selection grammar against docs/reference.md and the real profile
+//! library (the built-ins plus test profiles).
 //!
 //! The doc is the table: [`doc_examples_normalise_as_documented`] and
 //! [`doc_messages_are_the_messages`] read its two tables, and
@@ -11,88 +12,91 @@ use std::fmt;
 use proptest::prelude::*;
 
 use super::*;
+use crate::doc::{code, reference_md, section, table};
+use crate::profile::{self, Library};
 
-// ---- A fake catalog: the built-in library table of docs/reference.md, the
-// example config's user profile, and the abstract `a`, `b`, `f` of the
-// grammar's prose.
+// ---- The catalog: the real built-in library, plus test profiles loaded
+// through the same loader as user profiles, plus stand-ins for the library
+// profiles whose kinds have no profile schema yet.
 
+/// User profiles for the tests, stand-ins among them (the file's header
+/// says which and why).
+const TEST_PROFILES: &str = include_str!("test-profiles.yaml");
+
+/// STAND-INS for built-in profiles of kinds that have no profile schema
+/// yet (docker-*, nix-store: wave 4), with their documented actions.
+const NOT_BUILT_IN_KINDS: &[(&str, Kind, &str)] = &[
+    (
+        "docker-build-cache",
+        Kind::DockerBuildCache,
+        "docker builder prune",
+    ),
+    ("docker-dangling", Kind::DockerImages, "docker image prune"),
+    (
+        "docker-unreferenced",
+        Kind::DockerImages,
+        "docker image prune --all",
+    ),
+    ("nix-garbage", Kind::NixStore, "nix GC"),
+];
+
+/// A source's action: a real one, or a stand-in's description.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Action(&'static str);
+enum TestAction {
+    Real(profile::Action),
+    StandIn(&'static str),
+}
 
-impl fmt::Display for Action {
+impl fmt::Display for TestAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
+        match self {
+            Self::Real(action) => action.fmt(f),
+            Self::StandIn(action) => f.write_str(action),
+        }
     }
 }
 
-enum Fake {
-    Source(Kind, Action),
-    Filter(Vec<PredicateName>),
+struct TestCatalog {
+    library: Library,
+    /// Every source, the library's included, with its action as a
+    /// [`TestAction`] (the trait lends actions out by reference).
+    sources: BTreeMap<String, (Kind, TestAction)>,
 }
 
-struct FakeCatalog(BTreeMap<&'static str, Fake>);
+impl Catalog for TestCatalog {
+    type Action = TestAction;
 
-impl Catalog for FakeCatalog {
-    type Action = Action;
-
-    fn lookup(&self, name: &str) -> Option<Entry<'_, Action>> {
-        Some(match self.0.get(name)? {
-            Fake::Source(kind, action) => Entry::Source {
+    fn lookup(&self, name: &str) -> Option<Entry<'_, TestAction>> {
+        if let Some((kind, action)) = self.sources.get(name) {
+            return Some(Entry::Source {
                 kind: *kind,
                 action,
-            },
-            Fake::Filter(predicates) => Entry::Filter {
-                predicates: predicates.clone(),
-            },
-        })
+            });
+        }
+        match self.library.lookup(name)? {
+            Entry::Filter { predicates } => Some(Entry::Filter { predicates }),
+            Entry::Source { .. } => unreachable!("every library source is in `sources`"),
+        }
     }
 }
 
-fn catalog() -> FakeCatalog {
-    let delete = || Fake::Source(Kind::Fs, Action("delete"));
-    let mut map = BTreeMap::new();
-    for name in [
-        "pytest-tmp",
-        "pytest-cache",
-        "nix-shell-rc",
-        "nix-shell-tmpdir",
-        "claude-code-tmp",
-        "tmp-entry",
-        "mktemp-dir",
-        "zephyr-run",
-        "a",
-        "b",
-    ] {
-        map.insert(name, delete());
+fn catalog() -> TestCatalog {
+    let user = profile::parse_profiles(TEST_PROFILES).unwrap_or_else(|e| panic!("{e}"));
+    let library = Library::with_user_profiles(&user).unwrap_or_else(|e| panic!("{e}"));
+    let mut sources = BTreeMap::new();
+    for name in library.profiles().map(|p| p.name.clone()) {
+        if let Some(Entry::Source { kind, action }) = library.lookup(&name) {
+            sources.insert(name, (kind, TestAction::Real(action.clone())));
+        }
     }
-    map.insert("pip-cache", Fake::Source(Kind::Fs, Action("command")));
-    map.insert(
-        "cargo-target",
-        Fake::Source(Kind::CargoTarget, Action("cargo lock protocol")),
-    );
-    map.insert(
-        "docker-build-cache",
-        Fake::Source(Kind::DockerBuildCache, Action("docker builder prune")),
-    );
-    map.insert(
-        "docker-dangling",
-        Fake::Source(Kind::DockerImages, Action("docker image prune")),
-    );
-    map.insert(
-        "docker-unreferenced",
-        Fake::Source(Kind::DockerImages, Action("docker image prune --all")),
-    );
-    map.insert(
-        "nix-garbage",
-        Fake::Source(Kind::NixStore, Action("nix GC")),
-    );
-    for name in [
-        "idle-1h", "idle-1d", "idle-2d", "idle-3d", "idle-7d", "idle-10d", "idle-30d", "f",
-    ] {
-        map.insert(name, Fake::Filter(vec![PredicateName::IdleFor]));
+    for (name, kind, action) in NOT_BUILT_IN_KINDS {
+        assert!(
+            library.get(name).is_none(),
+            "`{name}` is in the library now: remove its stand-in"
+        );
+        sources.insert((*name).to_owned(), (*kind, TestAction::StandIn(action)));
     }
-    map.insert("has-cachedir-tag", Fake::Filter(vec![PredicateName::Has]));
-    FakeCatalog(map)
+    TestCatalog { library, sources }
 }
 
 /// The normalised text of an accepted expression.
@@ -144,74 +148,9 @@ fn filter(name: &str) -> Factor {
 
 // ---- docs/reference.md
 
-const REFERENCE_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference.md");
-
-fn reference_md() -> String {
-    std::fs::read_to_string(REFERENCE_MD).unwrap_or_else(|e| {
-        panic!("{REFERENCE_MD}: {e} (the flake's workspace-tests source must include it)")
-    })
-}
-
-/// The section of `doc` under the heading line `heading`, up to the next
-/// heading outside a code block.
-fn section(doc: &str, heading: &str) -> String {
-    let mut lines = doc.lines().skip_while(|line| *line != heading);
-    let mut out = vec![lines.next().unwrap_or_else(|| panic!("no {heading:?}"))];
-    let mut fenced = false;
-    for line in lines {
-        if line.starts_with("```") {
-            fenced = !fenced;
-        } else if !fenced && line.starts_with('#') {
-            break;
-        }
-        out.push(line);
-    }
-    out.join("\n")
-}
-
 /// The Selection grammar section of docs/reference.md.
 fn grammar_section() -> String {
     section(&reference_md(), "### Selection grammar")
-}
-
-/// The cells of a markdown table row, `\|` unescaped.
-fn cells(line: &str) -> Vec<String> {
-    let mut cells = Vec::new();
-    let mut cell = String::new();
-    let mut chars = line.trim().chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if chars.peek() == Some(&'|') => {
-                cell.push('|');
-                chars.next();
-            }
-            '|' => cells.push(std::mem::take(&mut cell).trim().to_owned()),
-            _ => cell.push(c),
-        }
-    }
-    // Leading `|` makes an empty first cell; the trailing one ends the last.
-    cells.remove(0);
-    cells
-}
-
-/// The text inside a cell that is one code span.
-fn code(cell: &str) -> &str {
-    cell.strip_prefix('`')
-        .and_then(|c| c.strip_suffix('`'))
-        .unwrap_or_else(|| panic!("not one code span: {cell}"))
-}
-
-/// The rows of the section's table whose header starts with `header`.
-fn table(section: &str, header: &str) -> Vec<Vec<String>> {
-    let mut lines = section.lines().skip_while(|l| !l.starts_with(header));
-    assert!(lines.next().is_some(), "no table headed {header:?}");
-    lines.next(); // the |---| line
-    let rows: Vec<Vec<String>> = lines
-        .take_while(|l| l.starts_with('|'))
-        .map(cells)
-        .collect();
-    assert!(!rows.is_empty(), "table {header:?} is empty");
-    rows
 }
 
 /// Every inline code span in the section's prose (outside fences and
@@ -288,7 +227,6 @@ const PROSE: &[(&str, Prose)] = &[
     ("profile:", Prose::Fragment),
     ("filter:", Prose::Fragment),
     ("profile:NAME", Prose::Fragment),
-    ("profile:NAME && filter:idle-*", Prose::Fragment),
     ("!filter:…", Prose::Fragment),
     ("!profile:…", Prose::Fragment),
     ("!profile:a && !profile:b", Prose::Fragment),
@@ -902,7 +840,9 @@ fn one_action_per_expression() {
             first: "a".into(),
             first_action: "delete".into(),
             other: "pip-cache".into(),
-            other_action: "command".into(),
+            other_action:
+                "command [\"pip\", \"--cache-dir\", \"{path}\", \"cache\", \"purge\"], cwd: candidate"
+                    .into(),
         }]
     );
     // Same kind and action: fine, in either order, and it is the kind.

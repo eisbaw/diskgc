@@ -73,6 +73,10 @@ pub struct Run {
     pub stdout: String,
     pub stderr: String,
     pub events: Vec<Event>,
+    /// Calls strace could not name (`???`, cut off by a detach): no path
+    /// to attribute; logged by the oracle, whose snapshot view judges
+    /// every object regardless.
+    pub unnamed_calls: Vec<strace::Unnamed>,
     /// When strace was started (the oracle refuses runs that started before
     /// it took its "before" snapshot).
     pub started: Instant,
@@ -487,7 +491,7 @@ impl Spawned {
                  tracee): {refusals:?}"
             ));
         }
-        let events = strace::read_record(&self.record_dir, RECORD_PREFIX)
+        let record = strace::read_record(&self.record_dir, RECORD_PREFIX)
             .map_err(|e| format!("{e}\n--- strace exit {status:?}, stderr\n{stderr}"))?;
         Ok(Run {
             argv,
@@ -495,7 +499,8 @@ impl Spawned {
             signal: status.signal(),
             stdout,
             stderr,
-            events,
+            events: record.events,
+            unnamed_calls: record.unnamed,
             started: self.started,
             took,
             judged: self.judged,
