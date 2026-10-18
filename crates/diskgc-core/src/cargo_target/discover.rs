@@ -308,7 +308,7 @@ pub fn inspect<H: Host>(
         if inside.iter().any(|n| is_cargo_lock_name(n)) {
             inspected
                 .profiles
-                .push(judged!(profile(host, &fd, rel, &at, &stat, inside)));
+                .push(judged!(profile_dir(host, &fd, rel, &at, &stat, inside)));
             continue;
         }
         if inspected.keep_marker.is_none() && inside.iter().any(|n| n == KEEP_MARKER) {
@@ -332,7 +332,7 @@ pub fn inspect<H: Host>(
                 judged!(open_dir(host, &fd, mount_id, Path::new(child), &child_at));
             let grandchildren = judged!(list(host, &child_fd, &child_at, deadline));
             if grandchildren.iter().any(|n| is_cargo_lock_name(n)) {
-                inspected.profiles.push(judged!(profile(
+                inspected.profiles.push(judged!(profile_dir(
                     host,
                     &child_fd,
                     child_rel,
@@ -351,7 +351,7 @@ pub fn inspect<H: Host>(
 /// whose sorted listing is `names`: its lock files and everything else,
 /// each statted (not followed), so that only real directories count as a
 /// layout's directories.
-fn profile<H: Host>(
+pub(super) fn profile_dir<H: Host>(
     host: &H,
     fd: &H::Fd,
     rel: PathBuf,

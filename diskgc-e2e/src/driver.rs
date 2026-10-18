@@ -43,6 +43,17 @@
 //!   every piece of evidence, `; `-separated). Skips are results, not
 //!   failures; only an error of the run is (`I failed <tag> <path> --
 //!   <message>`);
+//! - `cargo-reclaim`: the Cargo reclaim protocol (diskgc-core
+//!   `cargo_target::reclaim`) on every target discovery finds: `I refused
+//!   ...` and `I duplicate ...` as for `cargo-targets`, then per target its
+//!   `I target ...` line and, with `--after-eligibility`, a refusal by the
+//!   eligibility check (`I skip ...`, the protocol not run), otherwise the
+//!   protocol's outcome: `I reclaimed <path> entries=N bytes=B
+//!   held_us=<µs|none>`, `I skip <reason> <path> entries=N
+//!   held_us=<µs|none> -- <where>: <detail>` (N entries deleted before it
+//!   stopped), or, counted as failures, `I failed <tag> <path> entries=N
+//!   -- <message>` (an error for the target, the sandbox gate, or an error
+//!   of the run), `held_us` being how long the target's locks were held;
 //!
 //! where `<path>` is Rust's `{:?}` of the path, and `<tag>` is the errno
 //! name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip reason of
@@ -54,7 +65,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use diskgc_core::cargo_target::{self, Layout};
+use diskgc_core::cargo_target::{self, Layout, ReclaimEnd};
 use diskgc_core::engine::{
     self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Rules, WalkStop,
 };
@@ -89,6 +100,15 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
                                   Cargo targets below the ROOTs and whether
                                   each is eligible now (idle for DUR, e.g.
                                   1d); locks and deletes nothing
+    cargo-reclaim [--idle-for DUR] [--after-eligibility] ROOT...
+                                  the Cargo reclaim protocol on every target
+                                  below the ROOTs: lock every lock file,
+                                  recheck under the locks, delete inside the
+                                  locked profile directories, release;
+                                  --after-eligibility: judge each target
+                                  first, as a plan would, reclaim only an
+                                  eligible one and pass the protocol the
+                                  last build it measured
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -254,6 +274,10 @@ pub fn run<H: Delete>(
         }
         ("cargo-targets", roots) if !roots.is_empty() && !roots[0].starts_with("--") => {
             cargo_targets(host, owner, None, roots, &mut out)?;
+        }
+        ("cargo-reclaim", args) => {
+            let (flags, roots) = ReclaimFlags::parse(args)?;
+            cargo_reclaim(host, owner, flags, roots, &mut out)?;
         }
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
@@ -583,6 +607,158 @@ fn cargo_targets<H: Host>(
     Ok(())
 }
 
+/// The flags of `cargo-reclaim`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ReclaimFlags {
+    idle_for: Option<IdleFor>,
+    after_eligibility: bool,
+}
+
+impl ReclaimFlags {
+    /// `[--idle-for DUR] [--after-eligibility] ROOT...`: the flags and the
+    /// roots (at least one).
+    fn parse(args: &[String]) -> Result<(Self, &[String]), String> {
+        let mut flags = Self::default();
+        let mut rest = args;
+        loop {
+            match rest {
+                [flag, value, more @ ..] if flag == "--idle-for" => {
+                    flags.idle_for = Some(IdleFor(diskgc_core::units::parse_duration(value)?));
+                    rest = more;
+                }
+                [flag, more @ ..] if flag == "--after-eligibility" => {
+                    flags.after_eligibility = true;
+                    rest = more;
+                }
+                [flag, ..] if flag.starts_with("--") => {
+                    return Err(format!("cargo-reclaim: bad flag {flag:?}"));
+                }
+                [] => return Err("cargo-reclaim: no ROOT given".to_owned()),
+                roots => return Ok((flags, roots)),
+            }
+        }
+    }
+}
+
+/// `cargo-reclaim [--idle-for DUR] [--after-eligibility] ROOT...`:
+/// discovery below the roots, then the reclaim protocol on every target
+/// found, for the user `owner` (see the module docs for the lines).
+fn cargo_reclaim<H: Delete>(
+    host: &H,
+    owner: u32,
+    flags: ReclaimFlags,
+    roots: &[String],
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    let found = match cargo_target::discover(host, &roots, None) {
+        Ok(found) => found,
+        Err(stop) => {
+            cargo_stop(&stop, out);
+            return Ok(());
+        }
+    };
+    for skip in &found.refused {
+        out.ok(format!(
+            "refused {} {:?} -- {}",
+            skip.reason, skip.path, skip.detail
+        ));
+    }
+    for path in &found.duplicates {
+        out.ok(format!("duplicate {path:?}"));
+    }
+    let owners = [owner];
+    let rules = Rules {
+        owners: &owners,
+        block_ipc: true,
+        max_entries: DEFAULT_MAX_ENTRIES,
+    };
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    for target in &found.targets {
+        out.ok(format!(
+            "target {:?} {}",
+            target.path,
+            profiles_text(target)
+        ));
+        let judged = if flags.after_eligibility {
+            match cargo_target::eligibility(
+                host,
+                target,
+                &rules,
+                flags.idle_for,
+                &mut checker,
+                None,
+            ) {
+                Ok(Ok(eligible)) => eligible.last_build,
+                Ok(Err(skip)) => {
+                    out.ok(format!(
+                        "skip {} {:?} -- {}: {}",
+                        skip.reason,
+                        target.path,
+                        skip.path.display(),
+                        skip.detail
+                    ));
+                    continue;
+                }
+                Err(stop) => {
+                    cargo_stop(&stop, out);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let done = cargo_target::reclaim(
+            host,
+            target,
+            judged,
+            &rules,
+            flags.idle_for,
+            &mut checker,
+            None,
+        );
+        let held = done
+            .locks_held
+            .map_or("none".to_owned(), |d| d.as_micros().to_string());
+        let n = done.removed_entries;
+        match done.end {
+            ReclaimEnd::Complete => out.ok(format!(
+                "reclaimed {:?} entries={n} bytes={} held_us={held}",
+                target.path, done.removed_bytes
+            )),
+            ReclaimEnd::Skipped(skip) => out.ok(format!(
+                "skip {} {:?} entries={n} held_us={held} -- {}: {}",
+                skip.reason,
+                target.path,
+                skip.path.display(),
+                skip.detail
+            )),
+            ReclaimEnd::Failed { path, error } | ReclaimEnd::GateRefused { path, error } => out
+                .err_line(format!(
+                    "failed {} {path:?} entries={n} -- {error}",
+                    cause_tag(&error)
+                )),
+            ReclaimEnd::Stopped(cargo_target::Stop::DeadlinePassed { path }) => {
+                out.err_line(format!(
+                    "failed deadline {path:?} entries={n} -- deadline passed"
+                ));
+            }
+            ReclaimEnd::Stopped(cargo_target::Stop::Failed { path, error }) => {
+                out.err_line(format!(
+                    "failed {} {path:?} entries={n} -- {error}",
+                    cause_tag(&error)
+                ))
+            }
+        }
+    }
+    if let Some(scan) = checker.latest() {
+        for note in scan.notes() {
+            eprintln!("diskgc-e2e-driver: note: {note}");
+        }
+    }
+    Ok(())
+}
+
 /// `debug=classic:.cargo-lock,.cargo-build-lock ...` for a target's
 /// profile directories.
 fn profiles_text(target: &cargo_target::Target) -> String {
@@ -846,6 +1022,107 @@ events:
         let bad = ["--idle-for".to_owned(), "1d".to_owned()];
         assert!(run(&model, 1000, "cargo-targets", &bad, &mut |_| {}).is_err());
         assert!(run(&model, 1000, "cargo-targets", &[], &mut |_| {}).is_err());
+    }
+
+    /// `cargo-reclaim` runs the protocol on every target found: one is
+    /// reclaimed (every entry but its lock file, which stays), one whose
+    /// lock another process holds is `locked` and keeps everything; with
+    /// `--after-eligibility` a target the eligibility check refuses is not
+    /// locked at all.
+    #[test]
+    fn cargo_reclaim_runs_the_protocol_on_every_target() {
+        let model = ModelHost::from_yaml(
+            r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+  - {id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, parent: 1}
+tree:
+  /bin/sh: {}
+  /tmp/w/p/Cargo.toml: {}
+  /tmp/w/p/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug: {.cargo-lock: {}, .fingerprint: {f: {}}, deps: {d: {size: 4K}}}
+  /tmp/w/q/Cargo.toml: {}
+  /tmp/w/q/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug: {.cargo-lock: {}, deps: {d: {}}}
+locks:
+  - {path: /tmp/w/q/target/debug/.cargo-lock, holder: 42, mode: shared}
+processes:
+  - {pid: 42, exe: /bin/sh, cwd: /, maps: [/bin/sh], environ: [A=1]}
+events:
+  - {at: {call: 1, when: before}, advance: 2d}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut got = Vec::new();
+        let args = ["/tmp/w".to_owned()];
+        let outcome = run(&model, 1000, "cargo-reclaim", &args, &mut |l| got.push(l));
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }), "{got:#?}");
+        assert_eq!(
+            got[0],
+            "0 target \"/tmp/w/p/target\" debug=classic:.cargo-lock"
+        );
+        assert!(
+            got[1].starts_with("1 reclaimed \"/tmp/w/p/target\" entries=4 bytes=12288 held_us="),
+            "{got:#?}"
+        );
+        assert_eq!(
+            got[2],
+            "2 target \"/tmp/w/q/target\" debug=classic:.cargo-lock"
+        );
+        assert!(
+            got[3].starts_with("3 skip locked \"/tmp/w/q/target\" entries=0 held_us=none -- "),
+            "{got:#?}"
+        );
+        assert_eq!(got.len(), 4);
+        assert!(
+            model
+                .stat_path(Path::new("/tmp/w/p/target/debug/.cargo-lock"))
+                .is_some()
+        );
+        assert!(
+            model
+                .stat_path(Path::new("/tmp/w/p/target/debug/deps"))
+                .is_none()
+        );
+        assert!(
+            model
+                .stat_path(Path::new("/tmp/w/q/target/debug/deps/d"))
+                .is_some()
+        );
+
+        // The eligibility check first: q's lock holder holds the lock
+        // file open, so q is in use and the protocol never locks it.
+        let flocks = |m: &ModelHost| {
+            m.trace()
+                .iter()
+                .filter(|c| c.op == diskgc_model::spec::Op::Flock)
+                .count()
+        };
+        let before = flocks(&model);
+        let mut got = Vec::new();
+        let args = ["--after-eligibility".to_owned(), "/tmp/w/q".to_owned()];
+        let outcome = run(&model, 1000, "cargo-reclaim", &args, &mut |l| got.push(l));
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }), "{got:#?}");
+        assert!(
+            got[1].starts_with("1 skip in_use \"/tmp/w/q/target\" -- "),
+            "{got:#?}"
+        );
+        assert_eq!(flocks(&model), before);
+        for bad in [
+            &[][..],
+            &["--idle-for"],
+            &["--idle-for", "1d"],
+            &["--force", "/tmp/w"],
+        ] {
+            let bad: Vec<String> = bad.iter().map(|s| (*s).to_owned()).collect();
+            assert!(
+                run(&model, 1000, "cargo-reclaim", &bad, &mut |_| {}).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

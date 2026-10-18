@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 19:31'
+updated_date: '2026-10-18 03:35'
 labels:
   - wave-2
   - irreversible
@@ -47,6 +47,8 @@ From task-6 round 3: inuse::Checker::new now takes &Rules (Checker::new(&rules, 
 SUPERSEDED: the round-2 task-6 note above ('From task-6 round 2 ...: build the checker with inuse::Checker::new(inuse::Options::from_rules(&rules), ...); ... start engine::delete right after it') is stale. Current API: Checker::new(&rules, REUSE_LIMIT); delete through inuse::delete_cleared (Clear is bound to the walk record's root identity, not Copy, refused when expired or for another record); see the round-3 note and task-53's.
 
 From the task-7 review (H9): a union selects a candidate if any of its terms does. Deduplicate candidates found by several terms (one plan/action entry each), and report a filter skip (not_idle, has_not) only when no term selects the candidate.
+
+From task-53: the cargo-target action is cargo_target::reclaim (see task-10's note for the call and the ReclaimEnd mapping). For the walk order: Eligible::last_build (eligibility, no locks) is the 'oldest' key and is passed back as judged_last_build so a target rebuilt between ordering and acting is changed. reclaim is one target at a time and holds every lock of that target for its whole walk+scan+delete (measured 0.49 s per 100k entries untraced on tmpfs); deadlines are checked between operations, so a tier deadline stops it part-way (Stopped(DeadlinePassed), fingerprints already gone first). GateRefused stops the run.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

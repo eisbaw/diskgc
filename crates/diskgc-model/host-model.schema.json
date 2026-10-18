@@ -723,6 +723,7 @@
         "statx",
         "read_dir",
         "read_head",
+        "reopen_regular",
         "statvfs",
         "flock",
         "now",

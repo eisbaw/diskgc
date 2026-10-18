@@ -31,7 +31,9 @@ use crate::scratch::{self, Scratch};
 use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
-use crate::{cargo_suite, driver_suite, engine_suite, host_suite, inuse_suite};
+use crate::{
+    cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, host_suite, inuse_suite,
+};
 
 /// Which gate runs a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +247,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: cargo_suite::cargo_smoke_reports_a_broken_toolchain_as_a_toolchain_failure,
+    },
+    Test {
+        name: "cargo_reclaim_lock_hold_time_on_a_large_target",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: cargo_reclaim_suite::cargo_reclaim_lock_hold_time_on_a_large_target,
     },
     Test {
         name: "oracle_large_tree",

@@ -836,6 +836,37 @@ impl Host for ModelHost {
         })
     }
 
+    /// A new open file description of the regular file `file` refers to,
+    /// for reading (so it can be locked); anything else is refused, as
+    /// `LinuxHost` does, without being opened.
+    fn reopen_regular(&self, file: &ModelFd) -> Result<ModelFd, HostError> {
+        let ofd = self.fd_ofd(file);
+        let path = self.base_path(Base::Dir(file), Path::new(""));
+        let shown = path.display().to_string();
+        let reopened = self.call(Op::ReopenRegular, Some(path.clone()), None, |inner| {
+            let loc = inner.loc_of(ofd);
+            let object = Some(inner.state.dev_ino(loc));
+            match inner.state.inode(loc).kind {
+                Kind::File { .. } => {
+                    let new = inner.state.open_ofd(loc, path, Access::Read);
+                    inner.state.own_ofds.insert(new);
+                    inner.peak_open_fds = inner.peak_open_fds.max(inner.state.own_ofds.len());
+                    (Ok(new), object, "ok".to_owned())
+                }
+                _ => (
+                    Err(HostError::invalid(
+                        "reopen",
+                        &shown,
+                        "not a regular file (only lock files are reopened)",
+                    )),
+                    object,
+                    "not a regular file".to_owned(),
+                ),
+            }
+        });
+        reopened.map(|new| self.wrap(new))
+    }
+
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         let ofd = self.fd_ofd(fd);
         let path = self.base_path(Base::Dir(fd), Path::new(""));

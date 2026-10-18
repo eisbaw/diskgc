@@ -463,6 +463,9 @@ mod tests {
         fn read_head(&self, _: &usize, _: usize) -> Result<Vec<u8>, HostError> {
             unreachable!()
         }
+        fn reopen_regular(&self, _: &usize) -> Result<usize, HostError> {
+            unreachable!()
+        }
         fn statvfs(&self, _: &usize) -> Result<Space, HostError> {
             unreachable!()
         }

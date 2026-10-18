@@ -154,7 +154,7 @@ tree:
     CACHEDIR.TAG: {cachedir_tag: true}
     debug:
       .cargo-lock: {}
-      deps: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+      deps: {app-1: {size: 8G, mtime: 2026-10-01T00:00:00Z}}
   /nix/store/x-cargo/bin/cargo: {}
 locks:
   - {path: /home/mark/src/app/target/debug/.cargo-lock, holder: 4242, mode: exclusive}
@@ -175,8 +175,9 @@ expect:
 Fixtures live in `tests/models/<area>/<case>.yaml`, one named test per file;
 JSON reports are snapshot-tested with durations, timestamps and seed
 redacted. The sketch above is the fixture
-`crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml`; until
-the executor exists, a stand-in for the Cargo lock check runs it.
+`crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml`, run
+through Cargo discovery and the reclaim protocol (`tests/sketch.rs`;
+until the executor exists, that test maps a skipped target to exit 1).
 
 How the format reads (the schema documents every key):
 
@@ -478,9 +479,10 @@ positions; the replace-between-walk-and-unlink test needs the replacement
 at one exact moment). In the model these are events on the `Host` call
 trace. In containers, a **test driver** (`diskgc-e2e-driver`, built from
 `diskgc-e2e` only) runs single diskgc operations on a fixture (`walk`,
-`delete`, `reclaim` with the in-use check, `held`, and `cargo-targets`:
-Cargo discovery and eligibility, which locks and deletes nothing; the
-reclaim protocol adds its own) over
+`delete`, `reclaim` with the in-use check, `held`, `cargo-targets`:
+Cargo discovery and eligibility, which locks and deletes nothing, and
+`cargo-reclaim`: the Cargo reclaim protocol on every target found, which
+reports how long it held the locks) over
 `LinuxHost` wrapped in a **test-only `Host` wrapper** that pauses or kills
 it at a call position given by the harness. This is the one sanctioned
 exception to "no hooks in the product": it lives outside the product

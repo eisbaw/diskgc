@@ -514,8 +514,20 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   binaries from the build directory. 1.90 ignores the setting.
 - **New build-dir layout:** the 2026-10-16 nightly uses it by default. The
   profile directory has no `.fingerprint/` and no `deps/`; each unit gets
-  `build/<package>/<hash>/` holding its `fingerprint` and `out`, and test
-  binaries run from that `out/`. The lock files are those of 1.99.1.
+  `build/<package>/<hash>/` holding its `fingerprint/` and `out/` (a build
+  script's run also `run/`), libraries and binaries included, and test
+  binaries run from that `out/`; the final binaries are hard-linked into
+  the profile directory as before. The lock files are those of 1.99.1.
+- **Lock order** (measured 2026-10-18 in the containers with `strace -e
+  flock,openat` of `build` and `check`, fresh and repeated): 1.99.1 and the
+  nightly open each lock file with `O_RDWR|O_CREAT` and take
+  `.cargo-build-lock` (exclusive) first, then `.cargo-lock` (shared), then,
+  for `build` only, `.cargo-artifact-lock` (exclusive); 1.90 takes
+  `.cargo-lock` (exclusive) alone. A Cargo creates the lock files it takes
+  when they are missing: a 1.99.1 build on a target 1.90 made creates
+  `.cargo-build-lock`, takes it, and then waits for a `.cargo-lock` held by
+  someone else, writing nothing else meanwhile. Cargo releases its locks
+  with `LOCK_UN` (diskgc only ever closes, Host lock).
 - **Lock sets by command** (measured 2026-10-18 in the containers on the
   three pinned toolchains): `cargo check` on a fresh target of 1.99.1 and
   the nightly creates only `.cargo-build-lock` and `.cargo-lock`; `build`,
@@ -602,8 +614,10 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   directories, the profile directories and their lock files (`not_owner`).
 - **Layouts:** where a profile directory keeps its fingerprints, which the
   reclaim protocol deletes first. *Classic*: a directory `.fingerprint/` or
-  `deps/` in it (1.90, 1.99.1, a build directory's half). *Per-unit*:
-  neither, and a directory `build/` (the nightly's new build-dir layout).
+  `deps/` in it (1.90, 1.99.1, a build directory's half); its fingerprints
+  are `.fingerprint/`. *Per-unit*: neither, and a directory `build/` (the
+  nightly's new build-dir layout); its fingerprints are every
+  `build/<package>/<hash>/fingerprint`.
   Only real directories count, judged by `statx` without following: a
   regular file or a symlink with one of these names is no Cargo layout. A
   profile directory that holds anything but none of the three is an
@@ -614,7 +628,10 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
 - **Eligibility walk:** every entry of every profile directory except the
   lock files is walked as a candidate of its own (Filesystem candidates:
   ownership, keep markers, mounts, sockets and FIFOs, Cargo lock names and
-  nested targets, the entry budget); the first refusal is the target's.
+  nested targets); the first refusal is the target's. The entry budget is
+  one for the whole target: all its entries together, not each entry, may
+  hold at most `DEFAULT_MAX_ENTRIES` (`too_many_entries`), so one target
+  holds no more records in memory than one candidate may.
 - **Last build** (the kind's `idle_for` measure): the newest mtime or ctime
   of the profile directories, their lock files and everything the walks
   recorded in them. The same measure on every layout: it reads no
@@ -627,11 +644,6 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   is `empty` and not re-listed on every run.
 - The check made for a plan (`--dry-run`, `survey`) takes no lock; whether
   the locks are free is the Reclaim protocol's step 1.
-- **Known gap, the per-unit layout and the protocol:** Reclaim protocol
-  step 3 says to delete `.fingerprint/` first, which the per-unit layout
-  does not have (its fingerprints are `build/<package>/<hash>/fingerprint`),
-  and race test 6 ([testing.md](testing.md)) has not run on it (task-53,
-  task-11).
 
 ### In use
 
@@ -693,18 +705,84 @@ guarantee would need Cargo itself to hold a lock until the run ends.
 
 ### Reclaim protocol
 
-1. Take every known lock file of the target, exclusively, without waiting.
-   Any failure: release all, skip (`locked`). A Cargo that holds
-   `.cargo-build-lock` while waiting for `.cargo-lock` makes this fail,
-   which is intended.
-2. List the lock files again, re-read the last build time, run the
-   ownership walk and the process checks. A new lock file (a profile
-   created since discovery), a newer build or a hit: release, skip
-   (`changed` / `in_use`).
-3. In each locked profile directory: delete `.fingerprint/` first (so a
-   half-deleted profile always forces a rebuild), then every other entry
-   except the lock files, with the per-entry identity check from Deletion.
-4. Release the locks.
+The step that deletes (`cargo_target::reclaim` in the core).
+
+1. **Lock.** Reach the target again from its root, as found (Discovery);
+   refuse before locking a target whose layout or lock set is not one
+   diskgc reclaims (`unsupported_layout`, `empty`: an unknown lock name
+   would not be taken). Then take every lock file of every profile
+   directory, exclusively, without waiting. Holding every lock is what
+   makes the deletion safe, not the order they are taken in: diskgc only
+   ever tries a lock (`flock` with `LOCK_NB`) and never waits for one, so
+   it can never be part of a deadlock. The order is Cargo's own
+   (`.cargo-build-lock`, `.cargo-lock`, `.cargo-artifact-lock`; Lock
+   files) only to spare a Cargo that started first a brief wait, within
+   one profile directory: diskgc's first attempt there then fails before
+   it holds anything that Cargo waits for. Each profile directory is opened once, below the target, and must
+   be the one found; it serves the walks and the deletion below. Each lock
+   file is opened `O_PATH` below it and must be the one found (identity,
+   type included: `changed`); it is then reopened read-only through that
+   fd (`Host::reopen_regular`), never by name, so nothing but that regular
+   file is ever opened for the `flock` (a FIFO or device that took its name
+   would not be). Any lock held by someone else, shared or exclusive:
+   `locked`, release all, skip. A Cargo that holds `.cargo-build-lock`
+   while waiting for `.cargo-lock` makes this fail, which is intended.
+2. **Recheck under the locks.** Inspect the target again: the same profile
+   directories and lock files as when found (one created, removed or
+   replaced since, a `cargo build --release` or a newer Cargo's lock file
+   started meanwhile: `changed`), no keep marker, ownership, the layout.
+   Walk every entry of the locked profile directories (the eligibility
+   walk, one entry budget for the target). Measure the last build: newer
+   than the one the caller chose the target by (its eligibility check, a
+   plan), or no longer known: `changed`; then the idle requirement. Then
+   the in-use check of the whole target against a scan made now, under
+   the locks (a scan from before could miss a process started meanwhile):
+   every entry's record and the Cargo process checks (In use). Any hit:
+   release, skip.
+3. **Delete inside the locked profile directories,** each part with the
+   per-entry identity check of Deletion, in this order:
+   - **fingerprints first**, of every profile directory before anything
+     else of any, whatever its layout or mix of layouts (a target that
+     1.99.1 and the nightly both built has `.fingerprint/`, `deps/` and
+     per-unit units in `build/`): the entry `.fingerprint/` if there is
+     one, and every `build/<package>/<hash>/fingerprint` (each taken out
+     of the walk record of `build/` as a part of its own and deleted below
+     its unit directory, which is opened and matched against the record).
+     Once any other entry is gone, no fingerprint in either of those
+     places is left, so a profile deleted part-way always rebuilds instead
+     of reusing a half-deleted unit;
+   - then every other entry in name order, with `build/` and then `deps/`
+     last: the directories that tell the layout, so that a run stopped
+     part-way leaves a profile directory still recognised (classic,
+     per-unit, or lock files only) and the next run reclaims the rest.
+
+   Each part is deleted right after its own in-use check (`Checker::check`
+   on exactly the record then deleted, with the Cargo process checks on the
+   same scan, within Freshness) through `delete_cleared`; a hit stops the
+   deletion (`in_use`). Before each part its profile directory's lock
+   files are listed again: one created, removed or replaced while diskgc
+   holds the locks (a Cargo of another lock set starting, Lock files) stops
+   the deletion (`changed`). That listing is a detector and a backstop,
+   not the protection. The protection is an invariant: every lock set
+   diskgc reclaims (whole sets, Lock sets) holds `.cargo-lock`, and every
+   measured Cargo takes `.cargo-lock` before it writes into the profile
+   directory (Lock files: lock order). So a Cargo that starts during the
+   deletion and creates a lock file diskgc does not hold (a 1.99.1 build
+   on a target 1.90 made creates `.cargo-build-lock`) then waits on the
+   `.cargo-lock` diskgc holds and writes nothing. A Cargo that wrote into
+   the profile before taking `.cargo-lock` would break this; the Cargo
+   race tests (task-11) must show it holds on every pinned toolchain: a
+   reclaim of a target 1.90 made paused at an `unlinkat`, a 1.99.1 build
+   started then, and `/proc/locks` showing that it created
+   `.cargo-build-lock` and waits on `.cargo-lock` without writing. diskgc does not create missing lock files itself: that
+   would be a write into the target, and the invariant does not need it.
+   A part that stops part-way (`changed`, an
+   error, the deadline) stops the target; what was deleted stays deleted,
+   fingerprints first. Lock files are never in a record (every walk
+   refuses every Cargo lock name), so they are never unlinked, replaced or
+   moved; the profile directories themselves are never deleted.
+4. **Release** by closing the lock files' descriptors, whatever the
+   outcome (never `LOCK_UN`, Host lock).
 
 Nothing outside the locked profile directories is touched: not
 `CACHEDIR.TAG`, not the triple directories, not top-level entries such as
@@ -713,6 +791,38 @@ Nothing outside the locked profile directories is touched: not
 files never move, a Cargo blocked on a lock and a Cargo started afterwards
 lock the same inodes and stay mutually exclusive; a Cargo started during
 step 3 prints `Blocking waiting for file lock` and continues after step 4.
+
+**How long the locks are held:** steps 2 to 4, the walk, the scan and the
+delete of the whole target; every Cargo of the target waits that long.
+Measured 2026-10-18 in a container on tmpfs (Cargo 1.99.1, a real target
+plus 100,000 files in `deps/`): 0.49 s for 100,026 entries untraced, 3.4 s
+under the e2e suite's strace (`cargo_reclaim_lock_hold_time_on_a_large_target`,
+which reports it); a real build of the race fixture, about 260 entries,
+13 to 23 ms. It is reported (`locks_held`), not bounded: a deadline still
+stops the protocol between operations.
+
+**Limits.** The lock files are listed again before each part, not before
+each unlink: a lock file created during a part is seen at the next one
+(safe by the `.cargo-lock` invariant above, which this listing does not
+replace). An entry renamed out of a locked profile directory while it is
+being deleted is still deleted at its new place (object scope,
+Deletion: Scope); that takes a deliberate rename of the very object
+being reclaimed. Resumability has a gap: a classic profile whose only
+layout directory is `.fingerprint/` (no `deps/`, no `build/`) holds
+neither once a run stopped after its fingerprints went, so later runs
+skip it as `unsupported_layout` (safe: its fingerprints are already
+gone; the next Cargo build makes it recognisable again).
+Directories inside a profile are not made writable (`make_writable` is
+off): a read-only directory a build script left in its output makes that
+part's delete fail (`EACCES`), an error for the target after its
+fingerprints went.
+Each part's in-use check is fresh (Freshness), not atomic with its
+delete (In use, limit 5). The order "fingerprints first" relies on Cargo
+treating a unit whose fingerprint is missing as dirty (measured: the next
+build compiles again, on the three pinned toolchains, also killed right
+after the fingerprints or before the last unlink); race test 6
+([testing.md](testing.md), task-11) is to check it at seeded positions on
+every pinned toolchain.
 
 ## Docker kinds
 

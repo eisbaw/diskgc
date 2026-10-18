@@ -281,7 +281,8 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   `auto-optimise-store`, freed space can lag; Lix and other variants are
   unverified.
 - **Half-deleted Cargo `incremental/` state** might make rustc fail despite
-  `.fingerprint/` being deleted first; resolved by race test 6.
+  the fingerprints (`.fingerprint/`, or `build/<pkg>/<hash>/fingerprint` on the
+  per-unit layout) being deleted first; resolved by race test 6.
 - **`hidepid`** hides even more processes from the in-use checks on hardened
   systems.
 - **Docker containerd root discovery** for filesystem matching must be

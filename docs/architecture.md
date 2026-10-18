@@ -285,6 +285,11 @@ is accepted until measured otherwise.
   the descriptor of the object checked, never by name again; anything but
   a regular file is refused on that descriptor's type before it is
   opened for reading (a FIFO or a device is never opened).
+- **Locking a file checked by identity** (Cargo's lock files):
+  `reopen_regular` opens again, read-only and non-blocking, the regular
+  file an `O_PATH` fd refers to, through that fd (never by name), refusing
+  anything else by the fd's own type before opening it, since `flock`
+  refuses an `O_PATH` fd ([safety.md](safety.md#reclaim-protocol)).
 - **Deleting operations are a trait of their own** (`Delete: Host`:
   `unlinkat`, `fchmod` for `make_writable`, later the deleting `run`), so
   code given only a `Host` cannot delete or change permissions, and the

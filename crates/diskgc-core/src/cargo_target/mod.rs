@@ -1,7 +1,7 @@
-//! The `cargo-target` kind up to the reclaim protocol (docs/safety.md,
-//! `cargo-target`): discovery of Cargo target directories below the roots,
-//! what they hold (profile directories, lock files, layout), the last-build
-//! measure, eligibility, and the Cargo process heuristics.
+//! The `cargo-target` kind (docs/safety.md, `cargo-target`): discovery of
+//! Cargo target directories below the roots, what they hold (profile
+//! directories, lock files, layout), the last-build measure, eligibility,
+//! the Cargo process heuristics, and the reclaim protocol that deletes.
 //!
 //! The data first:
 //!
@@ -23,11 +23,12 @@
 //!   requirement and the in-use check (task-6's scan plus
 //!   [`cargo_evidence`]). It takes no lock and deletes nothing.
 //!
-//! The reclaim protocol (task-53: lock every known lock file, recheck,
-//! delete inside the locked profile directories) builds on the same parts:
-//! [`reach`], [`inspect`] and [`Inspected::same_locks`] (a new profile or
-//! lock file since discovery is `changed`), [`judge_layout`],
-//! [`walk_profiles`], [`last_build`] and [`cargo_evidence`].
+//! - [`reclaim`] is the reclaim protocol: lock every lock file, recheck
+//!   under the locks, delete inside the locked profile directories
+//!   (fingerprints first), release. It builds on the same parts: [`reach`],
+//!   [`inspect`] and [`Inspected::same_locks`] (a new profile or lock file
+//!   since discovery is `changed`), [`judge_layout`], the entry walks,
+//!   [`last_build`] and [`cargo_evidence`].
 //!
 //! Nothing here follows a symlink or crosses a mount: every directory is
 //! opened below its parent with `open_beneath`, and the walks are the
@@ -51,6 +52,7 @@ macro_rules! judged {
 mod discover;
 mod eligible;
 mod evidence;
+mod reclaim;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -63,6 +65,7 @@ pub use discover::{
 };
 pub use eligible::{Eligible, ProfileWalk, eligibility, judge_layout, last_build, walk_profiles};
 pub use evidence::cargo_evidence;
+pub use reclaim::{LOCK_ORDER, ReclaimEnd, Reclaimed, reclaim};
 
 /// The signature a valid `CACHEDIR.TAG` starts with (Cache Directory
 /// Tagging Specification; Cargo writes it into every target directory it
@@ -210,6 +213,19 @@ pub enum Layout {
 }
 
 impl ProfileDir {
+    /// Whether `other` is the same profile directory (place and identity)
+    /// with the same lock files (names and identities, types included).
+    pub fn same_locks(&self, other: &ProfileDir) -> bool {
+        self.rel == other.rel
+            && self.identity == other.identity
+            && self.locks.len() == other.locks.len()
+            && self
+                .locks
+                .iter()
+                .zip(&other.locks)
+                .all(|(a, b)| a.name == b.name && a.identity == b.identity)
+    }
+
     /// The lock files whose names are not on the allowlist.
     pub fn unknown_locks(&self) -> impl Iterator<Item = &LockFile> {
         self.locks.iter().filter(|l| !l.is_known())
@@ -271,19 +287,12 @@ impl Inspected {
     /// protocol's `changed`, docs/safety.md). Other entries do not count:
     /// a build changes them, and the last build measures that.
     pub fn same_locks(&self, other: &Inspected) -> bool {
-        let same_lock = |a: &LockFile, b: &LockFile| a.name == b.name && a.identity == b.identity;
-        let same_profile = |a: &ProfileDir, b: &ProfileDir| {
-            a.rel == b.rel
-                && a.identity == b.identity
-                && a.locks.len() == b.locks.len()
-                && a.locks.iter().zip(&b.locks).all(|(x, y)| same_lock(x, y))
-        };
         self.profiles.len() == other.profiles.len()
             && self
                 .profiles
                 .iter()
                 .zip(&other.profiles)
-                .all(|(a, b)| same_profile(a, b))
+                .all(|(a, b)| a.same_locks(b))
     }
 
     /// The (device, inode) of every object of the target outside the

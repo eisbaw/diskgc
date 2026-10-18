@@ -306,6 +306,83 @@ impl WalkRecord {
     fn listing(&self, index: usize) -> &[Entry] {
         &self.listings[index]
     }
+
+    /// The entry at `rel`: names below the candidate, one per level (empty:
+    /// the candidate itself). `None` when the record holds no such entry.
+    pub fn entry_at(&self, rel: &Path) -> Option<&Entry> {
+        let mut entry = &self.root;
+        for name in rel.components() {
+            let std::path::Component::Normal(name) = name else {
+                return None;
+            };
+            let listing = self.listings.get(entry.listing?)?;
+            entry = listing.iter().find(|e| e.name == name)?;
+        }
+        Some(entry)
+    }
+
+    /// The entries of the directory at `rel` ([`WalkRecord::entry_at`]),
+    /// sorted by name; `None` when there is no directory there.
+    pub fn listing_at(&self, rel: &Path) -> Option<&[Entry]> {
+        Some(self.listing(self.entry_at(rel)?.listing?))
+    }
+
+    /// Takes the entry at `rel` (at least one name below the candidate) and
+    /// everything the walk recorded below it out of this record, as a
+    /// record of its own whose candidate is that entry. Afterwards each
+    /// record holds exactly its part of the walked tree, so both can be
+    /// checked and deleted on their own, one after the other: the part
+    /// first (below its parent directory, reached and matched by the
+    /// caller), then the rest, whose delete then finds that directory as
+    /// the walk left it minus the part (the Cargo protocol deletes the
+    /// per-unit fingerprints first this way). Entry and byte counts move
+    /// with the part; the newest change of both stays the one of the whole
+    /// walk, an upper bound (the entries' own times are not kept). `None`,
+    /// and the record unchanged, when there is no entry at `rel` or `rel`
+    /// names the candidate itself.
+    pub fn split_off(&mut self, rel: &Path) -> Option<WalkRecord> {
+        let parent = rel.parent()?;
+        let name = rel.file_name()?;
+        let at = self.entry_at(parent)?.listing?;
+        let position = self.listings[at].iter().position(|e| e.name == name)?;
+        let mut root = self.listings[at].remove(position);
+        // The part's listings, moved into a table of its own (renumbered,
+        // in the order found); their slots here are left empty, so nothing
+        // of the part is left in this record.
+        let mut listings: Vec<Vec<Entry>> = Vec::new();
+        let mut entries = 1;
+        let mut bytes = root.bytes;
+        // (index in the part's table, index in this record's table).
+        let mut todo: Vec<(usize, usize)> = Vec::new();
+        if let Some(old) = root.listing {
+            listings.push(Vec::new());
+            root.listing = Some(0);
+            todo.push((0, old));
+        }
+        while let Some((new, old)) = todo.pop() {
+            let mut moved = std::mem::take(&mut self.listings[old]);
+            for child in &mut moved {
+                entries += 1;
+                bytes = bytes.saturating_add(child.bytes);
+                if let Some(old_child) = child.listing {
+                    listings.push(Vec::new());
+                    let new_child = listings.len() - 1;
+                    child.listing = Some(new_child);
+                    todo.push((new_child, old_child));
+                }
+            }
+            listings[new] = moved;
+        }
+        self.entries -= entries;
+        self.bytes = self.bytes.saturating_sub(bytes);
+        Some(WalkRecord {
+            root,
+            listings,
+            entries,
+            bytes,
+            newest_change: self.newest_change,
+        })
+    }
 }
 
 /// Why a candidate is not deleted, by its skip reason (docs/reference.md,

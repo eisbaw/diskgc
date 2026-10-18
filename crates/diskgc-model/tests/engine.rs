@@ -978,3 +978,63 @@ fn reopening_a_long_chain_stops_at_the_deadline() {
         "opened after the deadline: {opened_after:?}"
     );
 }
+
+/// `split_off` takes a part of a record out as a record of its own: the
+/// part is deleted first (below its parent, reached and matched by the
+/// caller), then the rest, which finds the part's directory as the walk
+/// left it minus the part, so neither delete meets anything it did not
+/// record and nothing is unlinked twice. Counts move with the part; the
+/// record is unchanged for a name it does not hold or for the candidate
+/// itself.
+#[test]
+fn a_split_off_part_and_the_rest_are_deleted_on_their_own() {
+    let host = model("");
+    let target = Target::new(&host, "/tmp/c");
+    let mut rest = walked(&host, &target, &rules());
+    let (all_entries, all_bytes) = (rest.entries(), rest.bytes());
+    assert!(rest.split_off(Path::new("")).is_none());
+    assert!(rest.split_off(Path::new("sub/none")).is_none());
+    assert!(rest.split_off(Path::new("a/x")).is_none(), "a is a file");
+    assert_eq!(rest.entries(), all_entries);
+
+    let mut part = rest.split_off(Path::new("sub/deeper")).expect("recorded");
+    assert_eq!(part.root().name, "deeper");
+    assert_eq!(part.entries(), 2, "deeper and g");
+    assert_eq!(rest.entries() + part.entries(), all_entries);
+    assert_eq!(rest.bytes() + part.bytes(), all_bytes);
+    assert!(rest.entry_at(Path::new("sub/deeper")).is_none());
+    assert!(rest.entry_at(Path::new("sub/f")).is_some());
+    assert!(part.entry_at(Path::new("g")).is_some());
+    assert_eq!(
+        rest.listing_at(Path::new("sub")).map(|l| l.len()),
+        Some(1),
+        "only f is left in sub"
+    );
+    // Nothing of the part is left among the objects the rest's in-use
+    // check matches.
+    let g = part.entry_at(Path::new("g")).expect("g").identity.id;
+    assert!(rest.objects().all(|id| id != g));
+    // A part of the part.
+    assert!(part.split_off(Path::new("g")).is_some());
+    assert_eq!(part.entries(), 1);
+    let _ = part;
+
+    let mut rest = walked(&host, &target, &rules());
+    let part = rest.split_off(Path::new("sub/deeper")).expect("recorded");
+    let sub = Target::new(&host, "/tmp/c/sub/deeper");
+    let done = delete(&host, &sub.candidate(), &part, DeleteOptions::default());
+    assert_eq!((done.end, done.removed_entries), (End::Complete, 2));
+    assert_eq!(
+        unlinked(&host),
+        ["/tmp/c/sub/deeper/g", "/tmp/c/sub/deeper"]
+    );
+    let done = deleted(&host, &target, &rest);
+    assert_eq!(done.end, End::Complete);
+    assert_eq!(done.removed_entries, all_entries - 2);
+    assert!(!exists(&host, "/tmp/c") && exists(&host, "/tmp/keep"));
+    let all = unlinked(&host);
+    let mut unique = all.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), all.len(), "an entry unlinked twice: {all:?}");
+}

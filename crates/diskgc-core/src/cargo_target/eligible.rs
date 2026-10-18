@@ -5,12 +5,14 @@
 use std::path::{Path, PathBuf};
 
 use super::discover::{check_deadline, open_dir};
-use super::{Inspected, Judged, LockSet, Stop, Target, cargo_evidence, inspect, reach};
+use super::{
+    Inspected, Judged, LockSet, ProfileDir, Project, Stop, Target, cargo_evidence, inspect, reach,
+};
 use crate::engine::{
     self, CARGO_LOCK_NAMES, Candidate, Identity, Reason, Rules, Skip, WalkRecord, WalkStop,
 };
 use crate::host::{FileType, Host, MonoTime, Timestamp};
-use crate::inuse::Checker;
+use crate::inuse::{Checker, Scan};
 use crate::profile::{IdleFor, Idleness, Unknown};
 use crate::resolve::Resolved;
 
@@ -118,6 +120,36 @@ pub fn judge_layout(path: &Path, inspected: &Inspected) -> Result<(), Skip> {
     Ok(())
 }
 
+/// What a new inspection of `target` (`inspected`) must show before its
+/// entries are walked: the same profile directories and lock files as
+/// when found (one created, removed or replaced since is `changed`), no
+/// keep marker in the target or a directory directly in it (`kept`),
+/// ownership of what the kind relies on ([`judge_owners`]) and a layout
+/// diskgc knows how to reclaim ([`judge_layout`]).
+pub(super) fn judge_inspected(
+    target: &Target,
+    inspected: &Inspected,
+    owners: &[u32],
+) -> Result<(), Skip> {
+    let path = &target.path;
+    if !inspected.same_locks(&target.inspected) {
+        return Err(Skip::new(
+            Reason::Changed,
+            path.clone(),
+            "a profile directory or lock file was created, removed or replaced since discovery",
+        ));
+    }
+    if let Some(marker) = &inspected.keep_marker {
+        return Err(Skip::new(
+            Reason::Kept,
+            path.join(marker),
+            "a keep marker in the target",
+        ));
+    }
+    judge_owners(path, &target.identity, inspected, owners)?;
+    judge_layout(path, inspected)
+}
+
 /// Every object the kind relies on but does not delete must be the user's
 /// too: the target directory, the directories holding profile directories
 /// two levels down, the profile directories and their lock files
@@ -157,9 +189,11 @@ fn judge_owners(
 /// lock files, each with the deletion engine's eligibility walk
 /// ([`engine::walk`], `rules`): ownership of every entry, keep markers,
 /// mounts, sockets and FIFOs, Cargo lock names and nested targets, the
-/// entry budget. The first refusal is the target's. `target` is the target
-/// directory reached at `path`; each profile directory is opened below it
-/// and must be the one inspected (`changed` otherwise).
+/// entry budget, which is one for the whole target (`rules.max_entries`
+/// over all its entries, not per entry). The first refusal is the
+/// target's. `target` is the target directory reached at `path`; each
+/// profile directory is opened below it and must be the one inspected
+/// (`changed` otherwise).
 pub fn walk_profiles<H: Host>(
     host: &H,
     target: &Resolved<H::Fd>,
@@ -169,51 +203,19 @@ pub fn walk_profiles<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Vec<ProfileWalk<H::Fd>>> {
     let mut walks = Vec::new();
+    let mut budget = Budget::new(rules.max_entries);
     for profile in inspected.profiles.iter().filter(|p| !p.is_empty()) {
         let at = path.join(&profile.rel);
-        check_deadline(host, deadline, &at)?;
-        let (fd, stat) = judged!(open_dir(
+        let dir = judged!(open_profile(host, target, &at, profile, deadline));
+        let entries = judged!(walk_entries(
             host,
-            &target.fd,
-            target.mount.id,
-            &profile.rel,
-            &at
+            &dir,
+            &at,
+            profile,
+            rules,
+            &mut budget,
+            deadline
         ));
-        if Identity::of(&stat) != Some(profile.identity) {
-            return Ok(Err(Skip::new(
-                Reason::Changed,
-                at,
-                "not the profile directory inspected (replaced in between)",
-            )));
-        }
-        let dir = Resolved {
-            fd,
-            mount: target.mount.clone(),
-            stat,
-        };
-        let mut entries = Vec::new();
-        for inspected_entry in &profile.entries {
-            let entry = at.join(&inspected_entry.name);
-            let candidate = Candidate::new(&dir, &entry).expect("an entry's path ends in its name");
-            match engine::walk(host, &candidate, rules, deadline) {
-                // The layout was judged by the types inspected: an entry of
-                // another type now (a directory replaced by a file or a
-                // symlink) is a change.
-                Ok(record) if record.root().identity.file_type != inspected_entry.file_type => {
-                    return Ok(Err(Skip::new(
-                        Reason::Changed,
-                        entry,
-                        "not of the type inspected (replaced in between)",
-                    )));
-                }
-                Ok(record) => entries.push((entry, record)),
-                Err(WalkStop::Skipped(skip)) => return Ok(Err(skip)),
-                Err(WalkStop::DeadlinePassed { path }) => {
-                    return Err(Stop::DeadlinePassed { path });
-                }
-                Err(WalkStop::Failed { path, error }) => return Err(Stop::Failed { path, error }),
-            }
-        }
         walks.push(ProfileWalk {
             dir,
             path: at,
@@ -221,6 +223,120 @@ pub fn walk_profiles<H: Host>(
         });
     }
     Ok(Ok(walks))
+}
+
+/// Opens the profile directory `profile` (at `path`) below the target
+/// directory `target`; it must be the one inspected (`changed`
+/// otherwise).
+pub(super) fn open_profile<H: Host>(
+    host: &H,
+    target: &Resolved<H::Fd>,
+    path: &Path,
+    profile: &ProfileDir,
+    deadline: Option<MonoTime>,
+) -> Judged<Resolved<H::Fd>> {
+    check_deadline(host, deadline, path)?;
+    let (fd, stat) = judged!(open_dir(
+        host,
+        &target.fd,
+        target.mount.id,
+        &profile.rel,
+        path
+    ));
+    if Identity::of(&stat) != Some(profile.identity) {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            path.to_owned(),
+            "not the profile directory inspected (replaced in between)",
+        )));
+    }
+    Ok(Ok(Resolved {
+        fd,
+        mount: target.mount.clone(),
+        stat,
+    }))
+}
+
+/// What is left of a target's entry budget ([`Rules::max_entries`]): one
+/// for all the entries of all its profile directories, so a target cannot
+/// hold more records in memory at once than one candidate may (task-9
+/// review, H4).
+#[derive(Debug)]
+pub(super) struct Budget {
+    max: usize,
+    used: usize,
+}
+
+impl Budget {
+    pub(super) fn new(max: usize) -> Self {
+        Self { max, used: 0 }
+    }
+
+    /// The skip of a target whose entries exceed the budget, at `path`.
+    fn exceeded(&self, path: PathBuf) -> Skip {
+        Skip::new(
+            Reason::TooManyEntries,
+            path,
+            format!(
+                "the target's profile directories hold more than {} entries (one budget for \
+                 the whole target)",
+                self.max
+            ),
+        )
+    }
+}
+
+/// Walks every entry of the profile directory `profile`, open as `dir` at
+/// `path`, but its lock files, each as a candidate of its own, within
+/// what is left of `budget` (see [`walk_profiles`]).
+pub(super) fn walk_entries<H: Host>(
+    host: &H,
+    dir: &Resolved<H::Fd>,
+    path: &Path,
+    profile: &ProfileDir,
+    rules: &Rules<'_>,
+    budget: &mut Budget,
+    deadline: Option<MonoTime>,
+) -> Judged<Vec<(PathBuf, WalkRecord)>> {
+    let mut entries = Vec::new();
+    for inspected_entry in &profile.entries {
+        let entry = path.join(&inspected_entry.name);
+        let candidate = Candidate::new(dir, &entry).expect("an entry's path ends in its name");
+        let left = Rules {
+            max_entries: budget.max.saturating_sub(budget.used),
+            ..*rules
+        };
+        match engine::walk(host, &candidate, &left, deadline) {
+            // The layout was judged by the types inspected: an entry of
+            // another type now (a directory replaced by a file or a
+            // symlink) is a change.
+            Ok(record) if record.root().identity.file_type != inspected_entry.file_type => {
+                return Ok(Err(Skip::new(
+                    Reason::Changed,
+                    entry,
+                    "not of the type inspected (replaced in between)",
+                )));
+            }
+            // The walk bounds its listings by what is left; an entry that
+            // is a file needs no listing, so the sum is checked here too.
+            Ok(record) if budget.used + record.entries() > budget.max => {
+                return Ok(Err(budget.exceeded(entry)));
+            }
+            Ok(record) => {
+                budget.used += record.entries();
+                entries.push((entry, record));
+            }
+            Err(WalkStop::Skipped(skip)) if skip.reason == Reason::TooManyEntries => {
+                return Ok(Err(budget.exceeded(skip.path)));
+            }
+            Err(WalkStop::Skipped(skip)) => return Ok(Err(skip)),
+            Err(WalkStop::DeadlinePassed { path }) => {
+                return Err(Stop::DeadlinePassed { path });
+            }
+            Err(WalkStop::Failed { path, error }) => return Err(Stop::Failed { path, error }),
+        }
+    }
+    Ok(Ok(entries))
 }
 
 /// The last build (docs/safety.md, `cargo-target`: Last build): the newest
@@ -274,24 +390,7 @@ pub fn eligibility<H: Host>(
         path,
         deadline
     ));
-    if !inspected.same_locks(&target.inspected) {
-        return Ok(Err(Skip::new(
-            Reason::Changed,
-            path.clone(),
-            "a profile directory or lock file was created, removed or replaced since discovery",
-        )));
-    }
-    if let Some(marker) = &inspected.keep_marker {
-        return Ok(Err(Skip::new(
-            Reason::Kept,
-            path.join(marker),
-            "a keep marker in the target",
-        )));
-    }
-    if let Err(skip) = judge_owners(path, &target.identity, &inspected, rules.owners) {
-        return Ok(Err(skip));
-    }
-    if let Err(skip) = judge_layout(path, &inspected) {
+    if let Err(skip) = judge_inspected(target, &inspected, rules.owners) {
         return Ok(Err(skip));
     }
     let walks = judged!(walk_profiles(
@@ -303,74 +402,15 @@ pub fn eligibility<H: Host>(
         deadline
     ));
     let last = last_build(&inspected, &walks);
-    if let Some(idle_for) = idle_for {
-        let now = host.wall_clock();
-        let skip = |reason, detail: String| Ok(Err(Skip::new(reason, path.clone(), detail)));
-        match idle_for.verdict(last, now) {
-            Idleness::Idle => {}
-            Idleness::NotIdle => {
-                return skip(
-                    Reason::NotIdle,
-                    format!(
-                        "last build at {} s, {} s before now; idle_for {} s required",
-                        last.map_or(0, |t| t.secs),
-                        now.secs - last.map_or(0, |t| t.secs),
-                        idle_for.0.as_secs()
-                    ),
-                );
-            }
-            Idleness::Unknown(Unknown::Unanswered) => {
-                return skip(
-                    Reason::UnsupportedFs,
-                    "its last build cannot be told: the kernel did not report a time, and an \
-                     unknown age is never idle"
-                        .to_owned(),
-                );
-            }
-            Idleness::Unknown(Unknown::InFuture) => {
-                return skip(
-                    Reason::FutureTime,
-                    format!(
-                        "its last build at {} s lies after now ({} s): its age says nothing",
-                        last.map_or(0, |t| t.secs),
-                        now.secs
-                    ),
-                );
-            }
-        }
+    if let Err(skip) = judge_idle(host, path, last, idle_for) {
+        return Ok(Err(skip));
     }
     let scan = checker.current(host).map_err(|error| Stop::Failed {
         path: path.clone(),
         error,
     })?;
-    if let Some(why) = scan.blocked() {
-        return Ok(Err(Skip::new(Reason::InUse, path.clone(), why)));
-    }
-    let mut evidence = Vec::new();
-    for walk in &walks {
-        for (candidate, record) in walk.candidates() {
-            match scan.check(&candidate, record) {
-                Ok(()) => {}
-                Err(skip) if skip.reason == Reason::InUse => {
-                    evidence.push(format!("{}: {}", skip.path.display(), skip.detail));
-                }
-                Err(skip) => return Ok(Err(skip)),
-            }
-        }
-    }
-    evidence.extend(cargo_evidence(
-        scan,
-        path,
-        target.identity.id,
-        &inspected,
-        reached.project,
-    ));
-    if !evidence.is_empty() {
-        return Ok(Err(Skip::new(
-            Reason::InUse,
-            path.clone(),
-            evidence.join("; "),
-        )));
+    if let Err(skip) = judge_in_use(scan, &walks, target, &inspected, reached.project) {
+        return Ok(Err(skip));
     }
     let (entries, bytes) = walks
         .iter()
@@ -383,4 +423,89 @@ pub fn eligibility<H: Host>(
         entries,
         bytes,
     }))
+}
+
+/// The idle requirement on the last build `last` of the target at `path`
+/// (none: anything passes): `not_idle`, or, for an unknown age, which is
+/// never idle, `unsupported_fs` (a time not reported) or `future_time`.
+pub(super) fn judge_idle<H: Host>(
+    host: &H,
+    path: &Path,
+    last: Option<Timestamp>,
+    idle_for: Option<IdleFor>,
+) -> Result<(), Skip> {
+    let Some(idle_for) = idle_for else {
+        return Ok(());
+    };
+    let now = host.wall_clock();
+    let skip = |reason, detail: String| Err(Skip::new(reason, path.to_owned(), detail));
+    match idle_for.verdict(last, now) {
+        Idleness::Idle => Ok(()),
+        Idleness::NotIdle => skip(
+            Reason::NotIdle,
+            format!(
+                "last build at {} s, {} s before now; idle_for {} s required",
+                last.map_or(0, |t| t.secs),
+                now.secs - last.map_or(0, |t| t.secs),
+                idle_for.0.as_secs()
+            ),
+        ),
+        Idleness::Unknown(Unknown::Unanswered) => skip(
+            Reason::UnsupportedFs,
+            "its last build cannot be told: the kernel did not report a time, and an unknown \
+             age is never idle"
+                .to_owned(),
+        ),
+        Idleness::Unknown(Unknown::InFuture) => skip(
+            Reason::FutureTime,
+            format!(
+                "its last build at {} s lies after now ({} s): its age says nothing",
+                last.map_or(0, |t| t.secs),
+                now.secs
+            ),
+        ),
+    }
+}
+
+/// The in-use check of the whole target against `scan`: a scan that
+/// cannot clear anything (unsettled, a blocking unreadable process), every
+/// entry's record ([`crate::inuse::Scan::check`]) and the Cargo heuristics
+/// ([`cargo_evidence`]). An in-use target names every piece of evidence,
+/// `; `-separated; another refusal of a record (a bound socket:
+/// `contains_ipc`) is returned as it is.
+pub(super) fn judge_in_use<F>(
+    scan: &Scan,
+    walks: &[ProfileWalk<F>],
+    target: &Target,
+    inspected: &Inspected,
+    project: Project,
+) -> Result<(), Skip> {
+    let path = &target.path;
+    if let Some(why) = scan.blocked() {
+        return Err(Skip::new(Reason::InUse, path.clone(), why));
+    }
+    let mut evidence = Vec::new();
+    for walk in walks {
+        for (candidate, record) in walk.candidates() {
+            match scan.check(&candidate, record) {
+                Ok(()) => {}
+                Err(skip) if skip.reason == Reason::InUse => {
+                    evidence.push(format!("{}: {}", skip.path.display(), skip.detail));
+                }
+                Err(skip) => return Err(skip),
+            }
+        }
+    }
+    evidence.extend(cargo_evidence(
+        scan,
+        path,
+        target.identity.id,
+        inspected,
+        project,
+    ));
+    if evidence.is_empty() {
+        Ok(())
+    } else {
+        Err(Skip::new(Reason::InUse, path.clone(), evidence.join("; ")))
+    }
 }

@@ -43,6 +43,9 @@ impl Host for Short {
     fn read_head(&self, file: &ModelFd, limit: usize) -> Result<Vec<u8>, HostError> {
         self.0.read_head(file, limit)
     }
+    fn reopen_regular(&self, file: &ModelFd) -> Result<ModelFd, HostError> {
+        self.0.reopen_regular(file)
+    }
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         self.0.statvfs(fd)
     }

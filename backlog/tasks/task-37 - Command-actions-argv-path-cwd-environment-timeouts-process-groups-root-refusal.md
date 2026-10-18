@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 21:24'
+updated_date: '2026-10-18 02:25'
 labels:
   - wave-4
   - irreversible
@@ -45,6 +45,8 @@ From task-50 round 3 (mped): never drop Command from the scan's patterns to get 
 Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp, /var/tmp; full report in the session scratchpad dogfood/). DECISION by the user: podman (docker here is a podman shim, no docker.sock) is covered by a user-configured command action, not a typed kind, e.g. podman image prune -f --filter until=168h. This revisits the PRD non-goal on command actions for container runtimes: update PRD.md and docs/reference.md to say so, and ship an example profile. On this machine podman holds 6.1G reclaimable images in ~/.local/share/containers.
 
 From task-8: a command action has no timeout of its own any more (docs/reference.md, Actions: the tier's timeout bounds it; the old text listed both with no precedence). Action::Command { argv, cwd: Option<Cwd> }: cwd is resolved at load (type dir -> candidate, file -> parent; None only for type any, decided per candidate: candidate for a directory, parent otherwise); cwd: candidate with type file is a load error. argv is non-empty with a non-empty program; {path} substitution is not checked at load.
+
+CORRECTION (2026-10-18): the 'until v1' wording above is stale. Development builds keep the sandbox gate; release packages from 0.1 (the ensure MVP) onwards are built without it (PRD Scope, Releases; safety.md, Pre-release sandbox gate). Command actions are out of 0.1's scope.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

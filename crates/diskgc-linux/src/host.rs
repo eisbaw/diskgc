@@ -132,6 +132,29 @@ impl LinuxHost {
     fn root(&self) -> ProcRoot<'_> {
         ProcRoot(self.proc.as_fd())
     }
+
+    /// The regular file `file` (at `subject`) refers to, opened again
+    /// read-only and non-blocking ([`Host::read_head`],
+    /// [`Host::reopen_regular`]). The type first, on the fd itself (an
+    /// `O_PATH` fd is fstat-able), so a FIFO or a device is refused (`why`
+    /// says what may be opened) without ever being opened: opening one has
+    /// effects (a FIFO's writer goes on, a device driver runs). Then the
+    /// object the fd refers to, through its magic link: never a name looked
+    /// up again; non-blocking all the same.
+    fn open_regular(&self, file: &LinuxFd, subject: &str, why: &str) -> Result<OwnedFd, HostError> {
+        let kind =
+            rustix::fs::fstat(file).map_err(|e| HostError::errno("fstat", subject, errno_of(e)))?;
+        if FileType::from_mode(kind.st_mode) != FileType::Regular {
+            return Err(HostError::invalid(
+                "reopen",
+                subject,
+                format!("not a regular file ({why})"),
+            ));
+        }
+        let rel = format!("self/fd/{}", file.as_fd().as_raw_fd());
+        self.root()
+            .open(&rel, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY)
+    }
 }
 
 /// This process's `status`, relative to the procfs root.
@@ -775,30 +798,19 @@ impl Host for LinuxHost {
 
     fn read_head(&self, file: &LinuxFd, limit: usize) -> Result<Vec<u8>, HostError> {
         let subject = format!("{file:?}");
-        // The type first, on the fd itself (an O_PATH fd is fstat-able), so
-        // a FIFO or a device is refused without ever being opened (opening
-        // one has effects: a FIFO's writer goes on, a device driver runs).
-        let kind = rustix::fs::fstat(file)
-            .map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
-        if FileType::from_mode(kind.st_mode) != FileType::Regular {
-            return Err(HostError::invalid(
-                "read",
-                &subject,
-                "not a regular file (only marker files are read)",
-            ));
-        }
-        // Then the object the fd refers to, reopened through its magic
-        // link: never a name looked up again; non-blocking all the same.
-        let rel = format!("self/fd/{}", file.as_fd().as_raw_fd());
-        let reopened = self
-            .root()
-            .open(&rel, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY)?;
+        let reopened = self.open_regular(file, &subject, "only marker files are read")?;
         let mut head = Vec::new();
         std::fs::File::from(reopened)
             .take(u64::try_from(limit).unwrap_or(u64::MAX))
             .read_to_end(&mut head)
             .map_err(|e| io_error("read", &subject, &e))?;
         Ok(head)
+    }
+
+    fn reopen_regular(&self, file: &LinuxFd) -> Result<LinuxFd, HostError> {
+        let subject = format!("{file:?}");
+        self.open_regular(file, &subject, "only lock files are reopened")
+            .map(LinuxFd)
     }
 
     fn statvfs(&self, fd: &LinuxFd) -> Result<Space, HostError> {
@@ -1773,6 +1785,80 @@ mod tests {
         };
         assert_eq!(opens(&fifo, &refused), 0, "read_head opened the FIFO");
         assert_eq!(opens(&file, &read), 1, "the control saw no open");
+    }
+
+    /// `reopen_regular` gives a lockable fd of the object an `O_PATH` fd
+    /// refers to (flock refuses the `O_PATH` fd itself), also after the
+    /// name was replaced, and refuses a FIFO without opening it (an inotify
+    /// watch sees no open; the regular file is the control) and a
+    /// directory.
+    #[test]
+    fn reopen_regular_locks_the_object_of_the_fd_and_never_opens_a_fifo() {
+        use rustix::fs::inotify;
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("reopen-regular");
+        let lock = dir.0.join(".cargo-lock");
+        std::fs::write(&lock, b"").expect("write");
+        let fd = resolve(&host, &lock, Want::Any).expect("resolve").fd;
+        let original = rustix::fs::fstat(&fd).expect("fstat").st_ino;
+        let err = match host.flock_try(
+            resolve(&host, &lock, Want::Any).expect("resolve").fd,
+            LockMode::Exclusive,
+        ) {
+            Err(e) => e,
+            Ok(other) => panic!("flock on an O_PATH fd: {other:?}"),
+        };
+        assert!(err.is(Errno::EBADF), "{err}");
+        // The name now holds another file: the reopened fd is the original.
+        std::fs::rename(&lock, dir.0.join("moved")).expect("rename");
+        std::fs::write(&lock, b"").expect("write");
+        let readable = host.reopen_regular(&fd).expect("reopen_regular");
+        assert_eq!(
+            rustix::fs::fstat(&readable).expect("fstat").st_ino,
+            original
+        );
+        match host
+            .flock_try(readable, LockMode::Exclusive)
+            .expect("flock")
+        {
+            TryLock::Acquired(_) => {}
+            TryLock::Busy(_) => panic!("the reopened lock file is busy"),
+        }
+
+        let fifo = dir.0.join("fifo");
+        rustix::fs::mknodat(
+            CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("mkfifo");
+        let opens = |path: &Path, expect_ok: bool| -> usize {
+            let fd = resolve(&host, path, Want::Any).expect("resolve").fd;
+            let watch =
+                inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)
+                    .expect("inotify_init");
+            inotify::add_watch(&watch, path, inotify::WatchFlags::OPEN).expect("add_watch");
+            let got = host.reopen_regular(&fd);
+            assert_eq!(got.is_ok(), expect_ok, "{path:?}: {got:?}");
+            if let Err(e) = got {
+                assert_eq!(e.cause, diskgc_core::host::Cause::Invalid, "{e}");
+            }
+            let mut buf = [std::mem::MaybeUninit::uninit(); 4096];
+            let mut reader = inotify::Reader::new(&watch, &mut buf);
+            let mut n = 0;
+            while reader.next().is_ok() {
+                n += 1;
+            }
+            n
+        };
+        assert_eq!(opens(&fifo, false), 0, "reopen_regular opened the FIFO");
+        assert_eq!(opens(&lock, true), 1, "the control saw no open");
+        let dir_fd = resolve(&host, &dir.0, Want::Directory)
+            .expect("resolve dir")
+            .fd;
+        assert!(host.reopen_regular(&dir_fd).is_err());
     }
 
     /// The wall clock is the realtime clock statx times are on.

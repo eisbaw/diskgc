@@ -3,10 +3,10 @@ id: TASK-9
 title: >-
   cargo-target kind: discovery, lock allowlist, last build, eligibility, process
   heuristics
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 02:06'
+updated_date: '2026-10-18 02:25'
 labels:
   - wave-1
   - irreversible
@@ -90,9 +90,11 @@ Bites round 2: model/unit mutations B1, B2, B3, S1 (last build +1 h), S2, S3 eac
 Round 3 (Codex round-2 blocker, mped GO): a .cargo-*lock* name counts as a lock file only on a regular file (statx, not followed); a directory, symlink, FIFO, socket or char device with such a name makes the target unsupported_layout (judge_layout, checked first), so nothing in that profile counts as reclaimable; a lock replaced by another type later is changed (same_locks compares identity, type included). Tests: a_lock_name_on_anything_but_a_regular_file_is_unsupported_layout (model, all five types plus the regular-file control), cargo_targets_discovered_and_judged@* (container: a real build's .cargo-lock replaced by a FIFO and by a directory). The round-2 type-change guard now has its own test: a_layout_marker_whose_type_changes_before_its_walk_is_changed (model events swap build/ for a file right before the walk opens the profile directory). Docs: cargo_target module doc (entries keep names and types), safety.md lock files are regular files, and the blind spot of another project's target-dir pointing at an attached target. Bites: lock-type rule disabled -> model test fails (Codex's scenario judged Eligible, valuable-data reclaimable) and container test fails (/tmp/w/lf/target eligible); type-change guard disabled -> its model test fails.
 
 Round 4 (Codex round-3 blocker, mped GO): a target is attached only when its parent holds a Cargo.toml that statx (not followed) shows as a regular file; a directory or a symlink (dangling or not) of that name leaves it detached (the conservative side; this drops the earlier acceptance of symlinked manifests). Test only_a_regular_cargo_toml_makes_a_target_attached (directory, symlink to a regular file, dangling symlink: in_use by a cargo elsewhere; regular-file control eligible); bite: has_manifest accepting any type -> the directory case is Eligible, test fails. Regression a_lock_file_replaced_by_a_symlink_after_discovery_is_changed (a rename over .cargo-lock between discovery and the check -> changed); bite: same_locks by name only -> the test fails (the target is then still refused, as unsupported_layout by the lock-type rule). safety.md says what attached means; doc nits fixed (detached-target rule named, not numbered; long doc lines rewrapped). QA addendum: the gate message and docs in diskgc-core host.rs and diskgc-linux sandbox.rs now say development builds keep the gate and release packages from 0.1 remove it (no 'until v1' left).
+
+Committed as ec38916 (tree ff37313) after the deep gate's fourth round: qa-test-runner, mped-architect and Codex all GO. Decision to raise at the check-in: CARGO_BUILD_BUILD_DIR split halves are never reclaimed in 0.1. In the task-53 handoff note above, Reached.project is Project {id, detached} (the later line supersedes the earlier one).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

@@ -845,6 +845,19 @@ pub trait Host {
     /// marker files (a `CACHEDIR.TAG`'s signature), never user data.
     fn read_head(&self, file: &Self::Fd, limit: usize) -> Result<Vec<u8>, HostError>;
 
+    /// The regular file open as `file` (typically an `O_PATH` fd whose
+    /// identity the caller checked with [`Host::statx`]`(Base::Dir(file),
+    /// "")`), opened again read-only and non-blocking as a new open file
+    /// description, so that it can be `flock`ed (`flock` refuses an
+    /// `O_PATH` fd). As for [`Host::read_head`], `LinuxHost` reopens the
+    /// object the fd refers to (through `/proc/self/fd`), never a name
+    /// looked up again, and refuses anything but a regular file
+    /// (`Cause::Invalid`) by the fd's own type before anything is opened,
+    /// so a FIFO or a device that took a lock file's name is never opened.
+    /// For Cargo's lock files (docs/safety.md, `cargo-target`: Reclaim
+    /// protocol).
+    fn reopen_regular(&self, file: &Self::Fd) -> Result<Self::Fd, HostError>;
+
     /// `fstatvfs(fd)`.
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError>;
 

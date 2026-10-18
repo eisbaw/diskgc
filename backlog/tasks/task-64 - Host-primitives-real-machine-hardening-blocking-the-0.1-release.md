@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-18 01:32'
+updated_date: '2026-10-18 03:55'
 labels:
   - wave-1
   - hardening
@@ -86,6 +86,11 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 From task-9 round 2 (review filings H3, H7):
 - H3: a dormant shell that exported CARGO_TARGET_DIR after exec is invisible to the initial-environment heuristic (environ shows the environment at exec); for an attached target its later cargo is caught by the project-dir rule, for a detached one by rule 6 only while cargo runs. Accepted limit; worth a real-machine check.
 - H7: a mode-000 directory (another tool's, or a test's) inside target/tmp/<x> makes cargo_target::inspect fail closed with unreadable for the whole target, indefinitely, although target/tmp is never deleted. Consider not listing directories two levels down that cannot be profile directories, or reporting it so the user can act.
+
+From task-53's deep gate (mped H4-H6, cargo-target reclaim protocol):
+- H4: measure the lock hold time (Reclaimed::locks_held, driver cargo-reclaim held_us) on a per-unit (nightly) target with many units: phase A deletes each build/<pkg>/<hash>/fingerprint as its own part, each with a lock re-listing (read_dir + statx of every profile entry), an open of its unit dir and an in-use check; measured so far only on a classic target with 100k files in deps/ (0.49 s untraced).
+- H5 (optional refactor): keep the inspected ProfileDir inside ProfileWalk, so reclaim needs no parallel 'walked' vector; it needs a clone of inspected data or a lifetime on the public ProfileWalk, so not done in task-53.
+- H6: a lock file hard-linked into two profile directories (same inode) makes the protocol's second flock on it fail against diskgc's own first lock, so the target is 'locked' with a message blaming 'another process'. Safe (nothing deleted) but misleading: detect duplicate lock identities across the target (e.g. in judge_layout -> unsupported_layout) or word the message.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

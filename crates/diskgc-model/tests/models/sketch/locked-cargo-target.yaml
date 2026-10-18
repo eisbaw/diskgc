@@ -10,7 +10,7 @@ tree:
     CACHEDIR.TAG: {cachedir_tag: true}
     debug:
       .cargo-lock: {}
-      deps: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+      deps: {app-1: {size: 8G, mtime: 2026-10-01T00:00:00Z}}
   /nix/store/x-cargo/bin/cargo: {}
 locks:
   - {path: /home/mark/src/app/target/debug/.cargo-lock, holder: 4242, mode: exclusive}

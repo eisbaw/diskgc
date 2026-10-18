@@ -4,7 +4,7 @@ title: 'Release review and final hardening: v1 freeze'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 23:56'
+updated_date: '2026-10-18 02:25'
 labels:
   - wave-5
   - review
@@ -40,6 +40,8 @@ Why: v1 freezes the CLI, JSON and YAML contracts for users. Final deep review (m
 From task-50: the v1 release package, and only it, enables the cargo feature release-without-sandbox-gate of diskgc-linux, set in one place (e.g. the diskgc package's cargoExtraArgs in flake.nix). Update the test sandbox_gate_flag_is_enabled_nowhere (crates/diskgc-linux/src/sandbox.rs) to allow exactly that line. The e2e binaries, the test driver and every check must stay gated. Remove the 'Until v1 is released' bullet from PRD Safety boundaries and update docs/safety.md, Pre-release sandbox gate. Today the shipped binary links no deleting code, so nothing checks the binary itself. Once it does, consider a flake check that the non-release package contains the marker path /.diskgc-test-sandbox (sandbox::check linked in) and the release package does not.
 
 0.1 comes first (2026-10-18): task-67 releases the ensure MVP and is the first package built with release-without-sandbox-gate; it sets the flag in one place and updates sandbox_gate_flag_is_enabled_nowhere. This task builds on 0.1: AC #4 then means the v1 package keeps that single flag site, and the 'Until v1 is released' text in the implementation note above is superseded by the PRD and safety.md changes for 0.1.
+
+CORRECTION (2026-10-18): AC #4's 'v1 package' predates the 0.1 release (task-67), which already lifts the sandbox gate in the release package; task-49 builds on 0.1 and re-reviews for v1.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

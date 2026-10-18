@@ -14,6 +14,7 @@ use std::time::Duration;
 use diskgc_core::engine::CARGO_LOCK_NAMES;
 
 use crate::cargo_probe::{self, Rusage};
+use crate::cargo_reclaim_suite;
 use crate::cargo_target_suite;
 use crate::cargo_under_test::{
     self, Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain, run_as_tester_untraced,
@@ -76,6 +77,22 @@ pub static CARGO_TESTS: &[CargoTest] = &[
     CargoTest {
         name: "cargo_detached_target_is_in_use_while_any_cargo_runs",
         run: cargo_target_suite::cargo_detached_target_is_in_use_while_any_cargo_runs,
+    },
+    CargoTest {
+        name: "cargo_reclaim_deletes_only_inside_locked_profile_dirs",
+        run: cargo_reclaim_suite::cargo_reclaim_deletes_only_inside_locked_profile_dirs,
+    },
+    CargoTest {
+        name: "cargo_reclaim_skips_a_target_whose_lock_is_held",
+        run: cargo_reclaim_suite::cargo_reclaim_skips_a_target_whose_lock_is_held,
+    },
+    CargoTest {
+        name: "cargo_reclaim_changed_between_discovery_and_locking",
+        run: cargo_reclaim_suite::cargo_reclaim_changed_between_discovery_and_locking,
+    },
+    CargoTest {
+        name: "cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile",
+        run: cargo_reclaim_suite::cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile,
     },
 ];
 

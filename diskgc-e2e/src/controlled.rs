@@ -52,6 +52,7 @@ pub const OPS: &[&str] = &[
     "statx",
     "read_dir",
     "read_head",
+    "reopen_regular",
     "statvfs",
     "flock_try",
     "flock_wait",
@@ -438,6 +439,11 @@ impl<H: Host> Host for Controlled<H> {
         self.host.read_head(file, limit)
     }
 
+    fn reopen_regular(&self, file: &Self::Fd) -> Result<Self::Fd, HostError> {
+        self.before("reopen_regular");
+        self.host.reopen_regular(file)
+    }
+
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError> {
         self.before("statvfs");
         self.host.statvfs(fd)
@@ -588,6 +594,7 @@ processes:
         host.read_dir(&a.fd, 10).expect("read_dir");
         let f = resolve(host, Path::new("/tmp/a/f"), Want::Any).expect("resolve f");
         host.read_head(&f.fd, 8).expect("read_head");
+        drop(host.reopen_regular(&f.fd).expect("reopen_regular"));
         host.wall_clock();
         host.statvfs(&a.fd).expect("statvfs");
         let deadline = host.now().checked_add(Duration::from_secs(1));
