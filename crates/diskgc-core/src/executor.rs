@@ -1,8 +1,12 @@
 //! The executor (docs/architecture.md, The reclaim walk), first slice: the
 //! minimal `ensure` of one `--select` tier of kind `cargo-target`
-//! (task-10). Later tasks extend it, nothing here is thrown away: groups,
-//! ranking and per-tier discovery for config tiers (task-20), deadlines
-//! with overruns, signals and re-sampling (task-54), the index (task-31).
+//! (task-10), and the dry run of one tier of kind `fs` (task-68's spike:
+//! [`crate::fs_kind`]; a reclaiming `ensure` refuses kind `fs` until its
+//! delete exists, task-18). Later tasks extend it: groups, ranking and
+//! per-tier discovery for config tiers (task-20), deadlines with overruns,
+//! signals and re-sampling (task-54), the index (task-31). The fs dry run's
+//! fused discover-and-judge ([`fs_kind::plan`]) is a dry-run shape that
+//! task-18 splits for the reclaim.
 //!
 //! Two entry points, kept apart by the type system:
 //!
@@ -19,9 +23,10 @@
 //! - [`dry_run`] plans. It takes only a [`Host`], so it cannot reach a
 //!   deleting method (nor the gate, which only `Delete` has): it measures,
 //!   discovers and runs the eligibility check of every target
-//!   ([`cargo_target::eligibility`]: no lock, no deletion), whatever the
-//!   available space, and lists them in the order [`ensure`] would take
-//!   them, eligible first.
+//!   ([`cargo_target::eligibility`]: no lock, no deletion), or of every
+//!   `fs` candidate ([`fs_kind::plan`]), whatever the available space, and
+//!   lists them in the order [`ensure`] would take them (`oldest`: least
+//!   recently built or changed first), eligible first.
 //!
 //! Both start with [`privileges`] and a [`Tier`], built and checked by the
 //! caller before anything touches the machine (static validation).
@@ -37,11 +42,11 @@ use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Reason, Rules, Skip};
-use crate::host::{Delete, Dev, Host, MonoTime, Space, Timestamp};
+use crate::fs_kind::{self, Find};
+use crate::host::{Delete, Dev, Host, HostError, MonoTime, Space, Timestamp};
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
-use crate::kind::Kind;
-use crate::profile::{Body, IdleFor, Library};
+use crate::profile::{Body, Finds, IdleFor, Library};
 use crate::report::{
     ActionEntry, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
@@ -54,7 +59,8 @@ use crate::units::{Size, format_bytes};
 /// (docs/reference.md, Commands).
 pub const SELECT_TIER: &str = "--select";
 
-/// One tier as this slice runs it: a single `cargo-target` term, its idle
+/// One tier as this slice runs it: a single term of one source profile
+/// (kind `cargo-target`, or kind `fs` for a dry run only), its idle
 /// requirement and its roots. Built by [`Tier::select`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier {
@@ -64,12 +70,24 @@ pub struct Tier {
     pub select: String,
     /// The source profile.
     pub profile: String,
+    /// What the source finds, by kind.
+    pub source: SourceKind,
     /// Where it looks: the bound roots, `{uid}` replaced.
     pub roots: Vec<PathBuf>,
     /// The term's idle requirement (the longest of its `filter:`s).
     pub idle_for: Option<IdleFor>,
     /// The action, as the report names it.
     pub operation: String,
+}
+
+/// What a tier's source profile finds, by kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceKind {
+    /// Cargo target directories, by their structure.
+    CargoTarget,
+    /// Entries matching its `find` (kind `fs`). Only planned: a reclaiming
+    /// [`ensure`] refuses it (task-18).
+    Fs(Find),
 }
 
 impl Tier {
@@ -88,8 +106,8 @@ impl Tier {
         let not_yet = |what: &str, task: &str| {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
-                 ({task}); select one `profile:cargo-target` term, optionally with \
-                 `&& filter:idle-...`"
+                 ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
+                 kind fs with --dry-run), optionally with `&& filter:idle-...`"
             )
         };
         let [term] = checked.expr().terms.as_slice() else {
@@ -108,10 +126,27 @@ impl Tier {
                 term.source
             ));
         };
-        if source.kind() != Kind::CargoTarget {
+        // The loader admits only these two finds (the Docker and Nix kinds
+        // are refused at load until task-35 / task-36).
+        let kind = match &source.finds {
+            Finds::CargoTargets => SourceKind::CargoTarget,
+            Finds::Paths {
+                patterns,
+                entry_type,
+            } => SourceKind::Fs(Find::new(patterns, *entry_type, &source.where_, uid)),
+        };
+        // `idle_for` is the only predicate this build evaluates in a term:
+        // a `has` / `has_not` filter is refused, never ignored.
+        if let Some(name) = term.factors.iter().find_map(|f| match f {
+            Factor::Filter(name) => match library.get(name).map(|p| &p.body) {
+                Some(Body::Filter(w)) if w.has.is_some() || w.has_not.is_some() => Some(name),
+                _ => None,
+            },
+            _ => None,
+        }) {
             return Err(not_yet(
-                &format!("kind {} (`profile:{}`)", source.kind(), term.source),
-                "task-18, task-35, task-36",
+                &format!("`filter:{name}` (a `has` / `has_not` filter)"),
+                "task-16",
             ));
         }
         let idle_for = library.idle_for(term)?;
@@ -132,6 +167,7 @@ impl Tier {
             name: SELECT_TIER.to_owned(),
             select: checked.expr().to_string(),
             profile: term.source.clone(),
+            source: kind,
             roots,
             idle_for,
             operation: source.action.to_string(),
@@ -156,6 +192,16 @@ pub struct Request {
     pub tally_budget: Option<Duration>,
     pub tier: Tier,
 }
+
+/// How long the dry run of an `fs` tier reuses one process scan for
+/// further candidates. A plan deletes nothing, so the deletion's freshness
+/// bound ([`crate::inuse::FRESHNESS`], to which `inuse::Checker` clamps
+/// any reuse) does not apply; with it, a scan per candidate dominated the
+/// plan's cost (task-68: 328 candidates spread over a 155,000-entry `/tmp`
+/// took ten minutes on a loaded laptop, a scan of 500 processes taking half
+/// a second unloaded). The plan's in-use verdicts are then up to this old,
+/// which a plan read later is anyway.
+pub const DRY_RUN_SCAN_REUSE: Duration = Duration::from_secs(60);
 
 /// `--tally-budget`'s default (docs/reference.md, `ensure`): the smaller of
 /// 30 s and a quarter of `--timeout` (30 s without a timeout).
@@ -283,9 +329,27 @@ pub fn ensure<H: Delete>(
     uid: u32,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let deadline = deadline_of(host, request.timeout);
     // Not a success until a path below says so.
-    let mut report = Report::new(Status::Error, Some(&request.path));
+    let report = Report::new(Status::Error, Some(&request.path));
+    // Before anything else (the gate, the first sample, the host lock):
+    // only kind cargo-target has a reclaim in this build. Kind fs has no
+    // delete yet (task-18), so a reclaim over its candidates is refused,
+    // never attempted. An allowlist: a source kind added later is refused
+    // here until its reclaim exists ([`Reclaim::walk`] refuses it too).
+    let SourceKind::CargoTarget = &request.tier.source else {
+        return usage(
+            report,
+            log,
+            format!(
+                "--select `{}`: `{}` is not of kind cargo-target: only Cargo targets are \
+                 reclaimed by this build (the fs delete is not implemented yet, task-18): a \
+                 reclaiming ensure refuses it; use --dry-run for a read-only plan",
+                request.tier.select, request.tier.profile
+            ),
+        );
+    };
+    let mut report = report;
+    let deadline = deadline_of(host, request.timeout);
     if let Err(gate) = host.may_delete() {
         return usage(
             report,
@@ -386,7 +450,72 @@ pub fn dry_run<H: Host>(
     let owners = [uid];
     let rules = rules(&owners);
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
-    let entry = |candidate: &Path, reason: Option<&'static str>, bytes: Option<u64>| PlanEntry {
+    let planned = match &tier.source {
+        SourceKind::CargoTarget => plan_cargo(
+            host,
+            tier,
+            measured.dev,
+            &rules,
+            &mut checker,
+            deadline,
+            &mut report,
+            log,
+        ),
+        SourceKind::Fs(find) => plan_fs(
+            host,
+            tier,
+            find,
+            measured.dev,
+            &rules,
+            deadline,
+            &mut report,
+            log,
+        ),
+    };
+    let Planned {
+        mut eligible,
+        skipped,
+        stopped,
+    } = planned;
+    oldest_first(&mut eligible, |(last, _)| *last);
+    report.plan = eligible
+        .into_iter()
+        .map(|(_, e)| e)
+        .chain(skipped)
+        .collect();
+    if let Some(stop) = stopped {
+        if matches!(stop, Stop::DeadlinePassed { .. }) {
+            report.status = Status::Deadline;
+        }
+        record_error(
+            &mut report,
+            log,
+            run_error(tier, format!("stopped: {stop}")),
+        );
+    }
+    // Unmeasured: unknown, not the earlier sample.
+    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+    report.held_by_deleted_files = held(host, &mut checker, measured.dev, log);
+    report
+}
+
+/// A plan in the making: the eligible candidates with their order key
+/// (the kind's idle measure), the skipped ones, and why planning stopped
+/// early (an error of the run, or the deadline).
+struct Planned {
+    eligible: Vec<(Option<Timestamp>, PlanEntry)>,
+    skipped: Vec<PlanEntry>,
+    stopped: Option<Stop>,
+}
+
+/// One plan entry of `tier`.
+fn plan_entry(
+    tier: &Tier,
+    candidate: &Path,
+    reason: Option<&'static str>,
+    bytes: Option<u64>,
+) -> PlanEntry {
+    PlanEntry {
         group: tier.group.clone(),
         tier: tier.name.clone(),
         profile: tier.profile.clone(),
@@ -394,6 +523,24 @@ pub fn dry_run<H: Host>(
         reason,
         estimated_bytes: bytes,
         operation: tier.operation.clone(),
+    }
+}
+
+/// The plan of a `cargo-target` tier: discovery, then the eligibility
+/// check of every target.
+#[allow(clippy::too_many_arguments)]
+fn plan_cargo<H: Host>(
+    host: &H,
+    tier: &Tier,
+    dev: Dev,
+    rules: &Rules<'_>,
+    checker: &mut Checker<'_>,
+    deadline: Option<MonoTime>,
+    report: &mut Report,
+    log: &mut dyn FnMut(&str),
+) -> Planned {
+    let entry = |candidate: &Path, reason: Option<&'static str>, bytes: Option<u64>| {
+        plan_entry(tier, candidate, reason, bytes)
     };
     let mut eligible = Vec::new();
     let mut skipped = Vec::new();
@@ -410,7 +557,7 @@ pub fn dry_run<H: Host>(
                 }
             }
             for skip in &misconfigured {
-                record_error(&mut report, log, run_error(tier, excluded(skip)));
+                record_error(report, log, run_error(tier, excluded(skip)));
             }
             let targets = if misconfigured.is_empty() {
                 found.targets.as_slice()
@@ -418,7 +565,7 @@ pub fn dry_run<H: Host>(
                 &[]
             };
             for target in targets {
-                if let Some(skip) = other_fs(target, measured.dev) {
+                if let Some(skip) = other_fs(target, dev) {
                     log_skip(log, tier, &skip);
                     skipped.push(entry(&target.path, Some(skip.reason.as_str()), None));
                     continue;
@@ -426,9 +573,9 @@ pub fn dry_run<H: Host>(
                 match cargo_target::eligibility(
                     host,
                     target,
-                    &rules,
+                    rules,
                     tier.idle_for,
-                    &mut checker,
+                    checker,
                     deadline,
                 ) {
                     Ok(Ok(e)) => {
@@ -455,26 +602,104 @@ pub fn dry_run<H: Host>(
             }
         }
     }
-    oldest_first(&mut eligible, |(last, _)| *last);
-    report.plan = eligible
-        .into_iter()
-        .map(|(_, e)| e)
-        .chain(skipped)
-        .collect();
-    if let Some(stop) = stopped {
-        if matches!(stop, Stop::DeadlinePassed { .. }) {
-            report.status = Status::Deadline;
-        }
-        record_error(
-            &mut report,
-            log,
-            run_error(tier, format!("stopped: {stop}")),
-        );
+    Planned {
+        eligible,
+        skipped,
+        stopped,
     }
-    // Unmeasured: unknown, not the earlier sample.
-    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
-    report.held_by_deleted_files = held(host, &mut checker, measured.dev, log);
-    report
+}
+
+/// The plan of an `fs` tier ([`fs_kind::plan`]): every candidate found
+/// below the roots, judged. As for Cargo, a root reached through a symlink
+/// or a mount crossing (`unsafe_path`) is a misconfiguration: an error,
+/// and the tier is excluded.
+#[allow(clippy::too_many_arguments)]
+fn plan_fs<H: Host>(
+    host: &H,
+    tier: &Tier,
+    find: &Find,
+    dev: Dev,
+    rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+    report: &mut Report,
+    log: &mut dyn FnMut(&str),
+) -> Planned {
+    let mut planned = Planned {
+        eligible: Vec::new(),
+        skipped: Vec::new(),
+        stopped: None,
+    };
+    let (found, stopped) = fs_kind::plan(
+        host,
+        &tier.roots,
+        find,
+        dev,
+        rules,
+        tier.idle_for,
+        DRY_RUN_SCAN_REUSE,
+        deadline,
+        log,
+    );
+    planned.stopped = stopped;
+    log(&format!(
+        "{}: `{}`: {} candidate(s) below {} ({} found again through another root or pattern, \
+         {} systemd-private-* passed over)",
+        tier.name,
+        tier.select,
+        found.judged.len(),
+        tier.roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        found.duplicates.len(),
+        found.private_tmp,
+    ));
+    let misconfigured: Vec<&Skip> = found
+        .refused
+        .iter()
+        .filter(|skip| is_misconfigured(tier, skip))
+        .collect();
+    for skip in &misconfigured {
+        record_error(report, log, run_error(tier, excluded(skip)));
+    }
+    for skip in found.refused.iter().filter(|s| !is_misconfigured(tier, s)) {
+        log_skip(log, tier, skip);
+        planned.skipped.push(plan_entry(
+            tier,
+            &skip.path,
+            Some(skip.reason.as_str()),
+            None,
+        ));
+    }
+    if !misconfigured.is_empty() {
+        return planned;
+    }
+    for (path, verdict) in &found.judged {
+        match verdict {
+            Ok(e) => {
+                log(&format!(
+                    "{} {}: eligible, {} entries, {} (newest change {})",
+                    tier.name,
+                    path.display(),
+                    e.entries,
+                    format_bytes(e.bytes),
+                    e.newest_change
+                        .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
+                ));
+                planned
+                    .eligible
+                    .push((e.newest_change, plan_entry(tier, path, None, Some(e.bytes))));
+            }
+            Err(skip) => {
+                log(&format!("{} {}: skip {skip}", tier.name, path.display()));
+                planned
+                    .skipped
+                    .push(plan_entry(tier, path, Some(skip.reason.as_str()), None));
+            }
+        }
+    }
+    planned
 }
 
 /// The one set of walk rules of a run: every entry the user's, any socket
@@ -518,6 +743,22 @@ fn discover<H: Host>(
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Discovery, Stop> {
+    // Only a Cargo tier discovers Cargo targets: an fs tier's roots are
+    // where its patterns look, never a place to look for targets (and
+    // reclaim them). No `_` arm: a new source kind must decide here.
+    match &tier.source {
+        SourceKind::CargoTarget => {}
+        SourceKind::Fs(_) => {
+            return Err(Stop::Failed {
+                path: tier.roots.first().cloned().unwrap_or_default(),
+                error: HostError::invalid(
+                    "discover",
+                    &tier.profile,
+                    "kind fs: Cargo discovery and reclaim run only for a cargo-target tier",
+                ),
+            });
+        }
+    }
     let found = cargo_target::discover(host, &tier.roots, deadline)?;
     log(&format!(
         "{}: `{}`: {} target(s) below {}",
@@ -826,8 +1067,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         before: u64,
     ) -> Option<u64> {
         let started = self.host.now();
-        // judged_last_build None: the tally only orders; the protocol's own
-        // recheck under the locks and the idle requirement decide.
+        // judged_last_build None: an accepted tally only orders; the
+        // protocol's own recheck under the locks and the idle requirement
+        // decide.
         let done = cargo_target::reclaim(
             self.host,
             target,

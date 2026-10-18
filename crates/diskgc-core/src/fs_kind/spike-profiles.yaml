@@ -1,0 +1,353 @@
+# task-68 (profile spike): the library rows of docs/reference.md (Built-in
+# profile library) written as USER profiles, as the spike dry-ran them on a
+# real laptop (2026-10-18). Evidence, not a shipped library: built-ins land
+# with task-65 / task-39 after verification. fs_kind::tests loads this file
+# as a configuration and checks every example with the matcher, so it stays
+# loadable and its examples stay true. When a built-in of the same name
+# ships, loading this file fails (a user profile may not shadow a built-in
+# without `override: true`, task-17): rename or delete the row then.
+#
+# Comments starting with "DOC:" say where a profile deviates from its
+# reference.md row and why (the spike's findings, task-68 notes).
+version: 1
+profiles:
+  # ---- the /tmp group -------------------------------------------------
+
+  - name: pytest-tmp
+    category: test
+    description: pytest temp dirs in /tmp, /var/tmp and one level down
+    # As reference.md's example. DOC: misses nested shells (nix-shell.X/
+    # nix-shell.Y/pytest-of-*, depth 3) and pytest dirs inside nix-shell rc
+    # dirs and zephyr run dirs; no `**`, so each container family is a
+    # pattern of its own.
+    find:
+      roots: [/tmp, /var/tmp]
+      paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/pytest-of-mark, /tmp/nix-shell.AbC123/pytest-of-mark, /var/tmp/tmp.x1/pytest-of-ci]
+      no_match: [/tmp/pytest-of-mark/pytest-3, /home/mark/pytest-of-mark, /tmp/a/b/pytest-of-mark]
+
+  - name: nix-shell-rc
+    category: nix
+    description: rc dirs nix-shell and nix develop leave in /tmp at every shell start
+    find:
+      roots: [/tmp]
+      paths: ["nix-shell-*-*", "nix-develop-*-*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/nix-shell-1144586-3257819220, /tmp/nix-develop-77-123]
+      no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586]
+
+  - name: nix-shell-tmpdir
+    category: nix
+    description: a nix-shell's TMPDIR in /tmp
+    find:
+      roots: [/tmp]
+      paths: ["nix-shell.*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/nix-shell.8raHjU]
+      no_match: [/tmp/nix-shell-1-2, /tmp/claude-1000/nix-shell.8raHjU]
+
+  - name: claude-code-tmp
+    category: ai agents
+    description: Claude Code session dirs, /tmp/claude-{uid}/<project>/<session>
+    # DOC (fixed in reference.md by task-68): Claude Code also makes
+    # /tmp/claude-{uid} the TMPDIR of the tools it runs, so depth 1 holds
+    # nix-shell.*, tmp* and loose files next to the project dirs, which are
+    # named after the project's path and so start with `-`. The row's
+    # `*/*` also matched inside those TMPDIR dirs (probe
+    # claude-code-tmp-star below).
+    find:
+      roots: [/tmp]
+      paths: ["claude-{uid}/-*/*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a]
+      no_match: [/tmp/claude-1000/-home-mark-src-app, /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark, /tmp/claude-1001x/-a/b]
+
+  - name: claude-code-tmp-star
+    category: probes
+    description: the earlier claude-code-tmp row, /tmp/claude-{uid}/*/*
+    find:
+      roots: [/tmp]
+      paths: ["claude-{uid}/*/*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/claude-1000/nix-shell.Ab1/pytest-of-mark]
+
+  - name: chromium-tmp
+    category: browsers
+    description: Chromium and Brave scratch in /tmp
+    # DOC: reference.md says `.org.chromium.Chromium.*`; on this machine
+    # those are FILES (8), and the bulk are DIRECTORIES without the dot
+    # (org.chromium.Chromium.*_chrome_url_fetcher_*, *_Unpacker_*: 260).
+    # Hence both patterns and `type: any`.
+    find:
+      roots: [/tmp]
+      paths: [".org.chromium.Chromium.*", "org.chromium.Chromium.*"]
+      type: any
+    action: delete
+    examples:
+      match: [/tmp/.org.chromium.Chromium.aB3dEf, /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
+      no_match: [/tmp/org.mozilla.firefox.x]
+
+  - name: mktemp-dir
+    category: generic
+    description: coreutils mktemp -d dirs in /tmp
+    # DOC: Python's tempfile.mkdtemp makes /tmp/tmpXXXXXXXX (no dot: 3,457
+    # here, 663 tmp.*); `tmp*` would cover both but also any name starting
+    # with "tmp".
+    find:
+      roots: [/tmp]
+      paths: ["tmp.*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/tmp.AbC123]
+      no_match: [/tmp/tmp00i1c8qs, /tmp/tmp]
+
+  - name: tmp-entry
+    category: generic
+    description: any top-level entry of /tmp and /var/tmp
+    find:
+      roots: [/tmp, /var/tmp]
+      paths: ["*"]
+      type: any
+    action: delete
+    examples:
+      match: [/tmp/anything, /var/tmp/.hidden, /tmp/claude-1000]
+      no_match: [/tmp/a/b, /home/mark/x]
+
+  - name: playwright-tmp
+    category: python / js
+    description: Playwright scratch (artifacts, browser profiles) in /tmp and nix-shell temp dirs
+    # DOC: reference.md says `playwright*` in /tmp; here none is top-level,
+    # all 73 lie in TMPDIR dirs (nix-shell.*, nix-shell-*-*), so the
+    # nix-shell patterns are added (as node-compile-cache's row has them).
+    find:
+      roots: [/tmp]
+      paths: ["playwright*", "nix-shell.*/playwright*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/playwright-artifacts-0a3aQN, /tmp/nix-shell.x1/playwright_chromiumdev_profile-Sw4zrD]
+      no_match: [/tmp/a/playwright-x]
+
+  - name: node-compile-cache
+    category: python / js
+    description: Node's compile cache in /tmp and nix-shell temp dirs
+    find:
+      roots: [/tmp]
+      paths: ["node-compile-cache", "nix-shell.*/node-compile-cache"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/node-compile-cache, /tmp/nix-shell.AbC/node-compile-cache]
+      no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
+
+  - name: zephyr-tmp
+    category: embedded
+    description: Zephyr scratch and zephyr-*-run.* dirs in /tmp
+    # DOC: `zephyr-*` already covers `zephyr-*-run.*`; one pattern.
+    find:
+      roots: [/tmp]
+      paths: ["zephyr-*"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/zephyr-h5e5-run.jTm9zGlH, /tmp/zephyr-scratch]
+      no_match: [/tmp/zephyr, /tmp/a/zephyr-x]
+
+  - name: renode-tmp
+    category: embedded
+    description: renode-* in /tmp and nix-shell temp dirs
+    # DOC: top-level renode-* here are crash dumps (renode-<pid>-crash);
+    # most renode-<pid> dirs lie inside zephyr-*-run.* (found by zephyr-tmp
+    # as part of the run dir) and nix-shell.* dirs.
+    find:
+      roots: [/tmp]
+      paths: ["renode-*", "nix-shell.*/renode-*"]
+      type: any
+    action: delete
+    examples:
+      match: [/tmp/renode-1045514-crash, /tmp/nix-shell.Ab1/renode-1000523]
+      no_match: [/tmp/renode, /tmp/zephyr-h5e5-run.x/renode-1]
+
+  # ---- plain deletes that need roots ------------------------------------
+
+  - name: pytest-cache
+    category: test
+    description: .pytest_cache dirs up to three levels below a root
+    # DOC: no `**`: the depth is spelled out (up to 3 below each root).
+    find:
+      roots: required
+      paths: [".pytest_cache", "*/.pytest_cache", "*/*/.pytest_cache", "*/*/*/.pytest_cache"]
+      type: dir
+    action: delete
+    examples:
+      match: [/home/mark/src/app/.pytest_cache, /home/mark/src/a/b/c/.pytest_cache]
+      no_match: [/home/mark/src/app/.pytest_cache/v]
+
+  - name: cmake-build
+    category: c / c++
+    description: directories holding a CMakeCache.txt, up to three levels below a root
+    # DOC: "directories containing CMakeCache.txt" is a source `where: {has:}`
+    # over every directory at the spelled-out depths; the outermost one wins
+    # (a candidate is never descended into). The spike found an in-source
+    # build: a git checkout with uncommitted changes (5.6 GiB) holding a
+    # CMakeCache.txt. Hence `has_not: CMakeLists.txt` (fixed in reference.md).
+    find:
+      roots: required
+      paths: ["*", "*/*", "*/*/*"]
+      type: dir
+    where: {has: CMakeCache.txt, has_not: CMakeLists.txt}
+    action: delete
+    # Paths only: every directory matches `*`, so no `no_match` can be
+    # written; what `where` keeps is not part of an example (task-17).
+    examples:
+      match: [/home/mark/src/app/build, /home/mark/src/a/b/c]
+
+  - name: west-build
+    category: embedded
+    description: Zephyr west build/ dirs (CMakeCache.txt; zephyr/ not expressible)
+    # DOC: the row wants CMakeCache.txt PLUS a zephyr/ directory; `where`
+    # takes each predicate once and `has` names a file, so only
+    # CMakeCache.txt is checked, and the name `build` stands in for the rest
+    # (it also finds non-Zephyr CMake build/ dirs). `has_not` as cmake-build.
+    find:
+      roots: required
+      paths: ["build", "*/build", "*/*/build"]
+      type: dir
+    where: {has: CMakeCache.txt, has_not: CMakeLists.txt}
+    action: delete
+    examples:
+      match: [/home/mark/zephyrproject/app/build]
+      no_match: [/home/mark/zephyrproject/app/build/zephyr]
+
+  - name: jest-cache
+    category: python / js
+    description: jest's cache dir
+    # DOC: jest's default cacheDirectory is $TMPDIR/jest_<x> (a fixed /tmp
+    # root, not roots: required); with a project root it is only found when
+    # configured inside the project. None exists on this machine.
+    find:
+      roots: required
+      paths: ["jest_*", ".cache/jest"]
+      type: dir
+    action: delete
+    examples:
+      match: [/tmp/jest_rs, /home/mark/.cache/jest]
+      no_match: [/home/mark/jest]
+
+  - name: platformio-cache
+    category: embedded
+    description: PlatformIO's .cache below a home
+    find:
+      roots: required
+      paths: [".platformio/.cache"]
+      type: dir
+    action: delete
+    examples:
+      match: [/home/mark/.platformio/.cache]
+      no_match: [/home/mark/.platformio]
+
+  - name: gradle-caches
+    category: jvm
+    description: ~/.gradle/caches
+    find:
+      roots: required
+      paths: [".gradle/caches"]
+      type: dir
+    action: delete
+    examples:
+      match: [/home/mark/.gradle/caches]
+      no_match: [/home/mark/.gradle]
+
+  - name: maven-repo
+    category: jvm
+    description: ~/.m2/repository
+    find:
+      roots: required
+      paths: [".m2/repository"]
+      type: dir
+    action: delete
+    examples:
+      match: [/home/mark/.m2/repository]
+      no_match: [/home/mark/.m2]
+
+  # ---- command actions: loaded and checked, never run by the spike --------
+
+  - name: pip-cache
+    category: caches
+    description: pip's cache
+    find: {roots: required, paths: [.cache/pip], type: dir}
+    action: {command: [pip, --cache-dir, "{path}", cache, purge]}
+    examples: {match: [/home/mark/.cache/pip]}
+
+  - name: go-build-cache
+    category: caches
+    description: Go's build cache
+    find: {roots: required, paths: [.cache/go-build], type: dir}
+    action: {command: [env, "GOCACHE={path}", go, clean, -cache]}
+    examples: {match: [/home/mark/.cache/go-build]}
+
+  - name: npm-cache
+    category: caches
+    description: npm's cache (the dir holding _cacache)
+    find: {roots: required, paths: [.npm], type: dir}
+    action: {command: [npm, cache, clean, --force, --cache, "{path}"]}
+    examples: {match: [/home/mark/.npm]}
+
+  - name: ccache
+    category: caches
+    description: ccache's cache
+    find: {roots: required, paths: [.cache/ccache, .ccache], type: dir}
+    action: {command: [env, "CCACHE_DIR={path}", ccache, --clear]}
+    examples: {match: [/home/mark/.cache/ccache, /home/mark/.ccache]}
+
+  - name: uv-cache
+    category: python / js
+    description: uv's cache
+    find: {roots: required, paths: [.cache/uv], type: dir}
+    action: {command: [uv, cache, clean, --cache-dir, "{path}"]}
+    examples: {match: [/home/mark/.cache/uv]}
+
+  - name: pnpm-store
+    category: python / js
+    description: pnpm's content-addressable store
+    find: {roots: required, paths: [.local/share/pnpm/store], type: dir}
+    action: {command: [pnpm, store, prune, --store-dir, "{path}"]}
+    examples: {match: [/home/mark/.local/share/pnpm/store]}
+
+  - name: yarn-cache
+    category: python / js
+    description: Yarn classic's cache
+    find: {roots: required, paths: [.cache/yarn], type: dir}
+    action: {command: [env, "YARN_CACHE_FOLDER={path}", yarn, cache, clean], cwd: parent}
+    examples: {match: [/home/mark/.cache/yarn]}
+
+  # ---- probes for the findings ------------------------------------------
+
+  - name: has-cachedir-tag
+    category: filters
+    description: holds a CACHEDIR.TAG (as a term filter, refused until task-16)
+    where: {has: CACHEDIR.TAG}
+
+  - name: cachedir-tagged
+    category: probes
+    description: any directory up to three levels down holding a CACHEDIR.TAG
+    find:
+      roots: required
+      paths: ["*", "*/*", "*/*/*"]
+      type: dir
+    where: {has: CACHEDIR.TAG}
+    action: delete
+    examples:
+      match: [/home/mark/.cache/x]

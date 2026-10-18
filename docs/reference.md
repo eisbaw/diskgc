@@ -70,7 +70,7 @@ directory whose filesystem must have the space.
   tally that orders the `--select` tier under the host lock: candidates it
   leaves untallied are taken after the tallied ones, in the order
   discovery found them, each judged in full under its own locks. A
-  candidate the tally refuses (kept, another user's, too many entries) is
+  candidate the tally refuses (e.g. kept, another user's, too many entries) is
   skipped with that reason for the run and never locked; a refusal that
   stops being true later (a `.diskgc-keep` removed after the tally) is a
   missed reclaim until the next run, never an unsafe delete. The dry run
@@ -83,7 +83,10 @@ directory whose filesystem must have the space.
   ones; a reclaim stops at the goal, the plan does not.
   Takes no lock (so it cannot tell `locked`: whether a target's locks are
   free is only tried by the reclaim) and always prints, even if the goal
-  is already met. With a `random` group, the order is for the printed seed
+  is already met. It deletes nothing, so the deletion's freshness bound
+  does not apply: the plan of a `cargo-target` tier reuses a process scan
+  for half a second, as a reclaim does, and that of an `fs` tier for up to
+  a minute (half a second for a scan that blocks every candidate). With a `random` group, the order is for the printed seed
   only. Sizes are estimates; Docker and Nix tiers can only say what they
   would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
   interrupted); JSON `status` is `dry_run`.
@@ -439,7 +442,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `category`, `description` | every profile; required on built-ins | Free text, shown by `profiles list`. |
 | `kind` | sources | Default `fs`. |
 | `find.roots` | sources | A list of absolute directories, or `required`. |
-| `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. |
+| `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a symlink candidate could only be refused (`unsafe_path`), and `tmp-entry` would report every symlink in `/tmp`. |
 | `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `idle_for`: when something is old enough is the tier's choice, written with a `filter:` (Key decisions: what vs when). |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
@@ -457,7 +460,7 @@ required}}`.
 | Predicate | Meaning | Kinds |
 |---|---|---|
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
-| `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`) | `fs` |
+| `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
 
 In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations) or
 `where: {has: CACHEDIR.TAG}` (one file name); each predicate at most once
@@ -640,15 +643,15 @@ v1 *target*; until verified it is listed as planned, not shipped.
 | containers | `docker-build-cache` | BuildKit cache of the default builder | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
-| ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/*/*` session dirs | `delete` |
-| browsers | `chromium-tmp` | `.org.chromium.Chromium.*` and similar automation profiles in `/tmp` | `delete` |
+| ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
+| browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
-| python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | jest's cache dir; `playwright*` in `/tmp`; `node-compile-cache` in `/tmp` and nix-shell temp dirs | `delete` |
-| c / c++ | `cmake-build` | directories containing `CMakeCache.txt` (roots required) | `delete` |
+| python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | jest's cache dir; `playwright*` in `/tmp` and nix-shell temp dirs; `node-compile-cache` in `/tmp` and nix-shell temp dirs | `delete` |
+| c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; roots required) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
-| embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`; roots required) | `delete` |
+| embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
 | embedded | `renode-tmp` | `renode-*` in `/tmp` and nix-shell temp dirs | `delete` |
 | embedded | `platformio-cache` | PlatformIO's `.cache` (roots required) | `delete` |
 | generic | `tmp-entry` | any top-level entry of `/tmp`, `/var/tmp` | `delete` |

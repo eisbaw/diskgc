@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:51'
+updated_date: '2026-10-18 08:25'
 labels:
   - wave-3
   - architecture
@@ -29,6 +29,12 @@ Why: the index must stay fresh without pounding the disk. Implement the tally pe
 - [ ] #2 --tally-budget 0 runs to completion; a small budget leaves untallied candidates reported in the index block
 - [ ] #3 The duty cycle and operation counts are asserted as bounds, not exact values, in model tests with the virtual clock
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-10 (mped): the pre-index tally treats a refusal as final for the run (missed reclaim, never unsafe). The index must never carry a stored refusal across runs as final, or 'never fake exhaustion' breaks; a stored refusal is a hint, re-judged at reclaim.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

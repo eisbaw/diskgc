@@ -2,7 +2,8 @@
 //! (docs/reference.md is the contract).
 //!
 //! So far: `ensure` with `--select` (one `cargo-target` tier), `--dry-run`
-//! and `--json` (task-10), plus `--version` and `--help`. The other
+//! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
+//! plus `--version` and `--help`. The other
 //! commands exit 2 saying which task brings them.
 //!
 //! The flow of `ensure`, every step before the next:
@@ -46,9 +47,11 @@ usage: diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
        diskgc --version
        diskgc --help
 
-This build runs `ensure --select` with one `profile:cargo-target` term
-(optionally `&& filter:idle-...`); `watch`, `check`, `survey`, `profiles`
-and config tiers arrive with later tasks. PATH and every DIR are absolute.
+This build runs `ensure --select` with one source profile term
+(optionally `&& filter:idle-...`): `profile:cargo-target`, or, with
+--dry-run only, a kind fs profile from the config (its delete is task-18);
+`watch`, `check`, `survey`, `profiles` and config tiers arrive with later
+tasks. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The CLI contract is docs/reference.md.
 ";

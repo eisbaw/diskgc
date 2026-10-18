@@ -4,6 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
+updated_date: '2026-10-18 12:42'
 labels:
   - wave-2
   - profiles
@@ -38,6 +39,12 @@ Stays in task-39: claude-code-tmp, chromium-tmp, playwright-tmp, node-compile-ca
 - [ ] #3 No profile depends on the Docker or Nix kinds, command actions or survey (task-37, task-38)
 - [ ] #4 Dormant nix-shell and nix develop sessions keep their rc and TMPDIR dirs (container test), or nix-shell-rc and nix-shell-tmpdir do not ship in 0.1
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-68: open question, unchecked. The dry run found every nix-shell rc dir (/tmp/nix-shell-*-*, /tmp/nix-develop-*-*) eligible: 65,458 judged, no in_use, though live shells were running on the laptop. Nothing has them open and no environment names them, so the in-use check cannot see a live shell's rc dir. Is deleting a live nix shell's rc dir harmless (read once at startup?) or does a live shell re-read it? Check before nix-shell-rc ships (this task's AC #4 covers TMPDIR dirs, not rc dirs).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 07:54'
+updated_date: '2026-10-18 08:25'
 labels:
   - wave-1
   - hardening
@@ -47,6 +47,8 @@ Filed from task-10's deep gate (Codex, mped, QA; file, do not fix in task-10): (
 Filed from task-10's deep gate round 2: (H8) docs/testing.md says the other binary tests stop at usage errors before the machine is read, but crates/diskgc/tests/cli.rs diskgc() isolates only DISKGC_CONFIG and XDG_CONFIG_HOME: tests without --config still look up /etc/diskgc/config.yaml on the host (a present, invalid file there changes their outcome); pass a config of the test's own everywhere, or document the dependency. (H9) the tally does no idle check, so a target that is not idle is locked (every Cargo lock of its profiles) and walked under the host lock before reclaim skips it as not_idle: a Cargo build starting in that window waits; consider an idle pre-filter from the tally's last build before locking (the protocol still rechecks under the locks).
 
 (H10) From task-10 round 4 (mped nit 3): resolve every root before discovery walks any of them, so a misconfigured root (unsafe_path) excludes the tier before any other root's walk is spent; today cargo_target::discover walks roots outermost first and refuses an unsafe one when it reaches it.
+
+From task-10 final round (filed at commit 783609f): H11 (QA) no container test runs a reclaiming ensure with a kept or not-owner target on the tallied path and asserts from the strace record that its .cargo-lock is never flocked (model-only today); cheap: add a .diskgc-keep target to ensure_exits_1_when_every_candidate_was_processed_below_min_free. H12 (mped) executor excluded() builds its message by stripping the Skip/ResolveError display prefix; carry the reason as data instead of re-parsing a string.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

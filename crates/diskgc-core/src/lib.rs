@@ -18,11 +18,14 @@
 //! one `--select` tier of kind `cargo-target`, its [`report`] (exit codes,
 //! JSON, summary), the host lock ([`hostlock`]) and the configuration
 //! lookup with the part of schema `version: 1` loaded so far ([`config`]).
+//! [`fs_kind`] is the read-only half of kind `fs` (task-68's spike): find
+//! patterns and the judgement of each candidate, for the dry run only.
 
 pub mod cargo_target;
 pub mod config;
 pub mod engine;
 pub mod executor;
+pub mod fs_kind;
 pub mod host;
 pub mod hostlock;
 pub mod inuse;

@@ -670,7 +670,8 @@ fn a_tally_refusal_is_final_for_the_run_even_if_it_stops_being_true() {
 
 /// R2: a keep marker that stays, on the under-lock path where the
 /// protocol's recheck (`judge_inspected`) is the only guard: with
-/// `--tally-budget` spent at once nothing is tallied, `old` is locked and
+/// a zero tally budget (set internally; on the CLI `--tally-budget 0`
+/// means no limit) nothing is tallied, `old` is locked and
 /// judged under its locks, skipped as `kept`, never unlinked; the run ends
 /// below the goal (exit 1). And on the tallied path, where the tally
 /// refuses it before any lock.

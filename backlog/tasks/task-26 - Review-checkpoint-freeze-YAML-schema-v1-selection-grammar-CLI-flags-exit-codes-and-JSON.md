@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 07:54'
+updated_date: '2026-10-18 12:42'
 labels:
   - wave-2
   - review
@@ -53,6 +53,13 @@ From task-10's deep gate, to decide at the freeze (filed, not fixed): (1) action
 From task-10's deep gate round 2: (3) QA: a dry run that stops on a host error (Stop::Failed during discovery or eligibility) exits 0 with errors[] filled; decide with item (2) above. (4) mped: expose 'tally cut short by --tally-budget' in the JSON (e.g. under index once it exists), since the reclaim order then differs from the dry run's plan.
 
 (5) From task-10 round 4: a dry run with an unmeasured final sample exits 0 (or 124 at the deadline): it reports avail_after_bytes null plus an errors entry, while a reclaiming run exits 3 for the same (reference.md, Exit codes); decide with (2)/(3).
+
+From task-10 final round: (6) a failed first statvfs (EIO) reports status usage_error / exit 2, which reads as the user's mistake; decide with (2)/(3)/(5).
+
+From task-68 (profile spike) and its review (mped S3): proposals for Mark to settle at the freeze, all now in docs/reference.md and implemented by the dry run (crates/diskgc-core/src/fs_kind/pattern.rs):
+1. In find.paths, `*` matches any run of bytes within one name, including a leading dot (unlike the shell): `*` matches `.X11-unix`, so tmp-entry covers hidden entries.
+2. `?`, `[`, `]` and `\` are reserved in patterns (a load-time error), so a later glob syntax cannot change an existing pattern's matching set. Python's tempfile dirs (/tmp/tmpXXXXXXXX) are not expressible without them (task-16).
+3. has / has_not: a regular file of that name directly in the candidate directory, not followed. Consequence (QA): a symlinked CMakeLists.txt does not count, so `has_not: CMakeLists.txt` passes a source tree whose CMakeLists.txt is a symlink (cmake-build, task-71).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

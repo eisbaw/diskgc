@@ -478,6 +478,10 @@ fn pattern(pattern: &str) -> Result<(), String> {
             "" => "has an empty segment",
             "." | ".." => "has a `.` or `..` segment: a pattern stays below its roots",
             s if s.contains("**") => "uses `**`: each segment is one directory level",
+            s if s.contains(crate::fs_kind::RESERVED) => {
+                "uses `?`, `[`, `]` or `\\`, which are reserved: within a segment only `*` is \
+                 special (any run of bytes within one name)"
+            }
             _ => continue,
         };
         return Err(format!("pattern `{pattern}` {problem}"));
