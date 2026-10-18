@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-18 13:18'
 labels:
   - wave-2
   - review
@@ -60,6 +60,10 @@ From task-68 (profile spike) and its review (mped S3): proposals for Mark to set
 1. In find.paths, `*` matches any run of bytes within one name, including a leading dot (unlike the shell): `*` matches `.X11-unix`, so tmp-entry covers hidden entries.
 2. `?`, `[`, `]` and `\` are reserved in patterns (a load-time error), so a later glob syntax cannot change an existing pattern's matching set. Python's tempfile dirs (/tmp/tmpXXXXXXXX) are not expressible without them (task-16).
 3. has / has_not: a regular file of that name directly in the candidate directory, not followed. Consequence (QA): a symlinked CMakeLists.txt does not count, so `has_not: CMakeLists.txt` passes a source tree whose CMakeLists.txt is a symlink (cmake-build, task-71).
+
+From task-68 r2 (mped S1): a --roots root inside systemd-private-* is skipped silently in JSON (only a stderr log line and the private_tmp summary count); other unsearchable roots are plan skips or run errors. Reporting it needs a reason code: decide at the freeze.
+
+Decision by Mark (2026-10-18): signed off for schema v1: (a) * matches a leading dot (unlike the shell); (b) ?, [, ], \ are reserved glob characters, refused at load; (c) has/has_not = a regular file directly in the candidate, symlinks not followed. reference.md already states these; at the freeze they are settled, not open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

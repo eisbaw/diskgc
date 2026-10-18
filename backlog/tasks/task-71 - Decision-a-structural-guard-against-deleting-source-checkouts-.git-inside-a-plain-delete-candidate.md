@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:29'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-18 13:18'
 labels:
   - wave-2
   - spike
@@ -35,4 +35,6 @@ Decision for Mark: (a) leave it to profiles and examples (status quo, with the h
 
 <!-- SECTION:NOTES:BEGIN -->
 QA's real-binary evidence (task-68 review round 1): proj/insrc2, a directory holding .git and CMakeCache.txt but no CMakeLists.txt, is eligible for cmake-build even with the fixed row (has: CMakeCache.txt, has_not: CMakeLists.txt); and tmp-entry plans as eligible a /tmp directory holding two .git trees. The has_not fix narrows the observed case only; the class needs the guard decided here.
+
+Decision by Mark (2026-10-18): yes: refuse any plain-delete candidate that has .git inside (at any depth the walk sees). It only adds safety; the task-68 spike found a real near-miss (cmake-build picked an in-source checkout with uncommitted work). Implement as a skip reason in the fs eligibility walk, in the dry-run planner and in task-18's delete path; document its single home in docs/safety.md.
 <!-- SECTION:NOTES:END -->

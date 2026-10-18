@@ -14,6 +14,7 @@ use std::time::Duration;
 use diskgc_core::engine::CARGO_LOCK_NAMES;
 
 use crate::cargo_probe::{self, Rusage};
+use crate::cargo_race_suite;
 use crate::cargo_reclaim_suite;
 use crate::cargo_target_suite;
 use crate::cargo_under_test::{
@@ -92,8 +93,52 @@ pub static CARGO_TESTS: &[CargoTest] = &[
         run: cargo_reclaim_suite::cargo_reclaim_changed_between_discovery_and_locking,
     },
     CargoTest {
-        name: "cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile",
-        run: cargo_reclaim_suite::cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile,
+        name: "cargo_race_2_a_build_started_during_deletion_waits_writing_nothing",
+        run: cargo_race_suite::cargo_race_2_a_build_started_during_deletion_waits_writing_nothing,
+    },
+    CargoTest {
+        name: "cargo_race_2_split_build_dir_on_a_target_first_built_whole",
+        run: cargo_race_suite::cargo_race_2_split_build_dir_on_a_target_first_built_whole,
+    },
+    CargoTest {
+        name: "cargo_race_2_a_cargo_clean_during_deletion",
+        run: cargo_race_suite::cargo_race_2_a_cargo_clean_during_deletion,
+    },
+    CargoTest {
+        name: "cargo_race_3_a_blocked_build_and_a_later_one_never_run_together",
+        run: cargo_race_suite::cargo_race_3_a_blocked_build_and_a_later_one_never_run_together,
+    },
+    CargoTest {
+        name: "cargo_race_locks_held_through_the_last_part_released_per_target",
+        run: cargo_race_suite::cargo_race_locks_held_through_the_last_part_released_per_target,
+    },
+    CargoTest {
+        name: "cargo_race_4_a_target_whose_test_binary_still_runs_is_skipped",
+        run: cargo_race_suite::cargo_race_4_a_target_whose_test_binary_still_runs_is_skipped,
+    },
+    CargoTest {
+        name: "cargo_race_6_killed_at_seeded_positions_the_next_build_succeeds",
+        run: cargo_race_suite::cargo_race_6_killed_at_seeded_positions_the_next_build_succeeds,
+    },
+    CargoTest {
+        name: "cargo_race_7_a_check_between_its_locks_and_a_build_keep_the_target",
+        run: cargo_race_suite::cargo_race_7_a_check_between_its_locks_and_a_build_keep_the_target,
+    },
+    CargoTest {
+        name: "cargo_race_8_run_or_test_paused_before_its_binary_keeps_the_target",
+        run: cargo_race_suite::cargo_race_8_run_or_test_paused_before_its_binary_keeps_the_target,
+    },
+    CargoTest {
+        name: "cargo_race_9_an_unknown_lock_file_is_unsupported_layout",
+        run: cargo_race_suite::cargo_race_9_an_unknown_lock_file_is_unsupported_layout,
+    },
+    CargoTest {
+        name: "cargo_race_split_build_dir_is_never_reclaimed",
+        run: cargo_race_suite::cargo_race_split_build_dir_is_never_reclaimed,
+    },
+    CargoTest {
+        name: "cargo_race_shared_target_dir_from_cargo_config",
+        run: cargo_race_suite::cargo_race_shared_target_dir_from_cargo_config,
     },
     CargoTest {
         name: "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free",

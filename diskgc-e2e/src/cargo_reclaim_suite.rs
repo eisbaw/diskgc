@@ -9,259 +9,18 @@
 //! classic layout on 1.90.0 and 1.99.1, the per-unit layout on the
 //! nightly.
 
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::cargo_harness::{
+    HOST_TRIPLE, build, cargo_reclaim, deletable, edit_main, lock_inodes, part_of, path_str,
+    planned_parts, profile_dirs, rebuilds, reclaimable, results, unlinked, verdict,
+};
 use crate::cargo_under_test::{self, Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain};
-use crate::controlled::ControlLine;
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::proc_locks::{self, Watched};
 use crate::suite::{Ctx, TestResult};
-use crate::under_test::Run;
 use crate::{TESTER, ensure, info};
-
-/// SIGKILL's number on Linux.
-const SIGKILL: i32 = 9;
-
-/// The host's target triple (the container is x86_64; each toolchain
-/// carries the host's rust-std).
-const HOST_TRIPLE: &str = "x86_64-unknown-linux-gnu";
-
-/// The driver's result lines (control lines left out), without their index.
-fn results(run: &Run) -> Result<Vec<String>, String> {
-    let mut lines = Vec::new();
-    for line in run.stdout.lines() {
-        if ControlLine::parse(line)?.is_none() {
-            let (_, text) = line
-                .split_once(' ')
-                .ok_or_else(|| format!("a result line without an index: {line:?}"))?;
-            lines.push(text.to_owned());
-        }
-    }
-    Ok(lines)
-}
-
-/// The verdict line that follows the `target` line of `target`.
-fn verdict(lines: &[String], target: &Path) -> Result<String, String> {
-    let quoted = format!("{target:?}");
-    let at = lines
-        .iter()
-        .position(|l| l.starts_with("target ") && l.split(' ').nth(1) == Some(&quoted))
-        .ok_or_else(|| format!("{} was not found: {lines:#?}", target.display()))?;
-    lines
-        .get(at + 1)
-        .cloned()
-        .ok_or_else(|| format!("no verdict after {}", lines[at]))
-}
-
-/// Runs `cargo-reclaim ARGS` as tester under strace (driver flags such as
-/// `--kill-at` go in `driver_flags`), already judged by nobody: the caller
-/// arms the oracle first and judges the run.
-fn cargo_reclaim(ctx: &Ctx, driver_flags: &[&str], args: &[&str]) -> Result<Run, String> {
-    let mut full: Vec<&str> = driver_flags.to_vec();
-    full.push("cargo-reclaim");
-    full.extend_from_slice(args);
-    let run = ctx.run_as_tester(&ctx.driver(), &full)?;
-    info!(
-        "cargo-reclaim {}:\n{}\n--- stderr\n{}",
-        full.join(" "),
-        run.stdout,
-        run.stderr
-    );
-    Ok(run)
-}
-
-fn is_lock_name(name: &OsStr) -> bool {
-    let name = name.to_string_lossy();
-    name.starts_with(".cargo-") && name.contains("lock")
-}
-
-/// The profile directories of the target at `target`, by the harness's own
-/// reading: `<t>/<p>/` and `<t>/<x>/<p>/` holding a `.cargo-*lock*` file.
-pub(crate) fn profile_dirs(target: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut found = Vec::new();
-    let subdirs = |dir: &Path| -> Result<Vec<PathBuf>, String> {
-        let mut dirs = Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {dir:?}: {e}"))? {
-            let entry = entry.map_err(|e| format!("read_dir {dir:?}: {e}"))?;
-            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                dirs.push(entry.path());
-            }
-        }
-        dirs.sort();
-        Ok(dirs)
-    };
-    for dir in subdirs(target)? {
-        if !cargo_under_test::lock_files(&dir)?.is_empty() {
-            found.push(dir);
-            continue;
-        }
-        for inner in subdirs(&dir)? {
-            if !cargo_under_test::lock_files(&inner)?.is_empty() {
-                found.push(inner);
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// Every entry of the profile directory `dir` but its lock files: what the
-/// protocol may delete (each with everything below it).
-pub(crate) fn deletable(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {dir:?}: {e}"))? {
-        let entry = entry.map_err(|e| format!("read_dir {dir:?}: {e}"))?;
-        if !is_lock_name(&entry.file_name()) {
-            found.push(entry.path());
-        }
-    }
-    found.sort();
-    Ok(found)
-}
-
-/// `path` and every object below it (symlinks not followed).
-pub(crate) fn objects_below(path: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut found = Vec::new();
-    let mut todo = vec![path.to_owned()];
-    while let Some(at) = todo.pop() {
-        let meta = std::fs::symlink_metadata(&at).map_err(|e| format!("lstat {at:?}: {e}"))?;
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(&at).map_err(|e| format!("read_dir {at:?}: {e}"))? {
-                todo.push(entry.map_err(|e| e.to_string())?.path());
-            }
-        }
-        found.push(at);
-    }
-    Ok(found)
-}
-
-/// Whether `path` (below a profile directory) is a fingerprint, in either
-/// layout: inside `.fingerprint/`, or `build/<package>/<hash>/fingerprint`
-/// and below.
-fn is_fingerprint(profile: &Path, path: &Path) -> bool {
-    let Ok(rel) = path.strip_prefix(profile) else {
-        return false;
-    };
-    let names: Vec<&OsStr> = rel.components().map(|c| c.as_os_str()).collect();
-    names.first() == Some(&OsStr::new(".fingerprint"))
-        || (names.len() >= 4 && names[0] == "build" && names[3] == "fingerprint")
-}
-
-/// Every fingerprint object in the profile directory `profile`, by the
-/// harness's walk.
-fn fingerprints(profile: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut found = Vec::new();
-    for entry in deletable(profile)? {
-        for object in objects_below(&entry)? {
-            if is_fingerprint(profile, &object) {
-                found.push(object);
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// The lock files of the target's profile directories, by inode.
-pub(crate) fn lock_inodes(target: &Path) -> Result<BTreeMap<PathBuf, u64>, String> {
-    let mut found = BTreeMap::new();
-    for profile in profile_dirs(target)? {
-        for lock in cargo_under_test::lock_files(&profile)? {
-            let ino = std::fs::symlink_metadata(&lock)
-                .map_err(|e| format!("lstat {lock:?}: {e}"))?
-                .ino();
-            found.insert(lock, ino);
-        }
-    }
-    Ok(found)
-}
-
-/// The oracle's fixture of a reclaim of `target`: every entry of every
-/// profile directory but the lock files may go.
-pub(crate) fn reclaimable(target: &Path) -> Result<Fixture, String> {
-    let mut fixture = Fixture::new();
-    for profile in profile_dirs(target)? {
-        for entry in deletable(&profile)? {
-            fixture = fixture.eligible(entry);
-        }
-    }
-    Ok(fixture)
-}
-
-/// The layout the harness reads in a profile directory (docs/safety.md,
-/// Layouts): `classic` (a directory `.fingerprint/` or `deps/`), `per-unit`
-/// (neither, a directory `build/`), `empty` (lock files only), or
-/// `unknown`.
-fn layout_of(profile: &Path) -> Result<&'static str, String> {
-    let dir = |name: &str| profile.join(name).is_dir() && !profile.join(name).is_symlink();
-    Ok(if dir(".fingerprint") || dir("deps") {
-        "classic"
-    } else if dir("build") {
-        "per-unit"
-    } else if deletable(profile)?.is_empty() {
-        "empty"
-    } else {
-        "unknown"
-    })
-}
-
-/// The paths the run's `unlinkat` calls removed, in the order made.
-fn unlinked(run: &Run) -> Vec<PathBuf> {
-    run.events
-        .iter()
-        .filter(|e| e.syscall == "unlinkat" && e.took_effect())
-        .flat_map(|e| e.removed.iter().cloned())
-        .collect()
-}
-
-fn build(ctx: &Ctx, toolchain: &Toolchain, project: &Path, args: &[&str]) -> TestResult {
-    Cargo::new(toolchain, project, args)
-        .output(ctx)?
-        .expect_success()?;
-    Ok(())
-}
-
-/// After a reclaim (complete or not): `cargo build PROFILE...` succeeds
-/// and the binary `cargo run PROFILE...` builds runs; with `recompiles`
-/// (every fingerprint of that profile was gone), it compiled the package
-/// again. `profile`: no arguments for debug, `--release` for release.
-fn rebuilds(
-    ctx: &Ctx,
-    toolchain: &Toolchain,
-    project: &Path,
-    profile: &[&str],
-    recompiles: bool,
-    what: &str,
-) -> TestResult {
-    let with = |command: &'static str| -> Vec<&str> {
-        std::iter::once(command)
-            .chain(profile.iter().copied())
-            .collect()
-    };
-    let built = Cargo::new(toolchain, project, &with("build")).output(ctx)?;
-    built.expect_success()?;
-    ensure!(
-        !recompiles || built.stderr.contains("Compiling diskgc-e2e-race"),
-        "{what} ({profile:?}): the next build did not compile the package again (a \
-         fingerprint survived?):\n{}",
-        built.stderr
-    );
-    let ran = Cargo::new(toolchain, project, &with("run")).output(ctx)?;
-    ran.expect_success()?;
-    ensure!(
-        ran.stdout.contains(RACE.output),
-        "{what} ({profile:?}): the rebuilt binary printed {:?}",
-        ran.stdout
-    );
-    Ok(())
-}
-
-fn path_str(path: &Path) -> Result<&str, String> {
-    path.to_str()
-        .ok_or_else(|| format!("non-UTF-8 path {}", path.display()))
-}
 
 /// AC #1 and AC #2, and the order of step 3, on targets real builds made
 /// (`build`, `test --no-run`, `build --release`, `build --target`): the
@@ -270,9 +29,10 @@ fn path_str(path: &Path) -> Result<&str, String> {
 /// record) finds no lock file unlinked or replaced and nothing outside the
 /// profile directories touched: not `CACHEDIR.TAG`, `.rustc_info.json`,
 /// `doc/`, `tmp/`, `criterion/` or the triple directory. The strace record
-/// shows every fingerprint unlinked before any other entry, and `build/`
-/// or `deps/` last in each profile; the next build compiles again and
-/// runs.
+/// shows the unlinks part by part in the harness's planned order of step 3
+/// ([`planned_parts`]: every fingerprint first, `build/` and `deps/` last
+/// in each profile), each part with its planned count; the next build
+/// compiles again and runs.
 pub fn cargo_reclaim_deletes_only_inside_locked_profile_dirs(
     ctx: &Ctx,
     toolchain: &Toolchain,
@@ -303,6 +63,7 @@ pub fn cargo_reclaim_deletes_only_inside_locked_profile_dirs(
         "expected debug, release and the triple's debug: {profiles:?}"
     );
     let locks = lock_inodes(&target)?;
+    let parts = planned_parts(&profiles)?;
     let oracle = Oracle::arm(reclaimable(&target)?)?;
     let run = cargo_reclaim(ctx, &[], &["/tmp/w"])?;
     let judged = oracle.judge(&run)?;
@@ -343,46 +104,39 @@ pub fn cargo_reclaim_deletes_only_inside_locked_profile_dirs(
         );
     }
 
-    // Step 3's order, from the strace record: every fingerprint before any
-    // other entry, and in each profile the layout's directories last.
-    let order = unlinked(&run);
-    let in_profile = |path: &Path| profiles.iter().find(|p| path.starts_with(p));
-    let first_other = order
+    // Step 3's order, from the strace record against the harness's own plan
+    // of the parts: each part's unlinks together, the parts in plan order
+    // (every fingerprint first, each profile's layout directories last), and
+    // each part's unlink count as planned.
+    let order: Vec<usize> = unlinked(&run)
         .iter()
-        .position(|path| !in_profile(path).is_some_and(|p| is_fingerprint(p, path)))
-        .ok_or("nothing but fingerprints was unlinked")?;
+        .map(|path| {
+            part_of(&parts, path).ok_or_else(|| format!("{} is in no planned part", path.display()))
+        })
+        .collect::<Result<_, String>>()?;
     ensure!(
-        first_other > 0,
-        "the first unlink was no fingerprint: {:?}",
-        order[0]
+        order.windows(2).all(|w| w[0] <= w[1]),
+        "the unlinks are not in the planned order of parts: {:?}",
+        order
+            .windows(2)
+            .find(|w| w[0] > w[1])
+            .map(|w| (&parts[w[0]].path, &parts[w[1]].path))
     );
-    if let Some(late) = order[first_other..]
-        .iter()
-        .find(|path| in_profile(path).is_some_and(|p| is_fingerprint(p, path)))
-    {
-        return Err(format!(
-            "a fingerprint ({}) was unlinked after another entry ({})",
-            late.display(),
-            order[first_other].display()
-        ));
-    }
-    let marker = if toolchain.name.starts_with("nightly") {
-        "build"
-    } else {
-        "deps"
-    };
-    for profile in &profiles {
-        let last_top = order
-            .iter()
-            .rfind(|path| path.parent() == Some(profile.as_path()))
-            .ok_or_else(|| format!("nothing unlinked in {}", profile.display()))?;
+    for (i, part) in parts.iter().enumerate() {
+        let made = order.iter().filter(|&&n| n == i).count();
         ensure!(
-            last_top.file_name() == Some(OsStr::new(marker)),
-            "{}: the last entry deleted is {}, not {marker}/",
-            profile.display(),
-            last_top.display()
+            made == part.objects,
+            "{}: {made} unlinks, planned {}",
+            part.path.display(),
+            part.objects
         );
     }
+    info!(
+        "{}: {} unlinks in the planned order of {} parts",
+        toolchain.name,
+        order.len(),
+        parts.len()
+    );
     rebuilds(ctx, toolchain, &p, &[], true, "after a complete reclaim")
 }
 
@@ -450,10 +204,12 @@ pub fn cargo_reclaim_skips_a_target_whose_lock_is_held(
     build(ctx, toolchain, &p, &["build"])
 }
 
-/// AC #3 on real Cargo: the driver paused right before its first lock
-/// (`flock_try:1`, after discovery), while (a) a `cargo build --release`
-/// creates a new profile directory, or (b) a rebuild after an edit makes a
-/// newer build than the one the eligibility check judged
+/// AC #3 on real Cargo, and race test 5 (docs/testing.md): the driver
+/// paused right before its first lock (`flock_try:1`, after discovery;
+/// `/proc/locks`: it holds none yet), while (a) a `cargo build --release`
+/// creates a new profile directory, (a') a `cargo build --target TRIPLE`
+/// creates a new triple's profile directory, or (b) a rebuild after an
+/// edit makes a newer build than the one the eligibility check judged
 /// (`--after-eligibility`): resumed, the target is `changed` and nothing
 /// is deleted (no unlink at all in the strace record; the lock files keep
 /// their inodes), and the builds succeed. The control: with nothing in
@@ -467,12 +223,49 @@ pub fn cargo_reclaim_changed_between_discovery_and_locking(
     let p = RACE.write(s, "w/p")?;
     build(ctx, toolchain, &p, &["build"])?;
     let target = p.join("target");
-    let cases: [(&str, &[&str], &str); 2] = [
-        ("a new profile directory", &[], "release"),
-        ("a newer build", &["--after-eligibility"], "debug"),
+    /// A change made while the driver is paused before its first lock.
+    struct Case {
+        name: &'static str,
+        flags: &'static [&'static str],
+        /// The directory below the target the build writes.
+        written: &'static str,
+        build: &'static [&'static str],
+        /// Whether the source is edited first.
+        edit: bool,
+    }
+    let cases = [
+        Case {
+            name: "a new profile directory",
+            flags: &[],
+            written: "release",
+            build: &["build", "--release"],
+            edit: false,
+        },
+        Case {
+            name: "a new triple's profile directory",
+            flags: &[],
+            written: HOST_TRIPLE,
+            build: &["build", "--target", HOST_TRIPLE],
+            edit: false,
+        },
+        Case {
+            name: "a newer build",
+            flags: &["--after-eligibility"],
+            written: "debug",
+            build: &["build"],
+            edit: true,
+        },
     ];
-    for (case, flags, written) in cases {
+    for Case {
+        name: case,
+        flags,
+        written,
+        build: build_args,
+        edit,
+    } in cases
+    {
         let locks = lock_inodes(&target)?;
+        let watched = Watched::files(&locks.keys().cloned().collect::<Vec<_>>())?;
         // Cargo's own writes, which happen while diskgc is paused, are the
         // fixture's concurrent writers; diskgc's unlinks are checked from
         // the strace record below.
@@ -487,14 +280,16 @@ pub fn cargo_reclaim_changed_between_discovery_and_locking(
         let mut spawned = ctx.spawn_as_tester(&ctx.driver(), &args)?;
         let paused = spawned.wait_paused()?;
         ensure!(paused.op == "flock_try" && paused.nth == 1, "{paused:?}");
-        if written == "release" {
-            build(ctx, toolchain, &p, &["build", "--release"])?;
-        } else {
-            let main = p.join("src/main.rs");
-            let text = std::fs::read_to_string(&main).map_err(|e| e.to_string())?;
-            std::fs::write(&main, format!("{text}\n// edit\n")).map_err(|e| e.to_string())?;
-            build(ctx, toolchain, &p, &["build"])?;
+        // Between discovery and locking: diskgc holds no lock yet.
+        let usage = watched.usage(&proc_locks::sample()?, paused.pid);
+        ensure!(
+            usage.is_empty(),
+            "{case}: paused before its first lock, diskgc already {usage}"
+        );
+        if edit {
+            edit_main(&p)?;
         }
+        build(ctx, toolchain, &p, build_args)?;
         spawned.resume(&paused)?;
         let run = spawned.wait()?;
         let judged = oracle.judge(&run)?;
@@ -534,107 +329,6 @@ pub fn cargo_reclaim_changed_between_discovery_and_locking(
     );
     judged.assert_clean()?;
     rebuilds(ctx, toolchain, &p, &[], true, "after the control")
-}
-
-/// Race test 6's shape at three chosen points, on a target with a debug
-/// and a release profile: the driver SIGKILLed before its second unlink
-/// (inside the fingerprints), before the first unlink after every
-/// fingerprint of both profiles (counted by the harness), and before its
-/// last unlink (the layout's directory). Each time no lock file is unlinked or
-/// replaced and nothing outside the profile directories' entries goes (the
-/// oracle); past the fingerprints none is left; the profile directory is
-/// still in a known layout (or holds only lock files); the next build
-/// succeeds and its binary runs, and once the fingerprints are gone it
-/// compiled the package again.
-pub fn cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile(
-    ctx: &Ctx,
-    toolchain: &Toolchain,
-) -> TestResult {
-    let s = &ctx.scratch;
-    s.mkdir("w", 0o755, TESTER)?;
-    let p = RACE.write(s, "w/p")?;
-    // Two profile directories: the fingerprints of both go before anything
-    // else of either (in one classic profile, name order alone would put
-    // `.fingerprint/` first).
-    let builds: [&[&str]; 2] = [&["build"], &["build", "--release"]];
-    for args in builds {
-        build(ctx, toolchain, &p, args)?;
-    }
-    let target = p.join("target");
-    for point in ["inside-fingerprints", "after-fingerprints", "last"] {
-        let profiles = profile_dirs(&target)?;
-        ensure!(profiles.len() == 2, "debug and release: {profiles:?}");
-        let mut fingerprint_objects = 0;
-        let mut all = 0;
-        for profile in &profiles {
-            fingerprint_objects += fingerprints(profile)?.len();
-            for entry in deletable(profile)? {
-                all += objects_below(&entry)?.len();
-            }
-        }
-        let k = match point {
-            "inside-fingerprints" => 2,
-            "after-fingerprints" => fingerprint_objects + 1,
-            _ => all,
-        };
-        ensure!(
-            fingerprint_objects > 0 && k <= all,
-            "{point}: k {k} of {all}"
-        );
-        let locks = lock_inodes(&target)?;
-        let oracle = Oracle::arm(reclaimable(&target)?)?;
-        let at = format!("unlinkat:{k}");
-        let run = cargo_reclaim(ctx, &["--kill-at", &at], &["/tmp/w"])?;
-        let judged = oracle.judge(&run)?;
-        ensure!(
-            run.signal == Some(SIGKILL),
-            "{point}: the driver was not killed at {at}: {:?} {:?}",
-            run.code,
-            run.signal
-        );
-        judged.assert_clean()?;
-        ensure!(
-            lock_inodes(&target)? == locks,
-            "{point}: lock files gone or replaced"
-        );
-        let gone = unlinked(&run);
-        ensure!(
-            gone.len() == k - 1,
-            "{point}: {} unlinks before the kill, want {}",
-            gone.len(),
-            k - 1
-        );
-        let mut layouts = Vec::new();
-        for profile in &profiles {
-            if point != "inside-fingerprints" {
-                let left = fingerprints(profile)?;
-                ensure!(
-                    left.is_empty(),
-                    "{point}: fingerprints left after other entries started to go: {left:?}"
-                );
-            }
-            let layout = layout_of(profile)?;
-            ensure!(
-                layout != "unknown",
-                "{point}: {} is in no known layout: {:?}",
-                profile.display(),
-                deletable(profile)?
-            );
-            layouts.push(layout);
-        }
-        info!(
-            "{point} (killed at {at} of {all}, {fingerprint_objects} fingerprint objects): \
-             layouts {layouts:?}, {} unlinked",
-            gone.len()
-        );
-        // Once past the fingerprints, both profiles had lost all of
-        // theirs, so both compile again.
-        let recompiles = point != "inside-fingerprints";
-        for profile in [&[][..], &["--release"]] {
-            rebuilds(ctx, toolchain, &p, profile, recompiles, point)?;
-        }
-    }
-    Ok(())
 }
 
 /// mped H6 (c): how long the protocol holds a target's locks (every Cargo

@@ -16,9 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::cargo_reclaim_suite::{
-    deletable, lock_inodes, objects_below, profile_dirs, reclaimable,
-};
+use crate::cargo_harness::{deletable, lock_inodes, objects_below, profile_dirs, reclaimable};
 use crate::cargo_under_test::{Cargo, SMOKE, Toolchain};
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};

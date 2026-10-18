@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:05'
+updated_date: '2026-10-18 13:18'
 labels:
   - wave-2
   - profiles
@@ -29,3 +30,9 @@ Decision for Mark: (a) keep spelling containers out per profile (status quo; che
 - [ ] #1 The decision is recorded in docs/reference.md (Profiles or Built-in profile library) and the affected library rows follow it
 - [ ] #2 nix-shell.* dirs below /tmp/claude-{uid} are either reachable by a /tmp profile or documented as out of scope
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Decision by Mark (2026-10-18): a shared temp-dir prefix list (nix-shell.*, /tmp/claude-{uid}, zephyr run dirs, nested shells, ...), defined once and used by every /tmp profile, not repeated per profile: it avoids drift. Define its single home in docs/reference.md.
+<!-- SECTION:NOTES:END -->

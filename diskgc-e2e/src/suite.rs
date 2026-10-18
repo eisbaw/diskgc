@@ -32,8 +32,8 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, ensure_suite, host_suite,
-    inuse_suite,
+    cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, ensure_suite,
+    host_suite, inuse_suite,
 };
 
 /// Which gate runs a test.
@@ -422,6 +422,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: inuse_suite::inuse_a_process_in_its_own_user_namespace_is_read,
+    },
+    Test {
+        name: "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: cargo_race_suite::cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions,
     },
     Test {
         name: "inuse_a_more_capable_process_blocks_outside_the_initial_namespace",

@@ -156,6 +156,14 @@ impl Toolchain {
             .ok_or_else(|| format!("no fast Cargo toolchain under test in {MANIFEST}"))
     }
 
+    /// The oldest stable toolchain in the manifest (the lowest release of
+    /// those that are no nightly): the one whose lock set the protocol was
+    /// first measured on, `.cargo-lock` alone for 1.90.0.
+    pub fn oldest() -> Result<Self, String> {
+        oldest_stable(Self::all()?)
+            .ok_or_else(|| format!("no stable Cargo toolchain under test in {MANIFEST}"))
+    }
+
     /// The toolchain called `name`.
     pub fn named(name: &str) -> Result<Self, String> {
         Self::all()?
@@ -196,6 +204,21 @@ impl Toolchain {
             ("CARGO_TERM_PROGRESS_WHEN".to_owned(), "never".to_owned()),
         ]
     }
+}
+
+/// The stable toolchain (no `-nightly` version) with the lowest release,
+/// compared number by number.
+pub fn oldest_stable(toolchains: Vec<Toolchain>) -> Option<Toolchain> {
+    let numbers = |t: &Toolchain| -> Vec<u64> {
+        t.version
+            .split('.')
+            .map(|n| n.parse().unwrap_or(u64::MAX))
+            .collect()
+    };
+    toolchains
+        .into_iter()
+        .filter(|t| !t.version.contains("-nightly"))
+        .min_by_key(numbers)
 }
 
 /// `1.101.0-nightly-2026-10-16` -> `1.101.0-nightly`; a stable version as is.
@@ -852,6 +875,19 @@ mod tests {
         ] {
             assert!(main.contains(&needle), "main.rs lacks {needle}");
         }
+    }
+
+    #[test]
+    fn the_oldest_stable_is_the_lowest_release_not_the_first_listed() {
+        let listed = parse_manifest(
+            "1.99.1 1.99.1 fast\n1.100.0 1.100.0 full\nnightly-2026-10-16 \
+             1.89.0-nightly-2026-10-16 full\n1.90.0 1.90.0 full\n",
+        )
+        .unwrap();
+        assert_eq!(oldest_stable(listed).unwrap().name, "1.90.0");
+        let only_nightly =
+            parse_manifest("nightly-2026-10-16 1.101.0-nightly-2026-10-16 fast\n").unwrap();
+        assert!(oldest_stable(only_nightly).is_none());
     }
 
     #[test]

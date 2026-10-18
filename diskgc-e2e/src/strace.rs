@@ -302,6 +302,15 @@ fn split_args(text: &str) -> Result<Vec<Arg>, String> {
                 Some(lt) if token.ends_with('>') => {
                     Arg::Fd(decode_hex(&token[lt + 1..token.len() - 1])?)
                 }
+                // A directory fd whose directory is gone: strace 7.2 puts
+                // the marker after the path (`8<\x2f...>(deleted)`); it is
+                // kept as the ` (deleted)` suffix the oracle classifies.
+                Some(lt) if token.ends_with(DELETED_FD_SUFFIX) => {
+                    let mut path =
+                        decode_hex(&token[lt + 1..token.len() - DELETED_FD_SUFFIX.len()])?;
+                    path.extend_from_slice(b" (deleted)");
+                    Arg::Fd(path)
+                }
                 _ => Arg::Other(token.to_owned()),
             };
             (arg, &rest[end..])
@@ -316,6 +325,9 @@ fn split_args(text: &str) -> Result<Vec<Arg>, String> {
     }
     Ok(args)
 }
+
+/// How strace 7.2's `-y` ends the path of an fd whose object was deleted.
+const DELETED_FD_SUFFIX: &str = ">(deleted)";
 
 /// Decodes `-xx` output: every byte as `\xHH`.
 fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
@@ -409,6 +421,22 @@ mod tests {
         );
         let ev = event(&line);
         assert_eq!(ev.removed, vec![PathBuf::from("/tmp/a b/sub\"dir")]);
+    }
+
+    /// strace 7.2 prints a deleted directory's fd as `8<...>(deleted)`
+    /// (seen when `cargo clean` removed a target diskgc was deleting in).
+    #[test]
+    fn a_directory_fd_of_a_deleted_directory_keeps_its_marker() {
+        let line = format!(
+            "unlinkat(8<{}>(deleted), \"{}\", 0) = 0",
+            hex("/tmp/p/target/debug/build"),
+            hex("x")
+        );
+        let ev = event(&line);
+        assert_eq!(
+            ev.removed,
+            vec![PathBuf::from("/tmp/p/target/debug/build (deleted)/x")]
+        );
     }
 
     #[test]

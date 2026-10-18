@@ -500,8 +500,9 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   `cargo test`: measured for 1.90 and the 1.96 nightly over the whole
   runtime of the binary, and for the toolchains pinned in
   [testing.md](testing.md#cargo-toolchains-under-test) between compilation
-  and the start of the binary (their locks during the binary's runtime
-  were not sampled).
+  and the start of the binary and while a `cargo test` binary runs (race
+  tests 4 and 8); their locks during a `cargo run` binary's runtime were
+  not sampled.
 - `.cargo-artifact-lock` exists in some targets on the development machine;
   1.90 and the 1.96 nightly did not create it with plain `build` / `run` /
   `test`.
@@ -528,6 +529,45 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   `.cargo-build-lock`, takes it, and then waits for a `.cargo-lock` held by
   someone else, writing nothing else meanwhile. Cargo releases its locks
   with `LOCK_UN` (diskgc only ever closes, Host lock).
+- **What a Cargo writes before `.cargo-lock`**, the invariant of the
+  Reclaim protocol (step 3). Measured on the three pinned toolchains, in
+  the containers, 2026-10-18:
+  - `build` on a classic target 1.90 made, while another process held
+    `.cargo-lock`, traced as `tester` in the project directory with
+    `strace -f -tt -y -s 200 -e trace=open,openat,openat2,creat,mkdir,mkdirat,unlink,unlinkat,rmdir,rename,renameat,renameat2,link,linkat,symlink,symlinkat,flock,utimensat,futimesat,truncate,ftruncate,chmod,fchmod,fchmodat,chown,fchown,fchownat,lchown,write,pwrite64,fallocate,copy_file_range,setxattr,fsetxattr -o FILE -- cargo build`:
+    below the target only `target/.rustc_info.json` (rewritten in place,
+    outside every profile directory), a `mkdir` of the profile directory
+    (`EEXIST`; profile directories are never deleted) and the `O_CREAT`
+    open of the lock files it takes first (`.cargo-build-lock` on 1.99.1
+    and the nightly); then it waits for `.cargo-lock`;
+  - by race test 2 ([testing.md](testing.md#cargo-race-tests)), against
+    diskgc paused in its deletion holding every lock: `build`, `check`,
+    `test --no-run` and `doc` wait for a lock diskgc holds and change
+    nothing in the profile directory but the lock files they create and
+    hold, on each toolchain's own target (classic on 1.90 and 1.99.1,
+    per-unit on the nightly) and, for 1.99.1 and the nightly, on a classic
+    target 1.90 made (`.cargo-lock` waited for); a split-mode `build`
+    (`CARGO_BUILD_BUILD_DIR`) on a target first built whole takes the build
+    directory's `.cargo-build-lock`, creates no lock file in the target's
+    profile and waits there too.
+
+  Inferred, not measured: the other commands that compile (`run`, `bench`,
+  `fix`, `rustc`, `rustdoc`, `install` and `package` building in a target)
+  go through the same locked layout (Cargo's `BuildRunner`, which takes the
+  locks before it prepares the profile directories). Untested: `fix`,
+  `bench`, `rustc`, `rustdoc`, `install`, `package`.
+
+  **The exception: `cargo clean`** without `-p` (the whole target, or a
+  whole profile directory with `--profile dev`) takes no lock and deletes
+  (measured by race test 2's clean case on the three toolchains: it runs to
+  its end while diskgc holds every lock, lock files included; `--release`
+  and other profiles are inferred to do the same). That is
+  safe for diskgc: both only delete, and no new build output is at risk; a
+  clean during a reclaim is one event, and diskgc's next identity-checked
+  unlink finds nothing (`ENOENT`): the target is skipped as `changed`,
+  nothing more is unlinked. Its directory descriptors are of removed
+  directories, which a later build cannot write into. `cargo clean -p`
+  waits for the locks like a build.
 - **Lock sets by command** (measured 2026-10-18 in the containers on the
   three pinned toolchains): `cargo check` on a fresh target of 1.99.1 and
   the nightly creates only `.cargo-build-lock` and `.cargo-lock`; `build`,
@@ -542,8 +582,9 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   (the package's directory), `CARGO`, and an `LD_LIBRARY_PATH` naming the
   profile directory (1.90.0 and 1.99.1 also its `deps/`; with a separate
   build directory 1.99.1 names the build directory's `deps/` instead, the
-  nightly only the target directory's profile directory); 1.99.1 also
-  passes the package's `OUT_DIR` (inside the profile directory). A
+  nightly only the target directory's profile directory); 1.90.0 and
+  1.99.1 also pass the package's `OUT_DIR` (inside the profile directory;
+  the nightly passes none to a runner: race test 8's logs). A
   `CARGO_BUILD_BUILD_DIR` set in the environment is inherited.
 
 diskgc has an explicit **allowlist of known lock file names** (`.cargo-lock`,
@@ -769,20 +810,27 @@ The step that deletes (`cargo_target::reclaim` in the core).
    holds the locks (a Cargo of another lock set starting, Lock files) stops
    the deletion (`changed`). That listing is a detector and a backstop,
    not the protection. The protection is an invariant: every lock set
-   diskgc reclaims (whole sets, Lock sets) holds `.cargo-lock`, and in the
-   measured lock order every Cargo takes `.cargo-lock` (Lock files: lock
-   order); that it writes nothing into the profile directory before then
-   is not verified yet (task-11). So a Cargo that starts during the
-   deletion and creates a lock file diskgc does not hold (a 1.99.1 build
-   on a target 1.90 made creates `.cargo-build-lock`) then waits on the
-   `.cargo-lock` diskgc holds and, if that holds, writes nothing. A Cargo
-   that wrote into the profile before taking `.cargo-lock` would break
-   this; the Cargo race tests (task-11) must show it holds on every pinned
-   toolchain: a reclaim of a target 1.90 made paused at an `unlinkat`, a
-   1.99.1 build started then, and `/proc/locks` showing that it created
-   `.cargo-build-lock` and waits on `.cargo-lock` without writing. diskgc
-   does not create missing lock files itself: that would be a write into
-   the target, and the invariant does not need it.
+   diskgc reclaims (whole sets, Lock sets) holds `.cargo-lock`, and the
+   pinned Cargos measured (`build`, `check`, `test --no-run`, `doc`, a
+   split-mode `build`; Lock files: what a Cargo writes before
+   `.cargo-lock`) take it, or wait for a lock diskgc holds, before they
+   write into the profile directory; other compiling commands are inferred
+   to do the same. So a Cargo that starts during the deletion and creates
+   a lock file diskgc does not hold (a 1.99.1 build on a target 1.90 made
+   creates `.cargo-build-lock`) then waits on the `.cargo-lock` diskgc
+   holds, having written nothing else, and diskgc stops at its next part
+   as `changed` (race test 2). A visible Cargo waiting there is also seen
+   by the next part's in-use check (`in_use`), which is how diskgc stops
+   for a Cargo of the same lock set. The exception is a `cargo clean`
+   without `-p`, which deletes without any lock: it only removes, and
+   diskgc then stops as `changed` at its next unlink (Lock files). A
+   future Cargo that wrote into the profile before taking `.cargo-lock`
+   would break the invariant; race test 2, which runs on every toolchain
+   in the list, fails for any such write still there while the Cargo
+   waits (one created and removed again in between is seen only by
+   repeating the strace measurement; [testing.md](testing.md#cargo-race-tests),
+   Limits). diskgc does not create missing lock files itself: that would
+   be a write into the target, and the invariant does not need it.
    A part that stops part-way (`changed`, an
    error, the deadline) stops the target; what was deleted stays deleted,
    fingerprints first. Lock files are never in a record (every walk
@@ -825,11 +873,13 @@ part's delete fail (`EACCES`), an error for the target after its
 fingerprints went.
 Each part's in-use check is fresh (Freshness), not atomic with its
 delete (In use, limit 5). The order "fingerprints first" relies on Cargo
-treating a unit whose fingerprint is missing as dirty (measured: the next
-build compiles again, on the three pinned toolchains, also killed right
-after the fingerprints or before the last unlink); race test 6
-([testing.md](testing.md), task-11) is to check it at seeded positions on
-every pinned toolchain.
+treating a unit whose fingerprint is missing as dirty: race test 6
+([testing.md](testing.md#cargo-race-tests)) kills the reclaim at the
+first unlink of every part and in the middle of every larger one
+(`.fingerprint/`, per-unit fingerprints, `incremental/`, `build/`,
+`deps/`), on every pinned toolchain and on a target that 1.99.1 and the
+nightly both built, and the next build always succeeds (compiling again
+once the fingerprints are gone).
 
 ## Docker kinds
 

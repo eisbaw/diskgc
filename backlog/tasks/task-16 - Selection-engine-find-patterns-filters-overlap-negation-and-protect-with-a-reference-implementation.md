@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-18 13:18'
 labels:
   - wave-2
   - irreversible
@@ -50,6 +50,10 @@ From task-68 (profile spike, 2026-10-18). Code: crates/diskgc-core/src/fs_kind/ 
 - Directories on the way that cannot be read (another user's nix-shell.* below /tmp) are reported as plan skips although they are not candidates (as cargo discovery does). Decide whether plan entries may name non-candidates.
 
 From task-68's review: the nested-match rule is a decision for Mark, not settled by the spike. The spike's dry run never descends into a candidate, so a match inside another match of the same profile is not found (the outer wins). It defines the profile's matching set (and its golden sets), so Mark decides it (outer only, or both) before the freeze.
+
+From task-68 r2 (mped N2): a matching name that holds a mount is now listed as contains_mount (and not searched deeper) even when the source's where would have rejected it; add to the open question whether plan entries may name non-candidates.
+
+Decision by Mark (2026-10-18): nested matches of the same profile: the outer match only. It is a sensible default and avoids redundant or double candidates. Document it in docs/reference.md.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

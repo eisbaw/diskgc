@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-18 13:16'
 labels:
   - wave-2
   - irreversible
@@ -53,6 +53,8 @@ From task-53: the cargo-target action is cargo_target::reclaim (see task-10's no
 From task-10: the executor slice is diskgc-core/src/executor.rs (ensure<H: Delete>, dry_run<H: Host>, Tier, Request, privileges) with report/mod.rs (Status, conclude for rows 0/124/3/1, to_json, summary). Today: one --select tier (Tier::select refuses unions, !filter:, !profile:, non-cargo-target kinds), discovery + a read-only cargo_target::tally per target AFTER the host lock (architecture.md notes the deviation from the pre-lock synchronous tally), sort by tally last_build (unknown last), reclaim each with judged_last_build None, re-sample after each, stop when avail >= --target-free; after the lock a fresh sample >= --min-free returns met before any discovery. Extend Reclaim::walk to groups/ranking/per-tier discovery/preflight; keep ReclaimEnd mapping (Complete=action; Skipped=skip, plus an action when removed_entries>0; Failed=candidate error, next target tried; GateRefused and Stopped(Failed)=run error, stop; Stopped(DeadlinePassed)=deadline_hit). The dry run plan is eligible-first in the same order (reference.md says so); keep dry run and ensure on the same ordering function. held_by_deleted_files comes from the last scan, or one made at the end.
 
 From task-68's review (mped S2): this build refuses a reclaiming ensure over a non-Cargo source at the top of executor::ensure (an allowlist on Tier.source), and executor::discover matches Tier.source exhaustively so an fs tier never reaches Cargo discovery or reclaim (model test an_fs_tier_never_reaches_the_cargo_reclaim_over_its_roots). With config tiers or multi-term selections, the kind refusal (a kind with no reclaim yet) must become a static check over EVERY tier, made before any tier deletes: refusing tier 3 after tiers 1-2 deleted breaks "a static config error discovered only after something was deleted" (PRD, What bad looks like).
+
+From task-68 r2 (mped N3): executor::discover's fs arm is unreachable through ensure (the allowlist guard runs first) and only bites under mutation; add a crate-internal test calling discover with an fs tier, or give Reclaim a cargo-only tier type so the arm cannot exist. Cosmetic: unwrap_or_default() puts an empty path in that error when roots are empty.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

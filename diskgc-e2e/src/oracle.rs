@@ -54,6 +54,12 @@ impl Fixture {
         self
     }
 
+    /// Adds every eligible path of `other` (a second target in one run).
+    pub fn eligible_from(mut self, other: Fixture) -> Self {
+        self.eligible.extend(other.eligible);
+        self
+    }
+
     pub fn concurrent_writer(mut self, path: impl Into<PathBuf>) -> Self {
         self.concurrent_writers.push(path.into());
         self

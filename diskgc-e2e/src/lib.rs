@@ -34,7 +34,9 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod cargo_harness;
 pub mod cargo_probe;
+pub mod cargo_race_suite;
 pub mod cargo_reclaim_suite;
 pub mod cargo_suite;
 pub mod cargo_target_suite;

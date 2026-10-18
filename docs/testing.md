@@ -419,7 +419,10 @@ stable and a nightly. A Cargo older than 1.90 with a 1.90-like lock set
 (Debian 13 ships 1.85, Ubuntu 24.04 ships 1.75) is acted on but untested;
 refusing unknown lock names only protects against newer versions. A new
 toolchain is a new entry in the list (and a new base image); its tests
-appear by themselves.
+appear by themselves. Adding one also means repeating the strace
+measurement of what a Cargo writes before `.cargo-lock`
+([safety.md](safety.md#lock-files)) with it, until race test 2 does that
+itself (task-13 H13).
 
 - **Layout.** Minimal profiles (rustc, cargo, the host's rust-std; no docs,
   no rust-src) and one C toolchain (the linker, nixpkgs' `stdenv.cc`) are
@@ -483,6 +486,98 @@ appear by themselves.
   whether the new task carries the filter), and most of a build's
   processes and threads never unlink; so the bound is relative to the full
   trace rather than per traced call.
+
+## Cargo race tests
+
+The race tests of section 5 are container tests in `diskgc-e2e`
+(`cargo_race_suite.rs`, `cargo_reclaim_suite.rs`, with shared helpers in
+`cargo_harness.rs`), each run once per toolchain under test
+(`NAME@TOOLCHAIN`, Cargo toolchains under test) unless marked. diskgc runs
+as the test driver's `cargo-reclaim` (the reclaim protocol of
+[safety.md](safety.md#reclaim-protocol) over `LinuxHost`), traced, paused
+or killed at `OP:N` positions (Controlled pause and kill points); the
+Cargo commands are untraced fixtures, declared to the oracle as concurrent
+writers only where they write during a judged run (`target/.rustc_info.json`,
+which Cargo rewrites in place when it starts; the whole target where a
+`cargo clean` removes it). Each scenario has one timed event: the Cargo
+command started while diskgc or another Cargo is stopped at a known
+point. Waits have wall-clock hang guards (120 s to reach a state); a state
+the test asserts is checked over a count of `/proc/locks` samples (one
+`read` each), not over a time.
+
+Every test judges the driver's runs with the deletion oracle (snapshot and
+strace record) and checks the Cargo commands' outcome. What else each one
+rests on, independent of diskgc, and what it takes from the driver's own
+report (its verdict line: reason, `entries=`, `held_us=`, the detail):
+
+| # | Test | What it checks (Reclaim protocol step) | Independent of diskgc | From the report |
+|---|---|---|---|---|
+| 1 | `cargo_reclaim_skips_a_target_whose_lock_is_held` | a build paused in its build script, the holder exclusive and shared: `locked` (step 1) | `/proc/locks`: the build holds `.cargo-lock`; oracle with nothing eligible | the reason `locked` |
+| 2 | `cargo_race_2_a_build_started_during_deletion_waits_writing_nothing` | the driver paused at the first unlink of the second-to-last part; `cargo build`, `check`, `test --no-run` and `doc` (a round each) started then wait for a lock diskgc holds, holding only lock files they created; the profile directory is unchanged but for them; diskgc finishes its part and stops before the last one, `changed` if a lock file appeared (the re-listing), else `in_use` (the part's check); the command recompiles, a built binary runs. On this toolchain's own target, and (H2, the `.cargo-lock` invariant of step 3) on a target the oldest stable made, where 1.99.1 and the nightly create and hold `.cargo-build-lock` and wait for `.cargo-lock`. On 1.90.0 only the own-target rounds run: no newer Cargo, and no `.cargo-build-lock` is created there | `/proc/locks` of diskgc and the command, steadily; the harness's walk (inode, size, mtime, ctime) of the profile; strace: the unlinks from the pause on lie in the part in progress | the reason and its detail |
+| 2 | `cargo_race_2_a_cargo_clean_during_deletion` | `cargo clean` and `cargo clean --profile dev` take no lock and remove what diskgc is deleting; diskgc's next unlink finds nothing and it stops (`changed`, `ENOENT`), unlinking nothing more; `cargo clean -p` waits for a lock diskgc holds, writing nothing, and diskgc stops `in_use` at its next part; the next build succeeds | `/proc/locks` (never waiting, or waiting steadily); strace: no unlink after the pause, or none past the part; the walk | the reason, `entries=`, `ENOENT` |
+| 2 | `cargo_race_2_split_build_dir_on_a_target_first_built_whole` | a target first built whole (all three lock files) is reclaimed, then split-mode build, run and test succeed; and race 2 with a split-mode build started during the deletion: it holds the build directory's `.cargo-build-lock` (which diskgc does not hold), creates no lock file in the target's profile, waits for a lock diskgc holds there, writes nothing into it; diskgc stops `in_use`. 1.90.0 ignores the setting (logged not applicable) | as race 2, plus `/proc/locks` on the build directory's lock | as race 2 |
+| 3 | `cargo_race_3_a_blocked_build_and_a_later_one_never_run_together` | a build blocked during the deletion and one started after diskgc exits: the second waits for the very lock files (by inode) the first holds in its build script, over the samples; both succeed (step 1; lock files never move) | `/proc/locks` by file id; strace: the unlinks from the pause on lie in the part in progress | the reason `in_use` naming the blocked build |
+| 3 | `cargo_race_locks_held_through_the_last_part_released_per_target` | two targets in one run: at the first and at the last unlink of the first target's last part diskgc holds every lock of it and a build waits; at the second target's first lock it holds none, and the build goes on (steps 3 and 4) | `/proc/locks` at three pauses | the reason `reclaimed` of both |
+| 4 | `cargo_race_4_a_target_whose_test_binary_still_runs_is_skipped` | a running test binary (no lock held on any lock file): `in_use`, nothing deleted (step 2 or the per-part check: indistinguishable from outside) | `/proc/locks`: no lock held; the test binary's executable inside the target; oracle with nothing eligible, no unlink | the reason and the evidence naming the test binary |
+| 5 | `cargo_reclaim_changed_between_discovery_and_locking` | paused at `flock_try:1`; `--release`, `--target`, or a newer build meanwhile: `changed`, no unlink (step 2) | `/proc/locks`: diskgc holds no lock at the pause; strace: no unlink; lock files keep their inodes | the reason `changed` |
+| 6 | `cargo_race_6_killed_at_seeded_positions_the_next_build_succeeds`; `cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions` (full tier, one run: a debug profile 1.99.1 and then the nightly built) | killed at every seeded position: the tree shows step 3's order (every part before the kill gone, every part after it whole, the part itself short by exactly the unlinks made); lock files keep their inodes and hold no lock; every profile keeps a known layout; the recovery builder rebuilds every profile and its binary runs, compiling again once the fingerprints are gone | the harness's plan and walk, strace counts, `/proc/locks` | nothing (the driver dies) |
+| 7 | `cargo_race_7_a_check_between_its_locks_and_a_build_keep_the_target` | `cargo check` holding `.cargo-build-lock` and waiting for `.cargo-lock`, a build waiting behind it: `locked` at the first lock with none taken; then a holder on `.cargo-build-lock` alone and a second target: at `flock_try:2` diskgc holds no lock of the first target (step 1, Cargo's order) | `/proc/locks` of both commands, steadily; diskgc paused at the run's second lock attempt (a later target's) holding nothing of the first | `locked` at `.cargo-build-lock`, `held_us=none` |
+| 8 | `cargo_race_8_run_or_test_paused_before_its_binary_keeps_the_target` | `cargo run` and `cargo test` paused in the runner (no lock held): `in_use`, nothing deleted, the binary runs; also a `cargo run` started while the driver, having judged the target eligible, is paused before its first lock (step 2: the scan made under the locks): `in_use`, or `changed` in a round where the harness's walk shows `cargo run` wrote into the profile (1.90.0 rewrites `<bin>.d` now and then), retried up to 5 rounds | `/proc/locks`: no lock held; oracle with nothing eligible, no unlink; the walk decides which verdict is right; the pause's length is logged | the reason and the evidence naming the runner |
+| 9 | `cargo_race_9_an_unknown_lock_file_is_unsupported_layout` | `.cargo-future-lock` beside the lock files: `unsupported_layout` with no lock taken, also while `.cargo-lock` is held (which would make it `locked`) (step 1, layout before locks) | diskgc paused at the run's second lock attempt (a later target's) holding nothing of the target; the holder still holds `.cargo-lock` | `unsupported_layout`, `held_us=none` |
+| AC | `cargo_race_split_build_dir_is_never_reclaimed` | a separate build directory: both halves `unsupported_layout`, no lock taken, nothing deleted, idle, during a build holding both halves' locks and during `cargo test` paused before its binary (1.90.0 ignores the setting: logged not applicable) | as race 9, for both halves; `/proc/locks`: the build holds both halves' locks | `unsupported_layout`, `held_us=none` |
+| AC | `cargo_race_shared_target_dir_from_cargo_config` | a `target-dir` from `.cargo/config.toml` outside the projects, used by two projects: races 1, 8, 4 and 2 on it; then a `target-dir` pointing at another project's own target: `cargo run` paused in its runner keeps it `in_use` by the runner's environment | as the races it repeats | as the races it repeats |
+
+**Race test 6's positions** are computed from the harness's own walk, not
+from absolute call counts: the parts of step 3 in their order (every
+profile's fingerprints, `.fingerprint/` and each
+`build/<package>/<hash>/fingerprint`, then each profile's other entries
+in name order, `build/` and `deps/` last), each object one `unlinkat`. The
+seeds are the first unlink of every part (every boundary, the very first
+included), the middle of every part of three objects or more (inside
+`.fingerprint/`, `incremental/`, `build/`, `deps/`) and the last unlink;
+they are named by part, so the positions are computed again after each
+rebuild, and every kill logs the part sizes. A debug and a release profile
+give about 20 positions per toolchain; the test requires a kill in the
+middle of `incremental/` and of the first fingerprint part among them. On
+the mixed layout every position is killed once per recovery builder
+(1.99.1, the nightly): before each kill the target is built by both, so it
+is mixed again, and after it only that builder rebuilds, so each recovers
+alone from the same interrupted state; the seeds must include kills inside
+`.fingerprint/`, inside a per-unit fingerprint and inside `incremental/`.
+
+**Limits.**
+
+- The walk that shows race test 2's Cargo wrote nothing compares objects
+  (inode, size, mtime, ctime) before and while it waits: a file created
+  and removed in between is invisible where a lock file was created too
+  (the directory's times move anyway). The strace measurement in
+  [safety.md](safety.md#lock-files) (what a Cargo writes before
+  `.cargo-lock`) covers that once per toolchain, for `build`; the test
+  does not repeat it (task-13 H13).
+- Race test 8's late case is conditional evidence for the scan made under
+  the locks: a scan kept from before them is caught only while the
+  driver's pause is shorter than the in-use scan's reuse limit (500 ms),
+  and only in a round where `cargo run` wrote nothing into the profile
+  (the test logs both, and warns when no round of 5 reached the check; it
+  does not fail on that). The model test of that step holds it
+  independently.
+- The "no lock taken" checks of races 7, 9 and the split build directory
+  see a lock still held at the run's second lock attempt; a lock taken
+  and released before it is not seen (the strace record traces no
+  `flock`). In race 7's first state both locks a Cargo-ordered or
+  reversed run would try first are held by others, so no single change to
+  the protocol makes that check fail; it guards against a lock of that
+  target held across targets.
+- No gate stops Cargo between compiling and starting its runner, so the
+  window in which a Cargo of another project, whose `target-dir` points
+  at an attached target, is the only evidence (the documented blind spot,
+  [safety.md](safety.md#cargo-target), In use) is not reached by any test.
+- The lock order is not a safety property ([safety.md](safety.md#reclaim-protocol),
+  step 1); race test 7 checks it because a wrong order makes a Cargo that
+  started first wait for diskgc.
+- A test whose case does not apply to a toolchain (no newer Cargo, no
+  `.cargo-build-lock`, no split build directory on 1.90.0) logs "not
+  applicable" and is reported `PASS` by the runner (task-13).
 
 ## Controlled pause and kill points
 

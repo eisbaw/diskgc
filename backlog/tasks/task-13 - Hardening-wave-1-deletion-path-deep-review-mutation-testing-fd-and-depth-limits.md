@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 08:25'
+updated_date: '2026-10-18 16:20'
 labels:
   - wave-1
   - hardening
@@ -49,6 +49,10 @@ Filed from task-10's deep gate round 2: (H8) docs/testing.md says the other bina
 (H10) From task-10 round 4 (mped nit 3): resolve every root before discovery walks any of them, so a misconfigured root (unsafe_path) excludes the tier before any other root's walk is spent; today cargo_target::discover walks roots outermost first and refuses an unsafe one when it reaches it.
 
 From task-10 final round (filed at commit 783609f): H11 (QA) no container test runs a reclaiming ensure with a kept or not-owner target on the tallied path and asserts from the strace record that its .cargo-lock is never flocked (model-only today); cheap: add a .diskgc-keep target to ensure_exits_1_when_every_candidate_was_processed_below_min_free. H12 (mped) executor excluded() builds its message by stripping the Skip/ResolveError display prefix; carry the reason as data instead of re-parsing a string.
+
+From task-11 (Cargo race tests, implementer, 2026-10-18): H13 race test 2 (cargo_race_2_a_build_started_during_deletion_waits_writing_nothing) proves 'a Cargo writes nothing into the profile directory before .cargo-lock' by comparing the harness's walk (inode, size, mtime, ctime) before the Cargo starts and while it waits; a file created and removed in between is invisible wherever the Cargo also created a lock file (the profile directory's times move anyway). A one-off strace -f measurement covers the three pinned toolchains (docs/safety.md, Lock files: what a Cargo writes before .cargo-lock). To catch it for a new toolchain on every run, have race test 2 run the waiting Cargo under its own strace of file-changing calls and fail on any call below the profile directory before the flock of .cargo-lock. H14 race test 8's late case (cargo run started while the driver, having judged the target eligible, is paused before its first lock) catches a scan kept from before the locks (Checker::forget removed under the locks) only while the pause is shorter than REUSE_LIMIT (500 ms), as it is on the development machine; on 1.90.0 the case often ends 'changed' instead (cargo run rewrites target/debug/<bin>.d) and then cannot catch it. A driver-only way to stretch the reuse window, or a model test pinning the forget, would make it deterministic (a_process_started_between_judging_and_locking_is_seen in the model covers the step today).
+
+From task-11 round 2 (deep gate, 2026-10-18): H15 (mped S7) a test whose case cannot apply to a toolchain (no newer Cargo on the oldest stable, no .cargo-build-lock or split build directory on 1.90.0) logs 'not applicable' but is reported PASS; add an N/A outcome to the runner like TOOLCHAIN (exit code, summary column), or do not register such a NAME@TOOLCHAIN at all. Today: cargo_race_2_*'s cross-version rounds and cargo_race_2_split_build_dir_on_a_target_first_built_whole on 1.90.0, cargo_race_7's lock-order part and cargo_race_split_build_dir_is_never_reclaimed on 1.90.0. H16 (mped Q3, low) race test 6 on a shared target-dir from .cargo/config.toml (two projects' units in one profile, the detached rule): not run yet. H17 (optional) the compile-to-runner window of a Cargo whose target-dir points at another project's attached target (docs/safety.md In use, blind spot) could be reached with strace --inject=execve:delay_enter on the Cargo, so a race test can show what diskgc does there (expected: deletes, the documented limit).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
