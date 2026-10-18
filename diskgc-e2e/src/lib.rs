@@ -19,7 +19,9 @@
 //!   processes of [`inuse_probe`] (started through [`holder`]); those of
 //!   the Cargo toolchains under test and the Cargo race helpers in
 //!   [`cargo_suite`], with [`cargo_under_test`], the helper processes of
-//!   [`cargo_probe`] and the `/proc/locks` sampler [`proc_locks`].
+//!   [`cargo_probe`] and the `/proc/locks` sampler [`proc_locks`]; those
+//!   of the `cargo-target` kind's discovery, eligibility and process
+//!   heuristics on real Cargo builds in [`cargo_target_suite`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -31,6 +33,7 @@
 
 pub mod cargo_probe;
 pub mod cargo_suite;
+pub mod cargo_target_suite;
 pub mod cargo_under_test;
 pub mod controlled;
 pub mod driver;

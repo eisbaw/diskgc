@@ -24,7 +24,7 @@
 //! than what `statx` reports, so on those filesystems a mapping matches by
 //! inode number alone: more matches, the conservative side.
 
-mod environ;
+pub(crate) mod environ;
 pub mod scan;
 
 use std::collections::{BTreeMap, HashMap};
@@ -42,7 +42,9 @@ use crate::host::{
 };
 use crate::resolve::{ResolveError, Want, open_beneath};
 
-pub use scan::{EnvPath, Excuse, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Unreadable, Use};
+pub use scan::{
+    EnvPath, Excuse, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Seen, Unreadable, Use,
+};
 
 /// How old a scan may be when the deletion it cleared starts
 /// (docs/safety.md, In use: Freshness).
@@ -94,7 +96,8 @@ pub struct Scan {
     unsettled: Option<String>,
     processes: usize,
     gone: usize,
-    commands: HashMap<Pid, OsString>,
+    /// Every process read in full, by pid (ordered, so reports are).
+    seen: BTreeMap<Pid, Seen>,
     uses: HashMap<DevIno, Vec<Use>>,
     /// Memory-map uses by inode number alone (see [`MAPS_BY_INODE`]).
     maps_by_inode: HashMap<u64, Vec<Pid>>,
@@ -120,7 +123,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         unsettled: gathered.unsettled,
         processes: gathered.read.len(),
         gone: gathered.gone,
-        commands: HashMap::new(),
+        seen: BTreeMap::new(),
         uses: HashMap::new(),
         maps_by_inode: HashMap::new(),
         environ: Vec::new(),
@@ -147,7 +150,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
                 text,
             });
         }
-        s.commands.insert(pid, read.command);
+        s.seen.insert(pid, read.seen);
     }
     Ok(s)
 }
@@ -269,11 +272,50 @@ impl Scan {
         notes
     }
 
-    fn command(&self, pid: Pid) -> String {
-        self.commands
+    /// The command of `pid` for messages (`?` when unknown).
+    pub fn command(&self, pid: Pid) -> String {
+        self.seen
             .get(&pid)
+            .map(|s| &s.command)
             .filter(|c| !c.is_empty())
             .map_or("?".into(), |c| c.to_string_lossy().into_owned())
+    }
+
+    /// Every process read in full, in pid order, with what it showed of
+    /// itself as text (for heuristics on paths and names, such as the
+    /// Cargo kind's, docs/safety.md, `cargo-target`: In use).
+    pub fn readable(&self) -> impl Iterator<Item = (Pid, &Seen)> {
+        self.seen.iter().map(|(pid, seen)| (*pid, seen))
+    }
+
+    /// The uses of the object `id` (fds, cwd, root, exe, mappings), matched
+    /// by (device, inode) exactly.
+    pub fn uses(&self, id: DevIno) -> &[Use] {
+        self.uses.get(&id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every absolute path named in an initial environment (values split
+    /// at `:`), with its process and variable.
+    pub fn environ_paths(&self) -> &[EnvPath] {
+        &self.environ
+    }
+
+    /// Why this scan cannot clear anything: it is unsettled, or a process
+    /// that blocks could not be read (docs/safety.md, In use). `None`: it
+    /// can judge candidates.
+    pub fn blocked(&self) -> Option<String> {
+        if let Some(why) = &self.unsettled {
+            return Some(why.clone());
+        }
+        let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
+        let name = u
+            .name
+            .as_ref()
+            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+        Some(format!(
+            "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
+            u.pid, u.error
+        ))
     }
 
     /// The open-but-deleted files of the visible processes on the
@@ -288,7 +330,11 @@ impl Scan {
             .into_iter()
             .map(|(pid, bytes)| HeldByDeleted {
                 pid,
-                command: self.commands.get(&pid).cloned().unwrap_or_default(),
+                command: self
+                    .seen
+                    .get(&pid)
+                    .map(|s| s.command.clone())
+                    .unwrap_or_default(),
                 bytes,
             })
             .collect()
@@ -310,21 +356,8 @@ impl Scan {
     pub fn check<F>(&self, candidate: &Candidate<'_, F>, record: &WalkRecord) -> Result<(), Skip> {
         let path = candidate.path();
         let in_use = |at: PathBuf, detail: String| Err(Skip::new(Reason::InUse, at, detail));
-        if let Some(why) = &self.unsettled {
-            return in_use(path.to_owned(), why.clone());
-        }
-        if let Some(u) = self.unreadable.iter().find(|u| u.excuse.is_none()) {
-            let name = u
-                .name
-                .as_ref()
-                .map_or("?".into(), |n| n.to_string_lossy().into_owned());
-            return in_use(
-                path.to_owned(),
-                format!(
-                    "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
-                    u.pid, u.error
-                ),
-            );
+        if let Some(why) = self.blocked() {
+            return in_use(path.to_owned(), why);
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
         for id in record.objects() {
@@ -553,6 +586,22 @@ impl<'a> Checker<'a> {
                 scan.took()
             ),
         ))
+    }
+
+    /// A scan younger than the reuse limit: the kept one, or a new one.
+    /// For judging without deleting (a plan, a survey): refusing needs no
+    /// freshness, and nothing it clears is deleted on its word (deleting
+    /// goes through [`Checker::check`] and its [`Clear`]).
+    pub fn current<H: Host>(&mut self, host: &H) -> Result<&Scan, HostError> {
+        let now = host.now();
+        let reusable = self
+            .latest
+            .as_ref()
+            .is_some_and(|s| now.saturating_since(s.started) < self.reuse_limit);
+        if !reusable {
+            self.rescan(host)?;
+        }
+        Ok(self.latest.as_ref().expect("made above"))
     }
 
     fn rescan<H: Host>(&mut self, host: &H) -> Result<(), HostError> {

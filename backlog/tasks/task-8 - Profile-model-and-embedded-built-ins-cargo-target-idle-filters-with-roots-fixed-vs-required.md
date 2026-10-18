@@ -3,10 +3,10 @@ id: TASK-8
 title: >-
   Profile model and embedded built-ins (cargo-target, idle filters) with roots
   fixed vs required
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 23:20'
+updated_date: '2026-10-17 23:50'
 labels:
   - wave-1
   - config
@@ -70,9 +70,11 @@ S7: AC #3 reworded via the CLI to name the gates (just check, nix flake check); 
 Binary size: 585,320 B at a7bce15, 585,616 B now (profile code not called yet); 2,272,040 B with Library::builtin() called (temporary probe, restored). Filed as task-61 (43). Hardening items filed on task-61 (39)-(43); notes on tasks 9, 16, 17, 19.
 
 Harness fix in this change (QA's first just e2e failed once: cargo_traced_build_within_bound@1.99.1, 'strace line without =: ???( <detached ...>', load-dependent): diskgc-e2e/src/strace.rs now classifies every strace -ff line form. parse_line -> Line { Call, Unfinished, Resumed, Unnamed, NotACall }; parse_file joins '<unfinished ...>' with its '<... NAME resumed>' line (signals may come between) and turns a call never resumed into '= ?' (Outcome::Unknown, took_effect, as a kill mid-call); 'NAME(ARGS <detached ...>' parses as '= ?' with its paths (the call can complete after the detach); '???(' lines are Unnamed (no name, no path): kept in Run.unnamed_calls and logged by the oracle, not counted as removals; the snapshot view judges every object. '+++ killed by', '+++ superseded by execve', '--- SIG' are NotACall; anything else is still an error. Tests: an_unnamed_detached_call_is_kept_apart_not_dropped, a_named_call_detached_mid_call_is_possibly_effective, unfinished_and_resumed_halves_are_joined, an_unfinished_call_never_resumed_is_possibly_effective, signal_and_exit_lines_are_not_events. Bites (each failed e2e-tests): detached named line dropped; detached named counted as failed; ??? an error again; ??? silently dropped; unresumed call dropped at EOF; unfinished not joined.
+
+Committed as a5e79bb (tree d2a29b4) after qa-test-runner GO and mped-architect GO (two rounds; user decisions U1 source where has/has_not only, U2 user fs profiles need examples, U3 tier timeout bounds command actions). The commit also carries the e2e harness strace-parser fix for the load-dependent flake QA hit.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::host::{
@@ -171,11 +171,25 @@ pub struct Unreadable {
     pub excuse: Option<Excuse>,
 }
 
+/// What a readable process showed of itself as text: its command and the
+/// link text of its working directories and executables (one per task that
+/// has its own). Text is a heuristic's material only (it is wrong in other
+/// mount namespaces); uses are matched by (device, inode).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// The command: the last name of its executable's path, without
+    /// ` (deleted)` (for messages and name heuristics).
+    pub command: OsString,
+    /// Link texts of `cwd`, as `/proc` shows them.
+    pub cwds: Vec<PathBuf>,
+    /// Link texts of `exe` (may end in ` (deleted)`).
+    pub exes: Vec<PathBuf>,
+}
+
 /// What a readable process uses.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Read {
-    /// The command, from the executable's path (for messages).
-    pub command: OsString,
+    pub seen: Seen,
     pub uses: Vec<(DevIno, How)>,
     pub environ: Vec<(OsString, PathBuf)>,
     pub deleted: Vec<(DevIno, u64, OsString)>,
@@ -260,8 +274,18 @@ impl Read {
     /// Adds `other`'s uses, environment paths and held deleted files to
     /// these (a later read never takes away what an earlier one found).
     fn add(&mut self, other: Read) {
-        if self.command.is_empty() {
-            self.command = other.command;
+        if self.seen.command.is_empty() {
+            self.seen.command = other.seen.command;
+        }
+        for (mine, theirs) in [
+            (&mut self.seen.cwds, other.seen.cwds),
+            (&mut self.seen.exes, other.seen.exes),
+        ] {
+            for text in theirs {
+                if !mine.contains(&text) {
+                    mine.push(text);
+                }
+            }
         }
         self.uses.extend(other.uses);
         self.uses.sort_unstable();
@@ -586,8 +610,18 @@ fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
         for target in targets {
             let id = placed(pid, &target.stat, || which.name().to_owned())?;
             read.uses.push((id, how));
-            if how == How::Exe && read.command.is_empty() {
-                read.command = command_of(&target.text);
+            let text = PathBuf::from(&target.text);
+            match how {
+                How::Exe => {
+                    if read.seen.command.is_empty() {
+                        read.seen.command = command_of(&target.text);
+                    }
+                    if !read.seen.exes.contains(&text) {
+                        read.seen.exes.push(text);
+                    }
+                }
+                How::Cwd if !read.seen.cwds.contains(&text) => read.seen.cwds.push(text),
+                _ => {}
             }
         }
     }
@@ -617,15 +651,14 @@ fn placed(
     })
 }
 
-/// The last name of an executable's path, without ` (deleted)`.
+/// The last name of an executable's path, without ` (deleted)`, byte for
+/// byte (a name heuristic may test it: no lossy conversion).
 fn command_of(exe: &OsStr) -> OsString {
-    let bytes = exe.as_encoded_bytes();
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = exe.as_bytes();
     let bytes = bytes.strip_suffix(b" (deleted)").unwrap_or(bytes);
     let name = bytes.rsplit(|b| *b == b'/').next().unwrap_or(bytes);
-    // Splitting at an ASCII byte keeps the encoding valid.
-    Path::new(&String::from_utf8_lossy(name).into_owned())
-        .as_os_str()
-        .to_owned()
+    OsStr::from_bytes(name).to_owned()
 }
 
 #[cfg(test)]

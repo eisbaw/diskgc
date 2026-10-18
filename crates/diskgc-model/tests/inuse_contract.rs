@@ -12,7 +12,7 @@ use common::host;
 use diskgc_core::host::{
     Base, BoundSocket, DirListing, Environ, Host, HostError, LinkTarget, LockMode, MapEntry,
     MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space,
-    Stat, TryLock, WaitLock,
+    Stat, Timestamp, TryLock, WaitLock,
 };
 use diskgc_core::inuse::{self, Options};
 use diskgc_model::{ModelFd, ModelHost};
@@ -40,6 +40,9 @@ impl Host for Short {
     fn read_dir(&self, dir: &ModelFd, limit: usize) -> Result<DirListing, HostError> {
         self.0.read_dir(dir, limit)
     }
+    fn read_head(&self, file: &ModelFd, limit: usize) -> Result<Vec<u8>, HostError> {
+        self.0.read_head(file, limit)
+    }
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         self.0.statvfs(fd)
     }
@@ -56,6 +59,9 @@ impl Host for Short {
     }
     fn now(&self) -> MonoTime {
         self.0.now()
+    }
+    fn wall_clock(&self) -> Timestamp {
+        self.0.wall_clock()
     }
     fn sleep(&self, duration: Duration) {
         self.0.sleep(duration);

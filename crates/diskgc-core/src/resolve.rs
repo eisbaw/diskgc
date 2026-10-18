@@ -460,6 +460,9 @@ mod tests {
         fn read_dir(&self, _: &usize, _: usize) -> Result<crate::host::DirListing, HostError> {
             unreachable!()
         }
+        fn read_head(&self, _: &usize, _: usize) -> Result<Vec<u8>, HostError> {
+            unreachable!()
+        }
         fn statvfs(&self, _: &usize) -> Result<Space, HostError> {
             unreachable!()
         }
@@ -475,6 +478,9 @@ mod tests {
             unreachable!()
         }
         fn now(&self) -> MonoTime {
+            unreachable!()
+        }
+        fn wall_clock(&self) -> crate::host::Timestamp {
             unreachable!()
         }
         fn sleep(&self, _: Duration) {

@@ -9,8 +9,11 @@
 //! ([`select`]: parser, normalised AST and static rules), the profile
 //! [`kind`]s it checks against, and the [`profile`] model with the built-in
 //! library (YAML through serde), which the grammar checks names against.
-//! [`units`] parses durations.
+//! [`cargo_target`] is the `cargo-target` kind up to its reclaim protocol:
+//! discovery, lock files and layouts, last build, eligibility and the Cargo
+//! process heuristics. [`units`] parses durations.
 
+pub mod cargo_target;
 pub mod engine;
 pub mod host;
 pub mod inuse;

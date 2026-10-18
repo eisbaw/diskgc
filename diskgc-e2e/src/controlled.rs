@@ -35,7 +35,7 @@ use std::time::Duration;
 use diskgc_core::host::{
     Base, BoundSocket, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode,
     MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
-    ProcView, Space, Stat, TryLock, Unlink, WaitLock,
+    ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
 
 use crate::exit;
@@ -51,10 +51,12 @@ pub const OPS: &[&str] = &[
     "openat2",
     "statx",
     "read_dir",
+    "read_head",
     "statvfs",
     "flock_try",
     "flock_wait",
     "now",
+    "wall_clock",
     "sleep",
     "kernel_release",
     "pids",
@@ -431,6 +433,11 @@ impl<H: Host> Host for Controlled<H> {
         self.host.read_dir(dir, limit)
     }
 
+    fn read_head(&self, file: &Self::Fd, limit: usize) -> Result<Vec<u8>, HostError> {
+        self.before("read_head");
+        self.host.read_head(file, limit)
+    }
+
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError> {
         self.before("statvfs");
         self.host.statvfs(fd)
@@ -454,6 +461,11 @@ impl<H: Host> Host for Controlled<H> {
     fn now(&self) -> MonoTime {
         self.before("now");
         self.host.now()
+    }
+
+    fn wall_clock(&self) -> Timestamp {
+        self.before("wall_clock");
+        self.host.wall_clock()
     }
 
     fn sleep(&self, duration: Duration) {
@@ -574,6 +586,9 @@ processes:
     fn call_everything<H: Delete>(host: &H) {
         let a = resolve(host, Path::new("/tmp/a"), Want::Directory).expect("resolve");
         host.read_dir(&a.fd, 10).expect("read_dir");
+        let f = resolve(host, Path::new("/tmp/a/f"), Want::Any).expect("resolve f");
+        host.read_head(&f.fd, 8).expect("read_head");
+        host.wall_clock();
         host.statvfs(&a.fd).expect("statvfs");
         let deadline = host.now().checked_add(Duration::from_secs(1));
         let lockable = || {

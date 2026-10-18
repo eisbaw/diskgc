@@ -19,7 +19,8 @@
 //!   fixture process (e.g. a build the lock holder blocks), declared to the
 //!   oracle as a concurrent writer where it writes during a judged run.
 //! - **Gates** ([`Gate`]) pause a helper on a control file on the scratch
-//!   mount: the race fixture's build script ([`BUILD_GATE_ENV`]) and the
+//!   mount: the race fixture's build script ([`BUILD_GATE_ENV`]), its
+//!   `#[test]` ([`TEST_GATE_ENV`]: a test binary still running) and the
 //!   Cargo runner wrapper ([`RUNNER_GATE_ENV`], `crate::cargo_probe`).
 //! - **Smoke** ([`smoke`]): builds and runs [`SMOKE`] with a toolchain. The
 //!   suite runs it before every Cargo test; a failure is reported as a
@@ -54,6 +55,10 @@ pub const BUILD_GATE_ENV: &str = "DISKGC_E2E_BUILD_GATE";
 
 /// Variable naming the Cargo runner wrapper's gate (`crate::cargo_probe`).
 pub const RUNNER_GATE_ENV: &str = "DISKGC_E2E_RUNNER_GATE";
+
+/// Variable naming the gate the race fixture's `#[test]` waits at, so its
+/// test binary keeps running (see `fixtures/cargo/race/src/main.rs`).
+pub const TEST_GATE_ENV: &str = "DISKGC_E2E_TEST_GATE";
 
 /// Suffix of the file a helper writes when it waits at a gate.
 pub const WAITING_SUFFIX: &str = ".waiting";
@@ -321,6 +326,13 @@ impl Cargo {
     pub fn build_gate(self, gate: &Gate) -> Self {
         let path = gate.path().display().to_string();
         self.env(BUILD_GATE_ENV, path)
+    }
+
+    /// Keeps the race fixture's test binary running at `gate` (`cargo
+    /// test`): a test binary still running.
+    pub fn test_gate(self, gate: &Gate) -> Self {
+        let path = gate.path().display().to_string();
+        self.env(TEST_GATE_ENV, path)
     }
 
     /// Runs binaries (`cargo run`, `cargo test`) through the runner wrapper,
@@ -820,6 +832,25 @@ mod tests {
             format!("from_secs({})", GATE_TIMEOUT.as_secs()),
         ] {
             assert!(build.contains(&needle), "build.rs lacks {needle}");
+        }
+    }
+
+    /// The fixture's test keeps its own copy of the gate protocol (it is
+    /// compiled by the Cargo under test, without this crate).
+    #[test]
+    fn the_fixture_test_speaks_the_gate_protocol() {
+        let (_, main) = RACE
+            .files
+            .iter()
+            .find(|(f, _)| *f == "src/main.rs")
+            .unwrap();
+        for needle in [
+            format!("\"{TEST_GATE_ENV}\""),
+            format!("\"{WAITING_SUFFIX}\""),
+            format!("\"{GO_SUFFIX}\""),
+            format!("from_secs({})", GATE_TIMEOUT.as_secs()),
+        ] {
+            assert!(main.contains(&needle), "main.rs lacks {needle}");
         }
     }
 

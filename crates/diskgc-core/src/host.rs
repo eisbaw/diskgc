@@ -213,8 +213,9 @@ impl HostError {
             subject: subject.to_string(),
             cause: Cause::SandboxGate,
             detail: format!(
-                "refused by the pre-release sandbox gate (docs/safety.md): {why}; until v1, \
-                 diskgc deletes only inside a diskgc test container"
+                "refused by the pre-release sandbox gate (docs/safety.md): {why}; a development \
+                 build deletes only inside a diskgc test container (release packages, from 0.1, \
+                 are built without the gate)"
             ),
         }
     }
@@ -832,6 +833,18 @@ pub trait Host {
     /// that creates entries faster than they are read.
     fn read_dir(&self, dir: &Self::Fd, limit: usize) -> Result<DirListing, HostError>;
 
+    /// At most `limit` bytes from the start of the regular file open as
+    /// `file` (fewer at its end); a read that fails part-way is that error.
+    /// `file` may be an `O_PATH` fd: `LinuxHost` reopens the object it
+    /// refers to read-only and non-blocking (through `/proc/self/fd`), so
+    /// what is read is the object the caller checked with
+    /// [`Host::statx`]`(Base::Dir(file), "")`, never a name looked up again;
+    /// anything but a regular file is refused (`Cause::Invalid`) by the
+    /// fd's own type, before anything is opened (a FIFO or a device is
+    /// never opened). For small
+    /// marker files (a `CACHEDIR.TAG`'s signature), never user data.
+    fn read_head(&self, file: &Self::Fd, limit: usize) -> Result<Vec<u8>, HostError>;
+
     /// `fstatvfs(fd)`.
     fn statvfs(&self, fd: &Self::Fd) -> Result<Space, HostError>;
 
@@ -849,6 +862,12 @@ pub trait Host {
 
     /// The monotonic clock including suspend time.
     fn now(&self) -> MonoTime;
+
+    /// The wall clock (`CLOCK_REALTIME`), on the scale `statx` reports
+    /// times on: only for comparing with file times (the idle filters,
+    /// docs/reference.md, Predicates). Never for deadlines or freshness,
+    /// which use [`Host::now`]: the wall clock can be stepped.
+    fn wall_clock(&self) -> Timestamp;
 
     /// Blocks for `duration`.
     fn sleep(&self, duration: Duration);
@@ -942,7 +961,8 @@ pub fn is_single_name(name: &OsStr) -> bool {
 /// The deleting operations of the port (see the module docs: they are kept
 /// apart from [`Host`] so that only code given a `Delete` can delete).
 /// Outside a diskgc test container, `LinuxHost` refuses every one of them
-/// with a [`Cause::SandboxGate`] error until v1 (docs/safety.md,
+/// with a [`Cause::SandboxGate`] error in development builds; release
+/// packages, from 0.1 onwards, are built without the gate (docs/safety.md,
 /// Pre-release sandbox gate).
 pub trait Delete: Host {
     /// `unlinkat(dir, name, flags)`: removes the entry `name` of the open
@@ -1021,7 +1041,8 @@ mod tests {
         assert_eq!(
             gate.to_string(),
             "unlinkat /tmp/x: refused by the pre-release sandbox gate (docs/safety.md): marker \
-             missing; until v1, diskgc deletes only inside a diskgc test container"
+             missing; a development build deletes only inside a diskgc test container (release \
+             packages, from 0.1, are built without the gate)"
         );
     }
 

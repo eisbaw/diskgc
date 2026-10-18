@@ -41,10 +41,16 @@ use std::time::Duration;
 use diskgc_core::host::{
     Access, Base, BoundSocket, Delete, DevIno, DirListing, Environ, Errno, Host, HostError, Ids,
     LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
-    ProcLink, ProcStatus, Space, Stat, TryLock, Unlink, WaitLock, is_single_name,
+    ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
+
+/// What a file marked `cachedir_tag` reads as: the first line of the
+/// Cache Directory Tagging Specification's `CACHEDIR.TAG`, as Cargo writes
+/// it.
+pub const CACHEDIR_TAG_CONTENT: &[u8] =
+    b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n";
 use crate::spec::{HostModel, Op, ProcAccess, When};
 use crate::state::{Fault, Kind, Loc, Ref, State, WalkRules};
 
@@ -797,6 +803,39 @@ impl Host for ModelHost {
         })
     }
 
+    /// A file marked `cachedir_tag` reads as a valid `CACHEDIR.TAG` (its
+    /// signature line); every other regular file as empty (contents are
+    /// not modelled); anything else is refused, as `LinuxHost` does.
+    fn read_head(&self, file: &ModelFd, limit: usize) -> Result<Vec<u8>, HostError> {
+        let ofd = self.fd_ofd(file);
+        let path = self.base_path(Base::Dir(file), Path::new(""));
+        let shown = path.display().to_string();
+        self.call(Op::ReadHead, Some(path), None, |inner| {
+            let loc = inner.loc_of(ofd);
+            let object = Some(inner.state.dev_ino(loc));
+            match inner.state.inode(loc).kind {
+                Kind::File { cachedir_tag } => {
+                    let mut head = if cachedir_tag {
+                        CACHEDIR_TAG_CONTENT.to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    head.truncate(limit);
+                    (Ok(head), object, "ok".to_owned())
+                }
+                _ => (
+                    Err(HostError::invalid(
+                        "read",
+                        &shown,
+                        "not a regular file (only marker files are read)",
+                    )),
+                    object,
+                    "not a regular file".to_owned(),
+                ),
+            }
+        })
+    }
+
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         let ofd = self.fd_ofd(fd);
         let path = self.base_path(Base::Dir(fd), Path::new(""));
@@ -870,6 +909,13 @@ impl Host for ModelHost {
         self.call(Op::Now, None, None, |inner| {
             let now = MonoTime(UPTIME_AT_START + inner.state.elapsed);
             (now, None, format!("{:?}", now.0))
+        })
+    }
+
+    fn wall_clock(&self) -> Timestamp {
+        self.call(Op::WallClock, None, None, |inner| {
+            let now = inner.state.wall_now();
+            (now, None, format!("{}.{:09}", now.secs, now.nanos))
         })
     }
 

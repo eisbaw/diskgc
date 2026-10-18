@@ -276,7 +276,15 @@ is accepted until measured otherwise.
   lock wait, child wait, the SIGTERM → 10 s → SIGKILL sequence, re-sampling)
   and the tally's batch timing and sleeps are port operations; `ModelHost`
   keeps a virtual clock and delivers signals as events, so deadlines, exit
-  codes 75 / 124 / 130 / 143 and the duty cycle are model-testable.
+  codes 75 / 124 / 130 / 143 and the duty cycle are model-testable. Two
+  clocks: `now` (monotonic, including suspend) for deadlines and freshness,
+  `wall_clock` (realtime, the scale of file times) only for comparing with
+  file times in the idle filters.
+- **File contents are not read**, with one exception: `read_head` reads the
+  first bytes of a small marker file (a `CACHEDIR.TAG`'s signature) through
+  the descriptor of the object checked, never by name again; anything but
+  a regular file is refused on that descriptor's type before it is
+  opened for reading (a FIFO or a device is never opened).
 - **Deleting operations are a trait of their own** (`Delete: Host`:
   `unlinkat`, `fchmod` for `make_writable`, later the deleting `run`), so
   code given only a `Host` cannot delete or change permissions, and the

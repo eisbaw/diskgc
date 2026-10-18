@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-17 18:01'
+updated_date: '2026-10-17 23:54'
 labels:
   - wave-1
   - hardening
@@ -35,6 +35,8 @@ Forward-carried from task-59 (hardening candidate): the mandatory-oracle ledger 
 Forward-carried from task-59 review (hardening): (1) The 10 s wall-time check in strace_seccomp_bpf_churn_within_bound may flake under load (the same traced churn measured 0.66-4.96 s on this host). Make it a logged budget or loosen it; the voluntary-context-switch bound (40,010 measured, bound 80,000) is the real test. (2) Enable clippy let_underscore_must_use for diskgc-e2e so that 'let _ = oracle.judge(..)' cannot satisfy the judged-run rule while discarding the Verdict (#[must_use] alone does not catch let _). (3) Document in oracle.rs and docs/testing.md that Unmatched::CreatedDuringRun is a guess: creates are not traced. It is inferred because the nearest known ancestor is a directory, so a removal of a pre-existing object under a path the snapshot never saw (e.g. below a skipped mount) is classified the same way.
 
 From the task-4 review (mped), harness items: H1 mount the Cargo toolchain closures from the host store (closureInfo) instead of baking them into the 2.84 GB base image; pair with item (3), tag pruning. H2 Ctx::setup always bind-mounts /nix/store read-only and the test listing requires the toolchain manifest (/opt/cargo-under-test/toolchains); both break the planned Debian (non-Nix) variant and the own-store Nix-daemon container, so each needs a per-image opt-out. H3 log the CPU count next to the traced-build ratio in cargo_traced_build_within_bound. H4 one builder for the as-tester + env_clear + TESTER_ENV command, now built in four places (cargo_under_test: Cargo::spawn, run_as_tester_untraced; cargo_suite: full_trace; holder: Holder::start). H5 a no-create flag for probe flock-hold (it creates a missing lock file today). H6 bisect the stables 1.91-1.98 for distinct lock behaviours and pin one toolchain per behaviour.
+
+H2 (per-image opt-out of the /nix/store bind mount and the toolchain manifest) moved to task-63, the Debian / static-binary e2e variant, for the 0.1 ensure MVP (2026-10-18).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

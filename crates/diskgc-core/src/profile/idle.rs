@@ -87,9 +87,9 @@ pub enum IdleMeasure {
     /// Kind `fs`: the newest mtime or ctime in the candidate's tree (atime
     /// is ignored: under `relatime` any reader refreshes it).
     NewestChange,
-    /// Kind `cargo-target`: the newest mtime of the profile directories
-    /// and their `.fingerprint/`, `deps/`, `build/`, `incremental/`
-    /// (docs/safety.md, cargo-target: Last build).
+    /// Kind `cargo-target`: the newest mtime or ctime of the profile
+    /// directories and everything in them, on every layout (docs/safety.md,
+    /// cargo-target: Last build; `cargo_target::last_build`).
     LastBuild,
     /// Kind `docker-build-cache`: last use as Docker records it.
     DockerLastUse,

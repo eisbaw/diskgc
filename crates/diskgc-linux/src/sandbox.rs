@@ -14,7 +14,7 @@
 //! The gate is [`permit`]: every deleting syscall wrapper of this crate
 //! takes the [`Permit`] it returns, and nothing else can make one. Building
 //! with the cargo feature `release-without-sandbox-gate` (defined in this
-//! crate's Cargo.toml, enabled only by the v1 release package) makes
+//! crate's Cargo.toml, enabled only by release packages, 0.1 onwards) makes
 //! [`permit`] always grant; nothing else removes the gate.
 
 use std::fmt;
@@ -100,7 +100,7 @@ pub(crate) fn permit() -> Result<Permit, &'static str> {
     }
 }
 
-/// The v1 release build: the gate is compiled out and every call is
+/// A release build (0.1 onwards): the gate is compiled out and every call is
 /// permitted. Only the release package enables this feature.
 #[cfg(feature = "release-without-sandbox-gate")]
 pub(crate) fn permit() -> Result<Permit, &'static str> {
@@ -209,7 +209,8 @@ mod tests {
     /// feature, and no manifest, flake or justfile enables it, by name or by
     /// `--all-features`. So the flake's packages and checks, `just` and plain
     /// `cargo` all build with the gate. Only the release task may change this
-    /// test, when it enables the feature for the v1 package in one place.
+    /// test, when it enables the feature for the release packages (0.1
+    /// onwards, the `ensure` MVP) in one place.
     ///
     /// flake.nix, the justfile and diskgc-e2e's manifest are not part of the
     /// flake's filtered build source, so the flake's workspace-tests cannot
@@ -280,8 +281,8 @@ mod tests {
         }
         assert!(
             found.is_empty(),
-            "the pre-release sandbox gate is removed by build configuration (only the v1 \
-             release package may do that):\n{}",
+            "the pre-release sandbox gate is removed by build configuration (only release \
+             packages, 0.1 onwards, may do that):\n{}",
             found.join("\n")
         );
         if !not_seen.is_empty() {

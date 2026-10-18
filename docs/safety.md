@@ -30,7 +30,8 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
   candidate that is a mount point or contains one (a user's FUSE or sshfs
   mount in `/tmp` is common) is skipped (`contains_mount`) without being
   touched, so a dead mount cannot hang the scan. Network filesystems (NFS,
-  CIFS, sshfs) are never candidates' filesystems (`unsupported_fs`).
+  CIFS, sshfs; the list is `NETWORK_FS_TYPES` in the engine) are never
+  candidates' filesystems (`unsupported_fs`).
 - Entries of systemd's `PrivateTmp` (`systemd-private-*`) are never
   candidates.
 
@@ -513,61 +514,182 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   binaries from the build directory. 1.90 ignores the setting.
 - **New build-dir layout:** the 2026-10-16 nightly uses it by default. The
   profile directory has no `.fingerprint/` and no `deps/`; each unit gets
-  `build/<package>/<hash>/` holding its `fingerprint` and `out`. The lock
-  files are those of 1.99.1.
+  `build/<package>/<hash>/` holding its `fingerprint` and `out`, and test
+  binaries run from that `out/`. The lock files are those of 1.99.1.
+- **Lock sets by command** (measured 2026-10-18 in the containers on the
+  three pinned toolchains): `cargo check` on a fresh target of 1.99.1 and
+  the nightly creates only `.cargo-build-lock` and `.cargo-lock`; `build`,
+  `test`, `doc`, `--release` and `--target` create all three in every
+  profile directory (`<triple>/debug` included); 1.90 creates `.cargo-lock`
+  alone. With a separate build directory (also `--release`) the target
+  directory's profile holds `.cargo-artifact-lock` and `.cargo-lock`, the
+  build directory's only `.cargo-build-lock` (on the nightly in the
+  per-unit layout).
+- **What Cargo gives the programs it runs** (same measurement; `cargo run`
+  and `cargo test` through a runner, and a test binary): `CARGO_MANIFEST_DIR`
+  (the package's directory), `CARGO`, and an `LD_LIBRARY_PATH` naming the
+  profile directory (1.90.0 and 1.99.1 also its `deps/`; with a separate
+  build directory 1.99.1 names the build directory's `deps/` instead, the
+  nightly only the target directory's profile directory); 1.99.1 also
+  passes the package's `OUT_DIR` (inside the profile directory). A
+  `CARGO_BUILD_BUILD_DIR` set in the environment is inherited.
 
 diskgc has an explicit **allowlist of known lock file names** (`.cargo-lock`,
 `.cargo-build-lock`, `.cargo-artifact-lock`). A profile directory containing
 any other `.cargo-*lock*` file is an unknown layout: the target is skipped
-(`unsupported_layout`). Lock files are never deleted or moved.
+(`unsupported_layout`). A lock file is a regular file (`statx`, not
+followed): a directory, symlink, FIFO, socket or device with a lock-like
+name is no Cargo's and makes the target `unsupported_layout` too, and a
+lock file of another type at a later check than when found is `changed`.
+Lock files are never deleted or moved.
+
+**Lock sets.** Only the measured whole sets are reclaimed: `.cargo-lock`
+alone, with `.cargo-build-lock`, or with both newer locks. A profile
+directory holding only `.cargo-build-lock` is the build directory's half of
+a **split build directory**, one holding `.cargo-lock` and
+`.cargo-artifact-lock` without `.cargo-build-lock` the target directory's
+half; any other combination was never measured. All of them are
+`unsupported_layout`: **neither half of a split pair is reclaimed.** Both
+halves would have to be locked together, and nothing on disk links them
+(the build directory comes from the environment or `.cargo/config.toml`,
+and its path can be a hash of the workspace's), so diskgc cannot find a
+half's partner. Locking one half alone is not enough: between compiling
+and starting a test binary Cargo holds no lock and works in the project
+directory, which is not the build directory's parent, so a build directory
+reclaimed then makes `cargo test` fail. Limit: a project with a separate
+build directory is not reclaimed at all until pairs can be recognised;
+both halves are listed with the reason. A target directory once used
+without a separate build directory keeps all three lock files and counts
+as whole; a Cargo using it as a half then still conflicts with diskgc on
+`.cargo-lock` and `.cargo-artifact-lock`.
 
 ### Discovery, idleness, eligibility
 
-- **Discovery:** walk `roots` (depth limit 6) for directories with a valid
-  `CACHEDIR.TAG` and at least one profile directory holding a known lock
-  file, at `<target>/<profile>/` or `<target>/<triple>/<profile>/`. Do not
-  descend into a found target. Never follow symlinks or cross mounts.
-  Targets on network filesystems are refused (`unsupported_fs`): Cargo does
-  not lock there.
-- **Last build** (the kind's `idle_for` measure): newest mtime of the
-  profile directories and their `.fingerprint/`, `deps/`, `build/`,
-  `incremental/`. It changes on real rebuilds but not on no-op builds, so an
-  up-to-date, actively used target can look idle; the lock and process
-  checks still protect visible running work.
+- **Discovery:** walk each root for directories with a valid `CACHEDIR.TAG`
+  (a regular file starting with the specification's signature, read
+  through the descriptor of the object checked) and at least one profile
+  directory, `<target>/<profile>/` or `<target>/<triple>/<profile>/`
+  holding a `.cargo-*lock*` file, known name or not (the recogniser's
+  shape: a target whose only lock name is unknown is listed as
+  `unsupported_layout`, not missed). A target is at most six directories
+  below its root (the root itself is depth 0). Do not descend into a found
+  target. Hidden directories are walked like any other (agent worktrees
+  hold targets). Never follow symlinks or cross mounts: a mount below a
+  root is not entered. A root on a network filesystem is refused without
+  being read (`unsupported_fs`): Cargo does not lock there. A target
+  reached through several roots (overlapping roots, a bind mount of the
+  same directory) is one target, by (device, inode). Roots are walked
+  outermost first (fewest path components), so such a target is recorded
+  under the outermost root that reaches it, whose way down to the target
+  passes every inner root's: the keep markers that count (below) do not
+  depend on the order the roots are given in. Limit: for a target reached
+  through two unrelated paths (a bind mount), only the markers on the way
+  from the root that recorded it count. A directory discovery cannot read
+  is reported (`unreadable`); one that vanished meanwhile is not.
+- **Reached again at every check:** from its root, one directory at a
+  time; it must be the directory found (`changed`, or `missing` if gone).
+  Its profile directories and lock files are listed again: one created,
+  removed or replaced since discovery is `changed`. A directory of another
+  mount one or two levels inside the target (where a profile directory
+  could hide) is `contains_mount`.
+- **Keep markers** (`kept`): in the root or any directory between it and
+  the target, in the target directory or a directory directly in it, or in
+  what would be deleted (a profile directory's entries, walked). A marker
+  deeper in a part the kind never deletes (`target/doc/x/`) keeps only that
+  part.
+- **Ownership:** besides every entry that would be deleted (the walks
+  below), the target directory, the triple directories holding profile
+  directories, the profile directories and their lock files (`not_owner`).
+- **Layouts:** where a profile directory keeps its fingerprints, which the
+  reclaim protocol deletes first. *Classic*: a directory `.fingerprint/` or
+  `deps/` in it (1.90, 1.99.1, a build directory's half). *Per-unit*:
+  neither, and a directory `build/` (the nightly's new build-dir layout).
+  Only real directories count, judged by `statx` without following: a
+  regular file or a symlink with one of these names is no Cargo layout. A
+  profile directory that holds anything but none of the three is an
+  unknown layout (`unsupported_layout`): the protocol would not know what
+  to delete first, and a non-Cargo cache with a tag and a lock-like name
+  must not pass by its names. An entry whose type changes between the
+  check and its walk is `changed`.
+- **Eligibility walk:** every entry of every profile directory except the
+  lock files is walked as a candidate of its own (Filesystem candidates:
+  ownership, keep markers, mounts, sockets and FIFOs, Cargo lock names and
+  nested targets, the entry budget); the first refusal is the target's.
+- **Last build** (the kind's `idle_for` measure): the newest mtime or ctime
+  of the profile directories, their lock files and everything the walks
+  recorded in them. The same measure on every layout: it reads no
+  layout-specific directory. It changes on real rebuilds but not on no-op
+  builds, so an up-to-date, actively used target can look idle; the lock
+  and process checks still protect visible running work. A time the
+  kernel does not report, or a last build in the future, passes no idle
+  filter (`unsupported_fs`, `future_time`): an unknown age is never idle.
 - **Empty:** a target whose profile directories hold nothing but lock files
   is `empty` and not re-listed on every run.
-- **Known gap, the new build-dir layout** (Lock files): there is no
-  `.fingerprint/` for Reclaim protocol step 3 to delete first, and Last
-  build reads `.fingerprint/` and `deps/`, which are absent; race test 6
-  ([testing.md](testing.md)), which rests on both, has not run on it. These
-  rules are unverified on that layout until revised (task-53, task-9,
+- The check made for a plan (`--dry-run`, `survey`) takes no lock; whether
+  the locks are free is the Reclaim protocol's step 1.
+- **Known gap, the per-unit layout and the protocol:** Reclaim protocol
+  step 3 says to delete `.fingerprint/` first, which the per-unit layout
+  does not have (its fingerprints are `build/<package>/<hash>/fingerprint`),
+  and race test 6 ([testing.md](testing.md)) has not run on it (task-53,
   task-11).
-- **Known gap, a separate build directory** (Lock files): each half is a
-  directory with a `CACHEDIR.TAG` and a known lock file, so discovery finds
-  both. The process rule "a `cargo*` process with its working directory in
-  the target's project directory" does not cover a build directory outside
-  the project, from which `cargo test` runs its test binaries (task-9); a
-  running test binary is still caught by its executable inside the build
-  directory.
 
 ### In use
 
-- any known lock file cannot be `flock`ed without waiting (`locked`);
-- a visible process has its executable or working directory inside the
-  target (`in_use`; e.g. a test binary still running);
+- any known lock file cannot be `flock`ed without waiting (`locked`;
+  Reclaim protocol, step 1);
+- a visible process uses (open fd, working directory, root, executable,
+  mapping) an object the walks recorded, or names a path inside one of
+  them in its initial environment (Filesystem candidates, In use), or uses
+  the target directory, a directory directly in it, a profile directory or
+  a lock file, matched by (device, inode) (`in_use`); an unsettled scan or
+  an unreadable process of the user blocks as there;
+- a visible process has its working directory or executable inside the
+  target, by path text (a test binary still running; parts the walks do
+  not read, such as `target/doc` and `target/tmp`);
 - a visible process whose executable name, after normalising Nix wrapper
   names (`.cargo-wrapped` → `cargo`), starts with `cargo` has its working
-  directory inside the target's project directory (the target's parent),
-  or `CARGO_TARGET_DIR` pointing at the target in its initial environment
-  (`in_use`).
+  directory in the target's project directory (the target's parent) or
+  below it, by path text, or in the project directory itself by (device,
+  inode);
+- a visible process's initial environment names a path inside the target,
+  whatever the variable: `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, and
+  the `LD_LIBRARY_PATH` and `OUT_DIR` Cargo gives what it runs;
+- a visible process's initial environment has `CARGO_MANIFEST_DIR` in the
+  project directory or below it: a process Cargo started for a package of
+  the project. `cargo run` execs its runner (or the binary) in its own
+  process, so no process named `cargo` is left; `cargo test`'s runner and
+  test binaries carry it too;
+- the target is **detached** (its parent holds no `Cargo.toml` that is a
+  regular file, judged by `statx` without following, or that cannot be
+  told; a directory or a symlink of that name, dangling or not, does not
+  make it attached: it was put there by `--target-dir`, `CARGO_TARGET_DIR`,
+  a `target-dir` in `.cargo/config.toml`, or it is a tool's nested target)
+  and a visible Cargo process (named as above) runs, wherever it works:
+  where a detached target's Cargo runs cannot be told from its path, so
+  any Cargo may be using it. A shared target directory is therefore
+  reclaimed only while no visible Cargo runs.
 
-Because Cargo holds no lock while a binary runs, these process checks are
-the only protection during `cargo run` / `cargo test`. They are heuristics:
-a Cargo started from outside the project directory without
-`CARGO_TARGET_DIR` (e.g. `--manifest-path`, or a `target-dir` in
-`.cargo/config.toml`) is not recognised between compilation and launch,
-and a deleted binary then makes `cargo run` fail with "No such file". A
-strict guarantee would need Cargo itself to hold a lock until the run ends.
+Paths are compared byte for byte, never through a lossy text conversion
+(a name that is not UTF-8 stays as it is).
+
+Because Cargo holds no lock while a binary runs, nor between compiling it
+and starting it, these process checks are the only protection during
+`cargo run` / `cargo test`. They are heuristics with these remaining blind
+spots between compilation and launch (afterwards the binary or runner
+names the target in `LD_LIBRARY_PATH`): a Cargo started outside the
+project directory of an attached target, with `--manifest-path` and the
+target next to that manifest, or in another project whose `target-dir`
+(`.cargo/config.toml`, `--target-dir`, `CARGO_TARGET_DIR` set after
+`exec`) points at an attached target (the detached-target rule above
+sees only detached ones); a Cargo the scan cannot see (another user's, a
+process diskgc cannot read and excuses, or one in another PID namespace);
+and a Cargo in another mount namespace, whose working
+directory and paths are not this namespace's (only its uses of the
+target's own objects, matched by identity, count). A deleted binary then
+makes `cargo run` fail with "No such file". A relative
+`CARGO_TARGET_DIR`, a variable exported after `exec`, and a process whose
+environment is empty (`env -i`) give no environment evidence. A strict
+guarantee would need Cargo itself to hold a lock until the run ends.
 
 ### Reclaim protocol
 
@@ -785,15 +907,16 @@ backported, and an unparseable release is refused too.
 
 ## Pre-release sandbox gate
 
-Until v1 is released, diskgc's deleting primitives (unlink, rmdir, the
+In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act
 unless they run inside a test container, so every entry point, including
 test drivers, is covered: both the image marker `/.diskgc-test-sandbox` and
 Podman's `/run/.containerenv` must exist (the same markers as the test
 interlock, see [testing.md](testing.md)). `check`, `survey`, `profiles`,
 `--dry-run` and `--tally-only` work anywhere. The gate is compiled in by
-default and removed only by the release package built for v1 (a dedicated
-build flag set in one place, by the release task), so it cannot be dropped
+default and removed only by release packages, from the 0.1 `ensure` MVP
+onwards (PRD, Scope; a dedicated build flag set in one place, by the release
+task), so it cannot be dropped
 by accident during development, and developers and AI agents cannot
 delete real data on their own machines with a work-in-progress build.
 

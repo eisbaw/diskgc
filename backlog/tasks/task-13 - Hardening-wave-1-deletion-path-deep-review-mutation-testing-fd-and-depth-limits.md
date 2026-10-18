@@ -6,16 +6,15 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 01:02'
+updated_date: '2026-10-17 23:55'
 labels:
   - wave-1
   - hardening
 dependencies:
   - TASK-12
-  - TASK-52
   - TASK-58
   - TASK-60
-  - TASK-61
+  - TASK-64
 references:
   - docs/testing.md
   - docs/safety.md
@@ -40,6 +39,8 @@ Why: the wave-1 surfaces (host primitives, deletion engine, in-use checks, Cargo
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-1: 'just mutants' is a placeholder (prints NOT RUN, exits 0). Replace it with the cargo-mutants invocation.
+
+Dependencies changed for the 0.1 ensure MVP (2026-10-18): task-52 (CI) removed, because the human decided e2e-full runs locally for now (just e2e-full on the development machine is the evidence until CI exists). task-61 removed: it is split; its real-machine and safety items moved to task-64, which this task now depends on, and the rest is deferred to wave 5.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

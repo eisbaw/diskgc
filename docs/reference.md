@@ -417,7 +417,7 @@ predicate: it is an always-on check ([safety.md](safety.md)).
 | Kind | `idle_for` means |
 |---|---|
 | `fs` | newest mtime or ctime in the candidate's tree (atime is ignored: under `relatime` any reader, such as a nightly scan, refreshes it) |
-| `cargo-target` | last build: newest mtime of the profile dirs and their `.fingerprint/`, `deps/`, `build/`, `incremental/` |
+| `cargo-target` | last build: newest mtime or ctime of the profile dirs and everything in them, on every Cargo layout ([safety.md](safety.md#discovery-idleness-eligibility)) |
 | `docker-build-cache` | last use, as recorded by Docker (`--filter until=`) |
 
 The report always names the measure used.

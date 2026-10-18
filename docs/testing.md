@@ -182,7 +182,9 @@ How the format reads (the schema documents every key):
 
 - **Tree:** keys are absolute paths; missing parents are created. A mapping
   of scalars is a file (`{}` is empty; `symlink:`, `link:` for a hard link,
-  `type: socket|fifo|char_device`); a mapping of mappings is a directory, with its own
+  `type: socket|fifo|char_device`, `cachedir_tag: true` for a file whose
+  first bytes are a valid `CACHEDIR.TAG` signature: contents are not
+  modelled otherwise, every other file reads as empty); a mapping of mappings is a directory, with its own
   attributes under `.` (`{.: {}}` is an empty directory). Owners default
   to 1000, times to `clock`.
 - **Mounts** in mount order, each with a `parent` (a stacked mount's parent
@@ -439,7 +441,9 @@ appear by themselves.
   rather than wait); the race fixture's `build.rs`, which waits at the gate
   named by `DISKGC_E2E_BUILD_GATE`; the runner wrapper `cargo-runner`, set
   as the host target's runner, which waits at the gate named by
-  `DISKGC_E2E_RUNNER_GATE` and then execs the binary. A gate is a pair of
+  `DISKGC_E2E_RUNNER_GATE` and then execs the binary; the race fixture's
+  `#[test]`, which waits at the gate named by `DISKGC_E2E_TEST_GATE` (a
+  test binary still running). A gate is a pair of
   control files on the scratch mount: the helper writes its pid to
   `GATE.waiting` and waits for `GATE.go` (failing after 300 s). `cargo run`
   execs its runner in its own process (same pid, the wrapper's
@@ -474,7 +478,9 @@ positions; the replace-between-walk-and-unlink test needs the replacement
 at one exact moment). In the model these are events on the `Host` call
 trace. In containers, a **test driver** (`diskgc-e2e-driver`, built from
 `diskgc-e2e` only) runs single diskgc operations on a fixture (`walk`,
-`delete`; later tasks add the in-use check and the Cargo operations) over
+`delete`, `reclaim` with the in-use check, `held`, and `cargo-targets`:
+Cargo discovery and eligibility, which locks and deletes nothing; the
+reclaim protocol adds its own) over
 `LinuxHost` wrapped in a **test-only `Host` wrapper** that pauses or kills
 it at a call position given by the harness. This is the one sanctioned
 exception to "no hooks in the product": it lives outside the product

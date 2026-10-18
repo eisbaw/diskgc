@@ -95,9 +95,10 @@ kinds), and where those guarantees end. The protocols are in
   no Cargo lock file is ever deleted or moved.
 - No symlink followed, no mount crossed.
 - The index never decides safety; every check runs at deletion time.
-- Until v1 is released, the binary refuses to delete anything outside the
-  test containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)),
-  so work-in-progress builds cannot delete real data.
+- Development builds refuse to delete anything outside the test
+  containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)), so
+  work-in-progress builds cannot delete real data. Only release packages
+  (0.1 onwards, see Scope) are built without that gate.
 
 Limits, stated plainly: diskgc only sees the caller's own processes without
 root, and not even those of them the kernel will not show it (setuid, more
@@ -174,6 +175,17 @@ when, and never as root.
 - A built-in profile whose matching set changed without a new name.
 
 ## Scope
+
+Releases. **0.1, the `ensure` MVP**, is the first build that may delete on
+a real machine: `ensure` (with `--select`, `--roots`, `--dry-run`, `--json`,
+the exit codes, host lock, deadlines and signals), `check`, the config file
+(schema `version: 1`, frozen by the contract review before 0.1), kinds `fs`
+and `cargo-target`, and the verified `/tmp` and Cargo built-ins, as a
+static binary with a tmpfiles drop-in and an example config. It ships only
+with the Cargo race tests, the journeys for its users and the contract
+review green; `watch`, the index, `survey`, Docker, Nix and command actions
+come later. **v1** is the full scope below. ("v1" names the product
+release; the config schema has its own `version: 1`.)
 
 In scope (v1): `ensure`, `watch` (including `--tally-only`), `check`,
 `survey`, `profiles`; profiles with `find` / `where` / `action`, the

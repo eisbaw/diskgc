@@ -32,6 +32,17 @@
 //!   (unreadable processes and why they do or do not block) go to stderr;
 //! - `held`: `I held pid=<pid> command=<command> bytes=<bytes>` per process
 //!   holding deleted files open on DIR's filesystem;
+//! - `cargo-targets`: Cargo discovery and eligibility (diskgc-core
+//!   `cargo_target`), nothing locked or deleted: `I refused <reason> <path>
+//!   -- <detail>` per root or directory discovery refused, `I duplicate
+//!   <path>` per target found again through another root, and per target
+//!   `I target <path> <profile>=<layout>:<lock>,<lock> ...` (layout
+//!   `classic`, `per-unit` or `unknown`) followed by its verdict, `I
+//!   eligible <path> last_build=<secs|unknown> entries=N bytes=B` or `I
+//!   skip <reason> <path> -- <where>: <detail>` (an in-use detail lists
+//!   every piece of evidence, `; `-separated). Skips are results, not
+//!   failures; only an error of the run is (`I failed <tag> <path> --
+//!   <message>`);
 //!
 //! where `<path>` is Rust's `{:?}` of the path, and `<tag>` is the errno
 //! name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip reason of
@@ -41,13 +52,15 @@
 //! reached, otherwise 1 (2: usage).
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use diskgc_core::cargo_target::{self, Layout};
 use diskgc_core::engine::{
     self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Rules, WalkStop,
 };
 use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
 use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT, Stop, delete_unused};
+use diskgc_core::profile::IdleFor;
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
 
@@ -72,6 +85,10 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
                                   --ipc-live: only live sockets and FIFOs keep it
     held DIR                      processes holding deleted files open on
                                   DIR's filesystem, with their bytes
+    cargo-targets [--idle-for DUR] ROOT...
+                                  Cargo targets below the ROOTs and whether
+                                  each is eligible now (idle for DUR, e.g.
+                                  1d); locks and deletes nothing
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -229,6 +246,15 @@ pub fn run<H: Delete>(
             reclaim(host, owner, Path::new(dir), true, &mut out)?;
         }
         ("held", [dir]) => held(host, owner, Path::new(dir), &mut out)?,
+        ("cargo-targets", [flag, idle, roots @ ..])
+            if flag == "--idle-for" && !roots.is_empty() =>
+        {
+            let idle = diskgc_core::units::parse_duration(idle)?;
+            cargo_targets(host, owner, Some(IdleFor(idle)), roots, &mut out)?;
+        }
+        ("cargo-targets", roots) if !roots.is_empty() && !roots[0].starts_with("--") => {
+            cargo_targets(host, owner, None, roots, &mut out)?;
+        }
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
     Ok(Outcome { failed: out.failed })
@@ -490,6 +516,107 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
     Ok(())
 }
 
+/// `cargo-targets [--idle-for DUR] ROOT...`: discovery below the roots,
+/// then the eligibility of every target found, for the user `owner` (see
+/// the module docs for the lines). Locks and deletes nothing.
+fn cargo_targets<H: Host>(
+    host: &H,
+    owner: u32,
+    idle_for: Option<IdleFor>,
+    roots: &[String],
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    let found = match cargo_target::discover(host, &roots, None) {
+        Ok(found) => found,
+        Err(stop) => {
+            cargo_stop(&stop, out);
+            return Ok(());
+        }
+    };
+    for skip in &found.refused {
+        out.ok(format!(
+            "refused {} {:?} -- {}",
+            skip.reason, skip.path, skip.detail
+        ));
+    }
+    for path in &found.duplicates {
+        out.ok(format!("duplicate {path:?}"));
+    }
+    let owners = [owner];
+    let rules = Rules {
+        owners: &owners,
+        block_ipc: true,
+        max_entries: DEFAULT_MAX_ENTRIES,
+    };
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    for target in &found.targets {
+        out.ok(format!(
+            "target {:?} {}",
+            target.path,
+            profiles_text(target)
+        ));
+        match cargo_target::eligibility(host, target, &rules, idle_for, &mut checker, None) {
+            Ok(Ok(e)) => out.ok(format!(
+                "eligible {:?} last_build={} entries={} bytes={}",
+                target.path,
+                e.last_build
+                    .map_or("unknown".to_owned(), |t| t.secs.to_string()),
+                e.entries,
+                e.bytes
+            )),
+            Ok(Err(skip)) => out.ok(format!(
+                "skip {} {:?} -- {}: {}",
+                skip.reason,
+                target.path,
+                skip.path.display(),
+                skip.detail
+            )),
+            Err(stop) => cargo_stop(&stop, out),
+        }
+    }
+    if let Some(scan) = checker.latest() {
+        for note in scan.notes() {
+            eprintln!("diskgc-e2e-driver: note: {note}");
+        }
+    }
+    Ok(())
+}
+
+/// `debug=classic:.cargo-lock,.cargo-build-lock ...` for a target's
+/// profile directories.
+fn profiles_text(target: &cargo_target::Target) -> String {
+    let profiles: Vec<String> = target
+        .inspected
+        .profiles
+        .iter()
+        .map(|p| {
+            let layout = match p.layout() {
+                Some(Layout::Classic) => "classic",
+                Some(Layout::PerUnit) => "per-unit",
+                None if p.is_empty() => "empty",
+                None => "unknown",
+            };
+            let locks: Vec<String> = p
+                .locks
+                .iter()
+                .map(|l| l.name.to_string_lossy().into_owned())
+                .collect();
+            format!("{}={layout}:{}", p.rel.display(), locks.join(","))
+        })
+        .collect();
+    profiles.join(" ")
+}
+
+fn cargo_stop(stop: &cargo_target::Stop, out: &mut Lines<'_>) {
+    match stop {
+        cargo_target::Stop::DeadlinePassed { path } => out.err_line(format!("deadline {path:?}")),
+        cargo_target::Stop::Failed { path, error } => {
+            out.err_line(format!("failed {} {path:?} -- {error}", cause_tag(error)));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The operations on `ModelHost`, which also fails a test on a call the
@@ -653,6 +780,72 @@ processes:
         let (outcome, got) = lines(&host, "held", "/tmp");
         assert_eq!(outcome, Ok(Outcome { failed: 0 }));
         assert_eq!(got, ["0 held pid=42 command=keep bytes=8192"]);
+    }
+
+    /// `cargo-targets` lists refused roots, duplicates, every target with
+    /// its profiles, and each verdict; a skip is a result, not a failure.
+    #[test]
+    fn cargo_targets_reports_discovery_and_eligibility() {
+        let model = ModelHost::from_yaml(
+            r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+  - {id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, parent: 1}
+tree:
+  /tmp/w/p/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug: {.cargo-lock: {}, deps: {d: {size: 4K}}}
+  /tmp/w/.hidden/q/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug: {.cargo-lock: {}, .cargo-new-lock: {}, build: {.: {}}}
+events:
+  - {at: {call: 1, when: before}, advance: 2d}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let args: Vec<String> = ["--idle-for", "1d", "/tmp/w", "/tmp/w/p", "/tmp/nope"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut got = Vec::new();
+        let outcome = run(&model, 1000, "cargo-targets", &args, &mut |l| got.push(l));
+        assert_eq!(outcome, Ok(Outcome { failed: 0 }), "{got:#?}");
+        assert!(
+            got[0].starts_with("0 refused missing \"/tmp/nope\" -- "),
+            "{got:#?}"
+        );
+        assert_eq!(got[1], "1 duplicate \"/tmp/w/p/target\"");
+        assert_eq!(
+            got[2],
+            "2 target \"/tmp/w/.hidden/q/target\" debug=per-unit:.cargo-lock,.cargo-new-lock"
+        );
+        assert!(
+            got[3].starts_with(
+                "3 skip unsupported_layout \"/tmp/w/.hidden/q/target\" -- \
+                 /tmp/w/.hidden/q/target/debug/.cargo-new-lock: an unknown Cargo lock file name"
+            ),
+            "{got:#?}"
+        );
+        assert_eq!(
+            got[4],
+            "4 target \"/tmp/w/p/target\" debug=classic:.cargo-lock"
+        );
+        assert_eq!(
+            got[5],
+            "5 eligible \"/tmp/w/p/target\" last_build=1792033200 entries=2 bytes=8192"
+        );
+        assert_eq!(got.len(), 6, "{got:#?}");
+        // Nothing locked or deleted.
+        assert!(model.trace().iter().all(|c| !matches!(
+            c.op,
+            diskgc_model::spec::Op::Unlinkat
+                | diskgc_model::spec::Op::Fchmod
+                | diskgc_model::spec::Op::Flock
+        )));
+        let bad = ["--idle-for".to_owned(), "1d".to_owned()];
+        assert!(run(&model, 1000, "cargo-targets", &bad, &mut |_| {}).is_err());
+        assert!(run(&model, 1000, "cargo-targets", &[], &mut |_| {}).is_err());
     }
 
     #[test]

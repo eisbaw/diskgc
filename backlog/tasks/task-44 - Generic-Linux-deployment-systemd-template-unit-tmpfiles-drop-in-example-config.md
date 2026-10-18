@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 23:49'
+updated_date: '2026-10-17 23:55'
 labels:
   - wave-5
   - deploy
@@ -34,6 +34,8 @@ Why: most users are not on NixOS. Ship a systemd template unit for watch (user a
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from task-2: the e2e base image currently bakes /run/diskgc (0755 root) and /run/diskgc/lock (0644 root) per the two tmpfiles lines in docs/safety.md (fakeRootCommands of e2eBaseImage in flake.nix). sandbox_trivial checks owner and mode. Once the shipped tmpfiles drop-in exists, apply it in the harness with systemd-tmpfiles --root=<scratch> --create (docs/testing.md, Shipped files) and drop the hand-written copy, so there is one source.
+
+Pulled out into task-66 for the 0.1 ensure MVP (2026-10-18): the tmpfiles drop-in for /run/diskgc/lock and the example config (ACs #1 and #2 here, and the forward-carried harness note above). What stays here: the systemd template unit for watch (user and system variants, AC #3).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

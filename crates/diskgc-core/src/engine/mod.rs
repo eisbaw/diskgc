@@ -51,7 +51,10 @@ use crate::host::{DevIno, FileType, Host, MonoTime, Stat, Timestamp};
 use crate::resolve::Resolved;
 
 pub use delete::{DeleteOptions, Deletion, End, delete};
-pub use walk::{CARGO_LOCK_NAMES, KEEP_MARKER, Rules, WalkStop, walk};
+pub(crate) use walk::host_failure;
+pub use walk::{
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, KEEP_MARKER, Rules, WalkStop, is_cargo_lock_name, walk,
+};
 
 /// Frames below the candidate that hold an fd at the same time (see the
 /// module docs). A frame's fd is closed before the next one is opened, so
@@ -117,6 +120,38 @@ impl<'a, F> Candidate<'a, F> {
     pub fn parent(&self) -> &F {
         self.parent
     }
+}
+
+/// Filesystem types diskgc never takes candidates from: network
+/// filesystems (docs/safety.md, Before the walk: `unsupported_fs`). Their
+/// locks are not those of the local kernel (Cargo does not lock there), and
+/// a dead server can hang any operation on them. Compared with mountinfo's
+/// type in full; a FUSE type also by the name after `fuse.`.
+pub const NETWORK_FS_TYPES: &[&str] = &[
+    "9p",
+    "afs",
+    "ceph",
+    "cifs",
+    "coda",
+    "davfs",
+    "gcsfuse",
+    "glusterfs",
+    "lustre",
+    "ncpfs",
+    "nfs",
+    "nfs4",
+    "rclone",
+    "s3fs",
+    "smb3",
+    "smbfs",
+    "sshfs",
+];
+
+/// Whether mountinfo's filesystem type `fs_type` is a network filesystem
+/// ([`NETWORK_FS_TYPES`], directly or as `fuse.<type>`).
+pub fn is_network_fs(fs_type: &str) -> bool {
+    let base = fs_type.strip_prefix("fuse.").unwrap_or(fs_type);
+    NETWORK_FS_TYPES.contains(&base)
 }
 
 /// What identifies an entry between the walk and its unlink, compared in
@@ -308,6 +343,22 @@ pub enum Reason {
     InUse,
     /// The candidate directory is `flock`ed by someone else.
     Locked,
+    /// A path that cannot be reached safely: a symlink or mount crossing
+    /// on the way, an odd mount table (docs/safety.md, Path traversal).
+    UnsafePath,
+    /// A Cargo target diskgc does not know how to reclaim: an unknown
+    /// Cargo lock file name, a lock set it has not measured (a half of a
+    /// split build directory), or a profile directory in no known layout
+    /// (docs/safety.md, `cargo-target`).
+    UnsupportedLayout,
+    /// A Cargo target whose profile directories hold nothing but lock
+    /// files: nothing to reclaim.
+    Empty,
+    /// Not idle for as long as the term's `idle_for` requires.
+    NotIdle,
+    /// Its last use lies in the future, so its age says nothing
+    /// (docs/reference.md, Predicates).
+    FutureTime,
 }
 
 impl Reason {
@@ -326,6 +377,11 @@ impl Reason {
             Self::TooManyEntries => "too_many_entries",
             Self::InUse => "in_use",
             Self::Locked => "locked",
+            Self::UnsafePath => "unsafe_path",
+            Self::UnsupportedLayout => "unsupported_layout",
+            Self::Empty => "empty",
+            Self::NotIdle => "not_idle",
+            Self::FutureTime => "future_time",
         }
     }
 }
@@ -397,6 +453,61 @@ mod tests {
             mnt_id: Some(30),
             mount_root: Some(false),
         }
+    }
+
+    #[test]
+    fn network_filesystems_are_known_by_type_also_through_fuse() {
+        for net in [
+            "nfs",
+            "nfs4",
+            "cifs",
+            "smb3",
+            "fuse.sshfs",
+            "sshfs",
+            "fuse.rclone",
+            "9p",
+        ] {
+            assert!(is_network_fs(net), "{net}");
+        }
+        for local in [
+            "ext4",
+            "tmpfs",
+            "btrfs",
+            "xfs",
+            "overlay",
+            "fuse",
+            "fuse.portal",
+            "nfsd",
+        ] {
+            assert!(!is_network_fs(local), "{local}");
+        }
+    }
+
+    #[test]
+    fn every_reason_has_a_distinct_report_name() {
+        let all = [
+            Reason::Missing,
+            Reason::NotOwner,
+            Reason::Unreadable,
+            Reason::Kept,
+            Reason::ContainsSpecial,
+            Reason::ContainsIpc,
+            Reason::ContainsMount,
+            Reason::UnsupportedFs,
+            Reason::Changed,
+            Reason::TooManyEntries,
+            Reason::InUse,
+            Reason::Locked,
+            Reason::UnsafePath,
+            Reason::UnsupportedLayout,
+            Reason::Empty,
+            Reason::NotIdle,
+            Reason::FutureTime,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|r| r.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), all.len());
     }
 
     /// Every part of the identity counts: an object with the same inode

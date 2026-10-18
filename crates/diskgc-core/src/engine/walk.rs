@@ -361,7 +361,7 @@ pub fn is_cargo_lock_name(name: &OsStr) -> bool {
 /// - anything else (`EMFILE`, `ENFILE`, `ENOMEM`, `EIO`, a malformed
 ///   answer): says nothing about this candidate and would hit the next one
 ///   too: [`WalkStop::Failed`], an error of the run.
-fn host_failure(path: PathBuf, what: &str, e: &HostError) -> WalkStop {
+pub(crate) fn host_failure(path: PathBuf, what: &str, e: &HostError) -> WalkStop {
     if e.is(Errno::ENOENT) {
         Skip::new(Reason::Changed, path, format!("gone while walked: {e}")).into()
     } else if e.is(Errno::EACCES) || e.is(Errno::EPERM) {

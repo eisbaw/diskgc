@@ -4,7 +4,7 @@ title: 'Minimal ensure: thresholds, host lock, exit codes, --select/--roots for 
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 21:24'
+updated_date: '2026-10-18 01:32'
 labels:
   - wave-1
   - cli
@@ -54,4 +54,8 @@ From task-5 (deletion engine): diskgc_core::engine is ready for the executor: wa
 CORRECTION after task-5's commit (50208a1): the earlier task-5 note here is stale. Current API: Candidate::new(&Resolved parent, path); Rules { owners, block_ipc, max_entries } (no IpcPolicy); skip reasons include unreadable and too_many_entries; WalkStop::Failed { path, error } and End::Failed / End::GateRefused { path, error } are RUN ERRORS the executor must report as failures, never as skips. Report End's path field, not the HostError text (which names an fd).
 
 From task-8: for --select, build the catalog with profile::Library::builtin() (an Err there is a bug in the shipped YAML: exit 2 naming it), select::compile(expr, &library), then library.bind_roots(&checked, Some(&roots) / None) for --roots (RootsError Missing/Unused/Empty/Path are usage errors, exit 2). units::parse_duration (integer + s m h d w, no months, bare number rejected) exists; sizes do not yet.
+
+From task-9: for profile:cargo-target terms, roots from Library::bind_roots -> cargo_target::discover(host, &roots, deadline) (Discovery {targets, refused: Vec<Skip>, duplicates}; Err(Stop) is an error of the run, exit 3). --dry-run plan: cargo_target::eligibility(host, &target, &rules, idle, &mut Checker, deadline) -> Ok(Ok(Eligible {last_build, entries, bytes})) / Ok(Err(Skip)) / Err(Stop); skip.reason.as_str() gives the JSON reason (engine::Reason gained unsafe_path, unsupported_layout, empty, not_idle, future_time, all already in reference.md's enum). The Host port now has wall_clock() (CLOCK_REALTIME) for 'now' in idle filters. eligibility takes only the term's positive idle requirement (Library::idle_for); a !filter:idle-* complement needs Idleness::passes(negated) per negated filter: extend the parameter when ensure supports complements. Order 'oldest' can use Eligible::last_build. Reclaim itself is task-53's protocol.
+
+From task-9 round 2 (review filing H2): discovery statx-es every entry within depth 6 of every root to find directories; read_dir returns names only. If discovery cost matters for ensure's latency, consider a d_type hint in read_dir (still statx before acting) and cheap ordering (index). Also: discover() now walks roots outermost first (keep-marker semantics); eligibility's in_use detail can be long (all evidence).
 <!-- SECTION:NOTES:END -->

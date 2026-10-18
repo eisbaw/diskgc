@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 07:04'
+updated_date: '2026-10-17 23:55'
 labels:
   - wave-1
   - tooling
@@ -38,6 +38,8 @@ Forward-carried from task-1: (1) 'just ci' = nix flake check -L, then just e2e-f
 Forward-carried from task-2: (1) The NOT RUN placeholders for e2e and e2e-full are gone. just e2e = check + nix build .#checks.x86_64-linux.e2e-tests + the fast container suite (5-minute budget); just e2e-full = check + all tiers (1-hour hang guard). (2) Runner hosts need rootless Podman with a subuid range covering uids 1000 and 1001. Containers run with --cap-add SYS_ADMIN --cap-add SYS_PTRACE --network=none --pull=never. (3) AC3 (interlock canary refuses in CI) holds for every CI run of just e2e or e2e-full. The runner executes diskgc-e2e-canary on the host first and stops unless it exits 86. Log line: 'interlock canary refused to run on the host (exit 86), as it must'. On a containerised runner /run/.containerenv may exist, but the image marker does not, so the canary still refuses. (4) Per-test logs go to target/e2e-logs/<test>.log; archive them as CI artifacts.
 
 From task-3 round 10: the diskgc-linux unit tests the_host_is_refused_under_another_namespaces_proc and the_host_is_refused_under_an_ancestors_proc_with_an_equal_pid need unprivileged user namespaces on the runner (user.max_user_namespaces > 0, kernel.unprivileged_userns_clone = 1 where it exists, no AppArmor restrict_unprivileged_userns, e.g. on Ubuntu 24.04 runners), and inside them unsharing pid and mount namespaces, mounting proc and writing kernel.ns_last_pid. They fail, naming that precondition, where it is missing; they do not skip. The nix build sandbox on the development machine allows all of it.
+
+No longer blocking wave 1 (human decision 2026-10-18): e2e-full runs locally for now, and task-13 no longer depends on this task.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

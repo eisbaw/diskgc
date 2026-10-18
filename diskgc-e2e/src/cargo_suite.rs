@@ -14,6 +14,7 @@ use std::time::Duration;
 use diskgc_core::engine::CARGO_LOCK_NAMES;
 
 use crate::cargo_probe::{self, Rusage};
+use crate::cargo_target_suite;
 use crate::cargo_under_test::{
     self, Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain, run_as_tester_untraced,
 };
@@ -55,6 +56,26 @@ pub static CARGO_TESTS: &[CargoTest] = &[
     CargoTest {
         name: "cargo_runner_gate_pauses_between_compile_and_run_holding_no_lock",
         run: cargo_runner_gate_pauses_between_compile_and_run_holding_no_lock,
+    },
+    CargoTest {
+        name: "cargo_targets_discovered_and_judged",
+        run: cargo_target_suite::cargo_targets_discovered_and_judged,
+    },
+    CargoTest {
+        name: "cargo_split_build_dir_halves_are_unsupported_layout",
+        run: cargo_target_suite::cargo_split_build_dir_halves_are_unsupported_layout,
+    },
+    CargoTest {
+        name: "cargo_running_cargo_keeps_its_target_in_use",
+        run: cargo_target_suite::cargo_running_cargo_keeps_its_target_in_use,
+    },
+    CargoTest {
+        name: "cargo_running_executable_below_a_non_utf8_name_keeps_its_target_in_use",
+        run: cargo_target_suite::cargo_running_executable_below_a_non_utf8_name_keeps_its_target_in_use,
+    },
+    CargoTest {
+        name: "cargo_detached_target_is_in_use_while_any_cargo_runs",
+        run: cargo_target_suite::cargo_detached_target_is_in_use_while_any_cargo_runs,
     },
 ];
 

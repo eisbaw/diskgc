@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-17 18:01'
+updated_date: '2026-10-18 01:32'
 labels:
   - wave-1
   - irreversible
@@ -55,6 +55,19 @@ CORRECTION (task-6 final review, mped and Codex): NotCleared::OtherCandidate com
 From task-4: Cargo 1.99.1 and the 2026-10-16 nightly hold .cargo-lock shared (not exclusive) during a build, with .cargo-build-lock and .cargo-artifact-lock exclusive (docs/safety.md, Lock files). Step 1's exclusive non-blocking flock of every known lock fails against a shared holder too, so the protocol is unaffected; a model test of 'locked' should include a shared holder.
 
 From the task-4 review (mped, reproduced by task-4; docs/safety.md, Lock files and Known gaps): nightly-2026-10-16 uses Cargo's new build-dir layout by default: the profile directory has no .fingerprint/ and no deps/; each unit gets build/<package>/<hash>/{fingerprint,out}; lock files as 1.99.1. Reclaim step 3's 'delete .fingerprint/ first' and the Last build measure (.fingerprint/, deps/) do not work on that layout; revise both (e.g. the per-unit fingerprint directories under build/ first, and Last build over build/ and incremental/). Also: with CARGO_BUILD_BUILD_DIR, 1.99.1 and the nightly split the lock set between target/<profile>/ (.cargo-artifact-lock exclusive, .cargo-lock shared) and the build-dir's <profile>/ (.cargo-build-lock), each half with its own CACHEDIR.TAG, so each half is a target of its own for discovery and locking.
+
+From task-9 (cargo_target in diskgc-core; rules in docs/safety.md cargo-target, which task-9 rewrote): what the protocol gets.
+- Input: cargo_target::Target from discover(): root, path, identity, inspected (Inspected: profiles = ProfileDir {rel, identity, changed, locks: Vec<LockFile {name, identity, changed}> sorted, entries: other names sorted}, dirs directly in the target, keep_marker). Lock files to take = every profile's locks (all known: judge_layout refuses unknown names first).
+- Reuse, do not re-implement: reach(host, &target, deadline) -> Reached {target: Resolved (O_PATH), project: Option<DevIno>} (re-walks from the root, keep markers on the way, identity check); inspect(host, &fd, mount_id, path, deadline) for step 2's re-listing and Inspected::same_locks(&target.inspected) for 'a new lock file / profile since discovery' (changed; race test 5); judge_layout(path, &inspected) (unknown lock name, split halves, unmeasured sets, unknown layout -> unsupported_layout; empty); walk_profiles(host, &reached.target, path, &inspected, &rules, deadline) -> Vec<ProfileWalk> (each entry but the lock files walked as its own engine Candidate; ProfileWalk::candidates()); last_build(&inspected, &walks) + IdleFor::verdict(last, host.wall_clock()); cargo_evidence(scan, path, target.identity.id, &inspected, reached.project) for the Cargo process rules (non-empty = in_use). eligibility() shows the composition without locks; the protocol is the same with step 1 first and inuse::Checker::check (Clear) + inuse::delete_cleared per entry instead of Checker::current.
+- Step 1 locking: open each lock below the profile dir with open_beneath(Access::Read, Want::Any), check the fd's identity == LockFile.identity (a replaced lock file is changed), flock_try Exclusive. Lock files are in Inspected::objects(), so another process holding one open is rule-1 evidence; diskgc's own pid is never counted.
+- Split pairs never reach the protocol (both halves unsupported_layout, decision recorded in safety.md Lock files).
+- Fingerprint first, per cargo_target::Layout: Classic -> the entry .fingerprint first; PerUnit -> every build/<pkg>/<hash>/fingerprint directory first (find them in the `build` entry's walk record), then the rest. Suggestion: delete the layout marker last (Classic: deps; PerUnit: build), so a run killed part-way leaves a profile still in a known layout; a profile with none of .fingerprint/, deps/, build/ is unsupported_layout and would otherwise stay unreclaimed until the next cargo build. safety.md 'Known gap, the per-unit layout and the protocol' is yours to close.
+
+From task-9 round 2 (review filings H1, H4, H6):
+- H1: the build directory's half of a split pair alone might be reclaimable while holding its .cargo-build-lock, if Cargo always takes it before touching the build dir and the test-binary window is covered (detached rule 6 covers a build dir outside the project while any cargo runs). Measure first (task-11 AC #4); until then both halves are unsupported_layout.
+- H4: a per-target entry budget: walk_profiles gives each profile entry its own DEFAULT_MAX_ENTRIES budget, so one target can hold several million entries in records at once (memory). Consider one budget per target for the protocol.
+- H6: (a) a lock file created mid-protocol (after step 1, before step 3): step 2 must re-inspect and compare with same_locks under the held locks, and the deletion of each entry must not run after a new lock appears (re-check before each profile dir?); (b) profile directories are opened twice (inspect, then walk_profiles reopens and checks identity): keep one fd per profile if the protocol needs the same object throughout; (c) how long locks are held: the whole profile's walk, scan and delete run under every lock of the target; a big target blocks Cargo (prints Blocking waiting for file lock) for that long: bound or report it.
+- Reached.project is now Project {id, detached}; cargo_evidence takes it.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

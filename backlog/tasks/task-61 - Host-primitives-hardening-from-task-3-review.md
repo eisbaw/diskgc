@@ -4,11 +4,11 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-17 22:44'
+updated_date: '2026-10-18 01:32'
 labels:
-  - wave-1
   - hardening
   - safety
+  - wave-5
 dependencies:
   - TASK-3
 priority: medium
@@ -172,6 +172,10 @@ From task-8's commit review (mped), hardening:
 (41) idle_for: 0s is accepted today (it makes every known-age candidate idle); reject it at load or document it in docs/reference.md (Predicates).
 (42) has / has_not take one file name; west-build needs CMakeCache.txt plus a zephyr/ directory (an entry, not a file, and two of them): decide a list form and 'entry' wording when west-build is verified (task-41).
 (43) Binary size: the release binary is 585,320 bytes at a7bce15 and 585,616 with task-8 (the profile code is not yet called, so it is linked out). With a temporary call to profile::Library::builtin() in main the static musl binary is 2,272,040 bytes (+1.69 MB, about 3.9x), measured 2026-10-18 through the flake package. The YAML stack (serde-saphyr deserialize: granit-parser, annotate-snippets, encoding_rs via encoding_rs_io) is the likely bulk; measure per crate (e.g. cargo-bloat) and decide whether that is acceptable before task-10 wires it in.
+
+Split for the 0.1 ensure MVP (2026-10-18). Moved to task-64 (real-machine hardening blocking 0.1), using this task's numbering (D1-D7 = description items, #N = the running numbers in these notes): D3, D4, D5, D6, D7, #19, #25, #26, #27, #32, #37, #38, #39, #41; task-3 round 5 (3) (tid reuse); task-3 round 9 (4) (no pidfd hang-up on Linux 5.8-6.8); task-3 round 10 (1) (bounded pidfd poll); task-3 final commit gate: PROC_SUPER_MAGIC check and the /proc-replaced real-kernel test; task-5 deep gate round 1 (2) (narrow fchmod) and (3) (rename-out and bind-mount races); task-6 deep gate round 1 (1) (held_by_deleted_files on btrfs), (2) (unsettled scan reuse), (3) (16-listing bound under make -j), (5) (pid reuse after read in safety.md limit 4); task-6 deep gate round 3 (1) (pid reuse within a scan) and (3) (narrow engine::delete and Checker::with_options); task-7 review H10 (guarded-spawn helper); task-50 review: the gate flag test scanning nested .cargo/config files. Everything else here is deferred: wave-5 hardening, no longer blocking task-13 or the 0.1 release. Its AC 'each of the seven items' now covers D1 and D2 only; D3-D7 are owned by task-64.
+
+From task-9 round 2 (mped B1, item (39)): the cargo-target kind made keep-marker checking independent of root order by walking roots outermost first, so a target reached through overlapping roots is recorded under the outermost root and markers between it and the target count. QUESTION for the fs kind: does fs discovery/dedupe by identity have the same root-order dependence (a .diskgc-keep between an outer root and a candidate ignored when the candidate is recorded under an inner root)? H5: with a bind mount, one object is reachable by two unrelated paths; only the recording path's markers count. A union of markers over every path that reached the object would close that; filed here, not done.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

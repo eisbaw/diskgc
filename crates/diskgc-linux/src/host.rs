@@ -24,16 +24,16 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, Delete, DirListing, Environ, Errno, Host, HostError, LinkTarget,
-    LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink,
-    ProcStatus, ProcView, Space, Stat, TryLock, UidMap, Unlink, WaitLock, is_single_name,
-    read_proc_view,
+    Access, Base, BoundSocket, Delete, DirListing, Environ, Errno, FileType, Host, HostError,
+    LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
+    ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock,
+    is_single_name, read_proc_view,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
@@ -773,6 +773,34 @@ impl Host for LinuxHost {
         })
     }
 
+    fn read_head(&self, file: &LinuxFd, limit: usize) -> Result<Vec<u8>, HostError> {
+        let subject = format!("{file:?}");
+        // The type first, on the fd itself (an O_PATH fd is fstat-able), so
+        // a FIFO or a device is refused without ever being opened (opening
+        // one has effects: a FIFO's writer goes on, a device driver runs).
+        let kind = rustix::fs::fstat(file)
+            .map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
+        if FileType::from_mode(kind.st_mode) != FileType::Regular {
+            return Err(HostError::invalid(
+                "read",
+                &subject,
+                "not a regular file (only marker files are read)",
+            ));
+        }
+        // Then the object the fd refers to, reopened through its magic
+        // link: never a name looked up again; non-blocking all the same.
+        let rel = format!("self/fd/{}", file.as_fd().as_raw_fd());
+        let reopened = self
+            .root()
+            .open(&rel, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY)?;
+        let mut head = Vec::new();
+        std::fs::File::from(reopened)
+            .take(u64::try_from(limit).unwrap_or(u64::MAX))
+            .read_to_end(&mut head)
+            .map_err(|e| io_error("read", &subject, &e))?;
+        Ok(head)
+    }
+
     fn statvfs(&self, fd: &LinuxFd) -> Result<Space, HostError> {
         let subject = format!("{fd:?}");
         let s = rustix::fs::fstatvfs(fd)
@@ -837,6 +865,15 @@ impl Host for LinuxHost {
             u64::try_from(t.tv_sec).expect("CLOCK_BOOTTIME seconds are non-negative"),
             u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
         ))
+    }
+
+    fn wall_clock(&self) -> Timestamp {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::Realtime);
+        Timestamp {
+            secs: t.tv_sec,
+            // tv_nsec is below one second.
+            nanos: u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
+        }
     }
 
     fn sleep(&self, duration: Duration) {
@@ -1651,6 +1688,109 @@ mod tests {
         let file = resolve(&host, &dir.0.join(&want[0]), Want::Any).expect("resolve file");
         let err = host.read_dir(&file.fd, 10).unwrap_err();
         assert!(err.is(Errno::ENOTDIR), "{err}");
+    }
+
+    /// `read_head` reads the start of the regular file an `O_PATH` fd
+    /// refers to, up to the limit, also after the name was replaced: it
+    /// reopens the object, not the name. A FIFO is refused without
+    /// blocking, and so is a directory.
+    #[test]
+    fn read_head_reads_the_object_of_the_fd_and_refuses_non_files() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("read-head");
+        let tag = dir.0.join("CACHEDIR.TAG");
+        std::fs::write(&tag, b"Signature: 8a477f597d28d172789f06886806bc55\nrest").expect("write");
+        let fd = resolve(&host, &tag, Want::Any).expect("resolve").fd;
+        assert_eq!(
+            host.read_head(&fd, 43).expect("read_head"),
+            b"Signature: 8a477f597d28d172789f06886806bc55"
+        );
+        assert_eq!(host.read_head(&fd, 1000).expect("read_head").len(), 48);
+        assert_eq!(host.read_head(&fd, 0).expect("read_head"), b"");
+        // The name now holds something else: the fd still reads its object.
+        std::fs::rename(&tag, dir.0.join("moved")).expect("rename");
+        std::fs::write(&tag, b"other").expect("write");
+        assert_eq!(&host.read_head(&fd, 9).expect("read_head"), b"Signature");
+
+        let fifo = dir.0.join("fifo");
+        rustix::fs::mknodat(
+            CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("mkfifo");
+        let fifo_fd = resolve(&host, &fifo, Want::Any).expect("resolve fifo").fd;
+        let err = host.read_head(&fifo_fd, 10).unwrap_err();
+        assert_eq!(err.cause, diskgc_core::host::Cause::Invalid, "{err}");
+        let dir_fd = resolve(&host, &dir.0, Want::Directory)
+            .expect("resolve dir")
+            .fd;
+        assert!(host.read_head(&dir_fd, 10).is_err());
+    }
+
+    /// A FIFO (or a device) is refused before it is opened: inotify reports
+    /// every open of the object (`IN_OPEN`) but none for an `O_PATH` open,
+    /// so a watch on the FIFO sees no open from `read_head`, while the same
+    /// watch on a regular file sees `read_head`'s (the control: the watch
+    /// works). A device node cannot be made unprivileged here; it takes the
+    /// same path (its type is not regular).
+    #[test]
+    fn read_head_refuses_a_fifo_without_opening_it() {
+        use rustix::fs::inotify;
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("read-head-unopened");
+        let fifo = dir.0.join("fifo");
+        rustix::fs::mknodat(
+            CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("mkfifo");
+        let file = dir.0.join("file");
+        std::fs::write(&file, b"x").expect("write");
+        let opens = |path: &Path, read: &dyn Fn(&LinuxFd)| -> usize {
+            let fd = resolve(&host, path, Want::Any).expect("resolve").fd;
+            let watch =
+                inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)
+                    .expect("inotify_init");
+            inotify::add_watch(&watch, path, inotify::WatchFlags::OPEN).expect("add_watch");
+            read(&fd);
+            let mut buf = [std::mem::MaybeUninit::uninit(); 4096];
+            let mut reader = inotify::Reader::new(&watch, &mut buf);
+            let mut n = 0;
+            while reader.next().is_ok() {
+                n += 1;
+            }
+            n
+        };
+        let refused = |fd: &LinuxFd| assert!(host.read_head(fd, 10).is_err());
+        let read = |fd: &LinuxFd| {
+            host.read_head(fd, 10).expect("read_head");
+        };
+        assert_eq!(opens(&fifo, &refused), 0, "read_head opened the FIFO");
+        assert_eq!(opens(&file, &read), 1, "the control saw no open");
+    }
+
+    /// The wall clock is the realtime clock statx times are on.
+    #[test]
+    fn wall_clock_is_realtime() {
+        let host = LinuxHost::new().expect("host setup");
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch");
+        let got = host.wall_clock();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch");
+        let got = Duration::new(u64::try_from(got.secs).expect("positive"), got.nanos);
+        assert!(
+            before <= got && got <= after,
+            "{before:?} {got:?} {after:?}"
+        );
     }
 
     /// A directory removed after it was opened fails its listing with
