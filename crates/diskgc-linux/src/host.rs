@@ -128,6 +128,51 @@ impl LinuxHost {
         Ok(Self { proc })
     }
 
+    /// The contents of diskgc's configuration file at the absolute `path`
+    /// (docs/reference.md, Configuration file), at most `limit` bytes; a
+    /// larger file is an error, never a truncated read.
+    ///
+    /// Not a [`Host`] method: configuration is read once, by the binary,
+    /// before anything touches candidates, and parsing it is pure
+    /// (`diskgc_core::config`). Unlike candidate paths, symlinks **are**
+    /// followed: packaged configurations are commonly symlinks (NixOS
+    /// `/etc` entries, home-manager files); what the file says is
+    /// validated, not where it lives. It is opened `O_PATH` first and its
+    /// type checked on that fd before it is opened for reading
+    /// ([`Self::open_regular`]), so a FIFO or a device at the path is
+    /// refused without being opened. Missing: `ENOENT` (or `ENOTDIR`), which
+    /// the lookup treats as "not there".
+    pub fn read_config_file(&self, path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
+        let subject = path.display().to_string();
+        if !path.is_absolute() {
+            return Err(HostError::invalid(
+                "open",
+                &subject,
+                "a configuration file path must be absolute",
+            ));
+        }
+        let fd = rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
+        let file = self.open_regular(
+            &LinuxFd(fd),
+            &subject,
+            "only a regular file is read as a configuration file",
+        )?;
+        let mut content = Vec::new();
+        std::fs::File::from(file)
+            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+            .read_to_end(&mut content)
+            .map_err(|e| io_error("read", &subject, &e))?;
+        if content.len() > limit {
+            return Err(HostError::invalid(
+                "read",
+                &subject,
+                format!("larger than {limit} bytes: not read as a configuration file"),
+            ));
+        }
+        Ok(content)
+    }
+
     /// The procfs mount every reader goes through.
     fn root(&self) -> ProcRoot<'_> {
         ProcRoot(self.proc.as_fd())
@@ -1020,6 +1065,21 @@ impl Host for LinuxHost {
             .cast_unsigned())
     }
 
+    fn effective_uid(&self) -> u32 {
+        rustix::process::geteuid().as_raw()
+    }
+
+    /// `fcntl(F_SETFD)` without `FD_CLOEXEC`, on that one fd: every other fd
+    /// stays close-on-exec.
+    fn inherit_lock(&self, lock: &Locked<LinuxFd>) -> Result<(), HostError> {
+        let fd = lock.fd();
+        let subject = format!("{fd:?}");
+        let flags = rustix::io::fcntl_getfd(fd)
+            .map_err(|e| HostError::errno("fcntl F_GETFD", &subject, errno_of(e)))?;
+        rustix::io::fcntl_setfd(fd, flags - rustix::io::FdFlags::CLOEXEC)
+            .map_err(|e| HostError::errno("fcntl F_SETFD", &subject, errno_of(e)))
+    }
+
     /// `status`, `uid_map` and the `fd` directory of a live task are read by
     /// number while the pidfd pins the process; a lookup that vanished
     /// (`ENOENT`) is `Gone` only when the pidfd then reports a hang-up,
@@ -1172,6 +1232,12 @@ const SOCK_DIAG_TIMEOUT: Duration = Duration::from_secs(1);
 /// appears outside the allowlisted wrappers, so a future deleting method
 /// cannot skip the gate.
 impl Delete for LinuxHost {
+    /// The gate's cached decision ([`sandbox::status`]); no [`Permit`] is
+    /// made, nothing is attempted.
+    fn may_delete(&self) -> Result<(), HostError> {
+        sandbox::status().map_err(|why| HostError::sandbox_gate("delete", "anything", why))
+    }
+
     fn unlinkat(&self, dir: &LinuxFd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
         let subject = shown(&Base::Dir(dir), Path::new(name));
         let permit = gate("unlinkat", &subject)?;

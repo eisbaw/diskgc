@@ -268,6 +268,44 @@ pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
 ) -> Result<Spawned, String> {
+    spawn_traced(ledger, records, cwd, env, program, args, As::Tester)
+}
+
+/// Who the traced code under test runs as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum As {
+    /// `tester` (uid 1000): every test but the root refusal.
+    Tester,
+    /// Container root (uid 0 in the user namespace), for the one check
+    /// that needs it: diskgc refusing to run as root
+    /// (docs/safety.md, Privileges). The program is exec'd by strace
+    /// directly, without `as-tester`.
+    Root,
+}
+
+/// Runs `program args...` as container root under strace, from `cwd`, with
+/// [`TESTER_ENV`] (`HOME` aside), and waits for it; entered in `ledger`
+/// like every traced run, so the oracle must judge it.
+pub fn run_as_root<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    program: &Path,
+    args: &[S],
+) -> Result<Run, String> {
+    let env = [("HOME".to_owned(), "/root".to_owned())];
+    spawn_traced(ledger, records, cwd, &env, program, args, As::Root)?.wait()
+}
+
+fn spawn_traced<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    env: &[(String, String)],
+    program: &Path,
+    args: &[S],
+    user: As,
+) -> Result<Spawned, String> {
     let n = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let record_dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
     let argv: Vec<String> = std::iter::once(program.display().to_string())
@@ -278,19 +316,26 @@ pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
         .collect();
     let self_exe =
         std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
-    info!("running as {TESTER_NAME} under strace: {argv:?}");
+    let who = match user {
+        As::Tester => TESTER_NAME,
+        As::Root => "root",
+    };
+    info!("running as {who} under strace: {argv:?}");
     let judged = ledger.enter(&argv);
 
     let started = Instant::now();
-    let mut strace = Command::new(STRACE)
+    let mut command = Command::new(STRACE);
+    command
         .args(STRACE_OPTIONS)
         .arg("-e")
         .arg(format!("trace={}", strace::TRACED_SYSCALLS))
         .arg("-o")
         .arg(record_dir.join(RECORD_PREFIX))
-        .arg("--")
-        .arg(&self_exe)
-        .args(["as-tester", "--"])
+        .arg("--");
+    if user == As::Tester {
+        command.arg(&self_exe).args(["as-tester", "--"]);
+    }
+    let mut strace = command
         .arg(program)
         .args(args)
         .env_clear()
@@ -352,6 +397,32 @@ impl Spawned {
     /// The pid of strace, the parent of the code under test.
     fn strace_pid(&self) -> u32 {
         self.strace.id()
+    }
+
+    /// The next stdout line holding `needle` (earlier lines are skipped;
+    /// they stay in the run's stdout), within [`CONTROL_TIMEOUT`]: for code
+    /// under test that says where it is by its result lines.
+    pub fn next_line(&mut self, needle: &str) -> Result<String, String> {
+        let deadline = Instant::now() + CONTROL_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(needle) => return Ok(line),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "{:?}: no line with {needle:?} within {CONTROL_TIMEOUT:?}",
+                        self.argv
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "{:?} closed its stdout before a line with {needle:?}",
+                        self.argv
+                    ));
+                }
+            }
+        }
     }
 
     /// The next control line on stdout (result lines are skipped; they stay

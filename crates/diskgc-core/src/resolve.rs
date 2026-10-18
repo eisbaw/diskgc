@@ -510,6 +510,12 @@ mod tests {
         fn own_pid(&self) -> Pid {
             unreachable!()
         }
+        fn effective_uid(&self) -> u32 {
+            unreachable!()
+        }
+        fn inherit_lock(&self, _: &crate::host::Locked<Self::Fd>) -> Result<(), HostError> {
+            unreachable!()
+        }
         fn proc_status(&self, _: Pid) -> Result<crate::host::ProcStatus, ProcError> {
             unreachable!()
         }

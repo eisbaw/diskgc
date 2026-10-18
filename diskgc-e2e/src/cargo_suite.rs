@@ -19,6 +19,7 @@ use crate::cargo_target_suite;
 use crate::cargo_under_test::{
     self, Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain, run_as_tester_untraced,
 };
+use crate::ensure_suite;
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::proc_locks::{self, Watched};
@@ -93,6 +94,18 @@ pub static CARGO_TESTS: &[CargoTest] = &[
     CargoTest {
         name: "cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile",
         run: cargo_reclaim_suite::cargo_reclaim_killed_leaves_lock_files_and_a_recognisable_profile,
+    },
+    CargoTest {
+        name: "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free",
+        run: ensure_suite::ensure_reclaims_the_oldest_real_target_and_stops_at_min_free,
+    },
+    CargoTest {
+        name: "ensure_exits_1_when_every_candidate_was_processed_below_min_free",
+        run: ensure_suite::ensure_exits_1_when_every_candidate_was_processed_below_min_free,
+    },
+    CargoTest {
+        name: "ensure_dry_run_plans_real_targets_and_deletes_nothing",
+        run: ensure_suite::ensure_dry_run_plans_real_targets_and_deletes_nothing,
     },
 ];
 

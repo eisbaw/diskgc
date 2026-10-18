@@ -50,13 +50,26 @@ pub struct HostModel {
     pub processes: Vec<ProcessSpec>,
     /// diskgc's own pid (`own_pid`; default 65000). It is listed among the
     /// pids; its fds are the ones the code under test holds open, its other
-    /// `/proc` entries read as `Failed` (not modelled), its uid is 1000.
+    /// `/proc` entries read as `Failed` (not modelled), its uid is
+    /// `own_uid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_pid: Option<u32>,
     /// diskgc's own `uid_map` as it reads it; default the initial user
     /// namespace's (`none`: unreadable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_uid_map: Option<String>,
+    /// diskgc's own user id (`geteuid`, and the uid its `status` shows);
+    /// default 1000. `0` models diskgc run as root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_uid: Option<u32>,
+    /// The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):
+    /// `open` (the default; the model deletes nothing real), `closed`
+    /// (outside a test container: `may_delete`, `unlinkat` and `fchmod`
+    /// are refused with `Cause::SandboxGate`, nothing is attempted), or
+    /// `refuses_deletes` (`may_delete` answers open but the deleting calls
+    /// are refused: what a caller that asked first must still survive).
+    #[serde(default, skip_serializing_if = "GateSpec::is_open")]
+    pub sandbox_gate: GateSpec,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
@@ -70,6 +83,22 @@ impl HostModel {
     /// to be saved under `tests/regressions/`).
     pub fn to_yaml(&self) -> String {
         serde_saphyr::to_string(self).expect("a host model always serialises")
+    }
+}
+
+/// The modelled sandbox gate (`sandbox_gate`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GateSpec {
+    #[default]
+    Open,
+    Closed,
+    RefusesDeletes,
+}
+
+impl GateSpec {
+    pub fn is_open(&self) -> bool {
+        *self == GateSpec::Open
     }
 }
 
@@ -488,8 +517,11 @@ pub enum Op {
     ProcMaps,
     ProcEnviron,
     OwnPid,
+    EffectiveUid,
+    InheritLock,
     ProcStatus,
     BoundUnixSockets,
+    MayDelete,
     Unlinkat,
     Fchmod,
 }
@@ -515,8 +547,11 @@ impl Op {
             Self::ProcMaps => "proc_maps",
             Self::ProcEnviron => "proc_environ",
             Self::OwnPid => "own_pid",
+            Self::EffectiveUid => "effective_uid",
+            Self::InheritLock => "inherit_lock",
             Self::ProcStatus => "proc_status",
             Self::BoundUnixSockets => "bound_unix_sockets",
+            Self::MayDelete => "may_delete",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",
         }

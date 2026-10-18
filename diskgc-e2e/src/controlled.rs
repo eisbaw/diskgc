@@ -33,7 +33,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Base, BoundSocket, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode,
+    Base, BoundSocket, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode, Locked,
     MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
     ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
@@ -529,6 +529,16 @@ impl<H: Host> Host for Controlled<H> {
         self.host.own_pid()
     }
 
+    fn effective_uid(&self) -> u32 {
+        self.before("effective_uid");
+        self.host.effective_uid()
+    }
+
+    fn inherit_lock(&self, lock: &Locked<Self::Fd>) -> Result<(), HostError> {
+        self.before("inherit_lock");
+        self.host.inherit_lock(lock)
+    }
+
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
         self.before("proc_status");
         self.host.proc_status(pid)
@@ -541,6 +551,11 @@ impl<H: Host> Host for Controlled<H> {
 }
 
 impl<H: Delete> Delete for Controlled<H> {
+    fn may_delete(&self) -> Result<(), HostError> {
+        self.before("may_delete");
+        self.host.may_delete()
+    }
+
     fn unlinkat(&self, dir: &Self::Fd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
         self.before("unlinkat");
         self.host.unlinkat(dir, name, what)

@@ -91,11 +91,20 @@ pub(crate) struct Permit(());
 /// thousands of unlinks would only add syscalls (and strace noise in the e2e
 /// tests). A refusal is kept too, so a process never deletes after having
 /// been refused.
-#[cfg(not(feature = "release-without-sandbox-gate"))]
 pub(crate) fn permit() -> Result<Permit, &'static str> {
+    status().map(|()| Permit(()))
+}
+
+/// The gate's decision without a [`Permit`]: what [`permit`] answers, for
+/// a caller that only needs to know (a reclaim that must fail fast before
+/// it measures, locks or plans; task-50 review H4). The same cached
+/// decision: asking first does not change what a later deleting call is
+/// told.
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+pub fn status() -> Result<(), &'static str> {
     static DECISION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     match DECISION.get_or_init(|| check().map_err(|why| why.to_string())) {
-        Ok(()) => Ok(Permit(())),
+        Ok(()) => Ok(()),
         Err(why) => Err(why),
     }
 }
@@ -103,8 +112,8 @@ pub(crate) fn permit() -> Result<Permit, &'static str> {
 /// A release build (0.1 onwards): the gate is compiled out and every call is
 /// permitted. Only the release package enables this feature.
 #[cfg(feature = "release-without-sandbox-gate")]
-pub(crate) fn permit() -> Result<Permit, &'static str> {
-    Ok(Permit(()))
+pub fn status() -> Result<(), &'static str> {
+    Ok(())
 }
 
 /// [`check`] with the marker paths taken relative to `root`, so the decision

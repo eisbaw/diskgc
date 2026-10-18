@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 03:35'
+updated_date: '2026-10-18 05:48'
 labels:
   - wave-2
   - irreversible
@@ -49,6 +49,8 @@ SUPERSEDED: the round-2 task-6 note above ('From task-6 round 2 ...: build the c
 From the task-7 review (H9): a union selects a candidate if any of its terms does. Deduplicate candidates found by several terms (one plan/action entry each), and report a filter skip (not_idle, has_not) only when no term selects the candidate.
 
 From task-53: the cargo-target action is cargo_target::reclaim (see task-10's note for the call and the ReclaimEnd mapping). For the walk order: Eligible::last_build (eligibility, no locks) is the 'oldest' key and is passed back as judged_last_build so a target rebuilt between ordering and acting is changed. reclaim is one target at a time and holds every lock of that target for its whole walk+scan+delete (measured 0.49 s per 100k entries untraced on tmpfs); deadlines are checked between operations, so a tier deadline stops it part-way (Stopped(DeadlinePassed), fingerprints already gone first). GateRefused stops the run.
+
+From task-10: the executor slice is diskgc-core/src/executor.rs (ensure<H: Delete>, dry_run<H: Host>, Tier, Request, privileges) with report/mod.rs (Status, conclude for rows 0/124/3/1, to_json, summary). Today: one --select tier (Tier::select refuses unions, !filter:, !profile:, non-cargo-target kinds), discovery + a read-only cargo_target::tally per target AFTER the host lock (architecture.md notes the deviation from the pre-lock synchronous tally), sort by tally last_build (unknown last), reclaim each with judged_last_build None, re-sample after each, stop when avail >= --target-free; after the lock a fresh sample >= --min-free returns met before any discovery. Extend Reclaim::walk to groups/ranking/per-tier discovery/preflight; keep ReclaimEnd mapping (Complete=action; Skipped=skip, plus an action when removed_entries>0; Failed=candidate error, next target tried; GateRefused and Stopped(Failed)=run error, stop; Stopped(DeadlinePassed)=deadline_hit). The dry run plan is eligible-first in the same order (reference.md says so); keep dry run and ensure on the same ordering function. held_by_deleted_files comes from the last scan, or one made at the end.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

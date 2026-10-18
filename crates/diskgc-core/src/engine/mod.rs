@@ -250,6 +250,11 @@ impl WalkRecord {
         self.newest_change
     }
 
+    /// Every entry, the candidate first.
+    pub fn all_entries(&self) -> impl Iterator<Item = &Entry> + '_ {
+        std::iter::once(&self.root).chain(self.listings.iter().flatten())
+    }
+
     /// (device, inode) of every entry, the candidate first: what the in-use
     /// check matches processes against (docs/safety.md, In use).
     pub fn objects(&self) -> impl Iterator<Item = DevIno> + '_ {
@@ -436,9 +441,36 @@ pub enum Reason {
     /// Its last use lies in the future, so its age says nothing
     /// (docs/reference.md, Predicates).
     FutureTime,
+    /// On another filesystem than the one that must have the space:
+    /// deleting it would free nothing there (docs/architecture.md,
+    /// Filesystem matching).
+    OtherFs,
 }
 
 impl Reason {
+    /// Every reason (keep it next to [`Reason::as_str`], whose match is
+    /// exhaustive: a new reason is added to both).
+    pub const ALL: [Reason; 18] = [
+        Reason::Missing,
+        Reason::NotOwner,
+        Reason::Unreadable,
+        Reason::Kept,
+        Reason::ContainsSpecial,
+        Reason::ContainsIpc,
+        Reason::ContainsMount,
+        Reason::UnsupportedFs,
+        Reason::Changed,
+        Reason::TooManyEntries,
+        Reason::InUse,
+        Reason::Locked,
+        Reason::UnsafePath,
+        Reason::UnsupportedLayout,
+        Reason::Empty,
+        Reason::NotIdle,
+        Reason::FutureTime,
+        Reason::OtherFs,
+    ];
+
     /// The skip reason's name in reports.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -459,6 +491,7 @@ impl Reason {
             Self::Empty => "empty",
             Self::NotIdle => "not_idle",
             Self::FutureTime => "future_time",
+            Self::OtherFs => "other_fs",
         }
     }
 }
@@ -562,25 +595,7 @@ mod tests {
 
     #[test]
     fn every_reason_has_a_distinct_report_name() {
-        let all = [
-            Reason::Missing,
-            Reason::NotOwner,
-            Reason::Unreadable,
-            Reason::Kept,
-            Reason::ContainsSpecial,
-            Reason::ContainsIpc,
-            Reason::ContainsMount,
-            Reason::UnsupportedFs,
-            Reason::Changed,
-            Reason::TooManyEntries,
-            Reason::InUse,
-            Reason::Locked,
-            Reason::UnsafePath,
-            Reason::UnsupportedLayout,
-            Reason::Empty,
-            Reason::NotIdle,
-            Reason::FutureTime,
-        ];
+        let all = Reason::ALL;
         let mut names: Vec<&str> = all.iter().map(|r| r.as_str()).collect();
         names.sort_unstable();
         names.dedup();

@@ -6,6 +6,7 @@ mounts:
   - {id: 1, at: /,     fs: ext4, dev: "254:1", size: 1000G, other_used: 980G}
   - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 900G,  other_used: 880G, parent: 1}
 tree:
+  /run/diskgc/lock: {uid: 0, gid: 0}
   /home/mark/src/app/target:
     CACHEDIR.TAG: {cachedir_tag: true}
     debug:

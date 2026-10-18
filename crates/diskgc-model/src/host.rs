@@ -51,7 +51,13 @@ use crate::load::{Action, Event, LoadError, Trigger};
 /// it.
 pub const CACHEDIR_TAG_CONTENT: &[u8] =
     b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n";
-use crate::spec::{HostModel, Op, ProcAccess, When};
+use crate::spec::{GateSpec, HostModel, Op, ProcAccess, When};
+
+/// What `LinuxHost` answers outside a test container: the gate's refusal,
+/// nothing attempted.
+fn gate_refusal(op: &'static str, subject: &str) -> HostError {
+    HostError::sandbox_gate(op, subject, "the host model's sandbox_gate is not open")
+}
 use crate::state::{Fault, Kind, Loc, Ref, State, WalkRules};
 
 /// What [`Host::now`] reads when a run starts: a running machine's uptime,
@@ -870,7 +876,15 @@ impl Host for ModelHost {
     fn statvfs(&self, fd: &ModelFd) -> Result<Space, HostError> {
         let ofd = self.fd_ofd(fd);
         let path = self.base_path(Base::Dir(fd), Path::new(""));
+        let shown = path.display().to_string();
         self.call(Op::Statvfs, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("fstatvfs", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
             let loc = inner.loc_of(ofd);
             (Ok(inner.state.space(loc.mnt)), None, "ok".to_owned())
         })
@@ -1077,6 +1091,24 @@ impl Host for ModelHost {
         })
     }
 
+    fn effective_uid(&self) -> u32 {
+        self.call(Op::EffectiveUid, None, None, |inner| {
+            let uid = inner.state.own_uid;
+            (uid, None, uid.to_string())
+        })
+    }
+
+    /// Recorded on the trace, with the locked file's path. The model starts
+    /// no children, so nothing else changes.
+    fn inherit_lock(&self, lock: &Locked<ModelFd>) -> Result<(), HostError> {
+        let ofd = self.fd_ofd(lock.fd());
+        let path = self.base_path(Base::Dir(lock.fd()), Path::new(""));
+        self.call(Op::InheritLock, Some(path), None, |inner| {
+            let object = Some(inner.state.dev_ino(inner.loc_of(ofd)));
+            (Ok(()), object, "ok".to_owned())
+        })
+    }
+
     /// Readable for every process, whatever its `proc:` says (as on Linux,
     /// where `status` is world-readable). diskgc itself is uid 1000.
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
@@ -1085,12 +1117,12 @@ impl Host for ModelHost {
             if pid.0 == inner.state.own_pid {
                 let status = ProcStatus {
                     name: "diskgc".into(),
-                    uid: Ids::same(crate::state::DEFAULT_ID),
+                    uid: Ids::same(inner.state.own_uid),
                     gid: Ids::same(crate::state::DEFAULT_ID),
                     cap_permitted: 0,
                     cap_effective: 0,
                     uid_map: crate::state::uid_map(inner.state.own_uid_map.as_deref()),
-                    fd_dir_owner: Some(crate::state::DEFAULT_ID),
+                    fd_dir_owner: Some(inner.state.own_uid),
                 };
                 return (Ok(status), None, "ok (own)".to_owned());
             }
@@ -1135,6 +1167,21 @@ impl Host for ModelHost {
 }
 
 impl Delete for ModelHost {
+    /// The modelled gate (`sandbox_gate`); open unless the model says
+    /// otherwise (it deletes nothing real). Recorded on the trace.
+    fn may_delete(&self) -> Result<(), HostError> {
+        self.call(Op::MayDelete, None, None, |inner| {
+            match inner.state.sandbox_gate {
+                GateSpec::Closed => (
+                    Err(gate_refusal("delete", "anything")),
+                    None,
+                    "refused".to_owned(),
+                ),
+                GateSpec::Open | GateSpec::RefusesDeletes => (Ok(()), None, "ok".to_owned()),
+            }
+        })
+    }
+
     fn unlinkat(&self, dir: &ModelFd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
         let ofd = self.fd_ofd(dir);
         if !is_single_name(name) {
@@ -1171,6 +1218,13 @@ impl Delete for ModelHost {
                         errno_text(e),
                     );
                 }
+                if !inner.state.sandbox_gate.is_open() {
+                    return (
+                        Err(gate_refusal("unlinkat", &shown)),
+                        None,
+                        "refused".to_owned(),
+                    );
+                }
                 let dir_loc = inner.loc_of(ofd);
                 match inner.state.unlinkat(dir_loc, name, what == Unlink::Dir) {
                     Ok(loc) => (Ok(()), Some(inner.state.dev_ino(loc)), "ok".to_owned()),
@@ -1197,6 +1251,13 @@ impl Delete for ModelHost {
                     Err(HostError::errno("fchmod", &shown, e)),
                     None,
                     errno_text(e),
+                );
+            }
+            if !inner.state.sandbox_gate.is_open() {
+                return (
+                    Err(gate_refusal("fchmod", &shown)),
+                    None,
+                    "refused".to_owned(),
                 );
             }
             let loc = inner.loc_of(ofd);

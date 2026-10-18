@@ -1,13 +1,24 @@
-//! Test helpers that read docs/reference.md, so tests can check the code
-//! against the doc's tables and examples (the doc is the contract; a test
-//! keeps the two equal). The flake's workspace-tests source includes the
-//! doc for this.
+//! Test helpers that read docs/reference.md (and docs/safety.md), so tests
+//! can check the code against the docs' tables and examples (the doc is
+//! the contract; a test keeps the two equal). The flake's workspace-tests
+//! source includes both docs for this.
 
 const REFERENCE_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference.md");
 
 pub(crate) fn reference_md() -> String {
-    std::fs::read_to_string(REFERENCE_MD).unwrap_or_else(|e| {
-        panic!("{REFERENCE_MD}: {e} (the flake's workspace-tests source must include it)")
+    read(REFERENCE_MD)
+}
+
+const SAFETY_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/safety.md");
+
+/// docs/safety.md (the host lock's tmpfiles lines).
+pub(crate) fn safety_md() -> String {
+    read(SAFETY_MD)
+}
+
+fn read(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!("{path}: {e} (the flake's workspace-tests source must include it)")
     })
 }
 

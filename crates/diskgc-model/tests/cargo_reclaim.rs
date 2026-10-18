@@ -22,7 +22,7 @@ use diskgc_core::engine::{
 };
 use diskgc_core::host::{
     Base, BoundSocket, Cause, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode,
-    MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
+    Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
     ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
 use diskgc_core::inuse::{Checker, Options, REUSE_LIMIT};
@@ -890,6 +890,12 @@ impl Host for Gated {
     fn own_pid(&self) -> Pid {
         self.0.own_pid()
     }
+    fn effective_uid(&self) -> u32 {
+        self.0.effective_uid()
+    }
+    fn inherit_lock(&self, lock: &Locked<ModelFd>) -> Result<(), HostError> {
+        self.0.inherit_lock(lock)
+    }
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
         self.0.proc_status(pid)
     }
@@ -899,6 +905,11 @@ impl Host for Gated {
 }
 
 impl Delete for Gated {
+    /// Open: this host models a gate that refuses only at the deleting
+    /// call itself, which the protocol must still treat as a run error.
+    fn may_delete(&self) -> Result<(), HostError> {
+        Ok(())
+    }
     fn unlinkat(&self, _: &ModelFd, name: &std::ffi::OsStr, _: Unlink) -> Result<(), HostError> {
         Err(HostError::sandbox_gate(
             "unlinkat",

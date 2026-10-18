@@ -168,6 +168,21 @@ reclaim(min, goal, filesystem, deadline):
   `stale`: the unit was gone or replaced at re-check. `changed`: something
   moved under a check (a Cargo lock or build appeared after the locks were
   taken, or an entry's identity changed during deletion).
+- Until the index exists (task-28 to task-31), `ensure` runs one
+  `--select` tier this way without one: after taking the lock it discovers
+  the tier's candidates and tallies each (the eligibility walk without the
+  idle and in-use checks, read-only) for the tier's order, within
+  `--tally-budget`; candidates the budget left untallied follow the
+  tallied ones in the order discovery found them. It then acts on each in
+  that order, every check made again under the candidate's own locks (so
+  a target that is not idle is locked and walked before it is skipped).
+  A candidate the tally refuses is skipped for the run and never locked:
+  re-judging it under its locks would take Cargo's locks on kept and
+  other users' targets and walk oversized ones again. A refusal that
+  stops being true after the tally (a `.diskgc-keep` removed) is a missed
+  reclaim until the next run, never an unsafe delete. The tally runs
+  under the host lock rather than before it (The tally: Synchronous
+  mode), so other reclaims wait that much longer.
 
 ### Measuring space
 
@@ -284,16 +299,27 @@ is accepted until measured otherwise.
   first bytes of a small marker file (a `CACHEDIR.TAG`'s signature) through
   the descriptor of the object checked, never by name again; anything but
   a regular file is refused on that descriptor's type before it is
-  opened for reading (a FIFO or a device is never opened).
+  opened for reading (a FIFO or a device is never opened). diskgc's own
+  configuration file is read by the binary, outside the port
+  (`LinuxHost::read_config_file`, the same type check first, at most
+  1 MiB): it may be a symlink, and only its content is validated; parsing
+  it is pure.
 - **Locking a file checked by identity** (Cargo's lock files):
   `reopen_regular` opens again, read-only and non-blocking, the regular
   file an `O_PATH` fd refers to, through that fd (never by name), refusing
   anything else by the fd's own type before opening it, since `flock`
   refuses an `O_PATH` fd ([safety.md](safety.md#reclaim-protocol)).
 - **Deleting operations are a trait of their own** (`Delete: Host`:
-  `unlinkat`, `fchmod` for `make_writable`, later the deleting `run`), so
-  code given only a `Host` cannot delete or change permissions, and the
-  pre-release sandbox gate guards exactly those methods.
+  `unlinkat`, `fchmod` for `make_writable`, later the deleting `run`, and
+  `may_delete`, the gate's decision asked before a reclaim starts), so
+  code given only a `Host` (the dry run, survey, tally) cannot delete or
+  change permissions, and the pre-release sandbox gate guards exactly
+  those methods.
+- **Who diskgc is, and what its children keep:** `effective_uid` (the
+  owner every entry must have, and what `{uid}` stands for) and
+  `inherit_lock`, which makes a held lock inheritable by children by
+  clearing close-on-exec on that one fd (the host lock,
+  [safety.md](safety.md#host-lock)).
 - **Listings are bounded**: `read_dir` takes a limit and stops past it
   (the deletion engine passes what is left of a candidate's entry budget),
   so a huge directory, or one filled faster than it is read, cannot exhaust

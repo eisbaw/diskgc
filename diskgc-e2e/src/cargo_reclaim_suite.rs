@@ -81,7 +81,7 @@ fn is_lock_name(name: &OsStr) -> bool {
 
 /// The profile directories of the target at `target`, by the harness's own
 /// reading: `<t>/<p>/` and `<t>/<x>/<p>/` holding a `.cargo-*lock*` file.
-fn profile_dirs(target: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn profile_dirs(target: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     let subdirs = |dir: &Path| -> Result<Vec<PathBuf>, String> {
         let mut dirs = Vec::new();
@@ -110,7 +110,7 @@ fn profile_dirs(target: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Every entry of the profile directory `dir` but its lock files: what the
 /// protocol may delete (each with everything below it).
-fn deletable(dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn deletable(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {dir:?}: {e}"))? {
         let entry = entry.map_err(|e| format!("read_dir {dir:?}: {e}"))?;
@@ -123,7 +123,7 @@ fn deletable(dir: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// `path` and every object below it (symlinks not followed).
-fn objects_below(path: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn objects_below(path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     let mut todo = vec![path.to_owned()];
     while let Some(at) = todo.pop() {
@@ -165,7 +165,7 @@ fn fingerprints(profile: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// The lock files of the target's profile directories, by inode.
-fn lock_inodes(target: &Path) -> Result<BTreeMap<PathBuf, u64>, String> {
+pub(crate) fn lock_inodes(target: &Path) -> Result<BTreeMap<PathBuf, u64>, String> {
     let mut found = BTreeMap::new();
     for profile in profile_dirs(target)? {
         for lock in cargo_under_test::lock_files(&profile)? {
@@ -180,7 +180,7 @@ fn lock_inodes(target: &Path) -> Result<BTreeMap<PathBuf, u64>, String> {
 
 /// The oracle's fixture of a reclaim of `target`: every entry of every
 /// profile directory but the lock files may go.
-fn reclaimable(target: &Path) -> Result<Fixture, String> {
+pub(crate) fn reclaimable(target: &Path) -> Result<Fixture, String> {
     let mut fixture = Fixture::new();
     for profile in profile_dirs(target)? {
         for entry in deletable(&profile)? {

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 22:45'
+updated_date: '2026-10-18 05:48'
 labels:
   - wave-2
   - irreversible
@@ -38,6 +38,8 @@ Why: what gets selected must equal the documented set semantics exactly. Write t
 From task-8 (profile model): Finds::Paths { patterns, entry_type: dir|file|any } are only checked structurally at load (relative, no empty, '.', '..' or '**'-containing segment, {uid} the only placeholder); the glob semantics within a segment are yours to define and document. A source may have its own where (Source.where_), which narrows it in every term (reference.md, Profiles fields); !profile: ignores it. Library::idle_for(&term) gives a term's combined idle requirement; has/has_not and !filter: evaluation are not implemented. Examples (Source.examples) are stored but not matched.
 
 From task-8's review (S1): IdleFor::verdict(last_use, now) is three-way (Idleness::Idle / NotIdle / Unknown(Unknown::Unanswered | InFuture)), and Idleness::passes(negated) is false for Unknown under both filter: and !filter:, so an unknown age never selects a candidate; the skip reason is Unknown::skip_reason() (unsupported_fs, future_time; future_time is new in docs/reference.md's skip reasons). has / has_not need the same three-way result: a directory that cannot be listed or a name the kernel will not answer about is unknown, and must not pass !filter:has-... either. Also: a source's own where now allows only has / has_not (user decision U1), and protect, like !profile:, ignores where (docs/reference.md). find.type is defined: dir = directory, file = regular file, any = directory or regular file; symlinks, sockets, FIFOs and devices are never candidates. Root normalisation and identity dedupe of overlapping roots are filed on task-61 (39).
+
+From task-10: executor::Tier::select refuses unions, !filter: and !profile: (exit 2 naming task-16/20) because the executor runs one positive cargo-target term. When complements arrive: cargo_target::eligibility/reclaim take only Option<IdleFor> (the term's positive requirement); extend that parameter to the term's idle rule (Idleness::passes(negated) per !filter:), and decide which skip reason a failed complement reports (reference.md's enum has none for 'too idle'; not_idle would mislead). A union of cargo-target terms with only positive idle filters reduces exactly to the shortest requirement; dedupe targets by identity across terms (task-7 H9).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

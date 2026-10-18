@@ -32,7 +32,8 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, host_suite, inuse_suite,
+    cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, ensure_suite, host_suite,
+    inuse_suite,
 };
 
 /// Which gate runs a test.
@@ -325,6 +326,42 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: engine_suite::engine_deletes_a_200k_entry_directory,
+    },
+    Test {
+        name: "ensure_above_min_free_exits_0_without_the_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_above_min_free_exits_0_without_the_host_lock,
+    },
+    Test {
+        name: "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines,
+    },
+    Test {
+        name: "ensure_as_root_without_allow_root_exits_2",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_as_root_without_allow_root_exits_2,
+    },
+    Test {
+        name: "ensure_refuses_a_host_lock_that_is_no_regular_file",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_refuses_a_host_lock_that_is_no_regular_file,
+    },
+    Test {
+        name: "ensure_waits_for_a_held_host_lock_until_the_deadline",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_waits_for_a_held_host_lock_until_the_deadline,
+    },
+    Test {
+        name: "ensure_host_lock_is_inherited_by_children_and_released_only_by_close",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_host_lock_is_inherited_by_children_and_released_only_by_close,
     },
     Test {
         name: "inuse_a_held_file_cwd_mapping_or_environment_keeps_the_candidate",
@@ -622,6 +659,12 @@ impl Ctx {
     /// Runs `program args...` as `tester` under strace, from `/`.
     pub fn run_as_tester(&self, program: &Path, args: &[&str]) -> Result<Run, String> {
         under_test::run_as_tester(&self.ledger, &self.records, Path::new("/"), program, args)
+    }
+
+    /// Runs `program args...` as container root under strace, from `/`
+    /// (the root refusal: docs/safety.md, Privileges).
+    pub fn run_as_root(&self, program: &Path, args: &[&str]) -> Result<Run, String> {
+        under_test::run_as_root(&self.ledger, &self.records, Path::new("/"), program, args)
     }
 
     /// The test driver under test (crate::driver).

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-17 21:24'
+updated_date: '2026-10-18 05:48'
 labels:
   - wave-2
   - config
@@ -55,6 +55,8 @@ From task-7 (selection grammar): each tier's select (and --select) goes through 
 From the task-7 review (H7): config/--select errors in --json need stable error codes (one per Syntax and CheckError variant); document in docs/reference.md that machines match codes, not text. Also: compile errors now quote the expression as written (CheckErrors.expr), so prefix with the tier name only.
 
 From task-8 (profile model, diskgc-core profile): embed the config's profiles as Vec<profile::ProfileSpec> (implements Deserialize; unknown and repeated keys rejected) and build the catalog with Library::with_user_profiles(&specs) -> Result<Library, LoadErrors>; each LoadError's 'at' is 'profiles[i] (`name`)'. Library implements select::Catalog: compile(tier.select, &library). Tier roots: library.bind_roots(&checked, tier.roots.as_deref()) -> Err(RootsError::Missing|Unused|Empty|Path) is the AC #1 load error (prefix the tier name). protect entries: library.roots_of(name, roots) (bare name of a required profile -> Missing; {profile, roots} of a fixed one -> Unused); the 'only kinds fs and cargo-target can be protected' rule is yours. units::parse_duration exists for tier timeout (sizes do not). reference.md now documents the profile fields (Profiles table) and that command actions have no timeout of their own: the tier's timeout bounds them.
+
+From task-10: diskgc-core/src/config.rs has the lookup (pure, tested) and a minimal version: 1 parse (deny_unknown_fields; profiles loaded through Library::with_user_profiles; non-empty protect and any owners refused; groups accepted unread as IgnoredAny, NOT validated). Extend ConfigSpec rather than adding a second loader; remove the protect/owners refusals as they get implemented (task-16, task-21). The binary reads the file through LinuxHost::read_config_file (follows symlinks, regular files only, MAX_CONFIG_BYTES = 1 MiB). check is not implemented yet (exit 2).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

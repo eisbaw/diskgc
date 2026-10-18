@@ -109,6 +109,7 @@ dependencies = [
  "diskgc-model",
  "libc",
  "rustix",
+ "serde_json",
 ]
 
 [[package]]

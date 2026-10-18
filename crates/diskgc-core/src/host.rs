@@ -921,6 +921,17 @@ pub trait Host {
     /// diskgc's own process id (`getpid`), as [`Host::pids`] lists it.
     fn own_pid(&self) -> Pid;
 
+    /// diskgc's effective user id (`geteuid`): whose files it may delete
+    /// (docs/safety.md, Privileges), and what `{uid}` stands for in paths.
+    fn effective_uid(&self) -> u32;
+
+    /// Lets every child diskgc starts from now on inherit the held lock
+    /// `lock` (clears close-on-exec on that one fd, `fcntl(F_SETFD)`), so
+    /// the lock stays held until the last holder of a copy closes it (the
+    /// host lock, docs/safety.md, Host lock). Nothing is locked or unlocked:
+    /// the lock is still released only by closing every copy.
+    fn inherit_lock(&self, lock: &Locked<Self::Fd>) -> Result<(), HostError>;
+
     /// What the in-use check needs to judge a process whose other entries
     /// cannot be read (docs/safety.md, In use), all readable for every
     /// process: one read of `/proc/<pid>/status` (`Name:`, `Uid:`, `Gid:`,
@@ -978,6 +989,16 @@ pub fn is_single_name(name: &OsStr) -> bool {
 /// packages, from 0.1 onwards, are built without the gate (docs/safety.md,
 /// Pre-release sandbox gate).
 pub trait Delete: Host {
+    /// Whether the deleting operations below would act at all: `LinuxHost`
+    /// answers with the pre-release sandbox gate's decision (a
+    /// [`Cause::SandboxGate`] error outside a diskgc test container in
+    /// development builds), without deleting or changing anything. A
+    /// reclaim asks it first, so a closed gate stops it before it measures,
+    /// locks or plans (docs/safety.md, Pre-release sandbox gate); it is on
+    /// `Delete`, so a dry run, which is given only a [`Host`], cannot even
+    /// ask.
+    fn may_delete(&self) -> Result<(), HostError>;
+
     /// `unlinkat(dir, name, flags)`: removes the entry `name` of the open
     /// directory `dir`. `name` is a single component ([`is_single_name`]:
     /// no `/`, not `.` or `..`). Linux has no unlink-by-inode, so callers check the entry's

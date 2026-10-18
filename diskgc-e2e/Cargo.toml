@@ -50,6 +50,9 @@ rustix = { version = "1", features = ["fs", "mount", "process", "thread"] }
 # kernel report a 2.6 release to the code under test (an old kernel,
 # simulated by the kernel itself). Bindings only; std links libc anyway.
 libc = "0.2"
+# Reads `diskgc ensure --json` back: the harness checks the report's fields
+# and values by parsing, never by text matching.
+serde_json = "1"
 
 [dev-dependencies]
 # Unit tests run the driver's operations and the controlled wrapper on the

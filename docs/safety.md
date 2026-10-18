@@ -617,7 +617,11 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   `deps/` in it (1.90, 1.99.1, a build directory's half); its fingerprints
   are `.fingerprint/`. *Per-unit*: neither, and a directory `build/` (the
   nightly's new build-dir layout); its fingerprints are every
-  `build/<package>/<hash>/fingerprint`.
+  `build/<package>/<hash>/fingerprint`. A profile directory can mix both
+  (a target that 1.99.1 and the nightly both built has `.fingerprint/`,
+  `deps/` and per-unit units in `build/`): it counts as classic, and its
+  fingerprints are both `.fingerprint/` and every
+  `build/<package>/<hash>/fingerprint` (Reclaim protocol, step 3).
   Only real directories count, judged by `statx` without following: a
   regular file or a symlink with one of these names is no Cargo layout. A
   profile directory that holds anything but none of the three is an
@@ -718,8 +722,9 @@ The step that deletes (`cargo_target::reclaim` in the core).
    (`.cargo-build-lock`, `.cargo-lock`, `.cargo-artifact-lock`; Lock
    files) only to spare a Cargo that started first a brief wait, within
    one profile directory: diskgc's first attempt there then fails before
-   it holds anything that Cargo waits for. Each profile directory is opened once, below the target, and must
-   be the one found; it serves the walks and the deletion below. Each lock
+   it holds anything that Cargo waits for. Each profile directory is
+   opened once, below the target, and must be the one found; it serves
+   the walks and the deletion below. Each lock
    file is opened `O_PATH` below it and must be the one found (identity,
    type included: `changed`); it is then reopened read-only through that
    fd (`Host::reopen_regular`), never by name, so nothing but that regular
@@ -764,18 +769,20 @@ The step that deletes (`cargo_target::reclaim` in the core).
    holds the locks (a Cargo of another lock set starting, Lock files) stops
    the deletion (`changed`). That listing is a detector and a backstop,
    not the protection. The protection is an invariant: every lock set
-   diskgc reclaims (whole sets, Lock sets) holds `.cargo-lock`, and every
-   measured Cargo takes `.cargo-lock` before it writes into the profile
-   directory (Lock files: lock order). So a Cargo that starts during the
+   diskgc reclaims (whole sets, Lock sets) holds `.cargo-lock`, and in the
+   measured lock order every Cargo takes `.cargo-lock` (Lock files: lock
+   order); that it writes nothing into the profile directory before then
+   is not verified yet (task-11). So a Cargo that starts during the
    deletion and creates a lock file diskgc does not hold (a 1.99.1 build
    on a target 1.90 made creates `.cargo-build-lock`) then waits on the
-   `.cargo-lock` diskgc holds and writes nothing. A Cargo that wrote into
-   the profile before taking `.cargo-lock` would break this; the Cargo
-   race tests (task-11) must show it holds on every pinned toolchain: a
-   reclaim of a target 1.90 made paused at an `unlinkat`, a 1.99.1 build
-   started then, and `/proc/locks` showing that it created
-   `.cargo-build-lock` and waits on `.cargo-lock` without writing. diskgc does not create missing lock files itself: that
-   would be a write into the target, and the invariant does not need it.
+   `.cargo-lock` diskgc holds and, if that holds, writes nothing. A Cargo
+   that wrote into the profile before taking `.cargo-lock` would break
+   this; the Cargo race tests (task-11) must show it holds on every pinned
+   toolchain: a reclaim of a target 1.90 made paused at an `unlinkat`, a
+   1.99.1 build started then, and `/proc/locks` showing that it created
+   `.cargo-build-lock` and waits on `.cargo-lock` without writing. diskgc
+   does not create missing lock files itself: that would be a write into
+   the target, and the invariant does not need it.
    A part that stops part-way (`changed`, an
    error, the deadline) stops the target; what was deleted stays deleted,
    fingerprints first. Lock files are never in a record (every walk
@@ -992,7 +999,11 @@ backported, and an unparseable release is refused too.
   f /run/diskgc/lock 0644 root root -
   ```
 
-  Missing → exit 2, printing those two lines.
+  Missing → exit 2, printing those two lines. The file is reached like any
+  configured path (no symlink, no mount crossing: Path traversal), opened
+  `O_PATH`, checked to be a regular file and reopened read-only through
+  that fd, so a FIFO or a device at the path is never opened; anything but
+  a regular file there is exit 2 too.
 - Any local user who can read the file can hold the lock and stall
   reclaims; `ensure` then exits 75 at its deadline.
 - Every child inherits the host lock's file descriptor (close-on-exec
@@ -1036,8 +1047,12 @@ How it holds:
   `make_writable`: changing permissions of user data is gated like
   deleting it) ask the gate before anything else; a refusal is a host error of its own kind
   (`Cause::SandboxGate`: no errno, the detail names the marker that is
-  missing or wrong) and nothing is attempted. `ModelHost` has no gate: it
-  deletes nothing real and is test-only.
+  missing or wrong) and nothing is attempted. `ModelHost` models it
+  (`sandbox_gate: open | closed | refuses_deletes`, open by default; it
+  deletes nothing real and is test-only). A refusal during a reclaim, after
+  `may_delete` answered open, is an error of the run that stops it (exit 3
+  unless the goal was met): only the model can produce it, since
+  `LinuxHost` decides once and keeps the answer.
 - **Structure:** each gated syscall wrapper in `diskgc-linux` (one for
   `unlinkat`, one for `fchmod`) takes a permit that only the gate can make. A source-scanning test
   (`diskgc-linux/src/source_scan.rs`) reads every production crate (every
@@ -1074,8 +1089,13 @@ How it holds:
   Child processes are of two kinds ([architecture.md](architecture.md#the-host-port)):
   read-only queries, ungated, and deleting runs (prune, GC, every command
   action), gated; each has one allowlisted wrapper.
-- **Once per process:** the gate decides at the first deleting call and
-  keeps the answer, a refusal included; the markers do not change while
+- **Fail fast:** a reclaiming `ensure` asks for the gate's decision
+  (`Delete::may_delete`: the same cached decision, no permit made) before
+  it measures, locks or plans, so outside a test container a development
+  build exits 2 naming the gate, even when the goal is already met.
+  `--dry-run` is given only a `Host`, so it neither asks nor could delete.
+- **Once per process:** the gate decides at the first deleting call (or
+  question) and keeps the answer, a refusal included; the markers do not change while
   diskgc runs. This assumes diskgc never changes its mount namespace or
   root (`setns`, `unshare`, `chroot`, `pivot_root`); the scan forbids those
   calls, so adding one fails it.
@@ -1098,8 +1118,10 @@ How it holds:
     syscalls reached in other numeric ways (`from_raw`, a transmute);
     deliberate obfuscation (a macro that builds a name, an `unsafe` cast);
     code shapes the text scan does not model.
-  - The shipped binary contains no deleting code yet, so no test inspects
-    the binary itself; the configuration is what is checked.
+  - No test inspects the shipped binary for the gate; the configuration
+    is checked, and a test runs the built binary's reclaiming `ensure`
+    outside a container on a fixture of its own and expects the refusal
+    (`a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate`).
 
 ## Privileges
 

@@ -264,6 +264,8 @@ pub fn host_model(
                 processes: procs.into_iter().take(live).collect(),
                 own_pid: None,
                 own_uid_map: None,
+                own_uid: None,
+                sandbox_gate: diskgc_model::spec::GateSpec::Open,
                 events: Vec::new(),
                 expect: None,
             }

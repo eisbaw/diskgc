@@ -64,15 +64,18 @@
         root = ./.;
         fileset = workspaceFiles;
       };
-      # The workspace tests also read docs/reference.md: the selection
-      # grammar's examples and messages are tested from the doc's tables
-      # (diskgc-core, select::tests), so the doc and the code cannot drift.
-      # Only this check sees it; the package and clippy do not.
+      # The workspace tests also read docs/reference.md and docs/safety.md:
+      # the selection grammar's examples and messages, the JSON report's
+      # fields and enums and the exit-code table are tested from
+      # reference.md, the host lock's tmpfiles lines from safety.md
+      # (diskgc-core's tests), so the docs and the code cannot drift. Only
+      # this check sees them; the package and clippy do not.
       workspaceTestSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           workspaceFiles
           ./docs/reference.md
+          ./docs/safety.md
         ];
       };
       # diskgc-e2e path-depends on workspace crates, which inherit fields from

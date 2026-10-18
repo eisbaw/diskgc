@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use common::host;
 use diskgc_core::host::{
-    Base, BoundSocket, DirListing, Environ, Host, HostError, LinkTarget, LockMode, MapEntry,
-    MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space,
-    Stat, Timestamp, TryLock, WaitLock,
+    Base, BoundSocket, DirListing, Environ, Host, HostError, LinkTarget, LockMode, Locked,
+    MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
+    ProcView, Space, Stat, Timestamp, TryLock, WaitLock,
 };
 use diskgc_core::inuse::{self, Options};
 use diskgc_model::{ModelFd, ModelHost};
@@ -94,6 +94,12 @@ impl Host for Short {
     }
     fn own_pid(&self) -> Pid {
         self.0.own_pid()
+    }
+    fn effective_uid(&self) -> u32 {
+        self.0.effective_uid()
+    }
+    fn inherit_lock(&self, lock: &Locked<ModelFd>) -> Result<(), HostError> {
+        self.0.inherit_lock(lock)
     }
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
         self.0.proc_status(pid)

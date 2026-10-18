@@ -54,7 +54,16 @@
       }
     },
     "own_pid": {
-      "description": "diskgc's own pid (`own_pid`; default 65000). It is listed among the\npids; its fds are the ones the code under test holds open, its other\n`/proc` entries read as `Failed` (not modelled), its uid is 1000.",
+      "description": "diskgc's own pid (`own_pid`; default 65000). It is listed among the\npids; its fds are the ones the code under test holds open, its other\n`/proc` entries read as `Failed` (not modelled), its uid is\n`own_uid`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "own_uid": {
+      "description": "diskgc's own user id (`geteuid`, and the uid its `status` shows);\ndefault 1000. `0` models diskgc run as root.",
       "type": [
         "integer",
         "null"
@@ -75,6 +84,10 @@
       "items": {
         "$ref": "#/$defs/ProcessSpec"
       }
+    },
+    "sandbox_gate": {
+      "description": "The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):\n`open` (the default; the model deletes nothing real), `closed`\n(outside a test container: `may_delete`, `unlinkat` and `fchmod`\nare refused with `Cause::SandboxGate`, nothing is attempted), or\n`refuses_deletes` (`may_delete` answers open but the deleting calls\nare refused: what a caller that asked first must still survive).",
+      "$ref": "#/$defs/GateSpec"
     },
     "tree": {
       "description": "Files and directories, keyed by absolute path. Missing parent\ndirectories are created with default attributes; a key below another\nkey adds entries to that directory.",
@@ -598,6 +611,15 @@
         "child"
       ]
     },
+    "GateSpec": {
+      "description": "The modelled sandbox gate (`sandbox_gate`).",
+      "type": "string",
+      "enum": [
+        "open",
+        "closed",
+        "refuses_deletes"
+      ]
+    },
     "LockModeSpec": {
       "description": "`shared` or `exclusive`.",
       "type": "string",
@@ -736,8 +758,11 @@
         "proc_maps",
         "proc_environ",
         "own_pid",
+        "effective_uid",
+        "inherit_lock",
         "proc_status",
         "bound_unix_sockets",
+        "may_delete",
         "unlinkat",
         "fchmod"
       ]

@@ -626,8 +626,10 @@ fn marker_rank(name: &OsStr) -> u8 {
     }
 }
 
-/// `<package>/<hash>/fingerprint` of every unit in the record of a
-/// per-unit layout's `build/`, in record (name) order.
+/// `<package>/<hash>/fingerprint` of every unit in the walk record of a
+/// profile directory's `build/`, whatever its layout (a classic profile
+/// that the nightly also built holds per-unit units there too), in record
+/// (name) order.
 fn unit_fingerprints(build: &WalkRecord) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for package in build.listing_at(Path::new("")).unwrap_or_default() {

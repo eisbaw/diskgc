@@ -20,13 +20,16 @@ diskgc profiles list | show NAME | test   [--config FILE]
 ```
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
-(the config's user profiles and `protect` list still apply). With
-`--select`, a config file is optional: if none is found, `EXPR` is evaluated
-against the built-in profiles alone. Without `--select`, a missing config is
-exit 2 as described under Configuration file. `--roots DIR`
-(repeatable, one directory each) supplies roots for `roots: required`
-profiles in that selection, and is only valid together with `--select`.
-Example for a CI runner:
+(the config's user profiles and `protect` list still apply); reports name
+that tier and its group `--select`. With `--select`, a config file is
+optional: if none is found, `EXPR` is evaluated against the built-in
+profiles alone. Without `--select`, a missing config is exit 2 as described
+under Configuration file. `--roots DIR` (repeatable, one directory each)
+supplies roots for `roots: required` profiles in that selection, and is
+only valid together with `--select`. A root that cannot be reached safely
+(`unsafe_path`: a symlink or a mount crossing on the way) is a
+misconfiguration, reported once as an error that excludes the tier
+([safety.md](safety.md#validation)). Example for a CI runner:
 
 ```
 diskgc ensure --min-free 50G \
@@ -40,10 +43,13 @@ directory whose filesystem must have the space.
 
 ### `ensure`
 
-- `PATH` is required: the directory the next job will write to. Its
-  filesystem is the one diskgc measures and frees. There is no default to
-  the current directory, so a hook launched from `/tmp` cannot silently free
-  the wrong disk. The resolved mount point is printed in every report.
+- `PATH` is required: the directory the next job will write to, as an
+  absolute path. Its filesystem is the one diskgc measures and frees. There
+  is no default to the current directory, and a relative `PATH` is a usage
+  error, so a hook launched from `/tmp` cannot silently free the wrong
+  disk. It is reached like every configured path (no symlink on the way,
+  [safety.md](safety.md#path-traversal)). The resolved mount point is
+  printed in every report.
 - `--min-free` (required): if available space is at least this, do nothing
   and exit 0, without taking the lock.
 - `--target-free` (default: same as `--min-free`): once triggered, keep
@@ -59,15 +65,28 @@ directory whose filesystem must have the space.
   cannot be interrupted and can overrun it. See [safety.md](safety.md#deadlines).
 - `--tally-budget` (default: the smaller of 30 s and a quarter of
   `--timeout`; `0` = no limit) and `--no-index`: see
-  [architecture.md](architecture.md#the-tally).
+  [architecture.md](architecture.md#the-tally). Without an index (before
+  task-29), `--no-index` changes nothing, and `--tally-budget` bounds the
+  tally that orders the `--select` tier under the host lock: candidates it
+  leaves untallied are taken after the tallied ones, in the order
+  discovery found them, each judged in full under its own locks. A
+  candidate the tally refuses (kept, another user's, too many entries) is
+  skipped with that reason for the run and never locked; a refusal that
+  stops being true later (a `.diskgc-keep` removed after the tally) is a
+  missed reclaim until the next run, never an unsafe delete. The dry run
+  judges every candidate fully and is not bounded by it.
 - `--dry-run`: print, in order, every candidate diskgc would consider,
   whether it is eligible or the skip reason, its estimated size and the
-  operation it would run (JSON: the `plan` array); delete nothing. Takes no
-  lock and always prints, even if the goal is already met. With a `random`
-  group, the order is for the printed seed only. Sizes are estimates; Docker
-  and Nix tiers can only say what they would run. Exits 0 (2 on usage
-  errors, 124 at the deadline, 130/143 when interrupted); JSON `status` is
-  `dry_run`.
+  operation it would run (JSON: the `plan` array); delete nothing. The
+  eligible candidates come first, in the order a reclaim would take them
+  when its tally is not cut short (`--tally-budget 0`), then the skipped
+  ones; a reclaim stops at the goal, the plan does not.
+  Takes no lock (so it cannot tell `locked`: whether a target's locks are
+  free is only tried by the reclaim) and always prints, even if the goal
+  is already met. With a `random` group, the order is for the printed seed
+  only. Sizes are estimates; Docker and Nix tiers can only say what they
+  would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
+  interrupted); JSON `status` is `dry_run`.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
   code including usage errors.
 
@@ -147,11 +166,23 @@ The first matching row wins:
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
 | 124 | Deadline reached during reclaim, below `--min-free`. |
-| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`. Something may have been deleted; the report says what. |
+| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`, or the final sample could not be taken. Something may have been deleted; the report says what. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
 The mapping is explicit in code and covered by tests. A Rust panic (101) is
-a bug.
+a bug. In a reclaiming run, available space decides 0, 75, 124, 3 and 1 by
+a fresh sample: a sample that could not be taken is a run error (3); 75
+and 124 require a fresh sample below `--min-free`. The first sample, of
+`PATH`'s filesystem before anything is done, is the exception: when it
+cannot be taken nothing was measured or done, and it is exit 2, like an
+unusable `PATH`. A dry run keeps its exits (0, 2, 124, 130/143) and
+reports a final sample it could not take as `avail_after_bytes: null`
+with an `errors` entry. The JSON `status` of each: 2 `usage_error` (also
+for a refusal to run as root, a missing host lock file and, in
+development builds, the pre-release sandbox gate,
+[safety.md](safety.md#pre-release-sandbox-gate)), 130 / 143
+`interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124 `deadline`,
+3 `error`, 1 `exhausted`.
 
 ## Output
 
@@ -185,14 +216,25 @@ JSON result (field names are part of the contract):
 - `index` says where the order came from (the live index of a running
   `watch`, a snapshot, or a synchronous tally), its age, how many candidates
   were not yet tallied, and whether the index covers everything it should
-  (`partial` when it hit its memory budget).
+  (`partial` when it hit its memory budget). Builds without an index
+  (before task-29) emit `null`.
+- Paths are JSON strings; bytes of a path that are not UTF-8 are shown as
+  U+FFFD (the text is for reading; diskgc itself compares paths byte for
+  byte).
 - `plan` is filled only by `--dry-run`; `reason` uses the skip-reason enum; a
   bucket is one plan entry with a member `count`; `estimated_bytes` is
-  `null` for Docker and Nix without a reported size and for candidates not
-  yet tallied.
+  `null` for Docker and Nix without a reported size, for candidates not
+  yet tallied, and for every skipped candidate (its checks stopped before
+  its walk was complete, so a size would be a partial count).
 - `avail_delta_bytes` is signed: the observed net change in available space
   around an action, never "bytes freed by this action" (see
-  [architecture.md](architecture.md#measuring-space)).
+  [architecture.md](architecture.md#measuring-space)); `null` when a
+  sample around the action failed. Anything diskgc did not measure is
+  `null`, never 0: `avail_after_bytes` when the final sample failed (and
+  then `target_met` too, and the run never counts as met). A candidate
+  deleted part-way (its deletion stopped, `changed`, `in_use` or an error)
+  is an action too, and also in `skipped` or `errors` with why it
+  stopped.
 - `count` is 1 for a single candidate. Selections that match very many
   candidates aggregate: one `skipped` entry per profile and reason with
   `count` and up to 20 `examples` (`candidate` is then empty), and after
@@ -200,11 +242,16 @@ JSON result (field names are part of the contract):
 - `held_by_deleted_files` lists open-but-deleted files on the requested
   filesystem (visible processes only); always present, possibly empty. Their
   space returns only when the process closes them; diskgc never kills
-  processes.
+  processes. It comes from the run's last process scan (one is made at the
+  end if the run made none); a run that reclaimed nothing because the goal
+  was met, or that ended before the reclaim (a usage error, a lock
+  timeout), scans nothing and leaves it empty.
 - `overruns` lists operations that blocked past the deadline (see
   [safety.md](safety.md#deadlines)); always present, usually empty.
 - On a usage error, fields that could not be determined (`mount`, `path`,
-  sizes) are `null`; `errors` says why.
+  sizes, `target_met`) are `null`; `errors` says why. In `errors`, `tier`,
+  `profile` and `candidate` are empty where they do not apply (a usage
+  error, an error of the whole run).
 
 ## Signals
 
@@ -215,10 +262,14 @@ specified in [safety.md](safety.md#host-lock).
 
 ## Sizes and durations
 
-- `K M G T` and `KiB MiB GiB TiB` are powers of 1024; `KB MB GB TB` are
-  powers of 1000. A bare number is an error.
-- `N%` is N percent of the filesystem size (`f_blocks × f_frsize`).
+- Sizes are an integer and a unit, case as written: `K M G T` and `KiB MiB
+  GiB TiB` are powers of 1024; `KB MB GB TB` are powers of 1000. A bare
+  number is an error, and so is any other unit (`g`, `Gb`, `B`, `1.5G`).
+- `N%` is N percent of the filesystem size (`f_blocks × f_frsize`), rounded
+  down; more than 100% is a usage error.
 - Durations: integer plus `s m h d w`. No months; `m` is always minutes.
+  A bare number is an error, except a bare `0` where a flag defines `0`
+  (`--timeout 0`, `--tally-budget 0`; `0s` means the same).
 - `--target-free` below `--min-free`, or either above the filesystem size,
   is a usage error (exit 2).
 
@@ -226,9 +277,14 @@ specified in [safety.md](safety.md#host-lock).
 
 Lookup: if `--config` or `$DISKGC_CONFIG` is given, that file and only that
 file is used; missing or unreadable is exit 2, never a fallback, so a typo
-cannot activate some other policy. Only when neither is given:
-`$XDG_CONFIG_HOME/diskgc/config.yaml` (default `~/.config/...`), then
-`/etc/diskgc/config.yaml`. None found: exit 2, listing the paths tried. The
+cannot activate some other policy. An empty or relative value is exit 2
+too (`DISKGC_CONFIG=$UNSET` must not fall back). Only when neither is given:
+`$XDG_CONFIG_HOME/diskgc/config.yaml` (default `~/.config/...`; a relative
+`$XDG_CONFIG_HOME` is ignored, as the XDG Base Directory specification
+says), then `/etc/diskgc/config.yaml`; a file that exists but cannot be
+read is exit 2, not a reason to try the next. None found: exit 2, listing
+the paths tried. The configuration file may be a symlink (packaged
+configurations often are); only its content is validated. The
 binary ships built-in *profiles* but **no built-in tiers**; an example config
 ships as `docs/example.yaml`, which packages install as the default.
 

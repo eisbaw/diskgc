@@ -16,6 +16,21 @@ use crate::inuse::{Checker, Scan};
 use crate::profile::{IdleFor, Idleness, Unknown};
 use crate::resolve::Resolved;
 
+/// What a target holds now, walked but not judged for idleness or use: a
+/// tally of one target ([`tally`]), the order key of a tier's `oldest`
+/// order before anything is locked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tally {
+    /// Its last build ([`last_build`]); `None` when the kernel did not
+    /// report a time.
+    pub last_build: Option<Timestamp>,
+    /// Entries the walks checked (as [`Eligible::entries`]).
+    pub entries: usize,
+    /// Their allocated bytes, each object once: an estimate of what
+    /// reclaiming frees.
+    pub bytes: u64,
+}
+
 /// A target that passed every check at the time of the check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eligible {
@@ -26,7 +41,8 @@ pub struct Eligible {
     /// everything below them; lock files and the directories themselves
     /// not counted).
     pub entries: usize,
-    /// Their allocated bytes: an estimate of what reclaiming frees.
+    /// Their allocated bytes, each object once (hard links counted once):
+    /// an estimate of what reclaiming frees.
     pub bytes: u64,
 }
 
@@ -382,6 +398,81 @@ pub fn eligibility<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Eligible> {
     let path = &target.path;
+    let walked = judged!(walk_target(host, target, rules, deadline));
+    let last = last_build(&walked.inspected, &walked.walks);
+    if let Err(skip) = judge_idle(host, path, last, idle_for) {
+        return Ok(Err(skip));
+    }
+    let scan = checker.current(host).map_err(|error| Stop::Failed {
+        path: path.clone(),
+        error,
+    })?;
+    if let Err(skip) = judge_in_use(
+        scan,
+        &walked.walks,
+        target,
+        &walked.inspected,
+        walked.project,
+    ) {
+        return Ok(Err(skip));
+    }
+    let (entries, bytes) = totals(&walked.walks);
+    Ok(Ok(Eligible {
+        last_build: last,
+        entries,
+        bytes,
+    }))
+}
+
+/// Tallies `target` now (found by [`super::discover`]), for the order of a
+/// tier: the first half of [`eligibility`] (reached again from its root,
+/// inspected again, the keep marker, ownership, [`judge_layout`],
+/// [`walk_profiles`] with `rules`), then its [`last_build`] and size. No
+/// idle requirement, no in-use check, no lock: read-only, and cheaper than
+/// [`eligibility`] by the process scan.
+///
+/// The contract with its caller (the executor's `oldest` order): a refusal
+/// here is final for the run. The target is skipped with this reason and
+/// never locked, because [`super::reclaim`] would take its Cargo locks
+/// before refusing it again (a kept target, another user's, one of too many
+/// entries walked once more under the locks). A refusal that stops being
+/// true afterwards (a `.diskgc-keep` removed after the tally) is therefore
+/// a missed reclaim until the next run, never an unsafe delete: an
+/// accepted target is still checked in full by [`super::reclaim`] under
+/// its locks.
+pub fn tally<H: Host>(
+    host: &H,
+    target: &Target,
+    rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+) -> Judged<Tally> {
+    let walked = judged!(walk_target(host, target, rules, deadline));
+    let (entries, bytes) = totals(&walked.walks);
+    Ok(Ok(Tally {
+        last_build: last_build(&walked.inspected, &walked.walks),
+        entries,
+        bytes,
+    }))
+}
+
+/// A target reached again, inspected again and judged as found, with its
+/// profile directories walked.
+struct Walked<F> {
+    inspected: Inspected,
+    walks: Vec<ProfileWalk<F>>,
+    project: Project,
+    /// Holds the target directory open while the walks' fds are used.
+    _target: Resolved<F>,
+}
+
+/// The common first half of [`eligibility`] and [`tally`].
+fn walk_target<H: Host>(
+    host: &H,
+    target: &Target,
+    rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+) -> Judged<Walked<H::Fd>> {
+    let path = &target.path;
     let reached = judged!(reach(host, target, deadline));
     let inspected = judged!(inspect(
         host,
@@ -401,28 +492,31 @@ pub fn eligibility<H: Host>(
         rules,
         deadline
     ));
-    let last = last_build(&inspected, &walks);
-    if let Err(skip) = judge_idle(host, path, last, idle_for) {
-        return Ok(Err(skip));
-    }
-    let scan = checker.current(host).map_err(|error| Stop::Failed {
-        path: path.clone(),
-        error,
-    })?;
-    if let Err(skip) = judge_in_use(scan, &walks, target, &inspected, reached.project) {
-        return Ok(Err(skip));
-    }
-    let (entries, bytes) = walks
-        .iter()
-        .flat_map(|w| &w.entries)
-        .fold((0, 0u64), |(n, b), (_, r)| {
-            (n + r.entries(), b.saturating_add(r.bytes()))
-        });
-    Ok(Ok(Eligible {
-        last_build: last,
-        entries,
-        bytes,
+    Ok(Ok(Walked {
+        inspected,
+        walks,
+        project: reached.project,
+        _target: reached.target,
     }))
+}
+
+/// Entries and allocated bytes of every walk record, each object's bytes
+/// once (docs/architecture.md, Measuring space: Cargo hard-links binaries
+/// from `deps/` into the profile directory, so per name they would count
+/// twice).
+fn totals<F>(walks: &[ProfileWalk<F>]) -> (usize, u64) {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = 0;
+    let mut bytes = 0u64;
+    for (_, record) in walks.iter().flat_map(|w| &w.entries) {
+        entries += record.entries();
+        for entry in record.all_entries() {
+            if seen.insert(entry.identity.id) {
+                bytes = bytes.saturating_add(entry.bytes);
+            }
+        }
+    }
+    (entries, bytes)
 }
 
 /// The idle requirement on the last build `last` of the target at `path`

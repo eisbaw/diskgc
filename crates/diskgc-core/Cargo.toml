@@ -11,3 +11,6 @@ serde-saphyr.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Test-only: reads the JSON report back, and the JSON block of
+# docs/reference.md (Output), to compare fields and enums.
+serde_json.workspace = true

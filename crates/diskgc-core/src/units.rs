@@ -1,10 +1,124 @@
-//! Durations as configuration and the command line write them
-//! (docs/reference.md, Sizes and durations): an integer plus one of
-//! `s m h d w`. No months; `m` is always minutes; a bare number is an error.
+//! Sizes and durations as configuration and the command line write them
+//! (docs/reference.md, Sizes and durations).
 //!
-//! Sizes are not here yet (task-10 adds them next to these).
+//! - Sizes: an integer plus `K M G T` or `KiB MiB GiB TiB` (powers of
+//!   1024) or `KB MB GB TB` (powers of 1000), or `N%` of the filesystem
+//!   size. A bare number is an error.
+//! - Durations: an integer plus one of `s m h d w`. No months; `m` is
+//!   always minutes; a bare number is an error.
 
+use std::fmt;
 use std::time::Duration;
+
+/// A size as written: bytes, or a share of the filesystem it applies to,
+/// which only the filesystem's size turns into bytes ([`Size::bytes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    Bytes(u64),
+    /// `N%`: N percent of the filesystem size (`f_blocks × f_frsize`).
+    Percent(u64),
+}
+
+/// The size units and their factors (docs/reference.md, Sizes and
+/// durations). Case matters: `g` or `Gb` is no unit.
+const SIZE_UNITS: [(&str, u64); 12] = [
+    ("K", 1 << 10),
+    ("M", 1 << 20),
+    ("G", 1 << 30),
+    ("T", 1 << 40),
+    ("KiB", 1 << 10),
+    ("MiB", 1 << 20),
+    ("GiB", 1 << 30),
+    ("TiB", 1 << 40),
+    ("KB", 1_000),
+    ("MB", 1_000_000),
+    ("GB", 1_000_000_000),
+    ("TB", 1_000_000_000_000),
+];
+
+/// Parses `50G`, `80GiB`, `500MB`, `10%`. The error says what is wrong in
+/// words.
+pub fn parse_size(text: &str) -> Result<Size, String> {
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    let (number, unit) = text.split_at(digits);
+    if number.is_empty() {
+        return Err(format!(
+            "`{text}` is not a size: write an integer and a unit (K, M, G, T, KiB, ..., KB, \
+             ..., or %), e.g. `50G`"
+        ));
+    }
+    let too_big = || format!("`{text}`: the size is too large");
+    let n: u64 = number.parse().map_err(|_| too_big())?;
+    if unit.is_empty() {
+        return Err(format!(
+            "`{text}`: a bare number is not a size; add a unit (K, M, G, T, KiB, MiB, GiB, \
+             TiB, KB, MB, GB, TB, or %)"
+        ));
+    }
+    if unit == "%" {
+        return Ok(Size::Percent(n));
+    }
+    let factor = SIZE_UNITS
+        .iter()
+        .find(|(u, _)| *u == unit)
+        .map(|(_, f)| *f)
+        .ok_or_else(|| {
+            format!(
+                "`{text}`: unknown unit `{unit}`; the units are K, M, G, T and KiB, MiB, GiB, \
+                 TiB (powers of 1024), KB, MB, GB, TB (powers of 1000), and %"
+            )
+        })?;
+    n.checked_mul(factor).map(Size::Bytes).ok_or_else(too_big)
+}
+
+impl Size {
+    /// The bytes this size means on a filesystem of `fs_size` bytes. A size
+    /// above the filesystem's is an error (docs/reference.md: a usage
+    /// error), so is a percentage above 100.
+    pub fn bytes(self, fs_size: u64) -> Result<u64, String> {
+        let bytes = match self {
+            Self::Bytes(b) => b,
+            Self::Percent(p) => {
+                if p > 100 {
+                    return Err(format!("{p}% is more than the whole filesystem"));
+                }
+                // At most fs_size: exact in u128, no rounding up.
+                u64::try_from(u128::from(fs_size) * u128::from(p) / 100).expect("at most fs_size")
+            }
+        };
+        if bytes > fs_size {
+            return Err(format!(
+                "{bytes} bytes is more than the filesystem's size ({fs_size} bytes)"
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+impl fmt::Display for Size {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes(b) => write!(f, "{b} bytes"),
+            Self::Percent(p) => write!(f, "{p}%"),
+        }
+    }
+}
+
+/// `bytes` for people: binary units with one decimal (`52.3 GiB`), whole
+/// bytes below 1 KiB. Never parsed back.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
 
 /// The units, longest first (the order [`format_duration`] tries them).
 const UNITS: [(char, u64); 5] = [
@@ -116,6 +230,76 @@ mod tests {
             let error = parse_duration(text).expect_err(text);
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn sizes_are_an_integer_and_a_unit_or_a_percentage() {
+        for (text, want) in [
+            ("0K", Size::Bytes(0)),
+            ("1K", Size::Bytes(1024)),
+            ("50G", Size::Bytes(50 << 30)),
+            ("50GiB", Size::Bytes(50 << 30)),
+            ("2T", Size::Bytes(2 << 40)),
+            ("3MiB", Size::Bytes(3 << 20)),
+            ("1KiB", Size::Bytes(1024)),
+            ("5TiB", Size::Bytes(5 << 40)),
+            ("1KB", Size::Bytes(1000)),
+            ("500MB", Size::Bytes(500_000_000)),
+            ("50GB", Size::Bytes(50_000_000_000)),
+            ("1TB", Size::Bytes(1_000_000_000_000)),
+            ("10%", Size::Percent(10)),
+            ("0%", Size::Percent(0)),
+            ("100%", Size::Percent(100)),
+        ] {
+            assert_eq!(parse_size(text), Ok(want), "{text}");
+        }
+    }
+
+    /// AC #4 of task-10 (sizes half): a bare number is a usage error, and
+    /// so is every unit the doc does not list.
+    #[test]
+    fn bare_numbers_and_unknown_units_are_not_sizes() {
+        for (text, needle) in [
+            ("50", "bare number"),
+            ("0", "bare number"),
+            ("50g", "unknown unit"),
+            ("50Gb", "unknown unit"),
+            ("50gib", "unknown unit"),
+            ("50B", "unknown unit"),
+            ("1.5G", "unknown unit"),
+            ("50 G", "unknown unit"),
+            ("G", "not a size"),
+            ("", "not a size"),
+            ("-1G", "not a size"),
+            ("99999999999999999999G", "too large"),
+            ("99999999T", "too large"),
+        ] {
+            let error = parse_size(text).expect_err(text);
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_size_is_resolved_against_the_filesystem_and_never_exceeds_it() {
+        let fs = 1000;
+        assert_eq!(Size::Percent(10).bytes(fs), Ok(100));
+        assert_eq!(Size::Percent(100).bytes(fs), Ok(1000));
+        assert_eq!(Size::Percent(0).bytes(fs), Ok(0));
+        // Rounded down, never above the share.
+        assert_eq!(Size::Percent(33).bytes(10), Ok(3));
+        assert_eq!(Size::Percent(50).bytes(u64::MAX), Ok(u64::MAX / 2));
+        assert_eq!(Size::Bytes(1000).bytes(fs), Ok(1000));
+        assert!(Size::Bytes(1001).bytes(fs).is_err());
+        assert!(Size::Percent(101).bytes(fs).is_err());
+    }
+
+    #[test]
+    fn bytes_for_people() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(50 << 30), "50.0 GiB");
+        assert_eq!(format_bytes((3 << 20) / 2), "1.5 MiB");
     }
 
     #[test]

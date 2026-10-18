@@ -5,6 +5,14 @@ Normative for how the PRD's acceptance criteria and the guarantees in
 
 **No test ever runs diskgc against the developer's live system.** Tests run
 against a modelled host (in-process) or inside a rootless test container.
+One named exception proves the pre-release sandbox gate itself:
+`a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate`
+(`crates/diskgc/tests/cli.rs`) runs the built binary's reclaiming
+`ensure` on the host, and it touches only a fixture of its own: its roots
+and `PATH` are a fresh temp directory holding a fake Cargo target, its
+config a file of its own, its goal unreachable; the gate is expected to
+refuse (exit 2), and every fixture object must keep its inode. The other
+binary tests stop at usage errors before the machine is read.
 
 ## Grounding: acceptance signals and negative feedback
 
@@ -150,6 +158,7 @@ mounts:
   - {id: 1, at: /,     fs: ext4, dev: "254:1", size: 1000G, other_used: 980G}
   - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 900G,  other_used: 880G, parent: 1}
 tree:
+  /run/diskgc/lock: {uid: 0, gid: 0}
   /home/mark/src/app/target:
     CACHEDIR.TAG: {cachedir_tag: true}
     debug:
@@ -176,8 +185,8 @@ Fixtures live in `tests/models/<area>/<case>.yaml`, one named test per file;
 JSON reports are snapshot-tested with durations, timestamps and seed
 redacted. The sketch above is the fixture
 `crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml`, run
-through Cargo discovery and the reclaim protocol (`tests/sketch.rs`;
-until the executor exists, that test maps a skipped target to exit 1).
+through the executor (`tests/sketch.rs`: `ensure --min-free 15G --select
+profile:cargo-target --roots /home/mark/src /home/mark/src`).
 
 How the format reads (the schema documents every key):
 
@@ -199,7 +208,11 @@ How the format reads (the schema documents every key):
   directory owned by root), `privileged: true` (holds a capability diskgc
   lacks), `uid_map` (the text diskgc reads; default the initial
   namespace's; `none`: absent). The top-level `own_uid_map` is diskgc's
-  own (same default, `none` too). `locks` give their holder an fd of its own. As on
+  own (same default, `none` too), `own_uid` its user id (default 1000; 0
+  models running as root), and `sandbox_gate` the pre-release gate as
+  `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
+  deleting calls are refused; `refuses_deletes`: only the deleting calls
+  are). `locks` give their holder an fd of its own. As on
   `LinuxHost`, an empty fd table, map or environment, or no `exe`, reads
   as `Failed` (an
   empty read of a live process is never the answer there). diskgc itself
@@ -216,7 +229,7 @@ How the format reads (the schema documents every key):
   (a clock jump, e.g. a suspend), `fail` (the call fails with the named
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
   trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat`,
-  `fchmod` or `bound_unix_sockets`). `remove` is `rm -r`: every entry below is unlinked, and an
+  `fchmod`, `bound_unix_sockets` or `statvfs`). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the
   test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps

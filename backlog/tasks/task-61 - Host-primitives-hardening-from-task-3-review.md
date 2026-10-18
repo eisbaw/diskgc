@@ -4,7 +4,7 @@ title: Host primitives hardening from task-3 review
 status: To Do
 assignee: []
 created_date: '2026-10-17 01:02'
-updated_date: '2026-10-18 01:32'
+updated_date: '2026-10-18 05:48'
 labels:
   - hardening
   - safety
@@ -176,6 +176,8 @@ From task-8's commit review (mped), hardening:
 Split for the 0.1 ensure MVP (2026-10-18). Moved to task-64 (real-machine hardening blocking 0.1), using this task's numbering (D1-D7 = description items, #N = the running numbers in these notes): D3, D4, D5, D6, D7, #19, #25, #26, #27, #32, #37, #38, #39, #41; task-3 round 5 (3) (tid reuse); task-3 round 9 (4) (no pidfd hang-up on Linux 5.8-6.8); task-3 round 10 (1) (bounded pidfd poll); task-3 final commit gate: PROC_SUPER_MAGIC check and the /proc-replaced real-kernel test; task-5 deep gate round 1 (2) (narrow fchmod) and (3) (rename-out and bind-mount races); task-6 deep gate round 1 (1) (held_by_deleted_files on btrfs), (2) (unsettled scan reuse), (3) (16-listing bound under make -j), (5) (pid reuse after read in safety.md limit 4); task-6 deep gate round 3 (1) (pid reuse within a scan) and (3) (narrow engine::delete and Checker::with_options); task-7 review H10 (guarded-spawn helper); task-50 review: the gate flag test scanning nested .cargo/config files. Everything else here is deferred: wave-5 hardening, no longer blocking task-13 or the 0.1 release. Its AC 'each of the seven items' now covers D1 and D2 only; D3-D7 are owned by task-64.
 
 From task-9 round 2 (mped B1, item (39)): the cargo-target kind made keep-marker checking independent of root order by walking roots outermost first, so a target reached through overlapping roots is recorded under the outermost root and markers between it and the target count. QUESTION for the fs kind: does fs discovery/dedupe by identity have the same root-order dependence (a .diskgc-keep between an outer root and a candidate ignored when the candidate is recorded under an inner root)? H5: with a bind mount, one object is reachable by two unrelated paths; only the recording path's markers count. A union of markers over every path that reached the object would close that; filed here, not done.
+
+From task-10 (#43 binary size): with the YAML loader, config, executor and report linked, the static musl release binary (nix build .#default) is 3,489,560 bytes (was 585,616 before anything called the profile code; 2,272,040 with only Library::builtin() in task-8's measurement). A scratch copy with [profile.release] lto = true, codegen-units = 1 builds to 2,960,648 bytes (-15%). Not added: the gain is moderate, every e2e iteration rebuilds the release package (slower dev loop with fat LTO and one codegen unit), and the release-excludes-e2e check (symbol table needed) was not re-verified under LTO. Decide with the 0.1 packaging (task-66/67); a per-crate breakdown (cargo-bloat) was not done. Also from task-10: startup() is now used by ensure only; check/watch/survey/profiles exit 2 before startup ('not implemented'), so item (2) of the task-3 round-10 note is still open for check.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

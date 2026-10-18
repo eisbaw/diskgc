@@ -273,6 +273,10 @@ pub struct State {
     pub own_pid: u32,
     /// diskgc's own `uid_map` (`None`: unreadable).
     pub own_uid_map: Option<String>,
+    /// diskgc's own (effective) user id.
+    pub own_uid: u32,
+    /// The modelled sandbox gate.
+    pub sandbox_gate: crate::spec::GateSpec,
     /// The socket files a socket is bound to (in diskgc's network
     /// namespace).
     pub bound_sockets: BTreeSet<DevIno>,
@@ -292,6 +296,8 @@ impl State {
             procs: BTreeMap::new(),
             own_pid: DEFAULT_OWN_PID,
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
+            own_uid: DEFAULT_ID,
+            sandbox_gate: crate::spec::GateSpec::Open,
             bound_sockets: BTreeSet::new(),
             kernel,
             wall_start,

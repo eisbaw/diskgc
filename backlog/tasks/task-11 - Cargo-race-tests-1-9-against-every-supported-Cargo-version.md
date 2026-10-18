@@ -4,7 +4,7 @@ title: Cargo race tests 1-9 against every supported Cargo version
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 03:55'
+updated_date: '2026-10-18 05:47'
 labels:
   - wave-1
   - irreversible
@@ -63,6 +63,8 @@ From task-53 round 2 (mped H1-H3; docs/safety.md, cargo-target: Reclaim protocol
 - H2, the invariant the protocol's safety rests on, which the race tests MUST verify on every pinned toolchain: every reclaimable lock set holds .cargo-lock, and every Cargo takes .cargo-lock before it writes into the profile directory. Container test: a target made by 1.90 (only .cargo-lock); cargo-reclaim paused at unlinkat:N (diskgc holds .cargo-lock); start a 1.99.1 (and nightly) cargo build in the project; assert from /proc/locks that it created .cargo-build-lock, holds it, and waits on .cargo-lock, and (oracle/snapshot of the profile) that it wrote nothing else; resume: diskgc stops at the next part as changed (lock re-listing), the build then succeeds. If any Cargo writes before taking .cargo-lock, the protocol is unsafe: revise safety.md (AC #3 of this task).
 - H1, RT6 seeding: include kill positions inside incremental/ (half-deleted incremental state, PRD weak assumption), and a mixed target built by 1.99.1 and then the nightly (.fingerprint/, deps/ and build/<pkg>/<hash>/fingerprint in one profile; plan() now takes both kinds of fingerprints first, model-tested only).
 - H3, decision recorded: diskgc never creates a missing lock file (e.g. .cargo-build-lock in a 1.90-made profile) to hold it: that would write into the target, and the .cargo-lock invariant above makes it unnecessary. If the invariant fails a race test, revisit this.
+
+From task-10: the real binary now reclaims Cargo targets: diskgc ensure --min-free SIZE --select 'profile:cargo-target[ && filter:idle-...]' --roots DIR PATH (container only; development builds refuse outside, exit 2 naming the gate). Race tests that need diskgc paused at a port call still go through the driver (cargo-reclaim); tests of whole-run behaviour can call the binary as diskgc-e2e/src/ensure_suite.rs does (ensure_run, report() parses --json; the harness sets --min-free from its own statvfs). ensure orders targets by a read-only tally (cargo_target::tally) and calls reclaim with judged_last_build None, so a target rebuilt between the tally and its locks is judged only by the idle requirement under the locks, not as 'changed'. The docs/safety.md Reclaim protocol now says plainly that 'writes nothing into the profile directory before .cargo-lock' is unverified: race test for it as specified there.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

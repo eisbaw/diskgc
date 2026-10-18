@@ -3,10 +3,10 @@ id: TASK-53
 title: >-
   cargo-target reclaim protocol: lock all, recheck, delete inside locked profile
   dirs
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-18 03:55'
+updated_date: '2026-10-18 04:25'
 labels:
   - wave-1
   - irreversible
@@ -96,9 +96,11 @@ Round 2 (deep gate round 1: mped GO with should-fixes, Codex NO-GO x2 handled as
 - S4: the kill test's rebuild check now runs build/run for debug AND --release and asserts 'Compiling diskgc-e2e-race' for both once past the fingerprints. Bite (product: release's .fingerprint moved to the end of the plan; test: the fingerprints-left check disabled so only the new assertion can catch it) -> FAIL 'after-fingerprints (["--release"]): the next build did not compile the package again'.
 - S2 CORRECTION of my round-1 note ('PRD not edited'): the orchestrator edited the PRD's Weak-assumptions line about fingerprints (a factual wording fix); it is staged with this change.
 - H5 (ProfileDir inside ProfileWalk) not done: it needs either a clone of inspected data in the walk or a lifetime on the public ProfileWalk; filed on task-64. H1/H2/H3 filed on task-11, H4/H6 on task-64.
+
+Committed as 163f6e1 (tree 6f9b31f) after the deep gate's second round: qa-test-runner, mped-architect and Codex all GO. Doc nits carried to task-10's brief: unit_fingerprints doc comment, two unwrapped safety.md lines, 'measured' overclaim (only the lock order was measured; that Cargo writes nothing before .cargo-lock is task-11's to verify), safety.md classic-fingerprints summary needs the mixed-layout caveat.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

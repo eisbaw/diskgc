@@ -54,6 +54,13 @@
 //!   stopped), or, counted as failures, `I failed <tag> <path> entries=N
 //!   -- <message>` (an error for the target, the sandbox gate, or an error
 //!   of the run), `held_us` being how long the target's locks were held;
+//! - `host-lock GATE`: the host lock (diskgc-core `hostlock::acquire`:
+//!   `/run/diskgc/lock`, exclusive, inheritable by children), then a child
+//!   (`/bin/sh`) that waits until the file GATE exists, then the driver
+//!   closes its own descriptor and exits without waiting for the child:
+//!   `0 locked waited_ms=N`, `1 child pid=P`, `2 closed`. The child holds
+//!   the inherited copy, so the lock stays held until it exits
+//!   (docs/safety.md, Host lock);
 //!
 //! where `<path>` is Rust's `{:?}` of the path, and `<tag>` is the errno
 //! name, `invalid` or `sandbox_gate` ([`cause_tag`]), or the skip reason of
@@ -109,6 +116,9 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
                                   first, as a plan would, reclaim only an
                                   eligible one and pass the protocol the
                                   last build it measured
+    host-lock GATE                take the host lock, start a child that
+                                  inherits it and waits for the file GATE,
+                                  close the driver's copy, exit
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -279,6 +289,7 @@ pub fn run<H: Delete>(
             let (flags, roots) = ReclaimFlags::parse(args)?;
             cargo_reclaim(host, owner, flags, roots, &mut out)?;
         }
+        ("host-lock", [gate]) => host_lock(host, Path::new(gate), &mut out)?,
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
     Ok(Outcome { failed: out.failed })
@@ -604,6 +615,27 @@ fn cargo_targets<H: Host>(
             eprintln!("diskgc-e2e-driver: note: {note}");
         }
     }
+    Ok(())
+}
+
+/// `host-lock GATE` (see the module docs): what the executor's host lock
+/// gives a child. The child is started as diskgc will start prune, GC and
+/// command children (no fd closing of its own), and is left running.
+fn host_lock<H: Host>(host: &H, gate: &Path, out: &mut Lines<'_>) -> Result<(), String> {
+    let lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    out.ok(format!("locked waited_ms={}", lock.waited.as_millis()));
+    let child = std::process::Command::new("/bin/sh")
+        .args(["-c", "while [ ! -e \"$1\" ]; do sleep 0.1; done", "sh"])
+        .arg(gate)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn the child: {e}"))?;
+    out.ok(format!("child pid={}", child.id()));
+    // Closing is the only release (the port has none other); the child's
+    // inherited copy keeps the lock.
+    drop(lock);
+    out.ok("closed".to_owned());
     Ok(())
 }
 

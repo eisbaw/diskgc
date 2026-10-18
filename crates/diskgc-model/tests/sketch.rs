@@ -1,51 +1,51 @@
 //! The host-model sketch of docs/testing.md (Model tests) as a model test
-//! (task-14 AC #1), run through the real Cargo reclaim protocol (task-53,
-//! diskgc-core `cargo_target::reclaim`): discovery below the root, then
-//! the protocol, whose first lock (`.cargo-lock`, held by Cargo) is busy.
-//!
-//! The exit code is the executor's to decide (task-10): until it exists,
-//! this test maps a skipped target to exit 1 (nothing freed) and a
-//! reclaimed one to 0, which is all the fixture's `expect` asks.
+//! (task-14 AC #1), run through the executor (task-10): `ensure --min-free
+//! 15G --select profile:cargo-target --roots /home/mark/src
+//! /home/mark/src`. It takes the host lock, discovers the target, and the
+//! reclaim protocol's first lock (`.cargo-lock`, held by Cargo) is busy:
+//! skipped `locked`, exit 1 (everything processed, still below
+//! `--min-free`).
 
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use diskgc_core::cargo_target::{ReclaimEnd, discover, reclaim};
-use diskgc_core::engine::{DEFAULT_MAX_ENTRIES, Rules};
+use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::{Host, LockMode};
-use diskgc_core::inuse::{Checker, REUSE_LIMIT};
+use diskgc_core::profile::Library;
+use diskgc_core::units::parse_size;
 use diskgc_model::harness::{Outcome, fixture_path, load_fixture, run};
 use diskgc_model::spec::{Op, Skipped};
 use diskgc_model::{Holder, ModelHost};
 
-/// Discovery below `root` and the reclaim protocol on every target found:
-/// a skipped target is listed with its reason (exit 1), and an error of
-/// the run fails the test.
-fn reclaim_below(host: &ModelHost, root: &Path) -> Outcome {
-    let found = discover(host, &[root.to_owned()], None).unwrap_or_else(|e| panic!("{e}"));
-    assert!(found.refused.is_empty(), "{:?}", found.refused);
-    let owners = [1000];
-    let rules = Rules {
-        owners: &owners,
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
+/// `ensure` with `--select profile:cargo-target`, `root` as `--roots` and
+/// `PATH`: the report's exit code and skipped candidates.
+fn ensure_below(host: &ModelHost, root: &Path) -> Outcome {
+    let library = Library::builtin().unwrap_or_else(|e| panic!("{e}"));
+    let roots = [root.display().to_string()];
+    let request = Request {
+        path: root.to_owned(),
+        min_free: parse_size("15G").unwrap_or_else(|e| panic!("{e}")),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:cargo-target", &library, Some(&roots), 1000)
+            .unwrap_or_else(|e| panic!("{e}")),
     };
-    let mut checker = Checker::new(&rules, REUSE_LIMIT);
-    let mut skipped = Vec::new();
-    for target in &found.targets {
-        match reclaim(host, target, None, &rules, None, &mut checker, None).end {
-            ReclaimEnd::Complete => {}
-            ReclaimEnd::Skipped(skip) => skipped.push(Skipped {
-                candidate: target.path.clone(),
-                reason: skip.reason.as_str().to_owned(),
-            }),
-            other => panic!("{}: {other:?}", target.path.display()),
-        }
-    }
+    let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
+    let report = executor::ensure(host, &request, uid, &mut |l| eprintln!("{l}"));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
     Outcome {
-        exit: i32::from(!skipped.is_empty()),
-        skipped,
+        exit: i32::from(report.exit_code()),
+        skipped: report
+            .skipped
+            .iter()
+            .map(|s| Skipped {
+                candidate: s.candidate.clone(),
+                reason: s.reason.to_owned(),
+            })
+            .collect(),
     }
 }
 
@@ -59,7 +59,7 @@ fn the_testing_md_sketch_loads_and_runs() {
     .unwrap_or_else(|e| panic!("{e}"));
     // `run` checks expect (exit 1, skipped locked) and that the event fired.
     let host = run(&model, |host| {
-        reclaim_below(host, &PathBuf::from("/home/mark/src"))
+        ensure_below(host, &PathBuf::from("/home/mark/src"))
     });
 
     // The lock is cargo's (pid 4242) and still held; diskgc holds none.
@@ -68,14 +68,24 @@ fn the_testing_md_sketch_loads_and_runs() {
         host.locks_on(lock),
         vec![(Holder::Process(4242), LockMode::Exclusive)]
     );
-    // The protocol's only lock attempt was that one (the profile has no
-    // other lock file), the event addressed to it created the new
-    // profile's lock file right after it, and nothing was unlinked.
+    // Two lock attempts: the host lock (taken), then the protocol's only
+    // one on the target (the profile has no other lock file), which the
+    // event addressed to it followed by creating the new profile's lock
+    // file; nothing was unlinked.
     let trace = host.trace();
     let flocks: Vec<_> = trace.iter().filter(|c| c.op == Op::Flock).collect();
-    assert_eq!(flocks.len(), 1, "{flocks:?}");
-    assert_eq!(flocks[0].path.as_deref(), Some(lock));
-    assert_eq!(flocks[0].result, "busy");
+    assert_eq!(flocks.len(), 2, "{flocks:?}");
+    assert_eq!(
+        flocks[0].path.as_deref(),
+        Some(Path::new("/run/diskgc/lock"))
+    );
+    assert_eq!(flocks[0].result, "acquired");
+    assert_eq!(flocks[1].path.as_deref(), Some(lock));
+    assert_eq!(flocks[1].result, "busy");
+    assert!(
+        host.locks_on(Path::new("/run/diskgc/lock")).is_empty(),
+        "released"
+    );
     assert!(trace.iter().all(|c| c.op != Op::Unlinkat));
     assert!(
         host.stat_path(Path::new("/home/mark/src/app/target/release/.cargo-lock"))
@@ -85,7 +95,7 @@ fn the_testing_md_sketch_loads_and_runs() {
     // reopened through that fd for the flock, never by name.
     let at = trace
         .iter()
-        .position(|c| c.op == Op::Flock)
+        .position(|c| c.op == Op::Flock && c.path.as_deref() == Some(lock))
         .expect("the flock");
     assert_eq!(trace[at - 1].op, Op::ReopenRegular);
     // Available space is derived: 900G - 880G - the 8G file and the

@@ -152,6 +152,10 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     if let Some(pid) = model.own_pid {
         state.own_pid = pid;
     }
+    if let Some(uid) = model.own_uid {
+        state.own_uid = uid;
+    }
+    state.sandbox_gate = model.sandbox_gate;
     match model.own_uid_map.as_deref() {
         None => {}
         Some("none") => state.own_uid_map = None,
@@ -810,6 +814,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::Unlinkat,
             Op::Fchmod,
             Op::BoundUnixSockets,
+            Op::Statvfs,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}
