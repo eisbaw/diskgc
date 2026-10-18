@@ -303,6 +303,35 @@ fn a_known_cargo_lock_name_anywhere_is_contains_special() {
     );
 }
 
+/// No plain delete removes a version-control checkout (task-71): an entry
+/// named `.git`, `.hg` or `.svn` anywhere, of any type (a `.git` file of a
+/// worktree, a symlink: never followed), refuses the candidate as
+/// `contains_checkout` at that entry, before anything below it is read;
+/// so does a candidate that is itself such an entry. Nothing is unlinked.
+#[test]
+fn a_checkout_marker_anywhere_is_contains_checkout() {
+    for (tree, at) in [
+        ("  /tmp/c/.git: {HEAD: {}}\n", "/tmp/c/.git"),
+        ("  /tmp/c/sub/deeper/.git: {}\n", "/tmp/c/sub/deeper/.git"),
+        (
+            "  /tmp/c/sub/.git: {symlink: /tmp/keep}\n",
+            "/tmp/c/sub/.git",
+        ),
+        ("  /tmp/c/sub/.hg: {store: {}}\n", "/tmp/c/sub/.hg"),
+        ("  /tmp/c/.svn: {wc.db: {}}\n", "/tmp/c/.svn"),
+    ] {
+        let host = model(tree);
+        let skip = assert_skipped(&host, &rules(), Reason::ContainsCheckout, at);
+        assert!(skip.detail.contains("checkout"), "{skip}");
+    }
+    for marker in [".git", ".hg", ".svn"] {
+        let host = model(&format!("  /tmp/r/{marker}: {{HEAD: {{}}}}\n"));
+        let target = Target::new(&host, &format!("/tmp/r/{marker}"));
+        let skip = skipped(&host, &target, &rules());
+        assert_eq!(skip.reason, Reason::ContainsCheckout, "{skip}");
+    }
+}
+
 #[test]
 fn unknown_lock_names_without_the_target_layout_are_plain_files() {
     for tree in [

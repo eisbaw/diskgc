@@ -640,10 +640,18 @@ fn plan_fs<H: Host>(
         deadline,
         log,
     );
+    // Discovery and judgement are fused (fs_kind::plan): when the run
+    // stopped, the count is what was judged until then, and the entry it
+    // stopped at (in the run error) is not among them.
+    let partial = if stopped.is_some() {
+        ", discovery stopped early"
+    } else {
+        ""
+    };
     planned.stopped = stopped;
     log(&format!(
-        "{}: `{}`: {} candidate(s) below {} ({} found again through another root or pattern, \
-         {} systemd-private-* passed over)",
+        "{}: `{}`: {} candidate(s) judged below {} ({} found again through another root or \
+         pattern, {} systemd-private-* passed over{partial})",
         tier.name,
         tier.select,
         found.judged.len(),

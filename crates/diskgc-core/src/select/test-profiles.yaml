@@ -22,9 +22,9 @@
 
 # Stand-ins, not built in yet.
 - name: pytest-tmp
-  find: {roots: [/tmp, /var/tmp], paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"], type: dir}
+  find: {roots: [/tmp, /var/tmp], paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"], type: dir}
   action: delete
-  examples: {match: [/tmp/pytest-of-mark]}
+  examples: {match: [/tmp/pytest-of-mark/pytest-3/test_x0]}
 - name: pytest-cache
   find: {roots: required, paths: [.pytest_cache], type: dir}
   action: delete

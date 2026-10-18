@@ -1251,8 +1251,10 @@ pub fn cargo_race_8_run_or_test_paused_before_its_binary_keeps_the_target(
     if !exercised {
         info!(
             "WARNING: in {LATE_ROUNDS} rounds no late cargo run reached the in-use check under \
-             the locks (each wrote into the profile first and was `changed`): the scan made \
-             under the locks was not exercised on toolchain {}",
+             the locks within the reuse limit (each wrote into the profile first and was \
+             `changed`, or the driver was paused {} ms or longer): the scan made under the \
+             locks was not exercised on toolchain {}",
+            diskgc_core::inuse::REUSE_LIMIT.as_millis(),
             toolchain.name
         );
     }
@@ -1272,9 +1274,11 @@ const LATE_ROUNDS: usize = 5;
 /// made under the locks), or `changed` when `cargo run` wrote into a
 /// profile directory meanwhile (1.90.0 rewrites `<bin>.d` now and then),
 /// whose newer last build the recheck finds first. Returns whether the
-/// round reached the in-use check. Logs how long the driver was paused:
-/// from the reuse limit on (500 ms) a scan kept from before the locks
-/// would have been renewed anyway, so the round tells nothing about it.
+/// round reached the in-use check with the driver paused for less than
+/// the reuse limit (only such a round counts). Logs how long the driver
+/// was paused: from the reuse limit on ([`diskgc_core::inuse::REUSE_LIMIT`])
+/// a scan kept from before the locks would have been renewed anyway, so
+/// the round tells nothing about it.
 fn late_run(
     ctx: &Ctx,
     toolchain: &Toolchain,
@@ -1314,20 +1318,31 @@ fn late_run(
         "{case}: driver:\n{}\n--- stderr\n{}",
         run.stdout, run.stderr
     );
+    let limit = diskgc_core::inuse::REUSE_LIMIT;
     info!(
         "{case}: the driver was paused {:.0} ms between judging and locking{}",
         pause.as_secs_f64() * 1e3,
-        if pause >= diskgc_core::inuse::REUSE_LIMIT {
-            " (at or over the 500 ms reuse limit: a kept scan would have been renewed anyway, so \
-             this round says nothing about the scan under the locks)"
+        if pause >= limit {
+            format!(
+                " (at or over the {} ms reuse limit: a kept scan would have been renewed anyway, \
+                 so this round says nothing about the scan under the locks)",
+                limit.as_millis()
+            )
         } else {
-            ""
+            String::new()
         }
     );
     let judged = oracle.judge(&run)?;
     let got = verdict_of(&run, target)?;
-    let exercised = written.is_empty();
-    if exercised {
+    // A round that ran into the in-use check under the locks shows that
+    // scan was made there only if the driver's pause was shorter than the
+    // reuse limit (a longer pause renews any kept scan anyway). The scan
+    // from the eligibility check is older than the pause by the time
+    // between that scan and the pause, so `pause < REUSE_LIMIT` is
+    // necessary for such a round to tell anything, not sufficient.
+    let reached_the_check = written.is_empty();
+    let exercised = reached_the_check && pause < diskgc_core::inuse::REUSE_LIMIT;
+    if reached_the_check {
         expect_skip(&got, "in_use", target, &[(runner, manifest)])
             .map_err(|e| format!("{case}: {e}"))?;
     } else {
@@ -1821,8 +1836,18 @@ pub fn cargo_race_2_a_cargo_clean_during_deletion(ctx: &Ctx, toolchain: &Toolcha
         };
         let oracle = Oracle::arm(fixture)?;
         let root = s.path(&rel);
+        let original_locks = cargo_under_test::lock_files(&profile)?;
+        let original = Watched::files(&original_locks)?;
         let (mut spawned, paused) =
             spawn_paused(ctx, &format!("unlinkat:{k}"), &[path_str(&root)?])?;
+        // Before the clean, while the profile still exists: diskgc holds
+        // every lock file it found (as race test 2 checks).
+        let driver = original.usage(&proc_locks::sample()?, paused.pid);
+        ensure!(
+            original_locks.iter().all(|l| driver.holds(l)) && driver.waits.is_empty(),
+            "{what}: diskgc paused at unlinkat:{k} does not hold every lock file it found: it \
+             {driver}"
+        );
         let before = tree_state(&target)?;
         let mut cargo = Cargo::new(toolchain, &p, command).spawn(ctx)?;
         let cargo_pid = cargo.pid();
@@ -1844,7 +1869,13 @@ pub fn cargo_race_2_a_cargo_clean_during_deletion(ctx: &Ctx, toolchain: &Toolcha
         } else {
             let mut samples = 0;
             while cargo.is_running()? {
-                let usage = lock_usage(&profile, cargo_pid).unwrap_or_default();
+                // The lock files as found (their locks show even once the
+                // clean removed them) and any present now; a profile the
+                // clean removed holds none, any other error fails.
+                let usage = original
+                    .clone()
+                    .and_present_in(&profile)?
+                    .usage(&proc_locks::sample()?, cargo_pid);
                 ensure!(
                     usage.waits.is_empty(),
                     "{what}: waits for a lock, measured not to: it {usage}"

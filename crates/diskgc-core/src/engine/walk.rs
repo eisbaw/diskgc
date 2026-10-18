@@ -16,7 +16,12 @@
 //! 6. it is not a device node or of unknown type, does not have a Cargo
 //!    lock file's name ([`CARGO_LOCK_NAMES`], anywhere), and is not a lock
 //!    file of a Cargo target inside the candidate (the structural
-//!    recogniser) (`contains_special`).
+//!    recogniser) (`contains_special`);
+//! 7. for a plain delete ([`walk`]), it does not have a VCS checkout
+//!    marker's name ([`CHECKOUT_MARKERS`], whatever its type, anywhere, the
+//!    candidate itself included) (`contains_checkout`). The Cargo kind's
+//!    walk of a profile directory's entries ([`walk_cargo_profile_entry`])
+//!    is the one exception.
 //!
 //! The first entry that fails stops the walk. Host errors on the way are
 //! classified in one place, [`host_failure`]: fail closed, never treated as
@@ -42,6 +47,43 @@ pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 /// candidate itself included, refuses it: no Cargo lock file is ever
 /// deleted (the PRD), whatever directory the candidate is.
 pub const CARGO_LOCK_NAMES: &[&str] = &[".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+
+/// The names that mark a version-control checkout (docs/safety.md, The
+/// eligibility walk: no source checkout): Git's directory, or its file in
+/// a worktree, a submodule or a `--separate-git-dir` checkout; Mercurial's;
+/// Subversion's. An entry of one of these names, of any type (a symlink
+/// too: never followed, it counts as a checkout), anywhere in a plain-delete
+/// candidate, the candidate itself included, refuses it
+/// (`contains_checkout`): it may hold uncommitted work.
+pub const CHECKOUT_MARKERS: &[&str] = &[".git", ".hg", ".svn"];
+
+/// Whether `name` is one of [`CHECKOUT_MARKERS`] (compared as bytes, in
+/// full: `.gitignore` is not).
+pub fn is_checkout_marker(name: &OsStr) -> bool {
+    CHECKOUT_MARKERS.iter().any(|marker| name == *marker)
+}
+
+/// The first directory named like a checkout's metadata
+/// ([`CHECKOUT_MARKERS`]) on the way from `root` down to `at`, both
+/// excluded (docs/safety.md, No source checkout: inside a checkout's
+/// metadata, by path): `/r/proj/.git` for `root` `/r` and `at`
+/// `/r/proj/.git/objects`. Path text only, no system call. `at` itself is
+/// left to the walk (which refuses it by its name), and the root's own
+/// path is not looked at. `None` when nothing on the way is one, or `at`
+/// is not below `root`.
+pub fn checkout_metadata_below(root: &Path, at: &Path) -> Option<PathBuf> {
+    let below = at.strip_prefix(root).ok()?;
+    let mut names = below.components();
+    names.next_back()?;
+    let mut path = root.to_path_buf();
+    for name in names {
+        path.push(name);
+        if is_checkout_marker(name.as_os_str()) {
+            return Some(path);
+        }
+    }
+    None
+}
 
 /// What the walk requires of a candidate besides the fixed rules.
 #[derive(Debug, Clone, Copy)]
@@ -79,12 +121,56 @@ impl From<Skip> for WalkStop {
     }
 }
 
-/// The eligibility walk of `candidate`: its record, or why it is not
-/// eligible. Checks the deadline before every `statx`, open and listing.
+/// The eligibility walk of `candidate` for a plain delete: its record, or
+/// why it is not eligible. Checks the deadline before every `statx`, open
+/// and listing. Refuses a VCS checkout inside ([`CHECKOUT_MARKERS`],
+/// `contains_checkout`): every caller gets that, only the Cargo kind opts
+/// out ([`walk_cargo_profile_entry`]).
 pub fn walk<H: Host>(
     host: &H,
     candidate: &Candidate<'_, H::Fd>,
     rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+) -> Result<WalkRecord, WalkStop> {
+    walk_as(host, candidate, rules, Checkouts::Refused, deadline)
+}
+
+/// [`walk`] for an entry of a Cargo profile directory (the `cargo-target`
+/// kind's reclaim protocol, docs/safety.md), the one walk that does not
+/// refuse a VCS checkout inside: build scripts legitimately put checkouts
+/// in a target (a vendored source cloned into `build/<pkg>/out/`), and
+/// the target is Cargo's output, which its own protocol reclaims.
+/// Crate-private; only the Cargo kind calls it (a caller invariant, not
+/// enforced by a type).
+pub(crate) fn walk_cargo_profile_entry<H: Host>(
+    host: &H,
+    candidate: &Candidate<'_, H::Fd>,
+    rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+) -> Result<WalkRecord, WalkStop> {
+    walk_as(
+        host,
+        candidate,
+        rules,
+        Checkouts::AllowedInCargoTarget,
+        deadline,
+    )
+}
+
+/// Whether a walk refuses a VCS checkout inside its candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Checkouts {
+    /// A plain delete: any [`CHECKOUT_MARKERS`] name is `contains_checkout`.
+    Refused,
+    /// An entry of a Cargo profile directory ([`walk_cargo_profile_entry`]).
+    AllowedInCargoTarget,
+}
+
+fn walk_as<H: Host>(
+    host: &H,
+    candidate: &Candidate<'_, H::Fd>,
+    rules: &Rules<'_>,
+    checkouts: Checkouts,
     deadline: Option<MonoTime>,
 ) -> Result<WalkRecord, WalkStop> {
     let path = || candidate.path.to_path_buf();
@@ -102,6 +188,7 @@ pub fn walk<H: Host>(
         host,
         candidate,
         rules,
+        checkouts,
         deadline,
         listings: Vec::new(),
         entries: 0,
@@ -160,6 +247,7 @@ struct Walker<'w, H: Host> {
     host: &'w H,
     candidate: &'w Candidate<'w, H::Fd>,
     rules: &'w Rules<'w>,
+    checkouts: Checkouts,
     deadline: Option<MonoTime>,
     /// The record's listings so far (complete for every listed directory).
     listings: Vec<Vec<Entry>>,
@@ -306,6 +394,16 @@ impl<H: Host> Walker<'_, H> {
                 format!(
                     "a Cargo lock file in a profile directory of a Cargo target (its directory's \
                      {target} holds {CACHEDIR_TAG})"
+                ),
+            ));
+        }
+        if self.checkouts == Checkouts::Refused && is_checkout_marker(&name) {
+            return Err(skip(
+                Reason::ContainsCheckout,
+                format!(
+                    "a version-control checkout's metadata ({:?}, never followed): it may hold \
+                     uncommitted work, and a plain delete never removes a checkout",
+                    identity.file_type
                 ),
             ));
         }

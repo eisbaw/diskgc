@@ -15,19 +15,24 @@ profiles:
 
   - name: pytest-tmp
     category: test
-    description: pytest temp dirs in /tmp, /var/tmp and one level down
-    # As reference.md's example. DOC: misses nested shells (nix-shell.X/
-    # nix-shell.Y/pytest-of-*, depth 3) and pytest dirs inside nix-shell rc
-    # dirs and zephyr run dirs; no `**`, so each container family is a
-    # pattern of its own.
+    description: pytest test dirs in /tmp, /var/tmp and one level down
+    # As reference.md's example: one candidate per test dir
+    # (pytest-of-<user>/pytest-<N>/<test>), not a session or the whole
+    # pytest-of-<user> (task-71: a test that ran `git init` is
+    # contains_checkout and keeps only its own dir). type: dir, so the
+    # `*current` symlinks and plain files in a session dir are no
+    # candidates; session dirs and pytest-of-<user> are left. DOC: misses
+    # nested shells (nix-shell.X/nix-shell.Y/pytest-of-*/...) and pytest
+    # dirs inside nix-shell rc dirs and zephyr run dirs; no `**`, so each
+    # container family is a pattern of its own.
     find:
       roots: [/tmp, /var/tmp]
-      paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"]
+      paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"]
       type: dir
     action: delete
     examples:
-      match: [/tmp/pytest-of-mark, /tmp/nix-shell.AbC123/pytest-of-mark, /var/tmp/tmp.x1/pytest-of-ci]
-      no_match: [/tmp/pytest-of-mark/pytest-3, /home/mark/pytest-of-mark, /tmp/a/b/pytest-of-mark]
+      match: [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0, /var/tmp/tmp.x1/pytest-of-ci/pytest-12/test_z1]
+      no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0, /home/mark/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/pytest-of-mark/pytest-1/test_x0, /tmp/pytest-of-mark/garbage-1a2b/test_x0]
 
   - name: nix-shell-rc
     category: nix

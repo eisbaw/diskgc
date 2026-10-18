@@ -203,8 +203,9 @@ fn judge_owners(
 
 /// Walks every entry of every profile directory of `inspected` but the
 /// lock files, each with the deletion engine's eligibility walk
-/// ([`engine::walk`], `rules`): ownership of every entry, keep markers,
-/// mounts, sockets and FIFOs, Cargo lock names and nested targets, the
+/// (`engine::walk_cargo_profile_entry`, `rules`): ownership of every
+/// entry, keep markers, mounts, sockets and FIFOs, Cargo lock names and
+/// nested targets (not VCS checkouts: exempt for the Cargo kind), the
 /// entry budget, which is one for the whole target (`rules.max_entries`
 /// over all its entries, not per entry). The first refusal is the
 /// target's. `target` is the target directory reached at `path`; each
@@ -322,7 +323,10 @@ pub(super) fn walk_entries<H: Host>(
             max_entries: budget.max.saturating_sub(budget.used),
             ..*rules
         };
-        match engine::walk(host, &candidate, &left, deadline) {
+        // Not `engine::walk`: a target may hold VCS checkouts (build
+        // scripts clone into `build/<pkg>/out/`), so the Cargo kind is the
+        // one walk exempt from `contains_checkout` (docs/safety.md).
+        match engine::walk_cargo_profile_entry(host, &candidate, &left, deadline) {
             // The layout was judged by the types inspected: an entry of
             // another type now (a directory replaced by a file or a
             // symlink) is a change.

@@ -157,6 +157,71 @@ pub fn engine_skips_a_nested_keep_marker_or_cargo_target(ctx: &Ctx) -> TestResul
     verdict.assert_clean()
 }
 
+/// task-71: a VCS checkout inside a plain-delete candidate makes it
+/// `contains_checkout`, on a real filesystem: a `.git` directory, a
+/// worktree's `.git` file deep inside, a `.git` symlink (never followed:
+/// its target, the bystander, is untouched), `.hg` and `.svn`
+/// directories. Nothing is deleted.
+pub fn engine_skips_a_source_checkout(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    bystander(ctx)?;
+    small_tree(ctx, "gitdir")?;
+    s.mkdir("gitdir/sub/.git", 0o755, TESTER)?;
+    s.write_file(
+        "gitdir/sub/.git/HEAD",
+        b"ref: refs/heads/main\n",
+        0o644,
+        TESTER,
+    )?;
+    small_tree(ctx, "worktree")?;
+    s.write_file(
+        "worktree/sub/deeper/.git",
+        b"gitdir: /home/tester/repo/.git/worktrees/w\n",
+        0o644,
+        TESTER,
+    )?;
+    small_tree(ctx, "gitlink")?;
+    s.symlink("gitlink/.git", &s.path("bystander"))?;
+    s.chown("gitlink/.git", TESTER)?;
+    small_tree(ctx, "hg")?;
+    s.mkdirs("hg/sub/.hg/store", 0o755, TESTER)?;
+    small_tree(ctx, "svn")?;
+    s.mkdir("svn/.svn", 0o755, TESTER)?;
+    s.write_file("svn/.svn/wc.db", b"", 0o644, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let cases = [
+        ("gitdir", "/tmp/gitdir/sub/.git"),
+        ("worktree", "/tmp/worktree/sub/deeper/.git"),
+        ("gitlink", "/tmp/gitlink/.git"),
+        ("hg", "/tmp/hg/sub/.hg"),
+        ("svn", "/tmp/svn/.svn"),
+    ];
+    let mut runs = Vec::new();
+    for (rel, _) in cases {
+        runs.push(delete(ctx, &[], rel)?);
+    }
+    let verdict = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;
+    for (run, (_, at)) in runs.iter().zip(cases) {
+        run.expect_code(1)?;
+        let line = outcome(run)?;
+        let want = format!("0 skip contains_checkout \"{at}\" -- ");
+        ensure!(
+            line.starts_with(&want),
+            "expected {want:?}..., got {line:?}"
+        );
+        ensure!(
+            run.events.is_empty(),
+            "a refused candidate saw unlink calls: {:?}",
+            run.events
+        );
+    }
+    ensure!(
+        exists(&ctx.scratch.path("bystander/kept")),
+        "the .git symlink's target went"
+    );
+    verdict.assert_clean()
+}
+
 /// AC #5: a tester-owned directory with mode 000 inside the candidate
 /// cannot be listed by tester (no `CAP_DAC_OVERRIDE`): the candidate is
 /// ineligible (`unreadable`, fail closed), never treated as empty.

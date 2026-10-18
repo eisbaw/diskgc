@@ -20,12 +20,14 @@
 //! order: a mount inside it by `mountinfo` (`contains_mount`, before
 //! anything looks inside), the source's own `where` (a candidate at all?),
 //! another filesystem than `PATH`'s (`other_fs`), a keep marker in any
-//! directory from the root down to it (`kept`), the engine's eligibility
+//! directory from the root down to it (`kept`), a directory on the way
+//! below the root named like a checkout's metadata (`contains_checkout`,
+//! by name only: `proj/.git/objects`), the engine's eligibility
 //! walk (ownership of every entry, keep markers, sockets and FIFOs,
-//! special content, the entry budget, fail closed), the identity found,
-//! the idle requirement on the newest change in the tree, and the in-use
-//! check. Read-only: no lock, no delete, so a `flock`ed candidate
-//! (`locked`) cannot be told.
+//! special content, VCS checkouts, the entry budget, fail closed), the
+//! identity found, the idle requirement on the newest change in the tree,
+//! and the in-use check. Read-only: no lock, no delete, so a `flock`ed
+//! candidate (`locked`) cannot be told.
 //!
 //! Fusing discovery and judgement is a dry-run shape: a reclaim needs the
 //! candidate's `flock`, the walk, a fresh in-use check and the delete
@@ -41,7 +43,7 @@ use super::{Find, PRIVATE_TMP_PREFIX};
 use crate::cargo_target::Stop;
 use crate::engine::{
     self, Candidate, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Rules, Skip, WalkStop,
-    is_network_fs,
+    checkout_metadata_below, is_network_fs,
 };
 use crate::host::{
     Access, Base, Dev, DevIno, DirListing, Errno, FileType, Host, MonoTime, Stat, Timestamp,
@@ -220,6 +222,7 @@ fn plan_into<H: Host>(
         let active: Vec<usize> = (0..find.patterns.len()).collect();
         let mut walk = Walk {
             host,
+            root,
             find,
             mounts: &mounts,
             judge: &mut judge,
@@ -267,6 +270,8 @@ fn type_matches(wanted: EntryType, found: FileType) -> bool {
 /// The walk of one root.
 struct Walk<'a, 'r, H: Host> {
     host: &'a H,
+    /// The root being walked (the path rules look below it).
+    root: &'a Path,
     find: &'a Find,
     mounts: &'a [PathBuf],
     judge: &'a mut Judge<'r>,
@@ -402,6 +407,8 @@ impl<H: Host> Walk<'_, '_, H> {
                 // this root's to find there.
                 Err(_) => continue,
             };
+            // A checkout's metadata is still searched, so what is found
+            // in it is reported (`contains_checkout`), never just missing.
             self.visit(&child, &at, level + 1, &deeper, kept)?;
         }
         Ok(())
@@ -598,6 +605,15 @@ impl<H: Host> Walk<'_, '_, H> {
                 Reason::Kept,
                 marker,
                 "a keep marker between the root and the candidate".to_owned(),
+            );
+        }
+        if let Some(metadata) = checkout_metadata_below(self.root, at) {
+            return skip(
+                Reason::ContainsCheckout,
+                &metadata,
+                "inside a version-control checkout's metadata (a directory on the way below the \
+                 root): deleting part of it can destroy the repository"
+                    .to_owned(),
             );
         }
         let candidate = Candidate::new(dir, at).expect("a candidate's path ends in its name");

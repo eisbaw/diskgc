@@ -327,6 +327,25 @@ fn every_entry_but_the_lock_files_goes_fingerprints_first() {
     assert!(last_flock < first_unlink);
 }
 
+/// task-71: the Cargo kind is exempt from `contains_checkout`: a VCS
+/// checkout a build script cloned into `build/<pkg>/out/` (`.git`, `.hg`,
+/// `.svn`) is reclaimed with the rest of the profile directory.
+#[test]
+fn a_vcs_checkout_a_build_script_cloned_is_reclaimed_with_the_target() {
+    let debug = "{.cargo-lock: {}, .cargo-build-lock: {}, .cargo-artifact-lock: {}, \
+        .fingerprint: {p-1: {bin-p: {}}}, build: {p-2: {out: {vendor: {.git: {HEAD: {}}, \
+        hg: {.hg: {store: {}}}, svn: {.svn: {wc.db: {}}}}}}}, deps: {p-1: {size: 1M}}, p: {}}";
+    let host = host(&yaml(debug, None, ""));
+    let locks = lock_files(&host);
+    let done = reclaimed(&host);
+    assert_eq!(done.end, ReclaimEnd::Complete, "{done:?}");
+    assert_invariants(&host, &locks);
+    for gone in [".git", "hg/.hg", "svn/.svn"] {
+        let path = format!("{TARGET}/debug/build/p-2/out/vendor/{gone}");
+        assert!(!exists(&host, &path), "{path} left");
+    }
+}
+
 /// The per-unit layout's fingerprints are `build/<package>/<hash>/
 /// fingerprint`: every one of them goes first, each split off the record
 /// of `build/` (deleted below its unit directory), then the other entries,

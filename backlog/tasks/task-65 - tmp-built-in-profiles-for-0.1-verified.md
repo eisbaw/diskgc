@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-18 19:55'
 labels:
   - wave-2
   - profiles
@@ -20,7 +20,7 @@ references:
 Why: 0.1 ships "the verified /tmp and Cargo built-ins" (PRD Scope, Releases), for the /tmp laptop owner (task-22). Pulled out of task-39: the verified /tmp subset only, all with the plain delete action.
 
 Profiles (names from docs/reference.md, Built-in profile library):
-- pytest-tmp: pytest-of-* in /tmp, /var/tmp, and one level down (nix-shell / mktemp dirs)
+- pytest-tmp: one candidate per pytest test dir, pytest-of-*/pytest-*/* in /tmp, /var/tmp, and the same one level down (nix-shell.* / tmp.* dirs); type dir, so the *current symlinks, plain files in a session dir, the session dirs and pytest-of-<user> are never candidates (task-71)
 - nix-shell-rc: /tmp/nix-shell-*-*, /tmp/nix-develop-*-* (rc dirs left by every shell start)
 - nix-shell-tmpdir: /tmp/nix-shell.* (a shell's TMPDIR)
 - mktemp-dir: /tmp/tmp.*
@@ -44,6 +44,12 @@ Stays in task-39: claude-code-tmp, chromium-tmp, playwright-tmp, node-compile-ca
 
 <!-- SECTION:NOTES:BEGIN -->
 From task-68: open question, unchecked. The dry run found every nix-shell rc dir (/tmp/nix-shell-*-*, /tmp/nix-develop-*-*) eligible: 65,458 judged, no in_use, though live shells were running on the laptop. Nothing has them open and no environment names them, so the in-use check cannot see a live shell's rc dir. Is deleting a live nix shell's rc dir harmless (read once at startup?) or does a live shell re-read it? Check before nix-shell-rc ships (this task's AC #4 covers TMPDIR dirs, not rc dirs).
+
+From task-71 D2 (Mark, 2026-10-18): pytest-tmp takes one pytest session per candidate (paths pytest-of-*/pytest-*, nix-shell.*/pytest-of-*/pytest-*, tmp.*/pytest-of-*/pytest-*; type dir), not the whole pytest-of-<user>: one session where a test ran git init (contains_checkout) no longer keeps the others. pytest's pytest-current symlink is never a candidate; pytest-of-<user> itself is left. reference.md (Profiles example, Built-in profile library row and note) and fs_kind/spike-profiles.yaml carry it; ship the built-in with these patterns (the name is not yet released, so no rename is needed). Dry run here: numbers in task-71's notes.
+
+From task-71 round 3 (Mark, 2026-10-18): pytest-tmp is one candidate per TEST DIR (pytest-of-*/pytest-*/*, plus nix-shell.*/ and tmp.*/ one level down; type dir), superseding the per-session note above. The checkout guard stays intact; only test dirs that ran git init are kept. mped measured the per-session cost here: 1,559 of 4,670 sessions held a .git, about 21 GiB, mostly whole suites where a few tests ran git init. Open items for when the profile ships:
+1. Check that pytest tolerates a test dir disappearing from a live session (or rely on in_use / an idle filter in the tier: a live session's test dirs are usually recent and often open).
+2. (mped N4) pytest writes a .lock file holding its PID in a live numbered session dir; consider it as an in-use hint for the test dirs below it (today it is only a plain file in the session dir, never a candidate and not read).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

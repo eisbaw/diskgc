@@ -44,7 +44,7 @@ Unit {
 }
 ```
 
-- **Granularity:** one unit per candidate (one `pytest-of-*` dir, one Cargo
+- **Granularity:** one unit per candidate (one pytest test dir, one Cargo
   target, one top-level `/tmp` entry). Small candidates (below 64 MiB) are
   merged per (profile set, parent directory, name family) into one
   **bucket**, so 98,000 tiny `nix-shell-*-*` rc dirs become a handful of

@@ -70,6 +70,68 @@ Immediately before acting, diskgc walks the candidate's whole tree
   directory may remove. Content that a `command` profile would clean (e.g. a
   Go cache inside a deleted `/tmp` directory) is *not* protected by
   nesting; protect it with `protect:` or `!profile:` if it matters.
+- **No source checkout** (`contains_checkout`), for every candidate
+  except `cargo-target`'s: kind `fs` with `delete`, and command actions
+  too, until a real case needs an exception (Mark, 2026-10-18:
+  over-protecting trusted code is the safe default). No entry anywhere in
+  the candidate, the candidate itself included, is named `.git`, `.hg` or
+  `.svn`, whatever its type. That covers Git's directory and the `.git`
+  *file* of a worktree, a submodule or a `--separate-git-dir` checkout,
+  Mercurial's and Subversion's directories, and a symlink of one of those
+  names (never followed: it counts as a checkout, which errs on the side
+  of keeping). A checkout may hold uncommitted work, which no profile can
+  tell from cache: task-68's dry run of a marker-file profile
+  (`cmake-build`) found, as its largest candidate, an in-source build in a
+  Git checkout with uncommitted changes. Decided by Mark, 2026-10-18
+  (task-71, `.hg` and `.svn` the same day): it only adds safety. A
+  candidate inside a checkout's working tree (a project's `build/`
+  directory) is not affected: only what lies in the candidate counts,
+  plus the path rule below. The cost is a name compare per entry the walk
+  already reads; no extra system call. There is no opt-out: no profile,
+  tier, `protect` entry or flag lets a candidate holding a checkout be
+  deleted.
+  - **Inside a checkout's metadata, by path** (Mark, 2026-10-18): a
+    candidate whose path has a name `.git`, `.hg` or `.svn` between its
+    profile root and itself is `contains_checkout` too: a broad pattern
+    under a project root finding `proj/.git/objects` or `proj/.hg/store`,
+    whose own trees hold no marker; deleting part of a repository's
+    metadata can destroy it. A path-only check of the names strictly
+    between the root and the candidate (`checkout_metadata_below` in the
+    engine): no system call, fail closed. The root's own path is not
+    checked: a root that a tier, `--roots` or a profile names inside a
+    checkout's metadata is taken as meant.
+  - **Exempt: `cargo-target`.** The Cargo kind is subject to neither
+    check: its walk of a profile directory's entries is the engine's walk
+    without the marker check (crate-private; only the Cargo kind calls
+    it), and Cargo discovery has no path check. Build scripts
+    legitimately put checkouts in a target (a vendored source cloned into
+    `build/<pkg>/out/`), the target is Cargo's own output, and its reclaim
+    protocol (below) is the one that decides. A Cargo target *inside* a
+    plain-delete candidate is refused anyway (`contains_special`).
+  - **Kept too (the accepted cost):** whatever holds a clone is never
+    deleted by a plain delete, and that can be much of what a profile
+    finds. Seen on the development machine: agents' scratch clones in
+    `/tmp` (review and fix checkouts), which held more than all the
+    eligible `/tmp` entries together in the part of `/tmp` a dry run
+    judged; pytest test dirs where a test ran `git init`, each kept whole
+    (`pytest-tmp` takes one test dir per candidate,
+    [reference.md](reference.md#built-in-profile-library)), so a test
+    suite that runs `git init` in many tests keeps that much, run after
+    run, until the dirs are removed some other way; CMake build
+    directories that fetch dependencies (FetchContent's
+    `_deps/<name>-src/.git`, CPM's `.cpm-cache/<name>/<hash>/.git`).
+    Inferred, not measured: Cargo's git checkouts
+    (`~/.cargo/git/checkouts/`, clones with a `.git` directory); temporary
+    clones of pip and npm building a VCS dependency.
+  - **Not recognised (limits):** bare repositories (no entry of those
+    names: a `foo.git/` holding `HEAD`, `objects/` and `refs/`), so Go's
+    module cache (`pkg/mod/cache/vcs/<hash>/`, bare repositories, seen on
+    the development machine) stays deletable, and so does a user's bare
+    repository holding unpushed commits; other version-control systems,
+    for example `.bzr`, `_darcs`, `CVS`, Sapling's `.sl`, `.pijul`,
+    Fossil's `.fslckout` and `_FOSSIL_`, and a Jujutsu `.jj` without a
+    colocated `.git`; a name of another case (`.GIT`) on a
+    case-insensitive filesystem.
 - **No sockets or FIFOs** inside (`contains_ipc`): those belong to running
   programs (agents, X11, tmux, ssh). Which ones count is a policy with two
   values: *any* socket or FIFO keeps its candidate (the default: the walk
@@ -122,6 +184,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
   soon as a listing would exceed what is left of that budget, so neither
   the record nor a listing of a directory that someone fills faster than it
   is read can exhaust memory.
+
+The walk stops at the first refusal, in walk order (each directory's
+names sorted), so a candidate reports one reason even when others also
+hold; which one is reported never changes whether it is deleted.
 
 The walk records every entry's identity, (device, inode), owner, type and
 birth time (where the filesystem reports one), for the in-use check and
@@ -554,20 +620,29 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   Inferred, not measured: the other commands that compile (`run`, `bench`,
   `fix`, `rustc`, `rustdoc`, `install` and `package` building in a target)
   go through the same locked layout (Cargo's `BuildRunner`, which takes the
-  locks before it prepares the profile directories). Untested: `fix`,
-  `bench`, `rustc`, `rustdoc`, `install`, `package`.
+  locks before it prepares the profile directories). Untested: `run`
+  (never started during a deletion; only paused before its binary),
+  `fix`, `bench`, `rustc`, `rustdoc`, `install`, `package`.
 
   **The exception: `cargo clean`** without `-p` (the whole target, or a
   whole profile directory with `--profile dev`) takes no lock and deletes
   (measured by race test 2's clean case on the three toolchains: it runs to
   its end while diskgc holds every lock, lock files included; `--release`
-  and other profiles are inferred to do the same). That is
-  safe for diskgc: both only delete, and no new build output is at risk; a
-  clean during a reclaim is one event, and diskgc's next identity-checked
-  unlink finds nothing (`ENOENT`): the target is skipped as `changed`,
-  nothing more is unlinked. Its directory descriptors are of removed
-  directories, which a later build cannot write into. `cargo clean -p`
-  waits for the locks like a build.
+  and other profiles are inferred to do the same). That is safe for
+  diskgc: both only delete, and no new build output is at risk. In the
+  order tested (the clean finishes while diskgc is paused inside a part),
+  diskgc's next identity-checked unlink finds nothing (`ENOENT`): the
+  target is skipped as `changed` and nothing more is unlinked; its
+  directory descriptors are then of removed directories, which a later
+  build cannot write into. When the two overlap, diskgc may still unlink
+  a few objects it recorded before the clean removes them, and the clean
+  may itself fail on an object diskgc removed first (`ENOENT`); within the
+  check-to-delete and multi-event policy that is harmless, as both sides
+  only delete what both may delete. A clean that lands between two parts
+  meets the lock re-listing first (step 3): the lock files are gone, so
+  the target is `changed` before any unlink (follows from the order of
+  step 3; not tested). `cargo clean -p` waits for the locks like a
+  build.
 - **Lock sets by command** (measured 2026-10-18 in the containers on the
   three pinned toolchains): `cargo check` on a fresh target of 1.99.1 and
   the nightly creates only `.cargo-build-lock` and `.cargo-lock`; `build`,
@@ -822,8 +897,10 @@ The step that deletes (`cargo_target::reclaim` in the core).
    as `changed` (race test 2). A visible Cargo waiting there is also seen
    by the next part's in-use check (`in_use`), which is how diskgc stops
    for a Cargo of the same lock set. The exception is a `cargo clean`
-   without `-p`, which deletes without any lock: it only removes, and
-   diskgc then stops as `changed` at its next unlink (Lock files). A
+   without `-p`, which deletes without any lock: it only removes. If it
+   lands while diskgc deletes a part, diskgc stops as `changed` at its
+   next unlink; if it lands between two parts, the listing of the lock
+   files before the next part finds them gone first (Lock files). A
    future Cargo that wrote into the profile before taking `.cargo-lock`
    would break the invariant; race test 2, which runs on every toolchain
    in the list, fails for any such write still there while the Cargo

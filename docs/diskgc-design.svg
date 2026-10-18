@@ -66,8 +66,8 @@
   <text x="60" y="394" class="h3">A profile (built-in YAML, or yours)</text>
   <text x="60" y="420" class="mono code">name:  pytest-tmp</text>
   <text x="60" y="440" class="mono code">find:  roots /tmp, /var/tmp</text>
-  <text x="60" y="458" class="mono code">       paths pytest-of-*,</text>
-  <text x="60" y="476" class="mono code">             nix-shell.*/pytest-of-*</text>
+  <text x="60" y="458" class="mono code">       paths pytest-of-*/pytest-*/*,</text>
+  <text x="60" y="476" class="mono code">       nix-shell.*/pytest-of-*/pytest-*/*</text>
   <text x="60" y="496" class="mono code">where: idle_for · has / has_not</text>
   <text x="60" y="516" class="mono code">action: delete | command | kind</text>
   <text x="60" y="536" class="mono code">kind:  fs | cargo-target | docker-*</text>

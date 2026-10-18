@@ -200,6 +200,49 @@ impl Watched {
         Ok(Self { files })
     }
 
+    /// Watches the `.cargo-*lock*` files in `dir` that exist now, added to
+    /// these: a directory or file removed meanwhile (`ENOENT`) adds
+    /// nothing, any other error fails. The files already watched keep
+    /// their ids, so their locks still show after they are removed (a lock
+    /// lives on the open file, not on the name).
+    pub fn and_present_in(mut self, dir: &Path) -> Result<Self, String> {
+        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        let listing = match std::fs::read_dir(dir) {
+            Ok(listing) => listing,
+            Err(e) if gone(&e) => return Ok(self),
+            Err(e) => return Err(format!("read_dir {}: {e}", dir.display())),
+        };
+        for entry in listing {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if gone(&e) => return Ok(self),
+                Err(e) => return Err(format!("read_dir {}: {e}", dir.display())),
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with(".cargo-") && name.contains("lock")) {
+                continue;
+            }
+            let path = entry.path();
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) => {
+                    let dev = meta.dev();
+                    let id = FileId {
+                        major: rustix::fs::major(dev),
+                        minor: rustix::fs::minor(dev),
+                        ino: meta.ino(),
+                    };
+                    if !self.files.iter().any(|(_, known)| *known == id) {
+                        self.files.push((path, id));
+                    }
+                }
+                Err(e) if gone(&e) => {}
+                Err(e) => return Err(format!("lstat {}: {e}", path.display())),
+            }
+        }
+        Ok(self)
+    }
+
     /// What `pid` does with the watched files according to `locks`.
     pub fn usage(&self, locks: &[Lock], pid: u32) -> Usage {
         let mut usage = Usage::default();

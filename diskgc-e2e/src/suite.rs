@@ -280,6 +280,12 @@ pub static TESTS: &[Test] = &[
         run: engine_suite::engine_skips_a_nested_keep_marker_or_cargo_target,
     },
     Test {
+        name: "engine_skips_a_source_checkout",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_skips_a_source_checkout,
+    },
+    Test {
         name: "engine_fails_closed_on_a_mode_000_directory",
         tier: Tier::Fast,
         expect: Expect::Pass,

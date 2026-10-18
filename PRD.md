@@ -86,8 +86,9 @@ kinds), and where those guarantees end. The protocols are in
   as its working directory, or (heuristically) named in its initial
   environment; not if the candidate directory is `flock`ed by someone
   else (a locked *file* inside is only caught as an open file of a visible
-  process), nor if it contains a mount, a `.diskgc-keep` file or a Cargo
-  target, nor (by default) a socket or FIFO; a configurable policy may
+  process), nor if it contains a mount, a `.diskgc-keep` file, a Cargo
+  target or (except for the Cargo kind) a version-control checkout, nor
+  (by default) a socket or FIFO; a configurable policy may
   block only live ones instead (a FIFO some visible process holds open, a
   socket bound in diskgc's network namespace), so stale test fixtures do
   not block forever.
@@ -238,7 +239,7 @@ whatever the profile.
 | Roots | Fixed, or `roots: required` supplied by a tier, `--roots` or a `protect` entry | A selection or protection can never be re-pointed or left unbound. |
 | Built-in profiles | YAML data with examples, golden sets and `verified_with`; a changed matching set means a new name | Narrowing is unsafe under negation and protection, so meaning is immutable per name. |
 | Safety | Code, always on; eligibility walk, ownership of every entry, in-use and identity checks at deletion time | A wrong profile or a stale index costs at most unused own files or speed. |
-| Nesting | Fixed structural recognisers (Cargo targets, `.diskgc-keep`), independent of the profile library | Editing a profile never changes what a parent's plain delete may remove. |
+| Nesting | Fixed structural recognisers (Cargo targets, `.diskgc-keep`, version-control checkouts), independent of the profile library | Editing a profile never changes what a parent's plain delete may remove. |
 | Gather vs act | Throttled background tally builds an index; reclaim walk orders by it, discovers per tier, checks live | No survey when the disk is full; policy order holds even with a stale index. |
 | Order in a tier | `oldest` default; opt-in `best-fit` | LRU by default; one sizable step when asked. |
 | Deadlines | Cooperative, with reported overruns | Blocking kernel operations cannot be interrupted; honesty over a false promise. |

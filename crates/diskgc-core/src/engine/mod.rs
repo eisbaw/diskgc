@@ -8,7 +8,9 @@
 //! 1. [`walk`]: the eligibility walk. It reads the candidate's whole tree
 //!    fd-relative and either refuses the candidate with a [`Skip`] reason or
 //!    returns a [`WalkRecord`]: every entry's name, [`Identity`] and
-//!    allocated size.
+//!    allocated size. (The Cargo kind walks its profile directories'
+//!    entries with `walk_cargo_profile_entry`, the same walk without the
+//!    refusal of VCS checkouts.)
 //! 2. [`delete`]: deletes exactly the entries of the record, depth first.
 //!    Every directory is reopened relative to its parent by its recorded
 //!    name and matched against its recorded identity; every `unlinkat` comes
@@ -51,10 +53,11 @@ use crate::host::{DevIno, FileType, Host, MonoTime, Stat, Timestamp};
 use crate::resolve::Resolved;
 
 pub use delete::{DeleteOptions, Deletion, End, delete};
-pub(crate) use walk::host_failure;
 pub use walk::{
-    CACHEDIR_TAG, CARGO_LOCK_NAMES, KEEP_MARKER, Rules, WalkStop, is_cargo_lock_name, walk,
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, KEEP_MARKER, Rules, WalkStop,
+    checkout_metadata_below, is_cargo_lock_name, is_checkout_marker, walk,
 };
+pub(crate) use walk::{host_failure, walk_cargo_profile_entry};
 
 /// Frames below the candidate that hold an fd at the same time (see the
 /// module docs). A frame's fd is closed before the next one is opened, so
@@ -408,6 +411,11 @@ pub enum Reason {
     /// structural recogniser), or a device node or an object of unknown
     /// type.
     ContainsSpecial,
+    /// A version-control checkout is inside ([`CHECKOUT_MARKERS`]
+    /// anywhere, the candidate itself included), or the candidate lies
+    /// inside a checkout's metadata, found by its path below the root
+    /// ([`checkout_metadata_below`]). Every candidate but the Cargo kind's.
+    ContainsCheckout,
     /// A socket or FIFO is inside (with [`Rules::block_ipc`]).
     ContainsIpc,
     /// A mount is inside, or the candidate is one.
@@ -450,12 +458,13 @@ pub enum Reason {
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 18] = [
+    pub const ALL: [Reason; 19] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
         Reason::Kept,
         Reason::ContainsSpecial,
+        Reason::ContainsCheckout,
         Reason::ContainsIpc,
         Reason::ContainsMount,
         Reason::UnsupportedFs,
@@ -479,6 +488,7 @@ impl Reason {
             Self::Unreadable => "unreadable",
             Self::Kept => "kept",
             Self::ContainsSpecial => "contains_special",
+            Self::ContainsCheckout => "contains_checkout",
             Self::ContainsIpc => "contains_ipc",
             Self::ContainsMount => "contains_mount",
             Self::UnsupportedFs => "unsupported_fs",
@@ -590,6 +600,36 @@ mod tests {
             "nfsd",
         ] {
             assert!(!is_network_fs(local), "{local}");
+        }
+    }
+
+    /// The path rule looks at the names strictly between the root and the
+    /// candidate: not the root's own path, not the candidate's own name
+    /// (the walk refuses that), only exact marker names.
+    #[test]
+    fn checkout_metadata_is_found_between_the_root_and_the_candidate() {
+        let below = |root: &str, at: &str| {
+            checkout_metadata_below(Path::new(root), Path::new(at)).map(|p| p.display().to_string())
+        };
+        assert_eq!(
+            below("/r", "/r/proj/.git/objects").as_deref(),
+            Some("/r/proj/.git")
+        );
+        assert_eq!(
+            below("/r", "/r/a/.hg/store/data").as_deref(),
+            Some("/r/a/.hg")
+        );
+        assert_eq!(below("/r", "/r/.svn/x").as_deref(), Some("/r/.svn"));
+        assert_eq!(below("/r", "/r/.git/a/.hg/b").as_deref(), Some("/r/.git"));
+        for (root, at) in [
+            ("/r", "/r/proj/.git"),
+            ("/r/.git", "/r/.git/lfs/tmp"),
+            ("/r", "/r/proj/.github/workflows"),
+            ("/r", "/r/proj/build/out"),
+            ("/r", "/other/.git/x"),
+            ("/r", "/r"),
+        ] {
+            assert_eq!(below(root, at), None, "{root} {at}");
         }
     }
 

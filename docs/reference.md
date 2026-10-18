@@ -208,7 +208,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable"}],
+  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -401,15 +401,15 @@ profiles apply and when.
 ```yaml
 - name: pytest-tmp
   category: test
-  description: pytest temp dirs in /tmp, also inside nix-shell and mktemp dirs
+  description: pytest test dirs in /tmp, also inside nix-shell and mktemp dirs
   find:                              # makes this a *source* profile
     roots: [/tmp, /var/tmp]
-    paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"]
+    paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"]
     type: dir
   action: delete
   examples:                          # checked by `diskgc profiles test` and CI
-    match:    [/tmp/pytest-of-mark, /tmp/nix-shell.AbC123/pytest-of-mark]
-    no_match: [/tmp/pytest-of-mark/pytest-3, /home/mark/pytest-of-mark]
+    match:    [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0]
+    no_match: [/tmp/pytest-of-mark/pytest-3, /home/mark/pytest-of-mark/pytest-3/test_x0]
   verified_with: pytest 8.3          # built-in profiles only
 ```
 
@@ -634,7 +634,7 @@ v1 *target*; until verified it is listed as planned, not shipped.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
-| test | `pytest-tmp` | `pytest-of-*` in `/tmp`, `/var/tmp`, and one level down (nix-shell / mktemp dirs) | `delete` |
+| test | `pytest-tmp` | pytest's test dirs `pytest-of-*/pytest-*/*` in `/tmp`, `/var/tmp`, and one level down (`nix-shell.*/pytest-of-*/pytest-*/*`, `tmp.*/...`); one candidate per test dir (below the list) | `delete` |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-shell-rc` | `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start) | `delete` |
 | nix | `nix-shell-tmpdir` | `/tmp/nix-shell.*` (a shell's `TMPDIR`) | `delete` |
@@ -648,7 +648,7 @@ v1 *target*; until verified it is listed as planned, not shipped.
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
 | python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | jest's cache dir; `playwright*` in `/tmp` and nix-shell temp dirs; `node-compile-cache` in `/tmp` and nix-shell temp dirs | `delete` |
-| c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; roots required) | `delete` |
+| c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; one holding a checkout is refused anyway, see [`contains_checkout`](safety.md#the-eligibility-walk-mandatory-per-candidate); roots required) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
@@ -658,6 +658,17 @@ v1 *target*; until verified it is listed as planned, not shipped.
 | generic | `mktemp-dir` | `/tmp/tmp.*` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
 
+- `pytest-tmp` takes one test directory per candidate
+  (`pytest-of-<user>/pytest-<N>/<test>`: what pytest's `tmp_path` made for
+  one test), not a session or the whole `pytest-of-<user>`: a test dir
+  that cannot go (one where the test ran `git init` is
+  `contains_checkout`, one in use `in_use`) keeps only itself. Only
+  directories are candidates (`type: dir`): pytest's `*current` symlinks
+  (`pytest-current` next to the sessions, `<test>current` next to the
+  test dirs) and plain files directly in a session dir never are. The
+  session dirs and `pytest-of-<user>` itself are left alone, also once
+  empty (`tmp-entry` may take them). pytest's `garbage-*` directories (an
+  interrupted cleanup of its own) are not matched.
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs
   a server-aware protocol first.

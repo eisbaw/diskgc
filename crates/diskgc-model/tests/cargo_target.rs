@@ -593,6 +593,22 @@ fn walk_refusals_and_mounts_refuse_the_target() {
     assert_eq!(d.refused[0].reason, Reason::ContainsMount, "{d:#?}");
 }
 
+/// task-71: the `cargo-target` kind is exempt from `contains_checkout`.
+/// Build scripts legitimately clone sources into a target (here
+/// `build/<pkg>/out/vendor/` holding `.git`, a `.git` file of a worktree,
+/// `.hg` and `.svn`), and the target stays eligible: the guard is for plain
+/// deletes only, and the Cargo kind's reclaim protocol decides.
+#[test]
+fn a_vcs_checkout_inside_a_target_leaves_it_eligible() {
+    let model = model(
+        "  /tmp/w/p/target/debug/build/x/out/vendor:\n      .git: {HEAD: {}, objects: {.: {}}}\n      \
+         wt: {.git: {}}\n      hg: {.hg: {store: {.: {}}}}\n      svn: {.svn: {wc.db: {}}}",
+        "",
+    );
+    let e = only_target(&model).unwrap_or_else(|s| panic!("{s}"));
+    assert!(e.bytes >= 2 << 20, "{e:?}");
+}
+
 // ---- In use (AC #3): each rule on its own ----
 
 /// A process line with the readable defaults a model process needs (an

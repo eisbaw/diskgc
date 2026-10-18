@@ -17,9 +17,12 @@ use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
 
-/// The user profiles the tests select from.
+/// The user profiles the tests select from. `pytest-of-dir` is a stand-in
+/// with whole `pytest-of-*` dirs as candidates (simple fixtures), not the
+/// library's `pytest-tmp` (one test dir per candidate, tested against the
+/// spike's profile file below).
 const PROFILES: &str = r#"
-- name: pytest-tmp
+- name: pytest-of-dir
   find:
     roots: [/tmp, /var/tmp]
     paths: ["pytest-of-*", "nix-shell.*/pytest-of-*", "tmp.*/pytest-of-*"]
@@ -53,6 +56,10 @@ const PROFILES: &str = r#"
   find: {roots: required, paths: ["*"], type: any}
   action: delete
   examples: {match: [/srv/x]}
+- name: deep-dirs
+  find: {roots: required, paths: ["*/*/*"], type: dir}
+  action: delete
+  examples: {match: [/srv/a/b/c]}
 "#;
 
 fn library() -> Library {
@@ -142,7 +149,7 @@ fn nothing_locked_or_deleted(host: &ModelHost) {
 /// levels down, not the candidate's own insides, and not `/home`.
 /// Eligible first, oldest newest-change first.
 #[test]
-fn pytest_tmp_plans_exactly_what_its_patterns_find() {
+fn pytest_of_dir_plans_exactly_what_its_patterns_find() {
     let host = host(&yaml(
         r#"  /tmp/pytest-of-mark:
     .: {mtime: 2026-10-10T00:00:00Z}
@@ -159,7 +166,7 @@ fn pytest_tmp_plans_exactly_what_its_patterns_find() {
   /home/mark/pytest-of-mark: {.: {}}
 "#,
     ));
-    let report = dry_run(&host, &request("profile:pytest-tmp", &[], "/tmp"));
+    let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
     assert_eq!(report.status, Status::DryRun, "{report:#?}");
     assert_eq!(report.exit_code(), 0);
     let mut found = plan(&report);
@@ -211,7 +218,7 @@ processes:
     let host = host(&model);
     let report = dry_run(
         &host,
-        &request("profile:pytest-tmp && filter:idle-3d", &[], "/tmp"),
+        &request("profile:pytest-of-dir && filter:idle-3d", &[], "/tmp"),
     );
     for (candidate, want) in [
         ("/tmp/pytest-of-ok", None),
@@ -355,7 +362,7 @@ fn a_reclaiming_ensure_over_fs_candidates_is_refused_before_anything() {
         "  /tmp/pytest-of-mark: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 900M}}\n  \
          /run/diskgc/lock: {uid: 0, gid: 0}\n",
     ));
-    let mut req = request("profile:pytest-tmp", &[], "/tmp");
+    let mut req = request("profile:pytest-of-dir", &[], "/tmp");
     req.min_free = parse_size("200M").expect("a size");
     let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
     let calls_before = host.trace().len();
@@ -384,7 +391,7 @@ fn has_filters_in_a_term_are_refused_not_ignored() {
     for (expr, needle) in [
         ("profile:tmp-entry && filter:has-tag", "`filter:has-tag`"),
         ("profile:tmp-entry && !filter:idle-1d", "`!filter:idle-1d`"),
-        ("profile:tmp-entry || profile:pytest-tmp", "a union"),
+        ("profile:tmp-entry || profile:pytest-of-dir", "a union"),
     ] {
         let error = Tier::select(expr, &library, None, 1000).expect_err(expr);
         assert!(
@@ -409,7 +416,7 @@ fn a_dry_run_reuses_a_process_scan_across_candidates() {
              path: /tmp/pytest-of-c, when: before}}, advance: {advance}}}\n",
             process(7, "/", "")
         )));
-        let report = dry_run(&host, &request("profile:pytest-tmp", &[], "/tmp"));
+        let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
         assert_eq!(
             report.plan.iter().filter(|p| p.reason.is_none()).count(),
             3,
@@ -443,7 +450,7 @@ fn a_blocking_scan_is_not_reused_past_the_reuse_limit() {
          advance: 5s}}\n",
         process(7, "/", "")
     )));
-    let report = dry_run(&host, &request("profile:pytest-tmp", &[], "/tmp"));
+    let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
     assert!(host.unfired_events().is_empty());
     assert_eq!(reason_of(&report, "/tmp/pytest-of-a"), Some(Some("in_use")));
     assert_eq!(
@@ -563,9 +570,195 @@ fn discovery_stops_at_the_deadline_after_a_listing_and_between_statx_calls() {
         ),
     ] {
         let host = host(&yaml(&format!("{tree}events:\n  - {event}\n")));
-        let report = dry_run(&host, &request("profile:pytest-tmp", &[], "/tmp"));
+        let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
         assert!(host.unfired_events().is_empty(), "{event}");
         assert_eq!(report.status, Status::Deadline, "{event}: {report:#?}");
         assert_eq!(report.exit_code(), 124, "{event}");
     }
+}
+
+/// task-71 AC #2 (QA's `insrc2`): an in-source build inside a checkout,
+/// `.git` and `CMakeCache.txt` but no `CMakeLists.txt`, passes
+/// `cmake-build`'s own `where` and is still never eligible: the walk
+/// refuses it as `contains_checkout`, at the `.git`. An out-of-source build
+/// next to it stays eligible, so the refusal is the checkout's; it lies
+/// inside a checkout itself (`/home/mark/.git`), which does not count: only
+/// what is in the candidate does.
+#[test]
+fn an_in_source_build_in_a_checkout_is_never_eligible_for_cmake_build() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /home/mark/src/insrc2:\n    .: {at}\n    CMakeCache.txt: {at}\n    main.c: {at}\n    \
+         .git: {{.: {at}, HEAD: {at}, objects: {{.: {at}}}}}\n  /home/mark/src/build:\n    .: \
+         {at}\n    CMakeCache.txt: {at}\n  /home/mark/.git: {{HEAD: {at}}}\n"
+    )));
+    let report = dry_run(
+        &host,
+        &request("profile:cmake-build", &["/home/mark/src"], "/home/mark"),
+    );
+    assert_eq!(
+        plan(&report),
+        [
+            ("/home/mark/src/build".to_owned(), None),
+            (
+                "/home/mark/src/insrc2".to_owned(),
+                Some("contains_checkout")
+            ),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    assert_eq!(report.status, Status::DryRun);
+    nothing_locked_or_deleted(&host);
+}
+
+/// task-71: any entry named `.git`, `.hg` or `.svn`, at any depth the walk
+/// sees and of any type, refuses a plain-delete candidate as
+/// `contains_checkout`: a `/tmp` directory holding two Git trees (QA's
+/// tmp-entry case), a worktree's `.git` *file* deep inside, a `.git`
+/// symlink (never followed), Mercurial's and Subversion's directories.
+/// Names that only look alike (`.gitignore`, `.github`, `git`, `.hgrc`)
+/// are plain entries: that candidate stays eligible.
+#[test]
+fn a_checkout_marker_anywhere_in_a_plain_delete_candidate_is_contains_checkout() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/two-repos:\n    .: {at}\n    a: {{.: {at}, .git: {{.: {at}, HEAD: {at}}}}}\n    b: \
+         {{.: {at}, .git: {{.: {at}, HEAD: {at}}}}}\n  /tmp/worktree:\n    .: {at}\n    x: {{.: \
+         {at}, y: {{.: {at}, z: {{.: {at}, .git: {at}, f: {at}}}}}}}\n  /tmp/gitlink:\n    .: \
+         {at}\n    sub: {{.: {at}, .git: {{symlink: /tmp/elsewhere, mtime: \
+         2026-10-01T00:00:00Z}}}}\n  /tmp/hg:\n    .: {at}\n    r: {{.: {at}, .hg: {{.: {at}, \
+         store: {{.: {at}}}}}}}\n  /tmp/svn:\n    .: {at}\n    .svn: {{.: {at}, wc.db: {at}}}\n  \
+         /tmp/look-alike:\n    .: {at}\n    .gitignore: {at}\n    .github: {{.: {at}}}\n    \
+         git: {{.: {at}}}\n    .hgrc: {at}\n    .svnignore: {at}\n"
+    )));
+    let report = dry_run(&host, &request("profile:tmp-entry", &[], "/tmp"));
+    let mut found = plan(&report);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("/tmp/gitlink".to_owned(), Some("contains_checkout")),
+            ("/tmp/hg".to_owned(), Some("contains_checkout")),
+            ("/tmp/look-alike".to_owned(), None),
+            ("/tmp/svn".to_owned(), Some("contains_checkout")),
+            ("/tmp/two-repos".to_owned(), Some("contains_checkout")),
+            ("/tmp/worktree".to_owned(), Some("contains_checkout")),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    // The walk stops at the marker: one `statx` of it (to admit it), and
+    // no other call on it or below it (no open, no listing).
+    let marker = Path::new("/tmp/two-repos/a/.git");
+    let touched: Vec<_> = host
+        .trace()
+        .into_iter()
+        .filter(|c| c.path.as_deref().is_some_and(|p| p.starts_with(marker)))
+        .collect();
+    assert!(
+        matches!(touched.as_slice(), [only] if only.op == Op::Statx
+            && only.path.as_deref() == Some(marker)),
+        "expected exactly one statx of the marker: {touched:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// The spike's profile file (task-68; diskgc-core
+/// `fs_kind/spike-profiles.yaml`) as a library: what the real-machine dry
+/// runs use, so a test of its profiles tests the file itself.
+fn spike_library() -> Library {
+    let text = include_str!("../../diskgc-core/src/fs_kind/spike-profiles.yaml");
+    diskgc_core::config::parse(Path::new("spike-profiles.yaml"), text.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"))
+        .library
+}
+
+/// task-71 (Mark, 2026-10-18): `pytest-tmp` takes one pytest test dir
+/// per candidate (`pytest-of-<user>/pytest-<N>/<test>`). Of two sessions,
+/// the test dir where a test ran `git init` is `contains_checkout`, and its
+/// sibling test dirs in the same session are eligible, as are the other
+/// session's and one inside a nix-shell temp dir. The session dirs,
+/// `pytest-of-mark`, pytest's `*current` symlinks and a plain file in a
+/// session dir (pytest's `.lock`) are never candidates.
+#[test]
+fn pytest_tmp_takes_one_test_dir_per_candidate_so_a_checkout_keeps_only_its_test() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let link = |to: &str| format!("{{symlink: {to}, mtime: 2026-10-01T00:00:00Z}}");
+    let host = host(&yaml(&format!(
+        "  /tmp/pytest-of-mark:\n    .: {at}\n    pytest-1:\n      .: {at}\n      .lock: {at}\n      \
+         test_repo0: {{.: {at}, .git: {{.: {at}, HEAD: {at}}}, f: {at}}}\n      test_repocurrent: \
+         {}\n      test_other0: {{.: {at}, g: {at}}}\n    pytest-2: {{.: {at}, test_x0: {{.: {at}, \
+         h: {at}}}}}\n    pytest-current: {}\n  \
+         /tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0: {{.: {at}, i: {at}}}\n",
+        link("/tmp/pytest-of-mark/pytest-1/test_repo0"),
+        link("/tmp/pytest-of-mark/pytest-2"),
+    )));
+    let request = Request {
+        tier: Tier::select("profile:pytest-tmp", &spike_library(), None, 1000)
+            .unwrap_or_else(|e| panic!("{e}")),
+        ..request("profile:tmp-entry", &[], "/tmp")
+    };
+    let report = dry_run(&host, &request);
+    let mut found = plan(&report);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (
+                "/tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0".to_owned(),
+                None
+            ),
+            ("/tmp/pytest-of-mark/pytest-1/test_other0".to_owned(), None),
+            (
+                "/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(),
+                Some("contains_checkout")
+            ),
+            ("/tmp/pytest-of-mark/pytest-2/test_x0".to_owned(), None),
+            ("/var/tmp".to_owned(), Some("missing")),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// task-71 (Mark, 2026-10-18): a candidate that lies inside a checkout's
+/// metadata is refused by its path alone, as `contains_checkout`: a broad
+/// pattern under a project root finds `proj/.git/objects` and
+/// `proj/.hg/store`, whose own trees hold no marker. Look-alike names on
+/// the way (`.github`) and an ordinary build directory stay eligible.
+#[test]
+fn a_candidate_inside_a_checkouts_metadata_is_contains_checkout_by_its_path() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /home/mark/src/proj/.git/objects: {{.: {at}, ab: {{.: {at}, cdef: {at}}}}}\n  \
+         /home/mark/src/proj/.hg/store: {{.: {at}, data: {{.: {at}}}}}\n  \
+         /home/mark/src/proj/.github/workflows: {{.: {at}, ci.yml: {at}}}\n  \
+         /home/mark/src/proj/build/out: {{.: {at}, a.o: {at}}}\n"
+    )));
+    let report = dry_run(
+        &host,
+        &request("profile:deep-dirs", &["/home/mark/src"], "/home/mark"),
+    );
+    let mut found = plan(&report);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (
+                "/home/mark/src/proj/.git/objects".to_owned(),
+                Some("contains_checkout")
+            ),
+            ("/home/mark/src/proj/.github/workflows".to_owned(), None),
+            (
+                "/home/mark/src/proj/.hg/store".to_owned(),
+                Some("contains_checkout")
+            ),
+            ("/home/mark/src/proj/build/out".to_owned(), None),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    nothing_locked_or_deleted(&host);
 }
