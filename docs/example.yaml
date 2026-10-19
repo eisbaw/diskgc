@@ -1,0 +1,12 @@
+# Example policy. Adjust roots to the directories whose Cargo targets you
+# own. `diskgc check --config /absolute/path/to/example.yaml` validates it
+# without accessing those roots.
+version: 1
+ipc: block-any
+groups:
+  - name: stale
+    tiers:
+      - name: cargo-old
+        select: profile:cargo-target && filter:idle-30d
+        roots: [/home/example/src]
+        timeout: 10m

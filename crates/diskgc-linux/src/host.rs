@@ -139,40 +139,70 @@ impl LinuxHost {
     /// `/etc` entries, home-manager files); what the file says is
     /// validated, not where it lives. It is opened `O_PATH` first and its
     /// type checked on that fd before it is opened for reading
-    /// ([`Self::open_regular`]), so a FIFO or a device at the path is
+    /// (see [`read_config_file`]), so a FIFO or a device at the path is
     /// refused without being opened. Missing: `ENOENT` (or `ENOTDIR`), which
     /// the lookup treats as "not there".
     pub fn read_config_file(&self, path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
-        let subject = path.display().to_string();
-        if !path.is_absolute() {
-            return Err(HostError::invalid(
-                "open",
-                &subject,
-                "a configuration file path must be absolute",
-            ));
-        }
-        let fd = rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
-        let file = self.open_regular(
-            &LinuxFd(fd),
-            &subject,
-            "only a regular file is read as a configuration file",
-        )?;
-        let mut content = Vec::new();
-        std::fs::File::from(file)
-            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
-            .read_to_end(&mut content)
-            .map_err(|e| io_error("read", &subject, &e))?;
-        if content.len() > limit {
-            return Err(HostError::invalid(
-                "read",
-                &subject,
-                format!("larger than {limit} bytes: not read as a configuration file"),
-            ));
-        }
-        Ok(content)
+        read_config_file(path, limit)
     }
+}
 
+/// Read a configuration without constructing `LinuxHost`. `diskgc check`
+/// uses this in Nix build sandboxes where process inspection and a minimum
+/// kernel are irrelevant. The O_PATH/fstat/reopen sequence keeps FIFO and
+/// device files from being opened while still following packaged symlinks.
+pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
+    let subject = path.display().to_string();
+    if !path.is_absolute() {
+        return Err(HostError::invalid(
+            "open",
+            &subject,
+            "a configuration file path must be absolute",
+        ));
+    }
+    let fd = rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
+    let kind =
+        rustix::fs::fstat(&fd).map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
+    if FileType::from_mode(kind.st_mode) != FileType::Regular {
+        return Err(HostError::invalid(
+            "reopen",
+            &subject,
+            "not a regular file (only a regular file is read as a configuration file)",
+        ));
+    }
+    let fd_path = format!("{PROC}/self/fd/{}", fd.as_raw_fd());
+    let file = rustix::fs::open(
+        &*fd_path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
+    let opened =
+        rustix::fs::fstat(&file).map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
+    if opened.st_dev != kind.st_dev || opened.st_ino != kind.st_ino {
+        return Err(HostError::invalid(
+            "reopen",
+            &subject,
+            "the configuration file changed between checking its type and reading it",
+        ));
+    }
+    let mut content = Vec::new();
+    std::fs::File::from(file)
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut content)
+        .map_err(|e| io_error("read", &subject, &e))?;
+    if content.len() > limit {
+        return Err(HostError::invalid(
+            "read",
+            &subject,
+            format!("larger than {limit} bytes: not read as a configuration file"),
+        ));
+    }
+    Ok(content)
+}
+
+impl LinuxHost {
     /// The procfs mount every reader goes through.
     fn root(&self) -> ProcRoot<'_> {
         ProcRoot(self.proc.as_fd())
@@ -1364,6 +1394,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn config_reader_needs_no_host_and_refuses_non_regular_files() {
+        let tmp = TempDir::new("config-read");
+        let config = tmp.0.join("config.yaml");
+        std::fs::write(&config, b"version: 1\n").expect("write");
+        let link = tmp.0.join("link.yaml");
+        std::os::unix::fs::symlink(&config, &link).expect("symlink");
+        assert_eq!(
+            read_config_file(&link, 1024).expect("read link"),
+            b"version: 1\n"
+        );
+        assert!(
+            read_config_file(&config, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("larger than")
+        );
+        let fifo = tmp.0.join("fifo");
+        rustix::fs::mknodat(
+            CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .expect("mkfifo");
+        assert_eq!(
+            read_config_file(&fifo, 1024).unwrap_err().cause,
+            Cause::Invalid
+        );
     }
 
     /// Set in the environment of [`Holder`] processes: the mode of

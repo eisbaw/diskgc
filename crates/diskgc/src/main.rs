@@ -3,7 +3,7 @@
 //!
 //! So far: `ensure` with `--select` (one `cargo-target` tier), `--dry-run`
 //! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
-//! `profiles list`, `show NAME` and `test`, plus `--version`
+//! `profiles list`, `show NAME` and `test`, `check`, plus `--version`
 //! and `--help`, whose Profiles section is rendered from the built-in
 //! library. The other commands exit 2 saying which task brings them.
 //!
@@ -11,16 +11,15 @@
 //!
 //! 1. the command line ([`parse`]: pure; sizes and durations checked);
 //! 2. startup: `LinuxHost` (its `/proc` checks) and the minimum kernel;
-//! 3. privileges (root refused without `--allow-root`);
-//! 4. the configuration (lookup, read, the part of `version: 1` loaded so
-//!    far) and the `--select` tier, checked against it (static
+//! 3. the configuration (lookup, read, all of `version: 1` checked) and
+//!    the `--select` tier, checked against it (static
 //!    validation: nothing on the machine was touched yet);
+//! 4. privileges (root refused without `--allow-root`);
 //! 5. the executor: `dry_run` (given the host as a plain `Host`) or
 //!    `ensure` (as a `Delete`, which asks the sandbox gate first).
 //!
-//! `profiles list | show | test` read the configuration the same way (step 2 and
-//! 4, its tiers ignored) and print the library's profiles
-//! (`diskgc_core::profile::describe`).
+//! `profiles list | show | test` and `check` read the configuration without
+//! host startup and print the library's profiles or checked tiers.
 //!
 //! stdout carries only the result (`--json`: exactly one object, for every
 //! exit code); stderr carries progress logs and errors.
@@ -30,7 +29,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::config::{self, Config, Env, Lookup, MAX_CONFIG_BYTES};
+use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
 use diskgc_core::profile::{Library, describe};
@@ -38,6 +37,7 @@ use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
+use diskgc_linux::host::read_config_file;
 
 /// Exit code for usage, config and provisioning errors, including a kernel
 /// older than the minimum (docs/reference.md, Exit codes).
@@ -53,6 +53,7 @@ usage: diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
        diskgc profiles list [--json] [--config FILE]
        diskgc profiles show NAME [--json] [--config FILE]
        diskgc profiles test [--json] [--config FILE]
+       diskgc check [--config FILE]
        diskgc --version
        diskgc --help
 
@@ -73,9 +74,8 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
 This build runs `ensure --select` with one source profile term
 (optionally `&& filter:idle-...`): `profile:cargo-target`, or a kind fs
 profile from the config whose action is `delete` (one with a command
-action only with --dry-run: task-37); `watch`, `check`, `survey`,
-config tiers arrive with later tasks. PATH and every
-DIR are absolute.
+action only with --dry-run: task-37); `watch`, `survey`, and config tiers
+in ensure arrive with later tasks. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The full contract is docs/reference.md in diskgc's source tree.
 ";
@@ -88,6 +88,7 @@ enum Invocation {
     Help,
     Ensure(EnsureArgs),
     Profiles(ProfilesArgs),
+    Check(Option<OsString>),
     /// A command of the contract that this build does not have yet.
     NotYet {
         command: String,
@@ -131,11 +132,7 @@ enum ProfilesCommand {
 
 /// The commands of docs/reference.md this build does not run yet, and
 /// the task that brings each.
-const NOT_YET: [(&str, &str); 3] = [
-    ("watch", "task-32"),
-    ("check", "task-15"),
-    ("survey", "task-38"),
-];
+const NOT_YET: [(&str, &str); 2] = [("watch", "task-32"), ("survey", "task-38")];
 
 /// Whether the command line asks for JSON: any argument `--json`, or
 /// `--json=...` (then a usage error). Decided on the raw arguments, before
@@ -160,6 +157,10 @@ fn parse(args: &[OsString]) -> Invocation {
             Err(why) => Invocation::UsageError(format!("ensure: {why}")),
         },
         [command, rest @ ..] if command == "profiles" => parse_profiles(rest),
+        [command, rest @ ..] if command == "check" => match parse_check(rest) {
+            Ok(config) => Invocation::Check(config),
+            Err(why) => Invocation::UsageError(format!("check: {why}")),
+        },
         [command, ..] => match NOT_YET.iter().find(|(name, _)| command == name) {
             Some((name, task)) => Invocation::NotYet {
                 command: (*name).to_owned(),
@@ -174,6 +175,27 @@ fn parse(args: &[OsString]) -> Invocation {
             )),
         },
     }
+}
+
+fn parse_check(args: &[OsString]) -> Result<Option<OsString>, String> {
+    let mut config = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.to_str() {
+            Some("--config") => set(
+                &mut config,
+                "--config",
+                rest.next()
+                    .cloned()
+                    .ok_or("--config needs a value".to_owned()),
+            )?,
+            Some(s) if s.starts_with("--config=") => {
+                set(&mut config, "--config", Ok(OsString::from(&s[9..])))?
+            }
+            _ => return Err(format!("unknown argument {}", arg.to_string_lossy())),
+        }
+    }
+    Ok(config)
 }
 
 /// `profiles list | show NAME | test` (docs/reference.md, `profiles`
@@ -386,7 +408,10 @@ fn startup() -> Result<LinuxHost, String> {
 /// lookup, and the configuration unless the search found no file (a
 /// given file that is missing is an error, never a fallback). Whether a
 /// missing configuration is an error is the command's choice.
-fn load_config(host: &LinuxHost, flag: Option<&OsStr>) -> Result<(Lookup, Option<Config>), String> {
+fn load_config(
+    flag: Option<&OsStr>,
+    for_profile_test: bool,
+) -> Result<(Lookup, Option<Config>), String> {
     let env = Env {
         diskgc_config: std::env::var_os("DISKGC_CONFIG"),
         xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
@@ -394,9 +419,14 @@ fn load_config(host: &LinuxHost, flag: Option<&OsStr>) -> Result<(Lookup, Option
     };
     let lookup = config::lookup(flag, &env)?;
     for path in lookup.paths() {
-        match host.read_config_file(path, MAX_CONFIG_BYTES) {
+        match read_config_file(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
-                let config = config::parse(path, &bytes).map_err(|e| e.to_string())?;
+                let config = if for_profile_test {
+                    config::parse_for_profile_test(path, &bytes)
+                } else {
+                    config::parse(path, &bytes)
+                }
+                .map_err(|e| e.to_string())?;
                 return Ok((lookup, Some(config)));
             }
             Err(e) if matches!(lookup, Lookup::Search(_)) && is_absent(&e) => continue,
@@ -408,8 +438,8 @@ fn load_config(host: &LinuxHost, flag: Option<&OsStr>) -> Result<(Lookup, Option
 
 /// `ensure`'s configuration: `None` when none is found and `--select`
 /// makes one optional.
-fn ensure_config(host: &LinuxHost, args: &EnsureArgs) -> Result<Option<Config>, String> {
-    match load_config(host, args.config.as_deref())? {
+fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
+    match load_config(args.config.as_deref(), false)? {
         (_, Some(config)) => Ok(Some(config)),
         (_, None) if args.select.is_some() => Ok(None),
         (lookup, None) => Err(format!(
@@ -464,20 +494,29 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(host) => host,
         Err(why) => return fail(why),
     };
-    let uid = match executor::privileges(&host, args.allow_root) {
-        Ok(uid) => uid,
-        Err(why) => return fail(why),
-    };
-    let config = match ensure_config(&host, args) {
+    let config = match ensure_config(args) {
         Ok(config) => config,
         Err(why) => return fail(why),
     };
     if let Some(config) = &config {
         log(&format!("config {}", config.path.display()));
-        if config.has_groups {
-            log("its groups are replaced by --select (and not validated by this build)");
+        for warning in &config.warnings {
+            log(&format!("warning: {warning}"));
+        }
+        if let Err(why) = config.validate_mode(args.allow_root) {
+            return fail(why);
+        }
+        if !config.protect.is_empty() {
+            return fail("protect: is statically valid, but ensure cannot enforce it in this build yet (task-16)".to_owned());
+        }
+        if config.ipc == IpcPolicy::LiveOnly {
+            return fail("ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)".to_owned());
         }
     }
+    let uid = match executor::privileges(&host, args.allow_root) {
+        Ok(uid) => uid,
+        Err(why) => return fail(why),
+    };
     let tier = match tier(args, config.as_ref(), uid) {
         Ok(tier) => tier,
         Err(why) => return fail(why),
@@ -511,8 +550,10 @@ fn builtin_library() -> Result<Library, String> {
 /// built-ins alone. A given file that is missing, or any file that does
 /// not load, is an error, as for `ensure`.
 fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
-    let host = startup()?;
-    let (_, config) = load_config(&host, args.config.as_deref())?;
+    let (_, config) = load_config(
+        args.config.as_deref(),
+        matches!(&args.command, ProfilesCommand::Test),
+    )?;
     let config_path = config.as_ref().map(|c| c.path.as_path());
     if let Some(path) = config_path {
         log(&format!("config {}", path.display()));
@@ -584,6 +625,47 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
     })
 }
 
+/// Machine-independent policy validation. No `LinuxHost`, kernel version
+/// check, process scan, path traversal or backend invocation occurs here.
+fn check(flag: Option<&OsStr>) -> Result<String, String> {
+    let (lookup, config) = load_config(flag, false)?;
+    let config = config.ok_or_else(|| {
+        format!(
+            "no configuration file found (tried {})",
+            lookup
+                .paths()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    for warning in &config.warnings {
+        log(&format!("warning: {warning}"));
+    }
+    let mut out = format!("config {}\n", config.path.display());
+    for group in &config.groups {
+        for tier in &group.tiers {
+            let profiles = tier
+                .select
+                .expr()
+                .terms
+                .iter()
+                .map(|term| term.source.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "{}.{}: {} => [{}]\n",
+                group.name,
+                tier.name,
+                tier.select.expr(),
+                profiles
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// The one JSON object of a failed command other than `ensure` (whose
 /// report says it): `status` as `ensure`'s usage-error report has it, the
 /// exit code (which `ensure`'s report does not carry: there it is only the
@@ -636,6 +718,19 @@ fn main() -> ExitCode {
             }
         },
         Invocation::Ensure(args) => finish(&ensure(&args), json),
+        Invocation::Check(config) => match check(config.as_deref()) {
+            Ok(out) => {
+                print!("{out}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                log(&format!("error: {why}"));
+                if json {
+                    println!("{}", error_json(&why));
+                }
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
         Invocation::Profiles(args) => match profiles(&args, json) {
             Ok((out, failed)) => {
                 print!("{out}");
@@ -660,9 +755,16 @@ fn main() -> ExitCode {
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
             // touch the machine: an old kernel is the reason to report.
-            let reason = match startup() {
-                Err(why) => why,
-                Ok(_) => reason,
+            let reason = if args
+                .first()
+                .is_some_and(|a| a == "check" || a == "profiles")
+            {
+                reason
+            } else {
+                match startup() {
+                    Err(why) => why,
+                    Ok(_) => reason,
+                }
             };
             match (json, report) {
                 (true, true) => {
@@ -721,14 +823,16 @@ mod tests {
     }
 
     #[test]
-    fn commands_of_later_tasks_say_so() {
+    fn check_parses_only_its_config_flag() {
+        assert_eq!(parse(&args(&["check"])), Invocation::Check(None));
         assert_eq!(
-            parse(&args(&["check"])),
-            Invocation::NotYet {
-                command: "check".into(),
-                task: "task-15"
-            }
+            parse(&args(&["check", "--config=/c.yaml"])),
+            Invocation::Check(Some("/c.yaml".into()))
         );
+        assert!(matches!(
+            parse(&args(&["check", "--json"])),
+            Invocation::UsageError(_)
+        ));
     }
 
     fn profiles_args(list: &[&str]) -> Result<ProfilesArgs, String> {

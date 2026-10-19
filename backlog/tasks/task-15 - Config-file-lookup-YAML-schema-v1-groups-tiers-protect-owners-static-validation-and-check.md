@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-19 01:34'
+updated_date: '2026-10-19 23:29'
 labels:
   - wave-2
   - config
@@ -61,6 +61,12 @@ From task-10: diskgc-core/src/config.rs has the lookup (pure, tested) and a mini
 From task-80: docs/reference.md (User profiles) now also asks check to warn about every user profile that says checkouts: allow (its candidates may be repositories with uncommitted work). The broad-pattern warning does not exist in code yet, so both land here, each with a test.
 
 From task-80 QA r3: reference.md says an example config ships as docs/example.yaml, but that file does not exist yet.
+
+2026-10-20 isolated TASK-15 implementation: typed version-1 groups, ranking, tiers/order/timeout, roots, protect, owners and IPC policy; all groups validated before ensure action, check machine-independent with normalized tier output and warnings. Targeted config tests and CLI tests pass; nix develop -c just check exit 0; Nix sandbox check derivation exit 0. A real ensure still intentionally refuses nonempty protect and ipc: live-only until TASK-16/21, config groups execution until TASK-20, and --allow-root until TASK-21. Full integrated e2e and independent reviews remain for the integration commit. Integration must switch the old-worktree config example check to profile::examples::failures(&library) from TASK-17.
+
+2026-10-20 integration checkpoint on 179ebb3: typed config/check plus pure task16 evaluator, nix develop -c just check PASS, nix develop -c just e2e PASS 90/90. Config example validation is strict for check/ensure; profiles test loads examples lax to report mismatch exit 1. UserOverride warnings regression added. Runtime group execution/protect/ipc live-only/root mode remain task16/20/21; task stays To Do. QA/MPED final review pending.
+
+Final checkpoint gate: parallel QA and MPED re-reviews GO after override-warning and protection-root fixes; both regressions pass. Task remains open for runtime ACs.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

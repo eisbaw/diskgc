@@ -414,6 +414,17 @@
       checks.${system} = {
         inherit diskgc;
 
+        # Static config validation must run in a Nix build sandbox: it may
+        # read the config, but cannot require deployment roots or backends.
+        config-check-sandbox = pkgs.runCommand "diskgc-config-check-sandbox" { } ''
+          output=$(${lib.getExe diskgc} check --config ${./docs/example.yaml})
+          case "$output" in
+            *"profile:cargo-target && filter:idle-30d"*) ;;
+            *) echo "check did not show the normalized tier" >&2; exit 1 ;;
+          esac
+          touch $out
+        '';
+
         # Guards acceptance criterion "statically linked": no program
         # interpreter and no shared-library dependencies, and it runs.
         diskgc-static =

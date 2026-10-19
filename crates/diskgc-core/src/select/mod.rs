@@ -23,6 +23,7 @@
 //! (`diskgc check` prints it), and parsing that text gives the same AST.
 
 mod check;
+mod evaluate;
 mod parse;
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ use std::fmt;
 
 pub use crate::kind::{Kind, PredicateName};
 pub use check::{Catalog, CheckError, CheckErrors, Checked, Entry, Is, check};
+pub use evaluate::{Facts, FilterVerdict, eligible, overlaps};
 pub use parse::{Syntax, SyntaxError, is_name, parse};
 
 /// A parsed, normalised expression: a union of terms (`||`), in the order

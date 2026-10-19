@@ -184,6 +184,101 @@ fn a_missing_given_config_is_exit_2() {
     );
 }
 
+#[test]
+fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
+    let tmp = TempDir::new("check-valid");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, "version: 1\nprofiles:\n  - name: a\n    find: {roots: [/a-does-not-exist], paths: ['x-*'], type: dir}\n    action: delete\n    examples: {match: [/a-does-not-exist/x-1]}\n  - name: b\n    find: {roots: [/b-does-not-exist], paths: ['x-*'], type: dir}\n    action: delete\n    examples: {match: [/b-does-not-exist/x-1]}\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: (profile:a || profile:b) && filter:idle-3d\n").expect("write");
+    let out = diskgc(&["check", "--config", path.to_str().expect("UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.starts_with(&format!("config {}\n", path.display())),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "stale.old: (profile:a && filter:idle-3d) || (profile:b && filter:idle-3d) => [a, b]"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {
+    let tmp = TempDir::new("check-warning");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, "version: 1\nprofiles:\n  - name: broad\n    find: {roots: [/home/example/.cache], paths: ['*'], type: dir}\n    action: delete\n    checkouts: allow\n    examples: {match: [/home/example/.cache/entry]}\n").expect("write");
+    let out = diskgc(&["check", "--config", path.to_str().expect("UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("only wildcards outside /tmp or /var/tmp"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("allows VCS checkouts"), "{stderr}");
+}
+
+#[test]
+fn check_never_falls_back_after_an_explicit_file_typo() {
+    let tmp = TempDir::new("check-lookup");
+    let xdg = tmp.0.join("xdg/diskgc");
+    std::fs::create_dir_all(&xdg).expect("mkdir");
+    std::fs::write(xdg.join("config.yaml"), "version: 1\n").expect("write");
+    let absent = tmp.0.join("typo.yaml");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_diskgc"));
+    command
+        .args(["check", "--config", absent.to_str().expect("UTF-8")])
+        .env("XDG_CONFIG_HOME", tmp.0.join("xdg"));
+    let out = command.output().expect("check");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains(&absent.display().to_string()));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_diskgc"));
+    command
+        .arg("check")
+        .env("DISKGC_CONFIG", &absent)
+        .env("XDG_CONFIG_HOME", tmp.0.join("xdg"));
+    let out = command.output().expect("check");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains(&absent.display().to_string()));
+}
+
+#[test]
+fn invalid_config_has_the_same_error_in_check_and_ensure_before_deletion() {
+    let tmp = TempDir::new("check-invalid");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:missing\n").expect("write");
+    let before = inventory(&tmp.0);
+    let config = path.to_str().expect("UTF-8");
+    let root = tmp.0.to_str().expect("UTF-8");
+    let check = diskgc(&["check", "--config", config]);
+    assert_eq!(check.status.code(), Some(2));
+    let ensure = diskgc(&[
+        "ensure",
+        "--config",
+        config,
+        "--min-free",
+        "100%",
+        "--select",
+        "profile:cargo-target",
+        "--roots",
+        root,
+        root,
+    ]);
+    assert_eq!(ensure.status.code(), Some(2));
+    let check_error = text(&check.stderr);
+    let ensure_error = text(&ensure.stderr);
+    assert!(
+        check_error.contains("tier `old`: invalid selection"),
+        "{check_error}"
+    );
+    assert!(
+        ensure_error.contains("tier `old`: invalid selection"),
+        "{ensure_error}"
+    );
+    assert_eq!(inventory(&tmp.0), before, "invalid policy touched fixture");
+}
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 

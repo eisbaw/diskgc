@@ -33,14 +33,16 @@ check:
 # budget is measured by the runner and is also the deadline for hung tests.
 # Host requirement: rootless Podman (not provided by the dev shell).
 
-# Commit gate: `check` plus the fast container tests, failing over 5 minutes.
+# `check`, a sandboxed config check, and fast container tests (5-minute budget).
 e2e: check _gcroot-dev
+    nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     just _runner e2e-runner run --suite fast --budget-secs 300
 
 # Every container test, Nix image then Debian; budgets only guard hangs.
 e2e-full: check _gcroot-dev
+    nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     just _runner e2e-runner run --suite full --budget-secs 3600
     just _e2e-debian

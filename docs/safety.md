@@ -1263,10 +1263,10 @@ its bit is set in `stx_mask`, each attribute only when its bit is set in
 
 Minimum kernel: Linux 5.8 (`STATX_MNT_ID` and `STATX_ATTR_MOUNT_ROOT`;
 `openat2` is 5.6); older kernels exit 2 at startup. Every command checks it
-except `--version`, `--help` and `check`, which touch nothing on the
-machine. The check reads `major.minor` of the `uname` release, so a vendor
-kernel numbered below 5.8 is refused even if it has these features
-backported, and an unparseable release is refused too.
+except `--version`, `--help`, `check` and `profiles`, which do not inspect
+candidates or processes. The check reads `major.minor` of the `uname`
+release, so a vendor kernel numbered below 5.8 is refused even if it has
+these features backported, and an unparseable release is refused too.
 
 ## Validation
 

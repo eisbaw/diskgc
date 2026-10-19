@@ -1,34 +1,28 @@
 //! The configuration file (docs/reference.md, Configuration file): where it
-//! is looked for, and the part of schema `version: 1` this build loads.
+//! is looked for, and schema `version: 1`.
 //!
 //! Lookup ([`lookup`]) is a pure function of the command line and the
 //! environment; reading a file is the binary's (through `LinuxHost`), and
 //! parsing it ([`parse`]) is pure again, so every rule here is tested
 //! without a machine.
 //!
-//! **What this build loads.** `version` (mandatory, `1`) and the user
-//! `profiles` (task-8's loader: the static profile rules, all problems at
-//! once). The rest of the schema arrives with task-15; until then:
-//!
-//! - `protect` with entries and `owners` are refused (exit 2): ignoring
-//!   either would change what is deleted (a protected match, or whose
-//!   files), so they are never silently dropped;
-//! - `groups` is accepted unread: `--select` replaces it
-//!   (docs/reference.md, Commands), and `ensure` without `--select` is
-//!   refused, so no tier of the file runs. It is **not validated yet**: an
-//!   invalid `groups` passes with `--select` (task-15 adds the full static
-//!   validation, and `check`).
-//!
-//! Unknown top-level keys are errors, as everywhere in the schema.
+//! Parsing checks every group, tier, protection and profile before any
+//! executor sees the policy. The checked data is retained for the planner;
+//! no machine paths are opened during static validation.
 
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
-use serde::de::IgnoredAny;
+use serde::de::Deserializer;
 
-use crate::profile::{Library, ProfileSpec};
+use crate::engine::Checkouts;
+use crate::kind::Kind;
+use crate::profile::{Action, Body, DurationSpec, Finds, Library, ProfileSpec, Roots};
+use crate::select::{self, Checked};
 
 /// The largest configuration file read (bytes): far above any real policy,
 /// small enough that a wrong path (a log, an image) is refused rather than
@@ -111,18 +105,66 @@ impl Lookup {
     }
 }
 
-/// A configuration file as this build loads it.
+/// A statically checked configuration file.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The file it was read from.
     pub path: PathBuf,
     /// The built-in profiles plus the file's `profiles:`.
     pub library: Library,
-    /// Whether the file has `groups:` (unread, see the module docs).
-    pub has_groups: bool,
+    pub groups: Vec<Group>,
+    pub protect: Vec<Protection>,
+    /// User names; resolution to non-system UIDs is environmental validation.
+    pub owners: Option<Vec<String>>,
+    pub warnings: Vec<String>,
+    pub ipc: IpcPolicy,
 }
 
-/// The top level of schema `version: 1`, as far as this build reads it.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub name: String,
+    pub ranking: Ranking,
+    pub tiers: Vec<Tier>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Tier {
+    pub name: String,
+    pub select: Checked,
+    pub roots: std::collections::BTreeMap<String, Vec<String>>,
+    pub order: Order,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct Protection {
+    pub profile: String,
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ranking {
+    Ordered,
+    Random,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Order {
+    Oldest,
+    BestFit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IpcPolicy {
+    BlockAny,
+    LiveOnly,
+}
+
+/// The top level of schema `version: 1`. Unknown and repeated mapping keys
+/// are errors, including inside a group, tier and protection.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigSpec {
@@ -130,11 +172,59 @@ struct ConfigSpec {
     #[serde(default)]
     profiles: Vec<ProfileSpec>,
     #[serde(default)]
-    protect: Option<Vec<IgnoredAny>>,
+    protect: Vec<ProtectSpec>,
+    #[serde(default, deserialize_with = "present")]
+    owners: Option<Vec<String>>,
     #[serde(default)]
-    owners: Option<Vec<IgnoredAny>>,
-    #[serde(default)]
-    groups: Option<IgnoredAny>,
+    groups: Vec<GroupSpec>,
+    #[serde(default, deserialize_with = "present")]
+    ipc: Option<IpcPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupSpec {
+    name: String,
+    #[serde(default, deserialize_with = "present")]
+    ranking: Option<Ranking>,
+    tiers: Vec<TierSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TierSpec {
+    name: String,
+    select: String,
+    #[serde(default, deserialize_with = "present")]
+    roots: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "present")]
+    order: Option<Order>,
+    #[serde(default, deserialize_with = "present")]
+    timeout: Option<DurationSpec>,
+}
+
+/// A present optional key must carry a value: YAML null must not silently
+/// become the default policy. Only an absent key receives the default.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ProtectSpec {
+    Bare(String),
+    WithRoots(ProtectWithRoots),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectWithRoots {
+    profile: String,
+    roots: Vec<String>,
 }
 
 /// Why a configuration file was refused: a load-time error, exit 2,
@@ -158,9 +248,20 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Parses the configuration file `path` holding `bytes` (see the module
-/// docs for what is loaded and what is refused).
+/// Parses and checks every static rule of the configuration. It does not
+/// access the machine beyond the already supplied bytes.
 pub fn parse(path: &Path, bytes: &[u8]) -> Result<Config, ConfigError> {
+    parse_inner(path, bytes, true)
+}
+
+/// Parses a configuration for `profiles test`. That command reports example
+/// mismatches as test failures (exit 1), while all other static rules still
+/// fail configuration loading (exit 2).
+pub fn parse_for_profile_test(path: &Path, bytes: &[u8]) -> Result<Config, ConfigError> {
+    parse_inner(path, bytes, false)
+}
+
+fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config, ConfigError> {
     let error = |message: String| ConfigError {
         path: path.to_owned(),
         message,
@@ -173,26 +274,172 @@ pub fn parse(path: &Path, bytes: &[u8]) -> Result<Config, ConfigError> {
             spec.version
         )));
     }
-    if spec.protect.as_ref().is_some_and(|p| !p.is_empty()) {
-        return Err(error(
-            "protect: is not supported by this build yet (task-15, task-16); it is refused \
-             rather than ignored, since ignoring it would delete what it protects"
-                .to_owned(),
-        ));
-    }
-    if spec.owners.is_some() {
-        return Err(error(
-            "owners: is allowed only with --allow-root (docs/reference.md, Configuration \
-             file), which this build does not support yet (task-21)"
-                .to_owned(),
-        ));
-    }
     let library = Library::with_user_profiles(&spec.profiles).map_err(|e| error(e.to_string()))?;
+    if check_examples && let Some(first) = crate::profile::examples::failures(&library).first() {
+        return Err(error(first.clone()));
+    }
+    let mut tier_names = BTreeSet::new();
+    let mut group_names = BTreeSet::new();
+    let mut groups = Vec::new();
+    for group in spec.groups {
+        valid_name(&group.name, "group").map_err(error)?;
+        if !group_names.insert(group.name.clone()) {
+            return Err(error(format!("duplicate group name `{}`", group.name)));
+        }
+        let mut tiers = Vec::new();
+        for tier in group.tiers {
+            valid_name(&tier.name, "tier").map_err(error)?;
+            if !tier_names.insert(tier.name.clone()) {
+                return Err(error(format!("duplicate tier name `{}`", tier.name)));
+            }
+            let checked = select::compile(&tier.select, &library)
+                .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
+            let roots = library
+                .bind_roots(&checked, tier.roots.as_deref())
+                .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
+            tiers.push(Tier {
+                name: tier.name,
+                select: checked,
+                roots,
+                order: tier.order.unwrap_or(Order::Oldest),
+                timeout: tier.timeout.map_or(Duration::from_secs(600), |t| t.0),
+            });
+        }
+        groups.push(Group {
+            name: group.name,
+            ranking: group.ranking.unwrap_or(Ranking::Ordered),
+            tiers,
+        });
+    }
+    let mut protect = Vec::new();
+    for item in spec.protect {
+        let (name, supplied) = match item {
+            ProtectSpec::Bare(name) => (name, None),
+            ProtectSpec::WithRoots(item) => (item.profile, Some(item.roots)),
+        };
+        let profile = library
+            .get(&name)
+            .ok_or_else(|| error(format!("protect: unknown profile `{name}`")))?;
+        let Body::Source(source) = &profile.body else {
+            return Err(error(format!(
+                "protect: `{name}` is a filter, not a source profile"
+            )));
+        };
+        if !matches!(source.kind(), Kind::Fs | Kind::CargoTarget) {
+            return Err(error(format!(
+                "protect: `{name}` has kind {}, which cannot be protected",
+                source.kind()
+            )));
+        }
+        let roots = library
+            .roots_of(&name, supplied.as_deref())
+            .map_err(|e| error(format!("protect `{name}`: {e}")))?;
+        protect.push(Protection {
+            profile: name,
+            roots,
+        });
+    }
+    if let Some(owners) = &spec.owners {
+        if owners.is_empty() || owners.iter().any(|o| o.trim().is_empty()) {
+            return Err(error("owners: list and names must be non-empty".to_owned()));
+        }
+        let unique: BTreeSet<_> = owners.iter().collect();
+        if unique.len() != owners.len() {
+            return Err(error("owners: user names must be unique".to_owned()));
+        }
+    }
+    let warnings = profile_warnings(&library, &groups, &protect);
     Ok(Config {
         path: path.to_owned(),
         library,
-        has_groups: spec.groups.is_some(),
+        groups,
+        protect,
+        owners: spec.owners,
+        warnings,
+        ipc: spec.ipc.unwrap_or(IpcPolicy::BlockAny),
     })
+}
+
+impl Config {
+    /// Invocation-specific checks are static too, but `check` has no
+    /// `--allow-root` mode and therefore validates the policy itself only.
+    pub fn validate_mode(&self, allow_root: bool) -> Result<(), String> {
+        match (allow_root, &self.owners) {
+            (true, None) => return Err("--allow-root requires an owners: list".to_owned()),
+            (false, Some(_)) => return Err("owners: is allowed only with --allow-root".to_owned()),
+            _ => {}
+        }
+        if allow_root
+            && self.library.profiles().any(|p| {
+                matches!(&p.body,
+            Body::Source(source) if matches!(&source.action, Action::Command { .. }))
+            })
+        {
+            return Err("command actions are refused under --allow-root".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn valid_name(name: &str, what: &str) -> Result<(), String> {
+    if !select::is_name(name) {
+        Err(format!(
+            "{what} name `{name}` must be a NAME (lowercase letters, digits, `-`, `_`)"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Warnings are advisory: valid policies still pass `check`. They do not
+/// affect the meaning of a profile or depend on the deployment machine.
+fn profile_warnings(library: &Library, groups: &[Group], protect: &[Protection]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for profile in library.profiles().filter(|p| {
+        matches!(
+            p.origin,
+            crate::profile::Origin::User | crate::profile::Origin::UserOverride
+        )
+    }) {
+        let Body::Source(source) = &profile.body else {
+            continue;
+        };
+        if source.checkouts == Checkouts::Allow {
+            warnings.push(format!(
+                "profile `{}` allows VCS checkouts: candidates may contain uncommitted work",
+                profile.name
+            ));
+        }
+        let Finds::Paths { patterns, .. } = &source.finds else {
+            continue;
+        };
+        let broad = patterns
+            .iter()
+            .any(|pattern| pattern.rsplit('/').next().is_some_and(|last| last == "*"));
+        let outside_temp = |root: &str| {
+            !Path::new(root).starts_with("/tmp") && !Path::new(root).starts_with("/var/tmp")
+        };
+        let roots_outside = match &source.roots {
+            Roots::Fixed(roots) => roots.iter().any(|root| outside_temp(root)),
+            Roots::Required => {
+                groups
+                    .iter()
+                    .flat_map(|g| &g.tiers)
+                    .filter_map(|tier| tier.roots.get(&profile.name))
+                    .flatten()
+                    .any(|root| outside_temp(root))
+                    || protect
+                        .iter()
+                        .filter(|p| p.profile == profile.name)
+                        .flat_map(|p| &p.roots)
+                        .any(|root| outside_temp(root))
+            }
+        };
+        if broad && roots_outside {
+            warnings.push(format!("profile `{}` ends a path pattern with only wildcards outside /tmp or /var/tmp; verify its matches", profile.name));
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]
@@ -285,28 +532,21 @@ mod tests {
              {roots: required}\ngroups:\n  - name: g\n    tiers: []\nprotect: []\n",
         )
         .expect("loads");
-        assert!(config.has_groups);
+        assert_eq!(config.groups.len(), 1);
         assert!(config.library.get("my-target").is_some());
         assert!(config.library.get("cargo-target").is_some());
-        assert!(!parsed("version: 1\n").expect("loads").has_groups);
+        assert!(parsed("version: 1\n").expect("loads").groups.is_empty());
     }
 
     #[test]
-    fn what_this_build_cannot_honour_is_refused_not_ignored() {
+    fn malformed_configs_are_refused_not_ignored() {
         for (text, needle) in [
             ("profiles: []\n", "version"),
             ("version: 2\n", "version: 2 is not supported"),
-            (
-                "version: 1\nprotect: [claude-code-tmp]\n",
-                "protect: is not supported",
-            ),
-            (
-                "version: 1\nowners: [mark]\n",
-                "owners: is allowed only with --allow-root",
-            ),
+            ("version: 1\nprotect: [not-there]\n", "unknown profile"),
             (
                 "version: 1\nowners: []\n",
-                "owners: is allowed only with --allow-root",
+                "owners: list and names must be non-empty",
             ),
             ("version: 1\ntiers: []\n", "tiers"),
             (
@@ -325,5 +565,210 @@ mod tests {
                 .message
                 .contains("UTF-8")
         );
+    }
+
+    const FS: &str = "profiles:\n  - name: scratch\n    find: {roots: [/scratch], paths: ['x-*'], type: dir}\n    action: delete\n    examples: {match: [/scratch/x-a], no_match: [/scratch/y-a]}\n";
+
+    fn policy(body: &str) -> String {
+        format!("version: 1\n{FS}{body}")
+    }
+
+    #[test]
+    fn groups_are_checked_and_retain_the_policy_order() {
+        let config = parsed(&policy("groups:\n  - name: stale\n    ranking: random\n    tiers:\n      - name: old\n        select: profile:scratch && filter:idle-3d\n        order: best-fit\n        timeout: 2m\n      - name: next\n        select: profile:cargo-target\n        roots: [/builds]\n  - name: pressure\n    tiers:\n      - name: recent\n        select: profile:scratch\nprotect:\n  - scratch\n  - {profile: cargo-target, roots: [/builds]}\n"))
+            .expect("valid policy");
+        assert_eq!(
+            config
+                .groups
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>(),
+            ["stale", "pressure"]
+        );
+        assert_eq!(config.groups[0].ranking, Ranking::Random);
+        assert_eq!(config.groups[1].ranking, Ranking::Ordered);
+        assert_eq!(config.groups[0].tiers[0].order, Order::BestFit);
+        assert_eq!(config.groups[0].tiers[0].timeout, Duration::from_secs(120));
+        assert_eq!(config.groups[0].tiers[1].timeout, Duration::from_secs(600));
+        assert_eq!(
+            config.groups[0].tiers[0].select.expr().to_string(),
+            "profile:scratch && filter:idle-3d"
+        );
+        assert_eq!(config.groups[0].tiers[1].roots["cargo-target"], ["/builds"]);
+        assert_eq!(
+            config
+                .protect
+                .iter()
+                .map(|p| p.profile.as_str())
+                .collect::<Vec<_>>(),
+            ["scratch", "cargo-target"]
+        );
+    }
+
+    #[test]
+    fn every_config_specific_static_rule_has_a_refusal() {
+        let valid = policy(
+            "groups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:scratch\n",
+        );
+        for (text, needle) in [
+            ("version: 1\nunknown: x\n".to_owned(), "unknown"),
+            ("version: 2\n".to_owned(), "version: 2"),
+            ("version: 1\ngroups:\n  - name: g\n    tiers: []\n  - name: g\n    tiers: []\n".to_owned(), "duplicate group"),
+            ("version: 1\ngroups:\n  - name: g\n    tiers: [{name: t, select: 'profile:cargo-target', roots: [/a]}]\n  - name: h\n    tiers: [{name: t, select: 'profile:cargo-target', roots: [/a]}]\n".to_owned(), "duplicate tier"),
+            (valid.replace("name: t", "name: bad.name"), "tier name"),
+            (valid.replace("select: profile:scratch", "select: scratch"), "invalid selection"),
+            (valid.replace("select: profile:scratch", "select: profile:missing"), "no profile"),
+            (valid.replace("select: profile:scratch", "select: profile:cargo-target"), "roots: required"),
+            (valid.replace("select: profile:scratch", "select: profile:scratch\n        roots: [/a]"), "fixed roots"),
+            (valid.replace("select: profile:scratch", "select: profile:scratch\n        timeout: 5"), "bare number"),
+            (valid.replace("select: profile:scratch", "select: profile:scratch\n        order: newest"), "newest"),
+            (valid.replace("select: profile:scratch", "select: profile:scratch\n        typo: x"), "typo"),
+            (valid.replace("name: g", "name: g\n    ranking: newest"), "newest"),
+            (valid.replace("name: g", "name: g\n    typo: x"), "typo"),
+            (policy("protect: [missing]\n"), "unknown profile"),
+            (policy("protect: [idle-3d]\n"), "filter"),
+            (policy("protect: [cargo-target]\n"), "roots: required"),
+            (policy("protect: [{profile: scratch, roots: [/a]}]\n"), "fixed roots"),
+            (policy("protect: [{profile: cargo-target, roots: []}]\n"), "empty"),
+            (policy("protect: [{profile: cargo-target, roots: [relative]}]\n"), "absolute"),
+            (policy("protect: [{profile: cargo-target, roots: [~/src]}]\n"), "~"),
+            (policy("owners: []\n"), "non-empty"),
+            (policy("owners: null\n"), "owners"),
+            (policy("owners: [mark, mark]\n"), "unique"),
+            (policy("ipc: null\n"), "ipc"),
+            (policy("ipc: sometimes\n"), "sometimes"),
+        ] {
+            let e = parsed(&text).expect_err(&text);
+            assert!(e.contains(needle), "{needle}: {e}\n{text}");
+        }
+    }
+
+    #[test]
+    fn embedded_profiles_and_selection_rules_are_checked_by_config_load() {
+        let extra = "  - name: other\n    find: {roots: [/scratch], paths: ['y-*'], type: dir}\n    action: delete\n    examples: {match: [/scratch/y-a]}\n";
+        let filter = "  - name: has-file\n    where: {has: marker}\n";
+        let group =
+            "groups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:scratch\n";
+        let two = format!("version: 1\n{FS}{extra}{filter}{group}");
+        for (text, needle) in [
+            (
+                two.replace("name: scratch", "name: cargo-target"),
+                "cargo-target",
+            ),
+            (two.replace("name: scratch", "name: Bad.Name"), "name"),
+            (
+                two.replace("action: delete", "action: delete\n    typo: x"),
+                "typo",
+            ),
+            (two.replace("roots: [/scratch]", "roots: [~/scratch]"), "~"),
+            (
+                two.replace("roots: [/scratch]", "roots: [scratch]"),
+                "absolute",
+            ),
+            (two.replace("paths: ['x-*']", "paths: ['../x-*']"), ".."),
+            (
+                two.replace("match: [/scratch/x-a]", "match: [/scratch/no-match]"),
+                "example",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch || profile:cargo-target",
+                ),
+                "kind",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch || profile:other",
+                )
+                .replace(
+                    "paths: ['y-*'], type: dir}\n    action: delete",
+                    "paths: ['y-*'], type: dir}\n    action: {command: [/bin/true]}",
+                ),
+                "action",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:cargo-target && filter:has-file",
+                ),
+                "has",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch || filter:has-file",
+                ),
+                "filter",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch && !profile:cargo-target",
+                ),
+                "roots: required",
+            ),
+        ] {
+            let e = parsed(&text).expect_err(&text);
+            assert!(e.contains(needle), "{needle}: {e}\n{text}");
+        }
+    }
+
+    #[test]
+    fn mode_checks_refuse_owners_mismatch_and_root_commands() {
+        let ordinary = parsed(&policy("")).expect("loads");
+        assert!(ordinary.validate_mode(false).is_ok());
+        assert!(
+            ordinary
+                .validate_mode(true)
+                .unwrap_err()
+                .contains("requires an owners")
+        );
+        let root = parsed(&policy("owners: [mark]\n")).expect("loads");
+        assert!(
+            root.validate_mode(false)
+                .unwrap_err()
+                .contains("only with --allow-root")
+        );
+        assert!(root.validate_mode(true).is_ok());
+        let command = "version: 1\nowners: [mark]\nprofiles:\n  - name: cleaner\n    find: {roots: [/scratch], paths: ['x-*'], type: dir}\n    action: {command: [/bin/true]}\n    examples: {match: [/scratch/x-a]}\n";
+        let command = parsed(command).expect("loads");
+        assert!(
+            command
+                .validate_mode(true)
+                .unwrap_err()
+                .contains("command actions")
+        );
+    }
+
+    #[test]
+    fn warnings_are_specific_and_nonfatal() {
+        let broad = "version: 1\nprofiles:\n  - name: broad\n    find: {roots: [/home/mark/.cache], paths: ['*'], type: dir}\n    action: delete\n    checkouts: allow\n    examples: {match: [/home/mark/.cache/thing]}\n";
+        let config = parsed(broad).expect("valid but broad");
+        assert_eq!(config.warnings.len(), 2);
+        assert!(config.warnings.iter().any(|w| w.contains("only wildcards")));
+        assert!(config.warnings.iter().any(|w| w.contains("VCS checkouts")));
+        let tmp = parsed(&broad.replace("/home/mark/.cache", "/tmp")).expect("valid tmp");
+        assert_eq!(tmp.warnings.len(), 1);
+        let required = broad
+            .replace("roots: [/home/mark/.cache]", "roots: required")
+            .replace("/home/mark/.cache/thing", "/any/thing");
+        let bound = format!(
+            "{required}groups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:broad\n        roots: [/home/mark/.cache]\n"
+        );
+        assert_eq!(
+            parsed(&bound).expect("bound required root").warnings.len(),
+            2
+        );
+        let overridden = broad.replace("name: broad", "name: pytest-cache\n    override: true");
+        let config = parsed(&overridden).expect("user override with broad path");
+        assert_eq!(
+            config.library.get("pytest-cache").unwrap().origin,
+            crate::profile::Origin::UserOverride
+        );
+        assert_eq!(config.warnings.len(), 2);
+        assert!(config.warnings.iter().any(|w| w.contains("only wildcards")));
+        assert!(config.warnings.iter().any(|w| w.contains("VCS checkouts")));
     }
 }

@@ -155,7 +155,8 @@ snapshot when one exists, otherwise it tallies.
 
 Read-only: takes no lock, measures nothing, deletes nothing. The library
 is the built-in profiles plus the configuration file's user profiles,
-found as described under Configuration file (its groups are not read).
+found as described under Configuration file (its groups are validated but
+not used by this command).
 Without a configuration file (none found by the search), the built-ins
 alone, and no error. A given file (`--config`, `$DISKGC_CONFIG`) that
 is missing, or any file that does not load, is exit 2 with the same
@@ -196,10 +197,10 @@ stderr (`diskgc: config PATH`).
   `exit_code`, `profiles` (count), and `failures` (strings). Exit 0 when
   all examples pass, 1 when any fails.
 - Exit codes of `list`, `show` and `test`: 0 when the list or profile was
-  printed; 2 for a usage error, a startup check that fails (as for every
-  command but `--help`, `--version` and `check`), a configuration that is
-  missing (when given) or does not load, or an unknown `NAME`. Nothing
-  else. `test` also exits 1 on a failing example.
+  printed; 2 for a usage error, a configuration that is missing (when
+  given) or does not load, or an unknown `NAME`. These read-only commands
+  need no kernel or process-inspection startup check. `test` also exits 1
+  on a failing example.
 
 `--json` prints exactly one JSON object on stdout, for every exit code
 (any argument `--json` asks for it, as for `ensure`). A profile is the
@@ -289,6 +290,17 @@ so packaging and configuration tools run it before deploying (the NixOS
 module at build time, also when cross-building). Everything that depends on
 the machine is checked at run time; see
 [safety.md](safety.md#validation).
+
+The text output starts with `config PATH`, then one line per tier in policy
+order: `GROUP.TIER: NORMALIZED_EXPRESSION => [source profiles]`. Advisory
+warnings go to stderr. A user profile with `checkouts: allow` warns about
+repository contents; a path pattern ending in only wildcards warns when a
+fixed or tier-bound root lies outside `/tmp` and `/var/tmp`. Warnings do
+not make the configuration invalid.
+
+`check` validates an `owners:` list's shape; whether it is permitted is
+checked when `ensure` is invoked with or without `--allow-root`. User-name
+resolution remains a run-time check.
 
 ## Exit codes (`ensure`)
 
@@ -433,12 +445,14 @@ binary ships built-in *profiles* but **no built-in tiers**; an example config
 ships as `docs/example.yaml`, which packages install as the default.
 
 The config holds `version`, optional user `profiles`, optional `protect`,
-optional `owners` (only with `--allow-root`), and the tier `groups`.
+optional `owners` (only with `--allow-root`), optional `ipc`, and the tier
+`groups`.
 Thresholds, intervals and timeouts are command-line arguments, so the same
 file serves `watch` on a laptop and `ensure` on a runner.
 
 ```yaml
 version: 1
+ipc: block-any                    # block-any (default) | live-only
 
 profiles:                          # optional: your own, or overrides
   - name: zephyr-run
@@ -480,6 +494,9 @@ Rules:
 
 - **Groups run in list order. Always.** Escalation (stale before pressure)
   is group order; nothing reorders groups.
+- Group and tier names use `NAME` (lowercase letters or digits first,
+  followed by lowercase letters, digits, `-` or `_`). Names are unique at
+  their level, and tier names are unique across all groups.
 - **`ranking` decides tier order inside a group:** `ordered` (default, list
   order) or `random` (shuffled on each reclaim, so runners in a CI fleet
   lose different caches first and the fleet as a whole stays warmer; the
@@ -495,6 +512,11 @@ Rules:
 - **`owners:`** (user names) is required with `--allow-root` and forbidden
   otherwise. Names are resolved at run time (environmental validation);
   `root` and system users (uid below 1000) are rejected there.
+- **`ipc:`** controls sockets and FIFOs inside a candidate. `block-any`
+  (default) refuses a candidate containing any socket or FIFO. `live-only`
+  permits stale entries only when neither a process nor the kernel's socket
+  table reports them in use; it must configure the eligibility walk and
+  in-use scanner together. See [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate).
 - **Paths** must be absolute. `~` is rejected: it would mean `/root` for one
   caller and `/home/mark` for another. The only placeholder is `{uid}` (the
   effective user's id, e.g. in `/tmp/claude-{uid}`).
@@ -503,6 +525,14 @@ Rules:
   [safety.md](safety.md#validation). `version` is mandatory; tier names are
   unique across all groups.
 - Disabling a tier = commenting it out. There is no `enabled` field.
+
+In this development build, `check` validates these fields, including all
+configured groups. `ensure --select` still accepts one positive source
+term, optionally narrowed by a positive idle filter; run-time union and
+negation are deferred. It refuses a nonempty `protect`, `ipc: live-only`,
+and `--allow-root` until
+the selection, executor and root-mode tasks implement their run-time
+semantics (tasks 16, 20 and 21). It never ignores a safety setting.
 
 ### Tier fields
 
@@ -588,7 +618,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a symlink candidate could only be refused (`unsafe_path`), and `tmp-entry` would report every symlink in `/tmp`. |
 | `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `idle_for`: when something is old enough is the tier's choice, written with a `filter:` (Key decisions: what vs when). |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
-| `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). |
+| `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). Config load and `check` reject examples that contradict the path patterns. |
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
 | `override` | user profiles | See User profiles. |
@@ -679,6 +709,11 @@ parses back to the same expression):
   `!(profile:a || profile:b)` is written `!profile:a && !profile:b`.
 - **One source per term** (after distribution). Intersecting two source
   profiles that find at different depths matches only by accident.
+- **Depth is explicit.** A `find.paths` segment reaches exactly one level;
+  there is no `**` or implicit any-depth search. Profiles for project
+  artifacts list the supported depths or take each project as a root. A
+  deeper artifact outside those patterns is not found, even when a shallower
+  one has the same name.
 - **`||` is a union**; all source profiles in one expression share one kind
   and one action, so `a || b` and `b || a` select and remove exactly the
   same. Different actions belong in different tiers.
