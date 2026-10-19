@@ -5,11 +5,14 @@
 //!
 //! - **Toolchains.** The image holds each toolchain at
 //!   `/opt/cargo-under-test/NAME` and the C toolchain (the linker) at
-//!   `/opt/cargo-under-test/cc`, symlinks into the image's `/nix/store`
-//!   (read-only bind-mounted by `Ctx::setup`, so the deletion oracle's
-//!   snapshot does not walk it). The manifest `/opt/cargo-under-test/toolchains`
-//!   lists `NAME VERSION TIER` per toolchain; flake.nix (`cargoUnderTest`)
-//!   is the single source of the list and of each toolchain's tier.
+//!   `/opt/cargo-under-test/cc`: in the Nix image symlinks into its
+//!   `/nix/store`, in the Debian image into its rustup toolchain and `/usr`
+//!   (read-only bind-mounted by `Ctx::setup` as the image's descriptor
+//!   says, [`crate::image`], so the deletion oracle's snapshot does not walk
+//!   them). The manifest `/opt/cargo-under-test/toolchains` lists `NAME
+//!   VERSION TIER` per toolchain; flake.nix (`cargoUnderTest`, and the
+//!   Debian image's one line) is the single source of the list and of each
+//!   toolchain's tier.
 //! - **Fixture projects** ([`SMOKE`], [`RACE`]) are files under
 //!   `diskgc-e2e/fixtures/cargo/`, compiled into the harness and written to
 //!   a scratch tmpfs per test, owned by tester. They have no dependencies

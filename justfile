@@ -39,10 +39,22 @@ e2e: check
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix run -L .#e2e-runner -- run --suite fast --budget-secs 300
 
-# Every container test, fast and full tiers; the budget only guards hangs.
+# Every container test, fast and full tiers, then the Debian subset; the
+# budgets only guard hangs.
 e2e-full: check
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix run -L .#e2e-runner -- run --suite full --budget-secs 3600
+    just _e2e-debian
+
+# The portable subset on the Debian image with the static binary, no Nix
+# inside (docs/testing.md, Images). One test there:
+# `nix run .#e2e-runner-debian -- --log-dir target/e2e-logs-debian one NAME`.
+e2e-debian: check
+    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    just _e2e-debian
+
+_e2e-debian:
+    nix run -L .#e2e-runner-debian -- --log-dir target/e2e-logs-debian run --suite full --budget-secs 900
 
 # One container test by NAME, keeping the container on failure.
 e2e-one NAME:

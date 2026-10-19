@@ -26,7 +26,10 @@
 //!   `diskgc ensure` binary itself (thresholds, the host lock, exit codes,
 //!   `--json`, `--dry-run`, real Cargo reclaims) in [`ensure_suite`];
 //!   the user journeys, the product driven through the files its users
-//!   write (the CI operator's pre-job hook), in [`journey_suite`].
+//!   write (the CI operator's pre-job hook), in [`journey_suite`]. What
+//!   the test image is (Nix or Debian: what it mounts read-only, whether
+//!   it has Cargo toolchains, which tests it runs) is its descriptor,
+//!   [`image`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -51,6 +54,7 @@ pub mod ensure_suite;
 pub mod holder;
 pub mod host_probe;
 pub mod host_suite;
+pub mod image;
 pub mod interlock;
 pub mod inuse_probe;
 pub mod inuse_suite;

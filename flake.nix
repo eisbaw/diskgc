@@ -209,9 +209,65 @@
       # The C toolchain (linker) every toolchain above links with.
       cargoUnderTestCc = pkgs.stdenv.cc;
 
-      # The base image: userland, tools, users, markers and mount points (the
-      # harness provisions the host lock per test, on a tmpfs), and the Cargo
-      # toolchains under test.
+      # What every e2e image carries, whatever its userland (docs/testing.md,
+      # Container setup: Images): the sandbox marker, the users, the
+      # overlay-root fixture file, the mount points, and its descriptor
+      # (diskgc-e2e/src/image.rs), whose text is the argument. Runs under
+      # fakeroot in the new layer's root directory.
+      e2eImageCommon = descriptor: ''
+        # Interlock marker (docs/testing.md, Safety interlock, layer 2),
+        # baked into the image, never bind-mounted at run time.
+        cp ${sandboxMarker} .diskgc-test-sandbox
+        chmod 0444 .diskgc-test-sandbox
+
+        # The image's descriptor: what it mounts read-only, whether it has
+        # Cargo toolchains under test, which tests it runs.
+        printf '%s\n' ${lib.escapeShellArgs descriptor} > .diskgc-test-image
+        chmod 0444 .diskgc-test-image
+
+        # Users: tester runs the code under test; other owns the
+        # "other user's" fixtures (both mapped through the subuid range).
+        # These files replace the userland's own.
+        mkdir -p etc
+        printf '%s\n' \
+          'root:x:0:0:root:/root:/bin/sh' \
+          'tester:x:1000:1000:diskgc code under test:/home/tester:/bin/sh' \
+          'other:x:1001:1001:other owner:/home/other:/bin/sh' \
+          'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' > etc/passwd
+        printf '%s\n' \
+          'root:x:0:' 'tester:x:1000:' 'other:x:1001:' 'nogroup:x:65534:' > etc/group
+        printf '%s\n' 'passwd: files' 'group: files' > etc/nsswitch.conf
+        mkdir -p root home/tester home/other
+        chmod 0700 root
+        chown -R 1001:1001 home/other
+        chmod 0755 home/tester home/other
+
+        # A tester-owned file on the overlay root, outside every scratch
+        # mount (TESTER_OVERLAY_FILE in diskgc-e2e/src/suite.rs): the
+        # oracle tests delete it to prove the snapshot covers the overlay.
+        mkdir -p srv/tester
+        printf 'on the overlay root\n' > srv/tester/on-overlay
+        chown -R 1000:1000 srv/tester
+        chmod 0755 srv/tester
+
+        # Mount point of the Cargo smoke check's own tmpfs (SMOKE_MOUNT in
+        # diskgc-e2e/src/cargo_under_test.rs), unmounted after each check.
+        mkdir -p srv/cargo-smoke
+        chmod 0755 srv/cargo-smoke
+
+        # Mount points. The harness mounts tmpfs on /tmp (scratch), on
+        # /run/diskgc (the host lock, provisioned there as the tmpfiles
+        # lines of docs/safety.md do on a host whose /run is a tmpfs), on
+        # /home/tester (tester's home) and on /run/diskgc-e2e (its
+        # records); the runner mounts the binaries under test on
+        # /opt/diskgc-e2e/bin.
+        mkdir -p tmp var/tmp run/diskgc run/diskgc-e2e opt/diskgc-e2e/bin
+        chmod 1777 tmp var/tmp
+        chmod 0755 run/diskgc
+        chmod 0700 run/diskgc-e2e
+      '';
+
+      # The Nix base image: busybox, strace, the Cargo toolchains under test.
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
       # do, and the runner reuses a loaded image with that tag.
@@ -221,58 +277,20 @@
           pkgs.busybox
           pkgs.strace
         ];
-        # Runs under fakeroot in the image's root directory.
         fakeRootCommands = ''
-          # Interlock marker (docs/testing.md, Safety interlock, layer 2).
-          cp ${sandboxMarker} .diskgc-test-sandbox
-          chmod 0444 .diskgc-test-sandbox
-
-          # Users: tester runs the code under test; other owns the
-          # "other user's" fixtures (both mapped through the subuid range).
-          mkdir -p etc
-          printf '%s\n' \
-            'root:x:0:0:root:/root:/bin/sh' \
-            'tester:x:1000:1000:diskgc code under test:/home/tester:/bin/sh' \
-            'other:x:1001:1001:other owner:/home/other:/bin/sh' \
-            'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' > etc/passwd
-          printf '%s\n' \
-            'root:x:0:' 'tester:x:1000:' 'other:x:1001:' 'nogroup:x:65534:' > etc/group
-          printf '%s\n' 'passwd: files' 'group: files' > etc/nsswitch.conf
-          mkdir -p root home/tester home/other
-          chmod 0700 root
-          chown -R 1001:1001 home/other
-          chmod 0755 home/tester home/other
-
-          # A tester-owned file on the overlay root, outside every scratch
-          # mount (TESTER_OVERLAY_FILE in diskgc-e2e/src/suite.rs): the
-          # oracle tests delete it to prove the snapshot covers the overlay.
-          mkdir -p srv/tester
-          printf 'on the overlay root\n' > srv/tester/on-overlay
-          chown -R 1000:1000 srv/tester
-          chmod 0755 srv/tester
-
-          # Mount point of the Cargo smoke check's own tmpfs (SMOKE_MOUNT in
-          # diskgc-e2e/src/cargo_under_test.rs), unmounted after each check.
-          mkdir -p srv/cargo-smoke
-          chmod 0755 srv/cargo-smoke
-
-          # Mount points. The harness mounts tmpfs on /tmp (scratch), on
-          # /run/diskgc (the host lock, provisioned there as the tmpfiles
-          # lines of docs/safety.md do on a host whose /run is a tmpfs), on
-          # /home/tester (tester's home) and on /run/diskgc-e2e (its
-          # records); the runner mounts the binaries under test on
-          # /opt/diskgc-e2e/bin.
-          mkdir -p tmp var/tmp run/diskgc run/diskgc-e2e opt/diskgc-e2e/bin
-          chmod 1777 tmp var/tmp
-          chmod 0755 run/diskgc
-          chmod 0700 run/diskgc-e2e
-
+          ${e2eImageCommon [
+            "name nix"
+            "read-only /nix/store"
+            "toolchains manifest"
+            "tests all"
+          ]}
           # Cargo under test (diskgc-e2e/src/cargo_under_test.rs): one
           # symlink per toolchain and one to the C toolchain, into the
-          # image's /nix/store, which the harness bind-mounts read-only so
-          # the deletion oracle's snapshot does not walk it; the manifest
-          # lists `NAME VERSION TIER` per toolchain, in the order above. Nothing
-          # under /home/tester: the harness mounts a fresh tmpfs there.
+          # image's /nix/store, which the harness bind-mounts read-only (the
+          # descriptor's read-only) so the deletion oracle's snapshot does
+          # not walk it; the manifest lists `NAME VERSION TIER` per
+          # toolchain, in the order above. Nothing under /home/tester: the
+          # harness mounts a fresh tmpfs there.
           mkdir -p opt/cargo-under-test
           ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
           ${lib.concatMapStrings (t: ''
@@ -289,27 +307,85 @@
         };
       };
 
+      # The Debian image (docs/testing.md, Container setup: Images): no Nix
+      # inside, the static binaries under test only. Its userland is the
+      # official Rust image for the fast toolchain's release on Debian 13
+      # (trixie), pinned by digest: Debian's dash as /bin/sh, coreutils,
+      # gcc as the linker, and a rustup-installed (glibc-dynamic, non-Nix)
+      # toolchain whose real binaries the manifest points at, so Cargo runs
+      # without rustup's proxies or any variable. strace is the one file
+      # added from Nix: the static musl build of the same strace release
+      # the Nix image has (Debian's needs shared libraries), copied as a
+      # plain file, so no /nix/store exists in the container.
+      debianRustImage = pkgs.dockerTools.pullImage {
+        imageName = "library/rust";
+        imageDigest = "sha256:4df2ae8cfdfebdfc13a65da7f253b73d68983dc0339f2719bc17a279c913b13d";
+        hash = "sha256-7PLkeybbGZGXoQeSaRrU+4WeLt4UuMseSLi5JHjgu2E=";
+        finalImageName = "library/rust";
+        finalImageTag = "1.99.1-slim-trixie";
+        os = "linux";
+        arch = "amd64";
+      };
+      debianRustToolchain = "1.99.1-x86_64-unknown-linux-gnu";
+      e2eDebianImage = pkgs.dockerTools.streamLayeredImage {
+        name = "localhost/diskgc-e2e-debian";
+        fromImage = debianRustImage;
+        fakeRootCommands = ''
+          ${e2eImageCommon [
+            "name debian"
+            "read-only /usr"
+            "toolchains manifest"
+            "tests portable"
+          ]}
+          # strace where the harness runs it (/bin is Debian's link to
+          # /usr/bin; this layer must not make a /bin of its own).
+          mkdir -p usr/bin
+          cp ${pkgs.pkgsStatic.strace}/bin/strace usr/bin/strace
+          chmod 0755 usr/bin/strace
+
+          # Cargo under test: the image's rustup toolchain (its real cargo
+          # and rustc, not rustup's proxies) and Debian's gcc as the C
+          # toolchain; /usr is mounted read-only by the harness.
+          mkdir -p opt/cargo-under-test
+          ln -s /usr/local/rustup/toolchains/${debianRustToolchain} \
+            opt/cargo-under-test/debian-1.99.1
+          ln -s /usr opt/cargo-under-test/cc
+          printf '%s\n' 'debian-1.99.1 1.99.1 fast' > opt/cargo-under-test/toolchains
+        '';
+        config = {
+          Cmd = [ "/bin/sh" ];
+          Env = [ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ];
+          WorkingDir = "/";
+        };
+      };
+
       # The host-side runner with the image and binaries baked into its
       # arguments: `nix run .#e2e-runner -- run --suite fast`. A compiled
       # wrapper (makeBinaryWrapper), not a shell script.
-      e2eRunner =
-        pkgs.runCommand "diskgc-e2e-runner"
+      mkE2eRunner =
+        name: image:
+        pkgs.runCommand name
           {
             nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
             meta.mainProgram = "diskgc-e2e-runner";
           }
           ''
             makeBinaryWrapper ${e2eBins}/bin/diskgc-e2e-runner $out/bin/diskgc-e2e-runner \
-              --add-flags "--image-stream ${e2eBaseImage}" \
-              --add-flags "--image-ref ${e2eBaseImage.imageName}:${e2eBaseImage.imageTag}" \
+              --add-flags "--image-stream ${image}" \
+              --add-flags "--image-ref ${image.imageName}:${image.imageTag}" \
               --add-flags "--under-test ${e2eUnderTest}"
           '';
+      e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage;
+      # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
+      e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage;
     in
     {
       packages.${system} = {
         default = diskgc;
         e2e-runner = e2eRunner;
+        e2e-runner-debian = e2eRunnerDebian;
         e2e-base-image = e2eBaseImage;
+        e2e-debian-image = e2eDebianImage;
         e2e-under-test = e2eUnderTest;
       };
 
@@ -386,9 +462,11 @@
         # runner verdict). Nothing here needs a container.
         e2e-tests = craneLib.cargoTest (e2eArgs // { cargoArtifacts = e2eDeps; });
 
-        # The runner, image script and binaries under test build; running
-        # them needs Podman, so that happens in `just e2e`, not here.
+        # The runners, image scripts and binaries under test build; running
+        # them needs Podman, so that happens in `just e2e` and
+        # `just e2e-debian`, not here.
         e2e-runner = e2eRunner;
+        e2e-runner-debian = e2eRunnerDebian;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

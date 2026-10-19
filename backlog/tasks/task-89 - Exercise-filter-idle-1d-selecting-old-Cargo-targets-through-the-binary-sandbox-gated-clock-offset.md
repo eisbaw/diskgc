@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-19 02:54'
+updated_date: '2026-10-19 03:21'
 labels:
   - wave-2
   - testing
@@ -20,7 +21,7 @@ priority: medium
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by the CI operator journey (task-12). No test has the binary's idle filter select an old target: a target's last build counts mtimes and ctimes, ctime cannot be set back, and the shortest built-in filter is idle-1h. Refusal (not_idle) through the binary is covered; selection only by model tests and the test driver's --idle-for 1s.
+Found by the CI operator journey (task-12). No test has the binary's idle filter select an old target: a target's last build is the newest mtime or ctime of its entries, a fixture cannot set a ctime back, and the shortest built-in filter is idle-1h. Refusal (not_idle) through the binary is covered; selection only by model tests and the test driver's --idle-for 1s.
 
 Approaches ruled out (mped, round 2): time namespaces (CLOCK_REALTIME is not namespaced), libfaketime (the binary is static musl and diskgc reads the clock directly), setting the clock (needs CAP_SYS_TIME on the host; a container would change the host clock).
 

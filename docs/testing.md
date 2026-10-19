@@ -391,15 +391,15 @@ filesystem, processes and mounts from the developer's system.
   its tier). It also runs the hook's default selection
   (`filter:idle-1d`), which refuses every fixture target. Limit: no test
   has the binary's idle filter *select* an old target: a target's last
-  build counts ctimes, which a fixture cannot set back, and the shortest
-  built-in filter is `idle-1h` (task-89). Refusal (`not_idle`) through the
+  build is the newest mtime or ctime of its entries, a fixture cannot set
+  a ctime back, and the shortest built-in filter is `idle-1h` (task-89). Refusal (`not_idle`) through the
   binary is covered here and by
   `ensure_exits_1_when_every_candidate_was_processed_below_min_free`;
   selection by model tests and by the test driver's `--idle-for 1s`
   (`cargo_target_suite.rs`).
-- **Not only Nix:** the same tests in a container from a common non-Nix
-  distribution image (e.g. Debian) with the static binary, without Nix, and
-  a variant without Docker.
+- **Not only Nix:** a portable subset in a container from a Debian image
+  with the static binary, without Nix (Container setup: Images; `just
+  e2e-debian`), and a variant without Docker (task-46).
 - **Shipped files:** the systemd unit is checked with `systemd-analyze
   verify` (in `just check`); the tmpfiles drop-in is applied with
   `systemd-tmpfiles --root=<scratch> --create` in the container harness
@@ -448,8 +448,10 @@ itself (task-13 H13).
   `/opt/cargo-under-test/cc` link into the image's `/nix/store`, and the
   manifest `/opt/cargo-under-test/toolchains` lists `NAME VERSION TIER` per
   toolchain. The harness bind-mounts `/nix/store` read-only over itself in
-  every container, so the deletion oracle's snapshot does not walk it
-  ("mounts not walked: ... /nix/store (read-only)"). Nothing is baked under
+  every container of the Nix image (its descriptor's `read-only`;
+  Container setup: Images), so the deletion oracle's snapshot does not walk
+  it ("mounts not walked: ... /nix/store (read-only)"). The Debian image
+  has one toolchain of its own (Images). Nothing is baked under
   `/home/tester` (a fresh tmpfs per test): `CARGO_HOME` defaults to
   `/home/tester/.cargo` and starts empty. The three toolchains make the
   base image about 2.8 GB (from 80 MB); loading it after a change takes
@@ -692,6 +694,44 @@ checks its root mount, and both refuse fuse-overlayfs or another storage
 driver, whose inode numbers and birth times the snapshot keys were not
 validated on.
 
+**Images.** There are two test images, each with its own runner (`nix run
+.#e2e-runner`, `.#e2e-runner-debian`) and the same binaries under test, the
+static musl ones. Both carry, baked in by the same commands (flake.nix,
+`e2eImageCommon`), the sandbox marker, the users, the overlay-root fixture
+file, the mount points and a **descriptor**, `/.diskgc-test-image`
+(`diskgc-e2e/src/image.rs`), which says what would otherwise be assumed
+about Nix: which directories setup bind-mounts read-only over themselves
+(`read-only`), whether the image has Cargo toolchains under test
+(`toolchains manifest`, the manifest above, or `none`: no manifest is read
+and no Cargo test listed) and which tests it runs (`tests all` or
+`portable`: `PORTABLE_TESTS` in `suite.rs`, a Cargo test by its name before
+`@TOOLCHAIN`). A missing or malformed descriptor fails the listing and
+every test's setup; nothing falls back to "a Nix image".
+
+- **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace and the
+  Cargo toolchains under test from the Nix store; descriptor `read-only
+  /nix/store`, `toolchains manifest`, `tests all`. `just e2e`, `just
+  e2e-full`.
+- **Debian image** (`localhost/diskgc-e2e-debian`): no Nix inside. Its
+  userland is the official Rust image for the fast toolchain's release
+  (`rust:1.99.1-slim-trixie`, Debian 13), pinned by digest in flake.nix:
+  Debian's dash as `/bin/sh`, coreutils, gcc as the linker, and a
+  rustup-installed, glibc-dynamic Cargo 1.99.1 whose real binaries (not
+  rustup's proxies) the manifest names as `debian-1.99.1`. The one file
+  added from Nix is strace, the static musl build of the release the Nix
+  image has, copied as a plain file, so no `/nix/store` exists in the
+  container. Descriptor `read-only /usr` (the toolchain lives there),
+  `toolchains manifest`, `tests portable`: the interlock and oracle
+  tests, strace's seccomp bound, the static binary's `ensure` tests
+  (thresholds, host lock, exit codes, real Cargo reclaims, dry run) and the
+  CI operator's journey, whose hook runs under dash. `just e2e-debian`, and
+  the end of `just e2e-full`; about 30 s for the 21 tests once the image is
+  loaded. Costs: the pinned image is about 0.9 GB in the Nix store and
+  0.93 GB in Podman's; building the static strace fetches about 370 MB of
+  build tools. Limits: one Cargo (Debian's own rustc package, 1.85 in
+  Debian 13, is not tested); the race tests and the measurements whose
+  bounds were taken on the Nix toolchains run on the Nix image only.
+
 ## Safety interlock for destructive tests
 
 An environment variable is not enough (it leaks through `export`, direnv,
@@ -717,7 +757,8 @@ CI settings). Three layers:
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, the Cargo toolchain tests on the fast toolchain | before every commit (the gate); budget under 5 minutes for the container phase (canary, image check, every test), durations reported per test; over budget it fails, and tests still running at the deadline are killed |
-| `e2e-full` | every container test, fast and full tiers: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, the Debian variant, differential tests | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; a 1-hour deadline only guards against hangs |
+| `e2e-full` | every container test, fast and full tiers: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, differential tests; then `e2e-debian`'s run | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; a 1-hour deadline only guards against hangs |
+| `e2e-debian` | `check` plus the portable subset on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
 | `soak` | property tests with many cases | before a release, nightly CI |
 | `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |

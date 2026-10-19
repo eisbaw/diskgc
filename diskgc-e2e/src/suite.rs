@@ -15,6 +15,11 @@
 //! Cargo toolchain under test, listed as `NAME@TOOLCHAIN`; each first runs
 //! its toolchain's smoke check, and a test whose toolchain fails it is
 //! reported as `TOOLCHAIN` (exit [`exit::TOOLCHAIN`]), not as `FAIL`.
+//!
+//! Which of them an image lists and runs, whether it has toolchains at
+//! all, and what [`Ctx::setup`] mounts read-only, the image's descriptor
+//! says ([`crate::image`]); an image whose descriptor says `tests portable`
+//! runs only [`PORTABLE_TESTS`].
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -25,6 +30,7 @@ use std::time::{Duration, Instant};
 use rustix::mount::MountFlags;
 
 use crate::cargo_under_test::{self, Toolchain, ToolchainBroken};
+use crate::image::{self, Image};
 use crate::oracle::{Change, Fixture, Oracle, Unmatched};
 use crate::probe::{ESCAPE_CASES, ESCAPE_TARGET_DIR, ESCAPED_NAME};
 use crate::scratch::{self, Scratch};
@@ -90,6 +96,40 @@ pub const TESTER_OVERLAY_FILE: &str = "/srv/tester/on-overlay";
 /// What the oracle-mandatory bite test must fail with (the ledger's
 /// message, see [`Ledger::require_all_judged`]).
 const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
+
+/// The tests an image whose descriptor says `tests portable` runs (the
+/// Debian image, docs/testing.md: Images): what the static binary and the
+/// harness must do on a machine without Nix. Plain tests by name, Cargo
+/// tests by their name before `@TOOLCHAIN`. Left out: tests that need the
+/// Nix image's busybox (`/bin/busybox`, `/bin/cat`), the Cargo race tests
+/// and measurements whose bounds were taken on the Nix toolchains.
+pub static PORTABLE_TESTS: &[&str] = &[
+    // The interlock and the deletion oracle on this image's root.
+    "sandbox_trivial",
+    "interlock_canary_passes_in_container",
+    "interlock_aborts_outside_scratch",
+    "oracle_clean_when_only_eligible_objects_go",
+    "oracle_catches_deletion_outside_eligible_set",
+    "oracle_catches_replaced_objects",
+    "oracle_mandatory_unjudged_run_fails_the_test",
+    "snapshot_skips_read_only_mounts",
+    // strace's seccomp filter, with this image's strace.
+    "strace_seccomp_bpf_churn_within_bound",
+    // The static binary: ensure, the host lock, exit codes.
+    "ensure_above_min_free_exits_0_without_the_host_lock",
+    "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
+    "ensure_as_root_without_allow_root_exits_2",
+    "ensure_refuses_a_host_lock_that_is_no_regular_file",
+    "ensure_waits_for_a_held_host_lock_until_the_deadline",
+    "ensure_host_lock_is_inherited_by_children_and_released_only_by_close",
+    // On this image's Cargo.
+    "cargo_smoke",
+    "cargo_fixtures_build_without_network",
+    "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free",
+    "ensure_exits_1_when_every_candidate_was_processed_below_min_free",
+    "ensure_dry_run_plans_real_targets_and_deletes_nothing",
+    "journey_ci_operator_frees_space_with_ensure",
+];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -444,24 +484,40 @@ pub static TESTS: &[Test] = &[
 ];
 
 /// Prints `name<TAB>tier` per test (read by the runner): [`TESTS`], then
-/// every Cargo test per toolchain in the image. Without a readable
-/// toolchain manifest the listing fails: the Cargo tests never silently
-/// vanish.
+/// every Cargo test per toolchain in the image, each only if the image
+/// runs it (its descriptor, [`crate::image`]). Without a readable
+/// descriptor, or a readable toolchain manifest where the descriptor says
+/// `toolchains manifest`, the listing fails: tests never silently vanish.
 pub fn list() -> i32 {
-    let toolchains = match Toolchain::all() {
-        Ok(toolchains) => toolchains,
+    match listing() {
+        Ok(lines) => {
+            for (name, tier) in lines {
+                println!("{name}\t{}", tier.as_str());
+            }
+            exit::PASS
+        }
         Err(why) => {
             eprintln!("diskgc-e2e list: {why}");
-            return exit::FAIL;
+            exit::FAIL
         }
+    }
+}
+
+fn listing() -> Result<Vec<(String, Tier)>, String> {
+    let image = Image::load()?;
+    let toolchains = match image.toolchains {
+        image::Toolchains::Manifest => Toolchain::all()?,
+        image::Toolchains::None => Vec::new(),
     };
-    for test in TESTS {
-        println!("{}\t{}", test.name, test.tier.as_str());
-    }
-    for (name, tier) in cargo_suite::listing(&toolchains) {
-        println!("{name}\t{}", tier.as_str());
-    }
-    exit::PASS
+    let all = TESTS
+        .iter()
+        .map(|t| (t.name.to_owned(), t.tier))
+        .chain(cargo_suite::listing(&toolchains));
+    let lines: Vec<_> = all
+        .filter(|(name, _)| image.runs(name, PORTABLE_TESTS))
+        .collect();
+    ensure!(!lines.is_empty(), "image {} lists no test", image.name);
+    Ok(lines)
 }
 
 /// A test resolved from its listed name.
@@ -513,6 +569,20 @@ pub fn run(name: &str) -> i32 {
             return exit::USAGE;
         }
     };
+    match Image::load() {
+        Ok(image) if !image.runs(name, PORTABLE_TESTS) => {
+            eprintln!(
+                "diskgc-e2e: {name} is not run on the {} image (its descriptor: tests portable)",
+                image.name
+            );
+            return exit::USAGE;
+        }
+        Ok(_) => {}
+        Err(why) => {
+            eprintln!("diskgc-e2e: {why}");
+            return exit::FAIL;
+        }
+    }
     let started = Instant::now();
     let (outcome, toolchain) = match Ctx::setup() {
         Ok(ctx) => {
@@ -605,6 +675,8 @@ pub struct Ctx {
     pub ledger: Ledger,
     pub bin_dir: PathBuf,
     pub self_exe: PathBuf,
+    /// The image's descriptor ([`crate::image`]).
+    pub image: Image,
     /// Set when a Cargo toolchain under test failed its smoke check
     /// ([`Ctx::toolchain_broken`]).
     toolchain_failure: OnceLock<String>,
@@ -614,9 +686,11 @@ pub struct Ctx {
 pub const HOST_LOCK: &str = "/run/diskgc/lock";
 
 impl Ctx {
-    /// Checks the container's root filesystem, then mounts the records tmpfs
-    /// (root only) and the scratch tmpfs mounts, and provisions the host
-    /// lock and tester's profile on them.
+    /// Checks the container's root filesystem, bind-mounts read-only what
+    /// the image's descriptor names (the Nix image's store, the Debian
+    /// image's `/usr`), then mounts the records tmpfs (root only) and the
+    /// scratch tmpfs mounts, and provisions the host lock and tester's
+    /// profile on them.
     pub fn setup() -> Result<Self, String> {
         let uid = rustix::process::getuid().as_raw();
         ensure!(
@@ -624,7 +698,10 @@ impl Ctx {
             "the harness must run as container root to build fixtures, runs as uid {uid}"
         );
         require_native_overlay_root()?;
-        bind_read_only(NIX_STORE)?;
+        let image = Image::load()?;
+        for dir in &image.read_only {
+            bind_read_only(dir)?;
+        }
         let records = Scratch::mount("/run/diskgc-e2e", "0700", ROOT)?;
         let scratch = Scratch::mount("/tmp", "1777", ROOT)?;
         // The tmpfiles lines of docs/safety.md (Host lock):
@@ -644,6 +721,7 @@ impl Ctx {
             ledger: Ledger::new(),
             bin_dir: PathBuf::from(UNDER_TEST_BIN_DIR),
             self_exe,
+            image,
             toolchain_failure: OnceLock::new(),
         })
     }
@@ -712,17 +790,15 @@ impl Ctx {
     }
 }
 
-/// The image's store: busybox, strace and the Cargo toolchains under test.
-pub const NIX_STORE: &str = "/nix/store";
-
 /// Bind-mounts `path` (a directory of the image) read-only over itself, so
 /// the deletion oracle's snapshot skips it like every read-only mount
 /// (docs/testing.md, Grounding): the Cargo toolchains under test are
 /// several 10,000 files on the overlay root, which nothing deletes.
-fn bind_read_only(path: &str) -> Result<(), String> {
-    rustix::mount::mount_bind(path, path).map_err(|e| format!("bind mount {path}: {e}"))?;
+fn bind_read_only(path: &Path) -> Result<(), String> {
+    rustix::mount::mount_bind(path, path)
+        .map_err(|e| format!("bind mount {}: {e}", path.display()))?;
     rustix::mount::mount_remount(path, MountFlags::BIND | MountFlags::RDONLY, c"")
-        .map_err(|e| format!("remount {path} read-only: {e}"))
+        .map_err(|e| format!("remount {} read-only: {e}", path.display()))
 }
 
 /// The snapshot's key rules (docs/testing.md, Grounding) are validated on
@@ -1216,10 +1292,12 @@ fn oracle_logs_unmatched_strace_removals(ctx: &Ctx) -> TestResult {
 }
 
 /// Read-only mounts are not walked by the snapshot (the binaries under
-/// test, the image's store with the Cargo toolchains under test, a
-/// read-only bind mount in scratch), objects stay visible through a
+/// test, what the image's descriptor mounts read-only, e.g. the Nix
+/// image's store with the Cargo toolchains under test, a read-only bind
+/// mount in scratch), objects stay visible through a
 /// writable path to the same filesystem, and a writable mount nested below
-/// a read-only one is still walked.
+/// a read-only one is still walked. The image's Cargo toolchains lie below
+/// what its descriptor mounts read-only.
 fn snapshot_skips_read_only_mounts(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     s.mkdirs("ro-src/nested", 0o755, ROOT)?;
@@ -1237,11 +1315,9 @@ fn snapshot_skips_read_only_mounts(ctx: &Ctx) -> TestResult {
         snap.took,
         snap.skipped
     );
-    for ro in [
-        Path::new(UNDER_TEST_BIN_DIR),
-        Path::new(NIX_STORE),
-        &s.path("ro-dst"),
-    ] {
+    let mut read_only = vec![PathBuf::from(UNDER_TEST_BIN_DIR), s.path("ro-dst")];
+    read_only.extend(ctx.image.read_only.iter().cloned());
+    for ro in &read_only {
         ensure!(
             snap.skipped.get(ro) == Some(&Skip::ReadOnly),
             "{} not skipped as read-only: {:?}",
@@ -1258,6 +1334,23 @@ fn snapshot_skips_read_only_mounts(ctx: &Ctx) -> TestResult {
             "the snapshot walked the read-only mount {}: {below:?}",
             ro.display()
         );
+    }
+    // The image's Cargo toolchains (tens of thousands of files) lie below
+    // what its descriptor mounts read-only, so no snapshot walks them.
+    if ctx.image.toolchains == image::Toolchains::Manifest {
+        for toolchain in Toolchain::all()? {
+            for dir in [&toolchain.bin_dir, &toolchain.cc_bin_dir] {
+                let real = std::fs::canonicalize(dir)
+                    .map_err(|e| format!("canonicalize {}: {e}", dir.display()))?;
+                ensure!(
+                    ctx.image.read_only.iter().any(|ro| real.starts_with(ro)),
+                    "{} ({}) is not below a read-only mount of the image's descriptor {:?}",
+                    dir.display(),
+                    real.display(),
+                    ctx.image.read_only
+                );
+            }
+        }
     }
     for walked in [s.path("ro-src/file"), nested.path("inside")] {
         ensure!(
@@ -1422,6 +1515,19 @@ fn oracle_large_tree(ctx: &Ctx) -> TestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name in the portable subset that no test has would silently shrink
+    /// the Debian run.
+    #[test]
+    fn every_portable_test_exists() {
+        for name in PORTABLE_TESTS {
+            assert!(
+                TESTS.iter().any(|t| t.name == *name)
+                    || cargo_suite::CARGO_TESTS.iter().any(|t| t.name == *name),
+                "{name} is in PORTABLE_TESTS but is no test"
+            );
+        }
+    }
 
     #[test]
     fn expectations_pass_and_fail_as_declared() {

@@ -108,9 +108,9 @@ fn target_of(rel: &str) -> PathBuf {
 /// successfully afterwards; the idle projects build again.
 ///
 /// Apart from the default-selection case, the hook selects
-/// `profile:cargo-target` without the idle filter: a target's last build
-/// counts ctimes, which cannot be set back, so every fixture target is
-/// seconds old. The in-use checks, not the idle filter, are what keeps the
+/// `profile:cargo-target` without the idle filter: a target's last build is
+/// the newest mtime or ctime of its entries, and a ctime cannot be set
+/// back, so every fixture target is seconds old. The in-use checks, not the idle filter, are what keeps the
 /// busy targets in A and B.
 pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolchain) -> TestResult {
     let busy = set_up_runner(ctx, toolchain)?;
@@ -182,22 +182,19 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     default.run.expect_code(1)?;
     let r = default.report?;
     ensure!(r["status"] == "exhausted" && acted(&r).is_empty(), "{r}");
-    // Idleness is judged under the target's locks (Reclaim protocol, step
-    // 2), so the paused build's target stops at its locks first: `locked`,
-    // not `not_idle` (task-87).
-    let not_idle: Vec<(&Path, &str)> = all_targets
-        .iter()
-        .map(|t| {
-            let reason = if *t == busy_targets[1] {
-                "locked"
-            } else {
-                "not_idle"
-            };
-            (t.as_path(), reason)
-        })
-        .collect();
+    // Below min-free with nothing able to meet it, the reclaim reaches
+    // every target; idleness is judged under a target's locks (Reclaim
+    // protocol, step 2), so the paused build's target stops at its locks
+    // first: `locked`, not `not_idle` (task-87).
+    let not_idle: [(&Path, &str); 5] = [
+        (&busy_targets[0], "not_idle"),
+        (&busy_targets[1], "locked"),
+        (&idle[0], "not_idle"),
+        (&idle[1], "not_idle"),
+        (&idle[2], "not_idle"),
+    ];
     expect_skipped(&r, &not_idle, "the default selection")?;
-    expect_summary(&default.run, &r, 0, all_targets.len(), 0)?;
+    expect_summary(&default.run, &r)?;
     expect_unchanged(&busy_before, "the default selection")?;
 
     // A: the hook frees the two oldest idle targets and stops.
@@ -219,12 +216,12 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         &[(&busy_targets[0], "in_use"), (&busy_targets[1], "locked")],
         "A",
     )?;
-    expect_summary(&a.run, &r, 2, 2, 0)?;
+    expect_summary(&a.run, &r)?;
     expect_held_log(&r, busy.holder.pid())?;
-    let after_a = r["avail_after_bytes"].as_u64().ok_or("avail_after_bytes")?;
+    let after_a = avail(Path::new(BUILDS))?;
     ensure!(
         after_a >= target_free.bytes,
-        "A ended at {after_a} bytes, below its target-free {}",
+        "the harness sees {after_a} bytes available after A, below its target-free {}",
         target_free.text
     );
     for target in &idle[..2] {
@@ -277,7 +274,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         ],
         "B",
     )?;
-    expect_summary(&b.run, &r, 1, 2, 2)?;
+    expect_summary(&b.run, &r)?;
     expect_held_log(&r, busy.holder.pid())?;
     expect_reclaimed(&idle[2])?;
     expect_unchanged(&busy_before, "B")?;
@@ -329,7 +326,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         r["status"] == "met" && r["path"] == FRESH_BUILDS && acted(&r).is_empty(),
         "{r}"
     );
-    expect_summary(&fresh.run, &r, 0, 0, 0)?;
+    expect_summary(&fresh.run, &r)?;
     ensure!(
         fresh.run.stdout.contains("report in /tmp/diskgc-pre-job."),
         "the default report is a new file in /tmp: {}",
@@ -469,22 +466,15 @@ fn expect_space_agrees(run: &Run, path: impl AsRef<Path>, min_free: &Goal) -> Te
 }
 
 /// The hook's summary line says what the report says: its status, space
-/// before and after, min-free and target met (the fields it reads without
-/// jq), and the counts of reclaimed, kept and already empty targets.
-fn expect_summary(
-    run: &Run,
-    report: &Value,
-    reclaimed: usize,
-    kept: usize,
-    empty: usize,
-) -> TestResult {
+/// before and after, min-free and target met (the top-level fields it
+/// reads without jq), followed by the report's path.
+fn expect_summary(run: &Run, report: &Value) -> TestResult {
     let text = |v: &Value| match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
     let want = format!(
-        "status {}, {} -> {} bytes available (min-free {}, target met: {}); {reclaimed} \
-         target(s) reclaimed, {kept} kept, {empty} already empty;",
+        "status {}, {} -> {} bytes available (min-free {}, target met: {}); report in ",
         text(&report["status"]),
         text(&report["avail_before_bytes"]),
         text(&report["avail_after_bytes"]),
@@ -505,6 +495,10 @@ fn expect_summary(
 /// stale holder of a deleted log.
 fn set_up_runner(ctx: &Ctx, toolchain: &Toolchain) -> Result<Busy, String> {
     let s = &ctx.scratch;
+    // The hook runs under the image's /bin/sh: busybox in the Nix image,
+    // dash in the Debian one.
+    let shell = std::fs::canonicalize("/bin/sh").map_err(|e| format!("/bin/sh: {e}"))?;
+    info!("the hook's shell: /bin/sh is {}", shell.display());
     s.mkdir("builds", 0o755, TESTER)?;
     s.mkdir("ci", 0o755, ROOT)?;
     s.write_file("ci/pre-job.sh", PRE_JOB_SCRIPT.as_bytes(), 0o755, ROOT)?;
@@ -602,8 +596,8 @@ struct HookRun {
 /// diskgc on `PATH`, `CI_BUILDS_DIR` [`BUILDS`], `DISKGC_SELECT`
 /// `profile:cargo-target` (see the journey's note on `filter:idle-1d`) and
 /// the report at `REPORTS/<case>.json` (unset: the path the hook prints);
-/// `vars` then sets (`Some`) or
-/// unsets (`None`) variables. The caller arms and judges the oracle.
+/// `vars` then sets (`Some`) or unsets (`None`) variables. The caller arms
+/// and judges the oracle.
 fn pre_job(ctx: &Ctx, case: &str, vars: &[Var]) -> Result<HookRun, String> {
     let mut env: BTreeMap<String, String> = [
         ("PATH", format!("{UNDER_TEST_BIN_DIR}:/bin")),

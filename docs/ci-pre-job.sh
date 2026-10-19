@@ -21,13 +21,24 @@
 #   DISKGC_REPORT       where the JSON report is kept, e.g. for a dashboard
 #                       (default: a new file from mktemp in ${TMPDIR:-/tmp},
 #                       never a fixed name in a shared directory, which
-#                       another job or user could hold or replace)
+#                       another job or user could hold or replace). The
+#                       hook never removes a report: on a persistent runner
+#                       set DISKGC_REPORT (and rotate it), or rely on the
+#                       ageing of /tmp (systemd-tmpfiles), or one file per
+#                       job accumulates.
 #
-# Exit: 0 when the job may start; otherwise diskgc's exit code, so the job
-# fails before it starts rather than half-way through, out of disk; 2 for
-# a misconfigured hook or runner; 3 when diskgc left no report although it
-# exited 0. diskgc's progress lines (one per reclaimed or skipped target)
-# go to stderr, i.e. to the job log.
+# Exit: 0 when the job may start; otherwise diskgc's exit code (docs/
+# reference.md, Exit codes), so the job fails before it starts rather than
+# half-way through, out of disk. The hook's own failures: 2 for a
+# misconfigured hook or an unprovisioned runner (the class diskgc uses for
+# usage and provisioning errors), 4 when diskgc exited 0 but left no
+# report (a code diskgc never uses).
+#
+# The exit code is authoritative. The one-line summary printed at the end
+# is informational: a few top-level fields of the report, read without jq.
+# For exact counts of reclaimed and kept targets, read the report with jq
+# (e.g. `jq '[.actions[].count] | add'`). diskgc's progress lines (one per
+# reclaimed or skipped target) go to stderr, i.e. to the job log.
 
 set -u
 
@@ -87,8 +98,8 @@ if [ ! -f "$report" ] || [ ! -s "$report" ]; then
         echo "pre-job: diskgc could not be started (exit $code): is it installed and on PATH?" >&2
         exit "$code"
     fi
-    echo "pre-job: diskgc ensure exited $code without writing its report to $report" >&2
-    [ "$code" -ne 0 ] || code=3
+    echo "pre-job: diskgc ensure exited $code without writing its report to $report (it could not write it, or it was interrupted)" >&2
+    [ "$code" -ne 0 ] || code=4
     exit "$code"
 fi
 
@@ -99,23 +110,10 @@ fi
 field() {
     sed -n -E "s/.*\"$1\":(\"[^\"]*\"|[^,}]*).*/\1/p" "$report" | tr -d '"'
 }
-# How often a text occurs in the report.
-count() {
-    grep -o "$1" "$report" | wc -l | tr -d ' '
-}
 
-# Reclaimed: `actions` entries (only they carry avail_delta_bytes). Kept:
-# `skipped` entries (only they carry examples), less those an earlier run
-# already reclaimed (`empty`). These count entries, not candidates: once
-# diskgc aggregates many skips of one reason into one entry with a `count`
-# (docs/reference.md, Output), they undercount; with jq, sum `.count`.
-reclaimed=$(count '"avail_delta_bytes":')
-empty=$(count '"reason":"empty"')
-kept=$(($(count '"examples":') - empty))
 echo "pre-job: diskgc ensure exited $code after ${took}s: status $(field status)," \
     "$(field avail_before_bytes) -> $(field avail_after_bytes) bytes available" \
     "(min-free $(field min_free_bytes), target met: $(field target_met));" \
-    "$reclaimed target(s) reclaimed, $kept kept, $empty already empty;" \
     "report in $report"
 
 case $code in
