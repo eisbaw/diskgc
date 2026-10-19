@@ -143,9 +143,10 @@ snapshot when one exists, otherwise it tallies.
 ### `profiles` command
 
 `list`: name, category, kind, description of every profile (built-in and
-user, marking overrides). `show NAME`: the full YAML as diskgc understands
-it. `test`: run every profile's `examples` against an in-memory model; exit
-1 on any failure.
+user, marking overrides and every profile that says `checkouts: allow`).
+`show NAME`: the full YAML as diskgc understands it; for a source,
+`checkouts` is always shown (the default spelled out). `test`: run every
+profile's `examples` against an in-memory model; exit 1 on any failure.
 
 ### `check`
 
@@ -206,7 +207,7 @@ JSON result (field names are part of the contract):
   "index": {"source": "live | snapshot | sync", "age_s": 0, "units": 0, "untallied": 0, "coverage": "complete | partial"},
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
-  "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": ""}],
+  "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
   "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
@@ -228,7 +229,10 @@ JSON result (field names are part of the contract):
   bucket is one plan entry with a member `count`; `estimated_bytes` is
   `null` for Docker and Nix without a reported size, for candidates not
   yet tallied, and for every skipped candidate (its checks stopped before
-  its walk was complete, so a size would be a partial count).
+  its walk was complete, so a size would be a partial count); `checkouts`
+  is the source profile's setting the candidate was judged under (`allow`:
+  it may hold a version-control checkout, see
+  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
 - `avail_delta_bytes` is signed: the observed net change in available space
   around an action, never "bytes freed by this action" (see
   [architecture.md](architecture.md#measuring-space)); `null` when a
@@ -406,6 +410,7 @@ profiles apply and when.
     roots: [/tmp, /var/tmp]
     paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"]
     type: dir
+  checkouts: allow                   # default refuse (Built-in profile library)
   action: delete
   examples:                          # checked by `diskgc profiles test` and CI
     match:    [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0]
@@ -447,6 +452,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `idle_for`: when something is old enough is the tier's choice, written with a `filter:` (Key decisions: what vs when). |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). |
+| `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
 | `override` | user profiles | See User profiles. |
 
@@ -634,12 +640,12 @@ v1 *target*; until verified it is listed as planned, not shipped.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
-| test | `pytest-tmp` | pytest's test dirs `pytest-of-*/pytest-*/*` in `/tmp`, `/var/tmp`, and one level down (`nix-shell.*/pytest-of-*/pytest-*/*`, `tmp.*/...`); one candidate per test dir (below the list) | `delete` |
+| test | `pytest-tmp` | pytest's test dirs `pytest-of-*/pytest-*/*` in `/tmp`, `/var/tmp`, and one level down (`nix-shell.*/pytest-of-*/pytest-*/*`, `tmp.*/...`); one candidate per test dir (below the list); `checkouts: allow`: pytest deletes these dirs itself (below the list), so a repository a test made there is a fixture | `delete` |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-shell-rc` | `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start) | `delete` |
 | nix | `nix-shell-tmpdir` | `/tmp/nix-shell.*` (a shell's `TMPDIR`) | `delete` |
 | nix | `nix-garbage` | dead store paths | Nix GC |
-| rust | `cargo-target` | Cargo `target/` dirs (roots required) | lock protocol |
+| rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the default builder | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
@@ -661,14 +667,28 @@ v1 *target*; until verified it is listed as planned, not shipped.
 - `pytest-tmp` takes one test directory per candidate
   (`pytest-of-<user>/pytest-<N>/<test>`: what pytest's `tmp_path` made for
   one test), not a session or the whole `pytest-of-<user>`: a test dir
-  that cannot go (one where the test ran `git init` is
-  `contains_checkout`, one in use `in_use`) keeps only itself. Only
+  that cannot go (one in use, `in_use`) keeps only itself. It says
+  `checkouts: allow` (Mark, 2026-10-19): a test dir holding a `.git`
+  (a test ran `git init`) is eligible like any other. pytest treats these
+  dirs as disposable itself: it keeps only the last
+  `tmp_path_retention_count` sessions (default 3) per base temp dir and
+  deletes the older ones; they pile up because every nix shell has a
+  `TMPDIR` of its own, so each holds its own few sessions that no later
+  pytest run cleans. The per-test-dir granularity was chosen while the
+  guard still applied here; it stays for now and can be revisited (its
+  candidate count is task-70's cost question). Only
   directories are candidates (`type: dir`): pytest's `*current` symlinks
   (`pytest-current` next to the sessions, `<test>current` next to the
   test dirs) and plain files directly in a session dir never are. The
   session dirs and `pytest-of-<user>` itself are left alone, also once
-  empty (`tmp-entry` may take them). pytest's `garbage-*` directories (an
-  interrupted cleanup of its own) are not matched.
+  empty; `tmp-entry`, which takes only top-level entries of `/tmp` and
+  `/var/tmp`, may take a whole `/tmp/pytest-of-<user>` (or the
+  `nix-shell.*` or `tmp.*` directory around one), with whatever is still
+  in it, never a session dir on its own. pytest's `garbage-*` directories
+  (an interrupted cleanup of its own) are not matched. Limit: under
+  pytest-xdist the test dirs are one level deeper
+  (`pytest-<N>/popen-gw<K>/<test>`), so a candidate is a whole worker's
+  directory, and one test dir there in use keeps all of that worker's.
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs
   a server-aware protocol first.
@@ -698,7 +718,9 @@ profile was renamed.
   in-memory model, so a profile is checked before it touches a disk.
 - `check` warns about a user profile whose last path segment is only
   wildcards outside `/tmp` and `/var/tmp` (e.g. `roots: [/home/mark]`,
-  `paths: ["*"]`).
+  `paths: ["*"]`), and about every user profile that says `checkouts:
+  allow` (its candidates may be repositories holding uncommitted work,
+  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
 - **Profiles are meant to be written by an AI and checked by the tool**,
   because globs are hard for humans to read and concrete paths are not:
   `diskgc survey --json` shows what no profile matches yet; an AI agent

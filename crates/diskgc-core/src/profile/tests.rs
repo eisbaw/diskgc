@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::doc::{code, code_blocks, reference_md, section, table};
+use crate::engine::Checkouts;
 use crate::host::Timestamp;
 use crate::select::{CheckError, SelectError, compile};
 use crate::units::format_duration;
@@ -67,6 +68,8 @@ fn the_built_in_library_loads() {
     assert_eq!(source.roots, Roots::Required);
     assert_eq!(source.action, Action::CargoLockProtocol);
     assert!(source.where_.is_empty());
+    // task-80: the one built-in that lets candidates hold checkouts.
+    assert_eq!(source.checkouts, Checkouts::Allow);
 }
 
 /// Every `idle-*` built-in requires exactly what its name says.
@@ -105,6 +108,35 @@ fn built_ins_are_in_the_reference_table() {
             profile.name
         );
     }
+}
+
+/// task-80: docs/reference.md's library table is the one home for which
+/// built-ins allow checkouts. For every shipped built-in source, its row
+/// says `checkouts: allow` exactly when the profile does. (Rows of
+/// profiles not shipped yet are checked when they ship.)
+#[test]
+fn the_reference_table_says_which_built_ins_allow_checkouts() {
+    let library_md = section(&reference_md(), "### Built-in profile library");
+    let rows = table(&library_md, "| Category | Profile |");
+    let library = Library::builtin().expect("built-ins");
+    let mut checked = 0;
+    for profile in library.profiles() {
+        let Body::Source(source) = &profile.body else {
+            continue;
+        };
+        let row = rows
+            .iter()
+            .find(|row| row[1].split(", ").any(|name| code(name) == profile.name))
+            .unwrap_or_else(|| panic!("no row for `{}`", profile.name));
+        assert_eq!(
+            row[2].contains("`checkouts: allow`"),
+            source.checkouts == Checkouts::Allow,
+            "`{}`: the reference row and the profile disagree on checkouts",
+            profile.name
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no built-in source was checked");
 }
 
 /// The mechanism behind AC #3: built-in YAML that breaks a rule does not
@@ -387,6 +419,78 @@ fn user_fs_profiles_need_examples_with_a_match() {
     );
 }
 
+/// task-80: `checkouts` is a source's setting. Absent, it is `refuse`
+/// (fail closed); `allow` and `refuse` are the only values, on any kind of
+/// source; a filter has none.
+#[test]
+fn checkouts_is_refuse_unless_a_source_says_allow() {
+    let example = "  examples: {match: [/tmp/x-1]}\n";
+    let checkouts = |extra: &str| {
+        let library =
+            with_user(&fs_source(&format!("{example}{extra}"))).unwrap_or_else(|e| panic!("{e}"));
+        match &library.get("x").expect("x").body {
+            Body::Source(source) => source.checkouts,
+            Body::Filter(_) => panic!("not a source"),
+        }
+    };
+    assert_eq!(checkouts(""), Checkouts::Refuse);
+    assert_eq!(checkouts("  checkouts: refuse\n"), Checkouts::Refuse);
+    assert_eq!(checkouts("  checkouts: allow\n"), Checkouts::Allow);
+    let cargo = with_user(
+        "- {name: my-targets, kind: cargo-target, find: {roots: required}}\n\
+         - {name: my-vendored, kind: cargo-target, find: {roots: required}, checkouts: allow}\n",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    for (name, want) in [
+        ("my-targets", Checkouts::Refuse),
+        ("my-vendored", Checkouts::Allow),
+    ] {
+        let Some(Body::Source(source)) = cargo.get(name).map(|p| &p.body) else {
+            panic!("{name}");
+        };
+        assert_eq!(source.checkouts, want, "{name}");
+    }
+    for value in ["Allow", "yes", "off", "true", "\"\""] {
+        let error = yaml_error(&fs_source(&format!("{example}  checkouts: {value}\n")));
+        assert!(
+            error.contains("refuse") && error.contains("allow"),
+            "`checkouts: {value}`: {error}"
+        );
+    }
+    for nested in ["[allow]", "[]", "{}", "{allow: true}"] {
+        let error = yaml_error(&fs_source(&format!("{example}  checkouts: {nested}\n")));
+        assert!(
+            error.contains("`refuse` or `allow`"),
+            "`checkouts: {nested}`: {error}"
+        );
+    }
+    // A null through an alias is a null too.
+    let error = yaml_error(&fs_source(&format!(
+        "{example}  description: &n null\n  checkouts: *n\n"
+    )));
+    assert!(error.contains("`checkouts` has no value"), "alias: {error}");
+    // A present null is not absence: on a source and on a filter, every
+    // YAML spelling of null is refused, never read as the default.
+    for null in ["", " ~", " null", " Null", " NULL", " !!null", " !!null ''"] {
+        let error = yaml_error(&fs_source(&format!("{example}  checkouts:{null}\n")));
+        assert!(
+            error.contains("`checkouts` has no value"),
+            "`checkouts:{null}`: {error}"
+        );
+        let error = yaml_error(&format!(
+            "- name: f\n  where: {{idle_for: 1d}}\n  checkouts:{null}\n"
+        ));
+        assert!(
+            error.contains("`checkouts` has no value"),
+            "filter `checkouts:{null}`: {error}"
+        );
+    }
+    assert_has(
+        &user_errors("- {name: f, where: {idle_for: 1d}, checkouts: allow}"),
+        "a filter profile has no `checkouts`",
+    );
+}
+
 /// U1: a source's own `where` takes `has` / `has_not`, never `idle_for`
 /// ("when" is the tier's, through filters).
 #[test]
@@ -601,6 +705,11 @@ fn the_reference_examples_load() {
         }
     );
     assert_eq!(source.examples.matches.len(), 2);
+    assert_eq!(
+        source.checkouts,
+        Checkouts::Allow,
+        "as its library row says"
+    );
 
     #[derive(serde::Deserialize)]
     struct ConfigProfiles {

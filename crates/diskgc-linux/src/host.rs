@@ -2160,7 +2160,7 @@ mod tests {
     /// bound needs it well under a second).
     #[test]
     fn the_in_use_check_finds_a_holder_on_this_machine() {
-        use diskgc_core::engine::{Candidate, DEFAULT_MAX_ENTRIES, Reason, Rules, walk};
+        use diskgc_core::engine::{Candidate, Reason, Rules, walk};
         use diskgc_core::inuse::{Options, scan};
         let host = LinuxHost::new().expect("host setup");
         let dir = TempDir::new("inuse");
@@ -2175,11 +2175,8 @@ mod tests {
 
         let uid = rustix::process::geteuid().as_raw();
         let parent = resolve(&host, &dir.0, Want::Directory).expect("resolve");
-        let rules = Rules {
-            owners: &[uid],
-            block_ipc: true,
-            max_entries: DEFAULT_MAX_ENTRIES,
-        };
+        let owners = [uid];
+        let rules = Rules::new(&owners);
         let scan = scan(
             &host,
             &Options {
@@ -2705,18 +2702,14 @@ mod tests {
     #[test]
     fn the_engine_walks_here_but_its_delete_is_refused_by_the_gate() {
         use diskgc_core::engine::{
-            Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, End, Reason, Rules, WalkStop, delete,
-            walk,
+            Candidate, DeleteOptions, End, Reason, Rules, WalkStop, delete, walk,
         };
         sandbox::check().expect_err("this test must run outside a diskgc test container");
         let host = LinuxHost::new().expect("host setup");
         let tmp = TempDir::new("engine");
         let me = rustix::process::geteuid().as_raw();
-        let rules = Rules {
-            owners: &[me],
-            block_ipc: true,
-            max_entries: DEFAULT_MAX_ENTRIES,
-        };
+        let owners = [me];
+        let rules = Rules::new(&owners);
         let parent = resolve(&host, &tmp.0, Want::Directory).expect("resolve");
         let walk_of = |name: &str| {
             let path = tmp.0.join(name);

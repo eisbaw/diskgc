@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
-use crate::engine::{DEFAULT_MAX_ENTRIES, Reason, Rules, Skip};
+use crate::engine::{Checkouts, Reason, Rules, Skip};
 use crate::fs_kind::{self, Find};
 use crate::host::{Delete, Dev, Host, HostError, MonoTime, Space, Timestamp};
 use crate::hostlock::{self, LockError};
@@ -76,6 +76,9 @@ pub struct Tier {
     pub roots: Vec<PathBuf>,
     /// The term's idle requirement (the longest of its `filter:`s).
     pub idle_for: Option<IdleFor>,
+    /// The source profile's `checkouts` setting: whether a candidate may
+    /// hold a VCS checkout (docs/safety.md, No source checkout).
+    pub checkouts: Checkouts,
     /// The action, as the report names it.
     pub operation: String,
 }
@@ -170,6 +173,7 @@ impl Tier {
             source: kind,
             roots,
             idle_for,
+            checkouts: source.checkouts,
             operation: source.action.to_string(),
         })
     }
@@ -448,7 +452,7 @@ pub fn dry_run<H: Host>(
     };
     let tier = &request.tier;
     let owners = [uid];
-    let rules = rules(&owners);
+    let rules = rules(tier, &owners, log);
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
@@ -523,6 +527,7 @@ fn plan_entry(
         reason,
         estimated_bytes: bytes,
         operation: tier.operation.clone(),
+        checkouts: tier.checkouts,
     }
 }
 
@@ -710,13 +715,22 @@ fn plan_fs<H: Host>(
     planned
 }
 
-/// The one set of walk rules of a run: every entry the user's, any socket
-/// or FIFO refuses (the default policy), the default entry budget.
-fn rules(owners: &[u32]) -> Rules<'_> {
+/// The one set of walk rules of `tier`'s run: every entry one of
+/// `owners`', any socket or FIFO refuses (the default policy), the default
+/// entry budget ([`Rules::new`]), and the source profile's `checkouts`
+/// setting. An `allow` is logged, so a run that may delete a checkout says
+/// so where it runs (docs/safety.md, No source checkout).
+fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules<'o> {
+    if tier.checkouts == Checkouts::Allow {
+        log(&format!(
+            "{}: profile `{}` says `checkouts: allow`: a candidate holding .git, .hg or .svn, or \
+             inside a checkout's metadata, is not refused for that",
+            tier.name, tier.profile
+        ));
+    }
     Rules {
-        owners,
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
+        checkouts: tier.checkouts,
+        ..Rules::new(owners)
     }
 }
 
@@ -947,7 +961,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
 
     fn run(&mut self, uid: u32) {
         let owners = [uid];
-        let rules = rules(&owners);
+        let rules = rules(self.tier, &owners, self.log);
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
         self.walk(&rules, &mut checker);
         self.report.held_by_deleted_files =

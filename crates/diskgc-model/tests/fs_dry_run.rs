@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
+use diskgc_core::engine::Checkouts;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
@@ -60,6 +61,16 @@ const PROFILES: &str = r#"
   find: {roots: required, paths: ["*/*/*"], type: dir}
   action: delete
   examples: {match: [/srv/a/b/c]}
+- name: tmp-entry-checkouts
+  find: {roots: [/tmp], paths: ["*"], type: any}
+  checkouts: allow
+  action: delete
+  examples: {match: [/tmp/x]}
+- name: deep-dirs-checkouts
+  find: {roots: required, paths: ["*/*/*"], type: dir}
+  checkouts: allow
+  action: delete
+  examples: {match: [/srv/a/b/c]}
 "#;
 
 fn library() -> Library {
@@ -107,11 +118,16 @@ fn request(select: &str, roots: &[&str], path: &str) -> Request {
 }
 
 fn dry_run(host: &ModelHost, request: &Request) -> Report {
+    dry_run_logged(host, request).0
+}
+
+/// [`dry_run`] and its log lines.
+fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
     let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
-    report
+    (report, lines)
 }
 
 /// The plan as (candidate, reason) pairs, in order.
@@ -664,6 +680,139 @@ fn a_checkout_marker_anywhere_in_a_plain_delete_candidate_is_contains_checkout()
     nothing_locked_or_deleted(&host);
 }
 
+/// task-80: the checkout guard is the source profile's setting. A user
+/// profile without `checkouts` refuses a candidate holding a checkout
+/// (`contains_checkout`); the same profile with `checkouts: allow` takes
+/// it, and the dry run's log says so once, naming the profile. Everything
+/// else is judged the same: a keep marker still keeps.
+#[test]
+fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = || {
+        host(&yaml(&format!(
+            "  /tmp/repo:\n    .: {at}\n    a: {{.: {at}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
+             /tmp/hg: {{.: {at}, .hg: {{.: {at}, store: {{.: {at}}}}}}}\n  /tmp/kept-repo:\n    \
+             .: {at}\n    .diskgc-keep: {at}\n    .git: {{.: {at}}}\n  /tmp/plain: {{.: {at}, f: \
+             {at}}}\n"
+        )))
+    };
+    let allows = |lines: &[String]| {
+        lines
+            .iter()
+            .filter(|l| l.contains("checkouts: allow"))
+            .count()
+    };
+    let refusing = host();
+    let (report, lines) = dry_run_logged(&refusing, &request("profile:tmp-entry", &[], "/tmp"));
+    let mut found = plan(&report);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("/tmp/hg".to_owned(), Some("contains_checkout")),
+            ("/tmp/kept-repo".to_owned(), Some("kept")),
+            ("/tmp/plain".to_owned(), None),
+            ("/tmp/repo".to_owned(), Some("contains_checkout")),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    assert_eq!(allows(&lines), 0, "{lines:#?}");
+    assert!(
+        report.plan.iter().all(|p| p.checkouts == Checkouts::Refuse),
+        "{:#?}",
+        report.plan
+    );
+    // As `--json` emits it: every plan entry says `refuse`.
+    let json: serde_json::Value =
+        serde_json::from_str(&report.to_json()).unwrap_or_else(|e| panic!("{e}"));
+    let emitted: Vec<&serde_json::Value> = json["plan"]
+        .as_array()
+        .expect("a plan")
+        .iter()
+        .map(|p| &p["checkouts"])
+        .collect();
+    assert!(
+        !emitted.is_empty() && emitted.iter().all(|c| *c == "refuse"),
+        "{emitted:?}"
+    );
+    nothing_locked_or_deleted(&refusing);
+
+    let allowing = host();
+    let (report, lines) = dry_run_logged(
+        &allowing,
+        &request("profile:tmp-entry-checkouts", &[], "/tmp"),
+    );
+    let mut found = plan(&report);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("/tmp/hg".to_owned(), None),
+            ("/tmp/kept-repo".to_owned(), Some("kept")),
+            ("/tmp/plain".to_owned(), None),
+            ("/tmp/repo".to_owned(), None),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    assert_eq!(allows(&lines), 1, "{lines:#?}");
+    // And in the plan (`--json`): every entry was judged under `allow`.
+    assert!(
+        report.plan.iter().all(|p| p.checkouts == Checkouts::Allow),
+        "{:#?}",
+        report.plan
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("profile `tmp-entry-checkouts` says `checkouts: allow`")),
+        "{lines:#?}"
+    );
+    nothing_locked_or_deleted(&allowing);
+}
+
+/// task-80: the path rule follows the same setting. Below a project root,
+/// `proj/.git/objects` is `contains_checkout` for a profile without
+/// `checkouts`, and eligible for the same patterns with `checkouts:
+/// allow`.
+#[test]
+fn the_checkout_path_rule_follows_the_profiles_setting() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = || {
+        host(&yaml(&format!(
+            "  /home/mark/src/proj/.git/objects: {{.: {at}, ab: {{.: {at}, cdef: {at}}}}}\n  \
+             /home/mark/src/proj/build/out: {{.: {at}, a.o: {at}}}\n"
+        )))
+    };
+    for (profile, metadata) in [
+        ("deep-dirs", Some("contains_checkout")),
+        ("deep-dirs-checkouts", None),
+    ] {
+        let host = host();
+        let report = dry_run(
+            &host,
+            &request(
+                &format!("profile:{profile}"),
+                &["/home/mark/src"],
+                "/home/mark",
+            ),
+        );
+        let mut found = plan(&report);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("/home/mark/src/proj/.git/objects".to_owned(), metadata),
+                ("/home/mark/src/proj/build/out".to_owned(), None),
+            ],
+            "{profile}: {:#?}",
+            report.plan
+        );
+        nothing_locked_or_deleted(&host);
+    }
+}
+
 /// The spike's profile file (task-68; diskgc-core
 /// `fs_kind/spike-profiles.yaml`) as a library: what the real-machine dry
 /// runs use, so a test of its profiles tests the file itself.
@@ -675,14 +824,14 @@ fn spike_library() -> Library {
 }
 
 /// task-71 (Mark, 2026-10-18): `pytest-tmp` takes one pytest test dir
-/// per candidate (`pytest-of-<user>/pytest-<N>/<test>`). Of two sessions,
-/// the test dir where a test ran `git init` is `contains_checkout`, and its
-/// sibling test dirs in the same session are eligible, as are the other
-/// session's and one inside a nix-shell temp dir. The session dirs,
-/// `pytest-of-mark`, pytest's `*current` symlinks and a plain file in a
-/// session dir (pytest's `.lock`) are never candidates.
+/// per candidate (`pytest-of-<user>/pytest-<N>/<test>`), the test dirs of
+/// two sessions and one inside a nix-shell temp dir. task-80 (Mark,
+/// 2026-10-19): it says `checkouts: allow`, so the test dir where a test
+/// ran `git init` is eligible too. The session dirs, `pytest-of-mark`,
+/// pytest's `*current` symlinks and a plain file in a session dir
+/// (pytest's `.lock`) are never candidates.
 #[test]
-fn pytest_tmp_takes_one_test_dir_per_candidate_so_a_checkout_keeps_only_its_test() {
+fn pytest_tmp_takes_one_test_dir_per_candidate_checkouts_included() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
     let link = |to: &str| format!("{{symlink: {to}, mtime: 2026-10-01T00:00:00Z}}");
     let host = host(&yaml(&format!(
@@ -710,10 +859,7 @@ fn pytest_tmp_takes_one_test_dir_per_candidate_so_a_checkout_keeps_only_its_test
                 None
             ),
             ("/tmp/pytest-of-mark/pytest-1/test_other0".to_owned(), None),
-            (
-                "/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(),
-                Some("contains_checkout")
-            ),
+            ("/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(), None),
             ("/tmp/pytest-of-mark/pytest-2/test_x0".to_owned(), None),
             ("/var/tmp".to_owned(), Some("missing")),
         ],

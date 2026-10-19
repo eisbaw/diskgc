@@ -19,6 +19,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
+use crate::engine::Checkouts;
 use crate::units::format_bytes;
 use json::Json;
 
@@ -177,6 +178,9 @@ pub struct PlanEntry {
     /// be a partial count).
     pub estimated_bytes: Option<u64>,
     pub operation: String,
+    /// The source profile's `checkouts` setting the candidate was judged
+    /// under (docs/safety.md, No source checkout).
+    pub checkouts: Checkouts,
 }
 
 /// One action (`actions`): a candidate deleted, completely or part-way.
@@ -327,6 +331,7 @@ impl Report {
                                 ("reason", Json::opt(p.reason, Json::str)),
                                 ("estimated_bytes", opt_u64(p.estimated_bytes)),
                                 ("operation", Json::str(&p.operation)),
+                                ("checkouts", Json::str(p.checkouts.as_str())),
                             ])
                         })
                         .collect(),

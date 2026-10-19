@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::doc::{code_blocks, reference_md, section, table};
-use crate::engine::Reason;
+use crate::engine::{Checkouts, Reason};
 
 /// Documented object fields this build always emits as `null`, and why.
 const NULL_FOR_NOW: &[(&str, &str)] = &[("index", "no index before task-28/29")];
@@ -41,6 +41,7 @@ fn full() -> Report {
         reason,
         estimated_bytes: bytes,
         operation: "cargo lock protocol".into(),
+        checkouts: Checkouts::Allow,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some("not_idle"), None)];
     r.actions = vec![ActionEntry {
@@ -161,6 +162,15 @@ fn every_status_and_reason_is_a_documented_value() {
     let doc = documented();
     let statuses: BTreeSet<String> = Status::ALL.iter().map(|s| s.as_str().to_owned()).collect();
     assert_eq!(statuses, alternatives(&doc["status"]), "status values");
+    let checkouts: BTreeSet<String> = Checkouts::ALL
+        .iter()
+        .map(|c| c.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        checkouts,
+        alternatives(&doc["plan"][0]["checkouts"]),
+        "plan checkouts values"
+    );
     let reasons = alternatives(&doc["skipped"][0]["reason"]);
     for reason in Reason::ALL {
         assert!(

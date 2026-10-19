@@ -4,7 +4,7 @@ title: 'fs kind: generic delete action with flock, live recheck and exclusions'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 19:19'
+updated_date: '2026-10-18 22:22'
 labels:
   - wave-2
   - irreversible
@@ -44,6 +44,8 @@ From task-68 final review (commit 19a47e3): (1) Codex F4 residual: fs_kind/plan.
 From task-71: engine::walk refuses VCS checkouts (.git/.hg/.svn anywhere: contains_checkout) for every plain delete. The fs delete path gets this by calling engine::walk; never route fs candidates through engine::walk_cargo_profile_entry (the Cargo kind's exemption, crate-private).
 
 From task-71 r2: the path-component checkout rule (a .git/.hg/.svn name on the path between the profile root and the candidate -> contains_checkout, Mark 2026-10-18) lives only in the fs planner's discovery (fs_kind/plan.rs carries it down like keep markers). The delete path must get candidates from that discovery, or re-apply the rule; add a test that a reclaiming fs run never deletes proj/.git/objects found by a broad pattern.
+
+From task-80 (supersedes the two task-71 notes above): engine::walk_cargo_profile_entry is gone. The checkout guard is the source profile's checkouts setting (refuse by default, allow only where a profile says so), carried in engine::Rules::checkouts; build the walk rules from the tier (executor's rules(tier, owners, log): Rules { checkouts: tier.checkouts, ..Rules::new(owners) }) and engine::walk applies it. The path rule is one pure call, engine::checkout_metadata_below(rules.checkouts, root, at) -> Option<Skip> (fail closed: a candidate not below its root is refused); the fs planner calls it in Walk::judge, and the delete path re-applies it with the same call if its candidates do not come from that discovery. Keep the test that a reclaiming fs run never deletes proj/.git/objects (profile without checkouts) and add its allow twin.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

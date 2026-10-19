@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 
+use crate::engine::Checkouts;
 use crate::kind::Kind;
 use crate::units::parse_duration;
 
@@ -40,6 +41,12 @@ pub struct ProfileSpec {
     pub action: Option<ActionSpec>,
     #[serde(default)]
     pub examples: Option<ExamplesSpec>,
+    /// `checkouts: refuse | allow`; absent means `refuse` (docs/safety.md,
+    /// No source checkout). Any other value is a parse error, a present
+    /// null (`checkouts:`, `~`, `null`) included: only absence means the
+    /// default.
+    #[serde(default, deserialize_with = "present_checkouts")]
+    pub checkouts: Option<CheckoutsSpec>,
     #[serde(default)]
     pub verified_with: Option<String>,
 }
@@ -128,6 +135,10 @@ impl Cwd {
     }
 }
 
+/// A [`Checkouts`] setting by its YAML name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckoutsSpec(pub Checkouts);
+
 /// A [`Kind`] by its YAML name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KindSpec(pub Kind);
@@ -159,6 +170,45 @@ impl<'de> Deserialize<'de> for KindSpec {
             .find(|kind| kind.name() == name)
             .map(KindSpec)
             .ok_or_else(|| de::Error::unknown_variant(&name, &KIND_NAMES))
+    }
+}
+
+/// `checkouts:` when the key is present: its value, never `None`. Without
+/// this, serde's `Option` would read a present null as absent, which would
+/// silently mean `refuse` on a source and pass the "a filter has no
+/// `checkouts`" rule.
+fn present_checkouts<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CheckoutsSpec>, D::Error> {
+    CheckoutsSpec::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for CheckoutsSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = CheckoutsSpec;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("`refuse` or `allow`")
+            }
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<CheckoutsSpec, E> {
+                Checkouts::ALL
+                    .into_iter()
+                    .find(|c| c.as_str() == text)
+                    .map(CheckoutsSpec)
+                    .ok_or_else(|| E::unknown_variant(text, &Checkouts::NAMES))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<CheckoutsSpec, E> {
+                Err(E::custom(
+                    "`checkouts` has no value: write `refuse` or `allow`, or leave the key out \
+                     (the default is `refuse`)",
+                ))
+            }
+            fn visit_none<E: de::Error>(self) -> Result<CheckoutsSpec, E> {
+                self.visit_unit()
+            }
+        }
+        deserializer.deserialize_any(V)
     }
 }
 

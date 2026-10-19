@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 13:16'
+updated_date: '2026-10-18 23:18'
 labels:
   - wave-2
   - irreversible
@@ -55,6 +55,8 @@ From task-10: the executor slice is diskgc-core/src/executor.rs (ensure<H: Delet
 From task-68's review (mped S2): this build refuses a reclaiming ensure over a non-Cargo source at the top of executor::ensure (an allowlist on Tier.source), and executor::discover matches Tier.source exhaustively so an fs tier never reaches Cargo discovery or reclaim (model test an_fs_tier_never_reaches_the_cargo_reclaim_over_its_roots). With config tiers or multi-term selections, the kind refusal (a kind with no reclaim yet) must become a static check over EVERY tier, made before any tier deletes: refusing tier 3 after tiers 1-2 deleted breaks "a static config error discovered only after something was deleted" (PRD, What bad looks like).
 
 From task-68 r2 (mped N3): executor::discover's fs arm is unreachable through ensure (the allowlist guard runs first) and only bites under mutation; add a crate-internal test calling discover with an fs tier, or give Reclaim a cargo-only tier type so the arm cannot exist. Cosmetic: unwrap_or_default() puts an empty path in that error when roots are empty.
+
+From task-80: executor::Tier carries the source profile's checkouts setting (one field, rules(tier, owners, log) builds the walk rules from it and logs an allow). With unions (task-16), combine the sources' settings as refuse-if-any: refuse wins (docs/safety.md, No source checkout).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

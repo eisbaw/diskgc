@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 19:01'
+updated_date: '2026-10-18 22:22'
 labels:
   - wave-4
   - irreversible
@@ -49,6 +49,8 @@ From task-8: a command action has no timeout of its own any more (docs/reference
 CORRECTION (2026-10-18): the 'until v1' wording above is stale. Development builds keep the sandbox gate; release packages from 0.1 (the ensure MVP) onwards are built without it (PRD Scope, Releases; safety.md, Pre-release sandbox gate). Command actions are out of 0.1's scope.
 
 From task-71 (Mark, 2026-10-18): the checkout guard (contains_checkout: a .git/.hg/.svn entry anywhere in the candidate, or such a name on its path below the root) applies to command-action candidates too, fail closed, until a real case needs an exception: over-protecting trusted code is the safe default. Run command-action candidates through engine::walk (and the fs planner's path checks), never engine::walk_cargo_profile_entry. Rule: docs/safety.md, The eligibility walk, No source checkout.
+
+From task-80: engine::walk_cargo_profile_entry is gone; whether a candidate may hold a checkout is its source profile's checkouts setting (refuse unless the profile says allow), in engine::Rules::checkouts. Command-action candidates get the guard by walking with the tier's rules (engine::walk) and calling engine::checkout_metadata_below(rules.checkouts, root, at) for the path rule; a command profile that legitimately finds repositories would say checkouts: allow (docs/safety.md, No source checkout), nothing in code.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

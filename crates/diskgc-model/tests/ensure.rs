@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::host;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::hostlock::TMPFILES_LINES;
-use diskgc_core::profile::Library;
+use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_size};
 use diskgc_model::spec::Op;
@@ -1030,4 +1030,246 @@ fn a_shared_holder_of_the_host_lock_blocks_too() {
         host.locks_on(Path::new(HOST_LOCK)),
         vec![(Holder::Process(4242), diskgc_core::host::LockMode::Shared)]
     );
+}
+
+// ---- task-80: the checkout guard is the source profile's setting
+
+/// A Git checkout a build script cloned into `old`'s target, as old as
+/// the rest of it (so `old` stays the oldest target).
+const VENDORED: &str = "  /home/mark/src/old/target/debug/build:\n    .: {mtime: \
+    2026-10-01T00:00:00Z}\n    p-2: {.: {mtime: 2026-10-01T00:00:00Z}, out: {.: {mtime: \
+    2026-10-01T00:00:00Z}, vendor: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: \
+    2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}}}\n";
+
+/// A third target found inside a checkout's metadata (`zz/.git/...`, found last),
+/// built 2026-10-05.
+fn in_metadata() -> String {
+    format!(
+        "  /home/mark/src/zz/.git/modules/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    \
+         debug: {}\n",
+        profile("1G", "2026-10-05T00:00:00Z")
+    )
+}
+
+/// The tier of a user profile of kind cargo-target that does not say
+/// `checkouts` (refused, the default), with `--roots SRC`.
+fn my_targets(min: &str) -> Request {
+    let specs = parse_profiles("- {name: my-targets, kind: cargo-target, find: {roots: required}}")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let library = Library::with_user_profiles(&specs).unwrap_or_else(|e| panic!("{e}"));
+    Request {
+        tier: Tier::select(
+            "profile:my-targets",
+            &library,
+            Some(&[SRC.to_owned()]),
+            1000,
+        )
+        .unwrap_or_else(|e| panic!("{e}")),
+        ..cargo(min, None)
+    }
+}
+
+/// [`dry_run`] and its log lines.
+fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
+    let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
+    let mut lines = Vec::new();
+    let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    (report, lines)
+}
+
+/// [`ensure`] and its log lines.
+fn ensure_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
+    let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
+    let mut lines = Vec::new();
+    let report = executor::ensure(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    (report, lines)
+}
+
+/// The log lines that say a profile allows checkouts.
+fn allow_lines(lines: &[String]) -> Vec<&String> {
+    lines
+        .iter()
+        .filter(|l| l.contains("checkouts: allow"))
+        .collect()
+}
+
+/// The plan's reason for `candidate` (`Some(None)`: eligible).
+fn plan_reason<'r>(report: &'r Report, candidate: &str) -> Option<Option<&'r str>> {
+    report
+        .plan
+        .iter()
+        .find(|p| p.candidate == Path::new(candidate))
+        .map(|p| p.reason)
+}
+
+/// task-80: the built-in `cargo-target` says `checkouts: allow` (the code
+/// has no Cargo exemption): a target holding a vendored checkout, and one
+/// found inside a checkout's metadata, are eligible, and the log says the
+/// profile allows checkouts. A user profile of the same kind without the
+/// field refuses both (`contains_checkout`), the first by the walk, the
+/// second by its path, and logs nothing about checkouts.
+#[test]
+fn a_cargo_target_tier_takes_its_checkout_setting_from_its_profile() {
+    let meta = "/home/mark/src/zz/.git/modules/target";
+    let fixture = yaml(false, &format!("{VENDORED}{}", in_metadata()));
+
+    let host = common::host(&fixture);
+    let (report, lines) = dry_run_logged(&host, &cargo("1G", None));
+    assert_eq!(plan_reason(&report, OLD), Some(None), "{report:#?}");
+    assert_eq!(plan_reason(&report, meta), Some(None), "{report:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("profile `cargo-target` says `checkouts: allow`")),
+        "{lines:#?}"
+    );
+
+    let host = common::host(&fixture);
+    let (report, lines) = dry_run_logged(&host, &my_targets("1G"));
+    assert_eq!(
+        plan_reason(&report, OLD),
+        Some(Some("contains_checkout")),
+        "{report:#?}"
+    );
+    assert_eq!(
+        plan_reason(&report, meta),
+        Some(Some("contains_checkout")),
+        "{report:#?}"
+    );
+    assert_eq!(plan_reason(&report, NEW), Some(None), "{report:#?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("checkouts: allow")),
+        "{lines:#?}"
+    );
+}
+
+/// task-80, the reclaim: with the built-in profile, `old` and the
+/// vendored checkout in it go; with a profile that refuses checkouts,
+/// `old` is skipped as `contains_checkout` and never unlinked on either
+/// path (refused by the tally, or, untallied, by the protocol's walk under
+/// its locks), the target inside a checkout's metadata is refused by its
+/// path before any lock (by the tally, or by the protocol), and only `new`
+/// is reclaimed: the goal is not met. Only the reclaim under the allowing
+/// profile logs that it allows checkouts.
+#[test]
+fn a_cargo_target_tier_reclaims_checkouts_only_when_its_profile_allows() {
+    let vendor = "/home/mark/src/old/target/debug/build/p-2/out/vendor/.git";
+    let host = common::host(&yaml(true, VENDORED));
+    let (report, lines) = ensure_logged(&host, &cargo("11G", None));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    // The reclaim says it runs with checkouts allowed, once, by profile.
+    let allowed = allow_lines(&lines);
+    assert!(
+        matches!(allowed.as_slice(), [line]
+            if line.contains("profile `cargo-target` says `checkouts: allow`")),
+        "{lines:#?}"
+    );
+    assert_eq!(report.actions[0].candidate, Path::new(OLD), "{report:#?}");
+    assert!(!exists(&host, vendor));
+
+    let meta = "/home/mark/src/zz/.git/modules/target";
+    for budget in [Some(Duration::ZERO), None] {
+        let host = common::host(&yaml(true, &format!("{VENDORED}{}", in_metadata())));
+        // A goal only `old` could meet: every target is judged.
+        let mut req = my_targets("13G");
+        req.tally_budget = budget;
+        let (report, lines) = ensure_logged(&host, &req);
+        assert!(allow_lines(&lines).is_empty(), "{budget:?}: {lines:#?}");
+        assert_eq!(report.status, Status::Exhausted, "{budget:?}: {report:#?}");
+        assert_eq!(
+            skip_reason(&report, OLD),
+            Some("contains_checkout"),
+            "{budget:?}: {report:#?}"
+        );
+        assert_eq!(
+            skip_reason(&report, meta),
+            Some("contains_checkout"),
+            "{budget:?}: {report:#?}"
+        );
+        let order: Vec<&Path> = report
+            .actions
+            .iter()
+            .map(|a| a.candidate.as_path())
+            .collect();
+        assert_eq!(order, [Path::new(NEW)], "{budget:?}: {report:#?}");
+        assert_eq!(unlinked_below(&host, OLD), 0, "{budget:?}");
+        assert_eq!(unlinked_below(&host, meta), 0, "{budget:?}");
+        assert!(exists(&host, vendor), "{budget:?}");
+        assert!(
+            calls(&host, Op::Flock).iter().all(|c| !touches(c, meta)),
+            "{budget:?}: a target refused by its path was locked"
+        );
+    }
+}
+
+/// Codex round 2 (task-80): the Cargo kind's checkout path rule covers
+/// every name between the root and each entry it would delete, not only
+/// the way down to the target: the target's own name (`<M>/debug`), a
+/// profile directory's (`target/<M>`) and a target triple's
+/// (`target/<M>/debug`), for each marker `<M>`. Each layout is discovered
+/// as a target, below `/home/mark/src/x`.
+fn checkout_layouts() -> Vec<(String, String)> {
+    let mut layouts = Vec::new();
+    for marker in [".git", ".hg", ".svn"] {
+        let debug = profile("1G", "2026-10-02T00:00:00Z");
+        let tag = "CACHEDIR.TAG: {cachedir_tag: true}";
+        layouts.push((
+            format!("/home/mark/src/x/{marker}"),
+            format!("  /home/mark/src/x/{marker}:\n    {tag}\n    debug: {debug}\n"),
+        ));
+        layouts.push((
+            "/home/mark/src/x/target".to_owned(),
+            format!("  /home/mark/src/x/target:\n    {tag}\n    {marker}: {debug}\n"),
+        ));
+        layouts.push((
+            "/home/mark/src/x/target".to_owned(),
+            format!("  /home/mark/src/x/target:\n    {tag}\n    {marker}: {{debug: {debug}}}\n"),
+        ));
+    }
+    layouts
+}
+
+/// Under a profile that refuses checkouts, each of those targets is
+/// `contains_checkout` in a dry run (eligibility), and in a reclaim
+/// whether the tally refuses it or, untallied, the protocol does (before
+/// any lock): nothing below it is unlinked, and it is never locked. Under
+/// the built-in (`checkouts: allow`) the same targets are eligible.
+#[test]
+fn a_cargo_target_with_a_marker_between_root_and_its_entries_is_refused() {
+    for (target, tree) in checkout_layouts() {
+        let fixture = yaml(true, &tree);
+        let host = common::host(&fixture);
+        let report = dry_run(&host, &my_targets("1G"));
+        assert_eq!(
+            plan_reason(&report, &target),
+            Some(Some("contains_checkout")),
+            "{tree}: {report:#?}"
+        );
+        let host = common::host(&fixture);
+        let report = dry_run(&host, &cargo("1G", None));
+        assert_eq!(
+            plan_reason(&report, &target),
+            Some(None),
+            "{tree}: {report:#?}"
+        );
+        for budget in [Some(Duration::ZERO), None] {
+            let host = common::host(&fixture);
+            // A goal nothing meets: every target is judged.
+            let mut req = my_targets("100G");
+            req.tally_budget = budget;
+            let report = ensure(&host, &req);
+            assert_eq!(
+                skip_reason(&report, &target),
+                Some("contains_checkout"),
+                "{budget:?} {tree}: {report:#?}"
+            );
+            assert_eq!(unlinked_below(&host, &target), 0, "{budget:?} {tree}");
+            assert!(
+                calls(&host, Op::Flock).iter().all(|c| !touches(c, &target)),
+                "{budget:?} {tree}: locked before it was refused"
+            );
+        }
+    }
 }

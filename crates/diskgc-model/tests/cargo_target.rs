@@ -13,7 +13,7 @@ use common::host;
 use diskgc_core::cargo_target::{
     DISCOVERY_DEPTH, Discovery, Eligible, Layout, LockSet, Target, discover, eligibility,
 };
-use diskgc_core::engine::{DEFAULT_MAX_ENTRIES, Reason, Rules, Skip};
+use diskgc_core::engine::{Reason, Rules, Skip};
 use diskgc_core::inuse::{Checker, REUSE_LIMIT};
 use diskgc_core::profile::IdleFor;
 use diskgc_model::ModelHost;
@@ -111,12 +111,10 @@ fn paths(d: &Discovery) -> Vec<String> {
         .collect()
 }
 
+/// The rules of a `profile:cargo-target` tier: its `checkouts` setting
+/// comes from the built-in profile, as in the executor.
 fn rules() -> Rules<'static> {
-    Rules {
-        owners: &[ME],
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    }
+    common::cargo_target_rules(&[ME])
 }
 
 /// Eligibility of `target` with the idle requirement `idle` (days).
@@ -593,11 +591,11 @@ fn walk_refusals_and_mounts_refuse_the_target() {
     assert_eq!(d.refused[0].reason, Reason::ContainsMount, "{d:#?}");
 }
 
-/// task-71: the `cargo-target` kind is exempt from `contains_checkout`.
 /// Build scripts legitimately clone sources into a target (here
 /// `build/<pkg>/out/vendor/` holding `.git`, a `.git` file of a worktree,
-/// `.hg` and `.svn`), and the target stays eligible: the guard is for plain
-/// deletes only, and the Cargo kind's reclaim protocol decides.
+/// `.hg` and `.svn`), and the target stays eligible: the built-in
+/// `cargo-target` says `checkouts: allow` (task-80; these rules take it
+/// from the library, no code exempts the Cargo kind).
 #[test]
 fn a_vcs_checkout_inside_a_target_leaves_it_eligible() {
     let model = model(

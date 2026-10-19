@@ -78,7 +78,7 @@ use diskgc_core::engine::{
 };
 use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
 use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT, Stop, delete_unused};
-use diskgc_core::profile::IdleFor;
+use diskgc_core::profile::{IdleFor, Library};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
 
@@ -411,11 +411,8 @@ fn delete<H: Delete>(
     let parent = parent_of(host, dir)?;
     let candidate = Candidate::new(&parent, dir)
         .ok_or_else(|| format!("{} does not end in a name", dir.display()))?;
-    let rules = Rules {
-        owners: &[owner],
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    };
+    let owners = [owner];
+    let rules = Rules::new(&owners);
     let record = match engine::walk(host, &candidate, &rules, None) {
         Ok(record) => record,
         Err(stop) => {
@@ -490,9 +487,8 @@ fn reclaim<H: Delete>(
         .ok_or_else(|| format!("{} does not end in a name", dir.display()))?;
     let owners = [owner];
     let rules = Rules {
-        owners: &owners,
         block_ipc: !ipc_live,
-        max_entries: DEFAULT_MAX_ENTRIES,
+        ..Rules::new(&owners)
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let result = delete_unused(
@@ -551,6 +547,22 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
     Ok(())
 }
 
+/// The walk rules the executor builds for a `profile:cargo-target` tier
+/// run by `owners`: the defaults ([`Rules::new`]) and the built-in
+/// profile's `checkouts` setting, read from the library as the executor
+/// does ([`Library::checkouts`]), never stated here.
+fn cargo_target_rules(owners: &[u32]) -> Result<Rules<'_>, String> {
+    let library =
+        Library::builtin().map_err(|e| format!("the built-in profiles do not load: {e}"))?;
+    let checkouts = library
+        .checkouts("cargo-target")
+        .ok_or("no built-in source profile `cargo-target`")?;
+    Ok(Rules {
+        checkouts,
+        ..Rules::new(owners)
+    })
+}
+
 /// `cargo-targets [--idle-for DUR] ROOT...`: discovery below the roots,
 /// then the eligibility of every target found, for the user `owner` (see
 /// the module docs for the lines). Locks and deletes nothing.
@@ -579,11 +591,7 @@ fn cargo_targets<H: Host>(
         out.ok(format!("duplicate {path:?}"));
     }
     let owners = [owner];
-    let rules = Rules {
-        owners: &owners,
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    };
+    let rules = cargo_target_rules(&owners)?;
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     for target in &found.targets {
         out.ok(format!(
@@ -700,11 +708,7 @@ fn cargo_reclaim<H: Delete>(
         out.ok(format!("duplicate {path:?}"));
     }
     let owners = [owner];
-    let rules = Rules {
-        owners: &owners,
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    };
+    let rules = cargo_target_rules(&owners)?;
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     for target in &found.targets {
         out.ok(format!(

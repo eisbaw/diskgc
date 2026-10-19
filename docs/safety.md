@@ -7,8 +7,11 @@ stated here, once.
 ## Principles
 
 - **Safety is code, always on.** No profile, tier or flag switches these
-  checks off. A wrong profile can at worst select the wrong *unused,
-  own* files, never files in use as far as diskgc can see.
+  checks off; the one exception is that a profile may let its own
+  candidates hold version-control checkouts
+  ([No source checkout](#the-eligibility-walk-mandatory-per-candidate)).
+  A wrong profile can at worst select the wrong *unused, own* files,
+  never files in use as far as diskgc can see.
 - **Positive only.** Nothing is a candidate unless a source profile found it
   ([reference.md](reference.md#profiles)).
 - **Checked at deletion time.** The index only orders work
@@ -70,10 +73,11 @@ Immediately before acting, diskgc walks the candidate's whole tree
   directory may remove. Content that a `command` profile would clean (e.g. a
   Go cache inside a deleted `/tmp` directory) is *not* protected by
   nesting; protect it with `protect:` or `!profile:` if it matters.
-- **No source checkout** (`contains_checkout`), for every candidate
-  except `cargo-target`'s: kind `fs` with `delete`, and command actions
-  too, until a real case needs an exception (Mark, 2026-10-18:
-  over-protecting trusted code is the safe default). No entry anywhere in
+- **No source checkout** (`contains_checkout`), unless the candidate's
+  source profile says `checkouts: allow` (below); of every kind and
+  action, plain `delete`, command actions (Mark, 2026-10-18:
+  over-protecting trusted code is the safe default) and the Cargo kind
+  alike. No entry anywhere in
   the candidate, the candidate itself included, is named `.git`, `.hg` or
   `.svn`, whatever its type. That covers Git's directory and the `.git`
   *file* of a worktree, a submodule or a `--separate-git-dir` checkout,
@@ -87,9 +91,12 @@ Immediately before acting, diskgc walks the candidate's whole tree
   candidate inside a checkout's working tree (a project's `build/`
   directory) is not affected: only what lies in the candidate counts,
   plus the path rule below. The cost is a name compare per entry the walk
-  already reads; no extra system call. There is no opt-out: no profile,
-  tier, `protect` entry or flag lets a candidate holding a checkout be
-  deleted.
+  already reads; no extra system call. For the Cargo kind, "the
+  candidate" is each entry of a target's profile directories (what it
+  deletes, below): the path rule runs from the root down to each entry,
+  so the target's own name, a target triple's and the profile
+  directory's count too (`.git/debug`, `target/.git`,
+  `target/.git/debug`).
   - **Inside a checkout's metadata, by path** (Mark, 2026-10-18): a
     candidate whose path has a name `.git`, `.hg` or `.svn` between its
     profile root and itself is `contains_checkout` too: a broad pattern
@@ -97,27 +104,45 @@ Immediately before acting, diskgc walks the candidate's whole tree
     whose own trees hold no marker; deleting part of a repository's
     metadata can destroy it. A path-only check of the names strictly
     between the root and the candidate (`checkout_metadata_below` in the
-    engine): no system call, fail closed. The root's own path is not
-    checked: a root that a tier, `--roots` or a profile names inside a
-    checkout's metadata is taken as meant.
-  - **Exempt: `cargo-target`.** The Cargo kind is subject to neither
-    check: its walk of a profile directory's entries is the engine's walk
-    without the marker check (crate-private; only the Cargo kind calls
-    it), and Cargo discovery has no path check. Build scripts
-    legitimately put checkouts in a target (a vendored source cloned into
-    `build/<pkg>/out/`), the target is Cargo's own output, and its reclaim
-    protocol (below) is the one that decides. A Cargo target *inside* a
-    plain-delete candidate is refused anyway (`contains_special`).
+    engine): no system call, fail closed (a candidate whose path is not
+    below its root is refused as `unsafe_path`, whatever the setting).
+    The root's own path is not checked: a
+    root that a tier, `--roots` or a profile names inside a checkout's
+    metadata is taken as meant. It follows the same setting as the walk's
+    check: one switch turns both off.
+  - **On by default; a profile may turn it off** (Mark, 2026-10-18,
+    task-80; there is no special case for any profile in code). A source
+    profile, built-in or user, says `checkouts: allow` to let its
+    candidates hold checkouts; `checkouts: refuse` is the default, so a
+    profile that does not say anything refuses (fail closed), and the
+    loader rejects any other value, an empty one (`checkouts:`, `~`)
+    included. Nothing else turns the guard off: no tier, `protect` entry,
+    `!profile:` or flag. A run whose profile allows checkouts says so in
+    its log (one line per tier, before the candidates), and a dry run's
+    plan entries carry the setting (`checkouts` in the JSON,
+    [reference.md](reference.md#output)). **The risk:** a broad user
+    pattern with `checkouts: allow` (`paths: ["*"]` under a project root)
+    can delete a repository with uncommitted or unpushed work, or part of
+    a repository's metadata. Built-in profiles turn it off only where the
+    tool's own output legitimately contains repositories; user profiles
+    should do the same. Which built-ins allow checkouts, and why, is in
+    each one's row of
+    [reference.md](reference.md#built-in-profile-library). The setting
+    applies to every kind: a user profile of kind `cargo-target`
+    that does not say `allow` refuses a target holding a checkout.
+    **Overlap:** where one candidate is found by several source profiles
+    of one tier (a union, `a || b`), it may hold a checkout only if every
+    one of them allows checkouts: `refuse` wins. This build runs one
+    source profile per tier (unions arrive with task-16 and task-20), so
+    the rule is stated here for them; each tier judges its own candidates
+    by its own source's setting, and a `protect` entry or `!profile:`
+    covers what its profile finds whatever that profile's `checkouts`.
   - **Kept too (the accepted cost):** whatever holds a clone is never
-    deleted by a plain delete, and that can be much of what a profile
-    finds. Seen on the development machine: agents' scratch clones in
-    `/tmp` (review and fix checkouts), which held more than all the
-    eligible `/tmp` entries together in the part of `/tmp` a dry run
-    judged; pytest test dirs where a test ran `git init`, each kept whole
-    (`pytest-tmp` takes one test dir per candidate,
-    [reference.md](reference.md#built-in-profile-library)), so a test
-    suite that runs `git init` in many tests keeps that much, run after
-    run, until the dirs are removed some other way; CMake build
+    deleted by a profile that refuses checkouts (the default), and that
+    can be much of what a profile finds. Seen on the development machine:
+    agents' scratch clones in `/tmp` (review and fix checkouts), which
+    held more than all the eligible `/tmp` entries together in the part
+    of `/tmp` a dry run judged; CMake build
     directories that fetch dependencies (FetchContent's
     `_deps/<name>-src/.git`, CPM's `.cpm-cache/<name>/<hash>/.git`).
     Inferred, not measured: Cargo's git checkouts
@@ -748,7 +773,9 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
 - **Eligibility walk:** every entry of every profile directory except the
   lock files is walked as a candidate of its own (Filesystem candidates:
   ownership, keep markers, mounts, sockets and FIFOs, Cargo lock names and
-  nested targets); the first refusal is the target's. The entry budget is
+  nested targets, VCS checkouts as the profile's `checkouts` says, by
+  name and by the path from the root down to each entry); the first
+  refusal is the target's. The entry budget is
   one for the whole target: all its entries together, not each entry, may
   hold at most `DEFAULT_MAX_ENTRIES` (`too_many_entries`), so one target
   holds no more records in memory than one candidate may.
@@ -830,7 +857,11 @@ The step that deletes (`cargo_target::reclaim` in the core).
 1. **Lock.** Reach the target again from its root, as found (Discovery);
    refuse before locking a target whose layout or lock set is not one
    diskgc reclaims (`unsupported_layout`, `empty`: an unknown lock name
-   would not be taken). Then take every lock file of every profile
+   would not be taken), and, when the profile refuses checkouts, a target
+   with an entry inside a checkout's metadata by its path, the target's,
+   a triple's and the profile directory's names included
+   (`contains_checkout`, No source checkout); the recheck under the
+   locks repeats it. Then take every lock file of every profile
    directory, exclusively, without waiting. Holding every lock is what
    makes the deletion safe, not the order they are taken in: diskgc only
    ever tries a lock (`flock` with `LOCK_NB`) and never waits for one, so

@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use common::{dir, host};
 use diskgc_core::engine::{
-    Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind, Reason,
-    Rules, Skip, WalkRecord, WalkStop, delete, walk,
+    Candidate, Checkouts, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind, Reason, Rules, Skip,
+    WalkRecord, WalkStop, delete, walk,
 };
 use diskgc_core::host::{Errno, FileType, MonoTime};
 use diskgc_core::resolve::Resolved;
@@ -72,12 +72,10 @@ impl Target {
     }
 }
 
+/// The rules a walk gets without stating anything but its owners
+/// ([`Rules::new`]): checkouts refused, by default.
 fn rules() -> Rules<'static> {
-    Rules {
-        owners: &[ME],
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    }
+    Rules::new(&[ME])
 }
 
 fn walked(host: &ModelHost, target: &Target, rules: &Rules<'_>) -> WalkRecord {
@@ -323,6 +321,18 @@ fn a_checkout_marker_anywhere_is_contains_checkout() {
         let host = model(tree);
         let skip = assert_skipped(&host, &rules(), Reason::ContainsCheckout, at);
         assert!(skip.detail.contains("checkout"), "{skip}");
+        // The walk stops at the marker: one `statx` of it (to admit it),
+        // and no other call on it or below it (no open, no listing).
+        let touched: Vec<_> = host
+            .trace()
+            .into_iter()
+            .filter(|c| c.path.as_deref().is_some_and(|p| p.starts_with(at)))
+            .collect();
+        assert!(
+            matches!(touched.as_slice(), [only] if only.op == Op::Statx
+                && only.path.as_deref() == Some(Path::new(at))),
+            "expected exactly one statx of the marker: {touched:#?}"
+        );
     }
     for marker in [".git", ".hg", ".svn"] {
         let host = model(&format!("  /tmp/r/{marker}: {{HEAD: {{}}}}\n"));
@@ -330,6 +340,50 @@ fn a_checkout_marker_anywhere_is_contains_checkout() {
         let skip = skipped(&host, &target, &rules());
         assert_eq!(skip.reason, Reason::ContainsCheckout, "{skip}");
     }
+}
+
+/// task-80: the checkout refusal is the source profile's setting, carried
+/// in [`Rules::checkouts`]. Rules that do not state it ([`Rules::new`])
+/// refuse; `allow` admits the same trees, marker included, and the record
+/// holds the marker's entries (they are deleted with the rest).
+#[test]
+fn checkouts_are_refused_unless_the_rules_allow_them() {
+    let tree = "  /tmp/c/sub/.git: {HEAD: {}, objects: {.: {}}}\n  /tmp/c/.hg: {store: {}}\n";
+    let host = model(tree);
+    let target = Target::new(&host, "/tmp/c");
+    assert_eq!(
+        skipped(&host, &target, &Rules::new(&[ME])).reason,
+        Reason::ContainsCheckout
+    );
+    let allow = Rules {
+        checkouts: Checkouts::Allow,
+        ..rules()
+    };
+    let record = walked(&host, &target, &allow);
+    for rel in ["sub/.git/HEAD", "sub/.git/objects", ".hg/store"] {
+        assert!(
+            record.entry_at(Path::new(rel)).is_some(),
+            "{rel} not walked"
+        );
+    }
+    // A candidate that is itself a marker, too.
+    let marker = Target::new(&host, "/tmp/c/sub/.git");
+    assert_eq!(
+        skipped(&host, &marker, &rules()).reason,
+        Reason::ContainsCheckout
+    );
+    walked(&host, &marker, &allow);
+    // Explicit `refuse` is the default.
+    let refuse = Rules {
+        checkouts: Checkouts::Refuse,
+        ..allow
+    };
+    assert_eq!(
+        skipped(&host, &target, &refuse).reason,
+        Reason::ContainsCheckout
+    );
+    assert_eq!(deleted(&host, &target, &record).end, End::Complete);
+    assert!(!exists(&host, "/tmp/c"));
 }
 
 #[test]

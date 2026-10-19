@@ -28,6 +28,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
 use crate::select::{Catalog, Entry, Term};
 
@@ -35,8 +36,8 @@ pub use idle::{IdleFor, IdleMeasure, Idleness, Unknown};
 pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{
-    ActionSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec, ProfileSpec,
-    RootsSpec, WhereSpec, parse_profiles,
+    ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
+    ProfileSpec, RootsSpec, WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -77,6 +78,11 @@ pub struct Source {
     /// (docs/reference.md, Selection grammar and `protect`).
     pub where_: Where,
     pub action: Action,
+    /// Whether its candidates may hold a VCS checkout (`checkouts:`;
+    /// [`Checkouts::Refuse`] when the profile does not say). Applies to the
+    /// walk and the path rule of every candidate it finds, whatever its
+    /// kind and action (docs/safety.md, No source checkout).
+    pub checkouts: Checkouts,
     pub examples: Examples,
     /// Built-in profiles only: the tool version it was checked against.
     pub verified_with: Option<String>,
@@ -233,6 +239,13 @@ impl Library {
 
     pub fn get(&self, name: &str) -> Option<&Profile> {
         self.profiles.get(name)
+    }
+
+    /// The `checkouts` setting of the source profile `name`, from the same
+    /// library field a tier of that profile walks with (`None`: no such
+    /// source profile).
+    pub fn checkouts(&self, name: &str) -> Option<Checkouts> {
+        self.source(name).map(|source| source.checkouts)
     }
 
     /// Every profile, by name.

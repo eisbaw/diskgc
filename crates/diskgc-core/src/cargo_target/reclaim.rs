@@ -1,10 +1,13 @@
 //! The reclaim protocol (docs/safety.md, `cargo-target`: Reclaim
 //! protocol): the step that deletes Cargo build output.
 //!
-//! 1. **Lock.** Reach the target again from its root ([`reach`]), check
-//!    that it is in a layout diskgc can reclaim as found ([`judge_layout`]),
-//!    then take every lock file of every profile directory, exclusively and
-//!    without waiting, in Cargo's own order ([`LOCK_ORDER`]). Each profile
+//! 1. **Lock.** Check that it is in a layout diskgc can reclaim as found
+//!    ([`judge_layout`]) and, as the source profile's `checkouts` says,
+//!    that no entry it would delete lies inside a checkout's metadata by
+//!    its path ([`judge_checkout_paths`]); reach the target again from its root
+//!    ([`reach`]), then take every lock file of every profile directory,
+//!    exclusively and without waiting, in Cargo's own order
+//!    ([`LOCK_ORDER`]). Each profile
 //!    directory is opened once, below the target, and must be the one
 //!    found; each lock file is opened `O_PATH` below it, must be the one
 //!    found (identity, type included), and is reopened read-only through
@@ -50,7 +53,8 @@ use std::time::Duration;
 
 use super::discover::{check_deadline, failure, list, open_dir, profile_dir};
 use super::eligible::{
-    Budget, judge_idle, judge_in_use, judge_inspected, open_profile, walk_entries,
+    Budget, judge_checkout_paths, judge_idle, judge_in_use, judge_inspected, open_profile,
+    walk_entries,
 };
 use super::{
     Inspected, Judged, LockFile, ProfileDir, ProfileWalk, Project, Stop, Target, cargo_evidence,
@@ -217,6 +221,10 @@ impl<H: Delete> Run<'_, '_, H> {
         // Only a layout diskgc knows how to lock and reclaim is locked: an
         // unknown lock name would not be taken.
         judge_layout(path, &target.inspected).map_err(ReclaimEnd::Skipped)?;
+        // The checkout path rule, as the source profile says, on the
+        // target as found (a path check: before any lock is taken).
+        judge_checkout_paths(target, &target.inspected, rules.checkouts)
+            .map_err(ReclaimEnd::Skipped)?;
         let reached = step(reach(host, target, deadline))?;
 
         // Step 1: every lock of every profile directory, in Cargo's order.
@@ -245,7 +253,7 @@ impl<H: Delete> Run<'_, '_, H> {
             path,
             deadline,
         ))?;
-        judge_inspected(target, &inspected, rules.owners).map_err(ReclaimEnd::Skipped)?;
+        judge_inspected(target, &inspected, rules).map_err(ReclaimEnd::Skipped)?;
         let mut budget = Budget::new(rules.max_entries);
         let mut walks = Vec::new();
         let mut walked: Vec<&ProfileDir> = Vec::new();

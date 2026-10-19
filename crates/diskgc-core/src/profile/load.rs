@@ -12,6 +12,7 @@ use super::spec::{
     parse_profiles,
 };
 use super::{Action, Body, Examples, Finds, IdleFor, Origin, Profile, Roots, Source, Where};
+use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
 use crate::select::{Syntax, is_name};
 
@@ -202,6 +203,11 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
             spec.examples.is_some(),
             "examples test a source's `find` patterns",
         ),
+        (
+            "checkouts",
+            spec.checkouts.is_some(),
+            "whether candidates may hold a checkout is the source's setting",
+        ),
     ] {
         if present {
             problems.push(format!("a filter profile has no `{field}`: {why}"));
@@ -281,6 +287,8 @@ fn source(
         finds,
         where_,
         action,
+        // Absent: refused (fail closed).
+        checkouts: spec.checkouts.map_or_else(Checkouts::default, |c| c.0),
         examples,
         verified_with: spec.verified_with.clone(),
     })

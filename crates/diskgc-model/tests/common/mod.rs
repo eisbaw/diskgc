@@ -5,6 +5,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
+use diskgc_core::engine::Rules;
+use diskgc_core::profile::Library;
 use diskgc_core::resolve::{Resolved, Want, resolve};
 use diskgc_model::{ModelFd, ModelHost};
 
@@ -34,6 +36,20 @@ pub fn host(yaml: &str) -> ModelHost {
 pub fn dir(host: &ModelHost, path: &str) -> Resolved<ModelFd> {
     resolve(host, Path::new(path), Want::Directory)
         .unwrap_or_else(|e| panic!("resolve {path}: {e}"))
+}
+
+/// The walk rules the executor builds for a `profile:cargo-target` tier
+/// run by `owners`: the defaults ([`Rules::new`]) and the built-in
+/// profile's `checkouts` setting, read from the library as the executor
+/// does ([`Library::checkouts`]), never stated here.
+pub fn cargo_target_rules(owners: &[u32]) -> Rules<'_> {
+    let library = Library::builtin().unwrap_or_else(|e| panic!("{e}"));
+    Rules {
+        checkouts: library
+            .checkouts("cargo-target")
+            .expect("a built-in source profile `cargo-target`"),
+        ..Rules::new(owners)
+    }
 }
 
 /// Runs `f`, which must fail the test, and returns the failure message.

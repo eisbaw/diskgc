@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-18 11:29'
-updated_date: '2026-10-18 21:44'
+updated_date: '2026-10-18 23:19'
 labels:
   - wave-2
   - spike
@@ -59,4 +59,8 @@ Dry run pytest-tmp on this laptop (read-only, same binary, guard on in both): wh
 Round 3 (Mark, 2026-10-18): pytest-tmp is one candidate per TEST DIR (pytest-of-*/pytest-*/*, plus nix-shell.*/ and tmp.*/ one level down; type dir). The guard stays intact; only test dirs that ran git init are kept. Reason (mped's read-only measurement): per session, 1,559 of 4,670 sessions held a .git, about 21 GiB, about 6x the 3.41 GiB pytest-tmp could reclaim. Session dirs, pytest-of-<user>, the *current symlinks and plain files in a session dir are never candidates (reference.md). Also: the path rule is now a pure function, engine::checkout_metadata_below(root, at) (mped N1), with a unit test; the Above struct is gone.
 
 Dry run 2026-10-18, this laptop, read-only (nice/ionice, --timeout 20m), per test dir: DEADLINE after 1,224 s with 43,766 test dirs judged in 595 of ~4,670 sessions, so the totals are partial and not comparable with the complete per-session run (3,034 eligible, 3.41 GiB, 1,542 contains_checkout). In the judged part: 32,441 test dirs eligible, 784,044,032 bytes (0.73 GiB, diskgc's estimate); 11,293 contains_checkout, 3.13 GiB by du; 31 contains_ipc, 1 in_use. What the split itself unlocks there: 11,669 eligible test dirs, 0.32 GiB, in 149 sessions that also hold a checkout (kept whole per session before); 383 sessions had no checkout (0.41 GiB), 63 had only checkout test dirs. Findings: (1) most of the bytes the guard keeps are in the git-init test dirs themselves, not in their siblings, so the per-test-dir split recovers the siblings only (here about a tenth of what the guard keeps); (2) the candidate count rises about tenfold (about 74 test dirs per session here), and a dry run of all of /tmp's pytest dirs no longer fits 20 min: buckets (architecture.md) and task-70's scan reuse matter for this profile. Not extrapolated to the whole of /tmp.
+
+Corrections (task-80, from mped's round-3 review): (1) Finding (2) above overstates buckets: a name family keeps the test name (test_foo0, test_bar0, ...), so per-test-dir candidates of pytest-tmp almost never merge into one bucket, and buckets do not absorb the tenfold candidate count; only task-70 (scan reuse) addresses that cost. (2) The 0.73 GiB and 3.13 GiB figures are of different sets (the eligible test dirs, and the contains_checkout test dirs) and from different tools: diskgc's estimate (stx_blocks x 512 per name, directories included) and du (allocated blocks per inode, directories included). Both count allocated blocks; they differ only where a file has several hard links in the set (diskgc counts it once per name, du once), which pytest test dirs rarely hold. Not checked against the data: no run measured the same set both ways. (3) The Cargo exemption described above (engine::walk_cargo_profile_entry) is gone: since task-80 the guard is the source profile's checkouts setting (refuse by default), carried in engine::Rules::checkouts, and the built-in cargo-target says checkouts: allow in builtin.yaml.
+
+Follow-up (Mark, 2026-10-19, task-80): pytest-tmp now says checkouts: allow, after a survey of all 75,253 leftover repos in pytest sessions found only test fixtures (task-65 note). The git-init test dirs counted above as contains_checkout are eligible under that profile; the per-test-dir granularity stays for now (task-70).
 <!-- SECTION:NOTES:END -->

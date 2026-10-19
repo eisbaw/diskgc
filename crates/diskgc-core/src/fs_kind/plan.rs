@@ -22,7 +22,8 @@
 //! another filesystem than `PATH`'s (`other_fs`), a keep marker in any
 //! directory from the root down to it (`kept`), a directory on the way
 //! below the root named like a checkout's metadata (`contains_checkout`,
-//! by name only: `proj/.git/objects`), the engine's eligibility
+//! by name only: `proj/.git/objects`; unless the profile says `checkouts:
+//! allow`, as the walk's own checkout rule), the engine's eligibility
 //! walk (ownership of every entry, keep markers, sockets and FIFOs,
 //! special content, VCS checkouts, the entry budget, fail closed), the
 //! identity found, the idle requirement on the newest change in the tree,
@@ -607,14 +608,8 @@ impl<H: Host> Walk<'_, '_, H> {
                 "a keep marker between the root and the candidate".to_owned(),
             );
         }
-        if let Some(metadata) = checkout_metadata_below(self.root, at) {
-            return skip(
-                Reason::ContainsCheckout,
-                &metadata,
-                "inside a version-control checkout's metadata (a directory on the way below the \
-                 root): deleting part of it can destroy the repository"
-                    .to_owned(),
-            );
+        if let Some(refused) = checkout_metadata_below(self.judge.rules.checkouts, self.root, at) {
+            return Ok(Err(refused));
         }
         let candidate = Candidate::new(dir, at).expect("a candidate's path ends in its name");
         let record = match engine::walk(self.host, &candidate, self.judge.rules, self.deadline) {

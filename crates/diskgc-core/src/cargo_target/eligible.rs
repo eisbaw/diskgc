@@ -9,7 +9,8 @@ use super::{
     Inspected, Judged, LockSet, ProfileDir, Project, Stop, Target, cargo_evidence, inspect, reach,
 };
 use crate::engine::{
-    self, CARGO_LOCK_NAMES, Candidate, Identity, Reason, Rules, Skip, WalkRecord, WalkStop,
+    self, CARGO_LOCK_NAMES, Candidate, Checkouts, Identity, Reason, Rules, Skip, WalkRecord,
+    WalkStop, checkout_metadata_below,
 };
 use crate::host::{FileType, Host, MonoTime, Timestamp};
 use crate::inuse::{Checker, Scan};
@@ -140,14 +141,16 @@ pub fn judge_layout(path: &Path, inspected: &Inspected) -> Result<(), Skip> {
 /// entries are walked: the same profile directories and lock files as
 /// when found (one created, removed or replaced since is `changed`), no
 /// keep marker in the target or a directory directly in it (`kept`),
-/// ownership of what the kind relies on ([`judge_owners`]) and a layout
-/// diskgc knows how to reclaim ([`judge_layout`]).
+/// ownership of what the kind relies on ([`judge_owners`]), a layout
+/// diskgc knows how to reclaim ([`judge_layout`]), and the checkout path
+/// rule as `rules` say ([`judge_checkout_paths`]).
 pub(super) fn judge_inspected(
     target: &Target,
     inspected: &Inspected,
-    owners: &[u32],
+    rules: &Rules<'_>,
 ) -> Result<(), Skip> {
     let path = &target.path;
+    judge_checkout_paths(target, inspected, rules.checkouts)?;
     if !inspected.same_locks(&target.inspected) {
         return Err(Skip::new(
             Reason::Changed,
@@ -162,8 +165,34 @@ pub(super) fn judge_inspected(
             "a keep marker in the target",
         ));
     }
-    judge_owners(path, &target.identity, inspected, owners)?;
+    judge_owners(path, &target.identity, inspected, rules.owners)?;
     judge_layout(path, inspected)
+}
+
+/// The checkout path rule for the Cargo kind (docs/safety.md, No source
+/// checkout): what the kind deletes is the entries of profile
+/// directories, so each entry is the candidate the rule judges, by the
+/// names strictly between the root and it: the directories above the
+/// target, the target's own name, a target triple's and the profile
+/// directory's ([`checkout_metadata_below`], under `checkouts: refuse`).
+/// The entry's own name and everything in it are the walk's. Path text
+/// only, no system call.
+pub(super) fn judge_checkout_paths(
+    target: &Target,
+    inspected: &Inspected,
+    checkouts: Checkouts,
+) -> Result<(), Skip> {
+    for profile in &inspected.profiles {
+        let dir = target.path.join(&profile.rel);
+        for entry in &profile.entries {
+            if let Some(refused) =
+                checkout_metadata_below(checkouts, &target.root, &dir.join(&entry.name))
+            {
+                return Err(refused);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every object the kind relies on but does not delete must be the user's
@@ -203,11 +232,11 @@ fn judge_owners(
 
 /// Walks every entry of every profile directory of `inspected` but the
 /// lock files, each with the deletion engine's eligibility walk
-/// (`engine::walk_cargo_profile_entry`, `rules`): ownership of every
-/// entry, keep markers, mounts, sockets and FIFOs, Cargo lock names and
-/// nested targets (not VCS checkouts: exempt for the Cargo kind), the
-/// entry budget, which is one for the whole target (`rules.max_entries`
-/// over all its entries, not per entry). The first refusal is the
+/// ([`engine::walk`], `rules`): ownership of every entry, keep markers,
+/// mounts, sockets and FIFOs, Cargo lock names and nested targets, VCS
+/// checkouts as the source profile's `checkouts` says, the entry budget,
+/// which is one for the whole target (`rules.max_entries` over all its
+/// entries, not per entry). The first refusal is the
 /// target's. `target` is the target directory reached at `path`; each
 /// profile directory is opened below it and must be the one inspected
 /// (`changed` otherwise).
@@ -323,10 +352,7 @@ pub(super) fn walk_entries<H: Host>(
             max_entries: budget.max.saturating_sub(budget.used),
             ..*rules
         };
-        // Not `engine::walk`: a target may hold VCS checkouts (build
-        // scripts clone into `build/<pkg>/out/`), so the Cargo kind is the
-        // one walk exempt from `contains_checkout` (docs/safety.md).
-        match engine::walk_cargo_profile_entry(host, &candidate, &left, deadline) {
+        match engine::walk(host, &candidate, &left, deadline) {
             // The layout was judged by the types inspected: an entry of
             // another type now (a directory replaced by a file or a
             // symlink) is a change.
@@ -382,7 +408,8 @@ pub fn last_build<F>(inspected: &Inspected, walks: &[ProfileWalk<F>]) -> Option<
 }
 
 /// Judges `target` (found by [`super::discover`]) now, without locking or
-/// deleting anything, for a plan or a survey: reached again from its root
+/// deleting anything, for a plan or a survey: the checkout path rule as
+/// `rules` say ([`judge_checkout_paths`]), reached again from its root
 /// ([`reach`]: `kept`, `changed`, `missing`, `unsupported_fs`), inspected
 /// again (a profile or lock file other than when found is `changed`), the
 /// keep marker in it, ownership, [`judge_layout`], [`walk_profiles`] with
@@ -469,7 +496,9 @@ struct Walked<F> {
     _target: Resolved<F>,
 }
 
-/// The common first half of [`eligibility`] and [`tally`].
+/// The common first half of [`eligibility`] and [`tally`] (the checkout
+/// path rule first, on the target as found: a path check, no system
+/// call).
 fn walk_target<H: Host>(
     host: &H,
     target: &Target,
@@ -477,6 +506,10 @@ fn walk_target<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Walked<H::Fd>> {
     let path = &target.path;
+    // As found, before anything is opened; again on the new inspection.
+    if let Err(skip) = judge_checkout_paths(target, &target.inspected, rules.checkouts) {
+        return Ok(Err(skip));
+    }
     let reached = judged!(reach(host, target, deadline));
     let inspected = judged!(inspect(
         host,
@@ -485,7 +518,7 @@ fn walk_target<H: Host>(
         path,
         deadline
     ));
-    if let Err(skip) = judge_inspected(target, &inspected, rules.owners) {
+    if let Err(skip) = judge_inspected(target, &inspected, rules) {
         return Ok(Err(skip));
     }
     let walks = judged!(walk_profiles(

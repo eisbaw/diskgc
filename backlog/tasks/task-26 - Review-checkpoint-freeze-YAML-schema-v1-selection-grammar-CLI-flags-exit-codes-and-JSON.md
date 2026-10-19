@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 17:44'
+updated_date: '2026-10-18 23:20'
 labels:
   - wave-2
   - review
@@ -66,6 +66,8 @@ From task-68 r2 (mped S1): a --roots root inside systemd-private-* is skipped si
 Decision by Mark (2026-10-18): signed off for schema v1: (a) * matches a leading dot (unlike the shell); (b) ?, [, ], \ are reserved glob characters, refused at load; (c) has/has_not = a regular file directly in the candidate, symlinks not followed. reference.md already states these; at the freeze they are settled, not open.
 
 Pre-freeze addition (task-71, 2026-10-18): new skip reason contains_checkout in the JSON enum (docs/reference.md, Output; Reason::ContainsCheckout), for a plain-delete candidate holding a .git, .hg or .svn entry (docs/safety.md, The eligibility walk). Review it with the rest of the enum before the freeze.
+
+Pre-freeze addition (task-80): JSON plan entries gained "checkouts": "refuse | allow" (the source profile's setting the candidate was judged under), documented in reference.md (Output) and checked by report::tests (field names and the value set). Schema v1 also gained the profile field checkouts: refuse | allow (reference.md, Profiles). Review both at the freeze.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

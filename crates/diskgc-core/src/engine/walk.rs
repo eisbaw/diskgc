@@ -17,11 +17,10 @@
 //!    lock file's name ([`CARGO_LOCK_NAMES`], anywhere), and is not a lock
 //!    file of a Cargo target inside the candidate (the structural
 //!    recogniser) (`contains_special`);
-//! 7. for a plain delete ([`walk`]), it does not have a VCS checkout
+//! 7. unless [`Rules::checkouts`] is [`Checkouts::Allow`] (a profile
+//!    that says `checkouts: allow`), it does not have a VCS checkout
 //!    marker's name ([`CHECKOUT_MARKERS`], whatever its type, anywhere, the
-//!    candidate itself included) (`contains_checkout`). The Cargo kind's
-//!    walk of a profile directory's entries ([`walk_cargo_profile_entry`])
-//!    is the one exception.
+//!    candidate itself included) (`contains_checkout`).
 //!
 //! The first entry that fails stops the walk. Host errors on the way are
 //! classified in one place, [`host_failure`]: fail closed, never treated as
@@ -52,9 +51,10 @@ pub const CARGO_LOCK_NAMES: &[&str] = &[".cargo-lock", ".cargo-build-lock", ".ca
 /// eligibility walk: no source checkout): Git's directory, or its file in
 /// a worktree, a submodule or a `--separate-git-dir` checkout; Mercurial's;
 /// Subversion's. An entry of one of these names, of any type (a symlink
-/// too: never followed, it counts as a checkout), anywhere in a plain-delete
-/// candidate, the candidate itself included, refuses it
-/// (`contains_checkout`): it may hold uncommitted work.
+/// too: never followed, it counts as a checkout), anywhere in a candidate,
+/// the candidate itself included, refuses it (`contains_checkout`) unless
+/// its profile says `checkouts: allow` ([`Rules::checkouts`]): it may hold
+/// uncommitted work.
 pub const CHECKOUT_MARKERS: &[&str] = &[".git", ".hg", ".svn"];
 
 /// Whether `name` is one of [`CHECKOUT_MARKERS`] (compared as bytes, in
@@ -63,23 +63,73 @@ pub fn is_checkout_marker(name: &OsStr) -> bool {
     CHECKOUT_MARKERS.iter().any(|marker| name == *marker)
 }
 
-/// The first directory named like a checkout's metadata
-/// ([`CHECKOUT_MARKERS`]) on the way from `root` down to `at`, both
-/// excluded (docs/safety.md, No source checkout: inside a checkout's
-/// metadata, by path): `/r/proj/.git` for `root` `/r` and `at`
-/// `/r/proj/.git/objects`. Path text only, no system call. `at` itself is
+/// Whether a candidate may hold a version-control checkout: a profile's
+/// `checkouts` field (docs/reference.md, Profiles; docs/safety.md, No
+/// source checkout). The default, and what a profile without the field
+/// gets, is [`Checkouts::Refuse`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Checkouts {
+    /// A candidate holding a [`CHECKOUT_MARKERS`] name, or lying inside a
+    /// checkout's metadata ([`checkout_metadata_below`]), is
+    /// `contains_checkout`.
+    #[default]
+    Refuse,
+    /// Neither rule applies.
+    Allow,
+}
+
+impl Checkouts {
+    /// Both settings, in the order docs/reference.md lists them.
+    pub const ALL: [Checkouts; 2] = [Checkouts::Refuse, Checkouts::Allow];
+
+    /// Their names as YAML and JSON spell them, in the order of
+    /// [`Checkouts::ALL`]: the one list of the values.
+    pub const NAMES: [&'static str; 2] = ["refuse", "allow"];
+
+    /// The setting as YAML and JSON spell it.
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+}
+
+/// The path rule of the checkout guard (docs/safety.md, No source
+/// checkout: inside a checkout's metadata, by path): under
+/// [`Checkouts::Refuse`], the refusal (`contains_checkout`) of a candidate
+/// at `at` found below `root` when a name strictly between them is one of
+/// [`CHECKOUT_MARKERS`] (`/r/proj/.git` for `root` `/r` and `at`
+/// `/r/proj/.git/objects`). Path text only, no system call. `at` itself is
 /// left to the walk (which refuses it by its name), and the root's own
-/// path is not looked at. `None` when nothing on the way is one, or `at`
-/// is not below `root`.
-pub fn checkout_metadata_below(root: &Path, at: &Path) -> Option<PathBuf> {
-    let below = at.strip_prefix(root).ok()?;
+/// path is not looked at. Fail closed, whatever the setting: an `at` that
+/// is not below `root` is a caller's mistake no rule can judge, refused as
+/// `unsafe_path`. `None` when it is below `root` and, under
+/// [`Checkouts::Allow`] or with no marker on the way, nothing refuses it.
+pub fn checkout_metadata_below(checkouts: Checkouts, root: &Path, at: &Path) -> Option<Skip> {
+    let Ok(below) = at.strip_prefix(root) else {
+        return Some(Skip::new(
+            Reason::UnsafePath,
+            at.to_path_buf(),
+            format!(
+                "not below its root {}: where it lies cannot be judged (fail closed)",
+                root.display()
+            ),
+        ));
+    };
+    if checkouts == Checkouts::Allow {
+        return None;
+    }
     let mut names = below.components();
     names.next_back()?;
     let mut path = root.to_path_buf();
     for name in names {
         path.push(name);
         if is_checkout_marker(name.as_os_str()) {
-            return Some(path);
+            return Some(Skip::new(
+                Reason::ContainsCheckout,
+                path,
+                "inside a version-control checkout's metadata (a directory on the way below the \
+                 root): deleting part of it can destroy the repository, and the profile refuses \
+                 checkouts (`checkouts: refuse`, the default)",
+            ));
         }
     }
     None
@@ -99,6 +149,25 @@ pub struct Rules<'a> {
     /// At most this many entries, the candidate included
     /// ([`super::DEFAULT_MAX_ENTRIES`] unless a test needs a small one).
     pub max_entries: usize,
+    /// Whether a candidate may hold a VCS checkout: the source profile's
+    /// setting. [`Rules::new`] (and so anything built from it without
+    /// saying otherwise) refuses.
+    pub checkouts: Checkouts,
+}
+
+impl<'a> Rules<'a> {
+    /// The rules of a run for `owners`: any socket or FIFO refuses (the
+    /// default policy), the default entry budget, and checkouts refused
+    /// ([`Checkouts::default`]). A caller that allows checkouts says so:
+    /// `Rules { checkouts: Checkouts::Allow, ..Rules::new(owners) }`.
+    pub fn new(owners: &'a [u32]) -> Self {
+        Self {
+            owners,
+            block_ipc: true,
+            max_entries: super::DEFAULT_MAX_ENTRIES,
+            checkouts: Checkouts::default(),
+        }
+    }
 }
 
 /// Why the walk ended without a record.
@@ -121,56 +190,15 @@ impl From<Skip> for WalkStop {
     }
 }
 
-/// The eligibility walk of `candidate` for a plain delete: its record, or
-/// why it is not eligible. Checks the deadline before every `statx`, open
-/// and listing. Refuses a VCS checkout inside ([`CHECKOUT_MARKERS`],
-/// `contains_checkout`): every caller gets that, only the Cargo kind opts
-/// out ([`walk_cargo_profile_entry`]).
+/// The eligibility walk of `candidate`: its record, or why it is not
+/// eligible. Checks the deadline before every `statx`, open and listing.
+/// Refuses a VCS checkout inside ([`CHECKOUT_MARKERS`],
+/// `contains_checkout`) unless `rules` allow checkouts (the source
+/// profile's `checkouts: allow`).
 pub fn walk<H: Host>(
     host: &H,
     candidate: &Candidate<'_, H::Fd>,
     rules: &Rules<'_>,
-    deadline: Option<MonoTime>,
-) -> Result<WalkRecord, WalkStop> {
-    walk_as(host, candidate, rules, Checkouts::Refused, deadline)
-}
-
-/// [`walk`] for an entry of a Cargo profile directory (the `cargo-target`
-/// kind's reclaim protocol, docs/safety.md), the one walk that does not
-/// refuse a VCS checkout inside: build scripts legitimately put checkouts
-/// in a target (a vendored source cloned into `build/<pkg>/out/`), and
-/// the target is Cargo's output, which its own protocol reclaims.
-/// Crate-private; only the Cargo kind calls it (a caller invariant, not
-/// enforced by a type).
-pub(crate) fn walk_cargo_profile_entry<H: Host>(
-    host: &H,
-    candidate: &Candidate<'_, H::Fd>,
-    rules: &Rules<'_>,
-    deadline: Option<MonoTime>,
-) -> Result<WalkRecord, WalkStop> {
-    walk_as(
-        host,
-        candidate,
-        rules,
-        Checkouts::AllowedInCargoTarget,
-        deadline,
-    )
-}
-
-/// Whether a walk refuses a VCS checkout inside its candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Checkouts {
-    /// A plain delete: any [`CHECKOUT_MARKERS`] name is `contains_checkout`.
-    Refused,
-    /// An entry of a Cargo profile directory ([`walk_cargo_profile_entry`]).
-    AllowedInCargoTarget,
-}
-
-fn walk_as<H: Host>(
-    host: &H,
-    candidate: &Candidate<'_, H::Fd>,
-    rules: &Rules<'_>,
-    checkouts: Checkouts,
     deadline: Option<MonoTime>,
 ) -> Result<WalkRecord, WalkStop> {
     let path = || candidate.path.to_path_buf();
@@ -188,7 +216,6 @@ fn walk_as<H: Host>(
         host,
         candidate,
         rules,
-        checkouts,
         deadline,
         listings: Vec::new(),
         entries: 0,
@@ -247,7 +274,6 @@ struct Walker<'w, H: Host> {
     host: &'w H,
     candidate: &'w Candidate<'w, H::Fd>,
     rules: &'w Rules<'w>,
-    checkouts: Checkouts,
     deadline: Option<MonoTime>,
     /// The record's listings so far (complete for every listed directory).
     listings: Vec<Vec<Entry>>,
@@ -397,12 +423,13 @@ impl<H: Host> Walker<'_, H> {
                 ),
             ));
         }
-        if self.checkouts == Checkouts::Refused && is_checkout_marker(&name) {
+        if self.rules.checkouts == Checkouts::Refuse && is_checkout_marker(&name) {
             return Err(skip(
                 Reason::ContainsCheckout,
                 format!(
                     "a version-control checkout's metadata ({:?}, never followed): it may hold \
-                     uncommitted work, and a plain delete never removes a checkout",
+                     uncommitted work, and the profile refuses checkouts (`checkouts: refuse`, \
+                     the default)",
                     identity.file_type
                 ),
             ));

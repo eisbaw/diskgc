@@ -8,9 +8,9 @@
 //! 1. [`walk`]: the eligibility walk. It reads the candidate's whole tree
 //!    fd-relative and either refuses the candidate with a [`Skip`] reason or
 //!    returns a [`WalkRecord`]: every entry's name, [`Identity`] and
-//!    allocated size. (The Cargo kind walks its profile directories'
-//!    entries with `walk_cargo_profile_entry`, the same walk without the
-//!    refusal of VCS checkouts.)
+//!    allocated size. Whether a VCS checkout inside refuses the candidate
+//!    is the source profile's setting, in [`Rules::checkouts`] (refused
+//!    unless the profile says `checkouts: allow`).
 //! 2. [`delete`]: deletes exactly the entries of the record, depth first.
 //!    Every directory is reopened relative to its parent by its recorded
 //!    name and matched against its recorded identity; every `unlinkat` comes
@@ -53,11 +53,11 @@ use crate::host::{DevIno, FileType, Host, MonoTime, Stat, Timestamp};
 use crate::resolve::Resolved;
 
 pub use delete::{DeleteOptions, Deletion, End, delete};
+pub(crate) use walk::host_failure;
 pub use walk::{
-    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, KEEP_MARKER, Rules, WalkStop,
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, Rules, WalkStop,
     checkout_metadata_below, is_cargo_lock_name, is_checkout_marker, walk,
 };
-pub(crate) use walk::{host_failure, walk_cargo_profile_entry};
 
 /// Frames below the candidate that hold an fd at the same time (see the
 /// module docs). A frame's fd is closed before the next one is opened, so
@@ -414,7 +414,8 @@ pub enum Reason {
     /// A version-control checkout is inside ([`CHECKOUT_MARKERS`]
     /// anywhere, the candidate itself included), or the candidate lies
     /// inside a checkout's metadata, found by its path below the root
-    /// ([`checkout_metadata_below`]). Every candidate but the Cargo kind's.
+    /// ([`checkout_metadata_below`]). Unless the source profile says
+    /// `checkouts: allow` ([`Checkouts`]).
     ContainsCheckout,
     /// A socket or FIFO is inside (with [`Rules::block_ipc`]).
     ContainsIpc,
@@ -605,11 +606,21 @@ mod tests {
 
     /// The path rule looks at the names strictly between the root and the
     /// candidate: not the root's own path, not the candidate's own name
-    /// (the walk refuses that), only exact marker names.
+    /// (the walk refuses that), only exact marker names. Under `checkouts:
+    /// allow` it refuses nothing below the root. Whatever the setting, a
+    /// candidate not below its root (`/rx` is not below `/r`) is refused
+    /// as `unsafe_path` (fail closed).
     #[test]
     fn checkout_metadata_is_found_between_the_root_and_the_candidate() {
+        let judged = |checkouts, root: &str, at: &str| {
+            checkout_metadata_below(checkouts, Path::new(root), Path::new(at))
+                .map(|skip| (skip.reason, skip.path.display().to_string()))
+        };
         let below = |root: &str, at: &str| {
-            checkout_metadata_below(Path::new(root), Path::new(at)).map(|p| p.display().to_string())
+            judged(Checkouts::Refuse, root, at).map(|(reason, path)| {
+                assert_eq!(reason, Reason::ContainsCheckout, "{root} {at}");
+                path
+            })
         };
         assert_eq!(
             below("/r", "/r/proj/.git/objects").as_deref(),
@@ -626,11 +637,38 @@ mod tests {
             ("/r/.git", "/r/.git/lfs/tmp"),
             ("/r", "/r/proj/.github/workflows"),
             ("/r", "/r/proj/build/out"),
-            ("/r", "/other/.git/x"),
             ("/r", "/r"),
         ] {
             assert_eq!(below(root, at), None, "{root} {at}");
         }
+        assert_eq!(judged(Checkouts::Allow, "/r", "/r/proj/.git/objects"), None);
+        for checkouts in [Checkouts::Refuse, Checkouts::Allow] {
+            for (root, at) in [
+                ("/r", "/other/.git/x"),
+                ("/r", "/rx/.git/y"),
+                ("/r", "/rx/y"),
+            ] {
+                assert_eq!(
+                    judged(checkouts, root, at),
+                    Some((Reason::UnsafePath, at.to_owned())),
+                    "{checkouts:?} {root} {at}"
+                );
+            }
+        }
+    }
+
+    /// Fail closed by default: rules that do not state the checkout
+    /// setting ([`Rules::new`], or anything built from it) refuse
+    /// checkouts, and the setting's own default is `refuse`.
+    #[test]
+    fn rules_that_do_not_state_the_checkout_setting_refuse_checkouts() {
+        assert_eq!(Checkouts::default(), Checkouts::Refuse);
+        assert_eq!(Rules::new(&[1000]).checkouts, Checkouts::Refuse);
+        let narrower = Rules {
+            max_entries: 3,
+            ..Rules::new(&[1000])
+        };
+        assert_eq!(narrower.checkouts, Checkouts::Refuse);
     }
 
     #[test]

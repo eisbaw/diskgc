@@ -386,13 +386,27 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, project: &Path) -> TestResult {
     Ok(())
 }
 
+/// A Git checkout in `old`'s target, where a build script would clone a
+/// vendored source (its `OUT_DIR`), relative to the scratch root.
+const VENDORED_CHECKOUT: &str = "w/old/target/debug/build/vendored-0000/out/repo/.git";
+
 /// Two projects built in turn, `old` first: `old`'s last build is older
 /// (the clock moves on by at least a second between them, so their times
-/// differ even on a coarse clock).
+/// differ even on a coarse clock). `old`'s target also holds a Git
+/// checkout ([`VENDORED_CHECKOUT`], made before `new` is built, so `old`
+/// stays the older): the built-in `cargo-target` says `checkouts: allow`
+/// (task-80), so it is part of the target like any other entry.
 fn two_targets(ctx: &Ctx, toolchain: &Toolchain) -> Result<(), String> {
     work_dir(ctx)?;
     let old = SMOKE.write(&ctx.scratch, "w/old")?;
     build(ctx, toolchain, &old)?;
+    ctx.scratch.mkdirs(VENDORED_CHECKOUT, 0o755, TESTER)?;
+    ctx.scratch.write_file(
+        &format!("{VENDORED_CHECKOUT}/HEAD"),
+        b"ref: refs/heads/main\n",
+        0o644,
+        TESTER,
+    )?;
     std::thread::sleep(Duration::from_millis(1100));
     let new = SMOKE.write(&ctx.scratch, "w/new")?;
     build(ctx, toolchain, &new)
@@ -403,7 +417,9 @@ fn two_targets(ctx: &Ctx, toolchain: &Toolchain) -> Result<(), String> {
 /// host lock, reclaims `old` first (the tier's `oldest` order), observes
 /// the goal and stops, so `new` is untouched. The oracle allows only
 /// `old`'s profile entries to go; lock files keep their inodes; the next
-/// build of `old` succeeds.
+/// build of `old` succeeds. The checkout in `old`'s target goes with it
+/// (task-80: the built-in profile allows checkouts; no code exempts
+/// Cargo).
 pub fn ensure_reclaims_the_oldest_real_target_and_stops_at_min_free(
     ctx: &Ctx,
     toolchain: &Toolchain,
@@ -453,6 +469,10 @@ pub fn ensure_reclaims_the_oldest_real_target_and_stops_at_min_free(
         "{r}"
     );
     ensure!(lock_inodes(old)? == locks, "lock files gone or replaced");
+    ensure!(
+        !ctx.scratch.path(VENDORED_CHECKOUT).exists(),
+        "the checkout in the old target was not reclaimed with it"
+    );
     ensure!(
         Path::new("/tmp/w/new/target/debug")
             .join(SMOKE.binary)
@@ -589,6 +609,14 @@ pub fn ensure_dry_run_plans_real_targets_and_deletes_nothing(
     );
     ensure!(
         r["plan"][0]["eligible"] == true && r["plan"][1]["eligible"] == false,
+        "{r}"
+    );
+    // The built-in cargo-target allows checkouts (task-80): every plan
+    // entry says so.
+    ensure!(
+        r["plan"]
+            .as_array()
+            .is_some_and(|p| p.iter().all(|e| e["checkouts"] == "allow")),
         "{r}"
     );
     for run in [&human, &json] {

@@ -87,11 +87,12 @@ kinds), and where those guarantees end. The protocols are in
   environment; not if the candidate directory is `flock`ed by someone
   else (a locked *file* inside is only caught as an open file of a visible
   process), nor if it contains a mount, a `.diskgc-keep` file, a Cargo
-  target or (except for the Cargo kind) a version-control checkout, nor
-  (by default) a socket or FIFO; a configurable policy may
-  block only live ones instead (a FIFO some visible process holds open, a
-  socket bound in diskgc's network namespace), so stale test fixtures do
-  not block forever.
+  target or a version-control checkout, nor if it lies inside one's
+  metadata (unless its profile says `checkouts: allow`), nor (by
+  default) a socket or FIFO; a
+  configurable policy may block only live ones instead (a FIFO some
+  visible process holds open, a socket bound in diskgc's network
+  namespace), so stale test fixtures do not block forever.
 - Cargo targets only inside profile directories whose locks diskgc holds;
   no Cargo lock file is ever deleted or moved.
 - No symlink followed, no mount crossed.
@@ -238,8 +239,8 @@ whatever the profile.
 | Composition | Qualified names; terms of one `profile:` (or a group) `&&` `filter:`s; `\|\|` only with parentheses; `!` only narrows | Composable by name, no precedence traps, nothing deleted that no profile found. |
 | Roots | Fixed, or `roots: required` supplied by a tier, `--roots` or a `protect` entry | A selection or protection can never be re-pointed or left unbound. |
 | Built-in profiles | YAML data with examples, golden sets and `verified_with`; a changed matching set means a new name | Narrowing is unsafe under negation and protection, so meaning is immutable per name. |
-| Safety | Code, always on; eligibility walk, ownership of every entry, in-use and identity checks at deletion time | A wrong profile or a stale index costs at most unused own files or speed. |
-| Nesting | Fixed structural recognisers (Cargo targets, `.diskgc-keep`, version-control checkouts), independent of the profile library | Editing a profile never changes what a parent's plain delete may remove. |
+| Safety | Code, always on; eligibility walk, ownership of every entry, in-use and identity checks at deletion time; the checkout guard is on by default, and a profile may allow checkouts | A wrong profile or a stale index costs at most unused own files or speed; one that says `checkouts: allow` can also cost a repository's uncommitted or unpushed work. |
+| Nesting | Fixed structural recognisers (Cargo targets, `.diskgc-keep`, version-control checkouts), independent of the profile library; only the candidate's own profile can turn the checkout guard off (`checkouts: allow`) | Editing one profile never widens what another profile's delete may remove; only a profile's own `checkouts: allow` lets its candidates hold checkouts. |
 | Gather vs act | Throttled background tally builds an index; reclaim walk orders by it, discovers per tier, checks live | No survey when the disk is full; policy order holds even with a stale index. |
 | Order in a tier | `oldest` default; opt-in `best-fit` | LRU by default; one sizable step when asked. |
 | Deadlines | Cooperative, with reported overruns | Blocking kernel operations cannot be interrupted; honesty over a false promise. |

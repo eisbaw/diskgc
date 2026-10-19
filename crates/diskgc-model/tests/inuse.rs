@@ -8,9 +8,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{dir, host};
-use diskgc_core::engine::{
-    Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Reason, Rules, Skip, walk,
-};
+use diskgc_core::engine::{Candidate, DeleteOptions, Deletion, End, Reason, Rules, Skip, walk};
 use diskgc_core::host::{Dev, Host, Pid};
 use diskgc_core::inuse::{
     self, Checker, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan, Stop, delete_unused,
@@ -81,9 +79,8 @@ fn processes(list: &[String]) -> String {
 
 fn rules(block_ipc: bool) -> Rules<'static> {
     Rules {
-        owners: &[ME],
         block_ipc,
-        max_entries: DEFAULT_MAX_ENTRIES,
+        ..Rules::new(&[ME])
     }
 }
 

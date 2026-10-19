@@ -17,9 +17,7 @@ use common::host;
 use diskgc_core::cargo_target::{
     ReclaimEnd, Reclaimed, Stop, Target, discover, eligibility, reclaim,
 };
-use diskgc_core::engine::{
-    CARGO_LOCK_NAMES, DEFAULT_MAX_ENTRIES, Reason, Rules, is_cargo_lock_name,
-};
+use diskgc_core::engine::{CARGO_LOCK_NAMES, Reason, Rules, is_cargo_lock_name};
 use diskgc_core::host::{
     Base, BoundSocket, Cause, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode,
     Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
@@ -108,12 +106,10 @@ fn with_events(yaml: &str, events: &[&str]) -> String {
     out
 }
 
+/// The rules of a `profile:cargo-target` tier: its `checkouts` setting
+/// comes from the built-in profile, as in the executor.
 fn rules() -> Rules<'static> {
-    Rules {
-        owners: &[ME],
-        block_ipc: true,
-        max_entries: DEFAULT_MAX_ENTRIES,
-    }
+    common::cargo_target_rules(&[ME])
 }
 
 /// The single target found below `/tmp/w`.
@@ -327,9 +323,10 @@ fn every_entry_but_the_lock_files_goes_fingerprints_first() {
     assert!(last_flock < first_unlink);
 }
 
-/// task-71: the Cargo kind is exempt from `contains_checkout`: a VCS
-/// checkout a build script cloned into `build/<pkg>/out/` (`.git`, `.hg`,
-/// `.svn`) is reclaimed with the rest of the profile directory.
+/// A VCS checkout a build script cloned into `build/<pkg>/out/` (`.git`,
+/// `.hg`, `.svn`) is reclaimed with the rest of the profile directory:
+/// the built-in `cargo-target` says `checkouts: allow` (task-80; these
+/// rules take it from the library, no code exempts the Cargo kind).
 #[test]
 fn a_vcs_checkout_a_build_script_cloned_is_reclaimed_with_the_target() {
     let debug = "{.cargo-lock: {}, .cargo-build-lock: {}, .cargo-artifact-lock: {}, \

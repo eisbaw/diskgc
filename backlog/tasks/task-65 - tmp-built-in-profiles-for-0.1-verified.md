@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-18 19:55'
+updated_date: '2026-10-19 01:34'
 labels:
   - wave-2
   - profiles
@@ -38,6 +38,8 @@ Stays in task-39: claude-code-tmp, chromium-tmp, playwright-tmp, node-compile-ca
 - [ ] #2 Each profile is verified against the dogfood findings and carries verified_with from a real system
 - [ ] #3 No profile depends on the Docker or Nix kinds, command actions or survey (task-37, task-38)
 - [ ] #4 Dormant nix-shell and nix develop sessions keep their rc and TMPDIR dirs (container test), or nix-shell-rc and nix-shell-tmpdir do not ship in 0.1
+- [x] #5 pytest-tmp's checkouts setting is decided (survey 2026-10-19: all 75,253 leftover repos were test fixtures; recommendation: allow)
+- [ ] #6 pytest-tmp's granularity (per session or per test dir) is decided before it ships: with checkouts allowed, per session costs about a tenth of the candidates; once shipped, a changed match set needs a new name
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -50,6 +52,14 @@ From task-71 D2 (Mark, 2026-10-18): pytest-tmp takes one pytest session per cand
 From task-71 round 3 (Mark, 2026-10-18): pytest-tmp is one candidate per TEST DIR (pytest-of-*/pytest-*/*, plus nix-shell.*/ and tmp.*/ one level down; type dir), superseding the per-session note above. The checkout guard stays intact; only test dirs that ran git init are kept. mped measured the per-session cost here: 1,559 of 4,670 sessions held a .git, about 21 GiB, mostly whole suites where a few tests ran git init. Open items for when the profile ships:
 1. Check that pytest tolerates a test dir disappearing from a live session (or rely on in_use / an idle filter in the tier: a live session's test dirs are usually recent and often open).
 2. (mped N4) pytest writes a .lock file holding its PID in a live numbered session dir; consider it as an in-use hint for the test dirs below it (today it is only a plain file in the session dir, never a candidate and not read).
+
+Correction (task-80, from mped's round-3 review of task-71): the premise above ('mostly whole suites where a few tests ran git init') does not match the per-test-dir sample in task-71's notes. There, most of the bytes the guard keeps sit in the test dirs that ran git init themselves: 11,293 contains_checkout test dirs, about 53 per session that holds a checkout (212 such sessions in the judged part), 3.13 GiB by du, against 0.32 GiB of eligible sibling test dirs in those sessions. So splitting per test dir recovers the siblings only, about a tenth of what the guard keeps; the rest stays until pytest-tmp's checkouts setting is decided (task-80: it keeps the default, refuse, until the survey of its kept test dirs).
+
+Decision (Mark, 2026-10-19, relayed by the orchestrator; AC #5): pytest-tmp says checkouts: allow. Evidence: a read-only survey of ALL 75,253 leftover repos in pytest sessions under /tmp on the development machine (not a sample) found only test fixtures, no real work: 64,042 authored by Test <test@example.com>, no worktrees, no network remotes; the only clones in the user's real identity were 50 switch_utils clones whose commits are all in the real repository. Sessions at most 19 days old, about 21.7 GiB. Landed with task-80: fs_kind/spike-profiles.yaml (the setting with this evidence as a comment), reference.md (the library row, the single home for which built-ins allow checkouts, and the pytest-tmp note), a model test (a test dir holding .git is eligible under pytest-tmp; bitten). Ship the built-in with checkouts: allow. Granularity stays per test dir (pytest-of-*/pytest-*/*) for now; it was chosen while the guard applied here and can be revisited now that it does not (the per-candidate cost is task-70's).
+
+Dry run (task-80 round 2, 2026-10-19, this laptop, read-only: ensure --dry-run --select profile:pytest-tmp, spike-profiles.yaml with checkouts: allow, nice/ionice, --timeout 20m): exit 124 at the deadline, so partial. 75,142 test dirs judged: 75,066 eligible, 6.29 GiB (diskgc's estimate); 76 contains_ipc; 0 contains_checkout; every plan entry carried checkouts: allow. Its unit is the test dir; the survey's units are repositories and sessions (21.7 GiB), so the two sets of numbers are not comparable.
+
+From task-80 r3 review (mped NITs): AC #6 wording should read 'per session yields about a tenth as many candidates'; the earlier implementation note saying spike-profiles.yaml carries the survey evidence as a comment is superseded (the comment is now a pointer; reference.md rests the allow on pytest's own retention, tmp_path_retention_count).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

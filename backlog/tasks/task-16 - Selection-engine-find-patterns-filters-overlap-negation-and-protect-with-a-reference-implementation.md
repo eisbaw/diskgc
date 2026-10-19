@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 13:18'
+updated_date: '2026-10-18 23:18'
 labels:
   - wave-2
   - irreversible
@@ -54,6 +54,8 @@ From task-68's review: the nested-match rule is a decision for Mark, not settled
 From task-68 r2 (mped N2): a matching name that holds a mount is now listed as contains_mount (and not searched deeper) even when the source's where would have rejected it; add to the open question whether plan entries may name non-candidates.
 
 Decision by Mark (2026-10-18): nested matches of the same profile: the outer match only. It is a sensible default and avoids redundant or double candidates. Document it in docs/reference.md.
+
+From task-80: overlap and the checkout setting. When one candidate is found by several source profiles of one tier (a union), it may hold a version-control checkout only if every one of them says checkouts: allow: refuse wins (docs/safety.md, No source checkout). executor::Tier has one checkouts field today; a union must combine its sources' settings as refuse-if-any (or judge per candidate by the sources that found it). Test both orders of a || b.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

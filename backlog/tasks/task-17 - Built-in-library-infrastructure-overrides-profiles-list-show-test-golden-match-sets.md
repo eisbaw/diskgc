@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 12:01'
+updated_date: '2026-10-18 23:19'
 labels:
   - wave-2
   - config
@@ -30,6 +30,7 @@ Why: the library must grow without silently changing meaning. Implement override
 - [ ] #3 profiles test exits 1 on a failing example
 - [ ] #4 Golden sets also cover the profiles shipped in wave 1 (cargo-target and the idle-* filters)
 - [ ] #5 profiles test matches examples on paths in diskgc-core (it does not depend on the test-only model crate)
+- [ ] #6 profiles list marks every profile that says checkouts: allow, and profiles show prints checkouts for every source (the default spelled out), as docs/reference.md (profiles command) says (moved from task-80 AC #5)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -42,6 +43,8 @@ From task-8: override: true is NOT implemented: it is an unknown key in ProfileS
 From task-8's review: the select tests' catalog loads crates/diskgc-core/src/select/test-profiles.yaml as user profiles; with override not implemented, a stand-in that should override a built-in cannot be written (any shared name is a load error). When override lands, keep the stand-ins without override: true, so a built-in shipping under a stand-in's name still fails the test catalog and forces the stand-in's removal. User fs profiles now need examples with at least one match (user decision U2), same as built-ins.
 
 From task-68: fs_kind::example_failures(source, uid) checks examples against the patterns (paths only); fs_kind::tests runs it over crates/diskgc-core/src/fs_kind/spike-profiles.yaml (all 27 fs sources of the spike). Open for `profiles test`: (1) roots: required examples can only be checked as "the last names match a pattern below some root", so a no_match is weak, and a profile whose last segment is `*` (cmake-build, cachedir-tagged) cannot have any no_match; (2) `{uid}` in patterns: the static check needs a uid; the spike uses 1000 and writes examples with it; (3) a source's own `where` and the entry type are not part of an example; the in-memory model of AC #5 would cover both. spike-profiles.yaml uses the library's names as user profiles: when a built-in of the same name ships, the file fails to load (no override), which is the reminder to delete or rename its row.
+
+From task-80: profiles list marks every profile that says checkouts: allow, and profiles show always prints checkouts (the default spelled out as refuse): docs/reference.md, profiles command. Until these commands exist, the only place an allow shows is the ensure / --dry-run log line ('<tier>: profile `<name>` says `checkouts: allow`: ...'). Golden match sets are unaffected: checkouts does not change what a profile finds, only what its candidates may hold.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
