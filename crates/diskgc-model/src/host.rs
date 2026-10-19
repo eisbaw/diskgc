@@ -193,6 +193,17 @@ impl ModelHost {
         self.inner.borrow().trace.clone()
     }
 
+    /// Number of calls of one kind, without cloning a potentially large
+    /// trace (for scale tests that care about scan or unlink cadence).
+    pub fn trace_count(&self, op: Op) -> usize {
+        self.inner
+            .borrow()
+            .trace
+            .iter()
+            .filter(|call| call.op == op)
+            .count()
+    }
+
     /// Indices (in the model's `events`) of events that have not fired.
     pub fn unfired_events(&self) -> Vec<usize> {
         self.inner

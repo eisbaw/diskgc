@@ -15,11 +15,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
+use diskgc_core::engine::Rules;
 use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::profile::{Library, parse_profiles};
+use diskgc_core::fs_kind::{self, Find, Judge};
+use diskgc_core::host::Host;
+use diskgc_core::inuse::{Checker, REUSE_LIMIT};
+use diskgc_core::outcome::{ReclaimEnd, Stop};
+use diskgc_core::profile::{EntryType, Library, Where, parse_profiles};
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::parse_size;
-use diskgc_model::spec::Op;
+use diskgc_model::spec::{FileSpec, NodeSpec, Op, StatxField};
 use diskgc_model::{Call, ModelHost};
 
 const PROFILES: &str = r#"
@@ -122,6 +127,86 @@ fn request(select: &str, roots: &[&str], path: &str, min: &str) -> Request {
 /// candidate is processed.
 fn tmp(select: &str) -> Request {
     request(select, &[], "/tmp", "100%")
+}
+
+/// The actual `fs` deletion protocol, on 40,000 distinct top-level `/tmp`
+/// candidates. This deliberately enters below the executor: the model's
+/// `statvfs` recomputes all reachable inodes at every sample, which would
+/// measure the model's quadratic accounting instead of scan cadence. The
+/// filesystem omits nlink so its unrelated link-count walk is skipped. An
+/// event advances the clock at the halfway unlink: the next candidate
+/// must scan again at the exact 500 ms reuse boundary.
+#[test]
+fn forty_thousand_tmp_candidates_reclaim_once_per_reuse_window() {
+    const CANDIDATES: usize = 40_000;
+    let mut model = diskgc_model::load::parse_yaml(&yaml(
+        "",
+        "",
+        "events:\n  - {at: {op: unlinkat, nth: 20000, when: after}, advance: 500ms}\n",
+    ))
+    .expect("base model");
+    model
+        .mounts
+        .iter_mut()
+        .find(|mount| mount.at == Path::new("/tmp"))
+        .expect("/tmp mount")
+        .statx_missing
+        .push(StatxField::Nlink);
+    for index in 0..CANDIDATES {
+        model.tree.insert(
+            PathBuf::from(format!("/tmp/entry-{index:05}")),
+            NodeSpec::File(FileSpec::default()),
+        );
+    }
+    let host = ModelHost::new(&model).expect("large model");
+    let find = Find::new(
+        &["entry-*".to_owned()],
+        EntryType::File,
+        &Where::default(),
+        1000,
+    );
+    let (discovered, stopped) = fs_kind::discover(&host, &[PathBuf::from("/tmp")], &find, None);
+    assert!(stopped.is_none(), "discovery stopped: {stopped:?}");
+    assert!(discovered.refused.is_empty(), "{:#?}", discovered.refused);
+    assert!(discovered.duplicates.is_empty());
+    assert_eq!(discovered.candidates.len(), CANDIDATES);
+
+    let owners = [1000];
+    let rules = Rules::new(&owners);
+    let judge = Judge {
+        find: &find,
+        rules: &rules,
+        idle_for: None,
+        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+    };
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let started = std::time::Instant::now();
+    for (path, candidate) in &discovered.candidates {
+        let found = candidate
+            .as_ref()
+            .unwrap_or_else(|skip| panic!("{path:?}: {skip:?}"));
+        let done = fs_kind::reclaim(&host, &judge, found, false, &mut checker, None);
+        assert_eq!(done.end, ReclaimEnd::Complete, "{path:?}: {done:?}");
+        assert_eq!(done.removed_entries, 1, "{path:?}");
+    }
+    eprintln!(
+        "40,000 model /tmp candidates: {:?}, {} process scans",
+        started.elapsed(),
+        host.trace_count(Op::OwnPid)
+    );
+    assert_eq!(
+        host.trace_count(Op::OwnPid),
+        2,
+        "one scan in each reuse window"
+    );
+    assert_eq!(host.trace_count(Op::Unlinkat), CANDIDATES);
+    assert!(
+        host.unfired_events().is_empty(),
+        "the clock advanced halfway through"
+    );
+    assert!(!exists(&host, "/tmp/entry-00000"));
+    assert!(!exists(&host, "/tmp/entry-20000"));
+    assert!(!exists(&host, "/tmp/entry-39999"));
 }
 
 fn ensure(host: &ModelHost, request: &Request) -> Report {
@@ -744,22 +829,61 @@ fn a_process_that_opens_a_candidate_after_an_earlier_scan_keeps_it() {
 }
 
 /// A scan that blocks every candidate (an unreadable process of the user)
-/// is never reused: the next candidate gets a new scan, also within the
-/// reuse window. Here pid 9 exits after blocking the first candidate.
+/// is reused only within the short blocked-scan window. Here pid 9 exits
+/// after blocking the first candidate, and the next candidate is judged
+/// at the 500 ms boundary against a new scan.
 #[test]
-fn a_blocking_scan_is_not_reused_for_the_next_candidate() {
+fn a_blocking_scan_is_replaced_at_the_short_limit() {
     let tree = format!(
         "  /tmp/pytest-of-a: {}\n  /tmp/pytest-of-b: {{.: {{mtime: 2026-09-01T00:00:00Z}}, f: \
          {{size: 10K, mtime: 2026-09-01T00:00:00Z}}}}\n",
         old_dir("10K")
     );
     let rest = "  - {pid: 9, exe: /usr/bin/tool, proc: failed}\nevents:\n  - {at: {op: flock, \
-                path: /tmp/pytest-of-a, when: after}, exit: 9}\n";
+                path: /tmp/pytest-of-a, when: after}, exit: 9}\n  - {at: {op: flock, \
+                path: /tmp/pytest-of-a, when: after}, advance: 500ms}\n";
     let host = host(&yaml("", &tree, rest));
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert!(host.unfired_events().is_empty());
     assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some("in_use"));
     assert_eq!(actions(&report), ["/tmp/pytest-of-a"], "{report:#?}");
+}
+
+/// A blocking scan that runs past the deadline is a stopped run, even when
+/// this is the final candidate and there is no next loop iteration to check.
+#[test]
+fn a_blocking_scan_past_the_deadline_stops_the_reclaim() {
+    let tree = format!("  /tmp/pytest-of-a: {}\n", old_dir("10K"));
+    let rest = "  - {pid: 9, exe: /usr/bin/tool, proc: failed}\nevents:\n  - {at: {op: own_pid, nth: 1, when: after}, advance: 700s}\n";
+    let host = host(&yaml("", &tree, rest));
+    let find = Find::new(
+        &["pytest-of-*".to_owned()],
+        EntryType::Dir,
+        &Where::default(),
+        1000,
+    );
+    let (discovered, stopped) = fs_kind::discover(&host, &[PathBuf::from("/tmp")], &find, None);
+    assert!(stopped.is_none());
+    let found = discovered.candidates[0].1.as_ref().expect("candidate");
+    let owners = [1000];
+    let rules = Rules::new(&owners);
+    let judge = Judge {
+        find: &find,
+        rules: &rules,
+        idle_for: None,
+        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+    };
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let deadline = host.now().checked_add(Duration::from_secs(600));
+    let done = fs_kind::reclaim(&host, &judge, found, false, &mut checker, deadline);
+    assert_eq!(
+        done.end,
+        ReclaimEnd::Stopped(Stop::DeadlinePassed {
+            path: PathBuf::from("/tmp/pytest-of-a")
+        })
+    );
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(unlinked_below(&host, "/tmp/pytest-of-a"), 0);
 }
 
 /// A candidate directory `flock`ed by another process is `locked` and

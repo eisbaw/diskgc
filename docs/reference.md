@@ -92,9 +92,9 @@ runs it as written.
   always prints, even if the goal is already met. An `fs` tier's plan is
   the reclaim's discovery and judgement
   ([safety.md](safety.md#deletion)) without the lock and the delete. It deletes nothing, so the deletion's freshness bound
-  does not apply: the plan of a `cargo-target` tier reuses a process scan
-  for half a second, as a reclaim does, and that of an `fs` tier for up to
-  a minute (half a second for a scan that blocks every candidate). With a `random` group, the order is for the printed seed
+  does not apply: both `cargo-target` and `fs` plans reuse a process scan
+  for up to a minute (half a second for a scan that blocks every candidate).
+  With a `random` group, the order is for the printed seed
   only. Sizes are estimates; Docker and Nix tiers can only say what they
   would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
   interrupted); JSON `status` is `dry_run`.

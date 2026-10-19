@@ -11,14 +11,13 @@
 //! `/tmp` takes minutes, and a mount made meanwhile must not be `statx`ed.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use super::discover::{Discovery, check_deadline, discover};
 use super::judge::{Judge, Tally, mountinfo};
 use super::{Find, Found};
 use crate::engine::{Rules, Skip};
-use crate::host::{Dev, Host, HostError, MonoTime};
-use crate::inuse::{Options, REUSE_LIMIT, Scan, scan};
+use crate::host::{Dev, Host, MonoTime};
+use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleFor;
 
@@ -39,46 +38,14 @@ pub struct Planned {
     pub unjudged: usize,
 }
 
-/// The process scans of a plan: one is reused for later candidates while
-/// it is younger than `reuse` (a plan deletes nothing, so the deletion's
-/// freshness bound, which `inuse::Checker` enforces, does not apply). A
-/// scan that blocks every candidate (unsettled: processes kept starting
-/// while it read; or an unreadable process of the user) is reused only
-/// within [`REUSE_LIMIT`], as for a deletion, so one busy moment does not
-/// mark a minute's worth of candidates `in_use`.
-struct Scans<'o> {
-    options: Options<'o>,
-    reuse: Duration,
-    latest: Option<Scan>,
-}
-
-impl Scans<'_> {
-    fn current<H: Host>(&mut self, host: &H) -> Result<&Scan, HostError> {
-        let now = host.now();
-        let fresh = self.latest.as_ref().is_some_and(|s| {
-            let reuse = if s.blocked().is_some() {
-                self.reuse.min(REUSE_LIMIT)
-            } else {
-                self.reuse
-            };
-            now.saturating_since(s.started()) < reuse
-        });
-        if !fresh {
-            self.latest = None;
-            self.latest = Some(scan(host, &self.options)?);
-        }
-        Ok(self.latest.as_ref().expect("made above"))
-    }
-}
-
 /// Finds the candidates of `find` below `roots` (absolute, `{uid}`
 /// replaced) and judges each (see the module docs). `dev` is the device of
 /// `PATH`'s filesystem. Errors of the run (a failing disk, no fds left, a
 /// process scan that fails, the deadline) stop it: they are returned with
 /// what was judged until then. Anything about one root, directory or
 /// candidate is in the result. A process scan serves the candidates
-/// judged within `scan_reuse` of its start. `log` gets a progress line
-/// every 10,000 candidates.
+/// judged within the plan checker's scan reuse window. `log` gets a
+/// progress line every 10,000 candidates.
 #[allow(clippy::too_many_arguments)]
 pub fn plan<H: Host>(
     host: &H,
@@ -87,7 +54,6 @@ pub fn plan<H: Host>(
     dev: Dev,
     rules: &Rules<'_>,
     idle_for: Option<IdleFor>,
-    scan_reuse: Duration,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) -> (Planned, Option<Stop>) {
@@ -116,16 +82,12 @@ pub fn plan<H: Host>(
         idle_for,
         dev,
     };
-    let mut scans = Scans {
-        options: Options::from_rules(rules),
-        reuse: scan_reuse,
-        latest: None,
-    };
+    let mut checker = Checker::for_plan(rules);
     let total = candidates.len();
     for (path, candidate) in candidates {
         let verdict = match candidate {
             Err(skip) => Err(skip),
-            Ok(found) => match judge_one(host, &judge, &found, &mut scans, deadline) {
+            Ok(found) => match judge_one(host, &judge, &found, &mut checker, deadline) {
                 Ok(verdict) => verdict,
                 Err(stop) => {
                     out.unjudged = total - out.judged.len();
@@ -150,7 +112,7 @@ fn judge_one<H: Host>(
     host: &H,
     judge: &Judge<'_>,
     found: &Found,
-    scans: &mut Scans<'_>,
+    checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Judged<Tally> {
     check_deadline(host, deadline, &found.path)?;
@@ -158,10 +120,14 @@ fn judge_one<H: Host>(
     let reached = judged!(judge.approach(host, found, &mounts, deadline));
     let candidate = reached.candidate(found)?;
     let walked = judged!(judge.contents(host, &reached, &candidate, found, true, deadline));
-    let scan = scans.current(host).map_err(|error| Stop::Failed {
+    let scan = checker.current(host).map_err(|error| Stop::Failed {
         path: found.path.clone(),
         error,
     })?;
+    // A process scan may outlast the deadline, including its one bounded
+    // retry. Leave this candidate unjudged rather than publishing a late
+    // verdict (the scan itself has no cooperative deadline).
+    check_deadline(host, deadline, &found.path)?;
     if let Err(skip) = scan.check(&candidate, &walked.record) {
         return Ok(Err(skip));
     }

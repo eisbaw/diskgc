@@ -50,10 +50,26 @@ pub use scan::{
 /// (docs/safety.md, In use: Freshness).
 pub const FRESHNESS: Duration = Duration::from_secs(1);
 
-/// How long a [`Checker`] reuses a scan for further candidates by default:
-/// half the freshness bound, so the deletion after a check has the other
-/// half to start.
+/// How long a deleting [`Checker`] may reuse a scan. The final check and
+/// [`delete_cleared`] still enforce [`FRESHNESS`] immediately before every
+/// deletion, including when a scan expires during the candidate check. The
+/// shorter reuse window gives a newly started process a chance to be seen
+/// between candidates before the deletion freshness limit is reached.
 pub const REUSE_LIMIT: Duration = Duration::from_millis(500);
+
+/// A scan that blocks every candidate is kept for less time after it finishes,
+/// so a transient process problem cannot mark a whole plan or reclaim `in_use`.
+/// A slow blocking scan is still shared by later candidates for that interval.
+pub const BLOCKED_REUSE_LIMIT: Duration = Duration::from_millis(500);
+
+/// A read-only plan may reuse a clear scan longer: it does not delete on
+/// the scan's word. A blocking scan is kept only for [`BLOCKED_REUSE_LIMIT`].
+pub const PLAN_REUSE_LIMIT: Duration = Duration::from_secs(60);
+
+/// One short pause before retrying a process list that kept growing. The
+/// retry is a complete scan; neither scan can clear a candidate unless it
+/// settles. A persistent fork storm stays a conservative `in_use` skip.
+pub const UNSETTLED_RETRY_PAUSE: Duration = Duration::from_millis(20);
 
 /// Filesystems whose memory maps may show another device (and, on older
 /// kernels, inode) than `statx` of the same file: a mapping matches by
@@ -94,6 +110,7 @@ pub struct Scan {
     finished: MonoTime,
     listings: usize,
     unsettled: Option<String>,
+    retried_unsettled: Option<String>,
     processes: usize,
     gone: usize,
     /// Every process read in full, by pid (ordered, so reports are).
@@ -121,6 +138,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         finished: gathered.finished,
         listings: gathered.listings,
         unsettled: gathered.unsettled,
+        retried_unsettled: None,
         processes: gathered.read.len(),
         gone: gathered.gone,
         seen: BTreeMap::new(),
@@ -167,6 +185,10 @@ pub struct HeldByDeleted {
 }
 
 impl Scan {
+    fn blocks_all(&self) -> bool {
+        self.unsettled.is_some() || self.unreadable.iter().any(|u| u.excuse.is_none())
+    }
+
     /// When the scan started: its age is measured from here.
     pub fn started(&self) -> MonoTime {
         self.started
@@ -217,6 +239,11 @@ impl Scan {
     /// read.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        if let Some(why) = &self.retried_unsettled {
+            notes.push(format!(
+                "process scan unsettled; retried after {UNSETTLED_RETRY_PAUSE:?}: {why}"
+            ));
+        }
         if let Some(why) = &self.unsettled {
             notes.push(format!("process scan unsettled: {why}"));
         }
@@ -523,6 +550,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A read-only plan's checker. Its verdicts are advisory; a reclaim
+    /// always uses a separate deleting checker with the freshness bound.
+    pub fn for_plan(rules: &Rules<'a>) -> Self {
+        Self {
+            options: Options::from_rules(rules),
+            reuse_limit: PLAN_REUSE_LIMIT,
+            latest: None,
+        }
+    }
+
     /// The scan the last check used.
     pub fn latest(&self) -> Option<&Scan> {
         self.latest.as_ref()
@@ -555,10 +592,7 @@ impl<'a> Checker<'a> {
         record: &WalkRecord,
     ) -> Result<Result<Clear, Skip>, HostError> {
         let now = host.now();
-        let reusable = self
-            .latest
-            .as_ref()
-            .is_some_and(|s| now.saturating_since(s.started) < self.reuse_limit);
+        let reusable = self.reusable_at(now);
         if !reusable {
             self.rescan(host)?;
         }
@@ -595,10 +629,7 @@ impl<'a> Checker<'a> {
     /// goes through [`Checker::check`] and its [`Clear`]).
     pub fn current<H: Host>(&mut self, host: &H) -> Result<&Scan, HostError> {
         let now = host.now();
-        let reusable = self
-            .latest
-            .as_ref()
-            .is_some_and(|s| now.saturating_since(s.started) < self.reuse_limit);
+        let reusable = self.reusable_at(now);
         if !reusable {
             self.rescan(host)?;
         }
@@ -607,8 +638,27 @@ impl<'a> Checker<'a> {
 
     fn rescan<H: Host>(&mut self, host: &H) -> Result<(), HostError> {
         self.latest = None;
-        self.latest = Some(scan(host, &self.options)?);
+        let mut latest = scan(host, &self.options)?;
+        if let Some(why) = latest.unsettled.take() {
+            host.sleep(UNSETTLED_RETRY_PAUSE);
+            latest = scan(host, &self.options)?;
+            latest.retried_unsettled = Some(why);
+        }
+        self.latest = Some(latest);
         Ok(())
+    }
+
+    fn reusable_at(&self, now: MonoTime) -> bool {
+        self.latest.as_ref().is_some_and(|scan| {
+            let blocked = scan.blocks_all();
+            let limit = if blocked {
+                BLOCKED_REUSE_LIMIT.min(self.reuse_limit)
+            } else {
+                self.reuse_limit
+            };
+            let since = if blocked { scan.finished } else { scan.started };
+            now.saturating_since(since) < limit
+        })
     }
 }
 
@@ -707,9 +757,10 @@ impl Checker<'_> {
 /// The last step of every deletion of a checked candidate (docs/safety.md,
 /// Deletion; the Cargo protocol's parts): the in-use check of exactly
 /// `record` against a scan within the freshness rules ([`Checker::check`];
-/// a kept scan that blocks every candidate is dropped and made again
-/// first), the caller's own check on the same scan (`also`: the Cargo
-/// process heuristics; nothing for kind `fs`), then [`delete_cleared`]
+/// an unsettled scan is retried once, and a persistently blocking scan is
+/// kept for at most the checker's short reuse window), the caller's own
+/// check on the same scan (`also`: the Cargo process heuristics; nothing
+/// for kind `fs`), then [`delete_cleared`]
 /// right away. A clear that expired before the delete could start is
 /// checked once more against a new scan; twice is an error of the run.
 pub fn clear_and_delete<H: Delete>(
@@ -728,9 +779,6 @@ pub fn clear_and_delete<H: Delete>(
         ))
     };
     for attempt in 0..2 {
-        if checker.latest().is_some_and(|s| s.blocked().is_some()) {
-            checker.forget();
-        }
         let clear = checker
             .check(host, candidate, record)
             .map_err(NotDeleted::Failed)?

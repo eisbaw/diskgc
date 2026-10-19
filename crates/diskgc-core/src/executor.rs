@@ -206,16 +206,6 @@ pub struct Request {
     pub tier: Tier,
 }
 
-/// How long the dry run of an `fs` tier reuses one process scan for
-/// further candidates. A plan deletes nothing, so the deletion's freshness
-/// bound ([`crate::inuse::FRESHNESS`], to which `inuse::Checker` clamps
-/// any reuse) does not apply; with it, a scan per candidate dominated the
-/// plan's cost (task-68: 328 candidates spread over a 155,000-entry `/tmp`
-/// took ten minutes on a loaded laptop, a scan of 500 processes taking half
-/// a second unloaded). The plan's in-use verdicts are then up to this old,
-/// which a plan read later is anyway.
-pub const DRY_RUN_SCAN_REUSE: Duration = Duration::from_secs(60);
-
 /// `--tally-budget`'s default (docs/reference.md, `ensure`): the smaller of
 /// 30 s and a quarter of `--timeout` (30 s without a timeout).
 pub fn default_tally_budget(timeout: Option<Duration>) -> Duration {
@@ -468,7 +458,7 @@ pub fn dry_run<H: Host>(
     let tier = &request.tier;
     let owners = [uid];
     let rules = rules(tier, &owners, log);
-    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let mut checker = Checker::for_plan(&rules);
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
             host,
@@ -656,7 +646,6 @@ fn plan_fs<H: Host>(
         dev,
         rules,
         tier.idle_for,
-        DRY_RUN_SCAN_REUSE,
         deadline,
         log,
     );

@@ -30,9 +30,10 @@
 //!    change, none known: never idle), and the walked root must be the one
 //!    locked ([`locked_is_walked`]);
 //! 5. and 6. [`clear_and_delete`]: **in use?** against a process scan
-//!    within the freshness rules (docs/safety.md, In use: Freshness), never
-//!    one that blocks every candidate (dropped and made again), then
-//!    **deleted** right after, exactly the record the walk made and the
+//!    within the freshness rules (docs/safety.md, In use: Freshness);
+//!    an unsettled scan is retried once, and a persistently blocking one
+//!    only skips candidates briefly. A clear candidate is **deleted**
+//!    right after the check, exactly the record the walk made and the
 //!    check cleared: every directory reopened and matched, every entry
 //!    `statx`ed and matched right before its `unlinkat`, the deadline read
 //!    right before each change. A file created in the candidate after the
@@ -152,7 +153,10 @@ fn protocol<H: Delete>(
     let deletion =
         match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| Ok(())) {
             Ok(deletion) => deletion,
-            Err(NotDeleted::Skipped(skip)) => return Err(skip.into()),
+            Err(NotDeleted::Skipped(skip)) => {
+                check_deadline(host, deadline, path)?;
+                return Err(skip.into());
+            }
             Err(NotDeleted::Failed(error)) => return Err(failed(error)),
         };
     done.removed_entries = deletion.removed_entries;

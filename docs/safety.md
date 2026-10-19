@@ -320,8 +320,11 @@ never after the last one. Every read only adds: a use any read of a process
 found counts, also when a later read of it fails or finds it gone. A pid
 found gone and listed again was reused (or is a zombie not yet reaped): it
 is read again as a new process, once per scan. After 16
-listings that each brought new pids the scan is unsettled, and every
-candidate is `in_use`; listings made only for re-reads do not count (they
+listings that each brought new pids the scan is unsettled. The checker
+waits 20 ms and makes one complete new scan before judging a candidate.
+If that scan is unsettled too, the candidate is `in_use`; the blocked scan
+is reused for less than half a second from its completion before another retry. Listings made
+only for re-reads do not count (they
 are bounded by the re-reads each process gets) (a process it did not read could have inherited
 anything); a machine that keeps starting processes faster than the scan
 reads them costs reclaim that way. diskgc's own process is never counted:
@@ -540,7 +543,7 @@ the layer's inode in `maps`, a mapping alone does not match.
 **Freshness:** the `/proc` scan used for a candidate is never older than one
 second (monotonic clock including suspend time) when that candidate's
 deletion starts. A scan is as old as its first read. One scan serves the
-candidates checked within half a second of its start. The check that
+candidates checked strictly before 500 ms from its start. The check that
 clears a candidate looks at the clock as its last step before the
 deletion starts; if its scan is no longer fresh then (a suspend during the
 scan or right after it, a slow scan), the candidate is checked again
@@ -548,7 +551,7 @@ against a new scan, and if that one is not fresh either, it is an error of
 the run, not a skip. Refusing needs no freshness. Buckets
 ([architecture.md](architecture.md#the-index)) only group candidates for
 scheduling; each member gets its own check under this bound, which a scan
-less than half a second old may answer: a use that starts after that scan
+less than 500 ms old may answer: a use that starts after that scan
 is limit 5 above.
 
 **Visibility:** without root, other users' `/proc/<pid>/fd` cannot be read,
@@ -604,9 +607,9 @@ filesystem as it is then, whatever the tally or a plan said:
    passing it: `changed`); the eligibility walk (above), whose root must be
    the object found and the one locked (`changed`); the idle requirement
    on its newest change (none known: never idle). Then the in-use check
-   against a process scan within the freshness bound (In use: Freshness),
-   never one that blocked every candidate (unsettled, or an unreadable
-   process of the user): such a scan is dropped and made again. Any
+   against a process scan within the freshness bound (In use: Freshness).
+   An unsettled scan is retried once after 20 ms; a persistently blocked
+   scan can only skip candidates for half a second before it is replaced. Any
    failure: release, skip.
 5. Delete depth-first exactly the entries the walk recorded, right after
    the check, through the clear that check made for exactly that record
@@ -644,6 +647,9 @@ listing and `statx` of the eligibility walk and of the delete's reopening
 of directories, and right before each `unlinkat` and `fchmod` (step 5).
 Not before: the reads of the mount table, the open and `flock` of step 3 (the lock does
 not wait) and the in-use scan (bounded by its own rounds).
+An in-use scan can overrun the deadline, including its one retry after an
+unsettled scan. A dry run checks the deadline again before judging its
+candidate; a reclaim checks it in the delete engine before each mutation.
 
 **Scope** means *the objects the walk checked*. Every directory diskgc
 descends into is matched by (device, inode) against the walk's record, and

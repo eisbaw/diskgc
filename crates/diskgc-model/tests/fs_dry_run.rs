@@ -12,6 +12,7 @@ use std::time::Duration;
 use common::{dir, host};
 use diskgc_core::engine::{Candidate, Checkouts, DeleteOptions, End, Rules, delete, walk};
 use diskgc_core::executor::{self, Request, Tier};
+use diskgc_core::inuse::MAX_LISTINGS;
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::parse_size;
@@ -589,7 +590,7 @@ fn has_filters_in_a_term_are_refused_not_ignored() {
 }
 
 /// A dry run reuses one process scan for later candidates for up to
-/// `DRY_RUN_SCAN_REUSE` (it deletes nothing: the deletion's freshness
+/// the plan checker's one-minute limit (it deletes nothing: the deletion's freshness
 /// bound does not apply): with 5 s passing at each of three candidates'
 /// walks, one scan serves all three; past the reuse time a new one is made.
 #[test]
@@ -621,6 +622,38 @@ fn a_dry_run_reuses_a_process_scan_across_candidates() {
         "past the reuse time a new scan is made ({one} vs {more})"
     );
     assert_eq!(scans_with("1s"), one);
+}
+
+/// The first scan is unsettled and its bounded retry crosses the deadline.
+/// Even a settled retry cannot turn this candidate into a late plan entry.
+#[test]
+fn a_retry_that_crosses_the_deadline_leaves_the_candidate_unjudged() {
+    let forks: String = (1..=MAX_LISTINGS)
+        .map(|listing| {
+            format!(
+                "  - {{at: {{op: pids, nth: {listing}, when: after}}, fork: {{pid: 7, child: {}}}}}\n",
+                100 + listing
+            )
+        })
+        .collect();
+    let host = host(&yaml(&format!(
+        "  /tmp/pytest-of-a: {{.: {{mtime: 2026-10-01T00:00:00Z}}}}\nprocesses:\n{}events:\n{forks}  - {{at: {{op: pids, nth: {}, when: after}}, advance: 700s}}\n",
+        process(7, "/", ""),
+        MAX_LISTINGS + 1
+    )));
+    let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    assert_eq!(
+        reason_of(&report, "/tmp/pytest-of-a"),
+        None,
+        "the candidate is unjudged: {report:#?}"
+    );
+    assert!(
+        host.unfired_events().is_empty(),
+        "the retry crossed the deadline"
+    );
+    nothing_locked_or_deleted(&host);
 }
 
 /// A scan that blocks every candidate (here: an unreadable process of the

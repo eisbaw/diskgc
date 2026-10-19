@@ -436,6 +436,7 @@ pub fn eligibility<H: Host>(
         path: path.clone(),
         error,
     })?;
+    check_deadline(host, deadline, path)?;
     if let Err(skip) = judge_in_use(
         scan,
         &walked.walks,

@@ -613,7 +613,9 @@ impl State {
             dev: fs.dev,
             file_type: when(fs, StatxField::Type, inode.file_type()),
             perm: when(fs, StatxField::Mode, inode.perm),
-            nlink: when(fs, StatxField::Nlink, self.nlink(loc)),
+            // Link counting walks the inode graph. A modelled filesystem
+            // that cannot report nlink must not pay for a value it omits.
+            nlink: (!fs.missing.contains(&StatxField::Nlink)).then(|| self.nlink(loc)),
             uid: when(fs, StatxField::Uid, inode.uid),
             gid: when(fs, StatxField::Gid, inode.gid),
             ino: when(fs, StatxField::Ino, loc.ino),

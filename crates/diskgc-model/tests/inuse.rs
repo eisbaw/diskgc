@@ -864,6 +864,221 @@ fn a_process_list_that_keeps_growing_leaves_the_scan_unsettled() {
     assert_eq!(check_c(&host, true).0, Ok(()));
 }
 
+/// The first 16 growing listings do not condemn the candidate: after a
+/// short pause, a complete second scan sees a stable process list. The
+/// candidate may be cleared only on that settled scan.
+#[test]
+fn a_transiently_unsettled_scan_is_retried_before_judgement() {
+    let n = u32::try_from(MAX_LISTINGS).expect("small");
+    let forks: String = (1..=n)
+        .map(|k| {
+            format!(
+                "  - {{at: {{op: pids, nth: {k}, when: after}}, fork: {{pid: 10, child: {}}}}}\n",
+                100 + k
+            )
+        })
+        .collect();
+    let host = model(&format!(
+        "{}events:\n{forks}",
+        processes(&[process(10, &[])])
+    ));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("candidate");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    assert!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .is_ok()
+    );
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2,
+        "the first unsettled scan must be followed by one complete scan"
+    );
+    assert!(
+        checker
+            .latest()
+            .expect("scan")
+            .notes()
+            .iter()
+            .any(|n| n.contains("retried")),
+        "the retry is observable"
+    );
+}
+
+/// A fork storm that outlasts the one retry never clears a candidate. The
+/// blocking answer is shared only within 500 ms; after the storm ends the
+/// next scan can clear it.
+#[test]
+fn a_persistently_unsettled_scan_blocks_until_the_short_reuse_expires() {
+    let n = u32::try_from(MAX_LISTINGS).expect("small");
+    let forks: String = (1..=2 * n)
+        .map(|k| {
+            format!(
+                "  - {{at: {{op: pids, nth: {k}, when: after}}, fork: {{pid: 10, child: {}}}}}\n",
+                100 + k
+            )
+        })
+        .collect();
+    let host = model(&format!(
+        "{}events:\n{forks}",
+        processes(&[process(10, &[])])
+    ));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("candidate");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    assert_eq!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .expect_err("two unsettled scans must block")
+            .reason,
+        Reason::InUse
+    );
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2
+    );
+    assert!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .is_err()
+    );
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2,
+        "a blocked scan is shared briefly, never rescanned per candidate"
+    );
+    host.sleep(std::time::Duration::from_millis(500));
+    assert!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .is_ok()
+    );
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        3
+    );
+    assert!(host.unfired_events().is_empty());
+}
+
+/// An explicit zero reuse limit also applies when a scan blocks everyone.
+#[test]
+fn a_blocking_scan_respects_zero_reuse() {
+    let host = model(&processes(&[process(10, &["proc: denied", "gid: 1001"])]));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("candidate");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, std::time::Duration::ZERO);
+    for _ in 0..2 {
+        assert_eq!(
+            checker
+                .check(&host, &candidate, &record)
+                .expect("check")
+                .expect_err("unreadable process blocks")
+                .reason,
+            Reason::InUse
+        );
+    }
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2
+    );
+}
+
+/// A slow blocking scan is shared from completion, not already expired by
+/// the time its verdict is ready.
+#[test]
+fn a_slow_blocking_scan_is_reused_from_completion() {
+    let host = model(&format!(
+        "{}events:\n  - {{at: {{op: own_pid, nth: 1, when: after}}, advance: 600ms}}\n",
+        processes(&[process(10, &["proc: denied", "gid: 1001"])])
+    ));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("candidate");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    for _ in 0..2 {
+        assert!(
+            checker
+                .check(&host, &candidate, &record)
+                .expect("check")
+                .is_err()
+        );
+    }
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        1
+    );
+    host.sleep(std::time::Duration::from_millis(500));
+    assert!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .is_err()
+    );
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2
+    );
+}
+
+/// Model a 100 ms scan and 40,000 small-candidate checks taking another
+/// 400 ms. The process scan belongs to the reuse window, not to an
+/// individual candidate. A following check at exactly 500 ms must scan
+/// again. The integrated fs reclaim is separately
+/// exercised by the two-candidate freshness tests below.
+#[test]
+fn forty_thousand_candidate_checks_share_a_scan_within_freshness() {
+    let host = model("events:\n  - {at: {op: own_pid, nth: 1, when: after}, advance: 100ms}\n");
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("candidate");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    for _ in 0..40_000 {
+        assert!(
+            checker
+                .check(&host, &candidate, &record)
+                .expect("check")
+                .is_ok()
+        );
+        host.sleep(std::time::Duration::from_micros(10));
+    }
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        1,
+        "40,000 checks inside one reuse window use one scan"
+    );
+    host.sleep(std::time::Duration::from_millis(100));
+    assert!(
+        checker
+            .check(&host, &candidate, &record)
+            .expect("check")
+            .is_ok()
+    );
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        2,
+        "the exact reuse boundary forces a second scan"
+    );
+}
+
 // ---- flock ----
 
 /// A candidate directory `flock`ed by another process (shared or
@@ -1042,20 +1257,39 @@ fn a_scan_is_not_reused_across_a_suspend() {
     complete(reclaim_with(&host, &mut checker, "/tmp/d", true));
 }
 
-/// The reuse limit on its own: 700 ms after a scan (inside the freshness
-/// bound, beyond the reuse limit) the next candidate gets a new scan,
-/// which sees a file opened meanwhile.
+/// A clear scan is reusable only strictly before the one-second freshness
+/// boundary. At the boundary, the next candidate gets a new scan that
+/// sees a file opened meanwhile.
 #[test]
-fn a_scan_older_than_the_reuse_limit_is_not_reused() {
+fn a_scan_at_the_freshness_boundary_is_not_reused() {
     let host = model(&format!(
         "{}{}",
         processes(&[process(10, &[])]),
-        after_c_is_deleted(&["advance: 700ms", "open: {pid: 10, path: /tmp/d/x}"])
+        after_c_is_deleted(&["advance: 1s", "open: {pid: 10, path: /tmp/d/x}"])
     ));
     let mut checker = Checker::new(&rules(true), REUSE_LIMIT);
     complete(reclaim_with(&host, &mut checker, "/tmp/c", true));
     let skip = skip_of(reclaim_with(&host, &mut checker, "/tmp/d", true));
     assert_eq!(skip.reason, Reason::InUse, "{skip}");
+}
+
+/// A settled scan serves the next candidate at 400 ms. The checker and
+/// delete entry both check freshness before unlinking it.
+#[test]
+fn a_settled_scan_is_reused_inside_the_reuse_window() {
+    let host = model(&format!(
+        "{}{}",
+        processes(&[process(10, &[])]),
+        after_c_is_deleted(&["advance: 400ms"])
+    ));
+    let mut checker = Checker::new(&rules(true), REUSE_LIMIT);
+    complete(reclaim_with(&host, &mut checker, "/tmp/c", true));
+    complete(reclaim_with(&host, &mut checker, "/tmp/d", true));
+    assert_eq!(
+        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
+        1,
+        "both candidates use one process scan"
+    );
 }
 
 /// The call numbers of the last two clock reads before the first unlink of
