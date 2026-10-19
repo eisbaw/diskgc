@@ -22,6 +22,7 @@ use crate::cargo_under_test::{
 };
 use crate::ensure_suite;
 use crate::holder::Holder;
+use crate::journey_suite;
 use crate::oracle::{Fixture, Oracle};
 use crate::proc_locks::{self, Watched};
 use crate::suite::{Ctx, TestResult, Tier};
@@ -151,6 +152,10 @@ pub static CARGO_TESTS: &[CargoTest] = &[
     CargoTest {
         name: "ensure_dry_run_plans_real_targets_and_deletes_nothing",
         run: ensure_suite::ensure_dry_run_plans_real_targets_and_deletes_nothing,
+    },
+    CargoTest {
+        name: "journey_ci_operator_frees_space_with_ensure",
+        run: journey_suite::journey_ci_operator_frees_space_with_ensure,
     },
 ];
 

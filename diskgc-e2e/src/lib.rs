@@ -24,7 +24,9 @@
 //!   heuristics on real Cargo builds in [`cargo_target_suite`], and of
 //!   its reclaim protocol in [`cargo_reclaim_suite`]; those of the
 //!   `diskgc ensure` binary itself (thresholds, the host lock, exit codes,
-//!   `--json`, `--dry-run`, real Cargo reclaims) in [`ensure_suite`].
+//!   `--json`, `--dry-run`, real Cargo reclaims) in [`ensure_suite`];
+//!   the user journeys, the product driven through the files its users
+//!   write (the CI operator's pre-job hook), in [`journey_suite`].
 //! - **On the host** (`diskgc-e2e-runner`): [`runner`] makes sure the base
 //!   image is loaded (reused when its Nix hash is already present), lists the
 //!   tests from inside a container, runs one container per test, reports
@@ -52,6 +54,7 @@ pub mod host_suite;
 pub mod interlock;
 pub mod inuse_probe;
 pub mod inuse_suite;
+pub mod journey_suite;
 pub mod oracle;
 pub mod probe;
 pub mod proc_locks;

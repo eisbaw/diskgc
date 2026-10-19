@@ -4,6 +4,7 @@ title: Debian / static-binary e2e variant (non-Nix image)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
+updated_date: '2026-10-19 02:54'
 labels:
   - wave-1
   - testing
@@ -30,6 +31,12 @@ Constraints carried on task-46: the image must carry the sandbox marker in the i
 - [ ] #2 The harness opts out of the /nix/store bind mount and the toolchain manifest for that image (per-image opt-out)
 - [ ] #3 The CI-operator journey from task-12 runs on it
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-12 round 2: run the example pre-job hook (docs/ci-pre-job.sh, as the CI operator journey does) under dash, Debian/Ubuntu's /bin/sh, not only busybox sh; it uses mktemp, sed -E, grep -o and $(( )).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

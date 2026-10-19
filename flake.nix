@@ -79,12 +79,15 @@
         ];
       };
       # diskgc-e2e path-depends on workspace crates, which inherit fields from
-      # the root manifest, so its source is the workspace plus its directory.
+      # the root manifest, so its source is the workspace plus its directory,
+      # and the shipped example pre-job hook, which the CI operator's journey
+      # runs as written (diskgc-e2e/src/journey_suite.rs).
       e2eSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           workspaceFiles
           (craneLib.fileset.commonCargoSources ./diskgc-e2e)
+          ./docs/ci-pre-job.sh
         ];
       };
 

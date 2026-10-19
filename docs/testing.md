@@ -379,6 +379,24 @@ filesystem, processes and mounts from the developer's system.
 - **Nix GC** in a container with its own store and daemon.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
   process.**
+- **Journeys** (`journey_suite.rs`): the product driven through the files
+  its users write, judged like every container test. The CI operator's:
+  the example pre-job hook [ci-pre-job.sh](ci-pre-job.sh), run as written
+  by `sh` over five real Cargo projects (three idle, one with a build
+  paused in its build script, one whose test binary still runs) and a
+  deleted file a stale process holds; the goals come from the harness's
+  `statvfs` and its own count of each target's bytes, and every exit 0
+  or 1 is checked against that `statvfs` and `--min-free`
+  (`journey_ci_operator_frees_space_with_ensure`, once per toolchain in
+  its tier). It also runs the hook's default selection
+  (`filter:idle-1d`), which refuses every fixture target. Limit: no test
+  has the binary's idle filter *select* an old target: a target's last
+  build counts ctimes, which a fixture cannot set back, and the shortest
+  built-in filter is `idle-1h` (task-89). Refusal (`not_idle`) through the
+  binary is covered here and by
+  `ensure_exits_1_when_every_candidate_was_processed_below_min_free`;
+  selection by model tests and by the test driver's `--idle-for 1s`
+  (`cargo_target_suite.rs`).
 - **Not only Nix:** the same tests in a container from a common non-Nix
   distribution image (e.g. Debian) with the static binary, without Nix, and
   a variant without Docker.

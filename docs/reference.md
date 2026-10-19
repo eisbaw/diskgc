@@ -39,7 +39,10 @@ diskgc ensure --min-free 50G \
 ```
 
 The `--roots` value is where the profile looks; the final `PATH` is the
-directory whose filesystem must have the space.
+directory whose filesystem must have the space. A complete pre-job hook
+built on this call, branching on the exit code and keeping the `--json`
+report, is [ci-pre-job.sh](ci-pre-job.sh); the CI operator's journey test
+runs it as written.
 
 ### `ensure`
 

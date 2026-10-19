@@ -4,6 +4,7 @@ title: 'Packaging for 0.1: tmpfiles drop-in and example config'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
+updated_date: '2026-10-19 02:54'
 labels:
   - wave-2
   - deployment
@@ -28,6 +29,12 @@ Carried from task-44's note: the e2e base image bakes /run/diskgc (0755 root) an
 - [ ] #2 The example config passes diskgc check
 - [ ] #3 Both are installed by the release package
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-12 round 2: ship docs/ci-pre-job.sh as an example (e.g. share/doc/diskgc/examples/) or state that it is docs-only. The lock path and the two tmpfiles lines exist in three copies today (the hook, docs/safety.md Host lock, the flake's e2e image and harness comments); the shipped tmpfiles drop-in should become the single source the others are checked against.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -26,7 +26,7 @@ use crate::{ROOT, TESTER, ensure, info};
 
 /// Available bytes of the filesystem holding `path`, as an unprivileged
 /// writer may use them (`f_bavail × f_frsize`): the harness's own measure.
-fn avail(path: &Path) -> Result<u64, String> {
+pub(crate) fn avail(path: &Path) -> Result<u64, String> {
     let s = rustix::fs::statvfs(path).map_err(|e| format!("statvfs {path:?}: {e}"))?;
     Ok(s.f_bavail * s.f_frsize)
 }
@@ -34,7 +34,7 @@ fn avail(path: &Path) -> Result<u64, String> {
 /// The allocated bytes of every object below the target's profile
 /// directories' entries, each inode once (Cargo hard-links binaries from
 /// `deps/`): what reclaiming the target frees on tmpfs.
-fn freed_by(target: &Path) -> Result<u64, String> {
+pub(crate) fn freed_by(target: &Path) -> Result<u64, String> {
     let mut seen = BTreeSet::new();
     let mut bytes = 0;
     for profile in profile_dirs(target)? {
@@ -52,7 +52,7 @@ fn freed_by(target: &Path) -> Result<u64, String> {
 }
 
 /// `diskgc ensure ARGS` as tester under strace.
-fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
+pub(crate) fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
     let mut full = vec!["ensure"];
     full.extend_from_slice(args);
     let run = ctx.run_as_tester(&ctx.diskgc(), &full)?;
@@ -67,14 +67,14 @@ fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
 }
 
 /// The one JSON object a `--json` run printed.
-fn report(run: &Run) -> Result<Value, String> {
+pub(crate) fn report(run: &Run) -> Result<Value, String> {
     let lines: Vec<&str> = run.stdout.lines().collect();
     ensure!(lines.len() == 1, "--json prints one line: {:?}", run.stdout);
     serde_json::from_str(lines[0]).map_err(|e| format!("{e}: {:?}", lines[0]))
 }
 
 /// `field` of every entry of the report's list `list`.
-fn column<'a>(report: &'a Value, list: &str, field: &str) -> Vec<&'a Value> {
+pub(crate) fn column<'a>(report: &'a Value, list: &str, field: &str) -> Vec<&'a Value> {
     report[list]
         .as_array()
         .map(|entries| entries.iter().map(|e| &e[field]).collect())
@@ -83,7 +83,7 @@ fn column<'a>(report: &'a Value, list: &str, field: &str) -> Vec<&'a Value> {
 
 /// Removes the provisioned host lock (`/run/diskgc/lock`), as on a host
 /// without the tmpfiles drop-in.
-fn unprovision(ctx: &Ctx) -> TestResult {
+pub(crate) fn unprovision(ctx: &Ctx) -> TestResult {
     ctx.run_diskgc.remove_file("lock")?;
     ensure!(!Path::new(HOST_LOCK).exists(), "{HOST_LOCK} still there");
     Ok(())
