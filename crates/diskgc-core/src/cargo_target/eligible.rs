@@ -10,7 +10,7 @@ use super::{
 };
 use crate::engine::{
     self, CARGO_LOCK_NAMES, Candidate, Checkouts, Identity, Reason, Rules, Skip, WalkRecord,
-    WalkStop, checkout_metadata_below,
+    WalkStop, checkout_metadata_down_to,
 };
 use crate::host::{FileType, Host, MonoTime, Timestamp};
 use crate::inuse::{Checker, Scan};
@@ -141,16 +141,17 @@ pub fn judge_layout(path: &Path, inspected: &Inspected) -> Result<(), Skip> {
 /// entries are walked: the same profile directories and lock files as
 /// when found (one created, removed or replaced since is `changed`), no
 /// keep marker in the target or a directory directly in it (`kept`),
-/// ownership of what the kind relies on ([`judge_owners`]), a layout
-/// diskgc knows how to reclaim ([`judge_layout`]), and the checkout path
-/// rule as `rules` say ([`judge_checkout_paths`]).
+/// ownership of what the kind relies on ([`judge_owners`]) and a layout
+/// diskgc knows how to reclaim ([`judge_layout`]). The checkout path rule
+/// ([`judge_checkout_paths`]) is not repeated here: it is judged on the
+/// target as found, and the same profile directories (`same_locks`) have
+/// the same paths, so it could not answer differently.
 pub(super) fn judge_inspected(
     target: &Target,
     inspected: &Inspected,
     rules: &Rules<'_>,
 ) -> Result<(), Skip> {
     let path = &target.path;
-    judge_checkout_paths(target, inspected, rules.checkouts)?;
     if !inspected.same_locks(&target.inspected) {
         return Err(Skip::new(
             Reason::Changed,
@@ -170,26 +171,23 @@ pub(super) fn judge_inspected(
 }
 
 /// The checkout path rule for the Cargo kind (docs/safety.md, No source
-/// checkout): what the kind deletes is the entries of profile
-/// directories, so each entry is the candidate the rule judges, by the
-/// names strictly between the root and it: the directories above the
-/// target, the target's own name, a target triple's and the profile
-/// directory's ([`checkout_metadata_below`], under `checkouts: refuse`).
-/// The entry's own name and everything in it are the walk's. Path text
-/// only, no system call.
-pub(super) fn judge_checkout_paths(
-    target: &Target,
-    inspected: &Inspected,
-    checkouts: Checkouts,
-) -> Result<(), Skip> {
-    for profile in &inspected.profiles {
+/// checkout) on `target` as found: what the kind deletes is the entries
+/// of profile directories, so the rule judges the names from the root
+/// down to each profile directory, its own name included: the directories
+/// above the target, the target's own name, a target triple's and the
+/// profile directory's ([`checkout_metadata_down_to`], under `checkouts:
+/// refuse`). The verdict depends on those paths only, not on what the
+/// profile directories hold; an entry's own name and everything in it are
+/// the walk's. Fail closed whatever the setting: a target not below its
+/// root is `unsafe_path`. Path text only, no system call. Judged once per
+/// check, before anything is opened or locked: a recheck under the locks
+/// finds the same profile directories (`same_locks`) and so the same
+/// paths.
+pub(super) fn judge_checkout_paths(target: &Target, checkouts: Checkouts) -> Result<(), Skip> {
+    for profile in &target.inspected.profiles {
         let dir = target.path.join(&profile.rel);
-        for entry in &profile.entries {
-            if let Some(refused) =
-                checkout_metadata_below(checkouts, &target.root, &dir.join(&entry.name))
-            {
-                return Err(refused);
-            }
+        if let Some(refused) = checkout_metadata_down_to(checkouts, &target.root, &dir) {
+            return Err(refused);
         }
     }
     Ok(())
@@ -506,8 +504,8 @@ fn walk_target<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Walked<H::Fd>> {
     let path = &target.path;
-    // As found, before anything is opened; again on the new inspection.
-    if let Err(skip) = judge_checkout_paths(target, &target.inspected, rules.checkouts) {
+    // As found, before anything is opened.
+    if let Err(skip) = judge_checkout_paths(target, rules.checkouts) {
         return Ok(Err(skip));
     }
     let reached = judged!(reach(host, target, deadline));

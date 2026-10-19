@@ -93,10 +93,12 @@ Immediately before acting, diskgc walks the candidate's whole tree
   plus the path rule below. The cost is a name compare per entry the walk
   already reads; no extra system call. For the Cargo kind, "the
   candidate" is each entry of a target's profile directories (what it
-  deletes, below): the path rule runs from the root down to each entry,
-  so the target's own name, a target triple's and the profile
-  directory's count too (`.git/debug`, `target/.git`,
-  `target/.git/debug`).
+  deletes, below): the path rule runs from the root down to each profile
+  directory, its own name included, so the target's own name, a target
+  triple's and the profile directory's count too (`.git/debug`,
+  `target/.git`, `target/.git/debug`), whatever the profile directory
+  holds (an empty one there refuses its target too); each entry's own
+  name and what it holds are the walk's.
   - **Inside a checkout's metadata, by path** (Mark, 2026-10-18): a
     candidate whose path has a name `.git`, `.hg` or `.svn` between its
     profile root and itself is `contains_checkout` too: a broad pattern
@@ -774,7 +776,8 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   lock files is walked as a candidate of its own (Filesystem candidates:
   ownership, keep markers, mounts, sockets and FIFOs, Cargo lock names and
   nested targets, VCS checkouts as the profile's `checkouts` says, by
-  name and by the path from the root down to each entry); the first
+  name, and by the path from the root down to each profile directory,
+  judged once on the target as found); the first
   refusal is the target's. The entry budget is
   one for the whole target: all its entries together, not each entry, may
   hold at most `DEFAULT_MAX_ENTRIES` (`too_many_entries`), so one target
@@ -857,12 +860,14 @@ The step that deletes (`cargo_target::reclaim` in the core).
 1. **Lock.** Reach the target again from its root, as found (Discovery);
    refuse before locking a target whose layout or lock set is not one
    diskgc reclaims (`unsupported_layout`, `empty`: an unknown lock name
-   would not be taken), and, when the profile refuses checkouts, a target
-   with an entry inside a checkout's metadata by its path, the target's,
-   a triple's and the profile directory's names included
-   (`contains_checkout`, No source checkout); the recheck under the
-   locks repeats it. Then take every lock file of every profile
-   directory, exclusively, without waiting. Holding every lock is what
+   would not be taken), and, first, when the profile refuses checkouts, a
+   target with a profile directory inside a checkout's metadata by its
+   path, from the root down to each profile directory, the target's, a
+   triple's and the profile directory's own names included
+   (`contains_checkout`, No source checkout). The recheck under the locks
+   need not repeat it: it finds the same profile directories (`changed`
+   otherwise), so the same paths. Then take every lock file of every
+   profile directory, exclusively, without waiting. Holding every lock is what
    makes the deletion safe, not the order they are taken in: diskgc only
    ever tries a lock (`flock` with `LOCK_NB`) and never waits for one, so
    it can never be part of a deadlock. The order is Cargo's own

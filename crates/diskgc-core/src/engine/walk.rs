@@ -104,6 +104,31 @@ impl Checkouts {
 /// `unsafe_path`. `None` when it is below `root` and, under
 /// [`Checkouts::Allow`] or with no marker on the way, nothing refuses it.
 pub fn checkout_metadata_below(checkouts: Checkouts, root: &Path, at: &Path) -> Option<Skip> {
+    checkout_metadata(checkouts, root, at, Own::Excluded)
+}
+
+/// The same path rule for every candidate in the directory `dir`, without
+/// naming one: the names from below `root` down to `dir`, `dir`'s own name
+/// included (what [`checkout_metadata_below`] judges for any entry of
+/// `dir`). For a kind that keeps a directory and deletes what it holds
+/// (the Cargo kind's profile directories), so that the verdict does not
+/// depend on what the directory holds at the time. Fail closed as
+/// [`checkout_metadata_below`]: a `dir` not below `root` is `unsafe_path`
+/// whatever the setting; `root` itself has no names to judge.
+pub fn checkout_metadata_down_to(checkouts: Checkouts, root: &Path, dir: &Path) -> Option<Skip> {
+    checkout_metadata(checkouts, root, dir, Own::Included)
+}
+
+/// Whether the path rule looks at the last name of the path it judges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Own {
+    /// A candidate's own name is the walk's.
+    Excluded,
+    /// A directory whose entries are the candidates.
+    Included,
+}
+
+fn checkout_metadata(checkouts: Checkouts, root: &Path, at: &Path, own: Own) -> Option<Skip> {
     let Ok(below) = at.strip_prefix(root) else {
         return Some(Skip::new(
             Reason::UnsafePath,
@@ -118,7 +143,9 @@ pub fn checkout_metadata_below(checkouts: Checkouts, root: &Path, at: &Path) -> 
         return None;
     }
     let mut names = below.components();
-    names.next_back()?;
+    if own == Own::Excluded {
+        names.next_back()?;
+    }
     let mut path = root.to_path_buf();
     for name in names {
         path.push(name);

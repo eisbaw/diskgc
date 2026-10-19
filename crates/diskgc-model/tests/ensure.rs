@@ -1273,3 +1273,86 @@ fn a_cargo_target_with_a_marker_between_root_and_its_entries_is_refused() {
         }
     }
 }
+
+/// A profile directory holding nothing but its lock file, every time `at`.
+fn empty_profile(at: &str) -> String {
+    format!("{{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}}}")
+}
+
+/// task-81: targets whose profile directories inside a checkout's
+/// metadata hold no entries, each discovered below `/home/mark/src/x`:
+/// one found inside `.git` with only an empty profile directory, and, for
+/// each marker `<M>`, one whose empty profile directory is `target/<M>`
+/// or `target/<M>/debug` next to a full `debug`. With the target's
+/// expected reason under the built-in `checkouts: allow` (`None`:
+/// eligible).
+fn empty_checkout_layouts() -> Vec<(String, String, Option<&'static str>)> {
+    let at = "2026-10-02T00:00:00Z";
+    let (full, empty) = (profile("1G", at), empty_profile(at));
+    let tag = "CACHEDIR.TAG: {cachedir_tag: true}";
+    let mut layouts = vec![(
+        "/home/mark/src/x/.git/target".to_owned(),
+        format!("  /home/mark/src/x/.git/target:\n    {tag}\n    debug: {empty}\n"),
+        Some("empty"),
+    )];
+    for marker in [".git", ".hg", ".svn"] {
+        for inner in [empty.clone(), format!("{{debug: {empty}}}")] {
+            layouts.push((
+                "/home/mark/src/x/target".to_owned(),
+                format!(
+                    "  /home/mark/src/x/target:\n    {tag}\n    debug: {full}\n    {marker}: \
+                     {inner}\n"
+                ),
+                None,
+            ));
+        }
+    }
+    layouts
+}
+
+/// mped, task-80 r3: the Cargo kind's checkout path rule judges each
+/// profile directory by its path, from the root down to it, its own name
+/// included, whatever it holds: a profile directory with no entries
+/// inside a checkout's metadata refuses its target under a profile that
+/// refuses checkouts, in a dry run and in a reclaim, whether the tally
+/// refuses it or, untallied, the protocol does, before any lock: no lock
+/// file below it is `flock`ed and nothing is unlinked. Under the built-in
+/// (`checkouts: allow`) the rule refuses nothing (`empty` is the layout's
+/// verdict).
+#[test]
+fn a_cargo_target_with_an_empty_profile_directory_in_checkout_metadata_is_refused() {
+    for (target, tree, allowed) in empty_checkout_layouts() {
+        let fixture = yaml(true, &tree);
+        let host = common::host(&fixture);
+        let report = dry_run(&host, &my_targets("1G"));
+        assert_eq!(
+            plan_reason(&report, &target),
+            Some(Some("contains_checkout")),
+            "{tree}: {report:#?}"
+        );
+        let host = common::host(&fixture);
+        let report = dry_run(&host, &cargo("1G", None));
+        assert_eq!(
+            plan_reason(&report, &target),
+            Some(allowed),
+            "{tree}: {report:#?}"
+        );
+        for budget in [Some(Duration::ZERO), None] {
+            let host = common::host(&fixture);
+            // A goal nothing meets: every target is judged.
+            let mut req = my_targets("100G");
+            req.tally_budget = budget;
+            let report = ensure(&host, &req);
+            assert_eq!(
+                skip_reason(&report, &target),
+                Some("contains_checkout"),
+                "{budget:?} {tree}: {report:#?}"
+            );
+            assert_eq!(unlinked_below(&host, &target), 0, "{budget:?} {tree}");
+            assert!(
+                calls(&host, Op::Flock).iter().all(|c| !touches(c, &target)),
+                "{budget:?} {tree}: locked before it was refused"
+            );
+        }
+    }
+}

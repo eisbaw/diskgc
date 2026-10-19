@@ -56,7 +56,8 @@ pub use delete::{DeleteOptions, Deletion, End, delete};
 pub(crate) use walk::host_failure;
 pub use walk::{
     CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, Rules, WalkStop,
-    checkout_metadata_below, is_cargo_lock_name, is_checkout_marker, walk,
+    checkout_metadata_below, checkout_metadata_down_to, is_cargo_lock_name, is_checkout_marker,
+    walk,
 };
 
 /// Frames below the candidate that hold an fd at the same time (see the
@@ -652,6 +653,52 @@ mod tests {
                     judged(checkouts, root, at),
                     Some((Reason::UnsafePath, at.to_owned())),
                     "{checkouts:?} {root} {at}"
+                );
+            }
+        }
+    }
+
+    /// The rule for a directory's candidates (`checkout_metadata_down_to`)
+    /// looks at the directory's own name too, so it judges for any entry
+    /// of the directory what `checkout_metadata_below` judges for that
+    /// entry, whatever the directory holds; the same fail-closed
+    /// `unsafe_path` whatever the setting.
+    #[test]
+    fn checkout_metadata_down_to_a_directory_includes_its_own_name() {
+        let judged = |checkouts, root: &str, dir: &str| {
+            checkout_metadata_down_to(checkouts, Path::new(root), Path::new(dir))
+                .map(|skip| (skip.reason, skip.path.display().to_string()))
+        };
+        let refused = |path: &str| Some((Reason::ContainsCheckout, path.to_owned()));
+        for (root, dir, expected) in [
+            ("/r", "/r/x/.git", refused("/r/x/.git")),
+            ("/r", "/r/x/target/.hg/debug", refused("/r/x/target/.hg")),
+            ("/r", "/r/.svn", refused("/r/.svn")),
+            ("/r", "/r/x/target/debug", None),
+            ("/r", "/r/x/.github", None),
+            ("/r", "/r", None),
+            ("/r/.git", "/r/.git/target/debug", None),
+        ] {
+            assert_eq!(
+                judged(Checkouts::Refuse, root, dir),
+                expected,
+                "{root} {dir}"
+            );
+            let entry = format!("{dir}/entry");
+            assert_eq!(
+                checkout_metadata_below(Checkouts::Refuse, Path::new(root), Path::new(&entry))
+                    .map(|skip| (skip.reason, skip.path.display().to_string())),
+                expected,
+                "{root} {entry}: the same verdict as for an entry of {dir}"
+            );
+        }
+        assert_eq!(judged(Checkouts::Allow, "/r", "/r/x/.git"), None);
+        for checkouts in [Checkouts::Refuse, Checkouts::Allow] {
+            for dir in ["/other/.git", "/rx/.git", "/rx/y"] {
+                assert_eq!(
+                    judged(checkouts, "/r", dir),
+                    Some((Reason::UnsafePath, dir.to_owned())),
+                    "{checkouts:?} {dir}"
                 );
             }
         }

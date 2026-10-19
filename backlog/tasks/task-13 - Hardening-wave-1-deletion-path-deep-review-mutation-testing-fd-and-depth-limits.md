@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 19:02'
+updated_date: '2026-10-19 08:38'
 labels:
   - wave-1
   - hardening
@@ -57,6 +57,8 @@ From task-11 round 2 (deep gate, 2026-10-18): H15 (mped S7) a test whose case ca
 From task-11 r2 review (mped NITs, commit 75c89c1): H18 the clean test declares the whole target a concurrent writer, so the oracle cannot judge diskgc's unlinks before the pause; assert unlinked(&run)[..k-1] fall in parts before the one in progress (part_of). H19 test-code duplication: inline // edit writes in the split and shared tests duplicate edit_main; the manifest needle string is duplicated between race 8 and late_run; M2 builds --pause-at=... strings only to split them again; the clean -p walk check is a weaker copy of race 2's (factor race 2's check out and reuse it). H20 oldest_stable ranks an unparseable version last via unwrap_or(u64::MAX); it should fail. H21 optional: whole build, then split-mode build, then reclaim, then split-mode build/run/test (Cargo re-linking fresh units into the target is unpinned).
 
 From task-71 review round 1 (2026-10-18), on the task-11 follow-up: (mped) race test 8 still passes with only a WARNING when no late round is ever exercised on a toolchain (every round wrote into the profile and was changed, or the driver paused past REUSE_LIMIT): the scan-under-the-locks claim can go unexercised on a toolchain without failing. Decide whether that should fail, or count rounds across runs. (QA F4) race 2's clean case: 'ran to its end without waiting' rests on a single /proc/locks sample; a short wait between samples could be missed.
+
+From the task-63 follow-up review (commit 19fc56e): H22 race 7's has_build_lock branches and the blocked-build lock check in cargo_suite.rs accept a missing .cargo-build-lock from ANY toolchain; tie the absence to the measured release (1.90.0), as IGNORES_BUILD_DIR does for the build dir, so a regression cannot pass vacuously. H23 the NIX_ONLY_TESTS lookup (split('@') + list search) is written in both suite.rs::run and Image::runs; one Image::excluded() returning the reason would remove the copy. H24 testing.md suggests 'nix store gc' without saying it is machine-wide; justfile gcroots-drop/e2e-one comments read backwards; the justfile header's 'only call Nix, Cargo and Podman' now has rm. H25 .gcroots does not keep the flake checks' vendored crates, so after a GC the first gate re-fetches them (documented scope is image inputs + dev shell).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
