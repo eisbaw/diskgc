@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::cargo_under_test::{Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain};
+use crate::cargo_under_test::{self, Cargo, Gate, RACE, REACH_TIMEOUT, SMOKE, Toolchain};
 use crate::controlled::ControlLine;
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
@@ -275,7 +275,7 @@ pub fn cargo_split_build_dir_halves_are_unsupported_layout(
         &p,
         &[("CARGO_BUILD_BUILD_DIR", path_str(&build_dir)?)],
     )?;
-    let splits = toolchain.name != "1.90.0";
+    let splits = toolchain.release() != cargo_under_test::IGNORES_BUILD_DIR;
     ensure!(
         build_dir.exists() == splits,
         "toolchain {}: build directory {} exists: {}, expected {splits} (measured, \
@@ -500,7 +500,7 @@ fn newest_change_below(dir: &Path) -> Result<SystemTime, String> {
 
 /// Codex 2: a target below a directory whose name is not UTF-8, with a
 /// process running an executable from a part of the target the walks do
-/// not read (`target/tmp/sleep`, a copy of busybox, working in `/` with
+/// not read (`target/tmp/sleep`, a copy of the image's `sleep`, working in `/` with
 /// only `PATH` in its environment): only the executable's path text shows
 /// the use, and it must be compared byte for byte, so the target is
 /// `in_use`. It is eligible before and after (the control). The helper is
@@ -522,7 +522,8 @@ pub fn cargo_running_executable_below_a_non_utf8_name_keeps_its_target_in_use(
     let tmp = target.join("tmp");
     std::fs::create_dir(&tmp).map_err(|e| format!("mkdir {tmp:?}: {e}"))?;
     let helper = tmp.join("sleep");
-    std::fs::copy(BUSYBOX, &helper).map_err(|e| format!("copy busybox: {e}"))?;
+    let sleep = std::fs::canonicalize(SLEEP).map_err(|e| format!("{SLEEP}: {e}"))?;
+    std::fs::copy(&sleep, &helper).map_err(|e| format!("copy {}: {e}", sleep.display()))?;
     for path in [&tmp, &helper] {
         rustix::fs::chown(
             path.as_path(),
@@ -576,9 +577,9 @@ pub fn cargo_running_executable_below_a_non_utf8_name_keeps_its_target_in_use(
     Ok(())
 }
 
-/// The image's busybox (its applets are links to it; a copy named `sleep`
-/// is `sleep`).
-const BUSYBOX: &str = "/bin/busybox";
+/// The image's `sleep`, followed to its file: busybox in the Nix image (a
+/// copy named `sleep` is `sleep`), coreutils' in the Debian one.
+const SLEEP: &str = "/bin/sleep";
 
 /// mped S2: a detached target (`cargo build --target-dir out/target`, so
 /// its parent holds no `Cargo.toml`) is `in_use` while a Cargo runs in the

@@ -32,13 +32,14 @@
 # half-way through, out of disk. The hook's own failures: 2 for a
 # misconfigured hook or an unprovisioned runner (the class diskgc uses for
 # usage and provisioning errors), 4 when diskgc exited 0 but left no
-# report (a code diskgc never uses).
+# report (a code diskgc never uses: docs/reference.md, Exit codes).
 #
 # The exit code is authoritative. The one-line summary printed at the end
 # is informational: a few top-level fields of the report, read without jq.
-# For exact counts of reclaimed and kept targets, read the report with jq
-# (e.g. `jq '[.actions[].count] | add'`). diskgc's progress lines (one per
-# reclaimed or skipped target) go to stderr, i.e. to the job log.
+# For exact counts, read the report with jq, e.g. `jq '[.actions[].count]
+# | add // 0'` (`actions` also holds targets deleted part-way, which are in
+# `skipped` or `errors` too). diskgc's progress lines (one per reclaimed or
+# skipped target) go to stderr, i.e. to the job log.
 
 set -u
 
@@ -98,7 +99,8 @@ if [ ! -f "$report" ] || [ ! -s "$report" ]; then
         echo "pre-job: diskgc could not be started (exit $code): is it installed and on PATH?" >&2
         exit "$code"
     fi
-    echo "pre-job: diskgc ensure exited $code without writing its report to $report (it could not write it, or it was interrupted)" >&2
+    echo "pre-job: diskgc ensure exited $code without writing its report" \
+        "to $report (it could not write it, or it was interrupted)" >&2
     [ "$code" -ne 0 ] || code=4
     exit "$code"
 fi

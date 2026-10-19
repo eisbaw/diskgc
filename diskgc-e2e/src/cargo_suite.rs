@@ -196,8 +196,10 @@ fn cargo_smoke(_ctx: &Ctx, toolchain: &Toolchain) -> TestResult {
 }
 
 /// Bite proof of the toolchain failure category: the smoke check reports a
-/// toolchain whose `cargo` is missing, and one without its C toolchain (no
-/// linker), as broken at the step that failed; the real toolchain passes.
+/// toolchain whose `cargo` is missing, and one whose C toolchain's linker
+/// fails (a `cc` that exits 1, first on `PATH`: a missing one would not do
+/// on an image whose system `cc` is on `/bin`, as Debian's is), as broken at
+/// the step that failed; the real toolchain passes.
 /// (That the suite then reports `TOOLCHAIN` instead of `FAIL` is
 /// `suite::tests::a_broken_toolchain_is_reported_as_such`.)
 pub fn cargo_smoke_reports_a_broken_toolchain_as_a_toolchain_failure(ctx: &Ctx) -> TestResult {
@@ -206,13 +208,24 @@ pub fn cargo_smoke_reports_a_broken_toolchain_as_a_toolchain_failure(ctx: &Ctx) 
         bin_dir: PathBuf::from("/opt/cargo-under-test/no-such-toolchain/bin"),
         ..real.clone()
     };
+    ctx.scratch.mkdirs("broken-cc/bin", 0o755, TESTER)?;
+    ctx.scratch.write_file(
+        "broken-cc/bin/cc",
+        b"#!/bin/sh\necho 'broken cc for the smoke check bite' >&2\nexit 1\n",
+        0o755,
+        TESTER,
+    )?;
     let no_linker = Toolchain {
-        cc_bin_dir: PathBuf::from("/opt/cargo-under-test/no-such-cc/bin"),
+        cc_bin_dir: ctx.scratch.path("broken-cc/bin"),
         ..real.clone()
     };
     for (broken, step, needle) in [
         (&no_cargo, "cargo --version", "exited with"),
-        (&no_linker, "cargo build", "cc"),
+        (
+            &no_linker,
+            "cargo build",
+            "broken cc for the smoke check bite",
+        ),
     ] {
         match cargo_under_test::smoke(ctx, broken) {
             Ok(_) => {

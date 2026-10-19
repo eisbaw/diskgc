@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-19 02:54'
+updated_date: '2026-10-19 04:49'
 labels:
   - wave-2
   - release
@@ -51,6 +51,12 @@ The v1 release (task-49) builds on this one.
 - [ ] #3 Release notes list the limits and the deferred scope
 - [ ] #4 A dry-run on a real machine is reviewed before the first real run
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From task-63's review: the e2e images run the development build with the pre-release sandbox gate. Before 0.1 ships, run the Debian image's set (just e2e-debian) against the actual release artifact (the gate lifted), not the development build, e.g. a runner variant whose under-test directory holds the release binary.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

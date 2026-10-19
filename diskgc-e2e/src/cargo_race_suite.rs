@@ -125,10 +125,12 @@ pub fn cargo_race_2_split_build_dir_on_a_target_first_built_whole(
         .expect_success()?;
     if !build_dir.exists() {
         ensure!(
-            *toolchain == Toolchain::oldest()?,
-            "toolchain {} made no build directory at {}",
+            toolchain.release() == cargo_under_test::IGNORES_BUILD_DIR,
+            "toolchain {} made no build directory at {} (measured: only {} ignores \
+             CARGO_BUILD_BUILD_DIR, docs/safety.md Lock files)",
             toolchain.name,
-            build_dir.display()
+            build_dir.display(),
+            cargo_under_test::IGNORES_BUILD_DIR
         );
         info!(
             "toolchain {} ignores CARGO_BUILD_BUILD_DIR: a split build on a whole target is not \
@@ -1488,14 +1490,13 @@ pub fn cargo_race_split_build_dir_is_never_reclaimed(
     cargo(&["build"]).output(ctx)?.expect_success()?;
     cargo(&["test", "--no-run"]).output(ctx)?.expect_success()?;
     if !build_dir.exists() {
-        let oldest = Toolchain::oldest()?;
         ensure!(
-            *toolchain == oldest,
+            toolchain.release() == cargo_under_test::IGNORES_BUILD_DIR,
             "toolchain {} made no build directory at {} (measured: only {} ignores \
              CARGO_BUILD_BUILD_DIR, docs/safety.md Lock files)",
             toolchain.name,
             build_dir.display(),
-            oldest.name
+            cargo_under_test::IGNORES_BUILD_DIR
         );
         info!(
             "toolchain {} ignores CARGO_BUILD_BUILD_DIR: the split build directory case is not \

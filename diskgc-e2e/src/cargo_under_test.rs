@@ -42,6 +42,12 @@ use crate::suite::{Ctx, Tier};
 use crate::under_test::TESTER_ENV;
 use crate::{TESTER, info};
 
+/// The one release measured to ignore `CARGO_BUILD_BUILD_DIR` (it builds
+/// whole targets; docs/safety.md, Lock files). A test that finds no build
+/// directory accepts it only from this release, never from "the oldest
+/// toolchain in the image", which on an image with one Cargo is any.
+pub const IGNORES_BUILD_DIR: &str = "1.90.0";
+
 /// Where the image puts the toolchains under test.
 pub const CARGO_UNDER_TEST_DIR: &str = "/opt/cargo-under-test";
 

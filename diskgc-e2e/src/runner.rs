@@ -154,7 +154,7 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
     ensure_base_image(config)?;
     std::fs::create_dir_all(&config.log_dir)
         .map_err(|e| format!("create {}: {e}", config.log_dir.display()))?;
-    let listed = list_tests(config)?;
+    let (listed, image) = list_tests(config)?;
 
     match selection {
         Selection::Suite { full, budget, jobs } => {
@@ -172,7 +172,7 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
             );
             let deadline = started + *budget;
             let results = run_parallel(config, selected, *jobs, deadline);
-            Ok(report(&results, started.elapsed(), Some(*budget)))
+            Ok(report(&image, &results, started.elapsed(), Some(*budget)))
         }
         Selection::One { name } => {
             let Some(test) = listed.into_iter().find(|t| &t.name == name) else {
@@ -183,7 +183,7 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
             // A day: e2e-one is interactive; the deadline only guards hangs.
             let deadline = started + Duration::from_secs(24 * 3600);
             let result = run_container(config, &test, deadline, true);
-            Ok(report(&[result], started.elapsed(), None))
+            Ok(report(&image, &[result], started.elapsed(), None))
         }
     }
 }
@@ -370,10 +370,22 @@ pub struct Listed {
     pub tier: Tier,
 }
 
-/// Parses the `name<TAB>tier` lines of `diskgc-e2e list`.
+/// The prefix of the listing's line naming the image (its descriptor's
+/// `name`, `crate::image`).
+pub const IMAGE_LINE: &str = "# image ";
+
+/// The image `diskgc-e2e list` names, if it names one.
+pub fn listed_image(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.strip_prefix(IMAGE_LINE))
+        .map(|name| name.trim().to_owned())
+}
+
+/// Parses the `name<TAB>tier` lines of `diskgc-e2e list` (`#` lines, such
+/// as the image's name, are not tests).
 pub fn parse_listing(text: &str) -> Result<Vec<Listed>, String> {
     text.lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .map(|line| {
             let (name, tier) = line
                 .split_once('\t')
@@ -388,7 +400,8 @@ pub fn parse_listing(text: &str) -> Result<Vec<Listed>, String> {
         .collect()
 }
 
-fn list_tests(config: &Config) -> Result<Vec<Listed>, String> {
+/// The tests the image lists, and the image's name.
+fn list_tests(config: &Config) -> Result<(Vec<Listed>, String), String> {
     let name = format!("diskgc-e2e-{}-list", std::process::id());
     let out = Command::new("podman")
         .args(podman_run_args(config, &name, false))
@@ -403,11 +416,18 @@ fn list_tests(config: &Config) -> Result<Vec<Listed>, String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let listed = parse_listing(&String::from_utf8_lossy(&out.stdout))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let listed = parse_listing(&text)?;
     if listed.is_empty() {
         return Err("the container listed no tests".to_owned());
     }
-    Ok(listed)
+    let image = listed_image(&text).ok_or("the listing names no image")?;
+    info!(
+        "image {image} ({}) lists {} tests",
+        config.image_ref,
+        listed.len()
+    );
+    Ok((listed, image))
 }
 
 /// How one test ended.
@@ -587,7 +607,7 @@ pub fn verdict(results: &[TestRun], elapsed: Duration, budget: Option<Duration>)
 
 /// Prints the per-test table, failing logs and the summary; returns the
 /// exit code.
-fn report(results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i32 {
+fn report(image: &str, results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i32 {
     let mut sorted: Vec<&TestRun> = results.iter().collect();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.took));
     eprintln!("\ne2e per-test durations (slowest first):");
@@ -635,7 +655,8 @@ fn report(results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i
         None => String::new(),
     };
     eprintln!(
-        "\ne2e: {passed} of {} tests passed in {elapsed:.1?}{budget_text}; logs in {}",
+        "\ne2e ({image} image): {passed} of {} tests passed in {elapsed:.1?}{budget_text}; \
+         logs in {}",
         results.len(),
         results
             .first()
@@ -734,7 +755,12 @@ mod tests {
 
     #[test]
     fn listing_lines_parse_and_unknown_tiers_are_errors() {
-        let listed = parse_listing("a\tfast\nb\tfull\n").unwrap();
+        let listed = parse_listing("# image nix\na\tfast\nb\tfull\n").unwrap();
+        assert_eq!(
+            listed_image("# image nix\na\tfast\n").as_deref(),
+            Some("nix")
+        );
+        assert_eq!(listed_image("a\tfast\n"), None);
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[1].tier, Tier::Full);
         assert!(parse_listing("a\tslow\n").is_err());

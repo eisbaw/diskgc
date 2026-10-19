@@ -34,31 +34,55 @@ check:
 # Host requirement: rootless Podman (not provided by the dev shell).
 
 # Commit gate: `check` plus the fast container tests, failing over 5 minutes.
-e2e: check
+e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
-    nix run -L .#e2e-runner -- run --suite fast --budget-secs 300
+    just _runner e2e-runner run --suite fast --budget-secs 300
 
-# Every container test, fast and full tiers, then the Debian subset; the
-# budgets only guard hangs.
-e2e-full: check
+# Every container test, Nix image then Debian; budgets only guard hangs.
+e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    nix run -L .#e2e-runner -- run --suite full --budget-secs 3600
+    just _runner e2e-runner run --suite full --budget-secs 3600
     just _e2e-debian
 
-# The portable subset on the Debian image with the static binary, no Nix
-# inside (docs/testing.md, Images). One test there:
-# `nix run .#e2e-runner-debian -- --log-dir target/e2e-logs-debian one NAME`.
-e2e-debian: check
+# The static binary, no Nix inside (docs/testing.md, Images).
+# Every test but the Nix-only ones, on the Debian image.
+e2e-debian: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     just _e2e-debian
 
-_e2e-debian:
-    nix run -L .#e2e-runner-debian -- --log-dir target/e2e-logs-debian run --suite full --budget-secs 900
-
+# No dev shell root here, to stay fast: the gate recipes root it.
 # One container test by NAME, keeping the container on failure.
 e2e-one NAME:
-    nix run -L .#e2e-runner -- one {{NAME}}
+    just _runner e2e-runner one {{NAME}}
+
+# One container test by NAME on the Debian image, kept on failure.
+e2e-debian-one NAME:
+    just _runner e2e-runner-debian --log-dir target/e2e-logs-debian one {{NAME}}
+
+# The Debian image's run, shared by e2e-debian and e2e-full; its own log
+# directory, since test names repeat across images.
+_e2e-debian:
+    just _runner e2e-runner-debian --log-dir target/e2e-logs-debian run --suite full --budget-secs 900
+
+# Builds runner package NAME to an out-link under .gcroots/ (gitignored, at
+# the repo root so `cargo clean` keeps it) and runs it with ARGS. The
+# out-link is a GC root for the runner's closure, which holds its image's
+# inputs (the toolchains, the pinned Debian image), so a Nix GC on a low
+# disk does not force them to be fetched and built again; each build
+# replaces its link, so roots do not accumulate (docs/testing.md, Images).
+_runner NAME *ARGS:
+    nix build -L -o .gcroots/{{NAME}} .#{{NAME}}
+    .gcroots/{{NAME}}/bin/diskgc-e2e-runner {{ARGS}}
+
+# A GC root for the dev shell's inputs, the same way.
+_gcroot-dev:
+    nix build -L -o .gcroots/dev .#devShells.x86_64-linux.default.inputDerivation
+
+# Then `nix store gc`; Podman's image copies go with `podman rmi`.
+# Drops every GC root the container recipes made (.gcroots/).
+gcroots-drop:
+    rm -rf .gcroots
 
 # Property tests with many cases.
 soak:

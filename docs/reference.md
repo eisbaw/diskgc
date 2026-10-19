@@ -176,20 +176,24 @@ The first matching row wins:
 | 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`, or the final sample could not be taken. Something may have been deleted; the report says what. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
-The mapping is explicit in code and covered by tests. A Rust panic (101) is
-a bug. In a reclaiming run, available space decides 0, 75, 124, 3 and 1 by
-a fresh sample: a sample that could not be taken is a run error (3); 75
-and 124 require a fresh sample below `--min-free`. The first sample, of
-`PATH`'s filesystem before anything is done, is the exception: when it
-cannot be taken nothing was measured or done, and it is exit 2, like an
-unusable `PATH`. A dry run keeps its exits (0, 2, 124, 130/143) and
-reports a final sample it could not take as `avail_after_bytes: null`
-with an `errors` entry. The JSON `status` of each: 2 `usage_error` (also
-for a refusal to run as root, a missing host lock file and, in
-development builds, the pre-release sandbox gate,
-[safety.md](safety.md#pre-release-sandbox-gate)), 130 / 143
-`interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124 `deadline`,
-3 `error`, 1 `exhausted`.
+The mapping is explicit in code and covered by tests. `ensure` exits with
+no code but those in the table, or 101 when it panics (a bug, see task-88),
+so a wrapper can use any other code below 126 for its own errors without a
+collision (the shell reports 126 and 127 for a command it cannot run, and
+128+N for one a signal ended; the example hook,
+[ci-pre-job.sh](ci-pre-job.sh), uses 4 for a missing report). In a
+reclaiming run, available space decides 0, 75, 124, 3 and 1 by a fresh
+sample: a sample that could not be taken is a run error (3); 75 and 124
+require a fresh sample below `--min-free`. The first sample, of `PATH`'s
+filesystem before anything is done, is the exception: when it cannot be
+taken nothing was measured or done, and it is exit 2, like an unusable
+`PATH`. A dry run keeps its exits (0, 2, 124, 130/143) and reports a final
+sample it could not take as `avail_after_bytes: null` with an `errors`
+entry. The JSON `status` of each: 2 `usage_error` (also for a refusal to
+run as root, a missing host lock file and, in development builds, the
+pre-release sandbox gate, [safety.md](safety.md#pre-release-sandbox-gate)),
+130 / 143 `interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124
+`deadline`, 3 `error`, 1 `exhausted`.
 
 ## Output
 

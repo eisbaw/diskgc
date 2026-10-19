@@ -317,16 +317,20 @@
       # added from Nix: the static musl build of the same strace release
       # the Nix image has (Debian's needs shared libraries), copied as a
       # plain file, so no /nix/store exists in the container.
+      # The release of the Debian image's Cargo: the image tag, the rustup
+      # toolchain's directory and the manifest line follow it. Changing it
+      # needs the new tag's digest and hash (nix-prefetch-docker).
+      debianRustVersion = "1.99.1";
       debianRustImage = pkgs.dockerTools.pullImage {
         imageName = "library/rust";
         imageDigest = "sha256:4df2ae8cfdfebdfc13a65da7f253b73d68983dc0339f2719bc17a279c913b13d";
         hash = "sha256-7PLkeybbGZGXoQeSaRrU+4WeLt4UuMseSLi5JHjgu2E=";
         finalImageName = "library/rust";
-        finalImageTag = "1.99.1-slim-trixie";
+        finalImageTag = "${debianRustVersion}-slim-trixie";
         os = "linux";
         arch = "amd64";
       };
-      debianRustToolchain = "1.99.1-x86_64-unknown-linux-gnu";
+      debianRustToolchain = "${debianRustVersion}-x86_64-unknown-linux-gnu";
       e2eDebianImage = pkgs.dockerTools.streamLayeredImage {
         name = "localhost/diskgc-e2e-debian";
         fromImage = debianRustImage;
@@ -348,9 +352,9 @@
           # toolchain; /usr is mounted read-only by the harness.
           mkdir -p opt/cargo-under-test
           ln -s /usr/local/rustup/toolchains/${debianRustToolchain} \
-            opt/cargo-under-test/debian-1.99.1
+            opt/cargo-under-test/debian-${debianRustVersion}
           ln -s /usr opt/cargo-under-test/cc
-          printf '%s\n' 'debian-1.99.1 1.99.1 fast' > opt/cargo-under-test/toolchains
+          printf '%s\n' 'debian-${debianRustVersion} ${debianRustVersion} fast' > opt/cargo-under-test/toolchains
         '';
         config = {
           Cmd = [ "/bin/sh" ];

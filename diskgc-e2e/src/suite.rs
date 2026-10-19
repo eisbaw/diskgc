@@ -19,7 +19,7 @@
 //! Which of them an image lists and runs, whether it has toolchains at
 //! all, and what [`Ctx::setup`] mounts read-only, the image's descriptor
 //! says ([`crate::image`]); an image whose descriptor says `tests portable`
-//! runs only [`PORTABLE_TESTS`].
+//! runs every test but [`NIX_ONLY_TESTS`].
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -97,39 +97,17 @@ pub const TESTER_OVERLAY_FILE: &str = "/srv/tester/on-overlay";
 /// message, see [`Ledger::require_all_judged`]).
 const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 
-/// The tests an image whose descriptor says `tests portable` runs (the
-/// Debian image, docs/testing.md: Images): what the static binary and the
-/// harness must do on a machine without Nix. Plain tests by name, Cargo
-/// tests by their name before `@TOOLCHAIN`. Left out: tests that need the
-/// Nix image's busybox (`/bin/busybox`, `/bin/cat`), the Cargo race tests
-/// and measurements whose bounds were taken on the Nix toolchains.
-pub static PORTABLE_TESTS: &[&str] = &[
-    // The interlock and the deletion oracle on this image's root.
-    "sandbox_trivial",
-    "interlock_canary_passes_in_container",
-    "interlock_aborts_outside_scratch",
-    "oracle_clean_when_only_eligible_objects_go",
-    "oracle_catches_deletion_outside_eligible_set",
-    "oracle_catches_replaced_objects",
-    "oracle_mandatory_unjudged_run_fails_the_test",
-    "snapshot_skips_read_only_mounts",
-    // strace's seccomp filter, with this image's strace.
-    "strace_seccomp_bpf_churn_within_bound",
-    // The static binary: ensure, the host lock, exit codes.
-    "ensure_above_min_free_exits_0_without_the_host_lock",
-    "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
-    "ensure_as_root_without_allow_root_exits_2",
-    "ensure_refuses_a_host_lock_that_is_no_regular_file",
-    "ensure_waits_for_a_held_host_lock_until_the_deadline",
-    "ensure_host_lock_is_inherited_by_children_and_released_only_by_close",
-    // On this image's Cargo.
-    "cargo_smoke",
-    "cargo_fixtures_build_without_network",
-    "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free",
-    "ensure_exits_1_when_every_candidate_was_processed_below_min_free",
-    "ensure_dry_run_plans_real_targets_and_deletes_nothing",
-    "journey_ci_operator_frees_space_with_ensure",
-];
+/// The tests that run only on the Nix image, each with why (docs/testing.md,
+/// Container setup: Images). Every other test runs on every image: an image
+/// whose descriptor says `tests portable` (the Debian image) runs all but
+/// these, so a test that cannot run there fails loudly instead of being
+/// left out silently. Plain tests by name, Cargo tests by their name before
+/// `@TOOLCHAIN`.
+pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[(
+    "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
+    "needs a nightly toolchain beside the fast stable one (a mixed-layout target); the \
+     Debian image has one Cargo",
+)];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -490,7 +468,8 @@ pub static TESTS: &[Test] = &[
 /// `toolchains manifest`, the listing fails: tests never silently vanish.
 pub fn list() -> i32 {
     match listing() {
-        Ok(lines) => {
+        Ok((image, lines)) => {
+            println!("{}{image}", crate::runner::IMAGE_LINE);
             for (name, tier) in lines {
                 println!("{name}\t{}", tier.as_str());
             }
@@ -503,7 +482,8 @@ pub fn list() -> i32 {
     }
 }
 
-fn listing() -> Result<Vec<(String, Tier)>, String> {
+/// The image's name and the tests it runs, with their tiers.
+fn listing() -> Result<(String, Vec<(String, Tier)>), String> {
     let image = Image::load()?;
     let toolchains = match image.toolchains {
         image::Toolchains::Manifest => Toolchain::all()?,
@@ -514,10 +494,10 @@ fn listing() -> Result<Vec<(String, Tier)>, String> {
         .map(|t| (t.name.to_owned(), t.tier))
         .chain(cargo_suite::listing(&toolchains));
     let lines: Vec<_> = all
-        .filter(|(name, _)| image.runs(name, PORTABLE_TESTS))
+        .filter(|(name, _)| image.runs(name, NIX_ONLY_TESTS))
         .collect();
     ensure!(!lines.is_empty(), "image {} lists no test", image.name);
-    Ok(lines)
+    Ok((image.name, lines))
 }
 
 /// A test resolved from its listed name.
@@ -569,22 +549,27 @@ pub fn run(name: &str) -> i32 {
             return exit::USAGE;
         }
     };
-    match Image::load() {
-        Ok(image) if !image.runs(name, PORTABLE_TESTS) => {
+    let image = match Image::load() {
+        Ok(image) if !image.runs(name, NIX_ONLY_TESTS) => {
+            let base = name.split('@').next().unwrap_or(name);
+            let why = NIX_ONLY_TESTS
+                .iter()
+                .find(|(n, _)| *n == base)
+                .map_or("", |(_, why)| *why);
             eprintln!(
-                "diskgc-e2e: {name} is not run on the {} image (its descriptor: tests portable)",
+                "diskgc-e2e: {name} is not run on the {} image (NIX_ONLY_TESTS: {why})",
                 image.name
             );
             return exit::USAGE;
         }
-        Ok(_) => {}
+        Ok(image) => image,
         Err(why) => {
             eprintln!("diskgc-e2e: {why}");
             return exit::FAIL;
         }
-    }
+    };
     let started = Instant::now();
-    let (outcome, toolchain) = match Ctx::setup() {
+    let (outcome, toolchain) = match Ctx::setup(image) {
         Ok(ctx) => {
             let body = test.run(&ctx);
             let outcome = judge_expectation(test.expect(), body, ctx.teardown());
@@ -691,14 +676,13 @@ impl Ctx {
     /// image's `/usr`), then mounts the records tmpfs (root only) and the
     /// scratch tmpfs mounts, and provisions the host lock and tester's
     /// profile on them.
-    pub fn setup() -> Result<Self, String> {
+    pub fn setup(image: Image) -> Result<Self, String> {
         let uid = rustix::process::getuid().as_raw();
         ensure!(
             uid == 0,
             "the harness must run as container root to build fixtures, runs as uid {uid}"
         );
         require_native_overlay_root()?;
-        let image = Image::load()?;
         for dir in &image.read_only {
             bind_read_only(dir)?;
         }
@@ -1516,16 +1500,17 @@ fn oracle_large_tree(ctx: &Ctx) -> TestResult {
 mod tests {
     use super::*;
 
-    /// A name in the portable subset that no test has would silently shrink
-    /// the Debian run.
+    /// A name on the Nix-only list that no test has would protect nothing;
+    /// an entry without a reason explains nothing.
     #[test]
-    fn every_portable_test_exists() {
-        for name in PORTABLE_TESTS {
+    fn every_nix_only_test_exists_and_says_why() {
+        for (name, why) in NIX_ONLY_TESTS {
             assert!(
                 TESTS.iter().any(|t| t.name == *name)
                     || cargo_suite::CARGO_TESTS.iter().any(|t| t.name == *name),
-                "{name} is in PORTABLE_TESTS but is no test"
+                "{name} is in NIX_ONLY_TESTS but is no test"
             );
+            assert!(why.len() > 20, "{name}: say why it is Nix-only");
         }
     }
 

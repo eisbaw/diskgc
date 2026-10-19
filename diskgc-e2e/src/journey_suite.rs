@@ -97,7 +97,9 @@ fn target_of(rel: &str) -> PathBuf {
 /// - the hook on a fresh runner without a builds directory yet (it makes
 ///   it; exit 0), misconfigured (an unwritable report path, a relative or
 ///   unset builds directory) and on a runner without the host lock: exit 2
-///   from the hook's own checks, before diskgc runs.
+///   from the hook's own checks, before diskgc runs; with a diskgc on
+///   `PATH` that exits 0 without a report (exit 4) or cannot be executed
+///   (126 or 127).
 ///
 /// Every exit 0 or 1 is checked against the harness's own statvfs and
 /// min-free, and the hook's summary line against the report. Judged by the
@@ -110,8 +112,8 @@ fn target_of(rel: &str) -> PathBuf {
 /// Apart from the default-selection case, the hook selects
 /// `profile:cargo-target` without the idle filter: a target's last build is
 /// the newest mtime or ctime of its entries, and a ctime cannot be set
-/// back, so every fixture target is seconds old. The in-use checks, not the idle filter, are what keeps the
-/// busy targets in A and B.
+/// back, so every fixture target is seconds old. The in-use checks, not the
+/// idle filter, are what keeps the busy targets in A and B.
 pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolchain) -> TestResult {
     let busy = set_up_runner(ctx, toolchain)?;
     let busy_targets = [target_of(TESTS_RUNNING), target_of(BUILD_RUNNING)];
@@ -365,6 +367,48 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         ensure!(
             run.stderr.contains(message) && !run.stdout.contains("diskgc ensure exited"),
             "{case}: expected {message:?} before diskgc runs:\n{}{}",
+            run.stdout,
+            run.stderr
+        );
+    }
+
+    // A diskgc that cannot run, or exits 0 without a report: the hook says
+    // so and fails the job (exit 4, or the shell's 126/127), whatever the
+    // missing report would otherwise have read as.
+    let stub = |dir: &str, mode: u32| -> TestResult {
+        ctx.scratch.mkdirs(&format!("ci/{dir}"), 0o755, ROOT)?;
+        ctx.scratch.write_file(
+            &format!("ci/{dir}/diskgc"),
+            b"#!/bin/sh\nexit 0\n",
+            mode,
+            ROOT,
+        )?;
+        Ok(())
+    };
+    stub("stub-silent", 0o755)?;
+    stub("stub-not-executable", 0o644)?;
+    let broken_binaries: [(&str, &str, &[i32], &str); 2] = [
+        (
+            "stub-silent",
+            "/tmp/ci/stub-silent:/bin",
+            &[4],
+            "pre-job: diskgc ensure exited 0 without writing its report",
+        ),
+        (
+            "stub-not-executable",
+            "/tmp/ci/stub-not-executable:/bin",
+            &[126, 127],
+            "pre-job: diskgc could not be started",
+        ),
+    ];
+    for (case, path, codes, message) in broken_binaries {
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = pre_job(ctx, case, &[("PATH", Some(path))])?.run;
+        oracle.judge(&run)?.assert_clean()?;
+        ensure!(
+            run.code.is_some_and(|c| codes.contains(&c)) && run.stderr.contains(message),
+            "{case}: expected exit {codes:?} and {message:?}, got {:?}:\n{}{}",
+            run.code,
             run.stdout,
             run.stderr
         );

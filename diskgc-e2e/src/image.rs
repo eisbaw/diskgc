@@ -10,15 +10,15 @@
 //!   manifest`: the manifest [`crate::cargo_under_test::MANIFEST`] must be
 //!   there, and the Cargo tests are listed per toolchain) or none
 //!   (`toolchains none`: no Cargo test is listed, and no manifest is read);
-//! - which tests it runs (`tests all`, or `tests portable`: only
-//!   [`crate::suite::PORTABLE_TESTS`]).
+//! - which tests it runs (`tests all`, or `tests portable`: every test
+//!   but [`crate::suite::NIX_ONLY_TESTS`]).
 //!
 //! The format is one `KEY VALUE` per line, `#` comments and blank lines
 //! ignored; every key but `read-only` exactly once, unknown keys and values
 //! refused. A missing or unreadable descriptor fails the listing and every
 //! test's setup: nothing falls back to "a Nix image".
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Where the image carries its descriptor (flake.nix, the e2e images'
 /// `fakeRootCommands`).
@@ -37,8 +37,8 @@ pub enum Toolchains {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tests {
     All,
-    /// Only [`crate::suite::PORTABLE_TESTS`] (a Cargo test by its name
-    /// before `@TOOLCHAIN`).
+    /// Every test but [`crate::suite::NIX_ONLY_TESTS`] (a Cargo test by
+    /// its name before `@TOOLCHAIN`).
     Portable,
 }
 
@@ -54,13 +54,20 @@ pub struct Image {
 impl Image {
     /// Reads and parses [`DESCRIPTOR`].
     pub fn load() -> Result<Self, String> {
-        let text = std::fs::read_to_string(DESCRIPTOR).map_err(|e| {
+        Self::load_from(Path::new(DESCRIPTOR))
+    }
+
+    /// Reads and parses the descriptor at `path`; a file that is missing or
+    /// cannot be read is an error, never a default image.
+    pub fn load_from(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
             format!(
-                "read {DESCRIPTOR} (the test image's descriptor, flake.nix; every e2e image \
-                 carries one): {e}"
+                "read {} (the test image's descriptor, flake.nix; every e2e image carries \
+                 one): {e}",
+                path.display()
             )
         })?;
-        Self::parse(&text).map_err(|e| format!("{DESCRIPTOR}: {e}"))
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// Parses descriptor text (see the module docs).
@@ -121,13 +128,14 @@ impl Image {
     }
 
     /// Whether the image runs the test listed as `listed` (`NAME` or
-    /// `NAME@TOOLCHAIN`).
-    pub fn runs(&self, listed: &str, portable: &[&str]) -> bool {
+    /// `NAME@TOOLCHAIN`): everything, or everything but `nix_only` (name,
+    /// reason) on a `tests portable` image.
+    pub fn runs(&self, listed: &str, nix_only: &[(&str, &str)]) -> bool {
         match self.tests {
             Tests::All => true,
             Tests::Portable => {
                 let base = listed.split('@').next().unwrap_or(listed);
-                portable.contains(&base)
+                !nix_only.iter().any(|(name, _)| *name == base)
             }
         }
     }
@@ -154,17 +162,46 @@ mod tests {
         .unwrap();
         assert_eq!(nix.read_only, [PathBuf::from("/nix/store")]);
         assert_eq!(nix.toolchains, Toolchains::Manifest);
-        assert!(nix.runs("anything@1.99.1", &[]));
+        let nix_only = [("cargo_race_4", "needs the nightly")];
+        assert!(nix.runs("cargo_race_4@1.99.1", &nix_only));
         let debian =
             Image::parse("name debian\nread-only /usr\ntoolchains manifest\ntests portable\n")
                 .unwrap();
         assert_eq!(debian.tests, Tests::Portable);
-        assert!(debian.runs("journey@debian-1.99.1", &["journey"]));
-        assert!(debian.runs("journey", &["journey"]));
-        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &["journey"]));
+        assert!(debian.runs("journey@debian-1.99.1", &nix_only));
+        assert!(debian.runs("sandbox_trivial", &nix_only));
+        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only));
+        assert!(!debian.runs("cargo_race_4", &nix_only));
         let bare = Image::parse("name bare\ntoolchains none\ntests portable\n").unwrap();
         assert!(bare.read_only.is_empty());
         assert_eq!(bare.toolchains, Toolchains::None);
+    }
+
+    /// A temporary directory, removed when dropped (also when a test
+    /// panics).
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A missing or unreadable descriptor is an error: no image is assumed.
+    #[test]
+    fn a_missing_or_unreadable_descriptor_is_an_error() {
+        let guard =
+            TempDir(std::env::temp_dir().join(format!("diskgc-e2e-image-{}", std::process::id())));
+        let dir = &guard.0;
+        std::fs::create_dir_all(dir).unwrap();
+        let missing = Image::load_from(&dir.join("no-such-descriptor")).unwrap_err();
+        assert!(missing.contains("descriptor"), "{missing}");
+        // A directory cannot be read as a file.
+        let unreadable = Image::load_from(dir).unwrap_err();
+        assert!(unreadable.contains("descriptor"), "{unreadable}");
+        let file = dir.join("descriptor");
+        std::fs::write(&file, "name x\ntoolchains none\ntests all\n").unwrap();
+        assert_eq!(Image::load_from(&file).unwrap().name, "x");
     }
 
     #[test]
