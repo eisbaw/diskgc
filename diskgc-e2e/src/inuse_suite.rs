@@ -488,3 +488,175 @@ pub fn inuse_a_more_capable_process_blocks_outside_the_initial_namespace(ctx: &C
     holder.finish()?;
     verdict.assert_clean()
 }
+
+mod nix_cache {
+    //! A real Nix evaluator versus the shipped `nix-user-cache` profile. A
+    //! bounded pure computation keeps the evaluation live while the test
+    //! inspects its SQLite descriptor and runs diskgc.
+
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use crate::ensure_suite::{ensure_run, report};
+    use crate::oracle::{Fixture, Oracle};
+    use crate::suite::{Ctx, TestResult};
+    use crate::under_test::TESTER_ENV;
+    use crate::{ensure, info};
+
+    const NIX: &str = "/opt/nix-eval/nix";
+    const FLAKE: &str = "/opt/nix-eval/flake#held";
+    const CACHE: &str = "/home/tester/.cache/nix";
+
+    /// Task 75 AC #2: while Nix actually evaluates a flake, its naturally
+    /// opened eval-cache SQLite file makes that named candidate `in_use`.
+    pub fn nix_evaluation_keeps_its_user_eval_cache_in_use(ctx: &Ctx) -> TestResult {
+        let mut evaluator = Command::new(&ctx.self_exe)
+            .args(["as-tester", "--", NIX])
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "eval",
+                "--store",
+                "dummy://?read-only=false",
+                "--raw",
+                FLAKE,
+            ])
+            .env_clear()
+            .envs(TESTER_ENV.iter().copied())
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("start Nix evaluator {NIX}: {e}"))?;
+        let pid = evaluator.id();
+        let result = check_live_evaluation(ctx, &mut evaluator);
+        let _ = evaluator.kill();
+        let output = evaluator
+            .wait_with_output()
+            .map_err(|e| format!("reap Nix evaluator pid {pid}: {e}"))?;
+        result.map_err(|e| {
+            format!(
+                "{e}\nNix pid {pid} exited {:?}; stdout: {:?}; stderr: {:?}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    fn check_live_evaluation(ctx: &Ctx, evaluator: &mut Child) -> TestResult {
+        let pid = evaluator.id();
+        let cache_file = wait_for_eval_cache_fd(evaluator)?;
+        let candidate = cache_file
+            .parent()
+            .ok_or_else(|| format!("Nix cache file {} has no parent", cache_file.display()))?;
+        ensure!(
+            candidate.starts_with(CACHE) && candidate != Path::new(CACHE),
+            "Nix opened an unexpected eval cache path {}",
+            cache_file.display()
+        );
+        info!("Nix pid {pid} holds {} open", cache_file.display());
+
+        let oracle = Oracle::arm(
+            Fixture::new()
+                .concurrent_writer(CACHE)
+                .concurrent_writer("/home/tester/.local/share/nix"),
+        )?;
+        let run = ensure_run(
+            ctx,
+            &[
+                "--dry-run",
+                "--json",
+                "--no-index",
+                "--min-free",
+                "100%",
+                "--select",
+                "profile:nix-user-cache",
+                "--roots",
+                "/home/tester",
+                "/home/tester",
+            ],
+        )?;
+        let verdict = oracle.judge(&run)?;
+        run.expect_code(0)?;
+        let report = report(&run)?;
+        let candidate_name = candidate.to_string_lossy();
+        let entry = report["plan"]
+            .as_array()
+            .and_then(|plan| {
+                plan.iter()
+                    .find(|entry| entry["candidate"] == *candidate_name)
+            })
+            .ok_or_else(|| format!("Nix cache {candidate_name} missing from plan: {report}"))?;
+        ensure!(
+            entry["reason"] == "in_use" && entry["eligible"] == false,
+            "Nix cache {candidate_name} was not in_use: {entry}"
+        );
+        ensure!(
+            evaluator
+                .try_wait()
+                .map_err(|e| format!("poll Nix evaluator pid {pid}: {e}"))?
+                .is_none(),
+            "Nix evaluation finished before the dry run completed"
+        );
+        verdict.assert_clean()
+    }
+
+    fn wait_for_eval_cache_fd(evaluator: &mut Child) -> Result<PathBuf, String> {
+        let pid = evaluator.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(path) = eval_cache_fd(pid)? {
+                return Ok(path);
+            }
+            if let Some(status) = evaluator
+                .try_wait()
+                .map_err(|e| format!("poll Nix evaluator pid {pid}: {e}"))?
+            {
+                return Err(format!(
+                    "Nix evaluation exited with {status} before opening an eval-cache SQLite file"
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Nix pid {pid} opened no eval-cache SQLite file within 20 seconds"
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn eval_cache_fd(pid: u32) -> Result<Option<PathBuf>, String> {
+        let fds = match fs::read_dir(format!("/proc/{pid}/fd")) {
+            Ok(fds) => fds,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("list Nix pid {pid} descriptors: {e}")),
+        };
+        for entry in fds {
+            let entry = entry.map_err(|e| format!("read Nix pid {pid} descriptor: {e}"))?;
+            let target = match fs::read_link(entry.path()) {
+                Ok(target) => target,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("read Nix pid {pid} descriptor link: {e}")),
+            };
+            if target.starts_with(CACHE)
+                && target
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name.to_string_lossy().starts_with("eval-cache-v"))
+                && target
+                    .extension()
+                    .is_some_and(|extension| extension == "sqlite")
+            {
+                return Ok(Some(target));
+            }
+        }
+        Ok(None)
+    }
+}
+pub use nix_cache::nix_evaluation_keeps_its_user_eval_cache_in_use;

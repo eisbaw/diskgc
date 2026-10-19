@@ -27,6 +27,9 @@ use crate::units::parse_duration;
 #[serde(deny_unknown_fields)]
 pub struct ProfileSpec {
     pub name: String,
+    /// Explicit permission to replace a built-in with this name.
+    #[serde(default)]
+    pub r#override: Option<bool>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]

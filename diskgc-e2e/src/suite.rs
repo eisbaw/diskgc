@@ -103,11 +103,17 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// these, so a test that cannot run there fails loudly instead of being
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
-pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[(
-    "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
-    "needs a nightly toolchain beside the fast stable one (a mixed-layout target); the \
-     Debian image has one Cargo",
-)];
+pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
+        "needs a nightly toolchain beside the fast stable one (a mixed-layout target); the \
+         Debian image has one Cargo",
+    ),
+    (
+        "nix_evaluation_keeps_its_user_eval_cache_in_use",
+        "needs the real Nix evaluator and the flake baked into the Nix image",
+    ),
+];
 
 /// The tests whose container gets the FUSE device (`/dev/fuse`, when the
 /// host has it): only these mount a FUSE filesystem.
@@ -115,6 +121,18 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "nix_evaluation_keeps_its_user_eval_cache_in_use",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::nix_evaluation_keeps_its_user_eval_cache_in_use,
+    },
+    Test {
+        name: "go_mod_cache_builtin_deletes_a_read_only_module_tree",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::go_mod_cache_builtin_deletes_a_read_only_module_tree,
+    },
     Test {
         name: "sandbox_trivial",
         tier: Tier::Fast,

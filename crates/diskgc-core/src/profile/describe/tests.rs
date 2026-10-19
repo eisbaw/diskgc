@@ -37,7 +37,7 @@ fn libraries() -> Vec<(&'static str, Library)> {
 fn reload(yaml: &str, origin: Origin) -> Profile {
     let library = match origin {
         Origin::BuiltIn => Library::load(yaml, &[]),
-        Origin::User => Library::with_user_profiles(
+        Origin::User | Origin::UserOverride => Library::with_user_profiles(
             &parse_profiles(yaml).unwrap_or_else(|e| panic!("{e}:\n{yaml}")),
         ),
     }
@@ -82,6 +82,25 @@ fn show_yaml_spells_out_checkouts_for_every_source() {
     }
 }
 
+#[test]
+fn override_is_visible_in_list_show_and_json() {
+    let spec =
+        parse_profiles("- name: idle-1d\n  override: true\n  where: {idle_for: 2d}\n").unwrap();
+    let library = Library::with_user_profiles(&spec).unwrap();
+    let profile = library.get("idle-1d").unwrap();
+    assert_eq!(profile.origin, Origin::UserOverride);
+    assert!(
+        list_text(&library)
+            .lines()
+            .any(|line| line.starts_with("idle-1d ") && line.contains("user_override"))
+    );
+    let yaml = show_yaml(profile, None);
+    assert!(yaml.contains("  override: true\n"), "{yaml}");
+    let json: Value = serde_json::from_str(&profile_json(profile).to_text()).unwrap();
+    assert_eq!(json["origin"], "user_override");
+    assert_eq!(json["override"], true);
+}
+
 /// The schema form of a profile's JSON object: what docs/reference.md
 /// (Profiles) would write for it. The JSON object is a superset; this
 /// keeps the schema's keys, drops `null`s, turns `roots_required` back
@@ -91,7 +110,7 @@ fn schema_form(json: &Value) -> Value {
     let mut out = serde_json::Map::new();
     for (key, value) in json.as_object().expect("an object") {
         let value = match (key.as_str(), value) {
-            ("origin" | "role", _) | (_, Value::Null) => continue,
+            ("origin" | "role" | "override", _) | (_, Value::Null) => continue,
             ("find", Value::Object(fields)) => {
                 let required = fields["roots_required"].as_bool().expect("a boolean");
                 assert_eq!(fields["roots"].is_null(), required, "{json}");
@@ -389,7 +408,12 @@ fn list_text_is_one_aligned_table() {
         .iter()
         .find(|l| l.starts_with("idle-1h "))
         .expect("idle-1h");
-    assert!(idle.contains("built_in  filter  filters   -"), "{idle}");
+    let cells: Vec<&str> = idle.split_whitespace().collect();
+    assert_eq!(
+        &cells[..5],
+        ["idle-1h", "built_in", "filter", "filters", "-"],
+        "{idle}"
+    );
 }
 
 /// An unknown name is answered with the names it was probably meant to be.

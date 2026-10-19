@@ -188,19 +188,6 @@ profiles:
 
   # ---- plain deletes that need roots ------------------------------------
 
-  - name: pytest-cache
-    category: test
-    description: .pytest_cache dirs up to three levels below a root
-    # DOC: no `**`: the depth is spelled out (up to 3 below each root).
-    find:
-      roots: required
-      paths: [".pytest_cache", "*/.pytest_cache", "*/*/.pytest_cache", "*/*/*/.pytest_cache"]
-      type: dir
-    action: delete
-    examples:
-      match: [/home/mark/src/app/.pytest_cache, /home/mark/src/a/b/c/.pytest_cache]
-      no_match: [/home/mark/src/app/.pytest_cache/v]
-
   - name: cmake-build
     category: c / c++
     description: directories holding a CMakeCache.txt, up to three levels below a root

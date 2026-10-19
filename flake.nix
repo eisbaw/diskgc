@@ -267,7 +267,20 @@
         chmod 0700 run/diskgc-e2e
       '';
 
-      # The Nix base image: busybox, strace, the Cargo toolchains under test.
+      # A pure flake whose evaluation lasts long enough to inspect Nix's
+      # naturally opened eval-cache descriptor. Impure evaluation disables
+      # that cache in Nix itself.
+      nixEvalFixture = pkgs.writeTextDir "flake.nix" ''
+        {
+          outputs = { self }: {
+            held = toString (builtins.foldl' (acc: _: acc + 1) 0
+              (builtins.genList (x: x) 10000000));
+          };
+        }
+      '';
+
+      # The Nix base image: busybox, strace, Nix, and the Cargo toolchains
+      # under test.
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
       # do, and the runner reuses a loaded image with that tag.
@@ -276,6 +289,8 @@
         contents = [
           pkgs.busybox
           pkgs.strace
+          pkgs.nix
+          nixEvalFixture
         ];
         fakeRootCommands = ''
           ${e2eImageCommon [
@@ -292,6 +307,9 @@
           # toolchain, in the order above. Nothing under /home/tester: the
           # harness mounts a fresh tmpfs there.
           mkdir -p opt/cargo-under-test
+          mkdir -p opt/nix-eval
+          ln -s ${pkgs.nix}/bin/nix opt/nix-eval/nix
+          ln -s ${nixEvalFixture} opt/nix-eval/flake
           ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
           ${lib.concatMapStrings (t: ''
             ln -s ${t.toolchain} opt/cargo-under-test/${t.name}

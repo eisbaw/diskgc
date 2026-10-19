@@ -43,9 +43,7 @@ pub use pattern::{Pattern, RESERVED, Segment, path_matches};
 pub use plan::{Planned, plan};
 pub use reclaim::{Reclaimed, reclaim, tally};
 
-use std::path::Path;
-
-use crate::profile::{EntryType, Finds, Roots, Source, Where};
+use crate::profile::{EntryType, Finds, Source, Where};
 
 pub use crate::engine::{PRIVATE_TMP_PREFIX, is_private_tmp, path_in_private_tmp};
 
@@ -85,41 +83,4 @@ impl Find {
             has_not: where_.has_not.clone(),
         }
     }
-}
-
-/// The examples of `source` (kind `fs`) that do not hold for the user
-/// `uid`: each `match` path that no root and pattern finds, and each
-/// `no_match` path that one does, as a message. Paths only (the entry type
-/// and the source's `where` are not part of an example). What `diskgc
-/// profiles test` will check (task-17).
-pub fn example_failures(source: &Source, uid: u32) -> Vec<String> {
-    let Some(find) = Find::of(source, uid) else {
-        return Vec::new();
-    };
-    let uid_text = uid.to_string();
-    let fixed: Option<Vec<String>> = match &source.roots {
-        Roots::Fixed(roots) => Some(
-            roots
-                .iter()
-                .map(|r| r.replace("{uid}", &uid_text))
-                .collect(),
-        ),
-        Roots::Required => None,
-    };
-    let fixed_paths: Option<Vec<&Path>> = fixed
-        .as_ref()
-        .map(|roots| roots.iter().map(Path::new).collect());
-    let finds = |path: &str| path_matches(fixed_paths.as_deref(), &find.patterns, Path::new(path));
-    let mut failures = Vec::new();
-    for path in &source.examples.matches {
-        if !finds(path) {
-            failures.push(format!("match example {path} is not found by the patterns"));
-        }
-    }
-    for path in &source.examples.no_match {
-        if finds(path) {
-            failures.push(format!("no_match example {path} is found by the patterns"));
-        }
-    }
-    failures
 }

@@ -38,7 +38,7 @@ const PROFILES: &str = r#"
   find: {roots: required, paths: ["*"], type: any}
   action: delete
   examples: {match: [/srv/x]}
-- name: pytest-cache
+- name: pytest-cache-fixture
   find: {roots: required, paths: [".pytest_cache", "*/.pytest_cache"], type: dir}
   action: delete
   examples: {match: [/home/mark/src/app/.pytest_cache]}
@@ -1107,7 +1107,7 @@ fn each_kind_reaches_only_its_own_protocol() {
     let report = ensure(
         &host,
         &request(
-            "profile:pytest-cache",
+            "profile:pytest-cache-fixture",
             &["/home/mark/src"],
             "/home/mark",
             "100%",

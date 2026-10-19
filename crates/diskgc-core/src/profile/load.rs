@@ -4,7 +4,7 @@
 //! the kind" items of docs/safety.md, Validation). Every problem of every
 //! profile is reported, each with where it is.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::spec::{
@@ -60,6 +60,7 @@ pub(super) fn library(
             message,
         }])
     })?;
+    let builtin_names: BTreeSet<&str> = builtin.iter().map(|s| s.name.as_str()).collect();
     let specs = builtin
         .iter()
         .map(|spec| {
@@ -79,18 +80,50 @@ pub(super) fn library(
     let mut errors = Vec::new();
     let mut profiles: BTreeMap<String, Profile> = BTreeMap::new();
     let mut defined_at: BTreeMap<&str, String> = BTreeMap::new();
+    let mut user_names = BTreeSet::new();
     for (origin, at, spec) in specs {
         let mut problems = Vec::new();
-        if let Some(first) = defined_at.get(spec.name.as_str()) {
-            problems.push(match profiles.get(&spec.name).map(|p| p.origin) {
-                Some(Origin::BuiltIn) if origin == Origin::User => format!(
-                    "a built-in profile is named `{}`; choose another name (overriding a \
-                     built-in is not supported yet)",
-                    spec.name
-                ),
-                _ => format!("the name `{}` is already used by {first}", spec.name),
-            });
-        }
+        let origin = match origin {
+            Origin::BuiltIn => {
+                if let Some(first) = defined_at.get(spec.name.as_str()) {
+                    problems.push(format!(
+                        "the name `{}` is already used by {first}",
+                        spec.name
+                    ));
+                }
+                Origin::BuiltIn
+            }
+            Origin::User | Origin::UserOverride => {
+                if !user_names.insert(spec.name.as_str()) {
+                    let first = defined_at
+                        .get(spec.name.as_str())
+                        .map(String::as_str)
+                        .unwrap_or("an earlier user profile");
+                    problems.push(format!(
+                        "the name `{}` is already used by {first}",
+                        spec.name
+                    ));
+                }
+                match (builtin_names.contains(spec.name.as_str()), spec.r#override) {
+                    (true, Some(true)) => Origin::UserOverride,
+                    (true, _) => {
+                        problems.push(format!(
+                            "a built-in profile is named `{}`; use `override: true` to replace it",
+                            spec.name
+                        ));
+                        Origin::User
+                    }
+                    (false, Some(true)) => {
+                        problems.push(format!(
+                            "`override: true` names no built-in profile `{}`",
+                            spec.name
+                        ));
+                        Origin::User
+                    }
+                    (false, _) => Origin::User,
+                }
+            }
+        };
         match profile(spec, origin) {
             Ok(profile) if problems.is_empty() => {
                 defined_at.insert(&spec.name, at.clone());
@@ -133,6 +166,9 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
     }
     match origin {
         Origin::BuiltIn => {
+            if spec.r#override.is_some() {
+                problems.push("`override` is for user profiles only".to_owned());
+            }
             for (field, value) in [
                 ("category", &spec.category),
                 ("description", &spec.description),
@@ -149,7 +185,7 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
                 );
             }
         }
-        Origin::User => {
+        Origin::User | Origin::UserOverride => {
             if spec.verified_with.is_some() {
                 problems.push("`verified_with` is for built-in profiles only".to_owned());
             }

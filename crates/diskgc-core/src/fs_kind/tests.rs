@@ -166,8 +166,10 @@ fn the_spike_profiles_load_and_their_examples_hold() {
     let config = config::parse(Path::new("spike-profiles.yaml"), text.as_bytes())
         .unwrap_or_else(|e| panic!("{e}"));
     let mut checked = 0;
-    let mut failures = Vec::new();
     for profile in config.library.profiles() {
+        if profile.origin != Origin::User {
+            continue;
+        }
         let Body::Source(source) = &profile.body else {
             continue;
         };
@@ -175,12 +177,8 @@ fn the_spike_profiles_load_and_their_examples_hold() {
             continue;
         }
         checked += 1;
-        failures.extend(
-            example_failures(source, 1000)
-                .into_iter()
-                .map(|f| format!("{}: {f}", profile.name)),
-        );
     }
+    let failures = crate::profile::examples::failures(&config.library);
     assert!(failures.is_empty(), "{failures:#?}");
     // Every source the file defines is of kind fs and was checked.
     let user_sources = config
@@ -203,10 +201,10 @@ fn a_wrong_example_is_reported() {
                 examples: {match: [/tmp/b-1, /tmp/a-1], no_match: [/tmp/a-2]}}";
     let library = Library::with_user_profiles(&parse_profiles(yaml).expect("parses"))
         .unwrap_or_else(|e| panic!("{e}"));
-    let Some(Body::Source(source)) = library.get("x").map(|p| &p.body) else {
+    let Some(Body::Source(_)) = library.get("x").map(|p| &p.body) else {
         panic!("x is a source");
     };
-    let failures = example_failures(source, 1000);
+    let failures = crate::profile::examples::failures(&library);
     assert_eq!(failures.len(), 2, "{failures:?}");
     assert!(failures[0].contains("/tmp/b-1"), "{failures:?}");
     assert!(failures[1].contains("/tmp/a-2"), "{failures:?}");

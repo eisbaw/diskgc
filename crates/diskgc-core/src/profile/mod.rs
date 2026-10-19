@@ -20,6 +20,7 @@
 //! reads the machine; the built-ins are compiled in.
 
 pub mod describe;
+pub mod examples;
 mod idle;
 mod load;
 mod roots;
@@ -74,6 +75,8 @@ pub enum Origin {
     BuiltIn,
     /// The configuration file's `profiles:`.
     User,
+    /// A user profile that explicitly replaces a built-in.
+    UserOverride,
 }
 
 impl Origin {
@@ -83,6 +86,7 @@ impl Origin {
         match self {
             Self::BuiltIn => "built_in",
             Self::User => "user",
+            Self::UserOverride => "user_override",
         }
     }
 }
@@ -253,7 +257,7 @@ impl Library {
     }
 
     /// The built-in profiles and the configuration file's `profiles:`. A
-    /// user profile may not take a built-in's name (overrides: task-17).
+    /// A user profile takes a built-in's name only with `override: true`.
     pub fn with_user_profiles(user: &[ProfileSpec]) -> Result<Self, LoadErrors> {
         Self::load(BUILTIN_YAML, user)
     }

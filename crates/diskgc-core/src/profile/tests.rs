@@ -55,7 +55,13 @@ fn the_built_in_library_loads() {
     let library = Library::builtin().unwrap_or_else(|e| panic!("broken built-in profile:\n{e}"));
     let names: Vec<&str> = library.profiles().map(|p| p.name.as_str()).collect();
     let mut want: Vec<&str> = BUILT_IN_FILTERS.to_vec();
-    want.push("cargo-target");
+    want.extend([
+        "bun-cache",
+        "cargo-target",
+        "go-mod-cache",
+        "nix-user-cache",
+        "pytest-cache",
+    ]);
     want.sort_unstable();
     assert_eq!(names, want);
     assert!(library.profiles().all(|p| p.origin == Origin::BuiltIn));
@@ -70,6 +76,29 @@ fn the_built_in_library_loads() {
     assert!(source.where_.is_empty());
     // task-80: the one built-in that lets candidates hold checkouts.
     assert_eq!(source.checkouts, Checkouts::Allow);
+
+    let go = library.get("go-mod-cache").expect("go-mod-cache");
+    let Body::Source(go) = &go.body else {
+        panic!("go-mod-cache is not a source");
+    };
+    assert_eq!(go.kind(), Kind::Fs);
+    assert_eq!(go.roots, Roots::Required);
+    assert_eq!(
+        go.action,
+        Action::Delete {
+            make_writable: true
+        }
+    );
+}
+
+/// Built-in examples are checked as patterns, including negative paths.
+/// `roots: required` examples cannot assert a relative depth: the caller
+/// chooses the root, so the model golden fixture pins depths separately.
+#[test]
+fn built_in_fs_examples_hold() {
+    let library = Library::builtin().expect("built-ins");
+    let failures = super::examples::failures(&library);
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// Every `idle-*` built-in requires exactly what its name says.
@@ -219,11 +248,6 @@ fn unknown_keys_are_rejected_everywhere() {
         (
             "- {name: x, find: {roots: [/tmp], paths: [a], type: dir}, action: delete, examples: {r#match: [/tmp/a]}}",
             "r#match",
-        ),
-        // `override` arrives with task-17; until then it is unknown.
-        (
-            "- {name: x, override: true, where: {idle_for: 1d}}",
-            "override",
         ),
     ] {
         let error = yaml_error(yaml);
@@ -645,17 +669,57 @@ fn roots_and_patterns_are_checked_paths() {
 }
 
 #[test]
-fn names_are_unique_and_built_ins_are_not_shadowed() {
+fn names_are_unique_and_built_ins_need_explicit_override() {
     let errors = user_errors(
         "- name: idle-1d\n  where: {idle_for: 2d}\n- name: x\n  where: {idle_for: 1d}\n- name: x\n  where: {idle_for: 2d}\n",
     );
     assert_eq!(
         errors,
         vec![
-            "profiles[0] (`idle-1d`): a built-in profile is named `idle-1d`; choose another \
-             name (overriding a built-in is not supported yet)",
+            "profiles[0] (`idle-1d`): a built-in profile is named `idle-1d`; use `override: true` \
+             to replace it",
             "profiles[2] (`x`): the name `x` is already used by profiles[1] (`x`)",
         ]
+    );
+}
+
+#[test]
+fn explicit_override_replaces_one_built_in_and_rejects_typos() {
+    let yaml = "- name: idle-1d\n  override: true\n  where: {idle_for: 2d}\n";
+    let library = with_user(yaml).expect("override loads");
+    let replacement = library.get("idle-1d").expect("replacement");
+    assert_eq!(replacement.origin, Origin::UserOverride);
+    let Body::Filter(where_) = &replacement.body else {
+        panic!("filter")
+    };
+    assert_eq!(where_.idle_for, Some(IdleFor(Duration::from_secs(2 * DAY))));
+    assert_eq!(
+        library.profiles().filter(|p| p.name == "idle-1d").count(),
+        1
+    );
+    assert_has(
+        &user_errors("- name: idle-1d\n  where: {idle_for: 2d}\n"),
+        "use `override: true`",
+    );
+    assert_has(
+        &user_errors("- name: idle-1x\n  override: true\n  where: {idle_for: 2d}\n"),
+        "names no built-in",
+    );
+    assert_has(
+        &user_errors(
+            "- name: idle-1d\n  override: true\n  where: {idle_for: 2d}\n- name: idle-1d\n  override: true\n  where: {idle_for: 3d}\n",
+        ),
+        "already used",
+    );
+    let errors = Library::load(
+        "- name: x\n  override: true\n  where: {idle_for: 1d}\n",
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .to_string()
+            .contains("`override` is for user profiles only")
     );
 }
 

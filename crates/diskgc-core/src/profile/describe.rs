@@ -277,6 +277,7 @@ pub fn profile_json(p: &Profile) -> Json {
     Json::Obj(vec![
         ("name", Json::str(&p.name)),
         ("origin", Json::str(p.origin.name())),
+        ("override", Json::Bool(p.origin == Origin::UserOverride)),
         ("role", Json::str(p.role())),
         ("category", opt_str(p.category.as_deref())),
         ("description", opt_str(p.description.as_deref())),
@@ -412,6 +413,8 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
         (Origin::BuiltIn, _) => "built in".to_owned(),
         (Origin::User, Some(path)) => format!("from {}", path.display()),
         (Origin::User, None) => "a user profile".to_owned(),
+        (Origin::UserOverride, Some(path)) => format!("override from {}", path.display()),
+        (Origin::UserOverride, None) => "a user override".to_owned(),
     };
     let mut out = format!(
         "# {}: {} profile, {from}\n- name: {}\n",
@@ -419,6 +422,9 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
         profile.role(),
         profile.name
     );
+    if profile.origin == Origin::UserOverride {
+        out.push_str("  override: true\n");
+    }
     for (field, value) in [
         ("category", &profile.category),
         ("description", &profile.description),

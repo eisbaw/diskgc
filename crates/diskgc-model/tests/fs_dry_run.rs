@@ -9,10 +9,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::host;
-use diskgc_core::engine::Checkouts;
+use common::{dir, host};
+use diskgc_core::engine::{Candidate, Checkouts, DeleteOptions, End, Rules, delete, walk};
 use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::profile::{Library, parse_profiles};
+use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
@@ -21,7 +21,9 @@ use diskgc_model::spec::Op;
 /// The user profiles the tests select from. `pytest-of-dir` is a stand-in
 /// with whole `pytest-of-*` dirs as candidates (simple fixtures), not the
 /// library's `pytest-tmp` (one test dir per candidate, tested against the
-/// spike's profile file below).
+/// spike's profile file below). `pytest-cache-fixture` pins an older depth
+/// rule for the roots test; the shipped cache profile has its own golden
+/// fixture below.
 const PROFILES: &str = r#"
 - name: pytest-of-dir
   find:
@@ -34,7 +36,7 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["*"], type: any}
   action: delete
   examples: {match: [/tmp/x]}
-- name: pytest-cache
+- name: pytest-cache-fixture
   find:
     roots: required
     paths: [".pytest_cache", "*/.pytest_cache", "*/*/.pytest_cache"]
@@ -119,6 +121,203 @@ fn request(select: &str, roots: &[&str], path: &str) -> Request {
         tally_budget: None,
         tier: Tier::select(select, &library(), roots, 1000).unwrap_or_else(|e| panic!("{e}")),
     }
+}
+
+/// A shipped profile uses its embedded definition, including its real
+/// action and exact path patterns, rather than the spike profiles above.
+fn built_in_request(select: &str, root: &str) -> Request {
+    let library = Library::builtin().expect("built-in profiles");
+    let roots = [root.to_owned()];
+    Request {
+        path: PathBuf::from(root),
+        min_free: parse_size("1G").expect("a size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select(select, &library, Some(&roots), 1000).unwrap_or_else(|e| panic!("{e}")),
+    }
+}
+
+/// Each entry is present in the same fixture, including similar but
+/// out-of-scope names. The expected set pins what every built-in matches;
+/// changing it requires a new profile name, even when it narrows a match.
+#[test]
+fn shipped_home_cache_profiles_have_golden_match_sets() {
+    let host = host(&yaml(
+        r#"  /home/mark/src/.pytest_cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/src/app/.pytest_cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/src/a/b/.pytest_cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/src/a/b/c/.pytest_cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/src/a/b/c/d/.pytest_cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/gitv3: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/tarball-cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/tarball-cache-v2: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/eval-cache-v6: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/eval-cache-v7: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/nix/fetcher-cache-v1: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.bun/install/cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cache/.bun/install/cache: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/go/pkg/mod: {.: {mtime: 2026-10-01T00:00:00Z}, example: {.: {mode: "0555"}, file: {size: 1K}}}
+  /home/mark/other/pkg/mod: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/go/pkg/other: {.: {mtime: 2026-10-01T00:00:00Z}}
+"#,
+    ));
+    for (profile, root, expected) in [
+        (
+            "pytest-cache",
+            "/home/mark/src",
+            vec![
+                "/home/mark/src/.pytest_cache",
+                "/home/mark/src/a/b/.pytest_cache",
+                "/home/mark/src/a/b/c/.pytest_cache",
+                "/home/mark/src/app/.pytest_cache",
+            ],
+        ),
+        (
+            "nix-user-cache",
+            "/home/mark",
+            vec![
+                "/home/mark/.cache/nix/eval-cache-v6",
+                "/home/mark/.cache/nix/eval-cache-v7",
+                "/home/mark/.cache/nix/gitv3",
+                "/home/mark/.cache/nix/tarball-cache",
+                "/home/mark/.cache/nix/tarball-cache-v2",
+            ],
+        ),
+        (
+            "bun-cache",
+            "/home/mark",
+            vec![
+                "/home/mark/.bun/install/cache",
+                "/home/mark/.cache/.bun/install/cache",
+            ],
+        ),
+        ("go-mod-cache", "/home/mark", vec!["/home/mark/go/pkg/mod"]),
+    ] {
+        let report = dry_run(
+            &host,
+            &built_in_request(&format!("profile:{profile}"), root),
+        );
+        let mut actual: Vec<_> = plan(&report).into_iter().map(|(path, _)| path).collect();
+        actual.sort();
+        assert_eq!(actual, expected, "{profile}");
+        assert!(
+            report.plan.iter().all(|p| p.reason.is_none()),
+            "{profile}: {:#?}",
+            report.plan
+        );
+    }
+    nothing_locked_or_deleted(&host);
+}
+
+/// Each shipped cache source says `type: dir`. A matching regular file is
+/// outside its frozen set, including at a path that would otherwise match
+/// every path segment. Changing one source to `type: any` must turn this red.
+#[test]
+fn shipped_home_cache_profiles_never_match_regular_files() {
+    for (profile, root, path) in [
+        (
+            "pytest-cache",
+            "/home/mark/src",
+            "/home/mark/src/.pytest_cache",
+        ),
+        (
+            "nix-user-cache",
+            "/home/mark",
+            "/home/mark/.cache/nix/gitv3",
+        ),
+        ("bun-cache", "/home/mark", "/home/mark/.bun/install/cache"),
+        ("go-mod-cache", "/home/mark", "/home/mark/go/pkg/mod"),
+    ] {
+        let host = host(&yaml(&format!("  {path}: {{size: 1K}}\n")));
+        let report = dry_run(
+            &host,
+            &built_in_request(&format!("profile:{profile}"), root),
+        );
+        assert!(plan(&report).is_empty(), "{profile}: {:#?}", report.plan);
+        nothing_locked_or_deleted(&host);
+    }
+}
+
+/// The Go cache really can contain read-only module directories. Derive the
+/// delete option from the shipped profile and prove the model deletion uses
+/// it, rather than merely asserting the YAML field's spelling.
+#[test]
+fn shipped_go_mod_cache_makes_read_only_modules_writable_for_deletion() {
+    let host = host(&yaml(
+        "  /home/mark/go/pkg/mod: {.: {mode: \"0555\"}, example: {.: {mode: \"0555\"}, file: {size: 1K}}}\n",
+    ));
+    let library = Library::builtin().expect("built-ins");
+    let profile = library.get("go-mod-cache").expect("go-mod-cache");
+    let Body::Source(source) = &profile.body else {
+        panic!("go-mod-cache is not a source");
+    };
+    let Action::Delete { make_writable } = &source.action else {
+        panic!("go-mod-cache does not delete");
+    };
+    let parent = dir(&host, "/home/mark/go/pkg");
+    let target = Path::new("/home/mark/go/pkg/mod");
+    let candidate = Candidate::new(&parent, target).expect("candidate");
+    let record = walk(&host, &candidate, &Rules::new(&[1000]), None).expect("eligible");
+    let outcome = delete(
+        &host,
+        &candidate,
+        &record,
+        DeleteOptions {
+            make_writable: *make_writable,
+            ..DeleteOptions::default()
+        },
+    );
+    assert_eq!(outcome.end, End::Complete);
+    assert!(
+        host.stat_path(target).is_none(),
+        "module cache still exists"
+    );
+    let chmods: Vec<String> = host
+        .trace()
+        .iter()
+        .filter(|call| call.op == Op::Fchmod)
+        .map(|call| {
+            call.path
+                .as_ref()
+                .expect("fchmod path")
+                .display()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        chmods,
+        ["/home/mark/go/pkg/mod", "/home/mark/go/pkg/mod/example"]
+    );
+}
+
+/// A Nix evaluator with an eval-cache SQLite file open protects only that
+/// named cache entry. This models the generic in-use rule; the separate
+/// container acceptance check must establish that real Nix keeps the fd
+/// open while evaluating.
+#[test]
+fn nix_user_cache_keeps_an_eval_cache_with_an_open_sqlite_file() {
+    let entries = "  /usr/bin/nix: {}\n  /home/mark/.cache/nix/eval-cache-v6: {.: {}, db.sqlite: {size: 1K}}\n  /home/mark/.cache/nix/tarball-cache: {.: {}, tar: {size: 1K}}\n";
+    let evaluator = "processes:\n  - {pid: 42, exe: /usr/bin/nix, cwd: /home/mark, maps: [/usr/bin/nix], fds: [{path: /home/mark/.cache/nix/eval-cache-v6/db.sqlite}], environ: [PATH=/usr/bin]}\n";
+    let busy = host(&yaml(&format!("{entries}{evaluator}")));
+    let request = built_in_request("profile:nix-user-cache", "/home/mark");
+    let report = dry_run(&busy, &request);
+    assert_eq!(
+        reason_of(&report, "/home/mark/.cache/nix/eval-cache-v6"),
+        Some(Some("in_use"))
+    );
+    assert_eq!(
+        reason_of(&report, "/home/mark/.cache/nix/tarball-cache"),
+        Some(None)
+    );
+    nothing_locked_or_deleted(&busy);
+
+    let idle = host(&yaml(entries));
+    let report = dry_run(&idle, &request);
+    assert_eq!(
+        reason_of(&report, "/home/mark/.cache/nix/eval-cache-v6"),
+        Some(None)
+    );
 }
 
 fn dry_run(host: &ModelHost, request: &Request) -> Report {
@@ -322,7 +521,7 @@ fn roots_required_profiles_look_where_roots_say_and_list_a_candidate_once() {
     let report = dry_run(
         &host,
         &request(
-            "profile:pytest-cache",
+            "profile:pytest-cache-fixture",
             &["/home/mark/src", "/home/mark"],
             "/home/mark",
         ),

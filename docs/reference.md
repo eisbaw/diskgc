@@ -165,7 +165,7 @@ stderr (`diskgc: config PATH`).
 - `list`: every profile, one row each, in one aligned table, the values
   of `ORIGIN`, `ROLE`, `KIND`, `ACTION` and `CHECKOUTS` spelled as in the
   JSON below so the table can be grepped: `NAME`,
-  `ORIGIN` (`built_in` or `user`), `ROLE` (`source`: selected as
+  `ORIGIN` (`built_in`, `user`, or `user_override`), `ROLE` (`source`: selected as
   `profile:NAME`; `filter`: `filter:NAME`), `CATEGORY`, `KIND`, `ACTION`
   (`delete`, `delete make_writable`, `command PROGRAM`, where `PROGRAM` is
   the one `env` runs for an `[env, NAME=value, ...]` command, or
@@ -175,7 +175,7 @@ stderr (`diskgc: config PATH`).
   says `checkouts: allow` is marked), `DESCRIPTION`; `-` where a column
   does not apply (a filter has no kind, action, roots or checkouts).
   Sources come first, by name, then filters, the shortest `idle_for`
-  first. Overrides are marked once `override: true` exists (task-17).
+  first. An `override: true` replacement has ORIGIN `user_override`.
 - `show NAME`: the profile as YAML in the schema of Profiles, as diskgc
   understood it: a comment line saying where it comes from, then the
   profile as a list item with every default spelled out (`kind`,
@@ -183,16 +183,23 @@ stderr (`diskgc: config PATH`).
   fixed action (`cargo-target`'s lock protocol) is a comment, since the
   schema takes no `action` there. Pasted under a config's `profiles:`,
   it loads as the same profile (a built-in's name needs `override: true`
-  there, task-17). An unknown `NAME` is exit 2, naming the close names
+  there). An unknown `NAME` is exit 2, naming the close names
   (those containing it or contained in it, then the fewest edits away,
   at most two) or, without any, pointing to `profiles list`.
-- `test`: run every profile's `examples` against an in-memory model;
-  exit 1 on any failure. Not in this build yet (task-17): exit 2.
-- Exit codes of `list` and `show`: 0 when the list or the profile was
+- `test`: run every source profile's path `examples` against an in-memory
+  model of path, entry type and direct marker files. The abstract uid is
+  1000; `{uid}` in an example is expanded to it. A string example has the
+  profile's declared type (directory for `any`) and its required `has`
+  marker, so type and marker changes need separate model/golden fixtures.
+  Structural kinds and filters have no path examples. Human output reports
+  every failure; `--json` prints `config`, `status` (`passed | failed`),
+  `exit_code`, `profiles` (count), and `failures` (strings). Exit 0 when
+  all examples pass, 1 when any fails.
+- Exit codes of `list`, `show` and `test`: 0 when the list or profile was
   printed; 2 for a usage error, a startup check that fails (as for every
   command but `--help`, `--version` and `check`), a configuration that is
   missing (when given) or does not load, or an unknown `NAME`. Nothing
-  else. (`test` is exit 2 in this build.)
+  else. `test` also exits 1 on a failing example.
 
 `--json` prints exactly one JSON object on stdout, for every exit code
 (any argument `--json` asks for it, as for `ensure`). A profile is the
@@ -200,7 +207,7 @@ same object in `list` and `show`: every field of the schema, always
 present, `null` where the profile's role or kind has none. Values that are
 YAML identifiers keep their YAML spelling (kind names, `delete`,
 `command`, `dir`); values only the JSON has are snake_case, like the
-report's enum values (`status`, `reason`): `built_in`,
+report's enum values (`status`, `reason`): `built_in`, `user_override`,
 `cargo_lock_protocol`. (The report's `operation` is human-readable text,
 not one of these.)
 `config` is the configuration file read, `null` for none. `list` holds
@@ -218,7 +225,8 @@ under `profile`:
   "config": null,
   "profile": {
     "name": "zephyr-run",
-    "origin": "built_in | user",
+    "origin": "built_in | user | user_override",
+    "override": false,
     "role": "source | filter",
     "category": "build",
     "description": "Zephyr test runs left in /tmp",
@@ -772,6 +780,7 @@ listed as planned, not shipped.
 |---|---|---|---|
 | test | `pytest-tmp` | pytest's test dirs `pytest-of-*/pytest-*/*` in `/tmp`, `/var/tmp`, and one level down (`nix-shell.*/pytest-of-*/pytest-*/*`, `tmp.*/...`); one candidate per test dir (below the list); `checkouts: allow`: pytest deletes these dirs itself (below the list), so a repository a test made there is a fixture | `delete` |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
+| nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start) | `delete` |
 | nix | `nix-shell-tmpdir` | `/tmp/nix-shell.*` (a shell's `TMPDIR`) | `delete` |
 | nix | `nix-garbage` | dead store paths | Nix GC |
@@ -782,7 +791,9 @@ listed as planned, not shipped.
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
 | browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
+| caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
+| python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | jest's cache dir; `playwright*` in `/tmp` and nix-shell temp dirs; `node-compile-cache` in `/tmp` and nix-shell temp dirs | `delete` |
 | c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; one holding a checkout is refused anyway, see [`contains_checkout`](safety.md#the-eligibility-walk-mandatory-per-candidate); roots required) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
@@ -825,6 +836,22 @@ listed as planned, not shipped.
 - Gradle and Maven caches are protected only by the generic open-file
   checks; a Gradle daemon that is idle may hold nothing open. Use them in
   pressure tiers.
+- `nix-user-cache`, `go-mod-cache` and `bun-cache` use plain deletion because
+  Nix-installed versions of their tools may be absent from a long-running
+  diskgc service's `PATH`. The exact cache directories were checked against
+  Nix 2.34.8, Go 1.26.7 (`go env GOMODCACHE`), and Bun 1.3.3 (`bun pm
+  cache`). Bun 1.3.3 reports `.bun/install/cache` by default; setting
+  `BUN_INSTALL_CACHE_DIR` to the second path makes `bun pm cache` report that
+  path, and it is populated on this machine. These caches need a network fetch
+  to rebuild and may make offline builds fail until repopulated. Choose an
+  idle or pressure tier. `go-mod-cache` needs `make_writable` because Go
+  stores downloaded modules in read-only directories. Each source takes a
+  supplied home root, not an arbitrary project root. These profiles match
+  only the listed directories; they do not infer redirected cache locations
+  from environment variables.
+- `pytest-cache` finds only `.pytest_cache` through three directory levels
+  below each supplied root. Supply project roots for deeper trees. It
+  deletes pytest's result cache, which pytest recreates on the next run.
 - Profiles that find at any depth under a project root (`pytest-cache`,
   `cmake-build`, `west-build`) cannot use `**`; they list depths explicitly
   or take one root per project. Settled when they are verified.
@@ -841,7 +868,8 @@ profile was renamed.
 
 - The config's `profiles:` list adds profiles. A user profile with the name
   of a built-in must say `override: true`; otherwise it is a load-time
-  error, so nobody shadows a built-in by accident.
+  error, so nobody shadows a built-in by accident. `override: true` with
+  no built-in of that name is also an error, to catch misspelled targets.
 - A user profile of kind `fs` carries `examples` with at least one
   `match`, like a built-in: the examples are what `profiles test` checks.
 - `diskgc profiles test` runs every profile's `examples` against an

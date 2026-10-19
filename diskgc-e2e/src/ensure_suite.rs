@@ -73,6 +73,48 @@ pub(crate) fn report(run: &Run) -> Result<Value, String> {
     serde_json::from_str(lines[0]).map_err(|e| format!("{e}: {:?}", lines[0]))
 }
 
+/// The shipped Go module cache profile must carry `make_writable` through
+/// `ensure` to the real kernel deletion path. Go's downloaded module trees
+/// contain read-only directories; the unprivileged tester cannot empty this
+/// fixture without that option. The oracle bounds every deletion to `mod`.
+pub fn go_mod_cache_builtin_deletes_a_read_only_module_tree(ctx: &Ctx) -> TestResult {
+    let home = &ctx.home;
+    home.mkdirs("go/pkg/mod/example", 0o755, TESTER)?;
+    home.write_file(
+        "go/pkg/mod/example/source.go",
+        b"package example\n",
+        0o644,
+        TESTER,
+    )?;
+    home.chmod("go/pkg/mod/example", 0o555)?;
+    home.chmod("go/pkg/mod", 0o555)?;
+    let candidate = home.path("go/pkg/mod");
+    let oracle = Oracle::arm(Fixture::new().eligible(candidate.clone()))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:go-mod-cache",
+            "--roots",
+            "/home/tester",
+            "/home/tester",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    ensure!(!candidate.exists(), "read-only Go module cache remains");
+    let r = report(&run)?;
+    let actions = column(&r, "actions", "candidate");
+    ensure!(
+        actions == [&Value::from("/home/tester/go/pkg/mod")],
+        "{actions:?}"
+    );
+    verdict.assert_clean()
+}
+
 /// `field` of every entry of the report's list `list`.
 pub(crate) fn column<'a>(report: &'a Value, list: &str, field: &str) -> Vec<&'a Value> {
     report[list]

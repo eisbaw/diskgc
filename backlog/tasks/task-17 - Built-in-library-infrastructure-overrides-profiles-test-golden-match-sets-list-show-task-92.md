@@ -3,10 +3,10 @@ id: TASK-17
 title: >-
   Built-in library infrastructure: overrides, profiles test, golden match sets
   (list/show: task-92)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-19 12:49'
+updated_date: '2026-10-19 22:57'
 labels:
   - wave-2
   - config
@@ -25,12 +25,12 @@ Why: the library must grow without silently changing meaning. Implement override
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shadowing a built-in without override: true is a load error
-- [ ] #2 Changing a built-in's pattern without renaming fails the golden-set test (proved on a scratch profile)
-- [ ] #3 profiles test exits 1 on a failing example
-- [ ] #4 Golden sets also cover the profiles shipped in wave 1 (cargo-target and the idle-* filters)
-- [ ] #5 profiles test matches examples on paths in diskgc-core (it does not depend on the test-only model crate)
-- [ ] #6 profiles list marks every profile that says checkouts: allow, and profiles show prints checkouts for every source (the default spelled out), as docs/reference.md (profiles command) says (moved from task-80 AC #5)
+- [x] #1 Shadowing a built-in without override: true is a load error
+- [x] #2 Changing a built-in's pattern without renaming fails the golden-set test (proved on a scratch profile)
+- [x] #3 profiles test exits 1 on a failing example
+- [x] #4 Golden sets also cover the profiles shipped in wave 1 (cargo-target and the idle-* filters)
+- [x] #5 profiles test matches examples on paths in diskgc-core (it does not depend on the test-only model crate)
+- [x] #6 profiles list marks every profile that says checkouts: allow, and profiles show prints checkouts for every source (the default spelled out), as docs/reference.md (profiles command) says (moved from task-80 AC #5)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -47,9 +47,13 @@ From task-68: fs_kind::example_failures(source, uid) checks examples against the
 From task-80: profiles list marks every profile that says checkouts: allow, and profiles show always prints checkouts (the default spelled out as refuse): docs/reference.md, profiles command. Until these commands exist, the only place an allow shows is the ensure / --dry-run log line ('<tier>: profile `<name>` says `checkouts: allow`: ...'). Golden match sets are unaffected: checkouts does not change what a profile finds, only what its candidates may hold.
 
 From task-92 (2026-10-19): `profiles list` and `profiles show NAME` (human and --json) moved to task-92 and are implemented there (crates/diskgc-core/src/profile/describe.rs, wired in crates/diskgc/src/main.rs; contract in docs/reference.md, `profiles` command). AC #6 of this task is met by it: the list's CHECKOUTS column marks every `checkouts: allow`, and show spells `checkouts` out for every source (tests: profile::describe::tests::show_yaml_spells_out_checkouts_for_every_source, the CLI tests in crates/diskgc/tests/cli.rs). This task keeps: `override: true` (then mark overrides in the list: a column or an ORIGIN value, and a JSON field, documented in reference.md; show_yaml's note that a built-in's name needs `override: true` when pasted becomes true), `profiles test` (parse_profiles in main.rs returns NotYet task-17 for it today), the in-memory example model and the golden match sets. show_yaml renders a profile as schema YAML that loads back to the same Profile (round-trip test over the built-ins, test-actions.yaml and fs_kind/spike-profiles.yaml): the YAML rendering of Action that the task-8 note said was missing now exists there.
+
+2026-10-20 implementation checkpoint: override:true shadowing with load errors otherwise; profiles list/show/JSON mark overrides; profiles test checks in-core path/type/where examples with exit 1 and JSON failures; wave-1 cargo-target and seven idle filters have golden sets. Scratch mutation of cargo-target pattern changed golden set; restored. Infra isolated just check and integrated infra+four-cache just check passed; full e2e and independent reviews pending before AC/DoD/status closure.
+
+Final gate 2026-10-20: nix develop -c just check passed; nix develop -c just e2e passed 90/90; independent QA and MPED reviews GO. Scratch mutations to cargo-target and cache profile patterns made golden tests red and were restored.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

@@ -748,7 +748,7 @@ fn profiles_with_a_broken_or_missing_config_is_exit_2() {
 }
 
 /// Usage errors of `profiles` are exit 2, one JSON object with `--json`;
-/// `profiles test` says it is task-17's.
+/// `profiles test` checks path examples in core and reports all failures.
 #[test]
 fn profiles_usage_errors_are_exit_2() {
     for (args, needle) in [
@@ -756,7 +756,7 @@ fn profiles_usage_errors_are_exit_2() {
         (&["profiles", "show"], "show needs a NAME"),
         (&["profiles", "list", "x"], "list takes no NAME"),
         (&["profiles", "list", "--frob"], "unknown flag --frob"),
-        (&["profiles", "test"], "task-17"),
+        (&["profiles", "test", "x"], "test takes no NAME"),
     ] {
         let out = diskgc(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -768,4 +768,57 @@ fn profiles_usage_errors_are_exit_2() {
         let error = error_of(&out);
         assert!(error.contains(needle), "{with_json:?}: {error}");
     }
+}
+
+#[test]
+fn profiles_test_exits_one_on_failing_examples_in_human_and_json_modes() {
+    let tmp = TempDir::new("profile-test");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, "version: 1\nprofiles:\n  - name: scratch\n    find: {roots: [/tmp], paths: ['scratch-*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/other], no_match: [/tmp/scratch-oops]}\n").expect("write config");
+    let config = path.to_str().expect("UTF-8");
+    let out = diskgc(&["profiles", "test", "--config", config]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let human = text(&out.stdout);
+    assert!(
+        human.contains("scratch: match example /tmp/other was not found"),
+        "{human}"
+    );
+    assert!(
+        human.contains("scratch: no_match example /tmp/scratch-oops was found"),
+        "{human}"
+    );
+    let out = diskgc(&["profiles", "test", "--config", config, "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let data = json(&out);
+    assert_eq!(data["status"], "failed");
+    assert_eq!(data["exit_code"], 1);
+    assert_eq!(data["failures"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn profiles_test_passes_and_an_override_is_visible() {
+    let tmp = TempDir::new("profile-override");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, "version: 1\nprofiles:\n  - name: idle-1d\n    override: true\n    where: {idle_for: 2d}\n  - name: scratch\n    find: {roots: [/tmp], paths: ['scratch-*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/scratch-ok], no_match: [/tmp/other]}\n").expect("write config");
+    let config = path.to_str().expect("UTF-8");
+    let out = diskgc(&["profiles", "test", "--config", config, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let data = json(&out);
+    assert_eq!(data["status"], "passed");
+    assert_eq!(data["failures"].as_array().unwrap().len(), 0);
+    let out = diskgc(&["profiles", "show", "idle-1d", "--config", config, "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let profile = &json(&out)["profile"];
+    assert_eq!(profile["origin"], "user_override");
+    assert_eq!(profile["override"], true);
+    let out = diskgc(&["profiles", "show", "idle-1d", "--config", config]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stdout).contains("  override: true\n"));
+    let out = diskgc(&["profiles", "list", "--config", config]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stdout)
+            .lines()
+            .any(|line| line.starts_with("idle-1d ") && line.contains("user_override"))
+    );
 }
