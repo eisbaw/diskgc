@@ -83,6 +83,17 @@ pub enum EntryType {
     Any,
 }
 
+impl EntryType {
+    /// As the YAML (and the JSON of `profiles`) spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dir => "dir",
+            Self::File => "file",
+            Self::Any => "any",
+        }
+    }
+}
+
 /// `where:` (docs/reference.md, Predicates). Each predicate at most once.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

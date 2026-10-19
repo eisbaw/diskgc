@@ -16,7 +16,10 @@ diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR]
 diskgc watch  --tally-only [--config FILE] PATH
 diskgc check  [--config FILE]
 diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--config FILE] PATH...
-diskgc profiles list | show NAME | test   [--config FILE]
+diskgc profiles list [--json] [--config FILE]
+diskgc profiles show NAME [--json] [--config FILE]
+diskgc profiles test [--config FILE]
+diskgc --help | --version
 ```
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
@@ -94,7 +97,10 @@ runs it as written.
   would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
   interrupted); JSON `status` is `dry_run`.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
-  code including usage errors.
+  code including usage errors. Any argument `--json` (or `--json=...`, a
+  usage error) asks for it, wherever it stands, also where the parser takes
+  it as another flag's value (`--config --json`). `--help` (or `-h`) wins
+  over it: the help is printed as text, exit 0.
 
 ### `watch`
 
@@ -145,11 +151,123 @@ snapshot when one exists, otherwise it tallies.
 
 ### `profiles` command
 
-`list`: name, category, kind, description of every profile (built-in and
-user, marking overrides and every profile that says `checkouts: allow`).
-`show NAME`: the full YAML as diskgc understands it; for a source,
-`checkouts` is always shown (the default spelled out). `test`: run every
-profile's `examples` against an in-memory model; exit 1 on any failure.
+Read-only: takes no lock, measures nothing, deletes nothing. The library
+is the built-in profiles plus the configuration file's user profiles,
+found as described under Configuration file (its groups are not read).
+Without a configuration file (none found by the search), the built-ins
+alone, and no error. A given file (`--config`, `$DISKGC_CONFIG`) that
+is missing, or any file that does not load, is exit 2 with the same
+message `ensure` gives. The resolved configuration path is logged on
+stderr (`diskgc: config PATH`).
+
+- `list`: every profile, one row each, in one aligned table, the values
+  of `ORIGIN`, `ROLE`, `KIND`, `ACTION` and `CHECKOUTS` spelled as in the
+  JSON below so the table can be grepped: `NAME`,
+  `ORIGIN` (`built_in` or `user`), `ROLE` (`source`: selected as
+  `profile:NAME`; `filter`: `filter:NAME`), `CATEGORY`, `KIND`, `ACTION`
+  (`delete`, `delete make_writable`, `command PROGRAM`, where `PROGRAM` is
+  the one `env` runs for an `[env, NAME=value, ...]` command, or
+  `cargo_lock_protocol`), `ROOTS` (the fixed roots, comma-separated, or
+  `required`, which the JSON says as `find.roots_required: true`),
+  `CHECKOUTS` (`refuse` or `allow`, so every profile that
+  says `checkouts: allow` is marked), `DESCRIPTION`; `-` where a column
+  does not apply (a filter has no kind, action, roots or checkouts).
+  Sources come first, by name, then filters, the shortest `idle_for`
+  first. Overrides are marked once `override: true` exists (task-17).
+- `show NAME`: the profile as YAML in the schema of Profiles, as diskgc
+  understood it: a comment line saying where it comes from, then the
+  profile as a list item with every default spelled out (`kind`,
+  `checkouts`, a command's resolved `cwd`, empty `no_match`). A kind's
+  fixed action (`cargo-target`'s lock protocol) is a comment, since the
+  schema takes no `action` there. Pasted under a config's `profiles:`,
+  it loads as the same profile (a built-in's name needs `override: true`
+  there, task-17). An unknown `NAME` is exit 2, naming the close names
+  (those containing it or contained in it, then the fewest edits away,
+  at most two) or, without any, pointing to `profiles list`.
+- `test`: run every profile's `examples` against an in-memory model;
+  exit 1 on any failure. Not in this build yet (task-17): exit 2.
+- Exit codes of `list` and `show`: 0 when the list or the profile was
+  printed; 2 for a usage error, a startup check that fails (as for every
+  command but `--help`, `--version` and `check`), a configuration that is
+  missing (when given) or does not load, or an unknown `NAME`. Nothing
+  else. (`test` is exit 2 in this build.)
+
+`--json` prints exactly one JSON object on stdout, for every exit code
+(any argument `--json` asks for it, as for `ensure`). A profile is the
+same object in `list` and `show`: every field of the schema, always
+present, `null` where the profile's role or kind has none. Values that are
+YAML identifiers keep their YAML spelling (kind names, `delete`,
+`command`, `dir`); values only the JSON has are snake_case, like the
+report's enum values (`status`, `reason`): `built_in`,
+`cargo_lock_protocol`. (The report's `operation` is human-readable text,
+not one of these.)
+`config` is the configuration file read, `null` for none. `list` holds
+the profiles in the order of the table, each the object `show` prints
+under `profile`:
+
+```json
+{"config": "/home/mark/.config/diskgc/config.yaml", "profiles": []}
+```
+
+`show NAME`:
+
+```json
+{
+  "config": null,
+  "profile": {
+    "name": "zephyr-run",
+    "origin": "built_in | user",
+    "role": "source | filter",
+    "category": "build",
+    "description": "Zephyr test runs left in /tmp",
+    "kind": "fs",
+    "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "type": "dir | file | any"},
+    "where": {"idle_for": null, "has": null, "has_not": null},
+    "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
+    "checkouts": "refuse | allow",
+    "examples": {"match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
+    "verified_with": null
+  }
+}
+```
+
+- `role` says how a selection names the profile: `source` as
+  `profile:NAME`, `filter` as `filter:NAME`.
+- `kind`, `find`, `action`, `checkouts` and `examples` are `null` for a
+  filter; `examples` is also `null` for `cargo-target`, which takes none;
+  `verified_with` is set on built-in sources only.
+- `find.roots` is the list of fixed roots, or `null` when
+  `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
+  supplies them); `find.paths` and `find.type` are `null` for
+  `cargo-target`.
+- `where` always has its three predicates, `null` when unused;
+  `idle_for` is a duration (`3d`).
+- `action` has every field: `make_writable` (a boolean) for `delete`;
+  `command` (the argv) and `cwd` (`candidate`, `parent`, or `null` when
+  it is decided per candidate: `type: any` without `cwd`) for `command`;
+  neither for `cargo_lock_protocol`. Later kinds add their own `type`.
+- On an error (exit 2): `{"status": "usage_error", "exit_code": 2,
+  "error": "message"}`, the message as on stderr; `status` is the field
+  `ensure`'s report has too. Every command but `ensure` fails with this
+  object under `--json`.
+
+The JSON of `profiles` is a pre-freeze addition, reviewed with the rest
+at the contract freeze (task-26).
+
+`diskgc --help` (or `-h`, anywhere on the command line: `diskgc profiles
+list --help` is the same) prints the usage, then a short "Start here"
+block so an agent can begin from the binary alone: a dry-run example
+first, what `PATH` and `--roots` are, that `--min-free` is required also
+with `--dry-run`, that `ensure` without `--dry-run` deletes, the `--json`
+promise, and `ensure`'s exit codes, with the dry run's exit 0 whatever
+the goal (read `target_met`). It ends with a Profiles
+section generated from the built-in library at run time: one line per
+built-in source profile (name, category, description, and `(roots
+required: --roots DIR)` where it applies), the built-in filters on one
+line, then where to learn more (user profiles are listed by `diskgc
+profiles list`, details by `diskgc profiles show NAME`, machine-readable
+with `--json`). It reads no configuration. `--help` and `--version` exit
+0, and print text also when `--json` is given: help wins over `--json`.
 
 ### `check`
 
@@ -239,7 +357,9 @@ JSON result (field names are part of the contract):
   its walk was complete, so a size would be a partial count); `checkouts`
   is the source profile's setting the candidate was judged under (`allow`:
   it may hold a version-control checkout, see
-  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
+  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate));
+  `operation` is human-readable text (`cargo lock protocol`, a command's
+  argv), not an enum: it is for reading, not for matching.
 - `avail_delta_bytes` is signed: the observed net change in available space
   around an action, never "bytes freed by this action" (see
   [architecture.md](architecture.md#measuring-space)); `null` when a
@@ -639,7 +759,8 @@ not met).
 
 ### Built-in profile library
 
-Shipped inside the binary as YAML data, listed with `diskgc profiles list`.
+Shipped inside the binary as YAML data, listed with `diskgc profiles list`
+and at the end of `diskgc --help`.
 A built-in profile ships only with `examples`, model tests, structural
 fixtures where it relies on markers, and a `verified_with` line naming the
 tool version it was checked against on a real system. Every row below is a

@@ -3,8 +3,9 @@
 //!
 //! So far: `ensure` with `--select` (one `cargo-target` tier), `--dry-run`
 //! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
-//! plus `--version` and `--help`. The other
-//! commands exit 2 saying which task brings them.
+//! `profiles list` and `profiles show NAME` (task-92), plus `--version`
+//! and `--help`, whose Profiles section is rendered from the built-in
+//! library. The other commands exit 2 saying which task brings them.
 //!
 //! The flow of `ensure`, every step before the next:
 //!
@@ -17,6 +18,10 @@
 //! 5. the executor: `dry_run` (given the host as a plain `Host`) or
 //!    `ensure` (as a `Delete`, which asks the sandbox gate first).
 //!
+//! `profiles list | show` read the configuration the same way (step 2 and
+//! 4, its tiers ignored) and print the library's profiles
+//! (`diskgc_core::profile::describe`).
+//!
 //! stdout carries only the result (`--json`: exactly one object, for every
 //! exit code); stderr carries progress logs and errors.
 
@@ -28,7 +33,8 @@ use std::time::Duration;
 use diskgc_core::config::{self, Config, Env, Lookup, MAX_CONFIG_BYTES};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
-use diskgc_core::profile::Library;
+use diskgc_core::profile::{Library, describe};
+use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
@@ -44,16 +50,32 @@ const USAGE: &str = "\
 usage: diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
                      [--tally-budget DUR] [--no-index] --select EXPR [--roots DIR]...
                      [--dry-run] [--json] [--config FILE] [--allow-root] PATH
+       diskgc profiles list [--json] [--config FILE]
+       diskgc profiles show NAME [--json] [--config FILE]
        diskgc --version
        diskgc --help
+
+Start here, with a dry run (it reads only and deletes nothing):
+  diskgc ensure --dry-run --json --min-free 50G \\
+      --select 'profile:cargo-target && filter:idle-3d' --roots DIR PATH
+PATH: the directory whose filesystem must have --min-free available (that
+  filesystem is measured and freed); `roots: required` profiles look only
+  in --roots DIR. --min-free is required, also with --dry-run.
+Without --dry-run, ensure DELETES what the selection finds and the safety
+  checks allow, until the goal is met.
+--json prints exactly one JSON object on stdout for every exit; --help
+  prints the help as text.
+Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
+  target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
+  holds the lock (retry later), 124 deadline, 130/143 signal.
 
 This build runs `ensure --select` with one source profile term
 (optionally `&& filter:idle-...`): `profile:cargo-target`, or, with
 --dry-run only, a kind fs profile from the config (its delete is task-18);
-`watch`, `check`, `survey`, `profiles` and config tiers arrive with later
-tasks. PATH and every DIR are absolute.
+`watch`, `check`, `survey`, `profiles test` and config tiers arrive with
+later tasks. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
-The CLI contract is docs/reference.md.
+The full contract is docs/reference.md in diskgc's source tree.
 ";
 
 /// What the command line asks for. Kept separate from acting on it so the
@@ -63,6 +85,7 @@ enum Invocation {
     Version,
     Help,
     Ensure(EnsureArgs),
+    Profiles(ProfilesArgs),
     /// A command of the contract that this build does not have yet.
     NotYet {
         command: String,
@@ -84,30 +107,56 @@ struct EnsureArgs {
     select: Option<String>,
     roots: Vec<String>,
     dry_run: bool,
-    json: bool,
     config: Option<OsString>,
     allow_root: bool,
     path: PathBuf,
 }
 
+/// `profiles list | show NAME`'s arguments. Whether the output is JSON is
+/// [`json_requested`]'s, for every command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfilesArgs {
+    command: ProfilesCommand,
+    config: Option<OsString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfilesCommand {
+    List,
+    Show(String),
+}
+
 /// The commands of docs/reference.md this build does not run yet, and
 /// the task that brings each.
-const NOT_YET: [(&str, &str); 4] = [
+const NOT_YET: [(&str, &str); 3] = [
     ("watch", "task-32"),
     ("check", "task-15"),
     ("survey", "task-38"),
-    ("profiles", "task-17"),
 ];
 
+/// Whether the command line asks for JSON: any argument `--json`, or
+/// `--json=...` (then a usage error). Decided on the raw arguments, before
+/// they are understood, so that every exit prints one JSON object, a usage
+/// error included, also when `--json` ended up as another flag's value
+/// (`--config --json`) (docs/reference.md, `ensure` and `profiles`).
+fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .any(|a| a == "--json" || a.as_encoded_bytes().starts_with(b"--json="))
+}
+
 fn parse(args: &[OsString]) -> Invocation {
+    // Help wins wherever it is asked for (`profiles list --help`).
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Invocation::Help;
+    }
     match args {
         [flag] if flag == "--version" || flag == "-V" => Invocation::Version,
-        [flag] if flag == "--help" || flag == "-h" => Invocation::Help,
         [] => Invocation::UsageError("no command given".to_owned()),
         [command, rest @ ..] if command == "ensure" => match parse_ensure(rest) {
             Ok(args) => Invocation::Ensure(args),
             Err(why) => Invocation::UsageError(format!("ensure: {why}")),
         },
+        [command, rest @ ..] if command == "profiles" => parse_profiles(rest),
         [command, ..] => match NOT_YET.iter().find(|(name, _)| command == name) {
             Some((name, task)) => Invocation::NotYet {
                 command: (*name).to_owned(),
@@ -122,6 +171,63 @@ fn parse(args: &[OsString]) -> Invocation {
             )),
         },
     }
+}
+
+/// `profiles list | show NAME | test` (docs/reference.md, `profiles`
+/// command), flags before or after the words; `test` is task-17's.
+fn parse_profiles(args: &[OsString]) -> Invocation {
+    let usage = |why: String| Invocation::UsageError(format!("profiles: {why}"));
+    let (mut json, mut config, mut words) = (false, None, Vec::new());
+    let mut rest = args.iter();
+    let mut flags = || -> Result<(), String> {
+        while let Some(arg) = rest.next() {
+            let Some(flag) = arg.to_str().filter(|a| a.starts_with('-')) else {
+                words.push(text(arg)?.to_owned());
+                continue;
+            };
+            match flag.split_once('=') {
+                // Validated only: the output is `json_requested`'s.
+                None if flag == "--json" => {
+                    if std::mem::replace(&mut json, true) {
+                        return Err("--json is given twice".to_owned());
+                    }
+                }
+                Some(("--json", _)) => return Err("--json takes no value".to_owned()),
+                None if flag == "--config" => {
+                    let value = rest.next().ok_or("--config needs a value")?;
+                    set(&mut config, flag, Ok(value.clone()))?;
+                }
+                Some(("--config", value)) => set(&mut config, "--config", Ok(value.into()))?,
+                _ => return Err(format!("unknown flag {flag}")),
+            }
+        }
+        Ok(())
+    };
+    if let Err(why) = flags() {
+        return usage(why);
+    }
+    let Some((sub, names)) = words.split_first() else {
+        return usage("list, show NAME or test is required".to_owned());
+    };
+    let command = match (sub.as_str(), names) {
+        ("test", _) => {
+            return Invocation::NotYet {
+                command: "profiles test".to_owned(),
+                task: "task-17",
+            };
+        }
+        ("list", []) => ProfilesCommand::List,
+        ("list", more) => return usage(format!("list takes no NAME: {}", more.join(" "))),
+        ("show", [name]) => ProfilesCommand::Show(name.clone()),
+        ("show", []) => return usage("show needs a NAME".to_owned()),
+        ("show", more) => return usage(format!("show takes one NAME, not {}", more.len())),
+        (other, _) => {
+            return usage(format!(
+                "unknown subcommand {other}: list, show NAME or test"
+            ));
+        }
+    };
+    Invocation::Profiles(ProfilesArgs { command, config })
 }
 
 /// Text of a flag's value; sizes, durations and expressions are text.
@@ -240,7 +346,6 @@ fn parse_ensure(args: &[OsString]) -> Result<EnsureArgs, String> {
         select,
         roots,
         dry_run,
-        json,
         config,
         allow_root,
         path,
@@ -277,38 +382,47 @@ fn startup() -> Result<LinuxHost, String> {
     Ok(host)
 }
 
-/// The configuration this run uses (docs/reference.md, Configuration
-/// file): `None` when none is found and `--select` makes one optional.
-fn load_config(host: &LinuxHost, args: &EnsureArgs) -> Result<Option<Config>, String> {
+/// The configuration file (docs/reference.md, Configuration file), given
+/// by `flag` (`--config`), `$DISKGC_CONFIG` or found by the search: the
+/// lookup, and the configuration unless the search found no file (a
+/// given file that is missing is an error, never a fallback). Whether a
+/// missing configuration is an error is the command's choice.
+fn load_config(host: &LinuxHost, flag: Option<&OsStr>) -> Result<(Lookup, Option<Config>), String> {
     let env = Env {
         diskgc_config: std::env::var_os("DISKGC_CONFIG"),
         xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
         home: std::env::var_os("HOME"),
     };
-    let lookup = config::lookup(args.config.as_deref(), &env)?;
+    let lookup = config::lookup(flag, &env)?;
     for path in lookup.paths() {
         match host.read_config_file(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
-                return config::parse(path, &bytes)
-                    .map(Some)
-                    .map_err(|e| e.to_string());
+                let config = config::parse(path, &bytes).map_err(|e| e.to_string())?;
+                return Ok((lookup, Some(config)));
             }
             Err(e) if matches!(lookup, Lookup::Search(_)) && is_absent(&e) => continue,
             Err(e) => return Err(format!("config {}: {e}", path.display())),
         }
     }
-    if args.select.is_some() {
-        return Ok(None);
+    Ok((lookup, None))
+}
+
+/// `ensure`'s configuration: `None` when none is found and `--select`
+/// makes one optional.
+fn ensure_config(host: &LinuxHost, args: &EnsureArgs) -> Result<Option<Config>, String> {
+    match load_config(host, args.config.as_deref())? {
+        (_, Some(config)) => Ok(Some(config)),
+        (_, None) if args.select.is_some() => Ok(None),
+        (lookup, None) => Err(format!(
+            "no configuration file found (tried {}); ensure without --select needs one",
+            lookup
+                .paths()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
-    Err(format!(
-        "no configuration file found (tried {}); ensure without --select needs one",
-        lookup
-            .paths()
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
 }
 
 /// A configuration file that is not there (as opposed to one that cannot
@@ -331,8 +445,7 @@ fn tier(args: &EnsureArgs, config: Option<&Config>, uid: u32) -> Result<Tier, St
     let library = match config {
         Some(config) => &config.library,
         None => {
-            builtin = Library::builtin()
-                .map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))?;
+            builtin = builtin_library()?;
             &builtin
         }
     };
@@ -356,7 +469,7 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(uid) => uid,
         Err(why) => return fail(why),
     };
-    let config = match load_config(&host, args) {
+    let config = match ensure_config(&host, args) {
         Ok(config) => config,
         Err(why) => return fail(why),
     };
@@ -387,6 +500,61 @@ fn ensure(args: &EnsureArgs) -> Report {
     }
 }
 
+/// The built-in profiles alone; an error is a bug in the shipped YAML
+/// (the tests load it).
+fn builtin_library() -> Result<Library, String> {
+    Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
+}
+
+/// `profiles list | show NAME`: the text or JSON for stdout, or why not
+/// (exit 2). The library is the built-ins plus the configuration's user
+/// profiles; without a configuration file (none found by the search), the
+/// built-ins alone. A given file that is missing, or any file that does
+/// not load, is an error, as for `ensure`.
+fn profiles(args: &ProfilesArgs, json: bool) -> Result<String, String> {
+    let host = startup()?;
+    let (_, config) = load_config(&host, args.config.as_deref())?;
+    let config_path = config.as_ref().map(|c| c.path.as_path());
+    if let Some(path) = config_path {
+        log(&format!("config {}", path.display()));
+    }
+    let builtin;
+    let library = match &config {
+        Some(config) => &config.library,
+        None => {
+            builtin = builtin_library()?;
+            &builtin
+        }
+    };
+    Ok(match (&args.command, json) {
+        (ProfilesCommand::List, false) => describe::list_text(library),
+        (ProfilesCommand::List, true) => describe::list_json(library, config_path).to_text() + "\n",
+        (ProfilesCommand::Show(name), json) => {
+            let profile = library
+                .get(name)
+                .ok_or_else(|| describe::unknown_name(library, name))?;
+            if json {
+                describe::show_json(profile, config_path).to_text() + "\n"
+            } else {
+                describe::show_yaml(profile, config_path)
+            }
+        }
+    })
+}
+
+/// The one JSON object of a failed command other than `ensure` (whose
+/// report says it): `status` as `ensure`'s usage-error report has it, the
+/// exit code (which `ensure`'s report does not carry: there it is only the
+/// process's), and the message (docs/reference.md, `profiles` command).
+fn error_json(why: &str) -> String {
+    Json::Obj(vec![
+        ("status", Json::str(Status::UsageError.as_str())),
+        ("exit_code", Json::U64(EXIT_USAGE.into())),
+        ("error", Json::str(why)),
+    ])
+    .to_text()
+}
+
 fn log(line: &str) {
     eprintln!("diskgc: {line}");
 }
@@ -404,22 +572,47 @@ fn finish(report: &Report, json: bool) -> ExitCode {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    // `--json` holds for every exit code, usage errors included
-    // (docs/reference.md, `ensure`): decided before the command line is
-    // understood.
-    let json = args.first().is_some_and(|c| c == "ensure") && args.iter().any(|a| a == "--json");
+    // `--json` holds for every exit code, usage errors included: decided
+    // before the command line is understood. `ensure` prints its report,
+    // every other command `error_json`.
+    let json = json_requested(&args);
+    let report = args.first().is_some_and(|c| c == "ensure");
     match parse(&args) {
         Invocation::Version => {
             println!("diskgc {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Invocation::Help => {
-            print!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Invocation::Ensure(args) => finish(&ensure(&args), args.json),
+        Invocation::Help => match builtin_library() {
+            Ok(library) => {
+                print!("{USAGE}{}", describe::help_section(&library));
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                print!("{USAGE}");
+                log(&format!("error: {why}"));
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Invocation::Ensure(args) => finish(&ensure(&args), json),
+        Invocation::Profiles(args) => match profiles(&args, json) {
+            Ok(out) => {
+                print!("{out}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                log(&format!("error: {why}"));
+                if json {
+                    println!("{}", error_json(&why));
+                }
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
         Invocation::NotYet { command, task } => {
-            eprintln!("diskgc: {command} is not implemented in this build yet ({task})");
+            let why = format!("{command} is not implemented in this build yet ({task})");
+            eprintln!("diskgc: {why}");
+            if json {
+                println!("{}", error_json(&why));
+            }
             ExitCode::from(EXIT_USAGE)
         }
         Invocation::UsageError(reason) => {
@@ -429,16 +622,21 @@ fn main() -> ExitCode {
                 Err(why) => why,
                 Ok(_) => reason,
             };
-            if json {
-                eprintln!("diskgc: error: {reason}");
-                println!(
-                    "{}",
-                    Report::new(Status::UsageError, None)
-                        .usage_error(reason)
-                        .to_json()
-                );
-            } else {
-                eprint!("diskgc: {reason}\n{USAGE}");
+            match (json, report) {
+                (true, true) => {
+                    eprintln!("diskgc: error: {reason}");
+                    println!(
+                        "{}",
+                        Report::new(Status::UsageError, None)
+                            .usage_error(reason)
+                            .to_json()
+                    );
+                }
+                (true, false) => {
+                    eprintln!("diskgc: error: {reason}");
+                    println!("{}", error_json(&reason));
+                }
+                (false, _) => eprint!("diskgc: {reason}\n{USAGE}"),
             }
             ExitCode::from(EXIT_USAGE)
         }
@@ -491,6 +689,99 @@ mod tests {
         );
     }
 
+    fn profiles_args(list: &[&str]) -> Result<ProfilesArgs, String> {
+        match parse(&args(&[&["profiles"], list].concat())) {
+            Invocation::Profiles(a) => Ok(a),
+            Invocation::UsageError(e) => Err(e),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn profiles_parses_list_and_show_with_their_flags_anywhere() {
+        assert_eq!(
+            profiles_args(&["list"]),
+            Ok(ProfilesArgs {
+                command: ProfilesCommand::List,
+                config: None
+            })
+        );
+        let show =
+            profiles_args(&["show", "--json", "cargo-target", "--config=/c.yaml"]).expect("parses");
+        assert_eq!(show.command, ProfilesCommand::Show("cargo-target".into()));
+        assert_eq!(show.config.as_deref(), Some(OsStr::new("/c.yaml")));
+        let list = profiles_args(&["--json", "--config", "/c.yaml", "list"]).expect("parses");
+        assert_eq!(list.command, ProfilesCommand::List);
+        assert_eq!(list.config.as_deref(), Some(OsStr::new("/c.yaml")));
+    }
+
+    /// Help is asked for anywhere on the line, also after a command.
+    #[test]
+    fn help_anywhere_is_help() {
+        for list in [
+            &["--help"][..],
+            &["-h"],
+            &["profiles", "--help"],
+            &["profiles", "list", "--help"],
+            &["profiles", "show", "-h"],
+            &["ensure", "--help"],
+            &["ensure", "--min-free", "50", "-h"],
+            &["watch", "--help"],
+        ] {
+            assert_eq!(parse(&args(list)), Invocation::Help, "{list:?}");
+        }
+    }
+
+    #[test]
+    fn json_is_requested_by_any_json_argument() {
+        for (list, want) in [
+            (&["ensure", "--json"][..], true),
+            (&["profiles", "list", "--json=yes"], true),
+            (&["profiles", "list", "--config", "--json"], true),
+            (&["--json"], true),
+            (&["profiles", "list", "--jsonx"], false),
+            (&["profiles", "list", "json"], false),
+            (&["profiles", "list"], false),
+        ] {
+            assert_eq!(json_requested(&args(list)), want, "{list:?}");
+        }
+    }
+
+    #[test]
+    fn profiles_test_is_task_17s() {
+        assert_eq!(
+            parse(&args(&["profiles", "test"])),
+            Invocation::NotYet {
+                command: "profiles test".into(),
+                task: "task-17"
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_profiles_arguments_are_usage_errors() {
+        for (list, needle) in [
+            (&[][..], "list, show NAME or test is required"),
+            (&["--json"], "list, show NAME or test is required"),
+            (&["frob"], "unknown subcommand frob"),
+            (&["list", "x"], "list takes no NAME: x"),
+            (&["show"], "show needs a NAME"),
+            (&["show", "a", "b"], "show takes one NAME, not 2"),
+            (&["list", "--json", "--json"], "--json is given twice"),
+            (&["list", "--json=yes"], "--json takes no value"),
+            (&["list", "--config"], "--config needs a value"),
+            (
+                &["list", "--config", "/a", "--config=/b"],
+                "--config is given twice",
+            ),
+            (&["list", "--all"], "unknown flag --all"),
+        ] {
+            let error = profiles_args(list).expect_err(&format!("{list:?}"));
+            assert!(error.starts_with("profiles: "), "{error}");
+            assert!(error.contains(needle), "{list:?}: {error}");
+        }
+    }
+
     #[test]
     fn ensure_parses_every_flag_in_both_spellings() {
         let a = ensure_args(&[
@@ -518,7 +809,7 @@ mod tests {
         assert_eq!(a.timeout, Some(Duration::from_secs(120)));
         assert_eq!(a.roots, ["/b", "/c"]);
         assert_eq!(a.config.as_deref(), Some(OsStr::new("/etc/x.yaml")));
-        assert!(a.dry_run && a.json && !a.allow_root);
+        assert!(a.dry_run && !a.allow_root);
         assert_eq!(a.path, PathBuf::from("/b"));
         let d = ensure_args(&["--min-free", "10%", "/p"]).expect("parses");
         assert_eq!(d.timeout, Some(DEFAULT_TIMEOUT));

@@ -223,6 +223,62 @@ pub fn ensure_as_root_without_allow_root_exits_2(ctx: &Ctx) -> TestResult {
     judged.assert_clean()
 }
 
+/// task-92: as root (uid 0 in the container's user namespace), `profiles
+/// list` and `show` work (exit 0, the built-ins, no configuration in the
+/// image), since they only read and print (docs/safety.md, Privileges),
+/// while `ensure` without `--allow-root` still refuses, exit 2, the same
+/// binary side by side. Nothing is deleted.
+pub fn profiles_work_as_root_while_ensure_refuses(ctx: &Ctx) -> TestResult {
+    work_dir(ctx)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let list = ctx.run_as_root(&ctx.diskgc(), &["profiles", "list", "--json"])?;
+    let show = ctx.run_as_root(
+        &ctx.diskgc(),
+        &["profiles", "show", "cargo-target", "--json"],
+    )?;
+    let ensure_run = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--dry-run",
+            "--json",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            "/tmp/w",
+            "/tmp/w",
+        ],
+    )?;
+    let judged = oracle.judge_runs(&[&list, &show, &ensure_run])?;
+    list.expect_code(0)?;
+    let listed = report(&list)?;
+    ensure!(listed["config"].is_null(), "{listed}");
+    let names: Vec<&str> = listed["profiles"]
+        .as_array()
+        .ok_or_else(|| format!("no profiles list: {listed}"))?
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    ensure!(names.contains(&"cargo-target"), "{names:?}");
+    show.expect_code(0)?;
+    let shown = report(&show)?;
+    ensure!(
+        shown["profile"]["checkouts"] == "allow" && shown["profile"]["origin"] == "built_in",
+        "{shown}"
+    );
+    ensure_run.expect_code(2)?;
+    ensure!(
+        ensure_run.stderr.contains("refuses to run as root"),
+        "{}",
+        ensure_run.stderr
+    );
+    let refused = report(&ensure_run)?;
+    ensure!(refused["status"] == "usage_error", "{refused}");
+    judged.assert_clean()
+}
+
 /// The host lock path holding something other than a regular file (a
 /// FIFO, a directory, a symlink to a regular file) is refused, exit 2, on a
 /// real kernel: the FIFO is never opened (an open for reading would block

@@ -1,5 +1,7 @@
 //! Behavioural tests of the built `diskgc` binary, outside the test
-//! containers (the dev shell and the Nix build sandbox).
+//! containers (the dev shell and the Nix build sandbox). The `profiles`
+//! tests compare its output with `diskgc-core`'s library, so a built-in
+//! added there is checked here without editing a test.
 //!
 //! **Nothing here may reclaim on the machine running the tests.** The only
 //! reclaiming `ensure` is task-10's AC #6, and it is shaped so that even a
@@ -8,10 +10,13 @@
 //! config is a file of the test's own. Every other run here is refused
 //! before the machine is measured (usage errors).
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use diskgc_core::config;
+use diskgc_core::profile::Library;
 use serde_json::Value;
 
 fn diskgc(args: &[&str]) -> std::process::Output {
@@ -270,4 +275,481 @@ fn a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate() {
         before,
         "a fixture object went or was replaced"
     );
+}
+
+// ---- task-92: `--help` and `profiles list | show` (agent onboarding)
+
+/// The message of the one JSON error object a failed command other than
+/// `ensure` prints, after checking the fields agents branch on.
+fn error_of(out: &std::process::Output) -> String {
+    let object = json(out);
+    assert_eq!(object["status"], "usage_error", "{object}");
+    assert_eq!(object["exit_code"], 2, "{object}");
+    assert_eq!(out.status.code(), Some(2));
+    object["error"].as_str().expect("an error").to_owned()
+}
+
+/// docs/reference.md, read from the source tree (the flake's
+/// workspace-tests source includes it).
+fn reference_md() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference.md");
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// The exit codes of docs/reference.md's `ensure` table (`130 / 143` is
+/// two).
+fn documented_exit_codes() -> BTreeSet<u32> {
+    let doc = reference_md();
+    let table = doc
+        .lines()
+        .skip_while(|l| *l != "## Exit codes (`ensure`)")
+        .skip_while(|l| !l.starts_with("| Code |"))
+        .skip(2)
+        .take_while(|l| l.starts_with('|'));
+    let codes: BTreeSet<u32> = table
+        .flat_map(|row| {
+            let cell = row.split('|').nth(1).expect("a code cell").to_owned();
+            cell.split('/')
+                .map(|c| c.trim().parse::<u32>().expect("a code"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!codes.is_empty(), "no exit code table in docs/reference.md");
+    codes
+}
+
+/// task-92 round 2 (M1): `--help` lets an agent start on its own: a dry
+/// run first, what PATH is, that --min-free is required, that ensure
+/// without --dry-run deletes, the --json promise, and one exit-code line
+/// holding exactly the codes of docs/reference.md's table.
+#[test]
+fn help_starts_an_agent_with_a_dry_run() {
+    let out = diskgc(&["--help"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let help = text(&out.stdout);
+    let (_, start) = help
+        .split_once("\nStart here")
+        .unwrap_or_else(|| panic!("no Start here block:\n{help}"));
+    let example = start.lines().nth(1).expect("the example's first line");
+    assert!(
+        example
+            .trim_start()
+            .starts_with("diskgc ensure --dry-run --json --min-free"),
+        "the dry run comes first: {example}"
+    );
+    for needle in [
+        "--select 'profile:cargo-target && filter:idle-3d' --roots DIR PATH",
+        "PATH: the directory whose filesystem must have --min-free available",
+        "--min-free is required, also with --dry-run",
+        "Without --dry-run, ensure DELETES",
+        "--json prints exactly one JSON object on stdout for every exit; --help",
+        "prints the help as text",
+    ] {
+        assert!(start.contains(needle), "{needle:?}:\n{start}");
+    }
+    let mut lines = start
+        .lines()
+        .skip_while(|l| !l.starts_with("Exit codes (ensure): "));
+    let mut exit_line = lines.next().expect("an exit code line").to_owned();
+    for more in lines.take_while(|l| l.starts_with("  ")) {
+        exit_line.push(' ');
+        exit_line.push_str(more);
+    }
+    let exit_line = exit_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Each code with its label, the dry run's exit 0 explained.
+    for labelled in [
+        "0 met (--dry-run: 0 with status dry_run; read target_met)",
+        "1 exhausted",
+        "2 usage/config",
+        "3 error",
+        "75 another reclaim holds the lock (retry later)",
+        "124 deadline",
+        "130/143 signal",
+    ] {
+        assert!(exit_line.contains(labelled), "{labelled:?}: {exit_line}");
+    }
+    let codes: BTreeSet<u32> = exit_line
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.parse().expect("a number"))
+        .collect();
+    assert_eq!(codes, documented_exit_codes(), "{exit_line}");
+    assert!(
+        help.contains("(roots required: --roots DIR)"),
+        "the required-roots marker:\n{help}"
+    );
+}
+
+/// task-92 round 2 (M2): `-h` / `--help` anywhere is the full help (the
+/// Profiles section included), exit 0, nothing on stderr.
+#[test]
+fn help_anywhere_prints_the_full_help() {
+    let full = diskgc(&["--help"]);
+    assert_eq!(full.status.code(), Some(0));
+    for args in [
+        &["profiles", "--help"][..],
+        &["profiles", "list", "--help"],
+        &["profiles", "show", "cargo-target", "-h"],
+        &["ensure", "--help"],
+        &["ensure", "--min-free", "50", "--help"],
+    ] {
+        let out = diskgc(args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
+        assert_eq!(out.stdout, full.stdout, "{args:?}");
+    }
+    assert!(text(&full.stdout).contains("\nProfiles built in"));
+}
+
+/// task-92 round 2 (M3): `--json` gives one JSON object on every exit,
+/// also when the parser cannot take it as the flag: `--json=yes` and
+/// `--config --json` (where it is `--config`'s value).
+#[test]
+fn json_anywhere_gives_one_object() {
+    for (args, needle) in [
+        (
+            &["profiles", "list", "--json=yes"][..],
+            "--json takes no value",
+        ),
+        (
+            &["profiles", "list", "--config", "--json"],
+            "the configuration file must be an absolute path",
+        ),
+        (
+            &["profiles", "--json"],
+            "list, show NAME or test is required",
+        ),
+        (&["watch", "--json"], "not implemented in this build yet"),
+    ] {
+        let out = diskgc(args);
+        let error = error_of(&out);
+        assert!(error.contains(needle), "{args:?}: {error}");
+    }
+    for args in [
+        &["ensure", "--json=yes", "--min-free", "1G", "/x"][..],
+        &["ensure", "--min-free", "1G", "--config", "--json", "/x"],
+    ] {
+        let out = diskgc(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(json(&out)["status"], "usage_error", "{args:?}");
+    }
+}
+
+/// The built-in profiles, as the binary's library has them.
+fn builtin() -> Library {
+    Library::builtin().expect("the built-in profiles load")
+}
+
+/// The library `profiles` should show for a run whose JSON says it read
+/// `config` (`null`: none found, the built-ins alone). Normally `null`
+/// here; a machine with `/etc/diskgc/config.yaml` installed (which the
+/// search reaches, whatever `$XDG_CONFIG_HOME` says) is compared with
+/// that file instead.
+fn expected_library(config: &Value) -> Library {
+    match config.as_str() {
+        None => builtin(),
+        Some(path) => {
+            let bytes = std::fs::read(path).expect("read the config the binary read");
+            config::parse(Path::new(path), &bytes)
+                .expect("it loaded for the binary")
+                .library
+        }
+    }
+}
+
+fn names(library: &Library) -> BTreeSet<String> {
+    library.profiles().map(|p| p.name.clone()).collect()
+}
+
+/// The profile names of a `profiles list --json` object, each once.
+fn listed(list: &Value) -> BTreeSet<String> {
+    let entries = list["profiles"].as_array().expect("a profiles list");
+    let names: BTreeSet<String> = entries
+        .iter()
+        .map(|p| p["name"].as_str().expect("a name").to_owned())
+        .collect();
+    assert_eq!(names.len(), entries.len(), "a profile listed twice");
+    names
+}
+
+/// A config file holding user profiles, in a fresh temp dir.
+const USER_PROFILES: &str = "\
+version: 1
+profiles:
+  - name: zephyr-run
+    category: build
+    description: Zephyr test runs
+    find: {roots: [/tmp], paths: [\"zephyr-*-run.*\"], type: dir}
+    action: delete
+    examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH], no_match: [/tmp/zephyr-hal]}
+  - name: go-cache
+    find: {roots: required, paths: [go-build], type: dir}
+    action: {command: [env, \"GOCACHE={path}\", go, clean, -cache]}
+    examples: {match: [/home/u/go-build]}
+";
+
+fn user_config(tmp: &TempDir) -> (PathBuf, Library) {
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(&path, USER_PROFILES).expect("write");
+    let library = config::parse(&path, USER_PROFILES.as_bytes())
+        .expect("the test config loads")
+        .library;
+    (path, library)
+}
+
+/// task-92 AC #1 and #3: `--help` ends with a Profiles section naming
+/// every built-in profile. The test iterates the library, so a new
+/// built-in is checked without editing the help text or this test; a
+/// help text that names profiles by hand fails as soon as one is added.
+#[test]
+fn help_names_every_built_in_profile() {
+    let out = diskgc(&["--help"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    let help = text(&out.stdout);
+    assert!(help.starts_with("usage: diskgc ensure"), "{help}");
+    let (_, section) = help
+        .split_once("\nProfiles built in")
+        .unwrap_or_else(|| panic!("no Profiles section:\n{help}"));
+    let words: BTreeSet<&str> = section
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .collect();
+    let library = builtin();
+    for profile in library.profiles() {
+        assert!(
+            words.contains(profile.name.as_str()),
+            "--help does not name the built-in `{}`:\n{section}",
+            profile.name
+        );
+    }
+    for pointer in [
+        "`diskgc profiles list`",
+        "`diskgc profiles show NAME`",
+        "`--json`",
+    ] {
+        assert!(section.contains(pointer), "{pointer}:\n{section}");
+    }
+}
+
+/// task-92 AC #2 and #3: `profiles list --json` is one object listing the
+/// library's profiles, each once: the built-ins without a config file (no
+/// error), plus the config's user profiles with one.
+#[test]
+fn profiles_list_json_lists_the_library() {
+    let out = diskgc(&["profiles", "list", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let list = json(&out);
+    assert_eq!(listed(&list), names(&expected_library(&list["config"])));
+
+    let tmp = TempDir::new("list");
+    let (path, library) = user_config(&tmp);
+    let path_text = path.to_str().expect("UTF-8");
+    let out = diskgc(&["profiles", "list", "--config", path_text, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(&format!("config {path_text}")));
+    let list = json(&out);
+    assert_eq!(list["config"], path_text);
+    assert_eq!(listed(&list), names(&library));
+    assert!(listed(&list).is_superset(&names(&builtin())));
+    for entry in list["profiles"].as_array().expect("profiles") {
+        let name = entry["name"].as_str().expect("name");
+        let profile = library.get(name).expect("a profile of the library");
+        assert_eq!(entry["origin"], profile.origin.name(), "{name}");
+    }
+}
+
+/// The human listing: one header and one row per profile, each row
+/// starting with its name.
+#[test]
+fn profiles_list_is_one_table_row_per_profile() {
+    let tmp = TempDir::new("table");
+    let (path, library) = user_config(&tmp);
+    let out = diskgc(&[
+        "profiles",
+        "list",
+        "--config",
+        path.to_str().expect("UTF-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let table = text(&out.stdout);
+    let mut lines = table.lines();
+    let header = lines.next().expect("a header");
+    for column in [
+        "NAME",
+        "ORIGIN",
+        "ROLE",
+        "CATEGORY",
+        "KIND",
+        "ACTION",
+        "ROOTS",
+        "CHECKOUTS",
+    ] {
+        assert!(header.contains(column), "{header}");
+    }
+    let rows: BTreeSet<String> = lines
+        .map(|l| l.split_whitespace().next().expect("a name").to_owned())
+        .collect();
+    assert_eq!(rows, names(&library));
+    let zephyr = table
+        .lines()
+        .find(|l| l.starts_with("zephyr-run "))
+        .expect("the user profile's row");
+    for cell in ["user", "source", "build", "fs", "delete", "/tmp", "refuse"] {
+        assert!(zephyr.contains(cell), "{zephyr}");
+    }
+}
+
+/// task-92 AC #2: `show cargo-target --json` is its full definition:
+/// `checkouts: allow`, roots required, the kind's fixed action, the tool
+/// versions; it takes no examples (`null`). A user fs profile's examples
+/// are shown, `match` and `no_match`.
+#[test]
+fn profiles_show_json_is_the_full_definition() {
+    let out = diskgc(&["profiles", "show", "cargo-target", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = json(&out);
+    let cargo = &shown["profile"];
+    assert_eq!(cargo["name"], "cargo-target");
+    assert_eq!(cargo["origin"], "built_in");
+    assert_eq!(cargo["kind"], "cargo-target");
+    assert_eq!(cargo["checkouts"], "allow");
+    assert!(cargo["find"]["roots"].is_null(), "{cargo}");
+    assert_eq!(cargo["find"]["roots_required"], true);
+    assert_eq!(cargo["action"]["type"], "cargo_lock_protocol");
+    assert!(
+        cargo["examples"].is_null(),
+        "cargo-target takes no examples"
+    );
+    assert!(
+        cargo["verified_with"]
+            .as_str()
+            .is_some_and(|v| v.contains("cargo")),
+        "{cargo}"
+    );
+
+    let tmp = TempDir::new("show");
+    let (path, _) = user_config(&tmp);
+    let config = path.to_str().expect("UTF-8");
+    let out = diskgc(&[
+        "profiles",
+        "show",
+        "zephyr-run",
+        "--config",
+        config,
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let zephyr = &json(&out)["profile"];
+    assert_eq!(zephyr["origin"], "user");
+    assert_eq!(zephyr["checkouts"], "refuse", "the default, spelled out");
+    assert_eq!(
+        zephyr["examples"]["match"][0],
+        "/tmp/zephyr-h5e5-run.jTm9zGlH"
+    );
+    assert_eq!(zephyr["examples"]["no_match"][0], "/tmp/zephyr-hal");
+    assert_eq!(zephyr["find"]["paths"][0], "zephyr-*-run.*");
+    assert_eq!(zephyr["find"]["roots"][0], "/tmp");
+    assert_eq!(zephyr["find"]["roots_required"], false);
+
+    // The human form is YAML that spells the same out.
+    let out = diskgc(&["profiles", "show", "zephyr-run", "--config", config]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let yaml = text(&out.stdout);
+    for line in [
+        "- name: zephyr-run",
+        "  checkouts: refuse",
+        "    match: [/tmp/zephyr-h5e5-run.jTm9zGlH]",
+        "    no_match: [/tmp/zephyr-hal]",
+    ] {
+        assert!(yaml.lines().any(|l| l == line), "{line:?}:\n{yaml}");
+    }
+}
+
+/// An unknown name is exit 2, naming the close names; with `--json`, one
+/// object says so.
+#[test]
+fn profiles_show_of_an_unknown_name_is_exit_2() {
+    let out = diskgc(&["profiles", "show", "cargo"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("no profile is named `cargo`; close names: `cargo-target`"),
+        "{stderr}"
+    );
+    let out = diskgc(&["profiles", "show", "idle-5d", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = error_of(&out);
+    assert!(error.contains("`idle-1d`, `idle-2d`"), "{error}");
+}
+
+/// A broken config is exit 2 with the loader's message, as `ensure`
+/// reports it; a given config that is missing is exit 2, never a fallback
+/// to the built-ins.
+#[test]
+fn profiles_with_a_broken_or_missing_config_is_exit_2() {
+    let tmp = TempDir::new("broken");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(
+        &path,
+        "version: 1\nprofiles:\n  - name: x\n    find: {roots: [/tmp], paths: [a]}\n",
+    )
+    .expect("write");
+    let config = path.to_str().expect("UTF-8");
+    for args in [
+        &["profiles", "list", "--config", config][..],
+        &["profiles", "show", "cargo-target", "--config", config],
+    ] {
+        let out = diskgc(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty());
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains(&format!("invalid config {config}: profiles[0] (`x`)"))
+                && stderr.contains("kind fs needs `find.type`"),
+            "{stderr}"
+        );
+    }
+    let out = diskgc(&["profiles", "list", "--json", "--config", config]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = error_of(&out);
+    assert!(error.contains("kind fs needs `find.type`"), "{error}");
+
+    let out = diskgc(&[
+        "profiles",
+        "list",
+        "--config",
+        "/nonexistent-diskgc-test/config.yaml",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(text(&out.stderr).contains("ENOENT"));
+}
+
+/// Usage errors of `profiles` are exit 2, one JSON object with `--json`;
+/// `profiles test` says it is task-17's.
+#[test]
+fn profiles_usage_errors_are_exit_2() {
+    for (args, needle) in [
+        (&["profiles"][..], "list, show NAME or test"),
+        (&["profiles", "show"], "show needs a NAME"),
+        (&["profiles", "list", "x"], "list takes no NAME"),
+        (&["profiles", "list", "--frob"], "unknown flag --frob"),
+        (&["profiles", "test"], "task-17"),
+    ] {
+        let out = diskgc(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert!(text(&out.stderr).contains(needle), "{args:?}");
+        let with_json: Vec<&str> = args.iter().copied().chain(["--json"]).collect();
+        let out = diskgc(&with_json);
+        assert_eq!(out.status.code(), Some(2), "{with_json:?}");
+        let error = error_of(&out);
+        assert!(error.contains(needle), "{with_json:?}: {error}");
+    }
 }

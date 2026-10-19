@@ -274,12 +274,12 @@ pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
 /// Who the traced code under test runs as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum As {
-    /// `tester` (uid 1000): every test but the root refusal.
+    /// `tester` (uid 1000): every test but those run as root.
     Tester,
-    /// Container root (uid 0 in the user namespace), for the one check
-    /// that needs it: diskgc refusing to run as root
-    /// (docs/safety.md, Privileges). The program is exec'd by strace
-    /// directly, without `as-tester`.
+    /// Container root (uid 0 in the user namespace), for the checks that
+    /// need it: diskgc refusing to run as root, and the read-only commands
+    /// that run as root anyway (docs/safety.md, Privileges). The program
+    /// is exec'd by strace directly, without `as-tester`.
     Root,
 }
 

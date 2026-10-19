@@ -1289,7 +1289,11 @@ How it holds:
 ## Privileges
 
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
-  the laptop service runs as the owner, CI as the runner user.
+  the laptop service runs as the owner, CI as the runner user. `profiles
+  list` and `show` are exempt: they only read the configuration and
+  print, and run no command, so an agent in a root container can still
+  learn the profiles. As root they also show a configuration that `ensure
+  --allow-root` would refuse: the ownership checks below are not made.
 - Docker requires the `docker` group (root-equivalent; Docker's model, not
   ours). Nix GC goes through the Nix daemon as a normal user.
 - With `--allow-root`: an `owners:` list is required, command actions are

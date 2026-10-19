@@ -370,6 +370,12 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::ensure_as_root_without_allow_root_exits_2,
     },
     Test {
+        name: "profiles_work_as_root_while_ensure_refuses",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::profiles_work_as_root_while_ensure_refuses,
+    },
+    Test {
         name: "ensure_refuses_a_host_lock_that_is_no_regular_file",
         tier: Tier::Fast,
         expect: Expect::Pass,

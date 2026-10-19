@@ -13,10 +13,13 @@
 //!   `--roots` or a `protect` entry supplies.
 //! - [`idle`]: the `idle_for` predicate, how each kind measures it, and how
 //!   several combine in one term.
+//! - [`describe`]: what `diskgc --help` and `diskgc profiles list | show`
+//!   print about a library, as text and JSON.
 //!
 //! Everything here is pure: parsing a string and checking data. Nothing
 //! reads the machine; the built-ins are compiled in.
 
+pub mod describe;
 mod idle;
 mod load;
 mod roots;
@@ -53,12 +56,35 @@ pub struct Profile {
     pub body: Body,
 }
 
+impl Profile {
+    /// `source` (it has `find`: selected as `profile:NAME`) or `filter`
+    /// (only `where`: `filter:NAME`), as `profiles list` and its JSON spell
+    /// it.
+    pub fn role(&self) -> &'static str {
+        match self.body {
+            Body::Source(_) => "source",
+            Body::Filter(_) => "filter",
+        }
+    }
+}
+
 /// Where a profile comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     BuiltIn,
     /// The configuration file's `profiles:`.
     User,
+}
+
+impl Origin {
+    /// As `profiles list` and its JSON spell it (snake_case, like the
+    /// report's enums: a JSON-only value).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built_in",
+            Self::User => "user",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
