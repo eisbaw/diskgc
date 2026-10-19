@@ -410,6 +410,29 @@ impl State {
         )
     }
 
+    /// Mounts a fresh filesystem on the existing directory `spec.at` (an
+    /// event): the new mount's parent is the mount that directory is on.
+    pub fn mount_on(&mut self, spec: &crate::spec::MountEventSpec) -> Result<(), Fault> {
+        let on = self.lookup(&spec.at)?;
+        if self.inode(on).entries().is_none() {
+            return Err(Fault::Model(format!(
+                "mount: {} is not a directory",
+                spec.at.display()
+            )));
+        }
+        let dev = spec.dev.0;
+        let fs = Fs::new(dev, spec.fs.clone(), spec.size.0, 0, self.wall_now());
+        self.fss.insert(dev, fs);
+        self.mounts.push(Mount {
+            id: spec.id,
+            parent: Some(on.mnt),
+            dev,
+            on: Some(on),
+            read_only: false,
+        });
+        Ok(())
+    }
+
     pub fn mountinfo(&self) -> Vec<MountEntry> {
         self.mounts
             .iter()

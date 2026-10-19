@@ -334,8 +334,25 @@ fn image_exists(image_ref: &str) -> Result<bool, String> {
     }
 }
 
-/// `podman run` arguments shared by every container of a run.
-fn podman_run_args(config: &Config, name: &str, keep: bool) -> Vec<String> {
+/// The FUSE device, passed into the containers of
+/// [`crate::suite::FUSE_TESTS`] when the host has it.
+pub const FUSE_DEVICE: &str = "/dev/fuse";
+
+/// The `podman run` arguments that give test `name` the FUSE device: only a
+/// test that mounts FUSE gets it, and only when the host has one (a host
+/// without runs it without, and the test fails saying so, never skipped).
+fn fuse_device(name: &str) -> Vec<String> {
+    let base = name.split('@').next().unwrap_or(name);
+    if crate::suite::FUSE_TESTS.contains(&base) && Path::new(FUSE_DEVICE).exists() {
+        vec!["--device".to_owned(), FUSE_DEVICE.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `podman run` arguments shared by every container of a run, with `extra`
+/// options for this one (before the image).
+fn podman_run_args(config: &Config, name: &str, keep: bool, extra: &[String]) -> Vec<String> {
     let mut args: Vec<String> = [
         "run",
         "--name",
@@ -358,6 +375,7 @@ fn podman_run_args(config: &Config, name: &str, keep: bool) -> Vec<String> {
     if !keep {
         args.push("--rm".to_owned());
     }
+    args.extend_from_slice(extra);
     args.push(config.image_ref.clone());
     args.push(format!("{UNDER_TEST_BIN_DIR}/diskgc-e2e"));
     args
@@ -404,7 +422,7 @@ pub fn parse_listing(text: &str) -> Result<Vec<Listed>, String> {
 fn list_tests(config: &Config) -> Result<(Vec<Listed>, String), String> {
     let name = format!("diskgc-e2e-{}-list", std::process::id());
     let out = Command::new("podman")
-        .args(podman_run_args(config, &name, false))
+        .args(podman_run_args(config, &name, false, &[]))
         .arg("list")
         .stdin(Stdio::null())
         .output()
@@ -504,7 +522,12 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
         .map_err(|e| format!("create log {}: {e}", log.display()))
         .and_then(|(out, err)| {
             Command::new("podman")
-                .args(podman_run_args(config, &container, keep))
+                .args(podman_run_args(
+                    config,
+                    &container,
+                    keep,
+                    &fuse_device(&test.name),
+                ))
                 .args(["run", &test.name])
                 .stdin(Stdio::null())
                 .stdout(out)
@@ -674,6 +697,19 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Only the listed tests get the FUSE device, and every listed name is
+    /// a registered test (a renamed test would silently lose its device).
+    #[test]
+    fn only_the_fuse_tests_get_the_fuse_device() {
+        for name in crate::suite::FUSE_TESTS {
+            assert!(
+                crate::suite::TESTS.iter().any(|t| t.name == *name),
+                "{name} is not a registered test"
+            );
+        }
+        assert!(fuse_device("fs_reclaim_never_deletes_a_socket_or_fifo").is_empty());
     }
 
     const GLOBAL: &[&str] = &[

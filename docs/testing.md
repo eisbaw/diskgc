@@ -8,11 +8,13 @@ against a modelled host (in-process) or inside a rootless test container.
 One named exception proves the pre-release sandbox gate itself:
 `a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate`
 (`crates/diskgc/tests/cli.rs`) runs the built binary's reclaiming
-`ensure` on the host, and it touches only a fixture of its own: its roots
-and `PATH` are a fresh temp directory holding a fake Cargo target, its
-config a file of its own, its goal unreachable; the gate is expected to
-refuse (exit 2), and every fixture object must keep its inode. The other
-binary tests stop at usage errors before the machine is read.
+`ensure` on the host, once for kind `cargo-target` and once for kind
+`fs`, and it touches only a fixture of its own: the roots and `PATH` are
+a fresh temp directory holding a fake Cargo target and an old directory
+the config's `fs` user profile finds, the config a file of its own, the
+goal unreachable; the gate is expected to refuse (exit 2), and every
+fixture object must keep its inode. The other binary tests stop at usage
+errors before the machine is read.
 
 ## Grounding: acceptance signals and negative feedback
 
@@ -115,6 +117,29 @@ implements it. A bullet without a test is a gap, filed as a task.
 - Tasks labelled `irreversible` additionally pass the deep review gate
   (mped-architect plus the reviewers named in the task) before they are
   marked done.
+- **A task that ships or changes a profile** (built-in, or one the docs
+  or the example config ship) ships it with all of the following. This
+  rule is their single home (Mark, 2026-10-19); other documents point
+  here.
+  - Every such profile:
+    - its `examples` (`match` and `no_match`, docs/reference.md,
+      Profiles);
+    - a `ModelHost` fixture modelled on the layout seen on real machines
+      (the dogfood surveys in the task notes), with a model test that
+      bites: a mutation of the profile's distinguishing pattern, type or
+      `where`, or of a safety check it relies on, turns it red. The task
+      notes name each mutation tried and the test that went red, so the
+      bite can be checked;
+    - a container test wherever the kernel's view matters to it (sockets,
+      FIFOs, mounts, other users' files, processes using its candidates,
+      real tools' layouts);
+    - dry-run evidence: a read-only `ensure --dry-run` on a real machine,
+      its numbers (candidates, eligible, skip reasons, sizes) in the task
+      notes.
+  - Built-in profiles also:
+    - a golden match set (Profile golden sets, below; task-17);
+    - `verified_with`: the tool version the profile was checked against,
+      the one of that dry run.
 
 ## 1. Planner tests: plain data
 
@@ -229,7 +254,9 @@ How the format reads (the schema documents every key):
   (a clock jump, e.g. a suspend), `fail` (the call fails with the named
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
   trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat`,
-  `fchmod`, `bound_unix_sockets` or `statvfs`). `remove` is `rm -r`: every entry below is unlinked, and an
+  `fchmod`, `bound_unix_sockets` or `statvfs`), `mount` (`{id, at, fs, dev,
+  size}`: a fresh filesystem mounted on an existing directory, e.g. a FUSE
+  mount appearing in a candidate). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the
   test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
@@ -238,8 +265,9 @@ How the format reads (the schema documents every key):
   `RESOLVE_*` and `O_*` flags of
   [safety.md](safety.md#path-traversal) steps 2 and 3; `statx` of anything
   but an empty path or a single name below a directory fd; `unlinkat` of a
-  name unless the previous port call was a successful `statx` of that name
-  in that directory (the identity check right before the unlink,
+  name unless the previous port call (clock reads aside: the deadline is
+  read right before the unlink) was a successful `statx` of that name in
+  that directory (the identity check right before the unlink,
   [safety.md](safety.md#deletion)). Locks live on open file descriptions
   exactly as long as an fd refers to them.
 - **Limits:**
@@ -369,7 +397,14 @@ filesystem, processes and mounts from the developer's system.
   containing a mount, a mixed-owner tree (subuid ranges), a file created
   mid-delete, a deleted-but-open file in `held_by_deleted_files`, and a root
   with 100,000+ entries (ordering cost, aggregated reports, time to first
-  deletion including the eligibility walk).
+  deletion including the eligibility walk). The `fs` reclaim
+  (`fs_reclaim_suite.rs`) runs the binary over user profiles of a config
+  of the test's own: a `/tmp` laid out as on the development machine
+  (pytest test dirs, also in nix-shell TMPDIRs, rc dirs, decoys of every
+  refusal, a `systemd-private-*` directory a pattern matches) of about
+  12,000 entries in the fast tier and 100,000 in the full tier, judged by
+  the oracle; stale sockets and FIFOs; and a FUSE mount whose server
+  never answers (below).
 - **Dormant shells:** real `nix-shell` and `nix develop` sessions left idle
   with their `TMPDIR` under `/tmp`: their directories are skipped.
 - **Docker** in its own container (`docker:dind` under rootless Podman,
@@ -413,8 +448,15 @@ rootless container; behaviour on specific kernel versions follows the test
 host's kernel; systemd is not run for real. These rest on model tests with
 model-only fields. A VM suite can be added later.
 
-Why not FUSE: it has its own `flock`, `statx` and mount-id semantics, needs
-privileges, and is a large extra moving part.
+Why not FUSE (to model hosts): it has its own `flock`, `statx` and mount-id
+semantics, needs privileges, and is a large extra moving part. One
+container test mounts a FUSE filesystem as a fixture, not a model: a dead
+mount (the harness opens `/dev/fuse`, mounts it and never answers), to
+show that mounts come first (safety.md, Before the walk). It needs
+`/dev/fuse` in the container: the runner passes it (`--device`) to the
+tests listed in `FUSE_TESTS` (`suite.rs`) only, when the host has it, and
+the test fails saying so when it is missing; it first proves the mount
+dead (a `statx` of it gets no answer for 2 s).
 
 Container tests cannot run inside the Nix build sandbox, so they run from
 `just e2e`, not as `nix flake check` checks.

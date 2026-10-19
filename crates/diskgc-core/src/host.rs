@@ -1008,8 +1008,9 @@ pub trait Delete: Host {
     fn unlinkat(&self, dir: &Self::Fd, name: &OsStr, what: Unlink) -> Result<(), HostError>;
 
     /// Sets the permission bits of the open **directory** `dir` to `perm`
-    /// (`fchmod`; `LinuxHost` opens `.` below `dir` read-only for it, so `dir`
-    /// may be an `O_PATH` fd, as for [`Host::read_dir`]). Changing the
+    /// (`fchmod`). The fd must be open for reading; the deletion engine
+    /// reopens and checks the directory before its final deadline read.
+    /// Changing the
     /// permissions of user data is a modification, so it is gated like a
     /// deletion. The deletion engine's `make_writable` is its only caller
     /// (docs/reference.md, Actions; docs/safety.md, Deletion).

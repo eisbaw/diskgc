@@ -14,9 +14,10 @@
 //! - [`Scan::check`] judges one candidate's [`WalkRecord`] against it:
 //!   pure, no I/O, so one scan can serve several candidates while fresh.
 //! - [`Checker`] keeps the latest scan and makes a new one when it is
-//!   older than its reuse limit; [`delete_unused`] runs the whole step for
-//!   one candidate in the order of docs/safety.md, Deletion: lock the
-//!   directory, walk, check, delete, while the check is fresh.
+//!   older than its reuse limit; [`clear_and_delete`] is the last step of
+//!   every deletion (check against a fresh scan, then [`delete_cleared`]),
+//!   and [`lock_candidate`] and [`locked_is_walked`] are the `flock` of the
+//!   `fs` kind's protocol (`fs_kind::reclaim`, docs/safety.md, Deletion).
 //!
 //! Matching is by (device, inode) only, never by path text, which is wrong
 //! in other mount namespaces. Memory maps on overlayfs and btrfs report the
@@ -34,7 +35,6 @@ use std::time::Duration;
 
 use crate::engine::{
     self, Candidate, DeleteOptions, Deletion, Identity, IpcKind, Reason, Rules, Skip, WalkRecord,
-    WalkStop,
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
@@ -478,7 +478,8 @@ impl Clear {
 /// does, but only on a [`Clear`] made for that record and still fresh now
 /// (the last port call before the delete reads the clock); an expired one
 /// comes back ([`NotCleared::Expired`]) for the caller to check again. The only deletion entry
-/// point for checked candidates (`delete_unused`, the Cargo protocol).
+/// point for checked candidates (through [`clear_and_delete`]: the `fs`
+/// kind's protocol and the Cargo kind's).
 pub fn delete_cleared<H: Delete>(
     host: &H,
     clear: Clear,
@@ -513,7 +514,7 @@ impl<'a> Checker<'a> {
     }
 
     /// A checker with explicit options (for scans without a walk, and for
-    /// tests of the guard in [`delete_unused`]).
+    /// tests of the guard in [`Checker::serves`]).
     pub fn with_options(options: Options<'a>, reuse_limit: Duration) -> Self {
         Self {
             options,
@@ -611,42 +612,33 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// Why [`delete_unused`] deleted nothing (or stopped).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stop {
-    /// The candidate is not eligible or is in use: a skip with its reason.
-    Skipped(Skip),
-    /// The walk ended without a record (deadline, error of the run).
-    Walk(WalkStop),
-    /// A host error of the run (opening or locking the candidate, the
-    /// process list, a scan slower than the freshness bound).
-    Failed(HostError),
-}
-
-impl From<Skip> for Stop {
-    fn from(skip: Skip) -> Self {
-        Self::Skipped(skip)
-    }
-}
-
 /// The candidate's `flock` (directories only; dropping it releases it).
 #[derive(Debug)]
 pub struct CandidateLock<F> {
     locked: Option<Locked<F>>,
 }
 
+impl<F> CandidateLock<F> {
+    /// The lock held on the candidate directory; `None` when it is not a
+    /// directory that could be opened (left to the walk, which refuses
+    /// what it must, and to [`locked_is_walked`]).
+    pub fn locked(&self) -> Option<&Locked<F>> {
+        self.locked.as_ref()
+    }
+}
+
 /// Opens the candidate below its parent and takes an exclusive `flock` on
-/// it without waiting (docs/safety.md, Deletion, step 1; a directory
+/// it without waiting (docs/safety.md, Deletion, step 3; a directory
 /// another process holds `flock`ed is `locked`). Only directories are
 /// locked: a candidate that is not one (`ENOTDIR`, a symlink, a directory
 /// that cannot be opened for reading, anything else the open refuses for
 /// this path) gets no lock and is left to the walk, which refuses
-/// what it must; [`delete_unused`] then deletes nothing that turned out to
-/// be a directory without its lock.
+/// what it must; [`locked_is_walked`] then refuses a candidate that turned
+/// out to be a directory without its lock.
 pub fn lock_candidate<H: Host>(
     host: &H,
     candidate: &Candidate<'_, H::Fd>,
-) -> Result<CandidateLock<H::Fd>, Stop> {
+) -> Result<Result<CandidateLock<H::Fd>, Skip>, HostError> {
     let opened = open_beneath(
         host,
         candidate.parent(),
@@ -662,115 +654,125 @@ pub fn lock_candidate<H: Host>(
         Err(ResolveError::Host(e))
             if matches!(e.kernel_errno(), Some(Errno::EACCES | Errno::EPERM)) =>
         {
-            return Ok(CandidateLock { locked: None });
+            return Ok(Ok(CandidateLock { locked: None }));
         }
-        Err(ResolveError::Host(e)) => return Err(Stop::Failed(e)),
-        Err(_) => return Ok(CandidateLock { locked: None }),
+        Err(ResolveError::Host(e)) => return Err(e),
+        Err(_) => return Ok(Ok(CandidateLock { locked: None })),
     };
-    match host
-        .flock_try(fd, LockMode::Exclusive)
-        .map_err(Stop::Failed)?
-    {
-        TryLock::Acquired(locked) => Ok(CandidateLock {
+    match host.flock_try(fd, LockMode::Exclusive)? {
+        TryLock::Acquired(locked) => Ok(Ok(CandidateLock {
             locked: Some(locked),
-        }),
-        TryLock::Busy(_) => Err(Skip::new(
+        })),
+        TryLock::Busy(_) => Ok(Err(Skip::new(
             Reason::Locked,
             candidate.path().to_owned(),
             "the directory is flock'ed by another process",
-        )
-        .into()),
+        ))),
     }
 }
 
-/// The deletion step for one filesystem candidate, in the order of
-/// docs/safety.md, Deletion: lock the candidate directory, run the
-/// eligibility walk under the lock, check that the locked directory is the
-/// walked one, run the in-use check (`checker`, whose options must be
-/// [`Options::from_rules`] of `rules`), and delete what the walk recorded
-/// right after the check, which made sure it is fresh. The lock is held
-/// until the delete returns.
-pub fn delete_unused<H: Delete>(
+/// Why [`clear_and_delete`] deleted nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotDeleted {
+    /// In use (or refused by the caller's own check on the same scan).
+    Skipped(Skip),
+    /// An error of the run: the process list could not be read, or no scan
+    /// stayed fresh until the deletion could start.
+    Failed(HostError),
+}
+
+impl Checker<'_> {
+    /// Whether this checker's scans fit walks made with `rules`
+    /// ([`Options::from_rules`]): a narrower user list would excuse an
+    /// owner's processes as another user's. A mismatch is a bug of the
+    /// caller, an error of the run.
+    pub fn serves(&self, rules: &Rules<'_>) -> Result<(), HostError> {
+        let wanted = Options::from_rules(rules);
+        if self.options.users == wanted.users && self.options.sockets == wanted.sockets {
+            return Ok(());
+        }
+        Err(HostError::invalid(
+            "in-use check",
+            format!("{:?}", self.options.users),
+            format!(
+                "the checker's users {:?} and socket query {} disagree with the walk's owners \
+                 {:?} and IPC policy (block any: {}); build it with Checker::new (Options::from_rules) \
+                 from the same rules",
+                self.options.users, self.options.sockets, rules.owners, rules.block_ipc
+            ),
+        ))
+    }
+}
+
+/// The last step of every deletion of a checked candidate (docs/safety.md,
+/// Deletion; the Cargo protocol's parts): the in-use check of exactly
+/// `record` against a scan within the freshness rules ([`Checker::check`];
+/// a kept scan that blocks every candidate is dropped and made again
+/// first), the caller's own check on the same scan (`also`: the Cargo
+/// process heuristics; nothing for kind `fs`), then [`delete_cleared`]
+/// right away. A clear that expired before the delete could start is
+/// checked once more against a new scan; twice is an error of the run.
+pub fn clear_and_delete<H: Delete>(
     host: &H,
     checker: &mut Checker<'_>,
     candidate: &Candidate<'_, H::Fd>,
-    rules: &Rules<'_>,
+    record: &WalkRecord,
     options: DeleteOptions,
-) -> Result<Deletion, Stop> {
-    let wanted = Options::from_rules(rules);
-    let have = checker.options();
-    if have.users != wanted.users || have.sockets != wanted.sockets {
-        return Err(Stop::Failed(HostError::invalid(
+    also: &mut dyn FnMut(&Scan) -> Result<(), Skip>,
+) -> Result<Deletion, NotDeleted> {
+    let failed = |detail: String| {
+        NotDeleted::Failed(HostError::invalid(
             "in-use check",
             candidate.path().display(),
-            format!(
-                "the checker's users {:?} and socket query {} disagree with the walk's owners \
-                 {:?} and IPC policy (block any: {}); build the checker's options with \
-                 Options::from_rules",
-                have.users, have.sockets, rules.owners, rules.block_ipc
-            ),
-        )));
-    }
-    let lock = lock_candidate(host, candidate)?;
-    let record = engine::walk(host, candidate, rules, options.deadline).map_err(Stop::Walk)?;
-    locked_is_walked(host, candidate, &lock, &record)?;
-    let mut clear = checker
-        .check(host, candidate, &record)
-        .map_err(Stop::Failed)??;
-    // The check just made sure it is fresh; one more check if the clock
-    // moved past it anyway (a suspend in between).
-    let not_cleared = |e: NotCleared, why: &str| {
-        Stop::Failed(HostError::invalid(
-            "in-use check",
-            candidate.path().display(),
-            format!("{why}: {e:?}"),
+            detail,
         ))
     };
-    let done = match delete_cleared(host, clear, candidate, &record, options) {
-        Ok(done) => done,
-        Err(e @ NotCleared::OtherCandidate) => {
-            return Err(not_cleared(e, "the clear is for another walk record"));
-        }
-        Err(NotCleared::Expired(_)) => {
+    for attempt in 0..2 {
+        if checker.latest().is_some_and(|s| s.blocked().is_some()) {
             checker.forget();
-            clear = checker
-                .check(host, candidate, &record)
-                .map_err(Stop::Failed)??;
-            delete_cleared(host, clear, candidate, &record, options).map_err(|e| {
-                not_cleared(
-                    e,
-                    "a fresh check expired before the deletion could start, twice",
-                )
-            })?
         }
-    };
-    drop(lock);
-    Ok(done)
+        let clear = checker
+            .check(host, candidate, record)
+            .map_err(NotDeleted::Failed)?
+            .map_err(NotDeleted::Skipped)?;
+        also(checker.latest().expect("the check made or kept one")).map_err(NotDeleted::Skipped)?;
+        match delete_cleared(host, clear, candidate, record, options) {
+            Ok(done) => return Ok(done),
+            Err(NotCleared::Expired(_)) if attempt == 0 => checker.forget(),
+            Err(e) => return Err(failed(format!("the clear could not be used: {e:?}"))),
+        }
+    }
+    Err(failed(
+        "a fresh check expired before the deletion could start, twice".to_owned(),
+    ))
 }
 
 /// A directory candidate is deleted only under its lock, and only if the
 /// locked directory is the one the walk recorded (it could have been
 /// replaced between the open and the walk); a non-directory is never
-/// locked.
-fn locked_is_walked<H: Host>(
+/// locked. Used by the `fs` kind's reclaim.
+pub fn locked_is_walked<H: Host>(
     host: &H,
     candidate: &Candidate<'_, H::Fd>,
     lock: &CandidateLock<H::Fd>,
     record: &WalkRecord,
-) -> Result<(), Stop> {
+) -> Result<Result<(), Skip>, HostError> {
     let root = record.root().identity;
-    let changed =
-        |detail: &str| Err(Skip::new(Reason::Changed, candidate.path().to_owned(), detail).into());
+    let changed = |detail: &str| {
+        Ok(Err(Skip::new(
+            Reason::Changed,
+            candidate.path().to_owned(),
+            detail,
+        )))
+    };
     match (&lock.locked, root.file_type == FileType::Directory) {
-        (None, false) => Ok(()),
+        (None, false) => Ok(Ok(())),
         (None, true) => changed("a directory now, but it could not be opened and locked before"),
         (Some(_), false) => changed("not a directory any more, but a directory was locked"),
         (Some(locked), true) => {
-            let stat = host
-                .statx(Base::Dir(locked.fd()), Path::new(""))
-                .map_err(Stop::Failed)?;
+            let stat = host.statx(Base::Dir(locked.fd()), Path::new(""))?;
             if stat.dev_ino() == Some(root.id) {
-                Ok(())
+                Ok(Ok(()))
             } else {
                 changed("the locked directory is not the walked one (replaced in between)")
             }

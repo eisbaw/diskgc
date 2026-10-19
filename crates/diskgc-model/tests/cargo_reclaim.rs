@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use common::host;
 use diskgc_core::cargo_target::{
-    ReclaimEnd, Reclaimed, Stop, Target, discover, eligibility, reclaim,
+    ReclaimEnd, Reclaimed, Stop, Target, discover, eligibility, reach, reclaim,
 };
 use diskgc_core::engine::{CARGO_LOCK_NAMES, Reason, Rules, is_cargo_lock_name};
 use diskgc_core::host::{
@@ -128,6 +128,84 @@ fn reclaimed_with(host: &ModelHost, rules: &Rules<'_>) -> Reclaimed {
 
 fn reclaimed(host: &ModelHost) -> Reclaimed {
     reclaimed_with(host, &rules())
+}
+
+/// A manifest may itself be a mount point. Both eligibility and reclaim
+/// reach the project directory; neither may stat the manifest before
+/// consulting mountinfo, even when the target is also the discovery root.
+#[test]
+fn a_mounted_manifest_is_never_statted_during_eligibility_or_reclaim() {
+    let fixture = yaml(CLASSIC, None, "")
+        .replace("    Cargo.toml: {}\n", "")
+        .replace(
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}",
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n  - {id: 41, at: /tmp/w/p/Cargo.toml, fs: fuse.sshfs, dev: \"0:51\", size: 1G, parent: 30}",
+    );
+    let manifest = Path::new("/tmp/w/p/Cargo.toml");
+    for root in ["/tmp/w", TARGET] {
+        let host = host(&fixture);
+        let roots = [PathBuf::from(root)];
+        let discovery = discover(&host, &roots, None).expect("discover");
+        assert_eq!(discovery.targets.len(), 1, "{root}: {discovery:#?}");
+        let target = &discovery.targets[0];
+        let reached = reach(&host, target, None)
+            .expect("reach")
+            .expect("reachable");
+        assert!(reached.project.detached, "{root}: {reached:#?}");
+        let rules = rules();
+        let mut checker = Checker::new(&rules, REUSE_LIMIT);
+        let eligible = eligibility(&host, target, &rules, None, &mut checker, None)
+            .expect("eligibility")
+            .expect("eligible");
+        assert!(eligible.entries > 0, "{root}: {eligible:#?}");
+        let done = reclaim(&host, target, None, &rules, None, &mut checker, None);
+        assert_eq!(done.end, ReclaimEnd::Complete, "{root}: {done:#?}");
+        let touched: Vec<_> = host
+            .trace()
+            .into_iter()
+            .filter(|call| {
+                call.path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(manifest))
+            })
+            .collect();
+        assert!(
+            touched.is_empty(),
+            "{root}: mounted manifest touched: {touched:#?}"
+        );
+    }
+}
+
+/// Discovery inspects profile entries only one level deep. The shared
+/// eligibility walk must preflight a mount further inside an entry before
+/// statx, both while judging and again under Cargo's locks.
+#[test]
+fn a_nested_mount_in_a_profile_entry_is_never_statted() {
+    let mounted = Path::new("/tmp/w/p/target/debug/build/dead");
+    let fixture = yaml(CLASSIC, None, "").replace(
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}",
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n  - {id: 41, at: /tmp/w/p/target/debug/build/dead, fs: fuse.sshfs, dev: \"0:51\", size: 1G, parent: 30}",
+    );
+    let host = host(&fixture);
+    let target = found(&host);
+    let rules = rules();
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let eligible = eligibility(&host, &target, &rules, None, &mut checker, None)
+        .expect("eligibility")
+        .expect_err("mounted entry must be refused");
+    assert_eq!(eligible.reason, Reason::ContainsMount, "{eligible}");
+    let done = reclaim(&host, &target, None, &rules, None, &mut checker, None);
+    let touched: Vec<_> = host
+        .trace()
+        .into_iter()
+        .filter(|call| {
+            call.path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(mounted))
+        })
+        .collect();
+    assert!(touched.is_empty(), "nested mount was touched: {touched:#?}");
+    assert_skipped(&done, Reason::ContainsMount, "mount point");
 }
 
 #[track_caller]

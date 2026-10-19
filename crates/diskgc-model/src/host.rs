@@ -14,8 +14,9 @@
 //! - `statx` takes an empty path or a single name below a directory fd
 //!   (a longer path would follow symlinks in its earlier components);
 //! - `unlinkat` removes a single name, and only right after a successful
-//!   `statx` of that name in that directory (the previous port call; through
-//!   any fd of the directory): the identity check (docs/safety.md, Deletion);
+//!   `statx` of that name in that directory (the previous port call but
+//!   clock reads; through any fd of the directory): the identity check
+//!   (docs/safety.md, Deletion);
 //! - `fchmod` sets permission bits only (of a directory, else `ENOTDIR`).
 //!
 //! A `fail` event makes the call it is addressed to fail with its errno,
@@ -544,6 +545,7 @@ impl Inner {
                 self.injected = Some(*errno);
                 Ok(())
             }
+            Action::Mount(spec) => state.mount_on(spec),
         };
         if let Err(fault) = outcome {
             model_error(format!(
@@ -1199,16 +1201,24 @@ impl Delete for ModelHost {
             Some(entry.clone()),
             |inner| {
                 // The identity check is the call right before: a successful
-                // statx of this name in this directory (through any fd of it).
-                let checked = inner.trace.last().is_some_and(|last| {
-                    last.op == Op::Statx
-                        && last.object.is_some()
-                        && last.entry.as_ref() == Some(&entry)
-                });
+                // statx of this name in this directory (through any fd of
+                // it). Only a read of the clock may come between (the
+                // deadline check right before the unlink).
+                let checked = inner
+                    .trace
+                    .iter()
+                    .rev()
+                    .find(|c| !matches!(c.op, Op::Now | Op::WallClock))
+                    .is_some_and(|last| {
+                        last.op == Op::Statx
+                            && last.object.is_some()
+                            && last.entry.as_ref() == Some(&entry)
+                    });
                 if !checked {
                     violation(format!(
                         "unlinkat of {shown} without an identity check right before it (a statx of \
-                     that name in that directory as the previous call; docs/safety.md, Deletion)"
+                     that name in that directory as the previous call but clock reads; \
+                     docs/safety.md, Deletion)"
                     ));
                 }
                 if let Some(e) = inner.injected.take() {
@@ -1263,8 +1273,7 @@ impl Delete for ModelHost {
             let loc = inner.loc_of(ofd);
             let object = Some(inner.state.dev_ino(loc));
             if inner.state.inode(loc).entries().is_none() {
-                // The port's fchmod is for directories (LinuxHost reopens
-                // `.` with O_DIRECTORY).
+                // The port's fchmod is for directories.
                 let e = Errno::ENOTDIR;
                 return (
                     Err(HostError::errno("fchmod", &shown, e)),

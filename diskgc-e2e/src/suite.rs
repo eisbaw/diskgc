@@ -39,7 +39,7 @@ use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, ensure_suite,
-    host_suite, inuse_suite,
+    fs_reclaim_suite, host_suite, inuse_suite,
 };
 
 /// Which gate runs a test.
@@ -108,6 +108,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[(
     "needs a nightly toolchain beside the fast stable one (a mixed-layout target); the \
      Debian image has one Cargo",
 )];
+
+/// The tests whose container gets the FUSE device (`/dev/fuse`, when the
+/// host has it): only these mount a FUSE filesystem.
+pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touched"];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -350,6 +354,36 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: engine_suite::engine_deletes_a_200k_entry_directory,
+    },
+    Test {
+        name: "fs_reclaim_tmp_fixture_deletes_every_eligible_candidate_and_nothing_else",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_tmp_fixture_deletes_every_eligible_candidate_and_nothing_else,
+    },
+    Test {
+        name: "fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_else",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_else,
+    },
+    Test {
+        name: "fs_reclaim_never_deletes_a_socket_or_fifo",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_never_deletes_a_socket_or_fifo,
+    },
+    Test {
+        name: "fs_reclaim_never_enters_private_tmp_inside_a_candidate",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_never_enters_private_tmp_inside_a_candidate,
+    },
+    Test {
+        name: "fs_reclaim_a_dead_fuse_mount_is_never_touched",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_a_dead_fuse_mount_is_never_touched,
     },
     Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",

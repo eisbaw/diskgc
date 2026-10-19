@@ -406,6 +406,17 @@
             "null"
           ]
         },
+        "mount": {
+          "description": "A new filesystem is mounted on an existing directory (a user's\nFUSE mount appearing in a candidate while diskgc works).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountEventSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "open": {
           "description": "A process opens a file.",
           "anyOf": [
@@ -656,6 +667,40 @@
       "description": "Permission bits in octal, as a string, e.g. \"0755\".",
       "type": "string",
       "pattern": "^[0-7]{3,4}$"
+    },
+    "MountEventSpec": {
+      "description": "A mount an event makes: a fresh, empty filesystem of type `fs` on the\nexisting directory `at`, on the mount that directory is on.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "dev": {
+          "description": "Device number `major:minor`, not one already mounted.",
+          "$ref": "#/$defs/Dev"
+        },
+        "fs": {
+          "description": "Filesystem type, e.g. `fuse`, `nfs4`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Mount id; unique, not 0.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "size": {
+          "$ref": "#/$defs/Bytes"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "fs",
+        "dev",
+        "size"
+      ]
     },
     "MountSpec": {
       "description": "One mount.",

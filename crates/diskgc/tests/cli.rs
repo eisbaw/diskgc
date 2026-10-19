@@ -4,9 +4,10 @@
 //! added there is checked here without editing a test.
 //!
 //! **Nothing here may reclaim on the machine running the tests.** The only
-//! reclaiming `ensure` is task-10's AC #6, and it is shaped so that even a
-//! broken gate could touch nothing but the test's own fixture: its roots
-//! and PATH are a fresh temp directory holding a fake Cargo target, and its
+//! reclaiming `ensure`s are task-10's AC #6 (and task-18's kind `fs` twin
+//! in the same test), shaped so that even a broken gate could touch nothing
+//! but the test's own fixture: their roots and PATH are a fresh temp
+//! directory holding a fake Cargo target and an old directory, and their
 //! config is a file of the test's own. Every other run here is refused
 //! before the machine is measured (usage errors).
 
@@ -227,7 +228,9 @@ fn inventory(root: &Path) -> Vec<(PathBuf, u64)> {
 /// `.cargo-lock`, `.fingerprint/` and `deps/`), with a goal that cannot be
 /// met (100% free) and a config file of its own; never a real path, `$HOME`,
 /// `/tmp` at large or a default root. Every fixture object is still there,
-/// same inode, afterwards.
+/// same inode, afterwards. The same for a kind `fs` reclaim (task-18): a
+/// user profile of the config, `roots: required`, given the same temp
+/// directory, which holds an old plain directory it finds.
 #[test]
 fn a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate() {
     let tmp = TempDir::new("gate");
@@ -244,37 +247,50 @@ fn a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate() {
     std::fs::write(debug.join(".cargo-lock"), "").expect("write");
     std::fs::write(debug.join(".fingerprint/p-1/bin-p"), "x").expect("write");
     std::fs::write(debug.join("deps/p-1"), vec![7u8; 64 << 10]).expect("write");
+    std::fs::create_dir_all(w.join("old-scratch/sub")).expect("mkdir");
+    std::fs::write(w.join("old-scratch/sub/f"), vec![7u8; 4096]).expect("write");
     let config = tmp.0.join("config.yaml");
-    std::fs::write(&config, "version: 1\n").expect("write");
+    std::fs::write(
+        &config,
+        "version: 1\nprofiles:\n  - name: gate-scratch\n    find: {roots: required, paths: \
+         [\"old-*\"], type: dir}\n    action: delete\n    examples: {match: \
+         [/srv/w/old-x]}\n",
+    )
+    .expect("write");
     let before = inventory(&w);
 
     let w_text = w.to_str().expect("UTF-8 temp path");
-    let out = diskgc(&[
-        "ensure",
-        "--min-free",
-        "100%",
-        "--config",
-        config.to_str().expect("UTF-8"),
-        "--select",
-        "profile:cargo-target",
-        "--roots",
-        w_text,
-        "--json",
-        w_text,
-    ]);
-    let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
-    assert!(stderr.contains("sandbox gate"), "{stderr}");
-    let report = json(&out);
-    assert_eq!(report["status"], "usage_error");
-    let message = report["errors"][0]["message"].as_str().expect("message");
-    assert!(message.contains("pre-release sandbox gate"), "{message}");
-    assert!(report["actions"].as_array().is_some_and(Vec::is_empty));
-    assert_eq!(
-        inventory(&w),
-        before,
-        "a fixture object went or was replaced"
-    );
+    for select in ["profile:cargo-target", "profile:gate-scratch"] {
+        let out = diskgc(&[
+            "ensure",
+            "--min-free",
+            "100%",
+            "--config",
+            config.to_str().expect("UTF-8"),
+            "--select",
+            select,
+            "--roots",
+            w_text,
+            "--json",
+            w_text,
+        ]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{select}: stderr: {stderr}");
+        assert!(stderr.contains("sandbox gate"), "{select}: {stderr}");
+        let report = json(&out);
+        assert_eq!(report["status"], "usage_error", "{select}");
+        let message = report["errors"][0]["message"].as_str().expect("message");
+        assert!(
+            message.contains("pre-release sandbox gate"),
+            "{select}: {message}"
+        );
+        assert!(report["actions"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(
+            inventory(&w),
+            before,
+            "{select}: a fixture object went or was replaced"
+        );
+    }
 }
 
 // ---- task-92: `--help` and `profiles list | show` (agent onboarding)

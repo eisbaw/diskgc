@@ -237,7 +237,7 @@ fn overlapping_roots_find_each_target_once() {
 }
 
 /// A root on a network filesystem is refused (`unsupported_fs`) without
-/// being listed; a missing root is `missing`, a symlinked one
+/// opening or statting it; a missing root is `missing`, a symlinked one
 /// `unsafe_path`.
 #[test]
 fn a_root_on_a_network_filesystem_is_refused_unread() {
@@ -266,13 +266,96 @@ fn a_root_on_a_network_filesystem_is_refused_unread() {
     );
     assert!(d.refused[0].detail.contains("nfs4"), "{}", d.refused[0]);
     assert!(
-        model
-            .trace()
-            .iter()
-            .all(|c| !(c.op == Op::ReadDir
-                && c.path.as_deref().is_some_and(|p| p.starts_with("/net")))),
-        "the network filesystem was listed"
+        model.trace().iter().all(|c| {
+            !(matches!(c.op, Op::ReadDir | Op::Openat2 | Op::Statx)
+                && c.path.as_deref().is_some_and(|p| p.starts_with("/net")))
+        }),
+        "the network filesystem was touched: {:#?}",
+        model.trace()
     );
+}
+
+#[test]
+fn cargo_discovery_refuses_fuse_subtypes_before_opening_the_root() {
+    for fs in ["fuse.sshfs", "fuseblk.ntfs-3g", "fuse.fuse-overlayfs"] {
+        let text = with_mount(
+            &yaml("  /net/src/p/target/CACHEDIR.TAG: {cachedir_tag: true}", ""),
+            &format!("  - {{id: 40, at: /net, fs: {fs}, dev: \"0:50\", size: 1T, parent: 1}}"),
+        );
+        let model = host(&text);
+        let discovery = found(&model, &["/net/src"]);
+        assert!(discovery.targets.is_empty(), "{fs}: {discovery:#?}");
+        assert_eq!(discovery.refused.len(), 1, "{fs}: {discovery:#?}");
+        assert_eq!(discovery.refused[0].reason, Reason::UnsupportedFs, "{fs}");
+        assert!(
+            model.trace().iter().all(|call| {
+                !(matches!(call.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                    && call
+                        .path
+                        .as_deref()
+                        .is_some_and(|path| path.starts_with("/net")))
+            }),
+            "{fs}: {:#?}",
+            model.trace()
+        );
+    }
+}
+
+#[test]
+fn cargo_discovery_never_enters_private_tmp_below_a_root() {
+    let private = "/tmp/w/systemd-private-abc-cups.service-x1";
+    let tree = format!("  {private}/p/target/CACHEDIR.TAG: {{cachedir_tag: true}}");
+    let first = model(&tree, "");
+    let discovery = found(&first, &["/tmp/w"]);
+    assert_eq!(paths(&discovery), ["/tmp/w/p/target"], "{discovery:#?}");
+    assert!(
+        first.trace().iter().all(|call| !call
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(private))),
+        "PrivateTmp was touched: {:#?}",
+        first.trace()
+    );
+
+    let root = format!("{private}/p");
+    let model = model(&tree, "");
+    let discovery = found(&model, &[&root]);
+    assert!(discovery.targets.is_empty(), "{discovery:#?}");
+    assert_eq!(discovery.refused[0].reason, Reason::UnsafePath);
+    assert!(model.trace().iter().all(|call| {
+        !call
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(private))
+    }));
+}
+
+#[test]
+fn cargo_discovery_does_not_stat_a_mount_below_a_root_or_profile() {
+    for at in ["/tmp/w/dead", "/tmp/w/p/target/debug/build"] {
+        let yaml = with_mount(
+            &yaml(&format!("  {at}/f: {{}}"), ""),
+            &format!(
+                "  - {{id: 41, at: {at}, fs: fuse.sshfs, dev: \"0:51\", size: 1G, parent: 30}}"
+            ),
+        );
+        let model = host(&yaml);
+        let discovery = found(&model, &["/tmp/w"]);
+        assert!(
+            model.trace().iter().all(|call| !call
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(at))),
+            "{at} was touched: {:#?}",
+            model.trace()
+        );
+        if at.ends_with("/dead") {
+            assert_eq!(paths(&discovery), ["/tmp/w/p/target"]);
+        } else {
+            assert!(discovery.targets.is_empty(), "{discovery:#?}");
+            assert_eq!(discovery.refused[0].reason, Reason::ContainsMount);
+        }
+    }
 }
 
 /// A profile directory is recognised by any `.cargo-*lock*` name, so a

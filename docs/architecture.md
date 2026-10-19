@@ -174,11 +174,13 @@ reclaim(min, goal, filesystem, deadline):
   idle and in-use checks, read-only) for the tier's order, within
   `--tally-budget`; candidates the budget left untallied follow the
   tallied ones in the order discovery found them. It then acts on each in
-  that order, every check made again under the candidate's own locks (so
-  a target that is not idle is locked and walked before it is skipped).
-  A candidate the tally refuses is skipped for the run and never locked:
-  re-judging it under its locks would take Cargo's locks on kept and
-  other users' targets and walk oversized ones again. A refusal that
+  that order, every check made again under the candidate's own locks (a
+  Cargo target's lock files, an `fs` candidate's `flock`;
+  [safety.md](safety.md#deletion)), so a candidate that is not idle is
+  locked and walked before it is skipped. A candidate the tally refuses
+  is skipped for the run and never locked: re-judging it under its locks
+  would take Cargo's locks on kept and other users' targets (or `flock`
+  a kept directory) and walk oversized ones again. A refusal that
   stops being true after the tally (a `.diskgc-keep` removed) is a missed
   reclaim until the next run, never an unsafe delete. The tally runs
   under the host lock rather than before it (The tally: Synchronous

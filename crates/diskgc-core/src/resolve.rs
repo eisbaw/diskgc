@@ -242,14 +242,25 @@ pub fn resolve<H: Host>(
     path: &Path,
     want: Want,
 ) -> Result<Resolved<H::Fd>, ResolveError> {
-    if !path.is_absolute() {
-        return Err(unsafe_path(path, Unsafe::NotAbsolute));
-    }
-    if has_dot_segments(path) {
-        return Err(unsafe_path(path, Unsafe::NotNormal));
-    }
+    check_path(path)?;
     let mounts = host.mountinfo().map_err(ResolveError::Host)?;
-    let mount = mount_for(&mounts, path)
+    resolve_in(host, &mounts, path, want)
+}
+
+/// [`resolve`] against the mount table `mounts`, which the caller read
+/// (and may already have judged: the kind `fs` refuses a root on a network
+/// filesystem by its mountinfo line before anything there is opened or
+/// `statx`ed, docs/safety.md, Before the walk). Step 2 still confirms that
+/// the mount point is that mount, so a table that changed since it was
+/// read is `unsafe_path`, never followed.
+pub fn resolve_in<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    path: &Path,
+    want: Want,
+) -> Result<Resolved<H::Fd>, ResolveError> {
+    check_path(path)?;
+    let mount = mount_for(mounts, path)
         .map_err(|why| unsafe_path(path, why))?
         .clone();
 
@@ -285,6 +296,17 @@ pub fn resolve<H: Host>(
     let (fd, stat) =
         open_below(host, &mount_fd, mount.id, &rest, Access::Path, want).map_err(|e| e.at(path))?;
     Ok(Resolved { fd, mount, stat })
+}
+
+/// A configured path must be absolute and hold no `.` or `..` segment.
+fn check_path(path: &Path) -> Result<(), ResolveError> {
+    if !path.is_absolute() {
+        return Err(unsafe_path(path, Unsafe::NotAbsolute));
+    }
+    if has_dot_segments(path) {
+        return Err(unsafe_path(path, Unsafe::NotNormal));
+    }
+    Ok(())
 }
 
 /// Opens `rel` below the open directory `dir`, which is on mount `mount_id`,

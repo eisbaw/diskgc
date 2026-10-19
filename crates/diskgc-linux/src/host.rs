@@ -1266,8 +1266,7 @@ impl Delete for LinuxHost {
                 format!("{perm:#o} holds more than permission bits"),
             ));
         }
-        let readable = reopen_readable(dir, &subject)?;
-        fchmod_permitted(&permit, &readable, Mode::from_raw_mode(perm))
+        fchmod_permitted(&permit, dir, Mode::from_raw_mode(perm))
             .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))
     }
 }
@@ -1308,7 +1307,7 @@ fn unlinkat_permitted(
 
 /// `fchmod(dir, mode)`: the only permission change in this crate. The
 /// [`Permit`] proves the gate allowed it.
-fn fchmod_permitted(_gate: &Permit, dir: &OwnedFd, mode: Mode) -> rustix::io::Result<()> {
+fn fchmod_permitted(_gate: &Permit, dir: &LinuxFd, mode: Mode) -> rustix::io::Result<()> {
     rustix::fs::fchmod(dir, mode)
 }
 

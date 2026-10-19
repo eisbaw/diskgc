@@ -1,9 +1,6 @@
-//! The `fs` kind, read-only half (task-68, a spike): what a source
-//! profile's `find` finds below its roots, and the judgement of each
-//! candidate for a dry run. Deleting `fs` candidates is task-18; nothing
-//! here can delete (it is given a [`crate::host::Host`], never a
-//! `Delete`), and `executor::ensure` refuses a reclaiming run over `fs`
-//! candidates.
+//! The `fs` kind (docs/safety.md, Filesystem candidates; docs/reference.md,
+//! Profiles): what a source profile's `find` finds below its roots, the
+//! judgement of each candidate, and its deletion.
 //!
 //! The data first:
 //!
@@ -12,27 +9,45 @@
 //! - a [`Find`] is what a source profile finds: its patterns, the entry
 //!   type, and its own `where` (`has` / `has_not`), which narrows what is
 //!   a candidate at all;
-//! - [`plan`] walks the roots by the patterns (never deeper than they
-//!   say, no symlink followed, no mount crossed) and judges every
-//!   candidate as it finds it, with the deletion engine's eligibility
-//!   walk and the in-use check, into a [`Planned`].
+//! - [`discover`] walks the roots by the patterns (never deeper than they
+//!   say, no symlink followed, no mount crossed, mountinfo first) into a
+//!   [`Discovery`]: every candidate [`Found`], with the root it was found
+//!   under and its identity;
+//! - [`Judge`] holds the one set of checks of a found candidate
+//!   ([`judge`]): its approach (path rule, filesystem, mounts, reached
+//!   again from its root, identity, keep markers on the way) and its
+//!   contents (the source's `where`, the eligibility walk and the idle
+//!   requirement), each measured into a [`Tally`];
+//! - [`plan`] is the dry run: discovery, then every candidate judged and
+//!   checked against a process scan, into a [`Planned`]. It is given a
+//!   [`crate::host::Host`] only, so it cannot delete;
+//! - [`tally`] and [`reclaim`] are the reclaim's: a read-only tally of a
+//!   candidate for the tier's order, and the deletion protocol of one
+//!   candidate (docs/safety.md, Deletion): reached again, `flock`ed,
+//!   judged again under the lock, checked against a fresh process scan,
+//!   and deleted by the engine's identity-checked delete. Given a
+//!   [`crate::host::Delete`] host.
 
+mod discover;
+mod judge;
 mod pattern;
 mod plan;
+mod reclaim;
 
 #[cfg(test)]
 mod tests;
 
+pub use discover::{Discovery, Found, discover};
+pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches};
-pub use plan::{Eligible, Planned, plan};
+pub use plan::{Planned, plan};
+pub use reclaim::{Reclaimed, reclaim, tally};
 
 use std::path::Path;
 
 use crate::profile::{EntryType, Finds, Roots, Source, Where};
 
-/// The name prefix of systemd's `PrivateTmp` directories: never
-/// candidates, never descended into (docs/safety.md, Before the walk).
-pub const PRIVATE_TMP_PREFIX: &str = "systemd-private-";
+pub use crate::engine::{PRIVATE_TMP_PREFIX, is_private_tmp, path_in_private_tmp};
 
 /// What a kind `fs` source profile finds (docs/reference.md, Profiles),
 /// compiled for one user (`{uid}` replaced).

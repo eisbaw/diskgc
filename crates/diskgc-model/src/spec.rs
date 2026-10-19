@@ -409,6 +409,25 @@ pub struct EventSpec {
     /// `bound_unix_sockets`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,
+    /// A new filesystem is mounted on an existing directory (a user's
+    /// FUSE mount appearing in a candidate while diskgc works).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<MountEventSpec>,
+}
+
+/// A mount an event makes: a fresh, empty filesystem of type `fs` on the
+/// existing directory `at`, on the mount that directory is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MountEventSpec {
+    /// Mount id; unique, not 0.
+    pub id: u64,
+    pub at: PathBuf,
+    /// Filesystem type, e.g. `fuse`, `nfs4`.
+    pub fs: String,
+    /// Device number `major:minor`, not one already mounted.
+    pub dev: DevSpec,
+    pub size: Bytes,
 }
 
 /// A process and how reading its `/proc` entry goes.

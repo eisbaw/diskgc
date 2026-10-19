@@ -1,8 +1,8 @@
 //! Kind `fs` in `ensure --dry-run` (task-68's spike, diskgc-core
 //! `fs_kind`): segment-wise find patterns plan candidates, each judged by
-//! the engine's eligibility walk and the in-use check; and a reclaiming
-//! `ensure` over `fs` candidates is refused before it touches anything
-//! (their delete is task-18). Profiles are user profiles in the fixtures.
+//! the engine's eligibility walk and the in-use check, as the reclaim
+//! judges them (tests/fs_reclaim.rs). Profiles are user profiles in the
+//! fixtures.
 
 mod common;
 
@@ -66,6 +66,10 @@ const PROFILES: &str = r#"
   checkouts: allow
   action: delete
   examples: {match: [/tmp/x]}
+- name: nested-dir
+  find: {roots: [/tmp], paths: ["nix-shell.*/pytest-of-*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/nix-shell.A/pytest-of-mark]}
 - name: deep-dirs-checkouts
   find: {roots: required, paths: ["*/*/*"], type: dir}
   checkouts: allow
@@ -367,38 +371,6 @@ fn a_sources_own_has_narrows_what_is_a_candidate() {
     );
 }
 
-/// The safety requirement of task-68: kind `fs` has no delete yet
-/// (task-18), so a reclaiming `ensure` over `fs` candidates is refused as a
-/// usage error (exit 2), before anything else: no gate question, no
-/// sample, no host lock, no call on the host at all. Even with eligible
-/// candidates and the goal unmet.
-#[test]
-fn a_reclaiming_ensure_over_fs_candidates_is_refused_before_anything() {
-    let host = host(&yaml(
-        "  /tmp/pytest-of-mark: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 900M}}\n  \
-         /run/diskgc/lock: {uid: 0, gid: 0}\n",
-    ));
-    let mut req = request("profile:pytest-of-dir", &[], "/tmp");
-    req.min_free = parse_size("200M").expect("a size");
-    let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
-    let calls_before = host.trace().len();
-    let report = executor::ensure(&host, &req, uid, &mut |_| {});
-    assert_eq!(report.status, Status::UsageError, "{report:#?}");
-    assert_eq!(report.exit_code(), 2);
-    let message = &report.errors[0].message;
-    assert!(
-        message.contains("task-18") && message.contains("not implemented"),
-        "{message}"
-    );
-    assert_eq!(
-        host.trace().len(),
-        calls_before,
-        "ensure touched the host: {:#?}",
-        &host.trace()[calls_before..]
-    );
-    assert!(host.stat_path(Path::new("/tmp/pytest-of-mark/f")).is_some());
-}
-
 /// A `has` / `has_not` filter in a term is refused (task-16), never
 /// silently ignored; `!filter:` and unions stay refused too.
 #[test]
@@ -477,42 +449,6 @@ fn a_blocking_scan_is_not_reused_past_the_reuse_limit() {
     );
 }
 
-/// Defence in depth behind the refusal above (task-68 review, F1): an fs
-/// tier never reaches the Cargo reclaim. QA's scenario: a `roots: required`
-/// fs profile whose roots hold an old, attached Cargo target, below
-/// `--min-free` with the host lock provisioned. With the allowlist guard in
-/// `ensure`, nothing is called; were it removed, the reclaim's discovery
-/// refuses the fs source (an error of the run) instead of reclaiming the
-/// target its roots happen to hold. Either way: nothing unlinked, the
-/// target intact.
-#[test]
-fn an_fs_tier_never_reaches_the_cargo_reclaim_over_its_roots() {
-    let at = "2026-10-01T00:00:00Z";
-    let host = host(&yaml(&format!(
-        "  /run/diskgc/lock: {{uid: 0, gid: 0}}\n  /home/mark/src/proj/Cargo.toml: {{}}\n  \
-         /home/mark/src/proj/.pytest_cache: {{.: {{mtime: {at}}}}}\n  \
-         /home/mark/src/proj/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: \
-         {{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}, .fingerprint: {{.: {{mtime: {at}}}, \
-         p-1: {{.: {{mtime: {at}}}}}}}, deps: {{.: {{mtime: {at}}}, p-1: {{size: 5G, mtime: \
-         {at}}}}}}}\n"
-    )));
-    let mut req = request("profile:pytest-cache", &["/home/mark/src"], "/home/mark");
-    req.min_free = parse_size("99G").expect("a size");
-    let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
-    let report = executor::ensure(&host, &req, uid, &mut |l| eprintln!("{l}"));
-    assert_ne!(report.exit_code(), 0, "{report:#?}");
-    assert_eq!(
-        host.trace().iter().filter(|c| c.op == Op::Unlinkat).count(),
-        0,
-        "{report:#?}"
-    );
-    assert!(report.actions.is_empty(), "{:#?}", report.actions);
-    assert!(
-        host.stat_path(Path::new("/home/mark/src/proj/target/debug/deps/p-1"))
-            .is_some()
-    );
-}
-
 /// F2 (task-68 review): mounts come first, also before the source's own
 /// `where`. `has_not: mounted` would `statx` a name inside the candidate;
 /// on a dead FUSE mount there that hangs. The candidate is
@@ -545,7 +481,8 @@ fn a_mount_inside_is_refused_before_the_sources_where_looks_inside() {
 }
 
 /// F3 (task-68 review): a root inside systemd's PrivateTmp is never
-/// searched: checked on the root's own names, before it is opened.
+/// searched: checked on the root's own names, before it is opened, and
+/// reported as a misconfigured root.
 #[test]
 fn a_root_inside_private_tmp_is_never_searched() {
     let private = "/tmp/systemd-private-abc-cups.service-x1/tmp";
@@ -553,6 +490,15 @@ fn a_root_inside_private_tmp_is_never_searched() {
     let report = dry_run(&host, &request("profile:anything", &[private], "/tmp"));
     assert_eq!(plan(&report), [], "{:#?}", report.plan);
     assert_eq!(report.status, Status::DryRun);
+    // Reported as a misconfigured root (an error), as the reclaim does.
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("PrivateTmp")),
+        "{:#?}",
+        report.errors
+    );
     let touched: Vec<_> = host
         .trace()
         .into_iter()
@@ -591,6 +537,83 @@ fn discovery_stops_at_the_deadline_after_a_listing_and_between_statx_calls() {
         assert_eq!(report.status, Status::Deadline, "{event}: {report:#?}");
         assert_eq!(report.exit_code(), 124, "{event}");
     }
+}
+
+/// task-68's review residuals (Codex F4): discovery no longer ends `0`
+/// past the deadline through any of its other exits: the last matching
+/// name's `statx` crossing it (no `statx` follows to notice, its type is no
+/// candidate's, and the profile has one root, so no other root's check
+/// follows), a listing that fails (a skip, so no candidate follows either),
+/// and the source's `where` between its `has` and its `has_not`. Each ends
+/// `deadline` (124). The checks back each other up: the first two need the
+/// check after the listing or the one before discovery reports; the third
+/// is also caught by the plan's check before it judges a candidate.
+#[test]
+fn discovery_stops_at_the_deadline_through_every_exit() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let cases = [
+        (
+            "profile:unmounted",
+            None,
+            "/tmp",
+            "  /tmp/pytest-of-1: {}\n  /tmp/pytest-of-2: {}\n".to_owned(),
+            "  - {at: {op: statx, path: /tmp/pytest-of-2, when: after}, advance: 700s}\n",
+        ),
+        (
+            "profile:nested-dir",
+            None,
+            "/tmp",
+            "  /tmp/nix-shell.A: {.: {}}\n".to_owned(),
+            "  - {at: {op: read_dir, path: /tmp/nix-shell.A, when: before}, advance: 700s}\n  - \
+             {at: {op: read_dir, path: /tmp/nix-shell.A, when: before}, fail: EACCES}\n",
+        ),
+        (
+            "profile:cmake-build",
+            Some("/home/mark/src"),
+            "/home/mark",
+            format!(
+                "  /home/mark/src/build:\n    .: {at}\n    CMakeCache.txt: {at}\n    obj: {at}\n"
+            ),
+            "  - {at: {op: statx, path: /home/mark/src/build/CMakeCache.txt, when: after}, \
+             advance: 700s}\n",
+        ),
+    ];
+    for (select, root, path, tree, events) in cases {
+        let host = host(&yaml(&format!("{tree}events:\n{events}")));
+        let roots: Vec<&str> = root.into_iter().collect();
+        let report = dry_run(&host, &request(select, &roots, path));
+        assert!(host.unfired_events().is_empty(), "{events}");
+        assert_eq!(report.status, Status::Deadline, "{events}: {report:#?}");
+        assert_eq!(report.exit_code(), 124, "{events}");
+    }
+}
+
+/// The size estimate counts each object once (docs/architecture.md, The
+/// index: `est_bytes`; task-68 found the fs estimate counting a hard link
+/// per name): a candidate holding a 1M file under two names is estimated
+/// as one holding it under one.
+#[test]
+fn the_size_estimate_counts_a_hard_linked_object_once() {
+    let at = "mtime: 2026-10-01T00:00:00Z";
+    let host = host(&yaml(&format!(
+        "  /tmp/pytest-of-two:\n    .: {{{at}}}\n    f: {{size: 1M, {at}}}\n    g: {{link: \
+         /tmp/pytest-of-two/f}}\n  /tmp/pytest-of-one:\n    .: {{{at}}}\n    f: {{size: 1M, \
+         {at}}}\n"
+    )));
+    let report = dry_run(&host, &request("profile:unmounted", &[], "/tmp"));
+    let estimate = |candidate: &str| {
+        report
+            .plan
+            .iter()
+            .find(|p| p.candidate == Path::new(candidate))
+            .and_then(|p| p.estimated_bytes)
+            .unwrap_or_else(|| panic!("{candidate}: {:#?}", report.plan))
+    };
+    assert!(estimate("/tmp/pytest-of-one") >= 1 << 20);
+    assert_eq!(
+        estimate("/tmp/pytest-of-two"),
+        estimate("/tmp/pytest-of-one")
+    );
 }
 
 /// task-71 AC #2 (QA's `insrc2`): an in-source build inside a checkout,

@@ -34,21 +34,6 @@
 //! opened below its parent with `open_beneath`, and the walks are the
 //! engine's.
 
-/// A judgement that can also stop the run: `Ok(Ok(value))`, a skip of
-/// the target (`Ok(Err(skip))`), or an error of the run (`Err(stop)`).
-pub type Judged<T> = Result<Result<T, Skip>, Stop>;
-
-/// Unwraps a [`Judged`] value inside a function returning one: a stop or a
-/// skip returns from it.
-macro_rules! judged {
-    ($e:expr) => {
-        match $e? {
-            Ok(value) => value,
-            Err(skip) => return Ok(Err(skip)),
-        }
-    };
-}
-
 mod discover;
 mod eligible;
 mod evidence;
@@ -57,8 +42,8 @@ mod reclaim;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::engine::{CARGO_LOCK_NAMES, Identity, Skip};
-use crate::host::{DevIno, FileType, HostError, Stat, Timestamp};
+use crate::engine::{CARGO_LOCK_NAMES, Identity};
+use crate::host::{DevIno, FileType, Stat, Timestamp};
 
 pub use discover::{
     CARGO_MANIFEST, DISCOVERY_DEPTH, Discovery, Project, Reached, discover, inspect, reach,
@@ -67,7 +52,11 @@ pub use eligible::{
     Eligible, ProfileWalk, Tally, eligibility, judge_layout, last_build, tally, walk_profiles,
 };
 pub use evidence::cargo_evidence;
-pub use reclaim::{LOCK_ORDER, ReclaimEnd, Reclaimed, reclaim};
+pub use reclaim::{LOCK_ORDER, Reclaimed, reclaim};
+
+/// Shared with the `fs` kind ([`crate::outcome`]); named here too, where
+/// the Cargo kind's callers have always found them.
+pub use crate::outcome::{Judged, ReclaimEnd, Stop};
 
 /// The signature a valid `CACHEDIR.TAG` starts with (Cache Directory
 /// Tagging Specification; Cargo writes it into every target directory it
@@ -316,24 +305,4 @@ impl Inspected {
 /// reported (the age is then unknown, never assumed).
 fn newest_change(stat: &Stat) -> Option<Timestamp> {
     Some(stat.mtime?.max(stat.ctime?))
-}
-
-/// Why a step stopped without a verdict on the target: an error of the
-/// run, never a skip (the engine's rule: an `EMFILE`, `EIO`, ... says
-/// nothing about this target and would hit the next one too).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stop {
-    /// The deadline passed (at `path`).
-    DeadlinePassed { path: PathBuf },
-    /// The host failed at `path`.
-    Failed { path: PathBuf, error: HostError },
-}
-
-impl std::fmt::Display for Stop {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DeadlinePassed { path } => write!(f, "deadline passed at {}", path.display()),
-            Self::Failed { path, error } => write!(f, "{}: {error}", path.display()),
-        }
-    }
 }

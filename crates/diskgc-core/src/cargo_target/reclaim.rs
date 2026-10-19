@@ -23,7 +23,7 @@
 //!    the locks.
 //! 3. **Delete inside the locked profile directories**, each part with the
 //!    deletion engine's identity-checked delete, through
-//!    [`delete_cleared`] on the in-use check of exactly that part's record
+//!    [`clear_and_delete`] on the in-use check of exactly that part's record
 //!    (and the Cargo heuristics on the same scan), in this order
 //!    ([`plan`]): the fingerprints of every profile directory first,
 //!    whatever its layout or mix of layouts (`.fingerprint/`, and every
@@ -57,14 +57,14 @@ use super::eligible::{
     walk_entries,
 };
 use super::{
-    Inspected, Judged, LockFile, ProfileDir, ProfileWalk, Project, Stop, Target, cargo_evidence,
-    inspect, judge_layout, last_build, reach,
+    Inspected, Judged, LockFile, ProfileDir, ProfileWalk, Project, ReclaimEnd, Stop, Target,
+    cargo_evidence, inspect, judge_layout, last_build, reach,
 };
-use crate::engine::{Candidate, DeleteOptions, End, Identity, Reason, Rules, Skip, WalkRecord};
+use crate::engine::{Candidate, DeleteOptions, Identity, Reason, Rules, Skip, WalkRecord};
 use crate::host::{
     Access, Delete, Host, HostError, LockMode, Locked, MonoTime, Timestamp, TryLock,
 };
-use crate::inuse::{Checker, NotCleared, Options, delete_cleared};
+use crate::inuse::{Checker, NotDeleted, clear_and_delete};
 use crate::profile::IdleFor;
 use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath};
 
@@ -92,30 +92,6 @@ pub struct Reclaimed {
     /// waits that long (`Blocking waiting for file lock`).
     pub locks_held: Option<Duration>,
     pub end: ReclaimEnd,
-}
-
-/// How [`reclaim`] ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReclaimEnd {
-    /// Every entry of every locked profile directory but the lock files
-    /// was deleted.
-    Complete,
-    /// A skip of the target, with its reason: before anything was deleted
-    /// (`locked`, `changed`, `in_use`, `not_idle`, ...), or part-way
-    /// (`changed`, `in_use`; `removed_entries` says how far it got, the
-    /// fingerprints being gone first).
-    Skipped(Skip),
-    /// The engine's delete of an entry failed (`ENOTEMPTY`: something was
-    /// created in it after its walk; `EACCES`, ...): an error for this
-    /// target, part-way.
-    Failed { path: PathBuf, error: HostError },
-    /// The pre-release sandbox gate refused (docs/safety.md): an error of
-    /// the whole run, never a skip; every later deletion is refused too.
-    GateRefused { path: PathBuf, error: HostError },
-    /// An error of the run: the deadline passed, or a host failure that
-    /// says nothing about this target (`EIO`, `EMFILE`, a scan slower than
-    /// the freshness bound, ...).
-    Stopped(Stop),
 }
 
 /// Runs the reclaim protocol (see the module docs) on `target`, found by
@@ -205,19 +181,9 @@ impl<H: Delete> Run<'_, '_, H> {
     ) -> Result<(), ReclaimEnd> {
         let (host, target, deadline) = (self.host, self.target, self.deadline);
         let path = &target.path;
-        let wanted = Options::from_rules(rules);
-        let have = self.checker.options();
-        if have.users != wanted.users || have.sockets != wanted.sockets {
-            return Err(ReclaimEnd::Stopped(Stop::Failed {
-                path: path.clone(),
-                error: HostError::invalid(
-                    "in-use check",
-                    path.display(),
-                    "the checker's options disagree with the walk's rules; build it with \
-                     Checker::new from the same rules",
-                ),
-            }));
-        }
+        self.checker
+            .serves(rules)
+            .map_err(|error| failed(path, error))?;
         // The checkout path rule, as the source profile says, on the
         // target as found (a path check: before any lock is taken; the
         // same order as eligibility, so both give the same reason).
@@ -327,9 +293,8 @@ impl<H: Delete> Run<'_, '_, H> {
     }
 
     /// Deletes one part, right after its own in-use check and the Cargo
-    /// heuristics on the same scan, through [`delete_cleared`] with the
-    /// record that was checked. A clear that expired before the delete
-    /// could start is checked again once, against a new scan.
+    /// heuristics on the same scan ([`clear_and_delete`], with the record
+    /// that was checked).
     fn delete_part(
         &mut self,
         candidate: &Candidate<'_, H::Fd>,
@@ -338,68 +303,39 @@ impl<H: Delete> Run<'_, '_, H> {
         project: Project,
     ) -> Result<(), ReclaimEnd> {
         let (host, target) = (self.host, self.target);
-        let path = candidate.path();
-        for attempt in 0..2 {
-            let clear = match self.checker.check(host, candidate, record) {
-                Ok(Ok(clear)) => clear,
-                Ok(Err(skip)) => return Err(ReclaimEnd::Skipped(skip)),
-                Err(error) => return Err(failed(path, error)),
-            };
-            let scan = self.checker.latest().expect("the check made or kept one");
+        let options = DeleteOptions {
+            make_writable: false,
+            deadline: self.deadline,
+        };
+        // The Cargo process heuristics, on the same scan as the check.
+        let mut heuristics = |scan: &crate::inuse::Scan| {
             let evidence =
                 cargo_evidence(scan, &target.path, target.identity.id, inspected, project);
-            if !evidence.is_empty() {
-                return Err(ReclaimEnd::Skipped(Skip::new(
+            if evidence.is_empty() {
+                Ok(())
+            } else {
+                Err(Skip::new(
                     Reason::InUse,
                     target.path.clone(),
                     evidence.join("; "),
-                )));
+                ))
             }
-            let options = DeleteOptions {
-                make_writable: false,
-                deadline: self.deadline,
-            };
-            match delete_cleared(host, clear, candidate, record, options) {
-                Ok(done) => {
-                    self.removed_entries += done.removed_entries;
-                    self.removed_bytes = self.removed_bytes.saturating_add(done.removed_bytes);
-                    return match done.end {
-                        End::Complete => Ok(()),
-                        End::Changed { path, detail } => Err(ReclaimEnd::Skipped(Skip::new(
-                            Reason::Changed,
-                            path,
-                            detail,
-                        ))),
-                        End::DeadlinePassed { path } => {
-                            Err(ReclaimEnd::Stopped(Stop::DeadlinePassed { path }))
-                        }
-                        End::Failed { path, error } => Err(ReclaimEnd::Failed { path, error }),
-                        End::GateRefused { path, error } => {
-                            Err(ReclaimEnd::GateRefused { path, error })
-                        }
-                    };
-                }
-                Err(NotCleared::Expired(_)) if attempt == 0 => self.checker.forget(),
-                Err(e) => {
-                    return Err(failed(
-                        path,
-                        HostError::invalid(
-                            "in-use check",
-                            path.display(),
-                            format!("the clear could not be used: {e:?}"),
-                        ),
-                    ));
-                }
-            }
-        }
-        Err(failed(
-            path,
-            HostError::invalid(
-                "in-use check",
-                path.display(),
-                "a fresh check expired before the deletion could start, twice",
-            ),
-        ))
+        };
+        let done = match clear_and_delete(
+            host,
+            self.checker,
+            candidate,
+            record,
+            options,
+            &mut heuristics,
+        ) {
+            Ok(done) => done,
+            Err(NotDeleted::Skipped(skip)) => return Err(ReclaimEnd::Skipped(skip)),
+            Err(NotDeleted::Failed(error)) => return Err(failed(candidate.path(), error)),
+        };
+        self.removed_entries += done.removed_entries;
+        self.removed_bytes = self.removed_bytes.saturating_add(done.removed_bytes);
+        ReclaimEnd::of(done.end)
     }
 }
 

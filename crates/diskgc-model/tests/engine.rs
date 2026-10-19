@@ -161,7 +161,7 @@ fn a_tree_is_walked_then_deleted_depth_first_in_name_order() {
 }
 
 #[test]
-fn every_unlink_comes_right_after_the_statx_of_its_entry_and_after_the_deadline_check() {
+fn every_unlink_comes_right_after_the_statx_of_its_entry_and_the_deadline_checks() {
     let host = model("");
     let target = Target::new(&host, "/tmp/c");
     let far = MonoTime(UPTIME_AT_START + Duration::from_secs(3600));
@@ -179,11 +179,22 @@ fn every_unlink_comes_right_after_the_statx_of_its_entry_and_after_the_deadline_
             continue;
         }
         unlinks += 1;
-        // ModelHost already insists on the statx right before; the deadline
-        // check (a clock read) comes before that statx, never between.
-        assert_eq!(trace[k - 1].op, Op::Statx, "{call}");
-        assert_eq!(trace[k - 1].path, call.path);
-        assert_eq!(trace[k - 2].op, Op::Now, "no deadline check before {call}");
+        // ModelHost already insists on the statx right before, clock reads
+        // aside: the deadline is read before that statx and once more
+        // between it and the unlink (the statx can block; task-18 round 2),
+        // nothing else.
+        assert_eq!(
+            trace[k - 1].op,
+            Op::Now,
+            "no deadline check right before {call}"
+        );
+        assert_eq!(trace[k - 2].op, Op::Statx, "{call}");
+        assert_eq!(trace[k - 2].path, call.path);
+        assert_eq!(
+            trace[k - 3].op,
+            Op::Now,
+            "no deadline check before the statx of {call}"
+        );
     }
     assert_eq!(unlinks, 8);
 }
@@ -468,20 +479,20 @@ tree:
 "#
         ))
     };
-    // Refused at the statx that finds it (the mounted root, on mount 31):
-    // the walk never tries to enter it.
-    let entered = |host: &ModelHost, path: &str| {
-        host.trace()
-            .iter()
-            .any(|c| c.op == Op::Openat2 && c.path.as_deref() == Some(Path::new(path)))
+    // Refused from mountinfo before statx: a dead mount must not be touched.
+    let touched = |host: &ModelHost, path: &str| {
+        host.trace().iter().any(|c| {
+            matches!(c.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                && c.path.as_deref() == Some(Path::new(path))
+        })
     };
     let host = mounted("/tmp/c/sub/m");
     let skip = assert_skipped(&host, &rules(), Reason::ContainsMount, "/tmp/c/sub/m");
-    assert!(skip.detail.contains("mount 31"), "{skip}");
-    assert!(!entered(&host, "/tmp/c/sub/m"));
+    assert!(skip.detail.contains("mountinfo"), "{skip}");
+    assert!(!touched(&host, "/tmp/c/sub/m"));
     let host = mounted("/tmp/c");
     assert_skipped(&host, &rules(), Reason::ContainsMount, "/tmp/c");
-    assert!(!entered(&host, "/tmp/c"));
+    assert!(!touched(&host, "/tmp/c"));
 }
 
 #[test]

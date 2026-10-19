@@ -55,9 +55,9 @@ use crate::resolve::Resolved;
 pub use delete::{DeleteOptions, Deletion, End, delete};
 pub(crate) use walk::host_failure;
 pub use walk::{
-    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, Rules, WalkStop,
-    checkout_metadata_below, checkout_metadata_down_to, is_cargo_lock_name, is_checkout_marker,
-    walk,
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, PRIVATE_TMP_PREFIX,
+    Rules, WalkStop, checkout_metadata_below, checkout_metadata_down_to, is_cargo_lock_name,
+    is_checkout_marker, is_private_tmp, path_in_private_tmp, walk,
 };
 
 /// Frames below the candidate that hold an fd at the same time (see the
@@ -126,36 +126,76 @@ impl<'a, F> Candidate<'a, F> {
     }
 }
 
-/// Filesystem types diskgc never takes candidates from: network
-/// filesystems (docs/safety.md, Before the walk: `unsupported_fs`). Their
-/// locks are not those of the local kernel (Cargo does not lock there), and
-/// a dead server can hang any operation on them. Compared with mountinfo's
-/// type in full; a FUSE type also by the name after `fuse.`.
+/// Filesystem types diskgc never takes candidates from: network and
+/// cluster filesystems, and filesystems shared with another machine (a VM
+/// host's), whose files another host may be using while no process of this
+/// one is (docs/safety.md, Before the walk: `unsupported_fs`). Their locks
+/// are not the local kernel's alone (Cargo does not lock there), and a dead
+/// server can hang any operation on them. Compared with mountinfo's type in
+/// full, and a FUSE type (`fuse.<name>`) by its `<name>` too. Every FUSE
+/// type is refused anyway ([`may_be_networked`]); the FUSE names here only
+/// make the reason clear.
 pub const NETWORK_FS_TYPES: &[&str] = &[
+    // Network filesystems in the kernel.
     "9p",
     "afs",
     "ceph",
     "cifs",
     "coda",
-    "davfs",
-    "gcsfuse",
-    "glusterfs",
-    "lustre",
     "ncpfs",
     "nfs",
     "nfs4",
-    "rclone",
-    "s3fs",
     "smb3",
     "smbfs",
+    // Cluster and parallel filesystems (shared storage of several hosts).
+    "beegfs",
+    "gfs2",
+    "gpfs",
+    "lustre",
+    "ocfs2",
+    "orangefs",
+    "pvfs2",
+    // Shared with a VM's host.
+    "vboxsf",
+    "virtiofs",
+    "vmhgfs",
+    // FUSE clients of network storage (`fuse.<name>`).
+    "ceph-fuse",
+    "curlftpfs",
+    "davfs",
+    "gcsfuse",
+    "glusterfs",
+    "goofys",
+    "gvfsd-fuse",
+    "juicefs",
+    "lizardfs",
+    "mfs",
+    "moosefs",
+    "rclone",
+    "s3fs",
     "sshfs",
+    "vmhgfs-fuse",
 ];
 
-/// Whether mountinfo's filesystem type `fs_type` is a network filesystem
-/// ([`NETWORK_FS_TYPES`], directly or as `fuse.<type>`).
-pub fn is_network_fs(fs_type: &str) -> bool {
-    let base = fs_type.strip_prefix("fuse.").unwrap_or(fs_type);
-    NETWORK_FS_TYPES.contains(&base)
+/// Whether mountinfo's filesystem type `fs_type` may hold files another
+/// host uses: a type in [`NETWORK_FS_TYPES`] (directly, or as
+/// `fuse.<type>`), or any FUSE type (`fuse`, `fuseblk`, and their subtypes).
+/// A FUSE type cannot establish where its backing data is stored.
+pub fn may_be_networked(fs_type: &str) -> bool {
+    NETWORK_FS_TYPES.contains(&fs_type)
+        || matches!(fs_type, "fuse" | "fuseblk")
+        || fs_type.starts_with("fuse.")
+        || fs_type.starts_with("fuseblk.")
+}
+
+/// Why [`may_be_networked`] refuses `fs_type`, for messages.
+pub fn networked_why(fs_type: &str) -> &'static str {
+    let named = |name: &str| NETWORK_FS_TYPES.contains(&name);
+    if named(fs_type) || fs_type.strip_prefix("fuse.").is_some_and(named) {
+        "a network, cluster or shared filesystem"
+    } else {
+        "a FUSE filesystem (fail closed: its data may be on another host)"
+    }
 }
 
 /// What identifies an entry between the walk and its unlink, compared in
@@ -408,9 +448,9 @@ pub enum Reason {
     Unreadable,
     /// A `.diskgc-keep` file is inside.
     Kept,
-    /// A Cargo lock file name anywhere, a Cargo target inside (the
-    /// structural recogniser), or a device node or an object of unknown
-    /// type.
+    /// A PrivateTmp entry, a Cargo lock file name anywhere, a Cargo
+    /// target inside (the structural recogniser), or a device node or an
+    /// object of unknown type.
     ContainsSpecial,
     /// A version-control checkout is inside ([`CHECKOUT_MARKERS`]
     /// anywhere, the candidate itself included), or the candidate lies
@@ -577,32 +617,39 @@ mod tests {
         }
     }
 
+    /// Fail closed on FUSE (task-18 round 2, Codex B1): every FUSE type is
+    /// possibly networked unless allowlisted as local, so a network FUSE
+    /// client missing from the list (`ceph-fuse` once was) is refused too.
     #[test]
-    fn network_filesystems_are_known_by_type_also_through_fuse() {
+    fn network_and_unknown_fuse_filesystems_may_be_networked() {
         for net in [
             "nfs",
             "nfs4",
             "cifs",
             "smb3",
-            "fuse.sshfs",
-            "sshfs",
-            "fuse.rclone",
             "9p",
-        ] {
-            assert!(is_network_fs(net), "{net}");
-        }
-        for local in [
-            "ext4",
-            "tmpfs",
-            "btrfs",
-            "xfs",
-            "overlay",
+            "virtiofs",
+            "ocfs2",
+            "fuse.sshfs",
+            "fuse.rclone",
+            "fuse.ceph-fuse",
+            "fuse.mfs",
+            "fuse.s3fs",
             "fuse",
+            "fuseblk",
+            "fuseblk.ntfs-3g",
             "fuse.portal",
-            "nfsd",
+            "fuse.never-heard-of-it",
+            "fuse.fuse-overlayfs",
+            "fuse.",
         ] {
-            assert!(!is_network_fs(local), "{local}");
+            assert!(may_be_networked(net), "{net}");
         }
+        for local in ["ext4", "tmpfs", "btrfs", "xfs", "overlay", "nfsd"] {
+            assert!(!may_be_networked(local), "{local}");
+        }
+        assert!(networked_why("fuse.ceph-fuse").starts_with("a network"));
+        assert!(networked_why("fuse.never-heard-of-it").starts_with("a FUSE"));
     }
 
     /// The path rule looks at the names strictly between the root and the

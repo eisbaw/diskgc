@@ -15,11 +15,24 @@
 //! and durations.
 //!
 //! The first slice of the executor ([`executor`]): the minimal `ensure` of
-//! one `--select` tier of kind `cargo-target`, its [`report`] (exit codes,
+//! one `--select` tier of kind `cargo-target` or `fs`, its [`report`] (exit codes,
 //! JSON, summary), the host lock ([`hostlock`]) and the configuration
 //! lookup with the part of schema `version: 1` loaded so far ([`config`]).
-//! [`fs_kind`] is the read-only half of kind `fs` (task-68's spike): find
-//! patterns and the judgement of each candidate, for the dry run only.
+//! [`fs_kind`] is kind `fs`: find patterns, discovery, the judgement of
+//! each candidate shared by the dry run and the reclaim, and its deletion
+//! protocol. [`outcome`] holds how a candidate's judgement or reclaim ends,
+//! for both kinds.
+
+/// Unwraps a [`outcome::Judged`] value inside a function returning one: a
+/// stop or a skip returns from it.
+macro_rules! judged {
+    ($e:expr) => {
+        match $e? {
+            Ok(value) => value,
+            Err(skip) => return Ok(Err(skip)),
+        }
+    };
+}
 
 pub mod cargo_target;
 pub mod config;
@@ -31,6 +44,7 @@ pub mod hostlock;
 pub mod inuse;
 pub mod kernel;
 pub mod kind;
+pub mod outcome;
 pub mod profile;
 pub mod report;
 pub mod resolve;

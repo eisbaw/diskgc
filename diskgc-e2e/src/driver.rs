@@ -26,7 +26,7 @@
 //!   entries=N -- <message>` when the delete stopped (N entries removed
 //!   before), `<path>` absolute;
 //! - `reclaim`: one line like `delete`'s, for the whole deletion step of
-//!   diskgc-core `inuse::delete_unused` (lock, walk, in-use check,
+//!   the test support `diskgc_model::support::delete_unused` (lock, walk, in-use check,
 //!   delete): also `0 skip in_use|locked|contains_ipc ...`, and `0 failed
 //!   <tag> <dir> -- <message>` for an error of the run; the scan's notes
 //!   (unreadable processes and why they do or do not block) go to stderr;
@@ -77,10 +77,11 @@ use diskgc_core::engine::{
     self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Rules, WalkStop,
 };
 use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
-use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT, Stop, delete_unused};
+use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT};
 use diskgc_core::profile::{IdleFor, Library};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
+use diskgc_model::support::{Stop, delete_unused};
 
 use crate::controlled::{Action, ControlLine, Controlled, Plan, Point, stdio_control};
 use crate::exit;
@@ -471,7 +472,7 @@ fn parent_of<H: Host>(
 }
 
 /// `reclaim [--ipc-live] DIR`: the deletion step of diskgc-core
-/// (`inuse::delete_unused`): lock DIR, walk it for the user `owner`, check
+/// (`diskgc_model::support::delete_unused`): lock DIR, walk it for the user `owner`, check
 /// it against a scan of every visible process, delete it. With
 /// `ipc_live`, sockets and FIFOs keep it only when live. Prints one result
 /// line, and the scan's notes on stderr.

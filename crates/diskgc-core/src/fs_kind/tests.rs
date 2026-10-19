@@ -211,3 +211,85 @@ fn a_wrong_example_is_reported() {
     assert!(failures[0].contains("/tmp/b-1"), "{failures:?}");
     assert!(failures[1].contains("/tmp/a-2"), "{failures:?}");
 }
+
+fn mount(
+    id: u64,
+    parent_id: u64,
+    at: &str,
+    fs_type: &str,
+    fs_root: &str,
+) -> crate::host::MountEntry {
+    crate::host::MountEntry {
+        id,
+        parent_id,
+        dev: crate::host::Dev {
+            major: 0,
+            minor: 42,
+        },
+        fs_root: fs_root.into(),
+        mount_point: at.into(),
+        fs_type: fs_type.into(),
+        source: "src".into(),
+        read_only: false,
+    }
+}
+
+/// A root is judged by its path and its mount's mountinfo line before
+/// anything is opened (docs/safety.md, Before the walk): inside systemd's
+/// PrivateTmp by a name on its path, or by its mount's root in its
+/// filesystem (a bind mount of a `systemd-private-*` directory elsewhere,
+/// task-68's QA finding); on a network filesystem; or with no mount.
+#[test]
+fn a_root_is_judged_by_its_path_and_its_mounts_line_first() {
+    use super::judge::check_root;
+    use crate::engine::Reason;
+    let mounts = [
+        mount(1, 0, "/", "ext4", "/"),
+        mount(30, 1, "/tmp", "tmpfs", "/"),
+        mount(
+            31,
+            1,
+            "/srv/bound",
+            "tmpfs",
+            "/systemd-private-abc-x.service-y/tmp",
+        ),
+        mount(32, 1, "/mnt/nas", "nfs4", "/export"),
+        mount(33, 1, "/home/me/remote", "fuse.sshfs", "/"),
+        mount(34, 1, "/srv/plain", "tmpfs", "/srv-data"),
+    ];
+    let judged = |root: &str| check_root(Path::new(root), &mounts);
+    assert_eq!(judged("/tmp"), Ok(()));
+    assert_eq!(judged("/srv/plain/x"), Ok(()));
+    for private in [
+        "/tmp/systemd-private-abc-x.service-y/tmp",
+        "/srv/bound",
+        "/srv/bound/sub",
+    ] {
+        assert!(matches!(judged(private), Err(Ok(_))), "{private}");
+    }
+    for network in ["/mnt/nas", "/mnt/nas/scratch", "/home/me/remote/x"] {
+        match judged(network) {
+            Err(Err(skip)) => assert_eq!(skip.reason, Reason::UnsupportedFs, "{network}"),
+            other => panic!("{network}: {other:?}"),
+        }
+    }
+    match check_root(Path::new("/tmp"), &[]) {
+        Err(Err(skip)) => assert_eq!(skip.reason, Reason::UnsafePath),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The one test for systemd's PrivateTmp names: the prefix, as bytes, at
+/// the start of a name only.
+#[test]
+fn private_tmp_names_are_known_by_their_prefix() {
+    assert!(is_private_tmp(OsStr::new(
+        "systemd-private-abc-cups.service-x1"
+    )));
+    assert!(!is_private_tmp(OsStr::new("my-systemd-private-x")));
+    assert!(!is_private_tmp(OsStr::new("systemd-privat")));
+    assert!(path_in_private_tmp(Path::new(
+        "/tmp/systemd-private-a/tmp/x"
+    )));
+    assert!(!path_in_private_tmp(Path::new("/tmp/a/tmp/x")));
+}

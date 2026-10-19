@@ -1,41 +1,43 @@
 //! The executor (docs/architecture.md, The reclaim walk), first slice: the
-//! minimal `ensure` of one `--select` tier of kind `cargo-target`
-//! (task-10), and the dry run of one tier of kind `fs` (task-68's spike:
-//! [`crate::fs_kind`]; a reclaiming `ensure` refuses kind `fs` until its
-//! delete exists, task-18). Later tasks extend it: groups, ranking and
-//! per-tier discovery for config tiers (task-20), deadlines with overruns,
-//! signals and re-sampling (task-54), the index (task-31). The fs dry run's
-//! fused discover-and-judge ([`fs_kind::plan`]) is a dry-run shape that
-//! task-18 splits for the reclaim.
+//! minimal `ensure` of one `--select` tier of kind `cargo-target` (task-10)
+//! or of kind `fs` with the `delete` action (task-18, [`crate::fs_kind`]),
+//! and their dry runs. Later tasks extend it: groups, ranking and per-tier
+//! discovery for config tiers (task-20), deadlines with overruns, signals
+//! and re-sampling (task-54), the index (task-31), command actions
+//! (task-37).
 //!
 //! Two entry points, kept apart by the type system:
 //!
-//! - [`ensure`] reclaims. It takes a [`Delete`] host and asks the
-//!   pre-release sandbox gate first ([`Delete::may_delete`]), then
-//!   measures; at or above `--min-free` it returns at once, without the
-//!   host lock. Otherwise it takes the host lock ([`hostlock`]), measures
-//!   again, and runs the tier: discovery below the roots, a read-only tally
-//!   of each target for the `oldest` order ([`cargo_target::tally`]), then
-//!   the reclaim protocol on each target in that order
-//!   ([`cargo_target::reclaim`], which repeats every check under the
-//!   target's locks), re-sampling after each, until the goal
+//! - [`ensure`] reclaims. It takes a [`Delete`] host, refuses an action it
+//!   has no reclaim for, asks the pre-release sandbox gate
+//!   ([`Delete::may_delete`]), then measures; at or above `--min-free` it
+//!   returns at once, without the host lock. Otherwise it takes the host
+//!   lock ([`hostlock`]), measures again, and runs the tier: discovery
+//!   below the roots, a read-only tally of each candidate for the `oldest`
+//!   order ([`cargo_target::tally`], [`fs_kind::tally`]), then the kind's
+//!   own reclaim protocol on each in that order ([`cargo_target::reclaim`],
+//!   [`fs_kind::reclaim`], each of which repeats every check under the
+//!   candidate's locks), re-sampling after each, until the goal
 //!   (`--target-free`) is observed.
 //! - [`dry_run`] plans. It takes only a [`Host`], so it cannot reach a
 //!   deleting method (nor the gate, which only `Delete` has): it measures,
 //!   discovers and runs the eligibility check of every target
 //!   ([`cargo_target::eligibility`]: no lock, no deletion), or of every
-//!   `fs` candidate ([`fs_kind::plan`]), whatever the available space, and
-//!   lists them in the order [`ensure`] would take them (`oldest`: least
-//!   recently built or changed first), eligible first.
+//!   `fs` candidate ([`fs_kind::plan`]: the reclaim's discovery and
+//!   judgement), whatever the available space, and lists them in the order
+//!   [`ensure`] would take them (`oldest`: least recently built or changed
+//!   first), eligible first.
 //!
 //! Both start with [`privileges`] and a [`Tier`], built and checked by the
 //! caller before anything touches the machine (static validation).
 //!
-//! Each [`cargo_target::ReclaimEnd`] maps to the report as task-10's note
-//! says: `Complete` is an action; `Skipped` a skip (and an action too when
-//! entries were deleted part-way); `Failed` an error of that target (the
-//! next target is still tried); `GateRefused` and `Stopped(Failed)` errors
-//! of the run, which stop it; `Stopped(DeadlinePassed)` the deadline path.
+//! Each [`ReclaimEnd`], whatever the kind, maps to the report as task-10's
+//! note says (`Reclaim::record`): `Complete` is an action; `Skipped` a skip
+//! (and an action too when entries were deleted part-way); `Failed` an
+//! error of that candidate (the next one is still tried; an `fs`
+//! candidate's `ENOTEMPTY` is never retried); `GateRefused` and
+//! `Stopped(Failed)` errors of the run, which stop it;
+//! `Stopped(DeadlinePassed)` the deadline path.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,7 +48,7 @@ use crate::fs_kind::{self, Find};
 use crate::host::{Delete, Dev, Host, HostError, MonoTime, Space, Timestamp};
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
-use crate::profile::{Body, Finds, IdleFor, Library};
+use crate::profile::{Action, Body, Finds, IdleFor, Library};
 use crate::report::{
     ActionEntry, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
@@ -60,7 +62,7 @@ use crate::units::{Size, format_bytes};
 pub const SELECT_TIER: &str = "--select";
 
 /// One tier as this slice runs it: a single term of one source profile
-/// (kind `cargo-target`, or kind `fs` for a dry run only), its idle
+/// (kind `cargo-target`, or kind `fs`), its idle
 /// requirement and its roots. Built by [`Tier::select`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier {
@@ -79,8 +81,15 @@ pub struct Tier {
     /// The source profile's `checkouts` setting: whether a candidate may
     /// hold a VCS checkout (docs/safety.md, No source checkout).
     pub checkouts: Checkouts,
-    /// The action, as the report names it.
-    pub operation: String,
+    /// The source profile's action (for the code-backed kinds, the kind's).
+    pub action: Action,
+}
+
+impl Tier {
+    /// The action, as the report names it (`operation`, human-readable).
+    pub fn operation(&self) -> String {
+        self.action.to_string()
+    }
 }
 
 /// What a tier's source profile finds, by kind.
@@ -88,8 +97,8 @@ pub struct Tier {
 pub enum SourceKind {
     /// Cargo target directories, by their structure.
     CargoTarget,
-    /// Entries matching its `find` (kind `fs`). Only planned: a reclaiming
-    /// [`ensure`] refuses it (task-18).
+    /// Entries matching its `find` (kind `fs`), deleted by the kind's own
+    /// protocol ([`fs_kind::reclaim`]) when its action is `delete`.
     Fs(Find),
 }
 
@@ -110,7 +119,7 @@ impl Tier {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
-                 kind fs with --dry-run), optionally with `&& filter:idle-...`"
+                 kind fs), optionally with `&& filter:idle-...`"
             )
         };
         let [term] = checked.expr().terms.as_slice() else {
@@ -174,7 +183,7 @@ impl Tier {
             roots,
             idle_for,
             checkouts: source.checkouts,
-            operation: source.action.to_string(),
+            action: source.action.clone(),
         })
     }
 }
@@ -336,22 +345,28 @@ pub fn ensure<H: Delete>(
     // Not a success until a path below says so.
     let report = Report::new(Status::Error, Some(&request.path));
     // Before anything else (the gate, the first sample, the host lock):
-    // only kind cargo-target has a reclaim in this build. Kind fs has no
-    // delete yet (task-18), so a reclaim over its candidates is refused,
-    // never attempted. An allowlist: a source kind added later is refused
-    // here until its reclaim exists ([`Reclaim::walk`] refuses it too).
-    let SourceKind::CargoTarget = &request.tier.source else {
-        return usage(
-            report,
-            log,
-            format!(
-                "--select `{}`: `{}` is not of kind cargo-target: only Cargo targets are \
-                 reclaimed by this build (the fs delete is not implemented yet, task-18): a \
-                 reclaiming ensure refuses it; use --dry-run for a read-only plan",
-                request.tier.select, request.tier.profile
-            ),
-        );
-    };
+    // only a source whose removal this build implements is reclaimed. An
+    // allowlist: kind cargo-target through its lock protocol, kind fs
+    // through its own deletion protocol when its action is `delete`
+    // ([`fs_kind::reclaim`]). Anything else (a command action, task-37; a
+    // kind added later) is refused here, never attempted, until its
+    // reclaim exists ([`Reclaim::walk`] matches the kinds exhaustively).
+    match (&request.tier.source, &request.tier.action) {
+        (SourceKind::CargoTarget, Action::CargoLockProtocol)
+        | (SourceKind::Fs(_), Action::Delete { .. }) => {}
+        (_, action) => {
+            return usage(
+                report,
+                log,
+                format!(
+                    "--select `{}`: `{}` removes with `{action}`, which this build does not \
+                     run (command actions are task-37): a reclaiming ensure refuses it; use \
+                     --dry-run for a read-only plan",
+                    request.tier.select, request.tier.profile
+                ),
+            );
+        }
+    }
     let mut report = report;
     let deadline = deadline_of(host, request.timeout);
     if let Err(gate) = host.may_delete() {
@@ -526,7 +541,7 @@ fn plan_entry(
         candidate: candidate.to_owned(),
         reason,
         estimated_bytes: bytes,
-        operation: tier.operation.clone(),
+        operation: tier.operation(),
         checkouts: tier.checkouts,
     }
 }
@@ -645,13 +660,12 @@ fn plan_fs<H: Host>(
         deadline,
         log,
     );
-    // Discovery and judgement are fused (fs_kind::plan): when the run
-    // stopped, the count is what was judged until then, and the entry it
-    // stopped at (in the run error) is not among them.
+    // When the run stopped, the count is what was judged until then; the
+    // candidates found but not judged are counted apart.
     let partial = if stopped.is_some() {
-        ", discovery stopped early"
+        format!(", stopped early: {} found but not judged", found.unjudged)
     } else {
-        ""
+        String::new()
     };
     planned.stopped = stopped;
     log(&format!(
@@ -963,21 +977,40 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let owners = [uid];
         let rules = rules(self.tier, &owners, self.log);
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
-        self.walk(&rules, &mut checker);
+        // No `_` arm: a new source kind must decide here (and in `ensure`'s
+        // allowlist) how it is reclaimed. Each kind runs its own protocol
+        // only: an fs tier never reaches the Cargo reclaim, a Cargo tier
+        // never the fs one.
+        match &self.tier.source {
+            SourceKind::CargoTarget => self.walk_cargo(&rules, &mut checker),
+            SourceKind::Fs(find) => self.walk_fs(find, &rules, &mut checker),
+        }
         self.report.held_by_deleted_files =
             held(self.host, &mut checker, self.measured.dev, self.log);
     }
 
-    fn walk(&mut self, rules: &Rules<'_>, checker: &mut Checker<'_>) {
-        let found = match discover(self.host, self.tier, self.deadline, self.log) {
-            Ok(found) => found,
-            Err(stop) => return self.stop(&stop),
-        };
-        let misconfigured = misconfigured_roots(self.tier, &found);
-        for skip in &found.refused {
-            if misconfigured.contains(&skip) {
-                continue;
-            }
+    /// The end of the tally: the deadline and `--tally-budget`, whichever
+    /// comes first.
+    fn tally_until(&self) -> Option<MonoTime> {
+        let budget_end = self
+            .tally_budget
+            .and_then(|b| self.host.now().checked_add(b));
+        match (self.deadline, budget_end) {
+            (Some(deadline), Some(budget)) => Some(deadline.min(budget)),
+            (deadline, None) => deadline,
+            (None, budget) => budget,
+        }
+    }
+
+    /// Discovery's refusals of roots and directories, as skips; a
+    /// misconfigured root (`unsafe_path`) is an error that excludes the
+    /// tier: `false` then.
+    fn refusals(&mut self, refused: &[Skip]) -> bool {
+        let misconfigured: Vec<&Skip> = refused
+            .iter()
+            .filter(|skip| is_misconfigured(self.tier, skip))
+            .collect();
+        for skip in refused.iter().filter(|s| !is_misconfigured(self.tier, s)) {
             self.report.skipped.push(SkipEntry {
                 tier: self.tier.name.clone(),
                 profile: self.tier.profile.clone(),
@@ -987,20 +1020,35 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 reason: skip.reason.as_str(),
             });
         }
-        if !misconfigured.is_empty() {
-            for skip in misconfigured {
-                self.run_error(excluded(skip));
-            }
+        for skip in &misconfigured {
+            self.run_error(excluded(skip));
+        }
+        misconfigured.is_empty()
+    }
+
+    /// The goal is observed: logged, `true`.
+    fn goal_reached(&mut self, avail: u64) -> bool {
+        if avail < self.measured.target {
+            return false;
+        }
+        (self.log)(&format!(
+            "{}: {} available, the goal (--target-free {}) is reached",
+            self.tier.name,
+            format_bytes(avail),
+            format_bytes(self.measured.target)
+        ));
+        true
+    }
+
+    fn walk_cargo(&mut self, rules: &Rules<'_>, checker: &mut Checker<'_>) {
+        let found = match discover(self.host, self.tier, self.deadline, self.log) {
+            Ok(found) => found,
+            Err(stop) => return self.stop(&stop),
+        };
+        if !self.refusals(&found.refused) {
             return;
         }
-        let budget_end = self
-            .tally_budget
-            .and_then(|b| self.host.now().checked_add(b));
-        let tally_until = match (self.deadline, budget_end) {
-            (Some(deadline), Some(budget)) => Some(deadline.min(budget)),
-            (deadline, None) => deadline,
-            (None, budget) => budget,
-        };
+        let tally_until = self.tally_until();
         // Two groups, in this order (docs/reference.md, `--tally-budget`):
         // the tallied targets, oldest first, then those the budget left
         // untallied, in the order found (judged in full under their locks).
@@ -1021,12 +1069,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Ok(Ok(tally)) => tallied.push((target, tally)),
                 Ok(Err(skip)) => self.skip(&target.path, &skip),
                 Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
-                    (self.log)(&format!(
-                        "{}: --tally-budget spent at {}: it and the targets after it are \
-                         taken after the tallied ones, in the order found",
-                        self.tier.name,
-                        target.path.display()
-                    ));
+                    self.budget_spent(&target.path);
                     untallied.push(target);
                 }
                 Err(stop) => return self.stop(&stop),
@@ -1046,13 +1089,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         };
         for (target, tally) in queue {
-            if avail >= self.measured.target {
-                (self.log)(&format!(
-                    "{}: {} available, the goal (--target-free {}) is reached",
-                    self.tier.name,
-                    format_bytes(avail),
-                    format_bytes(self.measured.target)
-                ));
+            if self.goal_reached(avail) {
                 return;
             }
             (self.log)(&match &tally {
@@ -1072,36 +1109,183 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     target.path.display()
                 ),
             });
-            match self.reclaim(target, rules, checker, avail) {
+            let started = self.host.now();
+            // judged_last_build None: an accepted tally only orders; the
+            // protocol's own recheck under the locks and the idle
+            // requirement decide.
+            let done = cargo_target::reclaim(
+                self.host,
+                target,
+                None,
+                rules,
+                self.tier.idle_for,
+                checker,
+                self.deadline,
+            );
+            let held = format!(
+                ", Cargo locks held {} ms",
+                done.locks_held.map_or(0, |d| d.as_millis())
+            );
+            let outcome = Outcome {
+                started,
+                before: avail,
+                removed_entries: done.removed_entries,
+                end: done.end,
+                note: held,
+            };
+            match self.record(&target.path, outcome) {
                 Some(after) => avail = after,
                 None => return,
             }
         }
     }
 
-    /// The reclaim protocol on `target`; the available space after it, or
-    /// `None` when the run must stop.
-    fn reclaim(
-        &mut self,
-        target: &Target,
-        rules: &Rules<'_>,
-        checker: &mut Checker<'_>,
-        before: u64,
-    ) -> Option<u64> {
-        let started = self.host.now();
-        // judged_last_build None: an accepted tally only orders; the
-        // protocol's own recheck under the locks and the idle requirement
-        // decide.
-        let done = cargo_target::reclaim(
-            self.host,
-            target,
-            None,
+    /// The fs tier: discovery ([`fs_kind::discover`]), a read-only tally
+    /// of each candidate for the `oldest` order within `--tally-budget`
+    /// ([`fs_kind::tally`]), then the deletion protocol on each in that
+    /// order ([`fs_kind::reclaim`], which judges every candidate again
+    /// under its lock), re-sampling after each, until the goal is observed.
+    fn walk_fs(&mut self, find: &Find, rules: &Rules<'_>, checker: &mut Checker<'_>) {
+        let Action::Delete { make_writable } = self.tier.action else {
+            // `ensure` refuses every other action before the gate.
+            return self.run_error(format!(
+                "`{}` removes with `{}`: no fs reclaim runs it",
+                self.tier.profile, self.tier.action
+            ));
+        };
+        let judge = fs_kind::Judge {
+            find,
             rules,
-            self.tier.idle_for,
-            checker,
-            self.deadline,
-        );
-        let took = self.host.now().saturating_since(started);
+            idle_for: self.tier.idle_for,
+            dev: self.measured.dev,
+        };
+        let (found, stopped) = fs_kind::discover(self.host, &self.tier.roots, find, self.deadline);
+        (self.log)(&format!(
+            "{}: `{}`: {} candidate(s) below {} ({} found again through another root or \
+             pattern, {} systemd-private-* passed over)",
+            self.tier.name,
+            self.tier.select,
+            found.candidates.len(),
+            self.tier
+                .roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            found.duplicates.len(),
+            found.private_tmp,
+        ));
+        if let Some(stop) = stopped {
+            // An incomplete discovery is not the tier's set: nothing is
+            // reclaimed from it.
+            return self.stop(&stop);
+        }
+        if !self.refusals(&found.refused) {
+            return;
+        }
+        let tally_until = self.tally_until();
+        let mut tallied: Vec<(&fs_kind::Found, fs_kind::Tally)> = Vec::new();
+        let mut untallied: Vec<&fs_kind::Found> = Vec::new();
+        for (path, candidate) in &found.candidates {
+            let found = match candidate {
+                Ok(found) => found,
+                Err(skip) => {
+                    self.skip(path, skip);
+                    continue;
+                }
+            };
+            if !untallied.is_empty() {
+                untallied.push(found);
+                continue;
+            }
+            match fs_kind::tally(self.host, &judge, found, tally_until) {
+                Ok(Ok(tally)) => tallied.push((found, tally)),
+                Ok(Err(skip)) => self.skip(path, &skip),
+                Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
+                    self.budget_spent(path);
+                    untallied.push(found);
+                }
+                Err(stop) => return self.stop(&stop),
+            }
+        }
+        oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
+        let queue = tallied
+            .into_iter()
+            .map(|(found, tally)| (found, Some(tally)))
+            .chain(untallied.into_iter().map(|f| (f, None)));
+        let mut avail = match sample(self.host, self.measured) {
+            Ok(space) => space.avail_bytes,
+            Err(e) => return self.run_error(e),
+        };
+        for (found, tally) in queue {
+            if self.goal_reached(avail) {
+                return;
+            }
+            if self.past_deadline() {
+                self.deadline_hit = true;
+                (self.log)(&format!(
+                    "{}: the deadline passed before {}",
+                    self.tier.name,
+                    found.path.display()
+                ));
+                return;
+            }
+            (self.log)(&match &tally {
+                Some(tally) => format!(
+                    "{}: reclaiming {} (est. {}, {} entries, newest change {})",
+                    self.tier.name,
+                    found.path.display(),
+                    format_bytes(tally.bytes),
+                    tally.entries,
+                    tally
+                        .newest_change
+                        .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
+                ),
+                None => format!(
+                    "{}: reclaiming {} (not tallied)",
+                    self.tier.name,
+                    found.path.display()
+                ),
+            });
+            let started = self.host.now();
+            let done = fs_kind::reclaim(
+                self.host,
+                &judge,
+                found,
+                make_writable,
+                checker,
+                self.deadline,
+            );
+            let outcome = Outcome {
+                started,
+                before: avail,
+                removed_entries: done.removed_entries,
+                end: done.end,
+                note: String::new(),
+            };
+            match self.record(&found.path, outcome) {
+                Some(after) => avail = after,
+                None => return,
+            }
+        }
+    }
+
+    fn budget_spent(&mut self, at: &Path) {
+        (self.log)(&format!(
+            "{}: --tally-budget spent at {}: it and the candidates after it are taken after \
+             the tallied ones, in the order found",
+            self.tier.name,
+            at.display()
+        ));
+    }
+
+    /// Records the reclaim of `candidate` (any kind's protocol): samples
+    /// the space after it, makes it an action when anything was deleted
+    /// (with the observed change, `null` when unmeasured), and a skip or
+    /// an error by how it ended. The available space after it, or `None`
+    /// when the run must stop.
+    fn record(&mut self, candidate: &Path, outcome: Outcome) -> Option<u64> {
+        let took = self.host.now().saturating_since(outcome.started);
         let after = match sample(self.host, self.measured) {
             Ok(space) => Some(space.avail_bytes),
             Err(e) => {
@@ -1111,41 +1295,45 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 None
             }
         };
-        let delta =
-            after.map(|a| i64::try_from(i128::from(a) - i128::from(before)).unwrap_or(i64::MAX));
-        if matches!(done.end, ReclaimEnd::Complete) || done.removed_entries > 0 {
+        let delta = after
+            .map(|a| i64::try_from(i128::from(a) - i128::from(outcome.before)).unwrap_or(i64::MAX));
+        let complete = matches!(outcome.end, ReclaimEnd::Complete);
+        if complete || outcome.removed_entries > 0 {
             (self.log)(&format!(
-                "{}: {} {}: {} {} entries, observed change {}, {} ms, Cargo locks held {} ms",
+                "{}: {} {}: {} {} entries, observed change {}, {} ms{}",
                 self.tier.name,
                 self.tier.profile,
-                target.path.display(),
-                if matches!(done.end, ReclaimEnd::Complete) {
+                candidate.display(),
+                if complete {
                     "reclaimed"
                 } else {
                     "deleted part-way:"
                 },
-                done.removed_entries,
+                outcome.removed_entries,
                 signed_bytes(delta),
                 took.as_millis(),
-                done.locks_held.map_or(0, |d| d.as_millis())
+                outcome.note
             ));
             self.report.actions.push(ActionEntry {
                 tier: self.tier.name.clone(),
                 profile: self.tier.profile.clone(),
-                candidate: target.path.clone(),
+                candidate: candidate.to_owned(),
                 avail_delta_bytes: delta,
                 duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
                 count: 1,
             });
         }
-        match done.end {
+        match outcome.end {
             ReclaimEnd::Complete => {}
-            ReclaimEnd::Skipped(skip) => self.skip(&target.path, &skip),
+            ReclaimEnd::Skipped(skip) => self.skip(candidate, &skip),
             ReclaimEnd::Failed { path, error } => {
-                self.error(&target.path, format!("{}: {error}", path.display()));
+                // An error for this candidate only (an `ENOTEMPTY` from a
+                // file created after its walk, ...): reported, never
+                // retried in this run; the next candidate is still tried.
+                self.error(candidate, format!("{}: {error}", path.display()));
             }
             ReclaimEnd::GateRefused { path, error } => {
-                self.error(&target.path, format!("{}: {error}", path.display()));
+                self.error(candidate, format!("{}: {error}", path.display()));
                 (self.log)(&format!(
                     "{}: the sandbox gate refused: nothing more is deleted",
                     self.tier.name
@@ -1159,4 +1347,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         after
     }
+}
+
+/// How one candidate's reclaim went, for [`Reclaim::record`].
+struct Outcome {
+    started: MonoTime,
+    /// The available space before it.
+    before: u64,
+    removed_entries: usize,
+    end: ReclaimEnd,
+    /// Appended to the action's log line.
+    note: String,
 }

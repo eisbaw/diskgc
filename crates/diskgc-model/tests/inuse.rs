@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 use common::{dir, host};
 use diskgc_core::engine::{Candidate, DeleteOptions, Deletion, End, Reason, Rules, Skip, walk};
 use diskgc_core::host::{Dev, Host, Pid};
-use diskgc_core::inuse::{
-    self, Checker, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan, Stop, delete_unused,
-};
+use diskgc_core::inuse::{self, Checker, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
+use diskgc_model::support::{Stop, delete_unused};
 
 const ME: u32 = 1000;
 
@@ -520,7 +519,9 @@ fn a_use_found_by_an_earlier_read_still_counts() {
 
 /// The options of the in-use check must be those of the walk: a user list
 /// narrower than the owners would excuse an owner's processes as another
-/// user's. `delete_unused` refuses to run with options that disagree.
+/// user's. `Checker::serves` refuses them (here through the test support's
+/// `delete_unused`, which the `fs` and Cargo protocols share the check
+/// with).
 #[test]
 fn the_check_refuses_options_that_disagree_with_the_walk() {
     let host = model(&processes(&[process(10, &[])]));

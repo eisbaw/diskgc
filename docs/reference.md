@@ -87,9 +87,11 @@ runs it as written.
   eligible candidates come first, in the order a reclaim would take them
   when its tally is not cut short (`--tally-budget 0`), then the skipped
   ones; a reclaim stops at the goal, the plan does not.
-  Takes no lock (so it cannot tell `locked`: whether a target's locks are
-  free is only tried by the reclaim) and always prints, even if the goal
-  is already met. It deletes nothing, so the deletion's freshness bound
+  Takes no lock (so it cannot tell `locked`: whether a target's locks or
+  an `fs` candidate's `flock` are free is only tried by the reclaim) and
+  always prints, even if the goal is already met. An `fs` tier's plan is
+  the reclaim's discovery and judgement
+  ([safety.md](safety.md#deletion)) without the lock and the delete. It deletes nothing, so the deletion's freshness bound
   does not apply: the plan of a `cargo-target` tier reuses a process scan
   for half a second, as a reclaim does, and that of an `fs` tier for up to
   a minute (half a second for a scan that blocks every candidate). With a `random` group, the order is for the printed seed
@@ -761,10 +763,10 @@ not met).
 
 Shipped inside the binary as YAML data, listed with `diskgc profiles list`
 and at the end of `diskgc --help`.
-A built-in profile ships only with `examples`, model tests, structural
-fixtures where it relies on markers, and a `verified_with` line naming the
-tool version it was checked against on a real system. Every row below is a
-v1 *target*; until verified it is listed as planned, not shipped.
+A built-in profile must satisfy the profile-specific
+[Definition of Done](testing.md#definition-of-done-every-task).
+Every row below is a v1 *target*; until verified it is
+listed as planned, not shipped.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|

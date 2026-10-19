@@ -3,13 +3,15 @@
 //!
 //! Every directory is opened below its parent (`open_beneath`: no symlink,
 //! no mount crossing) and matched against the identity of the `statx` that
-//! found it, listed in full, and every name in it is `statx`ed (not
-//! followed) and checked, in this order:
+//! found it, listed in full. The mount table is read before the candidate
+//! is statted; a mount point or `systemd-private-*` name is refused before
+//! any statx of that entry. Every other name is `statx`ed (not followed)
+//! and checked, in this order:
 //!
 //! 1. the kernel answered the type, inode, owner and mount id
 //!    (`unsupported_fs` otherwise);
-//! 2. it is on the candidate's mount (`contains_mount`): a mount point
-//!    inside shows the mounted root, on another mount;
+//! 2. it is on the candidate's mount (`contains_mount`), including a mount
+//!    made after the table was read if its statx returns;
 //! 3. it is not a `.diskgc-keep` (`kept`);
 //! 4. its owner is one of [`Rules::owners`] (`not_owner`);
 //! 5. it is not a socket or FIFO, if [`Rules::block_ipc`] (`contains_ipc`);
@@ -27,6 +29,7 @@
 //! empty.
 
 use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
@@ -37,6 +40,35 @@ use super::{Candidate, Entry, Identity, Reason, Skip, WalkRecord, deadline_passe
 
 /// The keep marker (docs/reference.md, Protection marker).
 pub const KEEP_MARKER: &str = ".diskgc-keep";
+
+/// systemd's PrivateTmp tree is not cruft, even inside a candidate found
+/// by a broad profile. Compare names as bytes before touching their inode.
+pub const PRIVATE_TMP_PREFIX: &str = "systemd-private-";
+
+pub fn is_private_tmp(name: &OsStr) -> bool {
+    name.as_bytes().starts_with(PRIVATE_TMP_PREFIX.as_bytes())
+}
+
+pub fn path_in_private_tmp(path: &Path) -> bool {
+    path.components()
+        .any(|part| is_private_tmp(part.as_os_str()))
+}
+
+fn private_tmp(path: PathBuf) -> Skip {
+    Skip::new(
+        Reason::ContainsSpecial,
+        path,
+        "systemd PrivateTmp entry (systemd-private-*): never entered or deleted",
+    )
+}
+
+fn mounted(path: PathBuf) -> Skip {
+    Skip::new(
+        Reason::ContainsMount,
+        path,
+        "a mount point (mountinfo): not touched",
+    )
+}
 
 /// The file that marks a Cargo target directory for the recogniser.
 pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
@@ -218,7 +250,9 @@ impl From<Skip> for WalkStop {
 }
 
 /// The eligibility walk of `candidate`: its record, or why it is not
-/// eligible. Checks the deadline before every `statx`, open and listing.
+/// eligible. Reads mountinfo first and refuses any mount point in its
+/// tree before statx; checks the deadline before every `statx`, open and
+/// listing.
 /// Refuses a VCS checkout inside ([`CHECKOUT_MARKERS`],
 /// `contains_checkout`) unless `rules` allow checkouts (the source
 /// profile's `checkouts: allow`).
@@ -229,8 +263,24 @@ pub fn walk<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Result<WalkRecord, WalkStop> {
     let path = || candidate.path.to_path_buf();
+    if is_private_tmp(candidate.name) {
+        return Err(private_tmp(path()).into());
+    }
     if deadline_passed(host, deadline) {
         return Err(WalkStop::DeadlinePassed { path: path() });
+    }
+    let mount_points: Vec<PathBuf> = host
+        .mountinfo()
+        .map_err(|error| WalkStop::Failed {
+            path: PathBuf::from("/proc/self/mountinfo"),
+            error,
+        })?
+        .into_iter()
+        .map(|mount| mount.mount_point)
+        .filter(|mount| mount.starts_with(candidate.path))
+        .collect();
+    if mount_points.iter().any(|mount| mount == candidate.path) {
+        return Err(mounted(path()).into());
     }
     let stat = match host.statx(Base::Dir(candidate.parent), Path::new(candidate.name)) {
         Ok(stat) => stat,
@@ -244,6 +294,7 @@ pub fn walk<H: Host>(
         candidate,
         rules,
         deadline,
+        mount_points,
         listings: Vec::new(),
         entries: 0,
         bytes: 0,
@@ -302,6 +353,7 @@ struct Walker<'w, H: Host> {
     candidate: &'w Candidate<'w, H::Fd>,
     rules: &'w Rules<'w>,
     deadline: Option<MonoTime>,
+    mount_points: Vec<PathBuf>,
     /// The record's listings so far (complete for every listed directory).
     listings: Vec<Vec<Entry>>,
     entries: usize,
@@ -345,6 +397,15 @@ impl<H: Host> Walker<'_, H> {
             let path = || stack.path(i, Some(&name));
             if deadline_passed(self.host, self.deadline) {
                 return Err(WalkStop::DeadlinePassed { path: path() });
+            }
+            if is_private_tmp(&name) {
+                return Err(private_tmp(path()).into());
+            }
+            if !self.mount_points.is_empty() {
+                let at = path();
+                if self.mount_points.contains(&at) {
+                    return Err(mounted(at).into());
+                }
             }
             let stat = match self.host.statx(Base::Dir(stack.fd(i)), Path::new(&name)) {
                 Ok(stat) => stat,

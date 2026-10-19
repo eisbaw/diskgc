@@ -21,7 +21,7 @@
 //! [`crate::under_test::Ledger`], [`Oracle::judge_runs`] marks the runs it
 //! judged, and the test fails if one is left unjudged (`suite::run`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -71,6 +71,44 @@ impl Fixture {
         below(&self.eligible)
             || below(&self.concurrent_writers)
             || path.starts_with(DISKGC_STATE_DIR)
+    }
+}
+
+/// A read-only view of one fixture for a judgement. Looking up each path's
+/// ancestors bounds the number of probes by path depth, regardless of how
+/// many eligible roots the fixture declares. It is rebuilt from the public
+/// fixture fields for each judgement, so edits to those fields cannot leave
+/// a stale index.
+struct Coverage<'a> {
+    roots: HashSet<&'a Path>,
+    /// An empty root is a prefix of every path, including absolute paths;
+    /// absolute paths do not have an empty ancestor to probe.
+    covers_all: bool,
+}
+
+impl<'a> Coverage<'a> {
+    fn new(fixture: &'a Fixture) -> Self {
+        let covers_all = fixture
+            .eligible
+            .iter()
+            .chain(&fixture.concurrent_writers)
+            .any(|root| root.as_os_str().is_empty());
+        let roots = fixture
+            .eligible
+            .iter()
+            .chain(&fixture.concurrent_writers)
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(Path::new(DISKGC_STATE_DIR)))
+            .collect();
+        Self { roots, covers_all }
+    }
+
+    fn covers(&self, path: &Path) -> bool {
+        self.covers_all || self.covers_if(path, |ancestor| self.roots.contains(ancestor))
+    }
+
+    fn covers_if(&self, path: &Path, contains: impl FnMut(&Path) -> bool) -> bool {
+        path.ancestors().any(contains)
     }
 }
 
@@ -157,9 +195,17 @@ pub fn diff(
     after: &BTreeMap<PathBuf, Entry>,
     fixture: &Fixture,
 ) -> Vec<Violation> {
+    diff_with_coverage(before, after, &Coverage::new(fixture))
+}
+
+fn diff_with_coverage(
+    before: &BTreeMap<PathBuf, Entry>,
+    after: &BTreeMap<PathBuf, Entry>,
+    coverage: &Coverage<'_>,
+) -> Vec<Violation> {
     before
         .iter()
-        .filter(|(path, _)| !fixture.covers(path))
+        .filter(|(path, _)| !coverage.covers(path))
         .filter_map(|(path, old)| {
             let change = match after.get(path) {
                 None => Change::Deleted { before: *old },
@@ -186,6 +232,14 @@ pub fn traced_violations(
     before: &BTreeMap<PathBuf, Entry>,
     fixture: &Fixture,
 ) -> Vec<TracedViolation> {
+    traced_violations_with_coverage(events, before, &Coverage::new(fixture))
+}
+
+fn traced_violations_with_coverage(
+    events: &[Event],
+    before: &BTreeMap<PathBuf, Entry>,
+    coverage: &Coverage<'_>,
+) -> Vec<TracedViolation> {
     let mut found = Vec::new();
     for event in events.iter().filter(|e| e.took_effect()) {
         let changed = event
@@ -194,7 +248,7 @@ pub fn traced_violations(
             .map(|p| (p, "removed"))
             .chain(event.replaced.iter().map(|p| (p, "replaced")));
         for (path, how) in changed {
-            if before.contains_key(path) && !fixture.covers(path) {
+            if before.contains_key(path) && !coverage.covers(path) {
                 found.push(TracedViolation {
                     path: path.clone(),
                     pid: event.pid,
@@ -503,9 +557,10 @@ impl Oracle {
             after.took,
             after.key_stats
         );
+        let coverage = Coverage::new(&self.fixture);
         let verdict = Verdict {
-            snapshot: diff(&self.before.entries, &after.entries, &self.fixture),
-            traced: traced_violations(&events, &self.before.entries, &self.fixture),
+            snapshot: diff_with_coverage(&self.before.entries, &after.entries, &coverage),
+            traced: traced_violations_with_coverage(&events, &self.before.entries, &coverage),
             unmatched: unmatched_removals(&events, &self.before.entries, &after.entries),
         };
         for line in unmatched_log(&verdict.unmatched) {
@@ -568,6 +623,76 @@ mod tests {
         Fixture::new()
             .eligible("/tmp/cand")
             .concurrent_writer("/tmp/writer")
+    }
+
+    #[test]
+    fn indexed_coverage_preserves_component_wise_prefixes_and_the_state_allowlist() {
+        let fixture = fixture().eligible("relative/ok").eligible("/tmp/cand/.");
+        let indexed = Coverage::new(&fixture);
+        for (path, covered) in [
+            ("/tmp/cand", true),
+            ("/tmp/cand/child", true),
+            ("/tmp/candidate", false),
+            ("/tmp/cand-sibling", false),
+            ("/tmp", false),
+            ("/tmp/writer/log", true),
+            ("/tmp/writers/log", false),
+            ("relative/ok/child", true),
+            ("relative/okay", false),
+            ("/home/tester/.local/state/diskgc/index", true),
+            ("/home/tester/.local/state/diskgc-old/index", false),
+        ] {
+            let path = Path::new(path);
+            assert_eq!(fixture.covers(path), covered, "linear: {path:?}");
+            assert_eq!(indexed.covers(path), covered, "indexed: {path:?}");
+        }
+        for path in [
+            "/tmp/cand/../other",
+            "/tmp/./cand/child",
+            "//tmp//cand//child",
+            "relative/ok/../other",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(indexed.covers(path), fixture.covers(path), "{path:?}");
+        }
+
+        // Public fixture fields can contain an empty prefix. Preserve the
+        // old Path::starts_with behavior for that input as well.
+        let any = Fixture::new().concurrent_writer(PathBuf::new());
+        for path in [Path::new("/tmp/x"), Path::new("relative/x")] {
+            assert_eq!(Coverage::new(&any).covers(path), any.covers(path));
+        }
+    }
+
+    #[test]
+    fn coverage_probes_are_bounded_by_path_depth_with_many_eligible_roots() {
+        let mut fixture = Fixture::new();
+        fixture.eligible = (0..16_000)
+            .map(|n| PathBuf::from(format!("/tmp/eligible/{n}")))
+            .collect();
+        let indexed = Coverage::new(&fixture);
+        let covered = Path::new("/tmp/eligible/15999/deep");
+        let missing = Path::new("/tmp/other/deep");
+        assert_eq!(indexed.roots.len(), 16_001); // eligible roots and the state allowlist
+        for (path, expected, expected_probes) in [(covered, true, 2), (missing, false, 4)] {
+            let mut probes = 0;
+            let result = indexed.covers_if(path, |ancestor| {
+                probes += 1;
+                indexed.roots.contains(ancestor)
+            });
+            assert_eq!(result, expected, "{path:?}");
+            assert_eq!(probes, expected_probes, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_reflects_edits_to_public_fixture_fields_on_the_next_judgement() {
+        let before = tree(&[("/tmp/newly-eligible/file", entry(1, None))]);
+        let after = tree(&[]);
+        let mut fixture = Fixture::new();
+        assert_eq!(diff(&before, &after, &fixture).len(), 1);
+        fixture.eligible.push("/tmp/newly-eligible".into());
+        assert!(diff(&before, &after, &fixture).is_empty());
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub mod driver;
 pub mod driver_suite;
 pub mod engine_suite;
 pub mod ensure_suite;
+pub mod fs_reclaim_suite;
 pub mod holder;
 pub mod host_probe;
 pub mod host_suite;

@@ -32,11 +32,44 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
 - **Mounts first.** `mountinfo` is read before anything is `stat`ed. A
   candidate that is a mount point or contains one (a user's FUSE or sshfs
   mount in `/tmp` is common) is skipped (`contains_mount`) without being
-  touched, so a dead mount cannot hang the scan. Network filesystems (NFS,
-  CIFS, sshfs; the list is `NETWORK_FS_TYPES` in the engine) are never
-  candidates' filesystems (`unsupported_fs`).
+  touched, and a name a pattern matches is never `statx`ed when it is a
+  mount point, so a dead mount cannot hang discovery or the judgement of a
+  candidate (a container test mounts a FUSE filesystem whose server never
+  answers, task-18). That covers those two only: the in-use scan can still
+  hang on a process that uses a dead mount (In use, limits), and a mount
+  made after the table was read is a limit of the deletion (Deletion). For
+  an `fs` candidate the mount table is read again when it is reached for
+  its tally and its deletion, and once more under its lock (Deletion). The
+  shared eligibility walk also reads it before statting the candidate or
+  any descendant; this protects nested mounts in Cargo profile entries.
+- **No network filesystems.** A candidate's filesystem is never one that
+  another host may be using (`unsupported_fs`): a root on one is refused
+  by its `mountinfo` line before it is opened, and discovery never crosses
+  into one below a root (it is a mount point there, `contains_mount`). The
+  type in `mountinfo` decides (`may_be_networked` in the engine), and it
+  fails closed for FUSE:
+  - network, cluster and VM-shared types are named (`NETWORK_FS_TYPES`):
+    NFS, CIFS/SMB, Ceph, AFS, 9p, Lustre, GPFS, OCFS2, GFS2, BeeGFS,
+    virtiofs, VirtualBox and VMware shared folders, and the FUSE clients of
+    network storage by their `fuse.<name>` (`sshfs`, `ceph-fuse`,
+    `glusterfs`, `rclone`, `s3fs`, `gcsfuse`, `moosefs`/`mfs`, `lizardfs`,
+    `juicefs`, ...), so the reason is clear;
+  - **every FUSE filesystem** (`fuse`, `fuseblk`, and either prefix with a
+    subtype) is refused: a FUSE server can store its files anywhere, and
+    its type names its program, not where the data is. This includes
+    `fuse.fuse-overlayfs`: its backing directories can be on network
+    storage.
+  - Limit: a non-FUSE type that is neither on the list nor local (a new
+    kernel network filesystem) is taken as local; the list is extended
+    when one is seen.
 - Entries of systemd's `PrivateTmp` (`systemd-private-*`) are never
-  candidates.
+  candidates and never entered: a name a pattern matches with that prefix
+  is passed over, and a root inside one is refused before it is opened, as
+  a misconfiguration (`unsafe_path`, an error that excludes the tier): a
+  name on its path has the prefix, or its mount's root in its filesystem
+  (the `mountinfo` root field) does: a bind mount of such a directory
+  elsewhere. Limit: a copy of one, or one renamed to another name, is not
+  recognised.
 
 ### The eligibility walk (mandatory, per candidate)
 
@@ -54,6 +87,9 @@ Immediately before acting, diskgc walks the candidate's whole tree
   it, or in any directory between the profile root and the candidate
   (`kept`).
 - **No special content** (`contains_special`):
+  - no `systemd-private-*` entry anywhere in a plain-delete candidate,
+    even when every entry belongs to the caller; its name is refused before
+    it is `statx`ed;
   - no entry anywhere in the candidate, the candidate itself included, has
     a known Cargo lock file name (`.cargo-lock`, `.cargo-build-lock`,
     `.cargo-artifact-lock`, the allowlist of `cargo-target` below),
@@ -266,7 +302,7 @@ A candidate is skipped (`in_use`) if a visible process:
 Or it is a directory locked with `flock` by someone else (`locked`), the
 convention systemd-tmpfiles also honours: diskgc opens the candidate
 directory below its parent and takes an exclusive `flock` without waiting
-(Deletion, step 1); a lock held by anyone else, shared or exclusive, makes
+(Deletion, step 3); a lock held by anyone else, shared or exclusive, makes
 that fail. The walk then runs under the lock and must find the locked
 directory (same device and inode): a directory replaced between the open and
 the walk is `changed`. Only directories are locked; a candidate that is a
@@ -476,6 +512,20 @@ once; none of them makes diskgc take a live process for gone):
    flight in a socket's queue belongs to no process at all: neither is
    seen.
 
+**A process using a dead mount hangs the scan** (a standing condition, no
+event needed; for both kinds, `fs` and `cargo-target`): the scan
+`statx`es every visible process's fds, working directory and root through
+`/proc` (above), and that `statx` waits for an answer from a dead FUSE
+server or a network server that is gone. A shell left in a dead `sshfs`
+mount in `/tmp` therefore hangs every reclaim at its first in-use check,
+although discovery and the judgement never touch the mount (Before the
+walk). It is a hang, never a deletion; the deadline cannot interrupt it
+(Deadlines). The fix is task-102's: `AT_STATX_DONT_SYNC` on those
+`statx` calls makes FUSE answer from its cached attributes without a
+request. It does not help NFS: a lookup through a magic link of `/proc`
+revalidates the dentry (`d_weak_revalidate`), which can still wait for the
+server, so a process using a dead NFS mount stays a limit.
+
 **Overlay and btrfs:** `maps` can report a different (device, inode) than
 `stat` on overlayfs and btrfs subvolumes (the layer's or volume's device,
 and on older kernels the layer's inode). For a candidate on one of them, a
@@ -508,30 +558,92 @@ Fine for one-user machines and runners; weaker on shared hosts.
 
 ### Deletion
 
-For the `delete` action:
+For the `delete` action of kind `fs` (`fs_kind` in the core). A dry run,
+the tally that orders a tier and the reclaim share one discovery and one
+judgement, so a plan (`--dry-run`) predicts what a reclaim does, `locked`
+aside (a plan takes no lock), and the same checks run whichever of them
+asks.
 
-1. Take an exclusive `flock` on the candidate (directories), as
-   systemd-tmpfiles does, so cooperating tools see it is being removed.
-2. Under that lock, run the eligibility walk and the in-use check (above).
-   Any failure: release, skip.
-3. Delete depth-first exactly the entries the walk recorded, reopening
+**Discovery** walks the roots by the patterns (Before the walk;
+docs/reference.md, Profiles) and records each candidate with the root it
+was found under and its identity (device, inode, owner, type, birth time
+where reported). It judges nothing inside a candidate but the source's
+own `where`, which decides whether it is a candidate at all. A reclaim
+acts only on a discovery that completed: one stopped by the deadline or an
+error of the run reclaims nothing of the tier.
+
+**The tally** (the tier's order, docs/architecture.md, The reclaim walk)
+runs steps 1 and 2 below and, of step 4, the source's `where` and the
+eligibility walk on each candidate, read-only: no lock, no idle
+requirement, no in-use check. A candidate it refuses is skipped for the
+run and never locked.
+
+**Per candidate**, in the tier's order, every check is made again on the
+filesystem as it is then, whatever the tally or a plan said:
+
+1. **Place.** The deadline; the mount table, read now; the checkout
+   guard's path rule (`contains_checkout`, No source checkout), another
+   filesystem than `PATH`'s (`other_fs`), a mount at or inside the
+   candidate (`contains_mount`, never touched).
+2. **Reached again** from its root, one directory at a time (Path
+   traversal; the root's `mountinfo` line judged first), and it must be
+   the object discovery found (identity; `changed`, or `missing` when
+   gone). No keep marker in the root or any directory on the way (`kept`):
+   a `statx` of the name in each directory reached, never a listing. A kept
+   candidate is never locked.
+3. **Lock.** Take an exclusive `flock` on the candidate (directories),
+   opened below its parent, without waiting, as systemd-tmpfiles does, so
+   cooperating tools see it is being removed: held by anyone else, shared
+   or exclusive, it is `locked`. The locked directory must be the object
+   discovery found (`changed`). A candidate that is a single file is not
+   locked.
+4. **Judged again under the lock:** the mount table read again and the
+   place again (a mount made since step 1 is `contains_mount`, never
+   looked into); the keep markers on the way again, on the very
+   directories it was reached through; the source's own `where` (no longer
+   passing it: `changed`); the eligibility walk (above), whose root must be
+   the object found and the one locked (`changed`); the idle requirement
+   on its newest change (none known: never idle). Then the in-use check
+   against a process scan within the freshness bound (In use: Freshness),
+   never one that blocked every candidate (unsettled, or an unreadable
+   process of the user): such a scan is dropped and made again. Any
+   failure: release, skip.
+5. Delete depth-first exactly the entries the walk recorded, right after
+   the check, through the clear that check made for exactly that record
+   (an expired clear is checked once more against a new scan), reopening
    each directory relative to its parent (`openat2`, see Path traversal)
    and checking its identity against the walk's record, with a bounded
    number of fds (the shape above). Before each `unlinkat`, check the
    deadline, then `statx(AT_SYMLINK_NOFOLLOW)` the name and compare its
    identity (device, inode, owner, type, birth time where reported) with
-   what the walk recorded; the `unlinkat` is the very next operation. A
+   what the walk recorded, then read the clock once more (the `statx` can
+   block, the machine can sleep: no change starts past the deadline); the
+   `unlinkat` follows with no filesystem operation in between. A
    mismatch (or the name gone, or a mount met on the way down, `EXDEV`, or
    the `unlinkat` itself finding the name gone, mounted on or of another
    type) stops the delete: nothing more is unlinked and the candidate is
    `changed`; a later run walks it afresh.
    `make_writable` (if the profile allows it) adds owner write permission
    to a directory right after it is opened and matched, before anything in
-   it is unlinked, after all the checks (and never once the deadline has
-   passed). It is not undone: a delete that stops part-way (`changed`, an
+   it is unlinked, after all the checks. Its readable fd is reopened and
+   matched before the final deadline read, immediately before `fchmod`.
+   It is not undone: a delete that stops part-way (`changed`, an
    error, the deadline) leaves the directories it entered with owner write
    permission added.
-4. Release.
+6. Release (by closing), whatever the outcome.
+
+Each candidate is one action, measured as every action is (the observed
+change in available space around it, docs/architecture.md, Measuring
+space; `null` when the sample after it failed, which stops the run: the
+goal can no longer be observed). A candidate deleted part-way is an action
+and a skip or an error. The deadline is checked before each candidate
+(in the walk over the tier and again in step 1), before each directory the
+reach (step 2) opens and before its `statx` of the candidate and of each
+keep marker, before each `where` predicate, before each `openat2`,
+listing and `statx` of the eligibility walk and of the delete's reopening
+of directories, and right before each `unlinkat` and `fchmod` (step 5).
+Not before: the reads of the mount table, the open and `flock` of step 3 (the lock does
+not wait) and the in-use scan (bounded by its own rounds).
 
 **Scope** means *the objects the walk checked*. Every directory diskgc
 descends into is matched by (device, inode) against the walk's record, and
@@ -540,7 +652,7 @@ directory is renamed elsewhere mid-delete, diskgc keeps deleting that same
 object (the cruft it checked), never whatever now sits at the old path.
 Two windows remain and are accepted: an entry replaced between the `statx` and the
 `unlinkat` of its name (Linux has no unlink-by-inode), and a file opened or
-created inside the candidate after step 2. A third limit is separate from
+created inside the candidate after its check in step 4. A third limit is separate from
 them: an object removed and recreated between the walk and its check with
 the same device, inode number, owner and type (inode number reuse) passes
 the identity check where the filesystem reports no birth time; where it
@@ -552,6 +664,40 @@ never unlinked (the walk did not record it) and makes the delete partial
 candidate, never retried silently. So is any other refused unlink (e.g.
 `EACCES` in a read-only directory without `make_writable`): the delete
 stops there, partial.
+
+**Accepted limits of the `fs` protocol**, by the race policy (Mark,
+2026-10-17: the window between a check and the deletion, and races that
+need several events, are stated limits; one event that makes diskgc take
+a candidate in use for unused, where a fix is known, is not accepted).
+Each with the number of events outside diskgc it needs:
+
+- *Check to delete* (one event, the window): a change made after step
+  4's checks and before or during the delete is not looked for again. A
+  process that starts using the candidate is In use's limit 5 (at most
+  the freshness bound, usually milliseconds); a keep marker put on the way
+  to it, or a change that makes its source's `where` fail, is not seen and
+  the candidate is deleted; a file, socket or FIFO created inside it is
+  never unlinked and stops the delete (`ENOTEMPTY`, an error).
+- *Mounts made after a table was read* (one event): the table is read at
+  step 1 and again at step 4, and a mount can appear after either read
+  (and after discovery's or the tally's). A live mount made inside the
+  candidate then is still found by whatever reaches it next (the reach's
+  `RESOLVE_NO_XDEV`, the walk's mount id, the delete's `EXDEV`:
+  `contains_mount` or `changed`); a dead FUSE or network mount made in that
+  window can hang the first `statx` that reaches it (the deadline cannot
+  interrupt it; an overrun, never a deletion). The same for a mount
+  stacked on a root between the reading of its `mountinfo` line and its
+  resolution: the resolution refuses it (`unsafe_path`), but its `statx`
+  of a dead mount's root can hang first.
+- *A process using a dead mount* hangs the in-use scan: a limit of the
+  scan, for both kinds (In use).
+- *Inode number reuse* (two events: the candidate removed, and another
+  object created at its name with its inode number, owner and type, after
+  discovery): it passes the identity checks of steps 2 to 4 where the
+  filesystem reports no birth time (the third limit above). Any other
+  replacement is `changed` at whichever of steps 2, 3 or 4 first sees it:
+  each compares with the identity discovery recorded, and the walk's root
+  with the locked directory.
 
 ### Other properties
 
@@ -823,7 +969,8 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   test binaries carry it too;
 - the target is **detached** (its parent holds no `Cargo.toml` that is a
   regular file, judged by `statx` without following, or that cannot be
-  told; a directory or a symlink of that name, dangling or not, does not
+  told; a mount point at that name is treated as unknown without statting
+  it; a directory or a symlink of that name, dangling or not, does not
   make it attached: it was put there by `--target-dir`, `CARGO_TARGET_DIR`,
   a `target-dir` in `.cargo/config.toml`, or it is a tool's nested target)
   and a visible Cargo process (named as above) runs, wherever it works:
@@ -1309,7 +1456,11 @@ and, at the deadline, starts no new work and terminates a running child
 the kernel (a hung network mount, a disk in error recovery) cannot be
 interrupted by a signal and can overrun the deadline; diskgc lists the
 overrun in the report's `overruns` when it returns. Network filesystems are never candidates, which
-removes the commonest cause. A supervised worker that the caller could
+removes the commonest cause, and a mount point is never `statx`ed by
+discovery or the judgement of a candidate (Before the walk). What can
+still block: a process using a dead mount hangs the in-use scan (In use),
+and a dead mount made after the mount table was read (Deletion, accepted
+limits). A supervised worker that the caller could
 abandon while it stays blocked is not part of v1: it would have to keep the
 host lock held while abandoned, which moves the problem rather than solving
 it.

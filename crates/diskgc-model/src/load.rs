@@ -117,6 +117,8 @@ pub enum Action {
     Advance(Duration),
     /// The call the event fires before fails with this errno.
     Fail(Errno),
+    /// A new filesystem mounted on a directory.
+    Mount(crate::spec::MountEventSpec),
 }
 
 /// A validated event; `index` is its position in the model's `events`.
@@ -827,11 +829,21 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
         }
         actions.push(Action::Fail(errno.0));
     }
+    if let Some(m) = &spec.mount {
+        path(&m.at)?;
+        if m.id == 0 || state.mounts.iter().any(|existing| existing.id == m.id) {
+            return Err(format!("mount id {} is 0 or taken", m.id));
+        }
+        if state.fss.contains_key(&m.dev.0) {
+            return Err(format!("device {} is mounted already", m.dev.0));
+        }
+        actions.push(Action::Mount(m.clone()));
+    }
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
             "no action (create, mkdir, remove, rename, replace, chown, open, close, \
-                  exit, fork, dumpable, access, advance, fail)"
+                  exit, fork, dumpable, access, advance, fail, mount)"
                 .to_owned(),
         ),
         _ => Err("more than one action; use one event per action".to_owned()),

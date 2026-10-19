@@ -70,10 +70,11 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   holds the lock (retry later), 124 deadline, 130/143 signal.
 
 This build runs `ensure --select` with one source profile term
-(optionally `&& filter:idle-...`): `profile:cargo-target`, or, with
---dry-run only, a kind fs profile from the config (its delete is task-18);
-`watch`, `check`, `survey`, `profiles test` and config tiers arrive with
-later tasks. PATH and every DIR are absolute.
+(optionally `&& filter:idle-...`): `profile:cargo-target`, or a kind fs
+profile from the config whose action is `delete` (one with a command
+action only with --dry-run: task-37); `watch`, `check`, `survey`,
+`profiles test` and config tiers arrive with later tasks. PATH and every
+DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The full contract is docs/reference.md in diskgc's source tree.
 ";

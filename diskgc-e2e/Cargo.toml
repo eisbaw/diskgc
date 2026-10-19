@@ -53,8 +53,8 @@ libc = "0.2"
 # Reads `diskgc ensure --json` back: the harness checks the report's fields
 # and values by parsing, never by text matching.
 serde_json = "1"
-
-[dev-dependencies]
-# Unit tests run the driver's operations and the controlled wrapper on the
-# host model (pure, in-process); test-only, like diskgc-model itself.
+# Test-only, like this crate: the driver's `reclaim` step composition
+# (`diskgc_model::support`, not production code), and the unit tests run
+# the driver's operations and the controlled wrapper on the host model
+# (pure, in-process).
 diskgc-model = { path = "../crates/diskgc-model" }

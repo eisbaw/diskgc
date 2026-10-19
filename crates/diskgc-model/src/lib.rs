@@ -13,6 +13,7 @@ pub mod host;
 pub mod load;
 pub mod spec;
 pub mod state;
+pub mod support;
 
 pub use host::{Call, Holder, ModelFd, ModelHost};
 pub use load::LoadError;

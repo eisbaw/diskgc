@@ -1,4 +1,4 @@
-//! The delete step (docs/safety.md, Deletion, step 3): removes exactly the
+//! The delete step (docs/safety.md, Deletion, step 5): removes exactly the
 //! entries of a [`WalkRecord`], depth first, in the record's (name) order.
 //!
 //! - Every directory is reopened below its parent by its recorded name
@@ -6,15 +6,15 @@
 //!   recorded identity, after a deadline check; see [`super::frames`].
 //! - Every entry is removed by [`checked_unlink`]: the deadline is checked,
 //!   then `statx` of the name, its identity (device, inode, owner, type,
-//!   birth time) compared with the record, then `unlinkat` as the very next
-//!   port call. Nothing
-//!   runs between the `statx` and the `unlinkat`; what can still happen
-//!   there (the name replaced by another process) is the window
-//!   docs/safety.md accepts, since Linux has no unlink-by-inode.
+//!   birth time) compared with the record, the deadline again (the `statx`
+//!   can block, the machine can sleep), then `unlinkat`. No filesystem call
+//!   runs between the `statx` and the `unlinkat`, only that clock read;
+//!   what can still happen there (the name replaced by another process) is
+//!   the window docs/safety.md accepts, since Linux has no unlink-by-inode.
 //! - With `make_writable`, a directory without owner write permission gets
-//!   it right after it is opened and matched, before anything in it is
-//!   unlinked (after every check: the walk and the caller's in-use check
-//!   ran before this step).
+//!   it right after it is opened and matched (a readable fd is prepared
+//!   before the final deadline read and `fchmod`), before anything in it is unlinked (after every
+//!   check: the walk and the caller's in-use check ran before this step).
 //!
 //! The first mismatch stops the delete: the candidate is `changed`, and
 //! nothing more is unlinked (a concurrent writer or remover is at work; the
@@ -25,8 +25,10 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use crate::host::{Base, Cause, Delete, Errno, FileType, HostError, MonoTime, Stat, Unlink};
-use crate::resolve::ResolveError;
+use crate::host::{
+    Access, Base, Cause, Delete, Errno, FileType, HostError, MonoTime, Stat, Unlink,
+};
+use crate::resolve::{ResolveError, Want, open_beneath};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
 use super::{Candidate, Identity, WalkRecord, deadline_passed};
@@ -179,7 +181,8 @@ impl<H: Delete> Deleter<'_, H> {
         if deadline_passed(self.host, self.options.deadline) {
             return Err(End::DeadlinePassed { path: path() });
         }
-        match checked_unlink(self.host, dir, name, expected) {
+        match checked_unlink(self.host, dir, name, expected, self.options.deadline) {
+            Ok(Unlinked::DeadlinePassed) => Err(End::DeadlinePassed { path: path() }),
             Ok(Unlinked::Removed) => {
                 self.removed_entries += 1;
                 self.removed_bytes = self.removed_bytes.saturating_add(bytes);
@@ -205,10 +208,49 @@ impl<H: Delete> Deleter<'_, H> {
         // A mode the kernel did not report is left alone: the unlinks
         // below then fail on their own if it is read-only.
         match stat.perm {
-            Some(perm) if self.options.make_writable && perm & 0o200 == 0 => self
-                .host
-                .fchmod(dir, perm | 0o200)
-                .map_err(|error| host_failure(path(), error)),
+            Some(perm) if self.options.make_writable && perm & 0o200 == 0 => {
+                // Linux fchmod cannot act on O_PATH. Prepare its readable fd
+                // before the last clock read; reopening may block on a sick
+                // filesystem. Confirm it is still the directory the walk
+                // checked before changing its permissions.
+                let Some(mount_id) = stat.mnt_id else {
+                    return Err(End::Changed {
+                        path: path(),
+                        detail: "the kernel did not report the directory's mount id".into(),
+                    });
+                };
+                let (readable, reopened) = match open_beneath(
+                    self.host,
+                    dir,
+                    mount_id,
+                    Path::new(""),
+                    Access::Read,
+                    Want::Directory,
+                ) {
+                    Ok(opened) => opened,
+                    Err(ResolveError::Host(error)) => return Err(host_failure(path(), error)),
+                    Err(error) => {
+                        return Err(End::Changed {
+                            path: path(),
+                            detail: format!("could not reopen the same directory: {error}"),
+                        });
+                    }
+                };
+                if Identity::of(&reopened).is_none()
+                    || Identity::of(&reopened) != Identity::of(stat)
+                {
+                    return Err(End::Changed {
+                        path: path(),
+                        detail: "readable fd differs from the directory the walk checked".into(),
+                    });
+                }
+                if deadline_passed(self.host, self.options.deadline) {
+                    return Err(End::DeadlinePassed { path: path() });
+                }
+                self.host
+                    .fchmod(&readable, perm | 0o200)
+                    .map_err(|error| host_failure(path(), error))
+            }
             _ => Ok(()),
         }
     }
@@ -218,20 +260,25 @@ impl<H: Delete> Deleter<'_, H> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Unlinked {
     Removed,
+    /// Not unlinked: the deadline passed while the name was checked.
+    DeadlinePassed,
     /// Not unlinked: the name is not (or no longer) the recorded object.
     Changed(String),
 }
 
 /// The identity-checked unlink (docs/safety.md, Deletion): `statx` of
 /// `name` in `dir`, its (device, inode, owner, type, birth time) compared with
-/// `expected`, then `unlinkat` as the very next port call. The only caller
-/// of `Delete::unlinkat` in production code (a source-scan allowlist entry
-/// enforces it), so no unlink can skip the check.
+/// `expected`, then the deadline (the `statx` can block, the machine can
+/// sleep), then `unlinkat` as the very next port call (no filesystem call
+/// between: only that clock read). The only caller of `Delete::unlinkat`
+/// in production code (a source-scan allowlist entry enforces it), so no
+/// unlink can skip the check.
 fn checked_unlink<H: Delete>(
     host: &H,
     dir: &H::Fd,
     name: &OsStr,
     expected: &Identity,
+    deadline: Option<MonoTime>,
 ) -> Result<Unlinked, HostError> {
     let found = match host.statx(Base::Dir(dir), Path::new(name)) {
         Ok(stat) => stat,
@@ -243,6 +290,9 @@ fn checked_unlink<H: Delete>(
         return Ok(Unlinked::Changed(format!(
             "not the object the walk checked: found {now:?}, recorded {expected:?}"
         )));
+    }
+    if deadline_passed(host, deadline) {
+        return Ok(Unlinked::DeadlinePassed);
     }
     let what = if expected.file_type == FileType::Directory {
         Unlink::Dir

@@ -23,10 +23,12 @@ use super::{
 };
 use crate::engine::{
     self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Skip, WalkStop,
-    is_cargo_lock_name, is_network_fs,
+    is_cargo_lock_name, is_private_tmp, may_be_networked, networked_why, path_in_private_tmp,
 };
-use crate::host::{Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, Stat};
-use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath, resolve};
+use crate::host::{
+    Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
+};
+use crate::resolve::{ResolveError, Resolved, Unsafe, Want, mount_for, open_beneath, resolve_in};
 
 /// How far below a root discovery looks: a target at most this many
 /// directories down (the root itself is depth 0).
@@ -68,23 +70,22 @@ pub fn discover<H: Host>(
     let mut ordered: Vec<&PathBuf> = roots.iter().collect();
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
-        let resolved = match resolve(host, root, Want::Directory) {
-            Ok(resolved) => resolved,
+        let LocalRoot { resolved, mounts } = match resolve_root(host, root) {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(skip)) => {
+                found.refused.push(skip);
+                continue;
+            }
             Err(e) => {
                 found.refused.push(unreachable_root(root, e)?);
                 continue;
             }
         };
-        if is_network_fs(&resolved.mount.fs_type) {
-            found
-                .refused
-                .push(network_fs(root, &resolved.mount.fs_type));
-            continue;
-        }
         Walk {
             host,
             root,
             mount_id: resolved.mount.id,
+            mounts: &mounts,
             deadline,
             found: &mut found,
             seen: &mut seen,
@@ -94,13 +95,61 @@ pub fn discover<H: Host>(
     Ok(found)
 }
 
+/// Refuse a possibly shared root from its mountinfo entry before opening
+/// its mount point or doing any statx there. A dead FUSE root can block both.
+struct LocalRoot<F> {
+    resolved: Resolved<F>,
+    mounts: Vec<MountEntry>,
+}
+
+fn resolve_root<H: Host>(
+    host: &H,
+    root: &Path,
+) -> Result<Result<LocalRoot<H::Fd>, Skip>, ResolveError> {
+    if path_in_private_tmp(root) {
+        return Ok(Err(private_root(
+            root,
+            "a systemd PrivateTmp name on its path",
+        )));
+    }
+    let mounts = host.mountinfo().map_err(ResolveError::Host)?;
+    let mount = mount_for(&mounts, root).map_err(|why| ResolveError::UnsafePath {
+        path: root.to_owned(),
+        why,
+    })?;
+    if may_be_networked(&mount.fs_type) {
+        return Ok(Err(network_fs(root, &mount.fs_type)));
+    }
+    if private_mount_root(mount) {
+        return Ok(Err(private_root(
+            root,
+            "the mount root is a bind mount of systemd PrivateTmp",
+        )));
+    }
+    resolve_in(host, &mounts, root, Want::Directory)
+        .map(|resolved| Ok(LocalRoot { resolved, mounts }))
+}
+
+fn private_mount_root(mount: &MountEntry) -> bool {
+    path_in_private_tmp(&mount.fs_root)
+}
+
+fn private_root(root: &Path, why: &str) -> Skip {
+    Skip::new(
+        Reason::UnsafePath,
+        root.to_owned(),
+        format!("{why}: never searched or reclaimed"),
+    )
+}
+
 fn network_fs(path: &Path, fs_type: &str) -> Skip {
     Skip::new(
         Reason::UnsupportedFs,
         path.to_owned(),
         format!(
-            "on a network filesystem ({fs_type}): Cargo does not lock there, and a dead server \
-             would hang the walk"
+            "on {} ({fs_type}): Cargo does not lock there, and a dead server would hang the \
+             walk",
+            networked_why(fs_type)
         ),
     )
 }
@@ -186,10 +235,14 @@ pub(super) fn identity_of(stat: &Stat, path: &Path) -> Result<Identity, Skip> {
 fn subdir<H: Host>(
     host: &H,
     dir: &H::Fd,
+    mounts: &[MountEntry],
     mount_id: u64,
     name: &OsString,
     path: &Path,
 ) -> Judged<Option<Stat>> {
+    if mount_at(mounts, path) {
+        return Ok(Err(mounted(path)));
+    }
     let stat = match host.statx(Base::Dir(dir), Path::new(name)) {
         Ok(stat) => stat,
         Err(e) => return failure(path.to_owned(), "stat", &e),
@@ -209,6 +262,18 @@ fn subdir<H: Host>(
         )));
     }
     Ok(Ok((file_type == FileType::Directory).then_some(stat)))
+}
+
+fn mount_at(mounts: &[MountEntry], path: &Path) -> bool {
+    mounts.iter().any(|entry| entry.mount_point == path)
+}
+
+fn mounted(path: &Path) -> Skip {
+    Skip::new(
+        Reason::ContainsMount,
+        path.to_owned(),
+        "a mount point (mountinfo): not touched",
+    )
 }
 
 /// Opens the directory `name` below `dir` (`O_PATH`, no symlink, no mount
@@ -288,6 +353,21 @@ pub fn inspect<H: Host>(
     path: &Path,
     deadline: Option<MonoTime>,
 ) -> Judged<Inspected> {
+    let mounts = host.mountinfo().map_err(|error| Stop::Failed {
+        path: path.to_owned(),
+        error,
+    })?;
+    inspect_in(host, target, &mounts, mount_id, path, deadline)
+}
+
+fn inspect_in<H: Host>(
+    host: &H,
+    target: &H::Fd,
+    mounts: &[MountEntry],
+    mount_id: u64,
+    path: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<Inspected> {
     let names = judged!(list(host, target, path, deadline));
     let mut inspected = Inspected {
         profiles: Vec::new(),
@@ -300,15 +380,18 @@ pub fn inspect<H: Host>(
     for name in &names {
         let rel = PathBuf::from(name);
         let at = path.join(name);
-        if judged!(subdir(host, target, mount_id, name, &at)).is_none() {
+        if is_private_tmp(name) {
+            return Ok(Err(private_entry(&at)));
+        }
+        if judged!(subdir(host, target, mounts, mount_id, name, &at)).is_none() {
             continue;
         }
         let (fd, stat) = judged!(open_dir(host, target, mount_id, &rel, &at));
         let inside = judged!(list(host, &fd, &at, deadline));
         if inside.iter().any(|n| is_cargo_lock_name(n)) {
-            inspected
-                .profiles
-                .push(judged!(profile_dir(host, &fd, rel, &at, &stat, inside)));
+            inspected.profiles.push(judged!(profile_dir_in(
+                host, &fd, mounts, rel, &at, &stat, inside
+            )));
             continue;
         }
         if inspected.keep_marker.is_none() && inside.iter().any(|n| n == KEEP_MARKER) {
@@ -325,16 +408,20 @@ pub fn inspect<H: Host>(
         for child in &inside {
             let child_rel = rel.join(child);
             let child_at = path.join(&child_rel);
-            if judged!(subdir(host, &fd, mount_id, child, &child_at)).is_none() {
+            if is_private_tmp(child) {
+                return Ok(Err(private_entry(&child_at)));
+            }
+            if judged!(subdir(host, &fd, mounts, mount_id, child, &child_at)).is_none() {
                 continue;
             }
             let (child_fd, child_stat) =
                 judged!(open_dir(host, &fd, mount_id, Path::new(child), &child_at));
             let grandchildren = judged!(list(host, &child_fd, &child_at, deadline));
             if grandchildren.iter().any(|n| is_cargo_lock_name(n)) {
-                inspected.profiles.push(judged!(profile_dir(
+                inspected.profiles.push(judged!(profile_dir_in(
                     host,
                     &child_fd,
+                    mounts,
                     child_rel,
                     &child_at,
                     &child_stat,
@@ -345,6 +432,14 @@ pub fn inspect<H: Host>(
     }
     inspected.profiles.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(Ok(inspected))
+}
+
+fn private_entry(path: &Path) -> Skip {
+    Skip::new(
+        Reason::ContainsSpecial,
+        path.to_owned(),
+        "systemd PrivateTmp entry (systemd-private-*): never entered or reclaimed",
+    )
 }
 
 /// The profile directory open as `fd` (at `path`, `rel` below its target),
@@ -359,6 +454,22 @@ pub(super) fn profile_dir<H: Host>(
     stat: &Stat,
     names: Vec<OsString>,
 ) -> Judged<ProfileDir> {
+    let mounts = host.mountinfo().map_err(|error| Stop::Failed {
+        path: path.to_owned(),
+        error,
+    })?;
+    profile_dir_in(host, fd, &mounts, rel, path, stat, names)
+}
+
+fn profile_dir_in<H: Host>(
+    host: &H,
+    fd: &H::Fd,
+    mounts: &[MountEntry],
+    rel: PathBuf,
+    path: &Path,
+    stat: &Stat,
+    names: Vec<OsString>,
+) -> Judged<ProfileDir> {
     let identity = match identity_of(stat, path) {
         Ok(identity) => identity,
         Err(skip) => return Ok(Err(skip)),
@@ -367,6 +478,12 @@ pub(super) fn profile_dir<H: Host>(
     let mut entries = Vec::new();
     for name in names {
         let at = path.join(&name);
+        if is_private_tmp(&name) {
+            return Ok(Err(private_entry(&at)));
+        }
+        if mount_at(mounts, &at) {
+            return Ok(Err(mounted(&at)));
+        }
         let stat = match host.statx(Base::Dir(fd), Path::new(&name)) {
             Ok(stat) => stat,
             Err(e) => return failure(at, "stat", &e),
@@ -403,6 +520,7 @@ struct Walk<'a, H: Host> {
     host: &'a H,
     root: &'a Path,
     mount_id: u64,
+    mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
     found: &'a mut Discovery,
     seen: &'a mut HashSet<DevIno>,
@@ -429,6 +547,12 @@ impl<H: Host> Walk<'_, H> {
                 continue;
             };
             let path = top.path.join(&name);
+            if is_private_tmp(&name) {
+                continue;
+            }
+            if mount_at(self.mounts, &path) {
+                continue;
+            }
             let depth = top.depth + 1;
             match open_dir(self.host, &top.fd, self.mount_id, Path::new(&name), &path)? {
                 Ok((fd, _)) => {
@@ -482,7 +606,10 @@ impl<H: Host> Walk<'_, H> {
         let mut pending = Vec::new();
         for name in names {
             let at = path.join(&name);
-            match subdir(self.host, &fd, self.mount_id, &name, &at)? {
+            if is_private_tmp(&name) {
+                continue;
+            }
+            match subdir(self.host, &fd, self.mounts, self.mount_id, &name, &at)? {
                 Ok(Some(_)) => pending.push(name),
                 Ok(None) => {}
                 // A mount below the root is not crossed, and not refused:
@@ -503,10 +630,21 @@ impl<H: Host> Walk<'_, H> {
     /// tag and a profile directory); `Ok(Ok(true))` then, so it is not
     /// descended into.
     fn target_at(&mut self, fd: &H::Fd, path: &Path) -> Judged<bool> {
+        let tag = path.join(CACHEDIR_TAG);
+        if mount_at(self.mounts, &tag) {
+            return Ok(Err(mounted(&tag)));
+        }
         if !judged!(has_valid_tag(self.host, fd, self.mount_id, path)) {
             return Ok(Ok(false));
         }
-        let inspected = judged!(inspect(self.host, fd, self.mount_id, path, self.deadline));
+        let inspected = judged!(inspect_in(
+            self.host,
+            fd,
+            self.mounts,
+            self.mount_id,
+            path,
+            self.deadline
+        ));
         if inspected.profiles.is_empty() {
             return Ok(Ok(false));
         }
@@ -563,13 +701,24 @@ pub const CARGO_MANIFEST: &str = "Cargo.toml";
 
 /// Whether the directory `dir` (at `path`) holds a `Cargo.toml` that is a
 /// regular file (`statx`, not followed). A directory, a symlink (dangling or
-/// not) or anything else of that name does not count, nor does one not
-/// found or not readable: no is the conservative answer for
+/// not), a mount point, or anything else of that name does not count, nor
+/// does one not found or not readable: no is the conservative answer for
 /// [`Project::detached`]. Any other failure is an error of the run.
-fn has_manifest<H: Host>(host: &H, dir: &H::Fd, path: &Path) -> Result<bool, Stop> {
+fn has_manifest<H: Host>(
+    host: &H,
+    dir: &H::Fd,
+    mounts: &[MountEntry],
+    path: &Path,
+) -> Result<bool, Stop> {
+    let manifest = path.join(CARGO_MANIFEST);
+    // statx of a mounted file can wait forever for a dead FUSE server.
+    // A manifest we cannot safely inspect does not establish attachment.
+    if mount_at(mounts, &manifest) {
+        return Ok(false);
+    }
     match host.statx(Base::Dir(dir), Path::new(CARGO_MANIFEST)) {
         Ok(stat) => Ok(stat.file_type == Some(FileType::Regular)),
-        Err(e) => match failure::<Infallible>(path.join(CARGO_MANIFEST), "stat", &e)? {
+        Err(e) => match failure::<Infallible>(manifest, "stat", &e)? {
             Err(_missing_or_unreadable) => Ok(false),
             Ok(never) => match never {},
         },
@@ -589,13 +738,14 @@ pub fn reach<H: Host>(
     target: &Target,
     deadline: Option<MonoTime>,
 ) -> Judged<Reached<H::Fd>> {
-    let root = match resolve(host, &target.root, Want::Directory) {
-        Ok(root) => root,
+    let LocalRoot {
+        resolved: root,
+        mounts,
+    } = match resolve_root(host, &target.root) {
+        Ok(Ok(root)) => root,
+        Ok(Err(skip)) => return Ok(Err(skip)),
         Err(e) => return Ok(Err(unreachable_root(&target.root, e)?)),
     };
-    if is_network_fs(&root.mount.fs_type) {
-        return Ok(Err(network_fs(&target.root, &root.mount.fs_type)));
-    }
     let rel = target
         .path
         .strip_prefix(&target.root)
@@ -636,6 +786,12 @@ pub fn reach<H: Host>(
             )));
         }
         at.push(name);
+        if is_private_tmp(name) {
+            return Ok(Err(private_entry(&at)));
+        }
+        if mount_at(&mounts, &at) {
+            return Ok(Err(mounted(&at)));
+        }
         let (fd, stat) = match open_beneath(
             host,
             &dir,
@@ -679,15 +835,19 @@ pub fn reach<H: Host>(
             let path = target.path.parent().unwrap_or(&target.root);
             Project {
                 id: stat.dev_ino(),
-                detached: !has_manifest(host, &fd, path)?,
+                detached: !has_manifest(host, &fd, &mounts, path)?,
             }
         }
         // The target is the root: its parent is above it.
         None => match target.path.parent() {
-            Some(path) => match resolve(host, path, Want::Directory) {
-                Ok(parent) => Project {
-                    id: parent.stat.dev_ino(),
-                    detached: !has_manifest(host, &parent.fd, path)?,
+            Some(path) => match resolve_root(host, path) {
+                Ok(Ok(parent)) => Project {
+                    id: parent.resolved.stat.dev_ino(),
+                    detached: !has_manifest(host, &parent.resolved.fd, &parent.mounts, path)?,
+                },
+                Ok(Err(_)) => Project {
+                    id: None,
+                    detached: true,
                 },
                 Err(ResolveError::Host(e)) => {
                     // Only an error of the run stops; a parent that cannot
@@ -720,4 +880,31 @@ pub fn reach<H: Host>(
         },
         project,
     }))
+}
+
+#[cfg(test)]
+mod private_tmp_tests {
+    use super::*;
+    use crate::host::Dev;
+
+    #[test]
+    fn a_bind_mounted_private_tmp_root_is_identified_without_opening_it() {
+        let mount = |fs_root: &str| MountEntry {
+            id: 40,
+            parent_id: 1,
+            dev: Dev {
+                major: 0,
+                minor: 42,
+            },
+            fs_root: fs_root.into(),
+            mount_point: "/srv/bound".into(),
+            fs_type: "tmpfs".into(),
+            source: "tmpfs".into(),
+            read_only: false,
+        };
+        assert!(private_mount_root(&mount(
+            "/systemd-private-abc-cups.service-x1/tmp"
+        )));
+        assert!(!private_mount_root(&mount("/ordinary/tmp")));
+    }
 }
