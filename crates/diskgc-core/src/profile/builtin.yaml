@@ -85,6 +85,79 @@
     match: [/home/mark/src/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build]
   verified_with: CMake 3.30.5 (host CMakeCache.txt in retimer out-of-source builds, read-only survey 2026-10-20)
+
+# Each command receives the exact candidate diskgc measured. Keep each
+# program's own cache protocol: deleting a whole store can destroy metadata
+# or package state that its cleaner intentionally preserves.
+- name: pip-cache
+  category: caches
+  description: pip's HTTP and wheel cache below a supplied home root
+  find: {roots: required, paths: [.cache/pip], type: dir}
+  action: {command: [pip, --cache-dir, "{path}", cache, purge]}
+  examples:
+    match: [/home/mark/.cache/pip]
+    no_match: [/home/mark/.cache/pip/http-v2, /home/mark/.cache/uv]
+  verified_with: pip 26.1.2, host dry-run and Nix container cleaner 2026-10-20
+
+- name: uv-cache
+  category: python / js
+  description: uv's package and archive cache below a supplied home root
+  find: {roots: required, paths: [.cache/uv], type: dir}
+  action: {command: [uv, cache, clean, --cache-dir, "{path}"], cwd: parent}
+  examples:
+    match: [/home/mark/.cache/uv]
+    no_match: [/home/mark/.cache/uv/archive-v0, /home/mark/.cache/pip]
+  verified_with: uv 0.13.0, host dry-run and Nix container cleaner 2026-10-20
+
+- name: go-build-cache
+  category: caches
+  description: Go's build cache below a supplied home root
+  find: {roots: required, paths: [.cache/go-build], type: dir}
+  action: {command: [env, "GOCACHE={path}", go, clean, -cache]}
+  examples:
+    match: [/home/mark/.cache/go-build]
+    no_match: [/home/mark/.cache/go-build/00, /home/mark/go/pkg/mod]
+  verified_with: Go 1.26.8, host dry-run and Nix container cleaner 2026-10-20
+
+- name: npm-cache
+  category: caches
+  description: npm's cache below a supplied home root
+  find: {roots: required, paths: [.npm], type: dir}
+  action: {command: [npm, cache, clean, --force, --cache, "{path}"]}
+  examples:
+    match: [/home/mark/.npm]
+    no_match: [/home/mark/.npm/_cacache, /home/mark/.cache/npm]
+  verified_with: npm 11.19.0 (Node.js 24.21.0), host dry-run and Nix container cleaner 2026-10-20
+
+- name: pnpm-store
+  category: python / js
+  description: pnpm's content-addressable package store below a supplied home root
+  find: {roots: required, paths: [.local/share/pnpm/store], type: dir}
+  action: {command: [pnpm, store, prune, --store-dir, "{path}"]}
+  examples:
+    match: [/home/mark/.local/share/pnpm/store]
+    no_match: [/home/mark/.local/share/pnpm/store/v10, /home/mark/.local/share/pnpm]
+  verified_with: pnpm 12.9.0, host dry-run and Nix container cleaner 2026-10-20
+
+- name: yarn-cache
+  category: python / js
+  description: Yarn Classic's package cache below a supplied home root
+  find: {roots: required, paths: [.cache/yarn], type: dir}
+  action: {command: [env, "YARN_CACHE_FOLDER={path}", yarn, cache, clean], cwd: parent}
+  examples:
+    match: [/home/mark/.cache/yarn]
+    no_match: [/home/mark/.cache/yarn/v6, /home/mark/.yarn]
+  verified_with: Yarn Classic 1.22.22, host dry-run and Nix container cleaner 2026-10-20
+
+- name: ccache
+  category: caches
+  description: ccache's compiler cache at either standard home location
+  find: {roots: required, paths: [.cache/ccache, .ccache], type: dir}
+  action: {command: [env, "CCACHE_DIR={path}", ccache, --clear]}
+  examples:
+    match: [/home/mark/.cache/ccache, /home/mark/.ccache]
+    no_match: [/home/mark/.cache/ccache/tmp, /home/mark/.cache/sccache]
+  verified_with: ccache 4.14.1, host dry-run and Nix container cleaner 2026-10-20
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.
 - name: pytest-tmp

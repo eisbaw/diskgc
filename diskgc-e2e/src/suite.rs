@@ -38,8 +38,8 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    browser_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite,
-    ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
+    browser_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite,
+    engine_suite, ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
 };
 
 /// Which gate runs a test.
@@ -104,6 +104,22 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
+    ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
+    (
+        "go_build_cache_cleaner",
+        "needs the pinned Go in the Nix image",
+    ),
+    ("npm_cache_cleaner", "needs the pinned npm in the Nix image"),
+    (
+        "pnpm_store_cleaner",
+        "needs the pinned pnpm in the Nix image",
+    ),
+    (
+        "yarn_cache_cleaner",
+        "needs the pinned Yarn Classic in the Nix image",
+    ),
+    ("ccache_cleaner", "needs the pinned ccache in the Nix image"),
     (
         "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
         "needs a nightly toolchain beside the fast stable one (a mixed-layout target); the \
@@ -121,6 +137,48 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "pip_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::pip_cache_cleaner,
+    },
+    Test {
+        name: "uv_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::uv_cache_cleaner,
+    },
+    Test {
+        name: "go_build_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::go_build_cache_cleaner,
+    },
+    Test {
+        name: "npm_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::npm_cache_cleaner,
+    },
+    Test {
+        name: "pnpm_store_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::pnpm_store_cleaner,
+    },
+    Test {
+        name: "yarn_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::yarn_cache_cleaner,
+    },
+    Test {
+        name: "ccache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::ccache_cleaner,
+    },
     Test {
         name: "brave_cache_lock_live_then_stale_reclaims_only_cache",
         tier: Tier::Fast,

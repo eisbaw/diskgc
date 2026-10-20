@@ -190,6 +190,13 @@ fn the_built_in_library_loads() {
         "zephyr-tmp",
         "renode-tmp",
         "xdg-cache-entry",
+        "ccache",
+        "go-build-cache",
+        "npm-cache",
+        "pip-cache",
+        "pnpm-store",
+        "uv-cache",
+        "yarn-cache",
     ]);
     want.sort_unstable();
     assert_eq!(names, want);
@@ -222,6 +229,81 @@ fn the_built_in_library_loads() {
         panic!("pytest-tmp is a source");
     };
     assert_eq!(pytest.checkouts, Checkouts::Allow);
+}
+
+/// A command profile's paths and argv form one contract: the cleaner must
+/// receive the exact directory the finder measured. A changed path or
+/// missing `{path}` needs a new built-in name and fresh verification.
+#[test]
+fn command_cache_builtins_have_frozen_paths_and_cleaners() {
+    let library = Library::builtin().expect("built-ins");
+    for (name, paths, argv, cwd) in [
+        (
+            "pip-cache",
+            vec![".cache/pip"],
+            vec!["pip", "--cache-dir", "{path}", "cache", "purge"],
+            Cwd::Candidate,
+        ),
+        (
+            "uv-cache",
+            vec![".cache/uv"],
+            vec!["uv", "cache", "clean", "--cache-dir", "{path}"],
+            Cwd::Parent,
+        ),
+        (
+            "go-build-cache",
+            vec![".cache/go-build"],
+            vec!["env", "GOCACHE={path}", "go", "clean", "-cache"],
+            Cwd::Candidate,
+        ),
+        (
+            "npm-cache",
+            vec![".npm"],
+            vec!["npm", "cache", "clean", "--force", "--cache", "{path}"],
+            Cwd::Candidate,
+        ),
+        (
+            "pnpm-store",
+            vec![".local/share/pnpm/store"],
+            vec!["pnpm", "store", "prune", "--store-dir", "{path}"],
+            Cwd::Candidate,
+        ),
+        (
+            "yarn-cache",
+            vec![".cache/yarn"],
+            vec!["env", "YARN_CACHE_FOLDER={path}", "yarn", "cache", "clean"],
+            Cwd::Parent,
+        ),
+        (
+            "ccache",
+            vec![".cache/ccache", ".ccache"],
+            vec!["env", "CCACHE_DIR={path}", "ccache", "--clear"],
+            Cwd::Candidate,
+        ),
+    ] {
+        let Body::Source(source) = &library.get(name).expect("shipped cache").body else {
+            panic!("{name} is not a source");
+        };
+        assert_eq!(source.roots, Roots::Required, "{name}");
+        assert_eq!(source.checkouts, Checkouts::Refuse, "{name}");
+        assert_eq!(
+            source.finds,
+            Finds::Paths {
+                patterns: paths.into_iter().map(str::to_owned).collect(),
+                exclude: Vec::new(),
+                entry_type: EntryType::Dir,
+            },
+            "{name}"
+        );
+        assert_eq!(
+            source.action,
+            Action::Command {
+                argv: argv.into_iter().map(str::to_owned).collect(),
+                cwd: Some(cwd),
+            },
+            "{name}"
+        );
+    }
 }
 
 /// The cache deletion units and their application locks are fixed under each

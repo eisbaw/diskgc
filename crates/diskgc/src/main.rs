@@ -32,7 +32,7 @@ use std::time::Duration;
 use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
-use diskgc_core::profile::{Library, describe};
+use diskgc_core::profile::{Action, Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_duration, parse_size};
@@ -71,11 +71,11 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
 
-This build runs `ensure --select` with one source profile term
-(optionally `&& filter:idle-...`): `profile:cargo-target`, or a kind fs
-profile from the config whose action is `delete` (one with a command
-action only with --dry-run: task-37); `watch`, `survey`, and config tiers
-in ensure arrive with later tasks. PATH and every DIR are absolute.
+This build runs `ensure --select` with one source profile term and
+supported positive filters: `profile:cargo-target`, or a filesystem
+profile whose action is `delete` or `command`. `watch`, `survey`, and
+config tiers in ensure arrive with later tasks. PATH and every DIR are
+absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The full contract is docs/reference.md in diskgc's source tree.
 ";
@@ -482,6 +482,16 @@ fn tier(args: &EnsureArgs, config: Option<&Config>, uid: u32) -> Result<Tier, St
     Tier::select(expr, library, roots, uid)
 }
 
+/// Check the action that this invocation actually selected. Static config
+/// checks cover configured tiers; `--select` can choose another built-in or
+/// user profile from the same library.
+fn validate_selected_root_action(allow_root: bool, tier: &Tier) -> Result<(), String> {
+    if allow_root && matches!(tier.action, Action::Command { .. }) {
+        return Err("command actions are refused under --allow-root".to_owned());
+    }
+    Ok(())
+}
+
 /// Runs `ensure`; every error is already in the report.
 fn ensure(args: &EnsureArgs) -> Report {
     // Every error is logged where it is recorded: here for those found
@@ -521,6 +531,9 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(tier) => tier,
         Err(why) => return fail(why),
     };
+    if let Err(why) = validate_selected_root_action(args.allow_root, &tier) {
+        return fail(why);
+    }
     let request = Request {
         path: args.path.clone(),
         min_free: args.min_free,
@@ -801,6 +814,23 @@ mod tests {
             Invocation::UsageError(e) => Err(e),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn root_mode_checks_the_final_cli_selection() {
+        let library = Library::builtin().expect("built-ins");
+        let roots = ["/home/mark".to_owned()];
+        let command = Tier::select("profile:pip-cache", &library, Some(&roots), 1000)
+            .expect("command source");
+        let deletion = Tier::select("profile:go-mod-cache", &library, Some(&roots), 1000)
+            .expect("deletion source");
+        assert!(validate_selected_root_action(false, &command).is_ok());
+        assert!(validate_selected_root_action(true, &deletion).is_ok());
+        assert!(
+            validate_selected_root_action(true, &command)
+                .unwrap_err()
+                .contains("command actions are refused")
+        );
     }
 
     #[test]

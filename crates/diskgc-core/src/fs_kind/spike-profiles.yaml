@@ -5,7 +5,7 @@
 # as a configuration and checks every example with the matcher, so it stays
 # loadable and its examples stay true. When a built-in of the same name
 # ships, loading this file fails (a user profile may not shadow a built-in
-# without `override: true`, task-17): rename or delete the row then.
+# without `override: true`, task-17): delete the row then.
 #
 # Comments starting with "DOC:" say where a profile deviates from its
 # reference.md row and why (the spike's findings, task-68 notes).
@@ -129,57 +129,6 @@ profiles:
     examples:
       match: [/home/mark/.m2/repository]
       no_match: [/home/mark/.m2]
-
-  # ---- command actions: loaded and checked, never run by the spike --------
-
-  - name: pip-cache
-    category: caches
-    description: pip's cache
-    find: {roots: required, paths: [.cache/pip], type: dir}
-    action: {command: [pip, --cache-dir, "{path}", cache, purge]}
-    examples: {match: [/home/mark/.cache/pip]}
-
-  - name: go-build-cache
-    category: caches
-    description: Go's build cache
-    find: {roots: required, paths: [.cache/go-build], type: dir}
-    action: {command: [env, "GOCACHE={path}", go, clean, -cache]}
-    examples: {match: [/home/mark/.cache/go-build]}
-
-  - name: npm-cache
-    category: caches
-    description: npm's cache (the dir holding _cacache)
-    find: {roots: required, paths: [.npm], type: dir}
-    action: {command: [npm, cache, clean, --force, --cache, "{path}"]}
-    examples: {match: [/home/mark/.npm]}
-
-  - name: ccache
-    category: caches
-    description: ccache's cache
-    find: {roots: required, paths: [.cache/ccache, .ccache], type: dir}
-    action: {command: [env, "CCACHE_DIR={path}", ccache, --clear]}
-    examples: {match: [/home/mark/.cache/ccache, /home/mark/.ccache]}
-
-  - name: uv-cache
-    category: python / js
-    description: uv's cache
-    find: {roots: required, paths: [.cache/uv], type: dir}
-    action: {command: [uv, cache, clean, --cache-dir, "{path}"]}
-    examples: {match: [/home/mark/.cache/uv]}
-
-  - name: pnpm-store
-    category: python / js
-    description: pnpm's content-addressable store
-    find: {roots: required, paths: [.local/share/pnpm/store], type: dir}
-    action: {command: [pnpm, store, prune, --store-dir, "{path}"]}
-    examples: {match: [/home/mark/.local/share/pnpm/store]}
-
-  - name: yarn-cache
-    category: python / js
-    description: Yarn classic's cache
-    find: {roots: required, paths: [.cache/yarn], type: dir}
-    action: {command: [env, "YARN_CACHE_FOLDER={path}", yarn, cache, clean], cwd: parent}
-    examples: {match: [/home/mark/.cache/yarn]}
 
   # ---- probes for the findings ------------------------------------------
 

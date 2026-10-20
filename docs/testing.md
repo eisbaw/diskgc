@@ -782,8 +782,9 @@ being left out). A missing or malformed descriptor fails the listing and
 every test's setup; nothing falls back to "a Nix image". The runner names
 the image in its summary.
 
-- **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace and the
-  Cargo toolchains under test from the Nix store; descriptor `read-only
+- **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned
+  pip, uv, Go, npm, pnpm, Yarn Classic and ccache cleaners, and the Cargo
+  toolchains under test from the Nix store; descriptor `read-only
   /nix/store`, `toolchains manifest`, `tests all`. `just e2e`, `just
   e2e-full`.
 - **Debian image** (`localhost/diskgc-e2e-debian`): no Nix inside. Its

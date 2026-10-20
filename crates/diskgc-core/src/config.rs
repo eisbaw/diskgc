@@ -369,10 +369,17 @@ impl Config {
             (false, Some(_)) => return Err("owners: is allowed only with --allow-root".to_owned()),
             _ => {}
         }
+        // The built-in library is always loaded. Refuse a command only when
+        // a configured tier selects it; an unused built-in must not make an
+        // otherwise valid root policy fail static validation.
         if allow_root
-            && self.library.profiles().any(|p| {
-                matches!(&p.body,
-            Body::Source(source) if matches!(&source.action, Action::Command { .. }))
+            && self.groups.iter().flat_map(|group| &group.tiers).any(|tier| {
+                tier.select.expr().terms.iter().any(|term| {
+                    self.library.get(&term.source).is_some_and(|profile| {
+                        matches!(&profile.body,
+                            Body::Source(source) if matches!(&source.action, Action::Command { .. }))
+                    })
+                })
             })
         {
             return Err("command actions are refused under --allow-root".to_owned());
@@ -732,7 +739,7 @@ mod tests {
                 .contains("only with --allow-root")
         );
         assert!(root.validate_mode(true).is_ok());
-        let command = "version: 1\nowners: [mark]\nprofiles:\n  - name: cleaner\n    find: {roots: [/scratch], paths: ['x-*'], type: dir}\n    action: {command: [/bin/true]}\n    examples: {match: [/scratch/x-a]}\n";
+        let command = "version: 1\nowners: [mark]\nprofiles:\n  - name: cleaner\n    find: {roots: [/scratch], paths: ['x-*'], type: dir}\n    action: {command: [/bin/true]}\n    examples: {match: [/scratch/x-a]}\ngroups:\n  - name: one\n    tiers:\n      - {name: clean, select: 'profile:cleaner'}\n";
         let command = parsed(command).expect("loads");
         assert!(
             command

@@ -33,9 +33,5 @@
   find: {roots: [/tmp, /var/tmp], paths: ["*"], type: any}
   action: delete
   examples: {match: [/tmp/anything]}
-- name: pip-cache
-  find: {roots: required, paths: [pip], type: dir}
-  action: {command: [pip, --cache-dir, "{path}", cache, purge]}
-  examples: {match: [/home/mark/.cache/pip]}
 - name: has-cachedir-tag
   where: {has: CACHEDIR.TAG}

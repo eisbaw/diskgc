@@ -856,7 +856,7 @@ listed as planned, not shipped.
 | test | `pytest-tmp` | pytest's test directories `pytest-of-*/pytest-*/*` in `/tmp` and `/var/tmp`, under the temp-prefix v1 preset below; one candidate per test directory; `checkouts: allow`: pytest treats these as disposable, including repositories made by tests | `delete` |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
-| nix | `nix-shell-rc` | deferred past 0.1: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start; live shells may not hold them open) | `delete` |
+| nix | `nix-shell-rc` | planned: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*`; a live shell in a private PID namespace can have a namespace PID absent from host `/proc`, so the current PID guard is insufficient | no safe action yet |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset; real dormant-shell container protection and a complete host dry run are pending | `delete` |
 | nix | `nix-garbage` | dead store paths | Nix GC |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
@@ -873,9 +873,10 @@ listed as planned, not shipped.
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
-| python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | Jest's `$TMPDIR/jest_*` cache (unverified); `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
+| python / js | `jest-cache` | Jest's `$TMPDIR/jest_*` cache (unverified) | tool cleaner planned; exact command and path binding unverified |
+| python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
-| jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
+| jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | tool cleaner planned; protocol unverified |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
 | embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
@@ -884,6 +885,13 @@ listed as planned, not shipped.
 | generic | `mktemp-dir` | `tmp.*` directories under `/tmp`'s temp-prefix v1 preset | `delete` |
 | generic | `xdg-cache-entry` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known data and dedicated cache names; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
+
+The command cache profiles use the tools' own cleaners on the exact measured
+directory. They retain the default `checkouts: refuse` safety rule. Some real
+uv and npm caches contain `.git` metadata; those candidates report
+`contains_checkout` and are left intact. The profile does not override that
+check merely because the tool has a cleaner. A cache tool must be available
+on `PATH` for its command profile to run.
 
 **Built-in temp-prefix v1 preset.** `pytest-tmp`, `mktemp-dir`,
 `node-compile-cache`, `playwright-tmp` and `renode-tmp`
@@ -964,9 +972,9 @@ needs a different guard and is outside this Chromium-family set.
   mtime or ctime anywhere inside a directory; an open file is still
   refused as `in_use`. It matches only the two observed temporary name
   prefixes at the top of `/var/tmp`, not Podman's persistent storage.
-- Gradle and Maven caches are protected only by the generic open-file
-  checks; a Gradle daemon that is idle may hold nothing open. Use them in
-  pressure tiers.
+- Gradle and Maven cache profiles remain planned. A Gradle daemon that is
+  idle may hold no files open, so the generic in-use check alone has not
+  established a safe reclaim policy for them.
 - `nix-user-cache`, `go-mod-cache` and `bun-cache` use plain deletion because
   Nix-installed versions of their tools may be absent from a long-running
   diskgc service's `PATH`. The exact cache directories were checked against

@@ -279,8 +279,25 @@
         }
       '';
 
-      # The Nix base image: busybox, strace, Nix, and the Cargo toolchains
-      # under test.
+      # Real cache cleaners for the shipped command profiles. The image
+      # receives their pinned executables and runtime closures, so the
+      # profile tests exercise the programs instead of command stubs.
+      cacheTools = pkgs.buildEnv {
+        name = "diskgc-cache-tools";
+        paths = [
+          pkgs.python3Packages.pip
+          pkgs.uv
+          pkgs.go
+          pkgs.nodejs
+          pkgs.pnpm
+          pkgs.yarn
+          pkgs.ccache
+        ];
+        pathsToLink = [ "/bin" ];
+      };
+
+      # The Nix base image: busybox, strace, Nix, cache cleaners and the
+      # Cargo toolchains under test.
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
       # do, and the runner reuses a loaded image with that tag.
@@ -291,6 +308,7 @@
           pkgs.strace
           pkgs.nix
           nixEvalFixture
+          cacheTools
         ];
         fakeRootCommands = ''
           ${e2eImageCommon [

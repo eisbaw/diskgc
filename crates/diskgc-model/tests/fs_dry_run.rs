@@ -338,6 +338,56 @@ fn shipped_home_cache_profiles_have_golden_match_sets() {
     nothing_locked_or_deleted(&host);
 }
 
+/// The command profiles measure cache roots, never a cache's internal data
+/// or a neighboring package store. Their exact paths are part of the
+/// built-in name's contract.
+#[test]
+fn command_cache_builtins_have_golden_match_sets() {
+    let host = host(&yaml(
+        r#"  /usr/bin/pip: {mode: "0755"}
+  /usr/bin/uv: {mode: "0755"}
+  /usr/bin/go: {mode: "0755"}
+  /usr/bin/npm: {mode: "0755"}
+  /usr/bin/pnpm: {mode: "0755"}
+  /usr/bin/yarn: {mode: "0755"}
+  /usr/bin/ccache: {mode: "0755"}
+  /usr/bin/env: {mode: "0755"}
+  /home/mark/.cache/pip: {.: {}, http-v2: {.: {}, body: {size: 1K}}}
+  /home/mark/.cache/uv: {.: {}, archive-v0: {.: {}, package: {size: 1K}}}
+  /home/mark/.cache/go-build: {.: {}, 00: {.: {}, object: {size: 1K}}}
+  /home/mark/.npm: {.: {}, _cacache: {.: {}, content: {size: 1K}}}
+  /home/mark/.local/share/pnpm/store: {.: {}, v10: {.: {}, content: {size: 1K}}}
+  /home/mark/.cache/yarn: {.: {}, v6: {.: {}, package: {size: 1K}}}
+  /home/mark/.cache/ccache: {.: {}, tmp: {.: {}, object: {size: 1K}}}
+  /home/mark/.ccache: {.: {}, 0: {.: {}, object: {size: 1K}}}
+  /home/mark/.cache/sccache: {.: {}}
+  /home/mark/go/pkg/mod: {.: {}}
+  /home/mark/.local/share/pnpm/other: {.: {}}
+"#,
+    ));
+    for (profile, expected) in [
+        ("pip-cache", vec!["/home/mark/.cache/pip"]),
+        ("uv-cache", vec!["/home/mark/.cache/uv"]),
+        ("go-build-cache", vec!["/home/mark/.cache/go-build"]),
+        ("npm-cache", vec!["/home/mark/.npm"]),
+        ("pnpm-store", vec!["/home/mark/.local/share/pnpm/store"]),
+        ("yarn-cache", vec!["/home/mark/.cache/yarn"]),
+        (
+            "ccache",
+            vec!["/home/mark/.cache/ccache", "/home/mark/.ccache"],
+        ),
+    ] {
+        let report = dry_run(
+            &host,
+            &built_in_request(&format!("profile:{profile}"), "/home/mark"),
+        );
+        let mut actual: Vec<_> = plan(&report).into_iter().map(|(path, _)| path).collect();
+        actual.sort();
+        assert_eq!(actual, expected, "{profile}");
+    }
+    nothing_locked_or_deleted(&host);
+}
+
 /// The shipped version sources rank only matching siblings and protect all
 /// configured installed pointers, including a relative link into an old
 /// version. Every candidate is still visible in the plan with its reason.
