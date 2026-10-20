@@ -1,0 +1,8 @@
+{
+  "name": "diskgc-e2e-jest-cleaner",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "jest": "30.2.0"
+  }
+}

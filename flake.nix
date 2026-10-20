@@ -282,6 +282,20 @@
       # Real cache cleaners for the shipped command profiles. The image
       # receives their pinned executables and runtime closures, so the
       # profile tests exercise the programs instead of command stubs.
+      jestCleaner = pkgs.buildNpmPackage {
+        pname = "diskgc-e2e-jest-cleaner";
+        version = "30.2.0";
+        src = ./diskgc-e2e/npm-jest;
+        npmDepsHash = "sha256-QF+jyQKo0gqfzxtaxvIGLtQsFe3vJEonU/IDmpQOQEE=";
+        dontNpmBuild = true;
+        dontNpmPrune = true;
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postInstall = ''
+          mkdir -p $out/bin
+          makeWrapper ${pkgs.nodejs}/bin/node $out/bin/jest \
+            --add-flags $out/lib/node_modules/diskgc-e2e-jest-cleaner/node_modules/jest/bin/jest.js
+        '';
+      };
       cacheTools = pkgs.buildEnv {
         name = "diskgc-cache-tools";
         paths = [
@@ -293,6 +307,7 @@
           pkgs.yarn
           pkgs.ccache
           pkgs.platformio
+          jestCleaner
         ];
         pathsToLink = [ "/bin" ];
       };

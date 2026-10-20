@@ -122,6 +122,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     ),
     ("ccache_cleaner", "needs the pinned ccache in the Nix image"),
     (
+        "jest_cache_cleaner",
+        "needs the pinned Jest in the Nix image",
+    ),
+    (
         "platformio_cache_cleaner",
         "needs the pinned PlatformIO in the Nix image",
     ),
@@ -195,6 +199,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: cache_suite::ccache_cleaner,
+    },
+    Test {
+        name: "jest_cache_cleaner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::jest_cache_cleaner,
     },
     Test {
         name: "platformio_cache_cleaner",

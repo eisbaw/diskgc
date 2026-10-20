@@ -2047,6 +2047,31 @@ fn shipped_tmp_sources_find_their_candidates_in_the_model() {
     nothing_locked_or_deleted(&host);
 }
 
+/// Jest's fixed temp source discovers whole directories at the default
+/// prefix and within the frozen TMPDIR prefixes. A file or an arbitrary
+/// nested directory with the same name is never passed to the cleaner.
+#[test]
+fn jest_cache_finds_only_default_temp_directories_in_the_model() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /usr/bin/jest: {{mode: \"0755\"}}\n  \
+         /tmp/jest_rs: {{.: {at}, payload: {{size: 1M}}}}\n  \
+         /tmp/nix-shell.Ab1/jest_app_hash: {{.: {at}, payload: {{size: 1M}}}}\n  \
+         /tmp/subdir/jest_decoy: {{.: {at}, data: {at}}}\n  \
+         /tmp/jest_file: {at}\n  \
+         /tmp/jest: {{.: {at}}}\n"
+    )));
+    let report = dry_run(&host, &request("profile:jest-cache", &[], "/tmp"));
+    let mut actual: Vec<String> = plan(&report)
+        .into_iter()
+        .filter(|(_, reason)| reason.is_none())
+        .map(|(path, _)| path)
+        .collect();
+    actual.sort();
+    assert_eq!(actual, ["/tmp/jest_rs", "/tmp/nix-shell.Ab1/jest_app_hash"]);
+    nothing_locked_or_deleted(&host);
+}
+
 /// The three additional shipped sources have distinct deletion units:
 /// Claude sessions, Chromium scratch entries, and one Node cache tree per
 /// TMPDIR. Path lookalikes and a nested Node version directory do not

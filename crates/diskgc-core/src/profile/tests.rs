@@ -218,6 +218,7 @@ fn the_built_in_library_loads() {
         "xdg-cache-entry",
         "ccache",
         "go-build-cache",
+        "jest-cache",
         "npm-cache",
         "pip-cache",
         "python-pycache",

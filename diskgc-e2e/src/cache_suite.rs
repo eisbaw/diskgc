@@ -248,6 +248,99 @@ pub fn ccache_cleaner(ctx: &Ctx) -> TestResult {
     )
 }
 
+/// The pinned Jest package reports its default cache under /tmp. The
+/// profile must pass that exact candidate back to Jest and remove no other
+/// scratch directory, including one whose leaf looks like another cache.
+pub fn jest_cache_cleaner(ctx: &Ctx) -> TestResult {
+    let config = Command::new(&ctx.self_exe)
+        .args([
+            "as-tester",
+            "--",
+            "/bin/jest",
+            "--config",
+            "{}",
+            "--rootDir",
+            "/tmp",
+            "--showConfig",
+        ])
+        .env_clear()
+        .envs(TESTER_ENV.iter().copied())
+        .current_dir("/tmp")
+        .output()
+        .map_err(|error| format!("query pinned Jest default cache: {error}"))?;
+    ensure!(
+        config.status.success(),
+        "query pinned Jest default cache: {:?}\nstdout: {}\nstderr: {}",
+        config.status,
+        String::from_utf8_lossy(&config.stdout),
+        String::from_utf8_lossy(&config.stderr)
+    );
+    let config: serde_json::Value = serde_json::from_slice(&config.stdout)
+        .map_err(|error| format!("parse Jest configuration: {error}"))?;
+    let default_cache = config["configs"][0]["cacheDirectory"]
+        .as_str()
+        .ok_or("Jest did not report a cacheDirectory")?;
+    let relative = Path::new(default_cache)
+        .strip_prefix("/tmp/")
+        .map_err(|error| format!("Jest default cache {default_cache} is outside /tmp: {error}"))?;
+    let name = relative
+        .to_str()
+        .ok_or("Jest default cache has a non-UTF-8 name")?;
+    ensure!(
+        !name.contains('/') && name.starts_with("jest_"),
+        "Jest's default cache no longer matches the profile: {default_cache}"
+    );
+    ctx.scratch.mkdirs(name, 0o700, TESTER)?;
+    let payload = ctx.scratch.write_file(
+        &format!("{name}/payload"),
+        &vec![0x71; PAYLOAD_BYTES],
+        0o600,
+        TESTER,
+    )?;
+    ctx.scratch.mkdirs("subdir/jest_decoy", 0o700, TESTER)?;
+    let decoy = ctx.scratch.write_file(
+        "subdir/jest_decoy/keep",
+        b"outside Jest cache",
+        0o600,
+        TESTER,
+    )?;
+    let cache = ctx.scratch.path(name);
+    let before = file_bytes(&cache)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(cache.clone()))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "30s",
+            "--select",
+            "profile:jest-cache",
+            "/tmp",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let report = report(&run)?;
+    ensure!(
+        report["actions"].as_array().is_some_and(|actions| {
+            actions.len() == 1
+                && actions[0]["candidate"].as_str() == cache.to_str()
+                && actions[0]["avail_delta_bytes"]
+                    .as_i64()
+                    .is_some_and(|delta| delta > 0)
+        }),
+        "Jest did not free space in its measured cache: {report}"
+    );
+    ensure!(
+        before >= PAYLOAD_BYTES as u64 && !cache.exists() && !payload.exists() && decoy.exists(),
+        "Jest did not delete exactly its measured cache: {report}"
+    );
+    verdict.assert_clean()
+}
+
 /// The command must clear only PlatformIO's cache while leaving installed
 /// packages alone. The cleaner runs from the checked `.platformio` parent.
 pub fn platformio_cache_cleaner(ctx: &Ctx) -> TestResult {

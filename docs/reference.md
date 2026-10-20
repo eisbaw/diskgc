@@ -893,10 +893,10 @@ listed as planned, not shipped.
 | python / js | `python-pycache` | `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
 | python / js | `mypy-cache` | `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
 | python / js | `node-modules`, `python-venv` | planned: project dependency directories; no project activity evidence is available in the current profile schema | no safe action yet |
-| python / js | `jest-cache` | Jest's `$TMPDIR/jest_*` cache (unverified) | tool cleaner planned; exact command and path binding unverified |
+| python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
-| jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | tool cleaner planned; protocol unverified |
+| jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |
 | embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
@@ -914,9 +914,9 @@ check merely because the tool has a cleaner. A cache tool must be available
 on `PATH` for its command profile to run.
 
 **Built-in temp-prefix v1 preset.** `pytest-tmp`, `mktemp-dir`,
-`node-compile-cache`, `playwright-tmp` and `renode-tmp`
+`node-compile-cache`, `playwright-tmp`, `renode-tmp` and `jest-cache`
 opt in. Each base pattern (`pytest-of-*/pytest-*/*`, `tmp.*`,
-`node-compile-cache`, `playwright*`, `renode-*` respectively)
+`node-compile-cache`, `playwright*`, `renode-*`, `jest_*` respectively)
 is searched under each prefix below,
 relative to each profile's fixed roots. The empty prefix is the root itself.
 The list is finite: nested shell search stops after two shell levels, or

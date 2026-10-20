@@ -62,21 +62,6 @@ profiles:
 
   # ---- plain deletes that need roots ------------------------------------
 
-  - name: jest-cache
-    category: python / js
-    description: jest's cache dir
-    # DOC: jest's default cacheDirectory is $TMPDIR/jest_<x> (a fixed /tmp
-    # root, not roots: required); with a project root it is only found when
-    # configured inside the project. None exists on this machine.
-    find:
-      roots: required
-      paths: ["jest_*", ".cache/jest"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/jest_rs, /home/mark/.cache/jest]
-      no_match: [/home/mark/jest]
-
   - name: gradle-caches
     category: jvm
     description: ~/.gradle/caches

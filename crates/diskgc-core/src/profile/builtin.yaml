@@ -190,6 +190,18 @@
     no_match: [/home/mark/.cache/ccache/tmp, /home/mark/.cache/sccache]
   verified_with: ccache 4.14.1, host dry-run and Nix container cleaner 2026-10-20
 
+- name: jest-cache
+  category: python / js
+  description: Jest's default caches below the frozen temp-prefix v1 roots
+  find: {roots: [/tmp, /var/tmp], paths: ["jest_*"], type: dir}
+  # An empty CLI config avoids loading an arbitrary project's JS config.
+  # Jest removes the entire cache directory, so it starts from its parent.
+  action: {command: [jest, --config, "{}", --cacheDirectory, "{path}", --clearCache], cwd: parent}
+  examples:
+    match: [/tmp/jest_rs, /var/tmp/jest_project_abc, /tmp/nix-shell.Ab1/jest_app_hash]
+    no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
+  verified_with: Jest npm package 30.2.0 (pinned lockfile and Nix container cleaner, 2026-10-20)
+
 - name: west-build
   category: embedded
   description: Zephyr west build directories through depth five below a supplied root

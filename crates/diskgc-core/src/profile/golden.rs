@@ -20,6 +20,7 @@ const TEMP_PROFILE_NAMES: &[&str] = &[
     "playwright-tmp",
     "zephyr-tmp",
     "renode-tmp",
+    "jest-cache",
 ];
 
 #[test]
@@ -212,6 +213,69 @@ fn project_python_caches_have_frozen_depth_and_marker_rules() {
     }
 }
 
+#[test]
+fn jest_cache_has_a_frozen_temp_match_set_and_exact_cleaner_path() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library.get("jest-cache").expect("jest-cache").body else {
+        panic!("jest-cache is a source")
+    };
+    assert_eq!(
+        source.roots,
+        Roots::Fixed(vec!["/tmp".into(), "/var/tmp".into()])
+    );
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.finds,
+        Finds::Paths {
+            patterns: super::temp_roots::TEMP_PREFIXES_V1
+                .iter()
+                .map(|prefix| {
+                    if prefix.is_empty() {
+                        "jest_*".to_owned()
+                    } else {
+                        format!("{prefix}/jest_*")
+                    }
+                })
+                .collect(),
+            exclude: Vec::new(),
+            entry_type: EntryType::Dir,
+        }
+    );
+    assert_eq!(
+        source.action,
+        Action::Command {
+            argv: [
+                "jest",
+                "--config",
+                "{}",
+                "--cacheDirectory",
+                "{path}",
+                "--clearCache"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            cwd: Some(Cwd::Parent),
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let roots = [Path::new("/tmp"), Path::new("/var/tmp")];
+    for (path, expected) in [
+        ("/tmp/jest_rs", true),
+        ("/tmp/nix-shell.Ab1/jest_app_hash", true),
+        ("/var/tmp/jest_app_hash", true),
+        ("/tmp/subdir/jest_app_hash", false),
+        ("/tmp/jest", false),
+        ("/home/mark/jest_app_hash", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&roots), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
 const TREE: &[(&str, Option<EntryType>)] = &[
     ("/tmp/pytest-of-mark", Some(EntryType::Dir)),
     ("/tmp/pytest-of-mark/pytest-3", Some(EntryType::Dir)),
@@ -252,6 +316,7 @@ const TREE: &[(&str, Option<EntryType>)] = &[
         Some(EntryType::Dir),
     ),
     ("/tmp/nix-shell.AbC123/renode-123", Some(EntryType::Dir)),
+    ("/tmp/nix-shell.AbC123/jest_app_hash", Some(EntryType::Dir)),
     (
         "/tmp/nix-shell.AbC123/nix-shell.B2/pytest-of-ci/pytest-5",
         Some(EntryType::Dir),
@@ -342,6 +407,9 @@ const TREE: &[(&str, Option<EntryType>)] = &[
     ("/tmp/zephyr-scratch", Some(EntryType::Dir)),
     ("/tmp/zephyr-log.txt", Some(EntryType::File)),
     ("/tmp/renode-1045514-crash", Some(EntryType::Dir)),
+    ("/tmp/jest_rs", Some(EntryType::Dir)),
+    ("/tmp/jest_file", Some(EntryType::File)),
+    ("/tmp/jest", Some(EntryType::Dir)),
     ("/tmp/renode-log.txt", Some(EntryType::File)),
     ("/tmp/loose-file", Some(EntryType::File)),
     ("/tmp/link", None),
@@ -352,6 +420,7 @@ const TREE: &[(&str, Option<EntryType>)] = &[
         Some(EntryType::Dir),
     ),
     ("/var/tmp/buildah3558241755", Some(EntryType::Dir)),
+    ("/var/tmp/jest_project_hash", Some(EntryType::Dir)),
     (
         "/var/tmp/container_images_storage528829445",
         Some(EntryType::File),
@@ -494,6 +563,13 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
                 true,
                 Checkouts::Refuse,
             ),
+            "jest-cache" => (
+                &["/tmp", "/var/tmp"],
+                &["jest_*"],
+                EntryType::Dir,
+                true,
+                Checkouts::Refuse,
+            ),
             _ => panic!("unreviewed temporary profile {name}"),
         };
         assert_eq!(
@@ -527,13 +603,27 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         assert!(source.where_.is_empty(), "{name} predicates");
         assert_eq!(source.min_idle_for, None, "{name} minimum age");
         assert_eq!(source.checkouts, checkouts, "{name} checkout policy");
-        assert_eq!(
-            source.action,
+        let expected_action = if *name == "jest-cache" {
+            Action::Command {
+                argv: [
+                    "jest",
+                    "--config",
+                    "{}",
+                    "--cacheDirectory",
+                    "{path}",
+                    "--clearCache",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+                cwd: Some(Cwd::Parent),
+            }
+        } else {
             Action::Delete {
-                make_writable: false
-            },
-            "{name} action"
-        );
+                make_writable: false,
+            }
+        };
+        assert_eq!(source.action, expected_action, "{name} action");
     }
 }
 
@@ -712,6 +802,11 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
                 "/tmp/nix-develop-1-2/renode-1",
                 "/tmp/zephyr-h5e5-run.X/renode-1",
                 "/tmp/renode-1045514-crash",
+            ],
+            "jest-cache" => &[
+                "/tmp/nix-shell.AbC123/jest_app_hash",
+                "/tmp/jest_rs",
+                "/var/tmp/jest_project_hash",
             ],
             name => panic!("built-in /tmp source `{name}` has no golden set"),
         };
