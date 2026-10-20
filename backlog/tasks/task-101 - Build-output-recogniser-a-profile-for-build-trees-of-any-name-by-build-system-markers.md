@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-19 12:29'
-updated_date: '2026-10-20 08:34'
+updated_date: '2026-10-20 08:39'
 labels:
   - library
 dependencies:
@@ -55,4 +55,6 @@ Final safety-correction gate on rebased 9e2ea47 tree: nix develop -c just e2e ex
 2026-10-20 TASK101 real-West follow-up in isolated /tmp/diskgc-west-real-fixture: Zephyr 4.3.0 source is flake-locked by exact revision/narHash, West 1.5.0 and GCC/CMake/Ninja/binutils from pinned Nixpkgs. Offline disposable Podman container bind-mounts the immutable Zephyr tree read-only inside a scratch West workspace and invokes west build -b native_sim/native/64 twice, producing real zephyr.elf and CMakeCache.txt with CMAKE_HOME_DIRECTORY:INTERNAL=/tmp/west-app. Focused nix develop -c just e2e-one west_generated_output_uses_surviving_source_anchor passed 1/1: shipped west-build-anchored dry-run reported the fresh rebuildable output as not_idle with CMakeCache/source evidence, omitted equally genuine output after its source CMakeLists.txt was removed, then equivalent no-idle-floor profile reclaimed only the rebuildable output with deletion oracle clean. This verifies West-generated layout but does not satisfy TASK101 broader marker systems, survey scoring or prohibited real-host read-only verification; task stays In Progress. Full exact-tree e2e and independent QA/MPED review pending.
 
 2026-10-20 real-West follow-up final gate on main 94cd295 plus staged fixture: nix develop -c just e2e exited 0; fmt, clippy, workspace tests and sandboxed Nix checks passed; 130/130 Nix-container E2E including the full West-generated native_sim/native/64 case and 5/5 native Docker Engine dind E2E passed. QA and MPED reviews GO. No developer-host diskgc run or real project-path inspection. TASK101 remains In Progress for its broader acceptance criteria. Final exact-tree rerun after this tracker note pending.
+
+2026-10-20 tracker resolution for b68c8b7: the final exact-tree nix develop -c just e2e rerun exited 0 after the preceding tracker note. Formatting, Clippy, workspace tests, sandboxed Nix checks, 130/130 disposable Nix-container E2Es and 5/5 native Docker dind E2Es passed. QA and MPED reviews were GO before that commit. This closes the earlier gate-pending notation; TASK101 remains In Progress for broader acceptance criteria.
 <!-- SECTION:NOTES:END -->
