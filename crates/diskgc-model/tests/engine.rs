@@ -770,6 +770,24 @@ fn a_candidate_renamed_mid_delete_is_still_the_object_deleted() {
 }
 
 #[test]
+fn an_entry_renamed_out_after_the_walk_is_changed_and_kept() {
+    let host = model(
+        "events:\n  - {at: {op: openat2, path: /tmp/c, nth: 2, when: before}, rename: {from: /tmp/c/b, to: /tmp/escaped}}\n",
+    );
+    let target = Target::new(&host, "/tmp/c");
+    let record = walked(&host, &target, &rules());
+    let done = deleted(&host, &target, &record);
+    assert!(host.unfired_events().is_empty());
+    assert!(
+        matches!(&done.end, End::Changed { path, detail } if path == Path::new("/tmp/c/b") && detail.contains("gone")),
+        "{done:?}"
+    );
+    assert_eq!(unlinked(&host), ["/tmp/c/a"]);
+    assert!(exists(&host, "/tmp/escaped"), "moved entry was deleted");
+    assert!(exists(&host, "/tmp/c/sub"), "later entry was deleted");
+}
+
+#[test]
 fn make_writable_adds_owner_write_to_read_only_directories_after_the_checks() {
     let tree = "  /tmp/c/sub/deeper: {.: {mode: \"0555\"}}\n";
     let host = model(tree);
@@ -777,7 +795,7 @@ fn make_writable_adds_owner_write_to_read_only_directories_after_the_checks() {
     let record = walked(&host, &target, &rules());
     let options = DeleteOptions {
         make_writable: true,
-        ..DeleteOptions::default()
+        deadline: Some(MonoTime(UPTIME_AT_START + Duration::from_secs(3600))),
     };
     let done = delete(&host, &target.candidate(), &record, options);
     assert_eq!(done.end, End::Complete);
@@ -809,7 +827,8 @@ fn make_writable_adds_owner_write_to_read_only_directories_after_the_checks() {
         })
         .expect("g unlinked");
     assert!(chmod < first_unlink_inside);
-    assert_eq!(trace[chmod - 2].op, Op::Openat2, "{}", trace[chmod - 2]);
+    assert_eq!(trace[chmod - 1].op, Op::Now, "deadline check before fchmod");
+    assert_eq!(trace[chmod - 3].op, Op::Openat2, "{}", trace[chmod - 3]);
 
     // Without it, permissions are never touched.
     let host = model(tree);

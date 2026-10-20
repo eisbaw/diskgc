@@ -244,12 +244,11 @@ impl<H: Delete> Deleter<'_, H> {
                         detail: "readable fd differs from the directory the walk checked".into(),
                     });
                 }
-                if deadline_passed(self.host, self.options.deadline) {
-                    return Err(End::DeadlinePassed { path: path() });
+                match self.host.fchmod(&readable, self.options.deadline) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(End::DeadlinePassed { path: path() }),
+                    Err(error) => Err(host_failure(path(), error)),
                 }
-                self.host
-                    .fchmod(&readable, perm | 0o200)
-                    .map_err(|error| host_failure(path(), error))
             }
             _ => Ok(()),
         }

@@ -1113,7 +1113,7 @@ impl Delete for Gated {
             "not in a test container",
         ))
     }
-    fn fchmod(&self, _: &ModelFd, _: u32) -> Result<(), HostError> {
+    fn fchmod(&self, _: &ModelFd, _: Option<MonoTime>) -> Result<bool, HostError> {
         Err(HostError::sandbox_gate(
             "fchmod",
             "?",

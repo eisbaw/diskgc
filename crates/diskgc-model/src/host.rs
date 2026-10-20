@@ -17,7 +17,10 @@
 //!   `statx` of that name in that directory (the previous port call but
 //!   clock reads; through any fd of the directory): the identity check
 //!   (docs/safety.md, Deletion);
-//! - `fchmod` sets permission bits only (of a directory, else `ENOTDIR`).
+//! - `fchmod` adds owner write only (of a directory, else `ENOTDIR`). The
+//!   model does not simulate a second chmod between the mode read and the
+//!   syscall, or Linux's setgid-clearing rules; kernel container tests cover
+//!   the mode-read boundary.
 //!
 //! A `fail` event makes the call it is addressed to fail with its errno,
 //! without acting (a listing that fails, an entry that cannot be statted).
@@ -1421,10 +1424,21 @@ impl Delete for ModelHost {
         )
     }
 
-    fn fchmod(&self, dir: &ModelFd, perm: u32) -> Result<(), HostError> {
+    fn fchmod(&self, dir: &ModelFd, deadline: Option<MonoTime>) -> Result<bool, HostError> {
         let ofd = self.fd_ofd(dir);
-        if perm & !0o7777 != 0 {
-            violation(format!("fchmod with {perm:#o}: more than permission bits"));
+        let (is_directory, already_writable) = {
+            let inner = self.inner.borrow();
+            if !inner.state.sandbox_gate.is_open() {
+                return Err(gate_refusal("fchmod", &format!("{dir:?}")));
+            }
+            let loc = inner.loc_of(ofd);
+            let inode = inner.state.inode(loc);
+            let is_directory = inode.entries().is_some();
+            (is_directory, is_directory && inode.perm & 0o200 != 0)
+        };
+        // The clock read is the last port call before the fchmod event.
+        if is_directory && !already_writable && deadline.is_some_and(|at| self.now() >= at) {
+            return Ok(false);
         }
         let path = self.base_path(Base::Dir(dir), Path::new(""));
         let shown = path.display().to_string();
@@ -1454,11 +1468,19 @@ impl Delete for ModelHost {
                     errno_text(e),
                 );
             }
+            if inner.state.inode(loc).perm & 0o200 != 0 {
+                return (
+                    Ok(true),
+                    object,
+                    format!("{:04o}", inner.state.inode(loc).perm),
+                );
+            }
             let now = inner.state.wall_now();
             let inode = inner.state.inode_mut(loc);
-            inode.perm = perm;
+            inode.perm |= 0o200;
             inode.ctime = now;
-            (Ok(()), object, format!("{perm:04o}"))
+            let mode = inode.perm;
+            (Ok(true), object, format!("{mode:04o}"))
         })
     }
 

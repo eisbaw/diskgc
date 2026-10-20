@@ -4,6 +4,7 @@
 //! as `tester` under strace. The deletion oracle judges every run: nothing
 //! outside the candidate may disappear, whatever the engine reports.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -314,6 +315,116 @@ pub fn engine_never_deletes_an_entry_replaced_after_the_walk(ctx: &Ctx) -> TestR
     info!(
         "paused at port call {} (the walk/delete boundary), b replaced: never unlinked",
         paused.call
+    );
+    verdict.assert_clean()
+}
+
+/// A name moved out after the walk is gone at its checked parent. Deletion
+/// reports changed, leaves the moved object outside the candidate intact,
+/// and does not touch later entries.
+pub fn engine_keeps_an_entry_renamed_out_after_the_walk(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("r", 0o755, TESTER)?;
+    for name in ["a", "b", "c"] {
+        s.write_file(&format!("r/{name}"), name.as_bytes(), 0o644, TESTER)?;
+    }
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("r")))?;
+    let mut run = ctx.spawn_as_tester(
+        &ctx.driver(),
+        &["--pause-at", "openat2:4", "delete", "/tmp/r"],
+    )?;
+    let paused = run.wait_paused()?;
+    s.rename("r/b", "escaped")?;
+    run.resume(&paused)?;
+    let run = run.wait()?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    ensure!(
+        outcome(&run)?.starts_with("0 changed \"/tmp/r/b\" entries=1 -- "),
+        "renamed entry was not classified changed: {}",
+        run.stdout
+    );
+    ensure!(
+        exists(&s.path("escaped")) && exists(&s.path("r/c")) && !exists(&s.path("r/a")),
+        "renamed entry or later entry changed unexpectedly"
+    );
+    verdict.assert_clean()
+}
+
+/// A same-filesystem bind mount of a regular file can arrive after the
+/// identity statx and before unlinkat. The kernel must refuse unlinking
+/// the mount point with EBUSY; the engine reports changed and stops.
+pub fn engine_stops_at_file_bind_mount_after_identity_check(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("r", 0o755, TESTER)?;
+    for name in ["a", "b", "c"] {
+        s.write_file(&format!("r/{name}"), name.as_bytes(), 0o644, TESTER)?;
+    }
+    s.write_file("source", b"keep", 0o644, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("r")))?;
+    let mut run = ctx.spawn_as_tester(
+        &ctx.driver(),
+        &["--pause-at", "unlinkat:2", "delete", "/tmp/r"],
+    )?;
+    let paused = run.wait_paused()?;
+    s.bind_mount("source", "r/b")?;
+    run.resume(&paused)?;
+    let run = run.wait()?;
+    s.unmount("r/b")?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let line = outcome(&run)?;
+    ensure!(
+        line.starts_with("0 changed \"/tmp/r/b\" entries=1 -- ") && line.contains("EBUSY"),
+        "mounted file was not classified changed (EBUSY): {line:?}"
+    );
+    ensure!(
+        exists(&s.path("source")) && exists(&s.path("r/b")) && exists(&s.path("r/c")),
+        "mounted source, underlying target or later entry was deleted"
+    );
+    verdict.assert_clean()
+}
+
+/// The mode used by fchmod must be read from the held fd after a concurrent
+/// chmod, so a stale walk mode cannot restore bits another process removed.
+pub fn engine_make_writable_preserves_a_concurrent_mode_change(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    small_tree(ctx, "writable")?;
+    s.chmod("writable/sub/deeper", 0o555)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("writable")))?;
+    let mut run = ctx.spawn_as_tester(
+        &ctx.driver(),
+        &[
+            "--pause-at",
+            "fchmod:1",
+            "--pause-at",
+            "unlinkat:3",
+            "delete",
+            "--make-writable",
+            "/tmp/writable",
+        ],
+    )?;
+    let paused = run.wait_paused()?;
+    s.chmod("writable/sub/deeper", 0o550)?;
+    run.resume(&paused)?;
+    let paused = run.wait_paused()?;
+    let mode = std::fs::metadata(s.path("writable/sub/deeper"))
+        .map_err(|e| format!("stat after fchmod: {e}"))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    ensure!(
+        mode == 0o750,
+        "fchmod restored stale permission bits: {mode:#o}"
+    );
+    run.resume(&paused)?;
+    let run = run.wait()?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        outcome(&run)?.starts_with("0 removed entries=7 "),
+        "writable tree was not deleted: {}",
+        run.stdout
     );
     verdict.assert_clean()
 }

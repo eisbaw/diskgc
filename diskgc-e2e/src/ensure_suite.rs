@@ -67,6 +67,64 @@ pub(crate) fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
     Ok(run)
 }
 
+/// The configured CLI path must execute both groups in policy order, with
+/// each candidate deletion checked by the independent filesystem oracle.
+pub fn configured_groups_reclaim_in_order(ctx: &Ctx) -> TestResult {
+    let scratch = &ctx.scratch;
+    scratch.mkdir("group-stale", 0o755, TESTER)?;
+    scratch.mkdir("group-pressure", 0o755, TESTER)?;
+    scratch.write_file("group-stale/payload", &[7; 8192], 0o644, TESTER)?;
+    scratch.write_file("group-pressure/payload", &[9; 8192], 0o644, TESTER)?;
+    let stale = scratch.path("group-stale");
+    let pressure = scratch.path("group-pressure");
+    ctx.home.write_file(
+        "diskgc-groups.yaml",
+        b"version: 1\nprofiles:\n  - name: group-stale-source\n    find: {roots: [/tmp], paths: [group-stale], type: dir}\n    action: delete\n    examples: {match: [/tmp/group-stale]}\n  - name: group-pressure-source\n    find: {roots: [/tmp], paths: [group-pressure], type: dir}\n    action: delete\n    examples: {match: [/tmp/group-pressure]}\ngroups:\n  - name: stale\n    tiers:\n      - name: stale-tier\n        select: profile:group-stale-source\n  - name: pressure\n    tiers:\n      - name: pressure-tier\n        select: profile:group-pressure-source\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(stale.clone())
+            .eligible(pressure.clone()),
+    )?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-groups.yaml",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let result = report(&run)?;
+    let actions = result["actions"]
+        .as_array()
+        .ok_or("actions is not an array")?;
+    ensure!(
+        actions.len() == 2,
+        "expected both configured tiers: {result}"
+    );
+    ensure!(
+        actions[0]["tier"] == "stale-tier"
+            && actions[0]["candidate"] == stale.to_string_lossy().as_ref(),
+        "stale tier did not run first: {result}"
+    );
+    ensure!(
+        actions[1]["tier"] == "pressure-tier"
+            && actions[1]["candidate"] == pressure.to_string_lossy().as_ref(),
+        "pressure tier did not run second: {result}"
+    );
+    judged.assert_clean()?;
+    Ok(())
+}
+
 /// Claude's built-in source and a user-configured pytest probe see open
 /// files through the real Linux process scan. This proves only the held-file
 /// case; a live pytest session can have no descriptor in its test directory.

@@ -573,9 +573,9 @@ impl<H: Delete> Delete for Controlled<H> {
         self.host.unlinkat(dir, name, what)
     }
 
-    fn fchmod(&self, dir: &Self::Fd, perm: u32) -> Result<(), HostError> {
+    fn fchmod(&self, dir: &Self::Fd, deadline: Option<MonoTime>) -> Result<bool, HostError> {
         self.before("fchmod");
-        self.host.fchmod(dir, perm)
+        self.host.fchmod(dir, deadline)
     }
 
     fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation {
@@ -670,7 +670,7 @@ processes:
             .expect("statx");
         host.unlinkat(&a.fd, OsStr::new("sub"), Unlink::Dir)
             .expect("unlinkat");
-        host.fchmod(&a.fd, 0o755).expect("fchmod");
+        host.fchmod(&a.fd, None).expect("fchmod");
         let run = CommandRun {
             docker_info: None,
             executable: Path::new("/usr/bin/tool").to_owned(),

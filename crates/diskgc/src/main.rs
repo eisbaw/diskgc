@@ -1,7 +1,7 @@
 //! The `diskgc` binary: CLI and output, wiring `diskgc-core` to `LinuxHost`
 //! (docs/reference.md is the contract).
 //!
-//! So far: `ensure` with `--select` (one `cargo-target` tier), `--dry-run`
+//! So far: `ensure` with `--select` or configured ordered groups, `--dry-run`
 //! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
 //! `profiles list`, `show NAME` and `test`, `check`, plus `--version`
 //! and `--help`, whose Profiles section is rendered from the built-in
@@ -12,7 +12,7 @@
 //! 1. the command line ([`parse`]: pure; sizes and durations checked);
 //! 2. startup: `LinuxHost` (its `/proc` checks) and the minimum kernel;
 //! 3. the configuration (lookup, read, all of `version: 1` checked) and
-//!    the `--select` tier, checked against it (static
+//!    either the `--select` tier or all configured tiers, checked against it (static
 //!    validation: nothing on the machine was touched yet);
 //! 4. privileges (root refused without `--allow-root`);
 //! 5. the executor: `dry_run` (given the host as a plain `Host`) or
@@ -30,7 +30,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Owner};
+use diskgc_core::config::{
+    self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Order, Owner, Ranking,
+};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
 use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
@@ -53,7 +55,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const USAGE: &str = "\
 usage: diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
-                     [--tally-budget DUR] [--no-index] --select EXPR [--roots DIR]...
+                     [--tally-budget DUR] [--no-index] [--select EXPR] [--roots DIR]...
                      [--dry-run] [--json] [--config FILE] [--allow-root] PATH
        diskgc profiles list [--json] [--config FILE]
        diskgc profiles show NAME [--json] [--config FILE]
@@ -76,11 +78,9 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
 
-This build runs `ensure --select` with one source profile term and
-supported positive filters: `profile:cargo-target`, or a filesystem
-profile whose action is `delete` or `command`. `watch`, `survey`, and
-config tiers in ensure arrive with later tasks. PATH and every DIR are
-absolute.
+This build runs `ensure --select` or configured groups with ordered tiers
+and oldest order. Random ranking and best-fit order are rejected. `watch`
+and `survey` arrive with later tasks. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The full contract is docs/reference.md in diskgc's source tree.
 ";
@@ -504,11 +504,7 @@ fn tier(
     allow_root: bool,
 ) -> Result<Tier, String> {
     let Some(expr) = &args.select else {
-        return Err(format!(
-            "config {}: ensure without --select runs the config's groups, which this build \
-             does not do yet (task-15, task-20); give --select",
-            config.map_or_else(|| "?".to_owned(), |c| c.path.display().to_string())
-        ));
+        return Err("an explicit tier requires --select".to_owned());
     };
     let builtin;
     let library = match config {
@@ -524,6 +520,48 @@ fn tier(
         reject_root_uid_selected(&selected, library, &args.roots)?;
     }
     Ok(selected)
+}
+
+/// Compile every configured tier before any action. Unsupported execution
+/// options are errors rather than silently changing policy order.
+fn configured_tiers(
+    config: &Config,
+    uid: u32,
+    allow_root: bool,
+) -> Result<(Vec<Tier>, Vec<Duration>), String> {
+    let mut tiers = Vec::new();
+    let mut timeouts = Vec::new();
+    for group in &config.groups {
+        if group.ranking != Ranking::Ordered {
+            return Err(format!(
+                "group `{}`: ranking: random is not implemented for ensure yet (task-20)",
+                group.name
+            ));
+        }
+        for setting in &group.tiers {
+            if setting.order != Order::Oldest {
+                return Err(format!(
+                    "group `{}` tier `{}`: order: best-fit is not implemented for ensure yet (task-20)",
+                    group.name, setting.name
+                ));
+            }
+            let tier = Tier::configured(&group.name, setting, &config.library, uid)?;
+            if allow_root {
+                let supplied: Vec<String> = setting.roots.values().flatten().cloned().collect();
+                reject_root_uid_selected(&tier, &config.library, &supplied)?;
+                validate_selected_root_action(true, &tier)?;
+            }
+            tiers.push(tier);
+            timeouts.push(setting.timeout);
+        }
+    }
+    if tiers.is_empty() {
+        return Err(format!(
+            "config {}: groups contain no tiers",
+            config.path.display()
+        ));
+    }
+    Ok((tiers, timeouts))
 }
 
 /// Root mode must validate every source of a positive union. Checking only
@@ -648,13 +686,27 @@ fn ensure(args: &EnsureArgs) -> Report {
     } else {
         vec![uid]
     };
-    let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
-        Ok(tier) => tier,
-        Err(why) => return fail(why),
+    let configured = if args.select.is_none() {
+        let config = config.as_ref().expect("unselected ensure requires config");
+        match configured_tiers(config, uid, args.allow_root) {
+            Ok(tiers) => Some(tiers),
+            Err(why) => return fail(why),
+        }
+    } else {
+        None
     };
-    if let Err(why) = validate_selected_root_action(args.allow_root, &tier) {
-        return fail(why);
-    }
+    let tier = if let Some((tiers, _)) = &configured {
+        tiers[0].clone()
+    } else {
+        let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
+            Ok(tier) => tier,
+            Err(why) => return fail(why),
+        };
+        if let Err(why) = validate_selected_root_action(args.allow_root, &tier) {
+            return fail(why);
+        }
+        tier
+    };
     let request = Request {
         path: args.path.clone(),
         min_free: args.min_free,
@@ -664,7 +716,13 @@ fn ensure(args: &EnsureArgs) -> Report {
         tier,
     };
     let mut progress = |line: &str| log(line);
-    if args.dry_run {
+    if let Some((tiers, timeouts)) = &configured {
+        if args.dry_run {
+            executor::dry_run_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
+        } else {
+            executor::ensure_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
+        }
+    } else if args.dry_run {
         // A plain Host: the dry run has no way to reach a deleting method.
         executor::dry_run(&host, &request, &owners, &mut progress)
     } else {
@@ -1125,6 +1183,47 @@ mod tests {
             .expect_err("second source's uid placeholder must be refused");
         assert!(error.contains("selected profile `uid-union`"), "{error}");
         assert!(error.contains("find.paths"), "{error}");
+    }
+
+    #[test]
+    fn configured_execution_rejects_unsupported_policy_order() {
+        let source = "version: 1\ngroups:\n  - name: stale\n    ranking: random\n    tiers:\n      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n";
+        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("valid static policy");
+        let error =
+            configured_tiers(&config, 1000, false).expect_err("random ranking is unsupported");
+        assert!(error.contains("ranking: random"), "{error}");
+        let source = source
+            .replace("ranking: random", "ranking: ordered\n")
+            .replace("roots: [/tmp]", "roots: [/tmp]\n        order: best-fit");
+        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("valid static policy");
+        let error = configured_tiers(&config, 1000, false).expect_err("best-fit is unsupported");
+        assert!(error.contains("order: best-fit"), "{error}");
+    }
+
+    #[test]
+    fn configured_root_mode_checks_later_groups_before_execution() {
+        let source = concat!(
+            "version: 1\nprofiles:\n",
+            "  - name: uid-in-later-group\n",
+            "    find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
+            "    action: delete\n",
+            "    examples: {match: [/tmp/uid-1000]}\n",
+            "groups:\n",
+            "  - name: first\n    tiers:\n",
+            "      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n",
+            "  - name: later\n    tiers:\n",
+            "      - name: uid\n        select: profile:uid-in-later-group\n",
+        );
+        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("valid static policy");
+        let error =
+            configured_tiers(&config, 0, true).expect_err("later uid placeholder must be refused");
+        assert!(
+            error.contains("uid-in-later-group") && error.contains("find.paths"),
+            "{error}"
+        );
     }
 
     #[test]

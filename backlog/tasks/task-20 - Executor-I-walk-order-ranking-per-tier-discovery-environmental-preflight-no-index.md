@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 10:27'
+updated_date: '2026-10-20 12:49'
 labels:
   - wave-2
   - irreversible
@@ -59,6 +59,8 @@ From task-68 r2 (mped N3): executor::discover's fs arm is unreachable through en
 From task-80: executor::Tier carries the source profile's checkouts setting (one field, rules(tier, owners, log) builds the walk rules from it and logs an allow). With unions (task-16), combine the sources' settings as refuse-if-any: refuse wins (docs/safety.md, No source checkout).
 
 Compass root-mode finding (TASK21 AC5): {uid} currently expands from process UID 0 under --allow-root. Before config-group execution is enabled for root, define how each tier/source expands per authorized owner (one or many) and deduplicates overlapping candidates; reject ambiguous cases before the first action.
+
+2026-10-20 incremental configured-ensure slice: ordered groups/oldest tiers now compile and execute under one host lock, with preflight of all roots, command executables, and Docker bindings before first deletion; per-tier discovery and timeout; ModelHost trace tests and disposable container oracle E2E. Remaining TASK20 work: random ranking with report seed, best-fit ordering, and full acceptance/DoD gate. Root preflight resolves path safety but does not yet reject or report roots on a device other than requested PATH before the walk; kind discovery/tally still enforces same-filesystem matching before action, so this is a preflight/performance/reporting gap, not permission to delete elsewhere. Config protect and ipc live-only continue to fail closed until TASK16/TASK21 runtime enforcement.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

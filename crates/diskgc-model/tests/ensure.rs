@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
+use diskgc_core::config;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::hostlock::TMPFILES_LINES;
 use diskgc_core::profile::{Library, parse_profiles};
@@ -110,6 +111,211 @@ fn dry_run(host: &ModelHost, request: &Request) -> Report {
 
 fn calls(host: &ModelHost, op: Op) -> Vec<Call> {
     host.trace().into_iter().filter(|c| c.op == op).collect()
+}
+
+fn configured(policy: &str) -> (Vec<Tier>, Vec<Duration>) {
+    let config = config::parse(Path::new("/tmp/diskgc-test-policy.yaml"), policy.as_bytes())
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut tiers = Vec::new();
+    let mut timeouts = Vec::new();
+    for group in &config.groups {
+        for setting in &group.tiers {
+            tiers.push(
+                Tier::configured(&group.name, setting, &config.library, 1000)
+                    .unwrap_or_else(|error| panic!("{error}")),
+            );
+            timeouts.push(setting.timeout);
+        }
+    }
+    (tiers, timeouts)
+}
+
+fn grouped(host: &ModelHost, policy: &str, min: &str, target: Option<&str>) -> Report {
+    let (tiers, timeouts) = configured(policy);
+    let mut request = cargo(min, target);
+    request.tier = tiers[0].clone();
+    let mut lines = Vec::new();
+    let report =
+        executor::ensure_grouped(host, &request, &tiers, &timeouts, &[1000], &mut |line| {
+            lines.push(line.to_owned())
+        });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    report
+}
+
+#[test]
+fn configured_stale_tier_finishes_before_pressure_and_target_stops_pressure() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target && filter:idle-7d\n        roots: [/home/mark/src]\n  - name: pressure\n    tiers:\n      - name: recent\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let host = host(&yaml(true, ""));
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].tier, "old");
+    assert_eq!(report.actions[0].candidate, Path::new(OLD));
+    assert!(
+        calls(&host, Op::Flock)
+            .iter()
+            .all(|call| !touches(call, NEW))
+    );
+    let host = common::host(&yaml(true, ""));
+    let report = grouped(&host, policy, "12G", Some("19G"));
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .map(|action| action.tier.as_str())
+            .collect::<Vec<_>>(),
+        ["old", "recent"],
+        "{report:#?}"
+    );
+    assert_eq!(report.actions[1].candidate, Path::new(NEW));
+}
+
+#[test]
+fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: bad\n        select: profile:cargo-target\n        roots: [/home/mark/link]\n      - name: good\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let model = yaml(true, "").replacen(
+        "tree:\n",
+        "tree:\n  /home/mark/link: {symlink: /home/mark/src}\n",
+        1,
+    );
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].tier, "good");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier == "bad" && error.message.contains("misconfigured")),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn all_command_preflights_finish_before_first_group_deletion() {
+    let policy = "version: 1\nprofiles:\n  - name: later-command\n    find: {roots: [/tmp], paths: [unused-*], type: dir}\n    action: {command: [/usr/bin/rm, -rf, \"{path}\"]}\n    examples: {match: [/tmp/unused-a]}\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: command\n        select: profile:later-command\n";
+    let model = yaml(true, "").replacen("tree:\n", "tree:\n  /usr/bin/rm: {mode: \"0755\"}\n", 1);
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    let trace = host.trace();
+    let preflight = trace
+        .iter()
+        .rposition(|call| call.op == Op::ExecutableFile && touches(call, "/usr/bin/rm"))
+        .expect("later tier executable checked");
+    let deletion = trace
+        .iter()
+        .position(|call| call.op == Op::Unlinkat)
+        .expect("first tier deletes");
+    assert!(preflight < deletion, "{trace:#?}");
+}
+
+#[test]
+fn later_unsafe_root_is_checked_before_earlier_tier_deletes() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: bad-later\n        select: profile:cargo-target\n        roots: [/home/mark/link]\n";
+    let model = yaml(true, "").replacen(
+        "tree:\n",
+        "tree:\n  /home/mark/link: {symlink: /home/mark/src}\n",
+        1,
+    );
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|error| error.tier == "bad-later"),
+        "{report:#?}"
+    );
+    let trace = host.trace();
+    let check = trace
+        .iter()
+        .rposition(|call| touches(call, "/home/mark/link") && call.op == Op::Openat2)
+        .expect("unsafe root resolved in preflight");
+    let delete = trace
+        .iter()
+        .position(|call| call.op == Op::Unlinkat)
+        .expect("earlier tier deletes");
+    assert!(check < delete, "{trace:#?}");
+}
+
+#[test]
+fn configured_dry_run_plans_each_tier_without_the_delete_port() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target && filter:idle-7d\n        roots: [/home/mark/src]\n  - name: pressure\n    tiers:\n      - name: recent\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let (tiers, timeouts) = configured(policy);
+    let host = host(&yaml(true, ""));
+    let mut request = cargo("12G", Some("15G"));
+    request.tier = tiers[0].clone();
+    let report =
+        executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    assert!(
+        report.plan.iter().any(|entry| entry.group == "stale"
+            && entry.tier == "old"
+            && entry.candidate == Path::new(OLD)),
+        "{report:#?}"
+    );
+    assert!(
+        report.plan.iter().any(|entry| entry.group == "pressure"
+            && entry.tier == "recent"
+            && entry.candidate == Path::new(NEW)),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::MayDelete).is_empty());
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn configured_dry_run_continues_after_one_tier_budget_expires() {
+    let policy = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: quick\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        timeout: 1s\n      - name: later\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        timeout: 30s\n";
+    let (tiers, timeouts) = configured(policy);
+    let events = "events:\n  - {at: {op: statvfs, path: /home/mark/src, nth: 1, when: after}, advance: 2s}\n";
+    let host = host(&yaml(true, events));
+    let mut request = cargo("12G", Some("15G"));
+    request.tier = tiers[0].clone();
+    let report =
+        executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier == "quick" && error.message.contains("deadline")),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .plan
+            .iter()
+            .any(|entry| entry.tier == "later" && entry.reason.is_none()),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Flock).is_empty());
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+    assert!(host.unfired_events().is_empty());
+}
+
+#[test]
+fn failed_space_sample_in_first_tier_stops_later_tiers_without_deletion() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: later\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let model = format!(
+        "{}events:\n  - {{at: {{op: statvfs, path: /home/mark/src, nth: 4, when: before}}, fail: EIO}}\n",
+        yaml(true, "")
+    );
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", None);
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report.errors.iter().any(
+            |error| error.tier == "first" && error.message.contains("sampling available space")
+        ),
+        "{report:#?}"
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(
+        calls(&host, Op::Unlinkat).is_empty(),
+        "later tier deleted after unknown space"
+    );
 }
 
 fn touches(call: &Call, below: &str) -> bool {

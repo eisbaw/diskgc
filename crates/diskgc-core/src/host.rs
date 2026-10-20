@@ -1122,14 +1122,15 @@ pub trait Delete: Host {
     /// fails a test that does not.
     fn unlinkat(&self, dir: &Self::Fd, name: &OsStr, what: Unlink) -> Result<(), HostError>;
 
-    /// Sets the permission bits of the open **directory** `dir` to `perm`
-    /// (`fchmod`). The fd must be open for reading; the deletion engine
-    /// reopens and checks the directory before its final deadline read.
-    /// Changing the
-    /// permissions of user data is a modification, so it is gated like a
-    /// deletion. The deletion engine's `make_writable` is its only caller
-    /// (docs/reference.md, Actions; docs/safety.md, Deletion).
-    fn fchmod(&self, dir: &Self::Fd, perm: u32) -> Result<(), HostError>;
+    /// Add owner write to the open **directory** `dir`, asking the kernel to
+    /// retain its other current mode bits. The kernel may clear setgid under
+    /// its normal permission rules. The fd must be open for reading. Read its current mode,
+    /// check `deadline` immediately before `fchmod`, and return `false`
+    /// without changing it if time expired. Linux cannot atomically OR a
+    /// permission bit, so an unrelated concurrent chmod remains a race.
+    /// This modification is gated like deletion. The engine's
+    /// `make_writable` is its only production caller.
+    fn fchmod(&self, dir: &Self::Fd, deadline: Option<MonoTime>) -> Result<bool, HostError>;
 
     /// Runs a deleting command with `cwd` set by `fchdir` to the checked
     /// directory fd, in its own process group. `executable` must be an

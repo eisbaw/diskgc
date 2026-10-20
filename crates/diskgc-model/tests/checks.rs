@@ -259,21 +259,38 @@ fn unlinkat_of_a_path_fails_the_test() {
 }
 
 #[test]
-fn fchmod_sets_permission_bits_of_directories_only() {
-    let host = host(&tmp_yaml(""));
+fn fchmod_adds_owner_write_to_directories_only() {
+    let model = tmp_yaml("").replace("  /tmp/a:\n", "  /tmp/a:\n    .: {mode: \"0555\"}\n");
+    let host = host(&model);
     let a = dir(&host, "/tmp/a");
-    host.fchmod(&a.fd, 0o700).expect("fchmod");
+    assert!(host.fchmod(&a.fd, None).expect("fchmod"));
     assert_eq!(
         host.stat_path(Path::new("/tmp/a")).and_then(|s| s.perm),
-        Some(0o700)
+        Some(0o755)
     );
     let f = open_f(&host);
-    let err = host.fchmod(&f, 0o600).expect_err("a file");
+    let err = host.fchmod(&f, None).expect_err("a file");
     assert!(err.is(Errno::ENOTDIR), "{err}");
-    let message = failure(|| {
-        let _ = host.fchmod(&a.fd, 0o40_700);
-    });
-    assert!(message.contains(CHECK_FAILED), "{message}");
+    let err = host
+        .fchmod(&f, Some(host.now()))
+        .expect_err("a file, even after deadline");
+    assert!(err.is(Errno::ENOTDIR), "{err}");
+}
+
+#[test]
+fn fchmod_of_writable_directory_is_traced_without_changing_metadata() {
+    let host = host(&tmp_yaml(""));
+    let a = dir(&host, "/tmp/a");
+    let before = host.stat_path(Path::new("/tmp/a")).expect("directory");
+    let trace_len = host.trace().len();
+
+    assert!(host.fchmod(&a.fd, None).expect("already writable"));
+
+    assert_eq!(host.stat_path(Path::new("/tmp/a")), Some(before));
+    let trace = host.trace();
+    assert_eq!(trace.len(), trace_len + 1);
+    assert_eq!(trace[trace_len].op, Op::Fchmod);
+    assert_eq!(trace[trace_len].result, "0755");
 }
 
 #[test]

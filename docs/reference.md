@@ -41,6 +41,16 @@ diskgc ensure --min-free 50G \
   "$CI_BUILDS_DIR"
 ```
 
+The current configured `ensure` implementation runs groups and tiers in
+their written order and discovers each tier before leaving it. It refuses
+`ranking: random` and `order: best-fit` with exit 2 until their ordering
+and seed reporting are implemented. Before the first deletion, it checks
+all configured roots, command executables and Docker bindings under the
+host lock. A tier with an unsafe root or failed environment check is
+excluded and reported while the other tiers remain eligible. `protect:`
+and `ipc: live-only` remain refused by `ensure` until their runtime checks
+are implemented.
+
 The `--roots` value is where the profile looks; the final `PATH` is the
 directory whose filesystem must have the space. A complete pre-job hook
 built on this call, branching on the exit code and keeping the `--json`
@@ -92,7 +102,7 @@ process runs, even if that Cargo works in an unrelated directory; see
   `--timeout`; `0` = no limit) and `--no-index`: see
   [architecture.md](architecture.md#the-tally). Without an index (before
   task-29), `--no-index` changes nothing, and `--tally-budget` bounds the
-  tally that orders the `--select` tier under the host lock: candidates it
+  tally that orders each active tier under the host lock: candidates it
   leaves untallied are taken after the tallied ones, in the order
   discovery found them, each judged in full under its own locks. A
   candidate the tally refuses (e.g. kept, another user's, too many entries) is
@@ -133,7 +143,7 @@ process runs, even if that Cargo works in an unrelated directory; see
   `--min-free`: no deletions; only the background tally keeps the index
   fresh.
 - Below `--min-free`: run the reclaim walk with goal `--target-free`. No
-  overall deadline; each action is bounded by its tier's `timeout`. The wait
+  overall deadline; each tier's work is bounded by its `timeout`. The wait
   for the host lock stays interruptible by SIGTERM.
 - `--tally-only`: maintain the index and its snapshot, never reclaim (for
   CI runners, so that `ensure` in the pre-job hook finds a warm index).
@@ -583,7 +593,8 @@ Rules:
 - Disabling a tier = commenting it out. There is no `enabled` field.
 
 In this development build, `check` validates these fields, including all
-configured groups. `ensure --select` accepts one positive source term with
+configured groups. `ensure` runs configured groups in written order when
+`--select` is absent. `ensure --select` accepts one positive source term with
 supported idle and version filters, including negated idle filters, and unions
 of positive filesystem sources with exactly the same `delete` action and
 options. A filesystem union discovers each source separately, deduplicates
@@ -606,7 +617,7 @@ It never ignores a safety setting.
 | `select` | Profile expression (see Selection grammar). |
 | `roots` | Roots for the `roots: required` profiles in `select`. |
 | `order` | `oldest` (default) or `best-fit`. |
-| `timeout` | Per-action limit (default `10m`); a child is killed after it. |
+| `timeout` | Limit for the tier's entire reclaim pass (default `10m`), also bounded by `ensure --timeout`; a running child is killed at the deadline. |
 
 ### `protect`
 
@@ -901,7 +912,7 @@ file`, and for `type: any` decided per candidate the same way; `cwd:
 candidate` with `type: file` or `type: any` is a load-time error). The
 program (`command[0]`) is a name or path without `{path}`: it is resolved
 and logged to stderr before anything runs ([safety.md](safety.md#command-actions)),
-so it is never the candidate. The tier's `timeout`
+so it is never the candidate. The tier's remaining `timeout`
 bounds it (Tier fields). Two sources have the same action only if the
 action and every option are equal; the "one action" error shows a command
 action as its quoted argv and `cwd`. Environment passed:

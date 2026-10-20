@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-20 12:15'
+updated_date: '2026-10-20 12:45'
 labels:
   - wave-1
   - hardening
@@ -105,6 +105,8 @@ Group A verification update (2026-10-20): disposable Nix container `just e2e-one
 Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc directory against PROC_SUPER_MAGIC before reading NSpid or opening a pidfd, with a contextual refusal for other filesystems. In a disposable Nix container, host_procfs_stays_pinned_after_overmount passed 1/1: the probe unshared a private mount namespace, mounted its own procfs, opened a host on it, mounted tmpfs over /proc, verified a new host specifically refused the non-procfs mount, then lazily detached the overlay and the held procfs; readers through the held fd continued listing the probe. The probe cannot model an ancestor PID namespace procfs underneath, so docs/safety.md names that limit. Interlock canary refused host execution (exit 86). Full integrated E2E and independent QA/MPED review are pending; AC3 remains unchecked until integration.
 
 2026-10-20 integrated group C gate: nix develop -c just e2e passed Nix image 140/140 and native Docker 6/6; parallel QA and MPED reviews GO. AC3 checked with the exact ancestor-namespace construction limit documented in docs/safety.md. TASK64 remains open for D-J and remaining group A caveat; no developer-host diskgc run.
+
+2026-10-20 group D candidate: Delete::fchmod port now accepts only a held directory fd and deadline, reads current mode on the fd, checks the deadline immediately before fchmod, and requests only owner write addition. The caller no longer supplies arbitrary mode bits. ModelHost trace pins Now immediately before Fchmod; focused ModelHost checks 23/23 and engine 40/40 passed. Disposable Nix-container E2E passed rename-out 1/1, file bind-mount after statx 1/1, and concurrent chmod before fchmod 1/1; host interlock refused exit 86 each time. Linux kernel may clear setgid and chmod between fstat/fchmod is still a non-atomic race; docs/safety.md records this. Integrated full E2E and independent QA/MPED review pending before AC4 check.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

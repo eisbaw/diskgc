@@ -678,6 +678,18 @@ pub static TESTS: &[Test] = &[
         run: engine_suite::engine_never_deletes_an_entry_replaced_after_the_walk,
     },
     Test {
+        name: "engine_keeps_an_entry_renamed_out_after_the_walk",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_keeps_an_entry_renamed_out_after_the_walk,
+    },
+    Test {
+        name: "engine_stops_at_file_bind_mount_after_identity_check",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_stops_at_file_bind_mount_after_identity_check,
+    },
+    Test {
         name: "engine_stops_at_a_mount_that_appears_mid_delete",
         tier: Tier::Fast,
         expect: Expect::Pass,
@@ -688,6 +700,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: engine_suite::engine_make_writable_deletes_a_read_only_tree,
+    },
+    Test {
+        name: "engine_make_writable_preserves_a_concurrent_mode_change",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: engine_suite::engine_make_writable_preserves_a_concurrent_mode_change,
     },
     Test {
         name: "engine_deletes_a_tree_deeper_than_path_max",
@@ -742,6 +760,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: fuse_stall_suite::inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount,
+    },
+    Test {
+        name: "configured_groups_reclaim_in_order",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::configured_groups_reclaim_in_order,
     },
     Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",

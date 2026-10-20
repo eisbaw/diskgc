@@ -1544,18 +1544,25 @@ impl Delete for LinuxHost {
             .map_err(|e| HostError::errno("unlinkat", &subject, errno_of(e)))
     }
 
-    fn fchmod(&self, dir: &LinuxFd, perm: u32) -> Result<(), HostError> {
+    fn fchmod(&self, dir: &LinuxFd, deadline: Option<MonoTime>) -> Result<bool, HostError> {
         let subject = format!("{dir:?}");
         let permit = gate("fchmod", &subject)?;
-        if perm & !0o7777 != 0 {
-            return Err(HostError::invalid(
-                "fchmod",
-                &subject,
-                format!("{perm:#o} holds more than permission bits"),
-            ));
+        let stat = rustix::fs::fstat(dir)
+            .map_err(|e| HostError::errno("fstat before fchmod", &subject, errno_of(e)))?;
+        if FileType::from_mode(stat.st_mode) != FileType::Directory {
+            return Err(HostError::errno("fchmod", &subject, Errno::ENOTDIR));
         }
-        fchmod_permitted(&permit, dir, Mode::from_raw_mode(perm))
-            .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))
+        let mode = stat.st_mode & 0o7777;
+        if mode & 0o200 != 0 {
+            return Ok(true);
+        }
+        // fstat can block. The clock is the last operation before fchmod.
+        if deadline.is_some_and(|at| self.now() >= at) {
+            return Ok(false);
+        }
+        fchmod_permitted(&permit, dir, Mode::from_raw_mode(mode | 0o200))
+            .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))?;
+        Ok(true)
     }
 
     fn run_command(&self, cwd: &LinuxFd, run: &CommandRun) -> CommandInvocation {
@@ -3884,7 +3891,7 @@ mod tests {
         // A permission change (make_writable) is gated like a deletion.
         let mode_before = std::fs::metadata(&empty_dir).expect("stat").mode();
         let sub = resolve(&host, &empty_dir, Want::Directory).expect("resolve");
-        let err = host.fchmod(&sub.fd, 0o700).expect_err("refused");
+        let err = host.fchmod(&sub.fd, None).expect_err("refused");
         assert_eq!(err.cause, Cause::SandboxGate, "{err}");
         assert_eq!(
             std::fs::metadata(&empty_dir).expect("stat").mode(),

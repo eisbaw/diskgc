@@ -9,8 +9,8 @@
 //!
 //! `index` is `null`: there is no index before task-28/29, every run
 //! discovers its candidates afresh. `overruns` is always empty until
-//! the deadline work of task-54 can report one, and `seed` is `null` (no
-//! group, so no `random` ranking).
+//! the deadline work of task-54 can report one, and `seed` is `null` until
+//! `random` ranking is implemented for configured groups.
 
 pub mod json;
 

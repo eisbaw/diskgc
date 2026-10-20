@@ -785,10 +785,14 @@ filesystem as it is then, whatever the tally or a plan said:
    `make_writable` (if the profile allows it) adds owner write permission
    to a directory right after it is opened and matched, before anything in
    it is unlinked, after all the checks. Its readable fd is reopened and
-   matched before the final deadline read, immediately before `fchmod`.
+   matched; the gated permission port reads its current mode, then reads
+   the deadline immediately before `fchmod`, which can only add owner write.
    It is not undone: a delete that stops part-way (`changed`, an
    error, the deadline) leaves the directories it entered with owner write
-   permission added.
+   permission added. Linux has no atomic "OR this mode bit" operation: a
+   concurrent chmod between the port's mode read and `fchmod` can still
+   lose that other chmod's change. The kernel may also clear setgid under
+   its normal permission rules; the requested mode preserves all other bits.
 6. Release (by closing), whatever the outcome.
 
 Each candidate is one action, measured as every action is (the observed

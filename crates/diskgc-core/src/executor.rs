@@ -1,10 +1,8 @@
-//! The executor (docs/architecture.md, The reclaim walk), first slice: the
-//! minimal `ensure` of one `--select` tier of kind `cargo-target` (task-10)
-//! or of kind `fs` with the `delete` action (task-18, [`crate::fs_kind`]),
-//! and their dry runs. Later tasks extend it: groups, ranking and per-tier
-//! discovery for config tiers (task-20), deadlines with overruns, signals
-//! and re-sampling (task-54), the index (task-31), command actions
-//! (task-37).
+//! The executor (docs/architecture.md, The reclaim walk): one selected tier
+//! or configured ordered groups, with per-tier discovery and a shared host
+//! lock. Random ranking and best-fit order are still rejected by the CLI.
+//! Later tasks add deadlines with overruns and signals (task-54) and the
+//! index (task-31).
 //!
 //! Two entry points, kept apart by the type system:
 //!
@@ -28,8 +26,7 @@
 //!   [`ensure`] would take them (`oldest`: least recently built or changed
 //!   first), eligible first.
 //!
-//! Both start with [`privileges`] and a [`Tier`], built and checked by the
-//! caller before anything touches the machine (static validation).
+//! Both start with [`privileges`] and checked tiers built by the caller.
 //!
 //! Each [`ReclaimEnd`], whatever the kind, maps to the report as task-10's
 //! note says (`Reclaim::record`): `Complete` is an action; `Skipped` a skip
@@ -46,7 +43,8 @@ use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
-use crate::docker_backend::{self, Binding, Storage};
+use crate::config;
+use crate::docker_backend::{self, Binding, Bound, Storage};
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, EntryFilter, Find};
 use crate::host::{
@@ -60,7 +58,7 @@ use crate::report::{
     ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
 };
-use crate::resolve::{Resolved, Want, resolve};
+use crate::resolve::{ResolveError, Resolved, Want, resolve};
 use crate::select::{self, Factor};
 use crate::units::{Size, format_bytes};
 
@@ -177,6 +175,36 @@ impl Tier {
         uid: u32,
     ) -> Result<Tier, String> {
         let checked = select::compile(expr, library).map_err(|e| e.to_string())?;
+        let bound = library
+            .bind_roots(&checked, roots)
+            .map_err(|e| format!("--select `{expr}`: {e}"))?;
+        Self::from_checked(expr, &checked, library, &bound, uid)
+    }
+
+    /// Compile a statically checked config tier using its already-bound
+    /// roots. Rebinding would lose the parser's decision about fixed and
+    /// required roots, especially when several sources form a union.
+    pub fn configured(
+        group: &str,
+        tier: &config::Tier,
+        library: &Library,
+        uid: u32,
+    ) -> Result<Self, String> {
+        let expr = tier.select.expr().to_string();
+        let mut selected = Self::from_checked(&expr, &tier.select, library, &tier.roots, uid)
+            .map_err(|e| format!("group `{group}` tier `{}`: {e}", tier.name))?;
+        selected.group = group.to_owned();
+        selected.name = tier.name.clone();
+        Ok(selected)
+    }
+
+    fn from_checked(
+        expr: &str,
+        checked: &select::Checked,
+        library: &Library,
+        bound: &std::collections::BTreeMap<String, Vec<String>>,
+        uid: u32,
+    ) -> Result<Self, String> {
         let not_yet = |what: &str, task: &str| {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
@@ -184,13 +212,10 @@ impl Tier {
                  kind fs), optionally with supported filters, or a positive fs delete union"
             )
         };
-        let bound = library
-            .bind_roots(&checked, roots)
-            .map_err(|e| format!("--select `{expr}`: {e}"))?;
         let mut terms = Vec::new();
         for term in &checked.expr().terms {
             terms.push(Self::select_term(
-                expr, term, library, &bound, uid, &not_yet,
+                expr, term, library, bound, uid, &not_yet,
             )?);
         }
         let mut first = terms.remove(0);
@@ -474,6 +499,28 @@ fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
     }
 }
 
+/// Check every configured root without enumerating candidates. A missing
+/// root remains an empty source; an unsafe or unreadable root excludes its
+/// tier before any other tier is allowed to delete.
+fn preflight_roots<H: Host>(host: &H, tier: &Tier) -> Result<(), String> {
+    let roots = tier
+        .roots
+        .iter()
+        .chain(tier.fs_union.iter().flat_map(|source| &source.roots));
+    for root in roots {
+        match resolve(host, root, Want::Directory) {
+            Ok(_) | Err(ResolveError::Missing { .. }) => {}
+            Err(error) => {
+                return Err(format!(
+                    "root {}: {error} (misconfigured, or the environment changed); the tier is excluded",
+                    root.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Brings `PATH`'s filesystem to the goal (see the module docs). Progress
 /// goes to `log`, one line each.
 ///
@@ -655,9 +702,11 @@ pub fn ensure<H: Delete>(
         deadline,
         tally_budget: request.tally_budget,
         command_ready,
+        docker_bound: None,
         report: &mut report,
         log,
         deadline_hit: false,
+        run_stopped: false,
     };
     run.run(owners);
     let deadline_hit = run.deadline_hit;
@@ -668,6 +717,262 @@ pub fn ensure<H: Delete>(
         !report.errors.is_empty(),
     );
     // Released only here, by closing, after the final sample.
+    drop(lock);
+    report
+}
+
+/// Reclaim configured tiers in policy order under one host lock. All command
+/// and Docker environment checks finish before the first deletion. A tier
+/// whose environment fails is excluded and reported; the remaining tiers
+/// still run. The caller supplies the tiers in group/ranking order.
+pub fn ensure_grouped<H: Delete>(
+    host: &H,
+    request: &Request,
+    tiers: &[Tier],
+    tier_timeouts: &[Duration],
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let mut report = Report::new(Status::Error, Some(&request.path));
+    if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
+        return usage(report, log, "configuration has no tiers to run".to_owned());
+    }
+    for tier in tiers {
+        match (&tier.source, &tier.action) {
+            (SourceKind::CargoTarget, Action::CargoLockProtocol)
+            | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. })
+            | (SourceKind::DockerBuildCache, Action::DockerBuilderPrune)
+            | (SourceKind::DockerImages, Action::DockerImagePrune { .. }) => {}
+            (_, action) => {
+                return usage(
+                    report,
+                    log,
+                    format!(
+                        "tier `{}`: profile `{}` removes with unsupported action `{action}`",
+                        tier.name, tier.profile
+                    ),
+                );
+            }
+        }
+    }
+    if let Err(gate) = host.may_delete() {
+        return usage(
+            report,
+            log,
+            format!(
+                "a reclaiming ensure cannot run here: {gate} (use --dry-run for a read-only plan)"
+            ),
+        );
+    }
+    let deadline = deadline_of(host, request.timeout);
+    let measured = match measure(host, request, &mut report) {
+        Ok(measured) => measured,
+        Err(error) => return usage(report, log, error),
+    };
+    let first = &tiers[0];
+    let avail = report.avail_before_bytes.expect("measured");
+    if avail >= measured.min {
+        report.status = Status::Met;
+        report.avail_after_bytes = Some(avail);
+        warn_if_host_lock_unready(host, log);
+        return report;
+    }
+    let lock = match hostlock::acquire(host, deadline) {
+        Ok(lock) => lock,
+        Err(LockError::DeadlinePassed) => {
+            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+            report.status = after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
+            return report;
+        }
+        Err(error) => return usage(report, log, error.to_string()),
+    };
+    log(&format!(
+        "host lock {} taken after {} ms",
+        hostlock::host_lock_path().display(),
+        lock.waited.as_millis()
+    ));
+    match sample(host, &measured) {
+        Ok(space) if space.avail_bytes >= measured.min => {
+            report.status = Status::Met;
+            report.avail_after_bytes = Some(space.avail_bytes);
+            return report;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            record_error(&mut report, log, run_error(first, error));
+            return report;
+        }
+    }
+    let mut prepared = Vec::with_capacity(tiers.len());
+    for tier in tiers {
+        if deadline.is_some_and(|end| host.now() >= end) {
+            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+            report.status = conclude(
+                Final::of(report.avail_after_bytes, measured.min),
+                true,
+                !report.errors.is_empty(),
+            );
+            return report;
+        }
+        if let Err(error) = preflight_roots(host, tier) {
+            record_error(&mut report, log, run_error(tier, error));
+            prepared.push(None);
+            continue;
+        }
+        // Environmental checks of every tier finish under the host lock
+        // before any tier may delete. The action rechecks volatile binding.
+        let docker_argv = ["docker".to_owned()];
+        let argv = match &tier.action {
+            Action::Command { argv, .. } => Some(argv.as_slice()),
+            Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
+                Some(docker_argv.as_slice())
+            }
+            _ => None,
+        };
+        let ready = if let Some(argv) = argv {
+            match command_action::preflight(host, argv) {
+                Ok(Preflight::Ready(ready)) => {
+                    log(&format!(
+                        "{}: command executables: {}",
+                        tier.name,
+                        ready
+                            .executables
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    Some(ready)
+                }
+                Ok(Preflight::Missing(program)) => {
+                    log(&format!(
+                        "{}: profile `{}` is missing executable {program:?}",
+                        tier.name, tier.profile
+                    ));
+                    report.skipped.push(SkipEntry {
+                        tier: tier.name.clone(),
+                        profile: tier.profile.clone(),
+                        candidate: PathBuf::new(),
+                        count: 1,
+                        examples: Vec::new(),
+                        reason: Reason::Missing.as_str(),
+                    });
+                    prepared.push(None);
+                    continue;
+                }
+                Err(error) => {
+                    record_error(&mut report, log, run_error(tier, error.to_string()));
+                    prepared.push(None);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let mut docker_bound = None;
+        if matches!(
+            tier.source,
+            SourceKind::DockerBuildCache | SourceKind::DockerImages
+        ) {
+            match docker_backend::inspect_backend(host, measured.dev, docker_storage(tier)) {
+                Ok(Binding::Bound(bound)) => {
+                    log(&format!(
+                        "{}: Docker backend bound to {}",
+                        tier.name,
+                        docker_candidate(tier, &bound).display()
+                    ));
+                    docker_bound = Some(bound);
+                }
+                Ok(Binding::Skipped(skip)) => {
+                    log(&format!(
+                        "{}: skip Docker backend: {}: {}",
+                        tier.name, skip.reason, skip.detail
+                    ));
+                    report.skipped.push(SkipEntry {
+                        tier: tier.name.clone(),
+                        profile: tier.profile.clone(),
+                        candidate: PathBuf::new(),
+                        count: 1,
+                        examples: Vec::new(),
+                        reason: skip.reason,
+                    });
+                    prepared.push(None);
+                    continue;
+                }
+                Err(error) => {
+                    record_error(&mut report, log, run_error(tier, error.to_string()));
+                    prepared.push(None);
+                    continue;
+                }
+            }
+        }
+        prepared.push(Some((ready, docker_bound)));
+    }
+    let mut deadline_hit = false;
+    for ((tier, tier_timeout), ready) in tiers.iter().zip(tier_timeouts).zip(prepared) {
+        let Some((ready, docker_bound)) = ready else {
+            continue;
+        };
+        let avail = match sample(host, &measured) {
+            Ok(space) => space.avail_bytes,
+            Err(error) => {
+                record_error(&mut report, log, run_error(tier, error));
+                break;
+            }
+        };
+        if avail >= measured.target {
+            break;
+        }
+        if deadline.is_some_and(|end| host.now() >= end) {
+            deadline_hit = true;
+            break;
+        }
+        let own_deadline = (!tier_timeout.is_zero())
+            .then(|| host.now().checked_add(*tier_timeout))
+            .flatten();
+        let tier_deadline = match (deadline, own_deadline) {
+            (Some(run), Some(own)) => Some(run.min(own)),
+            (run, None) => run,
+            (None, own) => own,
+        };
+        let mut run = Reclaim {
+            host,
+            tier,
+            measured: &measured,
+            deadline: tier_deadline,
+            tally_budget: request.tally_budget,
+            command_ready: ready,
+            docker_bound,
+            report: &mut report,
+            log,
+            deadline_hit: false,
+            run_stopped: false,
+        };
+        run.run(owners);
+        let timed_out = run.deadline_hit;
+        let stopped = run.run_stopped;
+        if timed_out {
+            if deadline.is_some_and(|end| host.now() >= end) {
+                deadline_hit = true;
+                break;
+            }
+            record_error(
+                &mut report,
+                log,
+                run_error(tier, "tier timeout passed; the tier is excluded"),
+            );
+            continue;
+        }
+        if stopped {
+            break;
+        }
+    }
+    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+    report.status = conclude(
+        Final::of(report.avail_after_bytes, measured.min),
+        deadline_hit,
+        !report.errors.is_empty(),
+    );
     drop(lock);
     report
 }
@@ -805,6 +1110,80 @@ pub fn dry_run<H: Host>(
     report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
     report.held_by_deleted_files = held(host, &mut checker, measured.dev, log);
     report
+}
+
+/// Plan every configured tier in its policy order without taking a host
+/// lock. Each plan remains tagged with its configured group and tier.
+pub fn dry_run_grouped<H: Host>(
+    host: &H,
+    request: &Request,
+    tiers: &[Tier],
+    tier_timeouts: &[Duration],
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let Some(first) = tiers.first().filter(|_| tiers.len() == tier_timeouts.len()) else {
+        return usage(
+            Report::new(Status::DryRun, Some(&request.path)),
+            log,
+            "configuration has no tiers to plan".to_owned(),
+        );
+    };
+    let run_deadline = deadline_of(host, request.timeout);
+    let mut for_tier = request.clone();
+    for_tier.tier = first.clone();
+    for_tier.timeout = bounded_tier_timeout(host, run_deadline, tier_timeouts[0]);
+    let mut report = dry_run(host, &for_tier, owners, log);
+    if report.status == Status::UsageError {
+        return report;
+    }
+    if report.status == Status::Deadline {
+        if run_deadline.is_some_and(|end| host.now() >= end) {
+            return report;
+        }
+        // Only this tier's budget expired. Reclaim excludes that tier and
+        // continues; a grouped plan must still show later tiers.
+        report.status = Status::DryRun;
+    }
+    for (tier, timeout) in tiers.iter().zip(tier_timeouts).skip(1) {
+        if run_deadline.is_some_and(|end| host.now() >= end) {
+            report.status = Status::Deadline;
+            break;
+        }
+        for_tier.tier = tier.clone();
+        for_tier.timeout = bounded_tier_timeout(host, run_deadline, *timeout);
+        let part = dry_run(host, &for_tier, owners, log);
+        if part.status == Status::UsageError {
+            report.errors.extend(part.errors);
+            report.status = Status::UsageError;
+            report.avail_after_bytes = part.avail_after_bytes;
+            return report;
+        }
+        report.plan.extend(part.plan);
+        report.errors.extend(part.errors);
+        report.held_by_deleted_files = part.held_by_deleted_files;
+        report.avail_after_bytes = part.avail_after_bytes;
+        if part.status == Status::Deadline && run_deadline.is_some_and(|end| host.now() >= end) {
+            report.status = Status::Deadline;
+            break;
+        }
+        // A tier deadline alone does not stop the overall plan.
+    }
+    report
+}
+
+fn bounded_tier_timeout<H: Host>(
+    host: &H,
+    run_deadline: Option<MonoTime>,
+    tier_timeout: Duration,
+) -> Option<Duration> {
+    let remaining = run_deadline.map(|end| end.saturating_since(host.now()));
+    match (remaining, tier_timeout.is_zero()) {
+        (Some(remaining), false) => Some(remaining.min(tier_timeout)),
+        (Some(remaining), true) => Some(remaining),
+        (None, false) => Some(tier_timeout),
+        (None, true) => None,
+    }
 }
 
 /// A plan in the making: the eligible candidates with their order key
@@ -1483,9 +1862,11 @@ struct Reclaim<'a, 'l, H: Delete> {
     deadline: Option<MonoTime>,
     tally_budget: Option<Duration>,
     command_ready: Option<Ready>,
+    docker_bound: Option<Bound>,
     report: &'a mut Report,
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
+    run_stopped: bool,
 }
 
 impl<H: Delete> Reclaim<'_, '_, H> {
@@ -1505,18 +1886,19 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn walk_docker(&mut self) {
-        let bound = match docker_backend::inspect_backend(
-            self.host,
-            self.measured.dev,
-            docker_storage(self.tier),
-        ) {
+        let binding = if let Some(bound) = &self.docker_bound {
+            Ok(Binding::Bound(bound.clone()))
+        } else {
+            docker_backend::inspect_backend(self.host, self.measured.dev, docker_storage(self.tier))
+        };
+        let bound = match binding {
             Ok(Binding::Bound(bound)) => bound,
             Ok(Binding::Skipped(skip)) => {
                 self.skip_docker(Path::new(""), skip.reason, &skip.detail);
                 return;
             }
             Err(error) => {
-                self.run_error(format!("bind Docker backend: {error}"));
+                self.tier_error(format!("bind Docker backend: {error}"));
                 return;
             }
         };
@@ -1557,14 +1939,14 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
             Err(error) => {
-                self.run_error(format!("recheck Docker backend: {error}"));
+                self.tier_error(format!("recheck Docker backend: {error}"));
                 return;
             }
         }
         let cwd = match resolve(self.host, Path::new("/"), Want::Directory) {
             Ok(cwd) => cwd,
             Err(error) => {
-                self.run_error(format!("open Docker command cwd: {error}"));
+                self.tier_error(format!("open Docker command cwd: {error}"));
                 return;
             }
         };
@@ -1688,14 +2070,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         record_error(self.report, self.log, entry);
     }
 
-    /// An error of the run (no one candidate), logged.
+    /// A tier-local environment error: this tier is excluded while other
+    /// preflighted tiers may still run.
+    fn tier_error(&mut self, message: String) {
+        record_error(self.report, self.log, run_error(self.tier, message));
+    }
+
+    /// An error of the run (no one candidate): the group walk stops.
     fn run_error(&mut self, message: String) {
-        let entry = run_error(self.tier, message);
-        record_error(self.report, self.log, entry);
+        self.run_stopped = true;
+        self.tier_error(message);
     }
 
     /// An error of the run: recorded, and the run stops.
     fn stop(&mut self, stop: &Stop) {
+        self.run_stopped = true;
         if matches!(stop, Stop::DeadlinePassed { .. }) {
             self.deadline_hit = true;
             (self.log)(&format!("{}: the deadline passed: {stop}", self.tier.name));
@@ -1762,7 +2151,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             });
         }
         for skip in &misconfigured {
-            self.run_error(excluded(skip));
+            // A bad configured root excludes this tier only. Other tiers
+            // were independently preflighted and may still run.
+            self.tier_error(excluded(skip));
         }
         misconfigured.is_empty()
     }
@@ -2296,6 +2687,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.error_as(candidate, profile, format!("{}: {error}", path.display()));
             }
             ReclaimEnd::GateRefused { path, error } => {
+                self.run_stopped = true;
                 self.error_as(candidate, profile, format!("{}: {error}", path.display()));
                 (self.log)(&format!(
                     "{}: the sandbox gate refused: nothing more is deleted",
@@ -2304,6 +2696,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return None;
             }
             ReclaimEnd::Stopped(stop) => {
+                self.run_stopped = true;
                 self.stop(&stop);
                 return None;
             }
