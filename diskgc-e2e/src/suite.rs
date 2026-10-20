@@ -205,6 +205,12 @@ pub static TESTS: &[Test] = &[
         run: temp_safety_suite::dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent,
     },
     Test {
+        name: "nested_claude_shell_cache_reclaims_only_its_exact_entry",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: temp_safety_suite::nested_claude_shell_cache_reclaims_only_its_exact_entry,
+    },
+    Test {
         name: "checked_in_python_profile_vector_replays_in_container",
         tier: Tier::Fast,
         expect: Expect::Pass,

@@ -1,0 +1,34 @@
+# The frozen prefix preset reaches exact caches inside Claude's TMPDIR and
+# two nested shells. Neither enclosing shell nor a lookalike cache is deleted.
+profile_vector: 1
+profile: node-compile-cache
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/claude-1000/nix-shell.Ab1/node-compile-cache: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /tmp/claude-1000/nix-shell.Ab1/nix-shell.B2/node-compile-cache: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /tmp/claude-1000/nix-shell.Ab1/node-compile-cache-old: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /tmp/claude-1000/nix-shell.Ab1/important: {size: 8K, mtime: 2026-08-01T00:00:00Z}
+expect:
+  plan:
+    - {candidate: /tmp/claude-1000/nix-shell.Ab1/node-compile-cache}
+    - {candidate: /tmp/claude-1000/nix-shell.Ab1/nix-shell.B2/node-compile-cache}
+  reclaim_exit: 1
+  actions:
+    - /tmp/claude-1000/nix-shell.Ab1/node-compile-cache
+    - /tmp/claude-1000/nix-shell.Ab1/nix-shell.B2/node-compile-cache
+  removed:
+    - /tmp/claude-1000/nix-shell.Ab1/node-compile-cache
+    - /tmp/claude-1000/nix-shell.Ab1/nix-shell.B2/node-compile-cache
+  skipped: []
+  preserved:
+    - /tmp/claude-1000/nix-shell.Ab1/important
+    - /tmp/claude-1000/nix-shell.Ab1/node-compile-cache-old/payload
+    - /tmp/claude-1000/nix-shell.Ab1/nix-shell.B2

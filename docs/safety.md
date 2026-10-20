@@ -305,6 +305,9 @@ that directory open. The process scan then judges `/tmp/tmp.X` eligible. A
 disposable-container test reproduces this with a live process and the real
 binary's dry-run; it never performs the unsafe deletion. `mktemp-dir`,
 `nix-shell-tmpdir` and the broad `tmp-entry` are therefore not built-ins.
+The same test reproduces the false negative for a live
+`/tmp/claude-{uid}/nix-shell.*` TMPDIR; the frozen prefix preset only
+selects named entries inside that directory, never the outer shell itself.
 An idle-time filter cannot establish liveness. The rc names
 `nix-shell-<pid>-*` and `nix-develop-<pid>-*` also cannot use a host-only
 `/proc/<pid>` check: a shell can share `/tmp` from a different PID namespace

@@ -501,10 +501,14 @@ filesystem, processes and mounts from the developer's system.
 - **Dormant temp users:** a live process sets `TMPDIR` after exec, holds no
   descriptor in the directory and then sleeps. A ModelHost case and a
   disposable-container dry-run prove that a `tmp.*` delete profile would
-  mark it eligible; the container test requires `mktemp-dir`,
-  `nix-shell-tmpdir`, `nix-shell-rc` and `tmp-entry` to remain absent from the
-  built-in library. The user-configured probe is never run without
-  `--dry-run`. Protecting real dormant `nix-shell` and `nix develop`
+  mark it eligible. The container case also proves the same false negative
+  for a `nix-shell.*` directory under `/tmp/claude-{uid}`. A separate
+  disposable-container run reclaims an exact `node-compile-cache` entry
+  inside that prefix and preserves the enclosing shell and neighboring
+  file, checked by the deletion oracle. The container test requires
+  `mktemp-dir`, `nix-shell-tmpdir`, `nix-shell-rc` and `tmp-entry` to remain
+  absent from the built-in library. The user-configured probe is only run
+  with `--dry-run`. Protecting real dormant `nix-shell` and `nix develop`
   sessions remains a release blocker for those planned profiles.
 - **Native Docker Engine smoke** in its own digest-pinned dind image under
   rootless Podman (`just e2e-docker-one native_docker_engine_dind_smoke`).

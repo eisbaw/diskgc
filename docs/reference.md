@@ -978,6 +978,13 @@ The preset reaches selected *contents* inside nested shell temp roots. It
 does not make the enclosing `nix-shell.*` directories, including those below
 `/tmp/claude-{uid}`, deletion candidates. Those outer directories remain out
 of scope until dormant-shell liveness can be established at deletion time.
+For example, `node-compile-cache` can select
+`/tmp/claude-1000/nix-shell.Ab1/node-compile-cache` while preserving
+`/tmp/claude-1000/nix-shell.Ab1` and its other contents. This is exact
+entry matching, not permission to reclaim the enclosing TMPDIR. A shell
+that sets `TMPDIR` after exec without holding a descriptor in it can make
+that outer directory appear idle to the process scan; no age threshold
+proves it is unused.
 
 The browser cache sources take a home directory as their required root. They
 check that browser's `SingletonLock` before judging and again before deleting
