@@ -51,6 +51,7 @@ pub mod cargo_under_test;
 pub mod controlled;
 pub mod driver;
 pub mod driver_suite;
+pub mod embedded_suite;
 pub mod engine_suite;
 pub mod ensure_suite;
 pub mod fs_reclaim_suite;

@@ -292,6 +292,7 @@
           pkgs.pnpm
           pkgs.yarn
           pkgs.ccache
+          pkgs.platformio
         ];
         pathsToLink = [ "/bin" ];
       };

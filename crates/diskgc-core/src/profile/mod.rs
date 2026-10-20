@@ -105,8 +105,8 @@ pub enum Body {
 pub struct Source {
     pub roots: Roots,
     pub finds: Finds,
-    /// The profile's own predicates: `has`, `has_not`, `app_not_running`, and
-    /// `lacks_entry`. The source can set `min_idle_for`; a tier can require
+    /// The profile's own predicates: `has`, `has_dir`, `has_not`,
+    /// `app_not_running`, and `lacks_entry`. The source can set `min_idle_for`; a tier can require
     /// longer with `filter:`s. A term's
     /// filters narrow further; `!profile:` and `protect` ignore them
     /// (docs/reference.md, Selection grammar and `protect`).
@@ -168,6 +168,8 @@ pub struct Where {
     pub idle_for: Option<IdleFor>,
     /// A file name the candidate must contain.
     pub has: Option<String>,
+    /// A direct child that must be a directory, without following links.
+    pub has_dir: Option<String>,
     /// A file name the candidate must not contain.
     pub has_not: Option<String>,
     /// A Chromium-family `SingletonLock` that must be absent.
@@ -193,6 +195,7 @@ impl Where {
         let used = [
             (PredicateName::IdleFor, self.idle_for.is_some()),
             (PredicateName::Has, self.has.is_some()),
+            (PredicateName::HasDir, self.has_dir.is_some()),
             (PredicateName::HasNot, self.has_not.is_some()),
             (PredicateName::AppNotRunning, self.app_not_running.is_some()),
             (PredicateName::LacksEntry, self.lacks_entry.is_some()),

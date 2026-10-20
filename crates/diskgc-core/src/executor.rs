@@ -154,9 +154,9 @@ impl Tier {
             let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
                 return Err(format!("--select `{expr}`: no filter profile `{name}`"));
             };
-            if where_.has.is_some() || where_.has_not.is_some() {
+            if where_.has.is_some() || where_.has_dir.is_some() || where_.has_not.is_some() {
                 return Err(not_yet(
-                    &format!("`filter:{name}` (a `has` / `has_not` filter)"),
+                    &format!("`filter:{name}` (a `has` / `has_dir` / `has_not` filter)"),
                     "task-16",
                 ));
             }

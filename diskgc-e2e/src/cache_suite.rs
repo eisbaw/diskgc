@@ -9,6 +9,7 @@ use std::process::Command;
 use crate::ensure_suite::{ensure_run, report};
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
+use crate::under_test::TESTER_ENV;
 use crate::{TESTER, ensure};
 
 // ccache rewrites stats while clearing; the fixture must be large enough to
@@ -245,4 +246,70 @@ pub fn ccache_cleaner(ctx: &Ctx) -> TestResult {
             payload: Some("0/0/0123456789abcdefR"),
         },
     )
+}
+
+/// The command must clear only PlatformIO's cache while leaving installed
+/// packages alone. The cleaner runs from the checked `.platformio` parent.
+pub fn platformio_cache_cleaner(ctx: &Ctx) -> TestResult {
+    ctx.home
+        .mkdirs(".platformio/packages/kept", 0o700, TESTER)?;
+    ctx.home.mkdirs(".platformio/.cache", 0o700, TESTER)?;
+    ctx.home.mkdirs(".platformio/cache", 0o700, TESTER)?;
+    let package = ctx.home.write_file(
+        ".platformio/packages/kept/package.json",
+        b"installed package",
+        0o600,
+        TESTER,
+    )?;
+    let default_probe = ctx.home.write_file(
+        ".platformio/.cache/default-probe",
+        b"default cache",
+        0o600,
+        TESTER,
+    )?;
+    let nondefault = ctx.home.write_file(
+        ".platformio/cache/keep",
+        b"not the default cache",
+        0o600,
+        TESTER,
+    )?;
+    // First run the pinned tool without any cache override. This catches a
+    // profile that hard-codes a cleaner path different from PIO's default.
+    let default_run = Command::new(&ctx.self_exe)
+        .args([
+            "as-tester",
+            "--",
+            "/bin/pio",
+            "system",
+            "prune",
+            "--cache",
+            "--force",
+        ])
+        .env_clear()
+        .envs(TESTER_ENV.iter().copied())
+        .current_dir("/home/tester")
+        .output()
+        .map_err(|error| format!("run default PlatformIO prune: {error}"))?;
+    ensure!(
+        default_run.status.success(),
+        "default PlatformIO prune failed: {:?}\nstdout: {}\nstderr: {}",
+        default_run.status,
+        String::from_utf8_lossy(&default_run.stdout),
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+    ensure!(
+        !default_probe.exists() && nondefault.exists() && package.exists(),
+        "pinned PlatformIO's default cache differs from .platformio/.cache"
+    );
+    cleaner_changes_its_measured_cache(
+        ctx,
+        CacheCase {
+            profile: "platformio-cache",
+            cache: ".platformio/.cache",
+            payload: Some("downloaded-archive"),
+        },
+    )?;
+    ensure!(package.exists(), "PlatformIO package was removed");
+    ensure!(nondefault.exists(), "non-default cache was removed");
+    Ok(())
 }

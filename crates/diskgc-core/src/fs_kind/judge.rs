@@ -270,7 +270,7 @@ impl Judge<'_> {
             Ok(false) => Ok(Err(Skip::new(
                 Reason::Changed,
                 found.path.clone(),
-                "no longer passes its source profile's own `where` (has / has_not / lacks_entry), which it \
+                "no longer passes its source profile's own `where` (has / has_dir / has_not / lacks_entry), which it \
                  passed when found",
             ))),
             Err(skip) => Ok(Err(skip)),
@@ -444,6 +444,7 @@ pub(super) fn skip_or_stop(path: PathBuf, what: &str, e: &HostError) -> Result<S
 
 /// The source's own entry predicates on the entry `name` (at `at`, of
 /// type `file_type`) in `dir`. `has` and `has_not` inspect regular files;
+/// `has_dir` requires a direct child directory without following links;
 /// `lacks_entry` refuses any directory entry of its name, including a link.
 /// A file candidate holds nothing. A directory that cannot be read is
 /// neither (`Err`: refused as `unreadable`, never taken). The deadline is
@@ -1090,12 +1091,13 @@ pub(super) fn source_where<H: Host>(
     file_type: Option<FileType>,
     deadline: Option<MonoTime>,
 ) -> Judged<bool> {
-    let (has, has_not, lacks_entry) = (&find.has, &find.has_not, &find.lacks_entry);
-    if has.is_none() && has_not.is_none() && lacks_entry.is_none() {
+    let (has, has_dir, has_not, lacks_entry) =
+        (&find.has, &find.has_dir, &find.has_not, &find.lacks_entry);
+    if has.is_none() && has_dir.is_none() && has_not.is_none() && lacks_entry.is_none() {
         return Ok(Ok(true));
     }
     if file_type != Some(FileType::Directory) {
-        return Ok(Ok(has.is_none()));
+        return Ok(Ok(has.is_none() && has_dir.is_none()));
     }
     check_deadline(host, deadline, at)?;
     let fd = match open_beneath(
@@ -1128,6 +1130,15 @@ pub(super) fn source_where<H: Host>(
         && !judged!(holds(file))
     {
         return Ok(Ok(false));
+    }
+    if let Some(name) = has_dir {
+        check_deadline(host, deadline, &at.join(name))?;
+        match host.statx(Base::Dir(&fd), Path::new(name)) {
+            Ok(stat) if stat.file_type == Some(FileType::Directory) => {}
+            Ok(_) => return Ok(Ok(false)),
+            Err(e) if e.is(Errno::ENOENT) => return Ok(Ok(false)),
+            Err(e) => return Ok(Err(skip_or_stop(at.join(name), "stat", &e)?)),
+        }
     }
     if let Some(file) = has_not
         && judged!(holds(file))

@@ -54,6 +54,7 @@ impl fmt::Display for Kind {
 pub enum PredicateName {
     IdleFor,
     Has,
+    HasDir,
     HasNot,
     AppNotRunning,
     LacksEntry,
@@ -63,9 +64,10 @@ pub enum PredicateName {
 }
 
 impl PredicateName {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::IdleFor,
         Self::Has,
+        Self::HasDir,
         Self::HasNot,
         Self::AppNotRunning,
         Self::LacksEntry,
@@ -79,6 +81,7 @@ impl PredicateName {
         match self {
             Self::IdleFor => "idle_for",
             Self::Has => "has",
+            Self::HasDir => "has_dir",
             Self::HasNot => "has_not",
             Self::AppNotRunning => "app_not_running",
             Self::LacksEntry => "lacks_entry",
@@ -93,6 +96,7 @@ impl PredicateName {
         match self {
             Self::IdleFor => &[Kind::Fs, Kind::CargoTarget, Kind::DockerBuildCache],
             Self::Has
+            | Self::HasDir
             | Self::HasNot
             | Self::AppNotRunning
             | Self::LacksEntry

@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{Action, Body, EntryType, Finds, Library, Roots, Source};
+use super::{Action, Body, Cwd, EntryType, Finds, Library, Roots, Source};
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
 use std::collections::BTreeSet;
@@ -60,6 +60,110 @@ fn cmake_build_has_a_frozen_five_level_match_set_and_markers() {
         ("/home/mark/topics/a/b/c/d/build", true),
         ("/home/mark/topics/a/b/c/d/e/build", false),
         ("/home/mark/other/build", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn west_build_has_a_frozen_five_level_match_set_and_zephyr_markers() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library.get("west-build").expect("west-build").body else {
+        panic!("west-build is a source")
+    };
+    assert_eq!(source.roots, Roots::Required);
+    assert_eq!(
+        source.finds,
+        Finds::Paths {
+            patterns: [
+                "build",
+                "*/build",
+                "*/*/build",
+                "*/*/*/build",
+                "*/*/*/*/build"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            exclude: Vec::new(),
+            entry_type: EntryType::Dir,
+        }
+    );
+    assert_eq!(source.where_.has.as_deref(), Some("CMakeCache.txt"));
+    assert_eq!(source.where_.has_dir.as_deref(), Some("zephyr"));
+    assert_eq!(source.where_.lacks_entry.as_deref(), Some("CMakeLists.txt"));
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.action,
+        Action::Delete {
+            make_writable: false
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let root = Path::new("/home/mark/src");
+    for (path, expected) in [
+        ("/home/mark/src/build", true),
+        ("/home/mark/src/a/b/c/d/build", true),
+        ("/home/mark/src/a/b/c/d/e/build", false),
+        ("/home/mark/src/a/b/c/d/not-build", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn platformio_cache_uses_the_documented_default_path_and_own_cleaner() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library
+        .get("platformio-cache")
+        .expect("platformio-cache")
+        .body
+    else {
+        panic!("platformio-cache is a source")
+    };
+    assert_eq!(source.roots, Roots::Required);
+    assert_eq!(
+        source.finds,
+        Finds::Paths {
+            patterns: vec![".platformio/.cache".to_owned()],
+            exclude: Vec::new(),
+            entry_type: EntryType::Dir,
+        }
+    );
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.action,
+        Action::Command {
+            argv: [
+                "env",
+                "PLATFORMIO_CACHE_DIR=.cache",
+                "pio",
+                "system",
+                "prune",
+                "--cache",
+                "--force",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            cwd: Some(Cwd::Parent),
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let root = Path::new("/home/mark");
+    for (path, expected) in [
+        ("/home/mark/.platformio/.cache", true),
+        ("/home/mark/.platformio/cache", false),
+        ("/home/mark/.platformio/packages", false),
+        ("/home/mark/project/.pio/build", false),
     ] {
         assert_eq!(
             path_matches(Some(&[root]), &find.patterns, Path::new(path)),

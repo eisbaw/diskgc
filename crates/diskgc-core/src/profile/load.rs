@@ -234,6 +234,9 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
     if where_.lacks_entry.is_some() {
         problems.push("`where.lacks_entry` is a source predicate, not a tier filter".to_owned());
     }
+    if where_.has_dir.is_some() {
+        problems.push("`where.has_dir` is a source predicate, not a tier filter".to_owned());
+    }
     for (field, present, why) in [
         (
             "kind",
@@ -526,6 +529,7 @@ fn roots(spec: &RootsSpec, problems: &mut Vec<String>) -> Option<Roots> {
 fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
     for (predicate, name) in [
         ("has", &spec.has),
+        ("has_dir", &spec.has_dir),
         ("has_not", &spec.has_not),
         ("lacks_entry", &spec.lacks_entry),
     ] {
@@ -533,7 +537,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
             && !is_file_name(name)
         {
             problems.push(format!(
-                "`{predicate}: {name}` must name one file (no `/`, not `.` or `..`)"
+                "`{predicate}: {name}` must name one entry (no `/`, not `.` or `..`)"
             ));
         }
     }
@@ -591,6 +595,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
     Where {
         idle_for: spec.idle_for.map(|d| IdleFor(d.0)),
         has: spec.has.clone(),
+        has_dir: spec.has_dir.clone(),
         has_not: spec.has_not.clone(),
         app_not_running: spec.app_not_running.clone(),
         lacks_entry: spec.lacks_entry.clone(),

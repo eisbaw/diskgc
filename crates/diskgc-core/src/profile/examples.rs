@@ -1,10 +1,10 @@
 //! Pure profile example checks. The fixture is an in-memory path, its
-//! entry type and the names of its direct regular-file children. This
+//! entry type and the names of its direct regular-file and directory children. This
 //! uses the same compiled `fs` patterns as discovery; it opens no path.
 //!
 //! YAML's path-only examples cannot state an entry type or contents. For
 //! them the fixture uses the declared type (a directory for `any`) and
-//! includes the source's required `has` marker. Golden/model fixtures
+//! includes the source's required `has` and `has_dir` markers. Golden/model fixtures
 //! separately pin type and `where` behavior on real layouts.
 
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ pub struct Entry<'a> {
     pub path: &'a Path,
     pub entry_type: EntryType,
     pub files: &'a [&'a str],
+    pub dirs: &'a [&'a str],
 }
 
 /// Whether an `fs` source would find `entry` by path, type and its own
@@ -56,6 +57,10 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
         .as_deref()
         .is_none_or(|name| entry.files.contains(&name))
         && find
+            .has_dir
+            .as_deref()
+            .is_none_or(|name| entry.dirs.contains(&name))
+        && find
             .has_not
             .as_deref()
             .is_none_or(|name| !entry.files.contains(&name))
@@ -84,6 +89,7 @@ pub fn failures(library: &Library) -> Vec<String> {
             EntryType::Dir
         };
         let files: Vec<&str> = source.where_.has.as_deref().into_iter().collect();
+        let dirs: Vec<&str> = source.where_.has_dir.as_deref().into_iter().collect();
         for (label, paths, expected) in [
             ("match", &source.examples.matches, true),
             ("no_match", &source.examples.no_match, false),
@@ -94,6 +100,7 @@ pub fn failures(library: &Library) -> Vec<String> {
                     path: &model_path,
                     entry_type: model_type,
                     files: &files,
+                    dirs: &dirs,
                 };
                 if matches_entry(source, EXAMPLE_UID, &entry) != expected {
                     failures.push(format!(
@@ -129,6 +136,7 @@ mod tests {
             path,
             entry_type,
             files,
+            dirs: &[],
         };
         assert!(matches_entry(
             source,

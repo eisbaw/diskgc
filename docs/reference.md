@@ -234,7 +234,7 @@ under `profile`:
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
-    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null},
+    "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null},
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
@@ -648,6 +648,7 @@ required}}`.
 |---|---|---|
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
+| `has_dir` | contains a directory of this name directly in the candidate directory (not followed); checked again under the candidate lock before reclaim | `fs` source only |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only when the lock is absent in a safely reached directory. Every present lock retains it, even if its PID appears gone: that PID may be live in another namespace sharing the home directory. Unreadable locks and unsafe paths also retain it. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
@@ -878,9 +879,9 @@ listed as planned, not shipped.
 | c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | tool cleaner planned; protocol unverified |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
-| embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
+| embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |
 | embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
-| embedded | `platformio-cache` | PlatformIO's `.cache` (roots required) | `delete` |
+| embedded | `platformio-cache` | `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; real dormant-shell protection and a complete host dry run are pending | `delete` |
 | generic | `mktemp-dir` | `tmp.*` directories under `/tmp`'s temp-prefix v1 preset | `delete` |
 | generic | `xdg-cache-entry` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known data and dedicated cache names; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
@@ -1014,7 +1015,7 @@ needs a different guard and is outside this Chromium-family set.
   built-in exclusions are the guarantee for the named dedicated paths.
 - Profiles that find at several depths under a project root (`pytest-cache`,
   `cmake-build`, `west-build`) cannot use `**`; they list depths explicitly
-  or take one root per project. `cmake-build` reaches five levels below each
+  or take one root per project. `cmake-build` and `west-build` reach five levels below each
   root. Supply the project or workspace directory as a root when a build lies
   deeper. A changed depth bound requires a new built-in name because it
   changes the profile's matching set. Broader build-output recognition by

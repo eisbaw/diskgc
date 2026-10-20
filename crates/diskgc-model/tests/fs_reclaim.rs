@@ -806,6 +806,37 @@ fn every_check_is_made_again_under_the_candidates_lock() {
     }
 }
 
+/// A Zephyr marker removed after the candidate lock prevents deletion. The
+/// `has_dir` check is part of the source definition, so reclaim must repeat
+/// it under the lock just as it repeats the CMakeCache file check.
+#[test]
+fn west_build_directory_marker_is_rechecked_under_lock() {
+    let candidate = "/home/mark/src/app/build";
+    let tree = format!(
+        "  {candidate}: {{.: {{mtime: {OLD}}}, CMakeCache.txt: {{mtime: {OLD}}}, zephyr: {{.: {{mtime: {OLD}}}}}}}\n"
+    );
+    let event = format!(
+        "events:\n  - {{at: {{op: flock, path: {candidate}, when: after}}, remove: {candidate}/zephyr}}\n"
+    );
+    let host = host(&yaml("", &tree, &event));
+    let roots = ["/home/mark/src".to_owned()];
+    let library = Library::builtin().expect("built-ins");
+    let request = Request {
+        path: PathBuf::from("/home/mark"),
+        min_free: parse_size("100%").expect("size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:west-build", &library, Some(&roots), 1000)
+            .expect("west-build tier"),
+    };
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty(), "{report:#?}");
+    assert_eq!(skip_of(&report, candidate), Some("changed"), "{report:#?}");
+    assert_eq!(unlinked_below(&host, candidate), 0, "{report:#?}");
+    assert!(exists(&host, &format!("{candidate}/CMakeCache.txt")));
+}
+
 /// The candidate must be the object discovery found, at every step that
 /// reaches it again: one replaced between the tally and its lock (a new
 /// object at the same name, here holding someone's file), before or after

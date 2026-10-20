@@ -222,6 +222,7 @@ fn where_json(where_: &Where) -> Json {
             Json::opt(where_.idle_for, |d| Json::str(format_duration(d.0))),
         ),
         ("has", opt_str(where_.has.as_deref())),
+        ("has_dir", opt_str(where_.has_dir.as_deref())),
         ("has_not", opt_str(where_.has_not.as_deref())),
         (
             "app_not_running",
@@ -410,6 +411,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(name) = &where_.has {
         parts.push(format!("has: {}", yaml_scalar(name)));
+    }
+    if let Some(name) = &where_.has_dir {
+        parts.push(format!("has_dir: {}", yaml_scalar(name)));
     }
     if let Some(name) = &where_.has_not {
         parts.push(format!("has_not: {}", yaml_scalar(name)));

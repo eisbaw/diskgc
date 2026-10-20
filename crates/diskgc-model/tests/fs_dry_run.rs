@@ -1384,6 +1384,41 @@ fn shipped_cmake_build_finds_depth_five_and_refuses_sources_and_checkouts() {
     nothing_locked_or_deleted(&host);
 }
 
+/// Zephyr's own output directory distinguishes west builds from ordinary
+/// CMake builds. Source and checkout guards apply to the entire candidate,
+/// including a build found at the fifth relative depth.
+#[test]
+fn shipped_west_build_requires_directory_marker_and_refuses_sources() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let root = "/home/mark/topics";
+    let deep = "/home/mark/topics/a/b/c/d/build";
+    let host = host(&yaml(&format!(
+        "  /home/mark/topics/app/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}, zephyr.elf: {at}}}}}\n  \
+         /home/mark/topics/plain/build: {{.: {at}, CMakeCache.txt: {at}}}\n  \
+         /home/mark/topics/file-marker/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {at}}}\n  \
+         /home/mark/topics/link-marker/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{symlink: /home/mark/topics/app/build/zephyr, mtime: 2026-10-01T00:00:00Z}}}}\n  \
+         /home/mark/topics/insource/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}, CMakeLists.txt: {at}}}\n  \
+         /home/mark/topics/not-a-file/build: {{.: {at}, CMakeCache.txt: {{.: {at}}}, zephyr: {{.: {at}}}}}\n  \
+         /home/mark/topics/checkout/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
+         {deep}: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}}}\n  \
+         {deep}/deeper/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}}}\n"
+    )));
+    let report = dry_run(&host, &built_in_request("profile:west-build", root));
+    let mut actual = plan(&report);
+    actual.sort();
+    assert_eq!(
+        actual,
+        [
+            (deep.to_owned(), None),
+            (format!("{root}/app/build"), None),
+            (format!("{root}/checkout/build"), Some("contains_checkout")),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
 /// A `has` / `has_not` filter in a term is refused (task-16), never
 /// silently ignored; `!filter:` and unions stay refused too.
 #[test]

@@ -112,6 +112,9 @@ pub struct WhereSpec {
     pub idle_for: Option<DurationSpec>,
     #[serde(default)]
     pub has: Option<String>,
+    /// A direct child directory required by a filesystem source.
+    #[serde(default, deserialize_with = "present_non_null_string")]
+    pub has_dir: Option<String>,
     #[serde(default)]
     pub has_not: Option<String>,
     /// A Chromium-family `SingletonLock` entry, absolute or relative to

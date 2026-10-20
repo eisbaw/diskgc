@@ -119,6 +119,7 @@ fn a_scratch_pattern_mutation_changes_its_golden_set() {
                         path: std::path::Path::new(path),
                         entry_type: EntryType::Dir,
                         files: &[],
+                        dirs: &[],
                     },
                 )
             })

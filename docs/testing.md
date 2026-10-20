@@ -783,7 +783,7 @@ every test's setup; nothing falls back to "a Nix image". The runner names
 the image in its summary.
 
 - **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned
-  pip, uv, Go, npm, pnpm, Yarn Classic and ccache cleaners, and the Cargo
+  pip, uv, Go, npm, pnpm, Yarn Classic, ccache and PlatformIO cleaners, and the Cargo
   toolchains under test from the Nix store; descriptor `read-only
   /nix/store`, `toolchains manifest`, `tests all`. `just e2e`, `just
   e2e-full`.

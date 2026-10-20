@@ -27,7 +27,7 @@
 //! kernel does not report is `unsupported_fs`), found once (a candidate
 //! reached again through another root or pattern is listed once, under the
 //! outermost root: roots are walked outermost first), a mount at or inside
-//! it, then the source's own `where` (`has` / `has_not` / `lacks_entry`), which decides
+//! it, then the source's own `where` (`has` / `has_dir` / `has_not` / `lacks_entry`), which decides
 //! whether it is a candidate at all.
 //!
 //! The deadline is checked before every `statx`, after every listing

@@ -1050,6 +1050,7 @@ fn predicate_table_matches_the_reference() {
                 vec![Kind::Fs, Kind::CargoTarget, Kind::DockerBuildCache]
             ),
             (PredicateName::Has, vec![Kind::Fs]),
+            (PredicateName::HasDir, vec![Kind::Fs]),
             (PredicateName::HasNot, vec![Kind::Fs]),
             (PredicateName::AppNotRunning, vec![Kind::Fs]),
             (PredicateName::LacksEntry, vec![Kind::Fs]),

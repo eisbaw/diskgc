@@ -7,7 +7,7 @@
 //! - a [`Pattern`] is one `find.paths` pattern, `{uid}` replaced, in
 //!   segments ([`pattern`] has the matching rules);
 //! - a [`Find`] is what a source profile finds: its patterns, the entry
-//!   type, and its own `where` (`has` / `has_not` / `lacks_entry`), which narrows what is
+//!   type, and its own `where` (`has` / `has_dir` / `has_not` / `lacks_entry`), which narrows what is
 //!   a candidate at all;
 //! - [`discover`] walks the roots by the patterns (never deeper than they
 //!   say, no symlink followed, no mount crossed, mountinfo first) into a
@@ -60,6 +60,8 @@ pub struct Find {
     /// The source's own `where`: a file the candidate must contain
     /// (directly in it, as a regular file) ...
     pub has: Option<String>,
+    /// A direct child that must be a directory.
+    pub has_dir: Option<String>,
     /// ... and one it must not.
     pub has_not: Option<String>,
     pub app_not_running: Option<std::path::PathBuf>,
@@ -164,6 +166,7 @@ impl Find {
             exclude: exclude.iter().map(|p| Pattern::compile(p, uid)).collect(),
             entry_type,
             has: where_.has.clone(),
+            has_dir: where_.has_dir.clone(),
             has_not: where_.has_not.clone(),
             app_not_running: where_
                 .app_not_running

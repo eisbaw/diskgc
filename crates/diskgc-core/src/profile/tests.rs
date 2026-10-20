@@ -105,6 +105,30 @@ fn lacks_entry_cannot_be_silently_disabled_by_a_present_null_or_blank() {
 }
 
 #[test]
+fn has_dir_is_a_validated_source_guard() {
+    let source = |value: &str| {
+        format!(
+            "- name: west\n  find: {{roots: [/tmp], paths: [build], type: dir}}\n  where: {{has: CMakeCache.txt, has_dir: {value}}}\n  action: delete\n  examples: {{match: [/tmp/build]}}\n"
+        )
+    };
+    for value in ["", "~", "null", "NULL"] {
+        let yaml = source(value);
+        assert!(
+            parse_profiles(&yaml).is_err(),
+            "present null has_dir was accepted: {yaml}"
+        );
+    }
+    for value in ["''", "' '", "a/b", ".."] {
+        assert_has(&user_errors(&source(value)), "has_dir");
+    }
+    with_user(&source("zephyr")).expect("valid directory marker");
+    assert_has(
+        &user_errors("- name: only-filter\n  where: {has_dir: zephyr}\n"),
+        "source predicate",
+    );
+}
+
+#[test]
 fn version_guards_cannot_be_silently_disabled_by_present_null() {
     for (field, valid) in [
         ("keep_newest", "2"),
@@ -181,6 +205,7 @@ fn the_built_in_library_loads() {
         "go-mod-cache",
         "nix-user-cache",
         "pytest-cache",
+        "platformio-cache",
         "pytest-tmp",
         "mktemp-dir",
         "claude-code-tmp",
@@ -189,6 +214,7 @@ fn the_built_in_library_loads() {
         "playwright-tmp",
         "zephyr-tmp",
         "renode-tmp",
+        "west-build",
         "xdg-cache-entry",
         "ccache",
         "go-build-cache",
@@ -639,11 +665,15 @@ fn sources_and_filters_have_their_own_fields() {
             "- name: x\n  where: {idle_for: 1d}\n  examples: {match: [/tmp/a]}\n",
             "a filter profile has no `examples`",
         ),
-        ("- name: x\n  where: {has: a/b}\n", "must name one file"),
-        ("- name: x\n  where: {has_not: ..}\n", "must name one file"),
+        ("- name: x\n  where: {has: a/b}\n", "must name one entry"),
+        ("- name: x\n  where: {has_not: ..}\n", "must name one entry"),
+        (
+            "- name: x\n  where: {has_dir: a/b}\n",
+            "must name one entry",
+        ),
         (
             "- name: x\n  where: {lacks_entry: a/b}\n",
-            "must name one file",
+            "must name one entry",
         ),
         (
             "- name: x\n  where: {lacks_entry: marker}\n",
