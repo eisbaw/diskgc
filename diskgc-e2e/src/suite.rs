@@ -552,6 +552,12 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_proc_readers,
     },
     Test {
+        name: "host_procfs_stays_pinned_after_overmount",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_procfs_stays_pinned_after_overmount,
+    },
+    Test {
         name: "host_proc_readers_see_threads_after_main_exits",
         tier: Tier::Fast,
         expect: Expect::Pass,

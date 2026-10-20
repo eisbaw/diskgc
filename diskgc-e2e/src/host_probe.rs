@@ -39,11 +39,72 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-lock", [how, path, millis]) if how == "wait" => lock_wait(&host, path, millis),
         ("host-lock", [how, path]) if how == "close-semantics" => close_semantics(&host, path),
         ("host-proc", [pid]) => proc_readers(&host, pid),
+        ("host-proc-replaced", []) => proc_replaced_after_startup(&host),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
         ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
         _ => Err(format!("bad host probe arguments: {cmd} {args:?}")),
     }
+}
+
+/// In a disposable container subprocess, replace the pathname after the
+/// host has pinned procfs. Its readers must still use the original mount.
+fn proc_replaced_after_startup(host: &LinuxHost) -> Result<(), String> {
+    use rustix::mount::{
+        MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_change, unmount,
+    };
+
+    let own = Pid(std::process::id());
+    if !host.pids().map_err(|e| e.to_string())?.contains(&own) {
+        return Err("original procfs does not list this probe".into());
+    }
+    // SAFETY: this probe is a fresh single-threaded subprocess, and the
+    // mount operations must not be visible in the test harness namespace.
+    unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNS) }
+        .map_err(|e| format!("unshare mount namespace: {e}"))?;
+    mount_change(
+        "/",
+        MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+    )
+    .map_err(|e| format!("make mount namespace private: {e}"))?;
+    // This procfs mount belongs to the probe's private namespace, so it
+    // can be lazily detached even if the container's inherited mounts are
+    // locked against unmounting by the runtime.
+    mount("proc", "/proc", "proc", MountFlags::empty(), None)
+        .map_err(|e| format!("mount private procfs: {e}"))?;
+    let pinned = LinuxHost::new().map_err(|e| format!("open private procfs: {e}"))?;
+    mount("tmpfs", "/proc", "tmpfs", MountFlags::empty(), None)
+        .map_err(|e| format!("mount tmpfs over /proc: {e}"))?;
+    if std::fs::exists("/proc/self/status").map_err(|e| format!("check overmount: {e}"))? {
+        return Err("tmpfs overmount did not hide /proc/self/status".into());
+    }
+    let refused = LinuxHost::new().expect_err("new host must refuse a non-procfs /proc");
+    if !refused.to_string().contains("not procfs") {
+        return Err(format!("wrong refusal for non-procfs /proc: {refused}"));
+    }
+    if !host.pids().map_err(|e| e.to_string())?.contains(&own) {
+        return Err("held procfs stopped listing this probe after overmount".into());
+    }
+    if !pinned.pids().map_err(|e| e.to_string())?.contains(&own) {
+        return Err("private procfs stopped listing this probe after overmount".into());
+    }
+    unmount("/proc", UnmountFlags::DETACH).map_err(|e| format!("lazily detach overmount: {e}"))?;
+    if !std::fs::exists("/proc/self/status").map_err(|e| format!("check exposed procfs: {e}"))? {
+        return Err("private procfs did not reappear after lazy detach".into());
+    }
+    if !host.pids().map_err(|e| e.to_string())?.contains(&own) {
+        return Err("held procfs stopped listing this probe after lazy detach".into());
+    }
+    unmount("/proc", UnmountFlags::DETACH)
+        .map_err(|e| format!("lazily detach pinned procfs: {e}"))?;
+    if !std::fs::exists("/proc/self/status").map_err(|e| format!("check base procfs: {e}"))? {
+        return Err("container procfs did not reappear after lazy detach".into());
+    }
+    if !pinned.pids().map_err(|e| e.to_string())?.contains(&own) {
+        return Err("detached procfs stopped listing this probe".into());
+    }
+    println!("held_procfs=true overmount_refused=true detached_procfs_readable=true");
+    Ok(())
 }
 
 /// A short, stable name for why a host call failed.

@@ -473,7 +473,8 @@ unreadable, never gone. No `/proc` listing and no `ENOENT` decides it: a
 lookup can race an exec, `hidepid` can hide a live process (a hidden zombie
 is unreadable, not gone), and an exec can briefly show the old leader as a
 zombie. A process that cannot be read for any of these reasons is
-unreadable, never gone. diskgc refuses to start when `/proc` is not that of
+unreadable, never gone. diskgc refuses to start when the held `/proc`
+directory is not a procfs mount (`fstatfs`), when `/proc` is not that of
 its own pid namespace, or when `pidfd_open` is unavailable (blocked by
 seccomp or a sandbox), since without it no process could ever be confirmed
 gone. The namespace check reads the `NSpid` line of `/proc/self/status`,
@@ -491,7 +492,12 @@ diskgc opens then and keeps open; every later `/proc` read goes through
 that open directory, never through the path `/proc`, so all of them reach
 the mount that was checked for as long as diskgc runs (a mount made on
 `/proc` afterwards, such as an ancestor namespace's procfs exposed by
-unmounting it, is never read).
+unmounting it, is never read). A disposable-container regression covers a
+tmpfs mount over `/proc` after startup, followed by lazy detachment of that
+overmount and of a private procfs mount held by the host: its readers keep
+working even after the held mount is detached. It does not construct an
+ancestor PID namespace procfs underneath the mount, so that exact namespace
+transition is not exercised by the test.
 **Threads:** every task of a process is read (`/proc/<pid>/task/<tid>`),
 since a thread can hold files after the main thread exited and can have
 its own fd table or working directory. Reading goes in rounds, each one

@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-20 11:58'
+updated_date: '2026-10-20 12:15'
 labels:
   - wave-1
   - hardening
@@ -69,7 +69,7 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 <!-- AC:BEGIN -->
 - [ ] #1 A (blocking or hanging opens and stats: D3, D5, #26): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #2 B (path resolution: D4, D6): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #5 E (delete only what was checked: #32, task-6 round 3 (3), #27): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #6 F (process identity: pid reuse within and after a scan, tid reuse): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
@@ -101,6 +101,10 @@ Group A verification update (2026-10-20): disposable Nix container `just e2e-one
 2026-10-20 group B candidate: LinuxHost root-relative statx now opens with RESOLVE_NO_SYMLINKS and stats the held fd, preserving final-symlink identity while refusing intermediate symlinks. A mount-point final symlink returning ENOTDIR is classified unsafe_path through a no-symlink follow-up stat. Red-before/fixed-after host tests and focused disposable Nix-container host_resolve_refuses_symlinks passed 1/1; interlock canary refused host exit 86. Integrated full E2E and QA/MPED review pending; TASK64 C-J remain open.
 
 2026-10-20 integrated gate: group B and K changes passed nix develop -c just e2e (Nix image 139/139, native Docker 6/6) on the combined staged tree; parallel QA and MPED reviewers found no blocking issue. AC2 and AC11 checked. TASK64 remains open for groups C-J and remaining group A caveat. No diskgc execution on developer host or real project paths.
+
+Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc directory against PROC_SUPER_MAGIC before reading NSpid or opening a pidfd, with a contextual refusal for other filesystems. In a disposable Nix container, host_procfs_stays_pinned_after_overmount passed 1/1: the probe unshared a private mount namespace, mounted its own procfs, opened a host on it, mounted tmpfs over /proc, verified a new host specifically refused the non-procfs mount, then lazily detached the overlay and the held procfs; readers through the held fd continued listing the probe. The probe cannot model an ancestor PID namespace procfs underneath, so docs/safety.md names that limit. Interlock canary refused host execution (exit 86). Full integrated E2E and independent QA/MPED review are pending; AC3 remains unchecked until integration.
+
+2026-10-20 integrated group C gate: nix develop -c just e2e passed Nix image 140/140 and native Docker 6/6; parallel QA and MPED reviews GO. AC3 checked with the exact ancestor-namespace construction limit documented in docs/safety.md. TASK64 remains open for D-J and remaining group A caveat; no developer-host diskgc run.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

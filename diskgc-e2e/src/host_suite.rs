@@ -299,6 +299,26 @@ pub fn host_statx_and_statvfs_on_a_real_kernel(ctx: &Ctx) -> TestResult {
     verdict.assert_clean()
 }
 
+/// A root probe gets its own mount namespace, constructs LinuxHost, covers
+/// /proc with tmpfs, then lazily detaches the cover and its own procfs.
+/// The held procfs must keep serving its readers after it is detached.
+pub fn host_procfs_stays_pinned_after_overmount(ctx: &Ctx) -> TestResult {
+    let out = ctx.probe_as_root(&["host-proc-replaced"])?;
+    ensure!(
+        out.status.success(),
+        "procfs replacement probe failed: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    ensure!(
+        String::from_utf8_lossy(&out.stdout).trim()
+            == "held_procfs=true overmount_refused=true detached_procfs_readable=true",
+        "unexpected procfs probe evidence: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    Ok(())
+}
+
 /// `major:minor:inode` of `path` (not following it), as the probes print.
 fn dev_ino(path: &Path) -> Result<String, String> {
     let x = rustix::fs::statx(CWD, path, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::INO)

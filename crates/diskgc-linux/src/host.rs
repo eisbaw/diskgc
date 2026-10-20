@@ -44,7 +44,7 @@ use diskgc_core::host::{
     UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
 };
 use rustix::event::PollFlags;
-use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
+use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags};
 
 use crate::mountinfo::parse_mountinfo;
 use crate::procfs::{
@@ -89,6 +89,8 @@ pub struct LinuxHost {
 impl LinuxHost {
     /// Checks, failing closed, that the `/proc` readers can work here:
     ///
+    /// - the held `/proc` directory is a procfs mount (`fstatfs`), rather
+    ///   than a directory imitating the process files;
     /// - `/proc` is the one of this process's own pid namespace: the
     ///   `NSpid:` line of `/proc/self/status` has exactly one field, equal
     ///   to `getpid()` (see [`check_proc_namespace`]). Under another
@@ -120,6 +122,19 @@ impl LinuxHost {
             Mode::empty(),
         )
         .map_err(|e| HostError::errno("open", PROC, errno_of(e)))?;
+        let fs = rustix::fs::fstatfs(&proc)
+            .map_err(|e| HostError::errno("fstatfs", PROC, errno_of(e)))?;
+        if fs.f_type != PROC_SUPER_MAGIC {
+            return Err(HostError::invalid(
+                "fstatfs",
+                PROC,
+                format!(
+                    "filesystem type {:#x} is not procfs ({PROC_SUPER_MAGIC:#x}); \
+                     /proc must be a procfs mount",
+                    fs.f_type
+                ),
+            ));
+        }
         Self::with_proc(proc)
     }
 
