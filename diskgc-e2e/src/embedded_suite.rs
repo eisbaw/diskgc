@@ -7,68 +7,166 @@ use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
-/// A Zephyr-shaped output tree is deleted. Similar build directories and a
-/// source tree remain, including a `zephyr` symlink to a real directory that
-/// a following stat would mistake for the required direct child directory.
-pub fn west_build_requires_zephyr_directory_and_preserves_sources(ctx: &Ctx) -> TestResult {
+/// Newly created tmpfs entries cannot meet the built-in's three-day ctime
+/// floor. The same source predicate is exercised without that floor for
+/// real deletion; a built-in dry run checks the floor separately.
+const WEST_ANCHOR_KERNEL_PROFILE: &str = r#"version: 1
+profiles:
+  - name: west-anchor-kernel
+    find: {roots: required, paths: [build, "*/build", "*/*/build", "*/*/*/build", "*/*/*/*/build"], type: dir}
+    where: {has: CMakeCache.txt, has_dir: zephyr, lacks_entry: CMakeLists.txt, source_anchor: cmake}
+    action: delete
+    examples: {root: /home/tester/project, match: [/home/tester/project/app/build]}
+"#;
+
+/// The recorded CMake source, Zephyr marker, and output type must all agree.
+/// A missing or out-of-root source remains untouched on the real kernel.
+pub fn anchored_west_build_keeps_unrebuildable_outputs(ctx: &Ctx) -> TestResult {
     let home = &ctx.home;
+    home.write_file(
+        "diskgc.yaml",
+        WEST_ANCHOR_KERNEL_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
     for rel in [
-        "app/build/zephyr",
-        "ordinary/build",
-        "linked/build",
-        "source/build/zephyr",
+        "outside",
+        "project/app/build/zephyr",
+        "project/missing/build/zephyr",
+        "project/outside-root/build/zephyr",
+        "project/ordinary/build",
+        "project/linked/build",
+        "project/source/build/zephyr",
     ] {
         home.mkdirs(rel, 0o700, TESTER)?;
     }
     for rel in [
-        "app/build/CMakeCache.txt",
-        "ordinary/build/CMakeCache.txt",
-        "linked/build/CMakeCache.txt",
-        "source/build/CMakeCache.txt",
+        "project/app/CMakeLists.txt",
+        "outside/CMakeLists.txt",
+        "project/linked/CMakeLists.txt",
+        "project/source/CMakeLists.txt",
     ] {
-        home.write_file(rel, b"CMake cache", 0o600, TESTER)?;
+        home.write_file(rel, b"project(test)\n", 0o600, TESTER)?;
     }
-    home.write_file("app/build/zephyr/zephyr.elf", b"rebuildable", 0o600, TESTER)?;
+    for (rel, source) in [
+        ("project/app/build", "/home/tester/project/app"),
+        ("project/missing/build", "/home/tester/project/missing"),
+        ("project/outside-root/build", "/home/tester/outside"),
+        ("project/ordinary/build", "/home/tester/project/ordinary"),
+        ("project/linked/build", "/home/tester/project/linked"),
+        ("project/source/build", "/home/tester/project/source"),
+    ] {
+        home.write_file(
+            &format!("{rel}/CMakeCache.txt"),
+            format!("CMAKE_HOME_DIRECTORY:INTERNAL={source}\n").as_bytes(),
+            0o600,
+            TESTER,
+        )?;
+    }
+    for rel in [
+        "project/app/build/zephyr/zephyr.elf",
+        "project/missing/build/zephyr/precious.elf",
+        "project/outside-root/build/zephyr/precious.elf",
+    ] {
+        home.write_file(rel, b"keep unless source survives", 0o600, TESTER)?;
+    }
     home.symlink(
-        "linked/build/zephyr",
-        Path::new("/home/tester/app/build/zephyr"),
+        "project/linked/build/zephyr",
+        Path::new("/home/tester/project/app/build/zephyr"),
     )?;
     home.symlink(
-        "source/build/CMakeLists.txt",
+        "project/source/build/CMakeLists.txt",
         Path::new("/tmp/nonexistent-source"),
     )?;
 
-    let eligible = home.path("app/build");
-    let ordinary = home.path("ordinary/build");
-    let linked = home.path("linked/build");
-    let source = home.path("source/build");
+    let eligible = home.path("project/app/build");
+    let missing = home.path("project/missing/build");
+    let outside = home.path("project/outside-root/build");
+    let ordinary = home.path("project/ordinary/build");
+    let linked = home.path("project/linked/build");
+    let source = home.path("project/source/build");
     let oracle = Oracle::arm(Fixture::new().eligible(eligible.clone()))?;
-    let run = ensure_run(
+
+    let dry = ensure_run(
         ctx,
         &[
             "--json",
+            "--dry-run",
             "--no-index",
             "--min-free",
             "100%",
             "--select",
-            "profile:west-build",
+            "profile:west-build-anchored",
             "--roots",
-            "/home/tester",
+            "/home/tester/project",
             "/home/tester",
         ],
     )?;
-    let verdict = oracle.judge(&run)?;
+    dry.expect_code(0)?;
+    let plan = report(&dry)?;
+    ensure!(
+        plan["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"].as_str() == eligible.to_str()
+                    && entry["reason"].as_str() == Some("not_idle")
+                    && entry["build_evidence"]["source"].as_str()
+                        == Some("/home/tester/project/app")
+            })),
+        "built-in source anchor or idle floor missing: {plan}"
+    );
+    ensure!(
+        plan["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().all(|entry| {
+                entry["candidate"].as_str() != missing.to_str()
+                    && entry["candidate"].as_str() != outside.to_str()
+            })),
+        "unrebuildable output planned by the built-in: {plan}"
+    );
+
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc.yaml",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:west-anchor-kernel",
+            "--roots",
+            "/home/tester/project",
+            "/home/tester",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&dry, &run])?;
     run.expect_code(1)?;
     let report = report(&run)?;
     ensure!(
         report["actions"].as_array().is_some_and(|actions| {
             actions.len() == 1 && actions[0]["candidate"].as_str() == eligible.to_str()
         }),
-        "west-build did not delete exactly the Zephyr output: {report}"
+        "West anchor did not delete exactly the rebuildable output: {report}"
     );
-    ensure!(!eligible.exists(), "Zephyr build output remains");
-    ensure!(ordinary.exists(), "ordinary CMake build was removed");
-    ensure!(linked.exists(), "symlink marker build was removed");
-    ensure!(source.exists(), "source tree was removed");
+    ensure!(!eligible.exists(), "rebuildable Zephyr output remains");
+    for kept in [missing, outside, ordinary, linked, source] {
+        ensure!(
+            kept.exists(),
+            "protected output was removed: {}",
+            kept.display()
+        );
+    }
+    ensure!(
+        home.path("project/missing/build/zephyr/precious.elf")
+            .exists(),
+        "missing-source output data was removed"
+    );
+    ensure!(
+        home.path("project/outside-root/build/zephyr/precious.elf")
+            .exists(),
+        "out-of-root source output data was removed"
+    );
     verdict.assert_clean()
 }

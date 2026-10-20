@@ -72,7 +72,9 @@ fn show_yaml_loads_back_to_the_same_profile() {
 #[test]
 fn cmake_lacks_entry_survives_show_and_json() {
     let library = Library::builtin().expect("built-ins");
-    let profile = library.get("cmake-build").expect("cmake-build");
+    let profile = library
+        .get("cmake-build-anchored")
+        .expect("cmake-build-anchored");
     let yaml = show_yaml(profile, None);
     assert!(yaml.contains("lacks_entry: CMakeLists.txt"), "{yaml}");
     assert_eq!(&reload(&yaml, Origin::BuiltIn), profile);

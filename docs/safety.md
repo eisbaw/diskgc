@@ -646,6 +646,15 @@ each supplied root. Generic Ninja, OpenWrt, Buildroot, Yocto and Bazel
 markers alone do not establish a surviving source and are not shipped as
 deletion sources.
 
+`west-build-anchored` uses the same recorded CMake source validation and
+three-day idle floor for Zephyr `build/` directories. It also requires a
+direct `zephyr/` directory. A missing source, source outside the supplied
+root, or source without a safely reached regular `CMakeLists.txt` keeps the
+output even when the CMake cache and Zephyr marker remain. The old
+`cmake-build` and `west-build` marker-only names are retired. Configurations
+that still select either name fail validation until the operator chooses an
+anchored profile.
+
 ### Source-anchored Meson output
 
 `meson-build-anchored` applies the same ownership, checkout, in-use and

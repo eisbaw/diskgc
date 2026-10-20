@@ -924,13 +924,12 @@ listed as planned, not shipped.
 | python / js | `node-modules`, `python-venv` | planned: project dependency directories; no project activity evidence is available in the current profile schema | no safe action yet |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
-| c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `meson-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `autotools-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with regular `config.status`, `config.log`, and `Makefile`, status script recording this exact build directory and a surviving `configure.ac` source ancestor, and no `configure.ac` entry in the output; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
-| embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |
+| embedded | `west-build-anchored` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, no `CMakeLists.txt` entry, surviving recorded CMake source ancestor under the root, and mandatory 3-day idle age | `delete` |
 | embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
 | embedded | `platformio-cache` | `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
@@ -1083,13 +1082,15 @@ needs a different guard and is outside this Chromium-family set.
   in separate tiers can still let this profile reach other entries, so its
   built-in exclusions are the guarantee for the named dedicated paths.
 - Profiles that find at several depths under a project root (`pytest-cache`,
-  `cmake-build`, `west-build`, `python-pycache`, `mypy-cache`) cannot use `**`;
-  they list depths explicitly or take one root per project. `cmake-build`
-  and `west-build` reach five levels below each
+  `cmake-build-anchored`, `west-build-anchored`, `python-pycache`,
+  `mypy-cache`) cannot use `**`;
+  they list depths explicitly or take one root per project. The anchored
+  CMake and West profiles reach five levels below each
   root. Supply the project or workspace directory as a root when a build lies
   deeper. A changed depth bound requires a new built-in name because it
-  changes the profile's matching set. Broader build-output recognition by
-  markers and source anchors is separate from this CMake profile.
+  changes the profile's matching set. The former marker-only `cmake-build`
+  and `west-build` names were retired: selecting either now fails validation.
+  Use the anchored names after reviewing their source and idle requirements.
 - `python-pycache` and `mypy-cache` use one explicitly supplied project or
   workspace root. Both stop at depth five and retain the default checkout
   guard. `mypy-cache` additionally requires a regular `CACHEDIR.TAG` in the

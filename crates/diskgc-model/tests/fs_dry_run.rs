@@ -44,6 +44,11 @@ const PROFILES: &str = r#"
     type: dir
   action: delete
   examples: {match: [/home/mark/src/app/.pytest_cache]}
+- name: marker-build-fixture
+  find: {roots: required, paths: ["*", "*/*"], type: dir}
+  where: {has: CMakeCache.txt, lacks_entry: CMakeLists.txt}
+  action: delete
+  examples: {root: /home/mark/src, match: [/home/mark/src/build]}
 - name: has-tag
   where: {has: CACHEDIR.TAG}
 - name: unmounted
@@ -1313,7 +1318,11 @@ fn a_sources_own_has_narrows_what_is_a_candidate() {
     ));
     let report = dry_run(
         &host,
-        &request("profile:cmake-build", &["/home/mark/src"], "/home/mark"),
+        &request(
+            "profile:marker-build-fixture",
+            &["/home/mark/src"],
+            "/home/mark",
+        ),
     );
     assert_eq!(
         plan(&report),
@@ -1324,7 +1333,7 @@ fn a_sources_own_has_narrows_what_is_a_candidate() {
 }
 
 /// `has_not` keeps its v1 meaning: a symlink with the marker name is not
-/// a regular file. `lacks_entry` is the stricter guard used by cmake-build.
+/// a regular file. `lacks_entry` is the stricter guard used by anchored builds.
 #[test]
 fn has_not_still_allows_a_nonregular_entry() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
@@ -1339,55 +1348,6 @@ fn has_not_still_allows_a_nonregular_entry() {
         "{:#?}",
         report.plan
     );
-    nothing_locked_or_deleted(&host);
-}
-
-/// A project root reaches five relative directory levels. The direct
-/// CMakeCache marker makes an out-of-source build; a source CMakeLists of
-/// any entry type or checkout marker still refuses that same depth. A sixth level is outside
-/// this versioned match set.
-#[test]
-fn shipped_cmake_build_finds_depth_five_and_refuses_sources_and_checkouts() {
-    let at = "{mtime: 2026-10-01T00:00:00Z}";
-    let root = "/home/mark/topics";
-    let base = "/home/mark/topics/retimer-sim/firmware/retimer/out";
-    let host = host(&yaml(&format!(
-        "  {base}/rebuild-A: {{.: {at}, CMakeCache.txt: {at}, object.o: {at}}}\n  \
-         {base}/in-source: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {at}}}\n  \
-         {base}/listed-directory: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{.: {at}}}}}\n  \
-         {base}/listed-link: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{symlink: /tmp/absent, mtime: 2026-10-01T00:00:00Z}}}}\n  \
-         {base}/listed-fifo: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{type: fifo, mtime: 2026-10-01T00:00:00Z}}}}\n  \
-         {base}/checkout: {{.: {at}, CMakeCache.txt: {at}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
-         {base}/not-a-file: {{.: {at}, CMakeCache.txt: {{.: {at}}}}}\n  \
-         {base}/deeper/build: {{.: {at}, CMakeCache.txt: {at}}}\n"
-    )));
-    let report = dry_run(&host, &built_in_request("profile:cmake-build", root));
-    let mut actual = plan(&report);
-    actual.sort();
-    assert_eq!(
-        actual,
-        [
-            (format!("{base}/checkout"), Some("contains_checkout")),
-            (format!("{base}/rebuild-A"), None),
-        ],
-        "{:#?}",
-        report.plan
-    );
-    assert_eq!(report.status, Status::DryRun);
-    for name in [
-        "in-source",
-        "listed-directory",
-        "listed-link",
-        "listed-fifo",
-    ] {
-        let marker = PathBuf::from(format!("{base}/{name}/CMakeLists.txt"));
-        assert!(
-            host.trace().iter().any(|call| {
-                call.op == Op::Statx && call.path.as_deref() == Some(marker.as_path())
-            }),
-            "{name}: marker was never checked"
-        );
-    }
     nothing_locked_or_deleted(&host);
 }
 
@@ -1469,37 +1429,69 @@ fn anchored_cmake_needs_a_surviving_source_and_idle_output() {
     nothing_locked_or_deleted(&host);
 }
 
-/// Zephyr's own output directory distinguishes west builds from ordinary
-/// CMake builds. Source and checkout guards apply to the entire candidate,
-/// including a build found at the fifth relative depth.
+/// The West profile retains the Zephyr marker check, but an output is only
+/// eligible when its recorded CMake source still exists under the bound root.
+/// Its depth-five match set and checkout guard remain explicit.
 #[test]
-fn shipped_west_build_requires_directory_marker_and_refuses_sources() {
+fn anchored_west_build_requires_source_and_zephyr_directory() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
     let root = "/home/mark/topics";
     let deep = "/home/mark/topics/a/b/c/d/build";
     let host = host(&yaml(&format!(
-        "  /home/mark/topics/app/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}, zephyr.elf: {at}}}}}\n  \
+        "  /home/mark/topics/app/CMakeLists.txt: {at}\n  \
+         /home/mark/topics/app/build: {{.: {at}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/topics/app\\n\", mtime: 2026-10-01T00:00:00Z}}, \
+         zephyr: {{.: {at}, zephyr.elf: {at}}}}}\n  \
+         /home/mark/topics/missing/build: {{.: {at}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/topics/missing\\n\"}}, zephyr: {{.: {at}}}}}\n  \
+         /home/mark/elsewhere/CMakeLists.txt: {at}\n  \
+         /home/mark/topics/outside/build: {{.: {at}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/elsewhere\\n\"}}, zephyr: {{.: {at}}}}}\n  \
          /home/mark/topics/plain/build: {{.: {at}, CMakeCache.txt: {at}}}\n  \
          /home/mark/topics/file-marker/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {at}}}\n  \
          /home/mark/topics/link-marker/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{symlink: /home/mark/topics/app/build/zephyr, mtime: 2026-10-01T00:00:00Z}}}}\n  \
          /home/mark/topics/insource/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}, CMakeLists.txt: {at}}}\n  \
          /home/mark/topics/not-a-file/build: {{.: {at}, CMakeCache.txt: {{.: {at}}}, zephyr: {{.: {at}}}}}\n  \
-         /home/mark/topics/checkout/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
-         {deep}: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}}}\n  \
+         /home/mark/topics/checkout/CMakeLists.txt: {at}\n  \
+         /home/mark/topics/checkout/build: {{.: {at}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/topics/checkout\\n\", mtime: 2026-10-01T00:00:00Z}}, \
+         zephyr: {{.: {at}}}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
+         /home/mark/topics/a/b/c/d/CMakeLists.txt: {at}\n  \
+         {deep}: {{.: {at}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/topics/a/b/c/d\\n\", mtime: 2026-10-01T00:00:00Z}}, zephyr: {{.: {at}}}}}\n  \
          {deep}/deeper/build: {{.: {at}, CMakeCache.txt: {at}, zephyr: {{.: {at}}}}}\n"
     )));
-    let report = dry_run(&host, &built_in_request("profile:west-build", root));
+    // Creating a nested build changed the outer build directory's mtime.
+    // The depth-five candidate is still found, then refused by the idle floor.
+    let report = dry_run(
+        &host,
+        &built_in_request("profile:west-build-anchored", root),
+    );
     let mut actual = plan(&report);
     actual.sort();
     assert_eq!(
         actual,
         [
-            (deep.to_owned(), None),
+            (deep.to_owned(), Some("not_idle")),
             (format!("{root}/app/build"), None),
             (format!("{root}/checkout/build"), Some("contains_checkout")),
         ],
         "{:#?}",
         report.plan
+    );
+    assert!(
+        report
+            .plan
+            .iter()
+            .filter(|entry| entry.reason.is_none())
+            .all(|entry| {
+                let evidence = entry.build_evidence.as_ref().expect("source evidence");
+                evidence.marker == "CMakeCache.txt"
+                    && evidence.source.starts_with(root)
+                    && evidence
+                        .idle_age_seconds
+                        .is_some_and(|age| age >= 3 * 24 * 3600)
+            })
     );
     nothing_locked_or_deleted(&host);
 }
@@ -1779,7 +1771,7 @@ fn discovery_stops_at_the_deadline_through_every_exit() {
              {at: {op: read_dir, path: /tmp/nix-shell.A, when: before}, fail: EACCES}\n",
         ),
         (
-            "profile:cmake-build",
+            "profile:marker-build-fixture",
             Some("/home/mark/src"),
             "/home/mark",
             format!(
@@ -1825,41 +1817,6 @@ fn the_size_estimate_counts_a_hard_linked_object_once() {
         estimate("/tmp/pytest-of-two"),
         estimate("/tmp/pytest-of-one")
     );
-}
-
-/// task-71 AC #2 (QA's `insrc2`): an in-source build inside a checkout,
-/// `.git` and `CMakeCache.txt` but no `CMakeLists.txt`, passes
-/// `cmake-build`'s own `where` and is still never eligible: the walk
-/// refuses it as `contains_checkout`, at the `.git`. An out-of-source build
-/// next to it stays eligible, so the refusal is the checkout's; it lies
-/// inside a checkout itself (`/home/mark/.git`), which does not count: only
-/// what is in the candidate does.
-#[test]
-fn an_in_source_build_in_a_checkout_is_never_eligible_for_cmake_build() {
-    let at = "{mtime: 2026-10-01T00:00:00Z}";
-    let host = host(&yaml(&format!(
-        "  /home/mark/src/insrc2:\n    .: {at}\n    CMakeCache.txt: {at}\n    main.c: {at}\n    \
-         .git: {{.: {at}, HEAD: {at}, objects: {{.: {at}}}}}\n  /home/mark/src/build:\n    .: \
-         {at}\n    CMakeCache.txt: {at}\n  /home/mark/.git: {{HEAD: {at}}}\n"
-    )));
-    let report = dry_run(
-        &host,
-        &request("profile:cmake-build", &["/home/mark/src"], "/home/mark"),
-    );
-    assert_eq!(
-        plan(&report),
-        [
-            ("/home/mark/src/build".to_owned(), None),
-            (
-                "/home/mark/src/insrc2".to_owned(),
-                Some("contains_checkout")
-            ),
-        ],
-        "{:#?}",
-        report.plan
-    );
-    assert_eq!(report.status, Status::DryRun);
-    nothing_locked_or_deleted(&host);
 }
 
 /// task-71: any entry named `.git`, `.hg` or `.svn`, at any depth the walk

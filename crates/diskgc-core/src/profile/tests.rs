@@ -194,7 +194,6 @@ fn the_built_in_library_loads() {
         "bun-cache",
         "cargo-target",
         "autotools-build-anchored",
-        "cmake-build",
         "cmake-build-anchored",
         "meson-build-anchored",
         "containers-image-tmp",
@@ -216,7 +215,7 @@ fn the_built_in_library_loads() {
         "playwright-tmp",
         "zephyr-tmp",
         "renode-tmp",
-        "west-build",
+        "west-build-anchored",
         "xdg-cache-entry-v2",
         "ccache",
         "go-build-cache",
@@ -263,6 +262,22 @@ fn the_built_in_library_loads() {
         panic!("pytest-tmp is a source");
     };
     assert_eq!(pytest.checkouts, Checkouts::Allow);
+}
+
+#[test]
+fn retired_marker_only_build_profiles_fail_selection() {
+    let library = Library::builtin().expect("built-ins");
+    for retired in ["cmake-build", "west-build"] {
+        assert!(library.get(retired).is_none(), "{retired} is still shipped");
+        let expression = format!("profile:{retired}");
+        let error = compile(&expression, &library)
+            .expect_err("a retired deletion profile must fail before scanning")
+            .to_string();
+        assert!(
+            error.contains(&format!("no profile or filter is named `{retired}`")),
+            "{expression}: {error}"
+        );
+    }
 }
 
 /// A command profile's paths and argv form one contract: the cleaner must

@@ -94,8 +94,8 @@
   <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
   <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-tmp</text>
   <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, playwright</text>
-  <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  cmake-build, gradle, maven</text>
-  <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  zephyr-tmp, west-build, renode</text>
+  <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  cmake-build-anchored, gradle, maven</text>
+  <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  zephyr-tmp, west-build-anchored, renode</text>
   <text x="820" y="562" class="body"><tspan font-weight="700">filters</tspan>  idle-1h … idle-30d</text>
   <text x="820" y="582" class="small">each ships once verified on a real system</text>
 

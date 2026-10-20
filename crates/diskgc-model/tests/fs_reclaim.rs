@@ -47,6 +47,11 @@ const PROFILES: &str = r#"
   find: {roots: required, paths: [".pytest_cache", "*/.pytest_cache"], type: dir}
   action: delete
   examples: {match: [/home/mark/src/app/.pytest_cache]}
+- name: marker-build-fixture
+  find: {roots: required, paths: ["*", "*/*"], type: dir}
+  where: {has: CMakeCache.txt, lacks_entry: CMakeLists.txt}
+  action: delete
+  examples: {root: /home/mark/src, match: [/home/mark/src/build]}
 - name: deep-dirs
   find: {roots: required, paths: ["*/*/*"], type: dir}
   action: delete
@@ -732,7 +737,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
             "kept",
         ),
         (
-            "profile:cmake-build",
+            "profile:marker-build-fixture",
             "/home/mark/src/build".to_owned(),
             format!(
                 "  - {{at: {}, remove: /home/mark/src/build/CMakeCache.txt}}\n",
@@ -742,7 +747,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
             "changed",
         ),
         (
-            "profile:cmake-build",
+            "profile:marker-build-fixture",
             "/home/mark/src/build".to_owned(),
             format!(
                 "  - {{at: {}, create: /home/mark/src/build/CMakeLists.txt}}\n",
@@ -781,12 +786,12 @@ fn every_check_is_made_again_under_the_candidates_lock() {
         );
         let host = host(&yaml("", &tree, &format!("events:\n{event}")));
         let select = format!("{select} && filter:idle-1d");
-        let roots: &[&str] = if select.contains("cmake") {
+        let roots: &[&str] = if select.contains("marker-build-fixture") {
             &["/home/mark/src"]
         } else {
             &[]
         };
-        let path = if select.contains("cmake") {
+        let path = if select.contains("marker-build-fixture") {
             "/home/mark"
         } else {
             "/tmp"
@@ -810,10 +815,13 @@ fn every_check_is_made_again_under_the_candidates_lock() {
 /// `has_dir` check is part of the source definition, so reclaim must repeat
 /// it under the lock just as it repeats the CMakeCache file check.
 #[test]
-fn west_build_directory_marker_is_rechecked_under_lock() {
+fn anchored_west_build_directory_marker_is_rechecked_under_lock() {
     let candidate = "/home/mark/src/app/build";
     let tree = format!(
-        "  {candidate}: {{.: {{mtime: {OLD}}}, CMakeCache.txt: {{mtime: {OLD}}}, zephyr: {{.: {{mtime: {OLD}}}}}}}\n"
+        "  /home/mark/src/app/CMakeLists.txt: {{mtime: {OLD}}}\n  {candidate}: \
+         {{.: {{mtime: {OLD}}}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/app\\n\", mtime: {OLD}}}, \
+         zephyr: {{.: {{mtime: {OLD}}}}}}}\n"
     );
     let event = format!(
         "events:\n  - {{at: {{op: flock, path: {candidate}, when: after}}, remove: {candidate}/zephyr}}\n"
@@ -827,8 +835,8 @@ fn west_build_directory_marker_is_rechecked_under_lock() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
-        tier: Tier::select("profile:west-build", &library, Some(&roots), 1000)
-            .expect("west-build tier"),
+        tier: Tier::select("profile:west-build-anchored", &library, Some(&roots), 1000)
+            .expect("west-build-anchored tier"),
     };
     let report = ensure(&host, &request);
     assert!(host.unfired_events().is_empty(), "{report:#?}");

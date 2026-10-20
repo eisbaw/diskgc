@@ -337,10 +337,10 @@ pub static TESTS: &[Test] = &[
         run: cache_suite::platformio_cache_cleaner,
     },
     Test {
-        name: "west_build_requires_zephyr_directory_and_preserves_sources",
+        name: "anchored_west_build_keeps_unrebuildable_outputs",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: embedded_suite::west_build_requires_zephyr_directory_and_preserves_sources,
+        run: embedded_suite::anchored_west_build_keeps_unrebuildable_outputs,
     },
     Test {
         name: "brave_cache_lock_blocks_until_absent_then_reclaims_only_cache",

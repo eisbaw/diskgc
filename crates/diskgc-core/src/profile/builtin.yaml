@@ -93,23 +93,6 @@
     no_match: [/home/mark/go/pkg, /home/mark/go/pkg/mod/cache]
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20
 
-- name: cmake-build
-  category: c / c++
-  description: Out-of-source CMake build directories through depth five below a supplied root
-  find:
-    roots: required
-    # Explicit depths keep discovery finite; a matching outer build owns
-    # nested FetchContent builds. More depths require a new profile name.
-    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
-    type: dir
-  where: {has: CMakeCache.txt, lacks_entry: CMakeLists.txt}
-  action: delete
-  examples:
-    root: /home/mark/src
-    match: [/home/mark/src/build, /home/mark/src/a/b/c/d/build]
-    no_match: [/home/mark/src/a/b/c/d/e/build]
-  verified_with: CMake 3.30.5 (host CMakeCache.txt in retimer out-of-source builds, read-only survey 2026-10-20)
-
 # Project roots are supplied by policy. Explicit depths avoid an unbounded
 # recursive walk and let a matching outer cache own any nested cache.
 - name: python-pycache
@@ -282,21 +265,22 @@
     no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
   verified_with: Jest npm package 30.2.0 (pinned lockfile and Nix container cleaner, 2026-10-20)
 
-- name: west-build
+- name: west-build-anchored
   category: embedded
-  description: Zephyr west build directories through depth five below a supplied root
+  description: Source-anchored Zephyr west build directories through depth five below a supplied root
   find:
     roots: required
-    # A different depth bound needs a new built-in name.
+    # A different depth bound or safety predicate needs a new built-in name.
     paths: [build, "*/build", "*/*/build", "*/*/*/build", "*/*/*/*/build"]
     type: dir
-  where: {has: CMakeCache.txt, has_dir: zephyr, lacks_entry: CMakeLists.txt}
+  where: {has: CMakeCache.txt, has_dir: zephyr, lacks_entry: CMakeLists.txt, source_anchor: cmake}
+  min_idle_for: 3d
   action: delete
   examples:
     root: /home/mark/src
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
-  verified_with: Zephyr west build directory layout in Zephyr 4.3 documentation; host layout survey 2026-10-20
+  verified_with: Zephyr west build directory layout in Zephyr 4.3 documentation and CMake 3.30.5 recorded source path; model and disposable-container tests 2026-10-20
 
 - name: platformio-cache
   category: embedded

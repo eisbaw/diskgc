@@ -1,0 +1,40 @@
+# A Zephyr output needs the recorded, surviving CMake source under its root.
+profile_vector: 1
+profile: west-build-anchored
+path: /home/tester
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/app/CMakeLists.txt: {content: "project(app)\n"}
+    /home/tester/project/app/build:
+      .: {mtime: 2026-08-01T00:00:00Z}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/app\nZEPHYR_BASE:PATH=/opt/zephyr\n", mtime: 2026-08-01T00:00:00Z}
+      zephyr: {.: {mtime: 2026-08-01T00:00:00Z}, zephyr.elf: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/project/missing/build:
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/missing\n"}
+      zephyr: {.: {}, zephyr.elf: {size: 8K}}
+    /home/tester/outside/CMakeLists.txt: {content: "project(outside)\n"}
+    /home/tester/project/outside-source/build:
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/outside\n"}
+      zephyr: {.: {}, zephyr.elf: {size: 8K}}
+    /home/tester/project/other/build: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/project/other/build/CMakeCache.txt: {}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/build, source: /home/tester/project/app}
+  reclaim_exit: 1
+  actions: [/home/tester/project/app/build]
+  removed: [/home/tester/project/app/build]
+  skipped: []
+  preserved:
+    - /home/tester/project/app/CMakeLists.txt
+    - /home/tester/project/missing/build/zephyr/zephyr.elf
+    - /home/tester/project/outside-source/build/zephyr/zephyr.elf
+    - /home/tester/project/other/build/CMakeCache.txt

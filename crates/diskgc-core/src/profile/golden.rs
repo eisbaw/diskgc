@@ -23,53 +23,6 @@ const TEMP_PROFILE_NAMES: &[&str] = &[
 ];
 
 #[test]
-fn cmake_build_has_a_frozen_five_level_match_set_and_markers() {
-    let library = Library::builtin().expect("built-ins");
-    let Body::Source(source) = &library
-        .get("cmake-build")
-        .expect("shipped CMake profile")
-        .body
-    else {
-        panic!("cmake-build is a source")
-    };
-    assert_eq!(source.roots, Roots::Required);
-    assert_eq!(
-        source.finds,
-        Finds::Paths {
-            patterns: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            exclude: Vec::new(),
-            entry_type: EntryType::Dir,
-        }
-    );
-    assert_eq!(source.where_.has.as_deref(), Some("CMakeCache.txt"));
-    assert_eq!(source.where_.lacks_entry.as_deref(), Some("CMakeLists.txt"));
-    assert_eq!(source.checkouts, Checkouts::Refuse);
-    assert_eq!(
-        source.action,
-        Action::Delete {
-            make_writable: false
-        }
-    );
-    let find = Find::of(source, 1000).expect("filesystem source");
-    let root = Path::new("/home/mark/topics");
-    for (path, expected) in [
-        ("/home/mark/topics/build", true),
-        ("/home/mark/topics/a/b/c/d/build", true),
-        ("/home/mark/topics/a/b/c/d/e/build", false),
-        ("/home/mark/other/build", false),
-    ] {
-        assert_eq!(
-            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
-            expected,
-            "{path}"
-        );
-    }
-}
-
-#[test]
 fn anchored_cmake_requires_a_source_and_matches_any_name_through_five_levels() {
     let library = Library::builtin().expect("built-ins");
     let Body::Source(source) = &library
@@ -194,10 +147,14 @@ fn anchored_autotools_requires_generated_metadata_and_matches_any_name_through_f
 }
 
 #[test]
-fn west_build_has_a_frozen_five_level_match_set_and_zephyr_markers() {
+fn anchored_west_build_has_a_frozen_five_level_match_set_and_source_guard() {
     let library = Library::builtin().expect("built-ins");
-    let Body::Source(source) = &library.get("west-build").expect("west-build").body else {
-        panic!("west-build is a source")
+    let Body::Source(source) = &library
+        .get("west-build-anchored")
+        .expect("west-build-anchored")
+        .body
+    else {
+        panic!("west-build-anchored is a source")
     };
     assert_eq!(source.roots, Roots::Required);
     assert_eq!(
@@ -220,6 +177,11 @@ fn west_build_has_a_frozen_five_level_match_set_and_zephyr_markers() {
     assert_eq!(source.where_.has.as_deref(), Some("CMakeCache.txt"));
     assert_eq!(source.where_.has_dir.as_deref(), Some("zephyr"));
     assert_eq!(source.where_.lacks_entry.as_deref(), Some("CMakeLists.txt"));
+    assert_eq!(source.where_.source_anchor, Some(SourceAnchor::Cmake));
+    assert_eq!(
+        source.min_idle_for,
+        Some(super::IdleFor(Duration::from_secs(3 * 24 * 3600)))
+    );
     assert_eq!(source.checkouts, Checkouts::Refuse);
     assert_eq!(
         source.action,
