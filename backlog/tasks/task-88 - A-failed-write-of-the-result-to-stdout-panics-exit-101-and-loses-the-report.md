@@ -1,9 +1,10 @@
 ---
 id: TASK-88
 title: A failed write of the result to stdout panics (exit 101) and loses the report
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 02:54'
+updated_date: '2026-10-20 04:22'
 labels:
   - wave-2
   - safety
@@ -25,11 +26,17 @@ ENOSPC on stdout is exactly the low-disk CI case: a pre-job hook redirects the -
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A stdout write error (ENOSPC, EPIPE) never panics; the exit code is defined in reference.md and covered by a test (e.g. a container test writing to a full tmpfs, and a closed pipe)
-- [ ] #2 Every println! on the result path is replaced or covered
+- [x] #1 A stdout write error (ENOSPC, EPIPE) never panics; the exit code is defined in reference.md and covered by a test (e.g. a container test writing to a full tmpfs, and a closed pipe)
+- [x] #2 Every println! on the result path is replaced or covered
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-20 commit 3ae1448: checked stdout writes and flush return exit 3 with one stderr diagnostic. Fake writer mutation bit; disposable container EPIPE and /dev/full ENOSPC actual-binary cases passed with oracle clean. Full nix develop -c just e2e passed 124/124 Nix plus 1/1 Docker; QA/MPED reviews GO. No host path test.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

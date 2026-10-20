@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-19 04:49'
+updated_date: '2026-10-20 04:05'
 labels:
   - wave-2
   - release
@@ -56,6 +56,8 @@ The v1 release (task-49) builds on this one.
 
 <!-- SECTION:NOTES:BEGIN -->
 From task-63's review: the e2e images run the development build with the pre-release sandbox gate. Before 0.1 ships, run the Debian image's set (just e2e-debian) against the actual release artifact (the gate lifted), not the development build, e.g. a runner variant whose under-test directory holds the release binary.
+
+2026-10-20 user constraint supersedes prior test approach: do not test diskgc on developer host filesystem. AC4 currently requires a real-machine dry run and must be reconciled before release; substitute a reviewed disposable Docker Engine / real-kernel fixture only if it proves the relevant deployment contract, otherwise keep release blocked. The pre-release sandbox gate remains enabled until all other dependencies and this evidence are satisfied.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

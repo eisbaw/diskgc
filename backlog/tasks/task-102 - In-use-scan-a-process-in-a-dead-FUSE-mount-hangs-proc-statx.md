@@ -1,10 +1,10 @@
 ---
 id: TASK-102
 title: 'In-use scan: a process in a dead FUSE mount hangs /proc statx'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-19 15:05'
-updated_date: '2026-10-19 21:27'
+updated_date: '2026-10-20 05:51'
 labels:
   - safety
 dependencies:
@@ -21,5 +21,11 @@ Why: task-18 limit (standing condition): the in-use scan statx-es each visible p
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A process whose cwd and an open fd sit in a mount that stopped answering does not hang ensure: the scan finishes within the deadline (container test with a FUSE server that answers then stops)
-- [ ] #2 The candidate it would have touched is still never reported 'not in use' falsely (fail closed: unreadable evidence keeps it)
+- [x] #2 The candidate it would have touched is still never reported 'not in use' falsely (fail closed: unreadable evidence keeps it)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-20 partial fix in commit 8a84934: STATX_DONT_SYNC avoids the demonstrated FUSE hang when cached attributes exist. Disposable-container test asserts ensure exits in under six seconds after a 3s CLI timeout, reports in_use, and preserves the candidate; removing the flag made it hang 8.09s. Full e2e passed 127/127 Nix and 2/2 Docker, with QA/MPED review. AC1 still requires finishing within the 3s deadline and is not proven by that assertion, so task remains In Progress pending a strict deadline assertion and passing evidence. Dead NFS remains a separate documented possible hang.
+<!-- SECTION:NOTES:END -->

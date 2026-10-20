@@ -4,7 +4,7 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 10:59'
+updated_date: '2026-10-20 05:49'
 labels:
   - wave-4
   - irreversible
@@ -40,6 +40,8 @@ CORRECTION from task-50's review (supersedes the earlier task-50 note that every
 In LinuxHost each gets exactly one wrapper. The deleting one takes a Permit from gate(op, subject); the query one takes none but accepts only the constant argv set. Add both to the allowlist of the scan in crates/diskgc-linux/src/source_scan.rs (GATED_ALLOWED; the scan forbids Command, fork and exec everywhere else) without weakening its pattern list. A gate refusal is Cause::SandboxGate and must be reported as an error, never as a skip or a retry. ModelHost implements both without a gate.
 
 From task-50 round 3 (mped): the query run takes a closed enum of queries that diskgc-linux maps to argv (docs/architecture.md, The Host port). It never takes argv from the caller or from config. Its LinuxHost wrapper is a GATED_ALLOWED entry marked Gate::Ungated with its reason; the deleting run's wrapper is marked Gate::Permit (checked: its signature must take the Permit).
+
+2026-10-20 disposable-container Nix 2.34.8 feasibility proof: NIX_REMOTE=local with NIX_STATE_DIR=/tmp/state-A and /tmp/state-B reports the same store info {url: local, version: 2.34.8}; builtins.storeDir remains /nix/store while the root databases differ. NIX_STORE_DIR can also change without altering URL. The daemon URL does not attest the physical store or socket target. Therefore URL plus logical store-dir checks cannot establish the GC root set, and a GC could delete paths that are live in the actual root DB. No nix-store profile shipped. docs/safety.md records the physical store plus root database binding requirement. Need a verifiable binding protocol or strictly pinned local configuration with independent root DB proof, then ModelHost and disposable-store E2E. No host GC or project path tested.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

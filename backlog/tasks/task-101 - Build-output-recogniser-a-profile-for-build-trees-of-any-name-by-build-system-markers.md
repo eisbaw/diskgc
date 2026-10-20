@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-19 12:29'
-updated_date: '2026-10-20 03:52'
+updated_date: '2026-10-20 05:09'
 labels:
   - library
 dependencies:
@@ -37,4 +37,12 @@ Safe-heuristic rule (user, 2026-10-19: 'but a safe heuristic'). A dir is taken o
 2026-10-20 TASK101 partial implementation in uncommitted /tmp/diskgc-task101: cmake-build-anchored only. CMakeCache.txt must record one normalized CMAKE_HOME_DIRECTORY strict ancestor within bound root; regular CMakeLists.txt outside candidate is opened without symlinks and its identity rechecked during judgement and under candidate lock. CMakeFiles directory, no CMakeLists in output, three-day idle floor, checkout refusal, depth <=5. Model dry-run and reclaim tests pass; nix develop -c just check passes. Read-only host dry-run on Tracy found profiler/build eligible 181874688 B, equal to du -sB1; tracy/build and capture/build refused nested .git. Plan includes marker/source/age for eligible, null age for skipped with discovery evidence. No host deletion, no Podman, no E2E, no commit. Other TASK101 systems (Meson, Ninja, autotools, Bazel, OpenWrt/buildroot, Yocto, generic CACHEDIR.TAG) and survey scoring remain unimplemented; source-anchor evidence and model/host verification are needed before any of those can safely delete. AC1-5 are not fully met.
 
 2026-10-20 integrated narrow cmake-build-anchored slice in commit 607d025. Full nix develop -c just e2e passed 121/121, including real-kernel anchored CMake guard/reclaim; QA and MPED GO. Locked candidate fd is used for anchor recheck, with model path-swap and source-identity race tests. Read-only Tracy dry run found profiler/build 181874688 B matching du and refused nested checkouts. Task remains In Progress: other build systems, OpenWrt/buildroot read-only verification, survey scoring, and per-system rebuildability tests are not implemented; AC1-5 as a whole remain open. No host deletion.
+
+2026-10-20 user testing constraint for remaining work: do not inspect, dry-run, or delete real host project paths. AC2 real-tree verification must use tool-generated trees inside disposable containers; fake filesystem YAML vectors are checked in for model tests. Local docker CLI is Podman-backed, so native Docker Engine proof requires an isolated dind fixture.
+
+Clarification: the existing checked-in ModelHost YAML sketch demonstrates the fixture mechanism; profile-specific checked-in vectors are still being implemented under TASK-103 and must not be claimed complete yet.
+
+2026-10-20 commit 3ae1448: meson-build-anchored shipped with exact generated meson-info source/build JSON, surviving source meson.build, locked-candidate recheck, model mutation bite and real pinned Meson container E2E. Checked-in Meson YAML vector passes the shared ModelHost runner. Full just e2e 124/124 Nix and 1/1 native Docker smoke; QA/MPED GO. TASK101 remains In Progress: generic Ninja has no independent source anchor; Buildroot output can contain .config and deliverable images, and OpenWrt build_dir can contain source edits, so those are survey-only pending sound cleanup protocols. No host project paths tested.
+
+2026-10-20 commit 4cd5197: Autotools source-anchored build profile added for generated GNU Autoconf 2.73 config.status. Strict ac_pwd/srcdir parser, surviving configure.ac/Makefile source, exact candidate binding and locked identity recheck. Checked-in ModelHost vector and 4 focused model tests cover copied output, missing source, checkout, fresh build, and source-disappearance race. Pinned Autoconf disposable-container E2E passed with measured output deletion and oracle clean. Mutation bite: reversing exact ac_pwd comparison caused the copied-output ModelHost test to fail by reclaiming 16 KiB; restored test passed. Full nix develop -c just e2e 126/126 Nix and 2/2 Docker; QA/MPED GO. No host project path was tested per user instruction, so AC2 real-host verification remains unmet. Other build systems and survey scoring remain open.
 <!-- SECTION:NOTES:END -->

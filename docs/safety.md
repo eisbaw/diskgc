@@ -1392,13 +1392,17 @@ profiles are never removed. `--max-freed` means "stop after at least this
 much"; the effect is measured, not assumed.
 
 Store selection: `NIX_REMOTE` or the `store` setting can point `nix-store`
-at another store. Before GC, diskgc asks Nix, with the exact environment it
-will pass to `nix-store`, which store is in effect
-(`nix --extra-experimental-features nix-command store info --json`, whose
-`url` names the store). Supported: `url` is `daemon`, or `local` without
-`root=`, `store=` or `real=` parameters, and `builtins.storeDir` is
-`/nix/store`; the filesystem of `/nix/store` is the one matched. Anything
-else: the tier is excluded and reported (`unsupported_store`).
+at another store. Before GC, diskgc must establish that the store **and its
+root database** are the ones for the matched `/nix/store` filesystem. The
+planned `nix --extra-experimental-features nix-command store info --json`
+`url` check and `builtins.storeDir` check are necessary but insufficient.
+On Nix 2.34.8, two direct local stores with distinct `NIX_STATE_DIR` values
+both report `url: "local"` and `/nix/store`, although their state directories
+hold different roots. Likewise, `url: "daemon"` does not identify the
+daemon's physical store: its socket may be overridden or reach a daemon in
+another mount namespace. Until a binding check covers both the physical
+store and the state directory, the `nix-store` kind remains unshipped
+(TASK-36); a URL or logical store directory alone must never enable GC.
 
 Verified on Nix 2.34.8 (2026-10-15): an untrusted, non-root user can delete
 dead store paths through the daemon (`nix-store --delete` on a freshly
