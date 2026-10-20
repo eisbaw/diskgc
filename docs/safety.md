@@ -579,6 +579,29 @@ so their use of *your* files is not seen; nor is the use of the user's own
 processes noted above as unreadable (setuid, more capable, non-dumpable).
 Fine for one-user machines and runners; weaker on shared hosts.
 
+### Project dependency directories (planned)
+
+An unchanged `node_modules` or `.venv` can still belong to a project used
+today: access need not change mtime or ctime. The current `fs` candidate
+`idle_for` measures changes inside that candidate and cannot establish
+project inactivity. The general in-use scan has known visibility limits
+and cannot supply a reliable project-idle signal on its own.
+
+A future project dependency source needs an explicit owning project root
+and a cooperative activity protocol. Every consumer would hold a shared
+project lock while it uses dependencies and update a last-use marker when
+done. Reclamation would take the exclusive project lock and, under it,
+recheck the marker age, project identity and candidate contents before
+deleting. Missing, unreadable or inconsistent state must retain the
+candidate. An uncooperative consumer means the protocol gives no safety
+claim; therefore a built-in profile cannot assume participation merely
+because a directory has the conventional name. No such source or lock
+protocol is implemented.
+
+Any future `.venv` source must retain `checkouts: refuse`. Editable VCS
+installs can place a real checkout under `.venv/src`, which may hold work
+that cannot be recovered by recreating the environment.
+
 ### Deletion
 
 For the `delete` action of kind `fs` (`fs_kind` in the core). A dry run,
@@ -892,6 +915,17 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
 
 ### Discovery, idleness, eligibility
 
+- **`/tmp` root decision (TASK-100):** a tier may explicitly bind the
+  built-in `cargo-target` profile to `roots: [/tmp]`; it then finds signed
+  targets up to six directory levels below `/tmp`, including detached
+  `CARGO_TARGET_DIR` targets. We do not add `/tmp` as an implicit or fixed
+  root: a tier's caller must choose the filesystem it wants to free and the
+  idle period, and the existing profile keeps one matching definition.
+  This is a policy choice, not a different reclaim protocol. On the
+  2026-10-20 host, nine top-level `*review-target` directories in `/tmp`
+  had a valid `CACHEDIR.TAG`, a `debug/.cargo-lock`, and no adjacent
+  `Cargo.toml` (3.9 GiB total by read-only `du`); none was deleted to make
+  this observation.
 - **Discovery:** walk each root for directories with a valid `CACHEDIR.TAG`
   (a regular file starting with the specification's signature, read
   through the descriptor of the object checked) and at least one profile
@@ -1003,6 +1037,15 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   where a detached target's Cargo runs cannot be told from its path, so
   any Cargo may be using it. A shared target directory is therefore
   reclaimed only while no visible Cargo runs.
+
+TASK-100 keeps this detached-target rule unchanged. `--target-dir` and
+`.cargo/config.toml` can direct a Cargo working in an unrelated project to
+the same target without leaving a path in its initial environment. Cargo
+also releases its build locks before starting `cargo run` and `cargo test`
+binaries, so finding the locks free cannot prove the target idle then. Age
+is no proof either: a previously idle target can be selected by a new Cargo
+process. Until Cargo exposes a reliable target identity throughout the
+run, an unrelated visible Cargo must continue to block a detached target.
 
 Paths are compared byte for byte, never through a lossy text conversion
 (a name that is not UTF-8 stays as it is).

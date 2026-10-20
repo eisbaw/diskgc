@@ -40,6 +40,7 @@ use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     browser_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite,
     embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
+    project_cache_suite,
 };
 
 /// Which gate runs a test.
@@ -141,6 +142,18 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "python_pycache_reclaims_only_selected_project_caches",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_cache_suite::python_pycache_reclaims_only_selected_project_caches,
+    },
+    Test {
+        name: "mypy_cache_requires_regular_tag_and_preserves_project",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_cache_suite::mypy_cache_requires_regular_tag_and_preserves_project,
+    },
     Test {
         name: "pip_cache_cleaner",
         tier: Tier::Fast,

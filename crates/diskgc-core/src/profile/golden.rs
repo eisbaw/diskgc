@@ -173,6 +173,45 @@ fn platformio_cache_uses_the_documented_default_path_and_own_cleaner() {
     }
 }
 
+#[test]
+fn project_python_caches_have_frozen_depth_and_marker_rules() {
+    let library = Library::builtin().expect("built-ins");
+    let root = Path::new("/home/mark/src");
+    for (name, suffix, marker) in [
+        ("python-pycache", "__pycache__", None),
+        ("mypy-cache", ".mypy_cache", Some("CACHEDIR.TAG")),
+    ] {
+        let Body::Source(source) = &library.get(name).expect("project cache").body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(source.roots, Roots::Required);
+        assert_eq!(source.where_.has.as_deref(), marker);
+        assert_eq!(source.checkouts, Checkouts::Refuse);
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            }
+        );
+        let find = Find::of(source, 1000).expect("filesystem source");
+        for depth in 1..=6 {
+            let mut relative = vec!["part"; depth - 1];
+            relative.push(suffix);
+            let path = root.join(relative.join("/"));
+            assert_eq!(
+                path_matches(Some(&[root]), &find.patterns, &path),
+                depth <= 5,
+                "{name} depth {depth} at {}",
+                path.display()
+            );
+        }
+        let unrelated = root.join(format!("app/{suffix}-backup"));
+        assert!(!path_matches(Some(&[root]), &find.patterns, &unrelated));
+        let outside = Path::new("/home/mark/other").join(suffix);
+        assert!(!path_matches(Some(&[root]), &find.patterns, &outside));
+    }
+}
+
 const TREE: &[(&str, Option<EntryType>)] = &[
     ("/tmp/pytest-of-mark", Some(EntryType::Dir)),
     ("/tmp/pytest-of-mark/pytest-3", Some(EntryType::Dir)),

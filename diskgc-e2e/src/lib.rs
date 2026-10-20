@@ -66,6 +66,7 @@ pub mod journey_suite;
 pub mod oracle;
 pub mod probe;
 pub mod proc_locks;
+pub mod project_cache_suite;
 pub mod release_check;
 pub mod runner;
 pub mod scratch;

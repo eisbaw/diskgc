@@ -199,10 +199,11 @@ fn code_block_expressions(doc: &str) -> Vec<String> {
     found
 }
 
-/// Every expression in the doc's code blocks, in order: the CI example and
-/// the example config's tiers.
+/// Every expression in the doc's code blocks, in order: the CI example,
+/// the explicit /tmp Cargo tier, and the example config's tiers.
 const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "profile:cargo-target && filter:idle-1d",
+    "profile:cargo-target && filter:idle-7d",
     "(profile:pytest-tmp || profile:mktemp-dir || profile:zephyr-run) && filter:idle-3d",
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",

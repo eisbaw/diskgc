@@ -1419,6 +1419,52 @@ fn shipped_west_build_requires_directory_marker_and_refuses_sources() {
     nothing_locked_or_deleted(&host);
 }
 
+/// Python bytecode and mypy caches are disposable independently of project
+/// recency. A tagged mypy cache is recognized; an untagged namesake is not.
+/// The checkout guard still protects a cache containing an embedded repo.
+#[test]
+fn shipped_project_python_caches_find_only_cache_directories() {
+    let root = "/home/mark/src";
+    let host = host(&yaml(
+        r#"  /home/mark/src/app/__pycache__:
+    .: {mtime: 2026-10-01T00:00:00Z}
+    main.cpython-313.pyc: {size: 1K}
+    nested: {__pycache__: {.: {}, inner.pyc: {size: 1K}}}
+  /home/mark/src/app/pkg/__pycache__: {.: {}, module.cpython-313.pyc: {size: 1K}}
+  /home/mark/src/app/repo/__pycache__: {.: {}, .git: {.: {}, HEAD: {}}}
+  /home/mark/src/app/.mypy_cache: {.: {}, CACHEDIR.TAG: {}, "3.13": {.: {}, module.meta.json: {size: 1K}}}
+  /home/mark/src/app/untagged/.mypy_cache: {.: {}, cache.json: {size: 1K}}
+  /home/mark/src/app/tag-dir/.mypy_cache: {.: {}, CACHEDIR.TAG: {.: {}}}
+  /home/mark/src/app/tag-link/.mypy_cache: {.: {}, CACHEDIR.TAG: {symlink: /tmp/absent}}
+  /home/mark/src/app/.mypy_cache-backup: {.: {}, CACHEDIR.TAG: {}}
+"#,
+    ));
+    let pycache = dry_run(&host, &built_in_request("profile:python-pycache", root));
+    let mut actual = plan(&pycache);
+    actual.sort();
+    assert_eq!(
+        actual,
+        [
+            ("/home/mark/src/app/__pycache__".to_owned(), None),
+            ("/home/mark/src/app/pkg/__pycache__".to_owned(), None),
+            (
+                "/home/mark/src/app/repo/__pycache__".to_owned(),
+                Some("contains_checkout")
+            ),
+        ],
+        "{:#?}",
+        pycache.plan
+    );
+    let mypy = dry_run(&host, &built_in_request("profile:mypy-cache", root));
+    assert_eq!(
+        plan(&mypy),
+        [("/home/mark/src/app/.mypy_cache".to_owned(), None)],
+        "{:#?}",
+        mypy.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
 /// A `has` / `has_not` filter in a term is refused (task-16), never
 /// silently ignored; `!filter:` and unions stay refused too.
 #[test]

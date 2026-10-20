@@ -269,7 +269,18 @@ pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
 ) -> Result<Spawned, String> {
-    spawn_traced(ledger, records, cwd, env, program, args, As::Tester, None)
+    spawn_traced(
+        ledger,
+        records,
+        TraceRequest {
+            cwd,
+            env,
+            program,
+            args,
+            user: As::Tester,
+            stderr_fd: None,
+        },
+    )
 }
 
 /// Start a traced tester with the caller's stderr fd. The harness can keep
@@ -286,12 +297,14 @@ pub fn spawn_as_tester_with_stderr<S: AsRef<OsStr>>(
     spawn_traced(
         ledger,
         records,
-        cwd,
-        &[],
-        program,
-        args,
-        As::Tester,
-        Some(stderr),
+        TraceRequest {
+            cwd,
+            env: &[],
+            program,
+            args,
+            user: As::Tester,
+            stderr_fd: Some(stderr),
+        },
     )
 }
 
@@ -318,19 +331,44 @@ pub fn run_as_root<S: AsRef<OsStr>>(
     args: &[S],
 ) -> Result<Run, String> {
     let env = [("HOME".to_owned(), "/root".to_owned())];
-    spawn_traced(ledger, records, cwd, &env, program, args, As::Root, None)?.wait()
+    spawn_traced(
+        ledger,
+        records,
+        TraceRequest {
+            cwd,
+            env: &env,
+            program,
+            args,
+            user: As::Root,
+            stderr_fd: None,
+        },
+    )?
+    .wait()
+}
+
+/// One traced invocation; the ledger and record store belong to the harness.
+struct TraceRequest<'a, S> {
+    cwd: &'a Path,
+    env: &'a [(String, String)],
+    program: &'a Path,
+    args: &'a [S],
+    user: As,
+    stderr_fd: Option<OwnedFd>,
 }
 
 fn spawn_traced<S: AsRef<OsStr>>(
     ledger: &Ledger,
     records: &Scratch,
-    cwd: &Path,
-    env: &[(String, String)],
-    program: &Path,
-    args: &[S],
-    user: As,
-    stderr_fd: Option<OwnedFd>,
+    request: TraceRequest<'_, S>,
 ) -> Result<Spawned, String> {
+    let TraceRequest {
+        cwd,
+        env,
+        program,
+        args,
+        user,
+        stderr_fd,
+    } = request;
     let n = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let record_dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
     let argv: Vec<String> = std::iter::once(program.display().to_string())

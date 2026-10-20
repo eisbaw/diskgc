@@ -86,6 +86,37 @@
     no_match: [/home/mark/src/a/b/c/d/e/build]
   verified_with: CMake 3.30.5 (host CMakeCache.txt in retimer out-of-source builds, read-only survey 2026-10-20)
 
+# Project roots are supplied by policy. Explicit depths avoid an unbounded
+# recursive walk and let a matching outer cache own any nested cache.
+- name: python-pycache
+  category: python / js
+  description: Python bytecode cache directories through depth five below a supplied project root
+  find:
+    roots: required
+    paths: [__pycache__, "*/__pycache__", "*/*/__pycache__", "*/*/*/__pycache__", "*/*/*/*/__pycache__"]
+    type: dir
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/app/__pycache__, /home/mark/src/app/pkg/sub/__pycache__]
+    no_match: [/home/mark/src/app/__pycache__/nested, /home/mark/src/app/a/b/c/d/__pycache__]
+  verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20
+
+- name: mypy-cache
+  category: python / js
+  description: Mypy tagged project caches through depth five below a supplied project root
+  find:
+    roots: required
+    paths: [.mypy_cache, "*/.mypy_cache", "*/*/.mypy_cache", "*/*/*/.mypy_cache", "*/*/*/*/.mypy_cache"]
+    type: dir
+  where: {has: CACHEDIR.TAG}
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/app/.mypy_cache, /home/mark/src/app/pkg/.mypy_cache]
+    no_match: [/home/mark/src/app/.mypy_cache/3.13, /home/mark/src/app/a/b/c/d/.mypy_cache]
+  verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20
+
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.

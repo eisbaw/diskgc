@@ -994,6 +994,39 @@ fn a_cargo_process_anywhere_keeps_a_detached_target() {
     judged(&not_cargo, &d.targets[0], Some(1)).expect("detached, but no Cargo runs");
 }
 
+/// TASK-100: `/tmp` can be supplied as the root without changing the
+/// detached-target rule. A Cargo in an unrelated project may still be
+/// using this target via `--target-dir` or config, with no initial
+/// `CARGO_TARGET_DIR` to identify it.
+#[test]
+fn tmp_root_finds_detached_target_but_unrelated_cargo_blocks_it() {
+    let tree = format!(
+        "  /opt/cargo: {{}}\n  /home/x/unrelated: {{.: {{}}}}\n  /tmp/review-target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug:{CLASSIC}"
+    );
+    let cargo = process(42, "/opt/cargo", "/home/x/unrelated", &[], "/bin/sh");
+    let running = with_processes(&tree, &[cargo]);
+    let discovered = found(&running, &["/tmp"]);
+    let target = discovered
+        .targets
+        .iter()
+        .find(|target| target.path == Path::new("/tmp/review-target"))
+        .expect("/tmp root finds the detached target");
+    assert_skip(
+        judged(&running, target, Some(1)),
+        Reason::InUse,
+        "is a Cargo process, and the target is detached",
+    );
+
+    let idle = model(&tree, "");
+    let discovered = found(&idle, &["/tmp"]);
+    let target = discovered
+        .targets
+        .iter()
+        .find(|target| target.path == Path::new("/tmp/review-target"))
+        .expect("/tmp root finds the detached target without a Cargo process");
+    judged(&idle, target, Some(1)).expect("idle detached target is eligible");
+}
+
 /// Codex round 2: only a regular file is a lock file. A directory, symlink,
 /// FIFO, socket or character device named `.cargo-lock` (next to a real
 /// `build/` directory and some data, under a signed tag) is

@@ -220,6 +220,8 @@ fn the_built_in_library_loads() {
         "go-build-cache",
         "npm-cache",
         "pip-cache",
+        "python-pycache",
+        "mypy-cache",
         "pnpm-store",
         "uv-cache",
         "yarn-cache",
