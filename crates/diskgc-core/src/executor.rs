@@ -259,20 +259,12 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
 }
 
 /// Privileges (docs/safety.md, Privileges): diskgc refuses to run as root
-/// without `--allow-root`. With it, an `owners:` list is required, which
-/// this build cannot load yet (task-15, task-21), so `--allow-root` is
-/// refused too, as root or not. Returns the effective uid: the one owner
-/// every entry must belong to.
+/// without `--allow-root`. The caller validates and resolves `owners:`
+/// before passing those IDs to the planner or reclaim. Returns the effective
+/// uid used for `{uid}` substitution, not an implicit ownership allowlist.
 pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, String> {
     let uid = host.effective_uid();
-    if allow_root {
-        return Err(
-            "--allow-root needs an `owners:` list in the configuration (docs/reference.md), \
-             which this build does not support yet (task-21)"
-                .to_owned(),
-        );
-    }
-    if uid == 0 {
+    if uid == 0 && !allow_root {
         return Err(
             "diskgc refuses to run as root (uid 0) without --allow-root (docs/safety.md, \
              Privileges): run it as the user whose caches it frees"
@@ -342,12 +334,18 @@ fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
     }
 }
 
-/// Brings `PATH`'s filesystem to the goal (see the module docs). `uid` is
-/// from [`privileges`]. Progress goes to `log`, one line each.
+/// Brings `PATH`'s filesystem to the goal (see the module docs). Progress
+/// goes to `log`, one line each.
+///
+/// Trusted-caller precondition: call [`privileges`] first. With root, load
+/// policy through a protected config path, resolve `owners` to non-system
+/// UIDs, and reject actions with [`Action::root_mode_error`] before calling.
+/// The CLI enforces these conditions; this library entry point accepts an
+/// already-validated request and ownership allowlist.
 pub fn ensure<H: Delete>(
     host: &H,
     request: &Request,
-    uid: u32,
+    owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
     // Not a success until a path below says so.
@@ -521,7 +519,7 @@ pub fn ensure<H: Delete>(
         log,
         deadline_hit: false,
     };
-    run.run(uid);
+    run.run(owners);
     let deadline_hit = run.deadline_hit;
     report.avail_after_bytes = final_sample(host, &measured, &mut report, log, &request.tier);
     report.status = conclude(
@@ -535,11 +533,12 @@ pub fn ensure<H: Delete>(
 }
 
 /// Plans what [`ensure`] would do, deleting nothing and taking no lock
-/// (docs/reference.md, `--dry-run`). Given only a [`Host`].
+/// (docs/reference.md, `--dry-run`). Given only a [`Host`]. Its caller must
+/// satisfy the same root policy and `owners` precondition as [`ensure`].
 pub fn dry_run<H: Host>(
     host: &H,
     request: &Request,
-    uid: u32,
+    owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
@@ -610,8 +609,7 @@ pub fn dry_run<H: Host>(
             }
         }
     }
-    let owners = [uid];
-    let rules = rules(tier, &owners, log);
+    let rules = rules(tier, owners, log);
     let mut checker = Checker::for_plan(&rules);
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
@@ -1335,9 +1333,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         self.deadline.is_some_and(|d| self.host.now() >= d)
     }
 
-    fn run(&mut self, uid: u32) {
-        let owners = [uid];
-        let rules = rules(self.tier, &owners, self.log);
+    fn run(&mut self, owners: &[u32]) {
+        let rules = rules(self.tier, owners, self.log);
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
         // No `_` arm: a new source kind must decide here (and in `ensure`'s
         // allowlist) how it is reclaimed. Each kind runs its own protocol

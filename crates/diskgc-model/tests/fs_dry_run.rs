@@ -1047,7 +1047,7 @@ fn dry_run(host: &ModelHost, request: &Request) -> Report {
 fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::dry_run(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     (report, lines)
 }

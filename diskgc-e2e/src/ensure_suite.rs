@@ -723,6 +723,208 @@ pub fn ensure_as_root_without_allow_root_exits_2(ctx: &Ctx) -> TestResult {
     judged.assert_clean()
 }
 
+/// Root mode reads only a protected policy, resolves tester through the
+/// container's passwd database, and applies that uid to the same eligibility
+/// walk used by ordinary ensure. Every attempted deletion is oracle checked.
+pub fn root_mode_uses_protected_config_and_named_owner(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("root-policy-work", 0o755, TESTER)?;
+    s.mkdir("root-policy-work/reclaim", 0o755, TESTER)?;
+    s.write_file(
+        "root-policy-work/reclaim/payload",
+        &[1u8; 4096],
+        0o600,
+        TESTER,
+    )?;
+    let config = b"version: 1\nowners: [tester]\nprofiles:\n  - name: root-policy-fixture\n    find: {roots: required, paths: [reclaim], type: dir}\n    action: delete\n    examples: {root: /tmp/root-policy-work, match: [/tmp/root-policy-work/reclaim]}\n";
+    ctx.run_diskgc
+        .write_file("root-policy.yaml", config, 0o600, ROOT)?;
+    ctx.run_diskgc.symlink(
+        "root-policy-link.yaml",
+        Path::new("/run/diskgc/root-policy.yaml"),
+    )?;
+    let args = [
+        "ensure",
+        "--allow-root",
+        "--json",
+        "--min-free",
+        "100%",
+        "--config",
+        "/run/diskgc/root-policy-link.yaml",
+        "--select",
+        "profile:root-policy-fixture",
+        "--roots",
+        "/tmp/root-policy-work",
+        "/tmp/root-policy-work",
+    ];
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("root-policy-work/reclaim")))?;
+    let holder = Holder::root(ctx, &["hold", "/tmp/root-policy-work/reclaim/payload", "/"])?;
+    let held_plan = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[&args[..3], &["--dry-run"], &args[3..]].concat(),
+    )?;
+    held_plan.expect_code(0)?;
+    let held = report(&held_plan)?;
+    ensure!(
+        held["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"] == "/tmp/root-policy-work/reclaim" && entry["reason"] == "in_use"
+            })),
+        "root holder was ignored: {held}"
+    );
+    holder.finish()?;
+    let plan = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[&args[..3], &["--dry-run"], &args[3..]].concat(),
+    )?;
+    plan.expect_code(0)?;
+    let planned = report(&plan)?;
+    ensure!(
+        planned["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"] == "/tmp/root-policy-work/reclaim" && entry["reason"].is_null()
+            })),
+        "root plan did not accept tester-owned entry: {planned}"
+    );
+    ensure!(
+        s.path("root-policy-work/reclaim").exists(),
+        "dry run deleted entry"
+    );
+    let run = ctx.run_as_root(&ctx.diskgc(), &args)?;
+    let judged = oracle.judge_runs(&[&held_plan, &plan, &run])?;
+    ensure!(
+        !s.path("root-policy-work/reclaim").exists(),
+        "root mode did not reclaim eligible entry: {}",
+        run.stderr
+    );
+    let result = report(&run)?;
+    ensure!(
+        result["status"] != "usage_error"
+            && result["actions"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+        "{result}"
+    );
+    judged.assert_clean()
+}
+
+/// Mode checks cover the actual file, an unsafe original ancestor, a link's
+/// target ancestor, and system-account resolution before any deletion.
+pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("root-rejected", 0o755, TESTER)?;
+    s.mkdir("root-rejected/reclaim", 0o755, TESTER)?;
+    s.write_file("root-rejected/reclaim/payload", b"keep", 0o600, TESTER)?;
+    let policy = b"version: 1\nowners: [tester]\nprofiles:\n  - name: root-rejected-fixture\n    find: {roots: required, paths: [reclaim], type: dir}\n    action: delete\n    examples: {root: /tmp/root-rejected, match: [/tmp/root-rejected/reclaim]}\n";
+    ctx.run_diskgc
+        .write_file("group-writable.yaml", policy, 0o620, ROOT)?;
+    ctx.run_diskgc.mkdir("unsafe-parent", 0o775, ROOT)?;
+    ctx.run_diskgc
+        .write_file("unsafe-parent/policy.yaml", policy, 0o600, ROOT)?;
+    s.write_file("root-link-target.yaml", policy, 0o600, ROOT)?;
+    ctx.run_diskgc
+        .symlink("linked.yaml", Path::new("/tmp/root-link-target.yaml"))?;
+    ctx.run_diskgc
+        .write_file("safe-target.yaml", policy, 0o600, ROOT)?;
+    s.symlink(
+        "root-link-original.yaml",
+        Path::new("/run/diskgc/safe-target.yaml"),
+    )?;
+    let system_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
+        "owners: [tester]",
+        "owners: [root]",
+        1,
+    );
+    ctx.run_diskgc
+        .write_file("system-owner.yaml", system_policy.as_bytes(), 0o600, ROOT)?;
+    let unknown_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
+        "owners: [tester]",
+        "owners: [diskgc-no-such-user-97531]",
+        1,
+    );
+    ctx.run_diskgc
+        .write_file("unknown-owner.yaml", unknown_policy.as_bytes(), 0o600, ROOT)?;
+    let command_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
+        "action: delete",
+        "action: {command: [/bin/true, '{path}']}",
+        1,
+    );
+    ctx.run_diskgc
+        .write_file("command.yaml", command_policy.as_bytes(), 0o600, ROOT)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut runs = Vec::new();
+    for (config, reason) in [
+        ("/run/diskgc/group-writable.yaml", "StrictModes"),
+        ("/run/diskgc/unsafe-parent/policy.yaml", "StrictModes"),
+        ("/run/diskgc/linked.yaml", "StrictModes"),
+        ("/tmp/root-link-original.yaml", "StrictModes"),
+        ("/run/diskgc/system-owner.yaml", "system uid"),
+        ("/run/diskgc/unknown-owner.yaml", "does not exist"),
+        ("/run/diskgc/command.yaml", "command actions are refused"),
+    ] {
+        let run = ctx.run_as_root(
+            &ctx.diskgc(),
+            &[
+                "ensure",
+                "--allow-root",
+                "--json",
+                "--min-free",
+                "100%",
+                "--config",
+                config,
+                "--select",
+                "profile:root-rejected-fixture",
+                "--roots",
+                "/tmp/root-rejected",
+                "/tmp/root-rejected",
+            ],
+        )?;
+        run.expect_code(2)?;
+        ensure!(run.stderr.contains(reason), "{config}: {}", run.stderr);
+        ensure!(
+            report(&run)?["status"] == "usage_error",
+            "{config}: {}",
+            run.stdout
+        );
+        runs.push(run);
+    }
+    let docker = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--allow-root",
+            "--json",
+            "--min-free",
+            "100%",
+            "--config",
+            "/run/diskgc/safe-target.yaml",
+            "--select",
+            "profile:docker-build-cache",
+            "/tmp/root-rejected",
+        ],
+    )?;
+    docker.expect_code(2)?;
+    ensure!(
+        docker.stderr.contains("owners: cannot bound"),
+        "{}",
+        docker.stderr
+    );
+    ensure!(
+        report(&docker)?["status"] == "usage_error",
+        "{}",
+        docker.stdout
+    );
+    runs.push(docker);
+    let judged = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;
+    ensure!(
+        s.path("root-rejected/reclaim/payload").exists(),
+        "a rejected policy deleted payload"
+    );
+    judged.assert_clean()
+}
+
 /// task-92: as root (uid 0 in the container's user namespace), `profiles
 /// list` and `show` work (exit 0, the built-ins, no configuration in the
 /// image), since they only read and print (docs/safety.md, Privileges),

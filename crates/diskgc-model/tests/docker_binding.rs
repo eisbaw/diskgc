@@ -167,7 +167,7 @@ fn build_cache_idle_filter_reaches_engine_prune() {
     let host = ModelHost::from_yaml(BUNDLED).unwrap();
     let uid = executor::privileges(&host, false).unwrap();
     let request = request_select("profile:docker-build-cache && filter:idle-1h");
-    let report = executor::ensure(&host, &request, uid, &mut |_| {});
+    let report = executor::ensure(&host, &request, &[uid], &mut |_| {});
     assert_eq!(report.actions.len(), 1, "{report:?}");
     let command = host
         .trace()
@@ -223,12 +223,12 @@ fn each_docker_profile_uses_one_fixed_whole_backend_action() {
     ] {
         let host = ModelHost::from_yaml(BUNDLED).unwrap();
         let uid = executor::privileges(&host, false).unwrap();
-        let plan = executor::dry_run(&host, &request(profile), uid, &mut |_| {});
+        let plan = executor::dry_run(&host, &request(profile), &[uid], &mut |_| {});
         assert_eq!(plan.plan.len(), 1, "{profile}: {plan:?}");
         assert_eq!(plan.plan[0].candidate, PathBuf::from(candidate));
         assert_eq!(host.trace_count(Op::RunCommand), 0);
 
-        let report = executor::ensure(&host, &request(profile), uid, &mut |_| {});
+        let report = executor::ensure(&host, &request(profile), &[uid], &mut |_| {});
         assert_eq!(report.actions.len(), 1, "{profile}: {report:?}");
         let command = host
             .trace()

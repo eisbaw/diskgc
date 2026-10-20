@@ -745,6 +745,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::ensure_as_root_without_allow_root_exits_2,
     },
     Test {
+        name: "root_mode_uses_protected_config_and_named_owner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::root_mode_uses_protected_config_and_named_owner,
+    },
+    Test {
+        name: "root_mode_refuses_untrusted_policy_and_system_owner",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::root_mode_refuses_untrusted_policy_and_system_owner,
+    },
+    Test {
         name: "profiles_work_as_root_while_ensure_refuses",
         tier: Tier::Fast,
         expect: Expect::Pass,

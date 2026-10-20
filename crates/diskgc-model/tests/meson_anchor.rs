@@ -54,7 +54,7 @@ fn model(build: &str, source_file: bool, duplicate_build: bool, events: &str) ->
 
 fn ensure(host: &ModelHost) -> diskgc_core::report::Report {
     let uid = executor::privileges(host, false).expect("privileges");
-    executor::ensure(host, &request(), uid, &mut |_| {})
+    executor::ensure(host, &request(), &[uid], &mut |_| {})
 }
 
 fn untouched(host: &ModelHost) {

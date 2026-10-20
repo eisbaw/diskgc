@@ -95,7 +95,7 @@ fn cargo(min: &str, target: Option<&str>) -> Request {
 fn ensure(host: &ModelHost, request: &Request) -> Report {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::ensure(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::ensure(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     report
 }
@@ -103,7 +103,7 @@ fn ensure(host: &ModelHost, request: &Request) -> Report {
 fn dry_run(host: &ModelHost, request: &Request) -> Report {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::dry_run(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     report
 }
@@ -157,7 +157,7 @@ fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
         let host = host(&model);
         let uid = executor::privileges(&host, false).unwrap();
         let mut lines = Vec::new();
-        let report = executor::ensure(&host, &cargo("1G", None), uid, &mut |line| {
+        let report = executor::ensure(&host, &cargo("1G", None), &[uid], &mut |line| {
             lines.push(line.to_owned());
         });
         let output = lines.join("\n");
@@ -501,7 +501,7 @@ fn every_error_is_logged() {
     let host = host(&yaml(true, &failing_statvfs(5)));
     let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::ensure(&host, &cargo("12G", None), uid, &mut |l| {
+    let report = executor::ensure(&host, &cargo("12G", None), &[uid], &mut |l| {
         lines.push(l.to_owned())
     });
     assert!(!report.errors.is_empty());
@@ -643,7 +643,7 @@ fn an_unsafe_root_is_a_misconfiguration_that_excludes_the_tier() {
         let plan = executor::dry_run(
             &host,
             &request("profile:cargo-target", roots, SRC, "1G", None),
-            uid,
+            &[uid],
             &mut |l| lines.push(l.to_owned()),
         );
         assert_eq!(
@@ -810,7 +810,7 @@ fn the_deadline_during_the_tally_is_124_not_a_spent_budget() {
     req.tally_budget = Some(Duration::from_secs(30 * 60));
     let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::ensure(&host, &req, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::ensure(&host, &req, &[uid], &mut |l| lines.push(l.to_owned()));
     assert_eq!(report.status, Status::Deadline, "{report:#?}");
     assert_eq!(report.exit_code(), 124);
     assert!(calls(&host, Op::Unlinkat).is_empty());
@@ -835,21 +835,16 @@ fn the_deadline_during_the_reclaim_is_124() {
 }
 
 /// AC #4 (privileges half): uid 0 is refused without `--allow-root`;
-/// `--allow-root` needs `owners:`, which this build cannot load, so it is
-/// refused too.
+/// the binary checks `owners:` and resolves it before reaching the executor.
 #[test]
 fn root_is_refused_without_allow_root() {
     let root = host(&format!("own_uid: 0\n{}", yaml(true, "")));
     let error = executor::privileges(&root, false).expect_err("root refused");
     assert!(error.contains("refuses to run as root"), "{error}");
-    let error = executor::privileges(&root, true).expect_err("not supported yet");
-    assert!(
-        error.contains("--allow-root needs an `owners:` list"),
-        "{error}"
-    );
+    assert_eq!(executor::privileges(&root, true), Ok(0));
     let user = host(&yaml(true, ""));
     assert_eq!(executor::privileges(&user, false), Ok(1000));
-    assert!(executor::privileges(&user, true).is_err());
+    assert_eq!(executor::privileges(&user, true), Ok(1000));
     assert!(calls(&root, Op::Unlinkat).is_empty());
 }
 
@@ -1109,7 +1104,7 @@ fn my_targets(min: &str) -> Request {
 fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::dry_run(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     (report, lines)
 }
@@ -1118,7 +1113,7 @@ fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) 
 fn ensure_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::ensure(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::ensure(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     (report, lines)
 }

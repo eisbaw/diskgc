@@ -144,6 +144,42 @@ fn tmp(select: &str) -> Request {
     request(select, &[], "/tmp", "100%")
 }
 
+/// Root-mode owner IDs are an explicit input to the same modelled walk:
+/// a process uid of zero does not silently admit root-owned or other-user
+/// entries when `owners:` contains only the chosen non-system user.
+#[test]
+fn root_mode_reclaims_only_named_owners_tree() {
+    let model = yaml(
+        "",
+        &format!(
+            "  /tmp/pytest-of-allowed: {}\n  /tmp/pytest-of-other: {{.: {{uid: 1001}}, f: {{size: 1M, uid: 1001, mtime: {OLD}}}}}\n",
+            old_dir("1M")
+        ),
+        "own_uid: 0\n",
+    );
+    let host = host(&model);
+    assert_eq!(executor::privileges(&host, true), Ok(0));
+    let request = tmp("profile:pytest-of-dir");
+    let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
+    assert!(
+        plan.plan
+            .iter()
+            .any(|item| item.candidate == Path::new("/tmp/pytest-of-allowed")
+                && item.reason.is_none()),
+        "{plan:?}"
+    );
+    assert!(
+        plan.plan
+            .iter()
+            .any(|item| item.candidate == Path::new("/tmp/pytest-of-other")
+                && item.reason == Some("not_owner")),
+        "{plan:?}"
+    );
+    let report = executor::ensure(&host, &request, &[1000], &mut |_| {});
+    assert!(exists(&host, "/tmp/pytest-of-other"));
+    assert!(!exists(&host, "/tmp/pytest-of-allowed"), "{report:?}");
+}
+
 /// The actual `fs` deletion protocol, on 40,000 distinct top-level `/tmp`
 /// candidates. This deliberately enters below the executor: the model's
 /// `statvfs` recomputes all reachable inodes at every sample, which would
@@ -227,7 +263,7 @@ fn forty_thousand_tmp_candidates_reclaim_once_per_reuse_window() {
 fn ensure(host: &ModelHost, request: &Request) -> Report {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::ensure(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::ensure(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("log:\n  {}", lines.join("\n  "));
     report
 }
@@ -235,7 +271,7 @@ fn ensure(host: &ModelHost, request: &Request) -> Report {
 fn dry_run(host: &ModelHost, request: &Request) -> Report {
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
     let mut lines = Vec::new();
-    let report = executor::dry_run(host, request, uid, &mut |l| lines.push(l.to_owned()));
+    let report = executor::dry_run(host, request, &[uid], &mut |l| lines.push(l.to_owned()));
     eprintln!("dry-run log:\n  {}", lines.join("\n  "));
     report
 }

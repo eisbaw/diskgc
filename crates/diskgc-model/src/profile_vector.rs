@@ -99,7 +99,7 @@ impl ProfileVector {
         };
         let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
         let uid = executor::privileges(&planning, false).map_err(|e| e.to_string())?;
-        let report = executor::dry_run(&planning, &request, uid, &mut |_| {});
+        let report = executor::dry_run(&planning, &request, &[uid], &mut |_| {});
         if !report.errors.is_empty() {
             return Err(format!("dry-run errors: {:?}", report.errors));
         }
@@ -143,7 +143,7 @@ impl ProfileVector {
             }
         }
         let uid = executor::privileges(&reclaiming, false).map_err(|e| e.to_string())?;
-        let report = executor::ensure(&reclaiming, &request, uid, &mut |_| {});
+        let report = executor::ensure(&reclaiming, &request, &[uid], &mut |_| {});
         if !report.errors.is_empty() {
             return Err(format!("reclaim errors: {:?}", report.errors));
         }

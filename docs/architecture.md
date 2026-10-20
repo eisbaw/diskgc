@@ -318,7 +318,8 @@ is accepted until measured otherwise.
   change permissions, and the pre-release sandbox gate guards exactly
   those methods.
 - **Who diskgc is, and what its children keep:** `effective_uid` (the
-  owner every entry must have, and what `{uid}` stands for) and
+  ordinary-mode owner every entry must have, and what `{uid}` stands for;
+  root mode uses the resolved `owners:` IDs for entry ownership) and
   `inherit_lock`, which makes a held lock inheritable by children by
   clearing close-on-exec on that one fd (the host lock,
   [safety.md](safety.md#host-lock)).

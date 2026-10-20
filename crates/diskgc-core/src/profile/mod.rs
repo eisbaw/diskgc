@@ -268,6 +268,21 @@ pub enum Action {
     },
 }
 
+impl Action {
+    /// Root mode can only apply actions whose candidate tree is checked
+    /// against the configured owner IDs. Docker prune operates on an Engine
+    /// cache shared by users, so `owners:` cannot bound its effect.
+    pub fn root_mode_error(&self) -> Option<&'static str> {
+        match self {
+            Self::Command { .. } => Some("command actions are refused under --allow-root"),
+            Self::DockerBuilderPrune | Self::DockerImagePrune { .. } => Some(
+                "Docker prune actions are refused under --allow-root: owners: cannot bound the daemon's shared cache",
+            ),
+            Self::Delete { .. } | Self::CargoLockProtocol => None,
+        }
+    }
+}
+
 /// What the "one action" error shows: enough to see what differs, every
 /// option included. Command arguments are quoted, so a space or an empty
 /// argument is visible.

@@ -852,6 +852,8 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: diskgc-core = { path = \"crates/diskgc-core\" }",
             "rustix.workspace = true",
             "workspace: rustix = { version = \"1.1.5\", features = [\"event\", \"fs\", \"net\", \"process\", \"system\", \"time\"] }",
+            "libc.workspace = true",
+            "workspace: libc = \"0.2\"",
         ],
     ),
 ];
@@ -932,6 +934,14 @@ pub(crate) const GATED: &[Pattern] = &[
 /// ungated with its reason; adding one is a safety review point
 /// (docs/safety.md, Pre-release sandbox gate).
 pub(crate) const GATED_ALLOWED: &[Allowed] = &[
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "resolve_owner",
+        gate: Gate::Ungated(
+            "getpwnam_r reads NSS user records; no filesystem mutation or child process",
+        ),
+        matches: 3,
+    },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
         function: "unlinkat_permitted",

@@ -16,6 +16,7 @@ release-without-sandbox-gate = []
 [dependencies]
 diskgc-core.workspace = true
 rustix.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 # unshare(CLONE_FILES | CLONE_FS) and many mappings in test helper processes;

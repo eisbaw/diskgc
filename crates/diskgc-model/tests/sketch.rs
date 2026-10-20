@@ -34,7 +34,7 @@ fn ensure_below(host: &ModelHost, root: &Path) -> Outcome {
             .unwrap_or_else(|e| panic!("{e}")),
     };
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
-    let report = executor::ensure(host, &request, uid, &mut |l| eprintln!("{l}"));
+    let report = executor::ensure(host, &request, &[uid], &mut |l| eprintln!("{l}"));
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     Outcome {
         exit: i32::from(report.exit_code()),

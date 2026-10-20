@@ -118,6 +118,7 @@ name = "diskgc-linux"
 version = "0.1.0"
 dependencies = [
  "diskgc-core",
+ "libc",
  "rustix",
 ]
 

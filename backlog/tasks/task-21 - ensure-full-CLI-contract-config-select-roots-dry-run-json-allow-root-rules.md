@@ -3,10 +3,10 @@ id: TASK-21
 title: >-
   ensure: full CLI contract (config, --select/--roots, --dry-run, --json,
   --allow-root rules)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-19 04:49'
+updated_date: '2026-10-20 09:15'
 labels:
   - wave-2
   - cli
@@ -29,15 +29,17 @@ Why: CI hooks and harnesses depend on the exact flags and exit codes. Complete e
 - [ ] #1 Every flag and rule in docs/reference.md#ensure has a test
 - [ ] #2 --dry-run deletes nothing and takes no lock (deletion oracle + lock probe)
 - [ ] #3 Bare numbers and month durations are usage errors
-- [ ] #4 --allow-root: owners required and resolving to non-system users; the config file and every directory above it root-owned and not writable by others; command actions refused
+- [x] #4 --allow-root: owners required and resolving to non-system users; the config file and every directory above it root-owned and not writable by others; command actions refused
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-From task-10: CLI parsing is hand-rolled in crates/diskgc/src/main.rs (parse/parse_ensure: --flag v and --flag=v, repeated single flags and unknown flags are usage errors, PATH must be absolute, --roots needs --select, --timeout 0 = none, default 10m; --tally-budget/--no-index parsed and ignored until the index). --json detection happens before parsing so usage errors print one JSON object. Contract decisions written into reference.md: reports name the --select tier and group '--select'; every exit 2 has status usage_error (root refusal, missing host lock, sandbox gate included); PATH absolute; empty/relative --config or DISKGC_CONFIG is exit 2; an unreadable user config is exit 2, not a fallback; config may be a symlink (LinuxHost::read_config_file follows symlinks: the --allow-root StrictModes check of the config and its directories must therefore resolve the real path and check every directory of it); non-UTF-8 path bytes show as U+FFFD in JSON; a part-way deletion is in actions and in skipped/errors; held_by_deleted_files empty when no reclaim ran. Still to do here: --allow-root (currently always refused, executor::privileges), owners:, command-action refusal, aggregation of skipped (task-19), the 'index' field, and the full flag-rule test sweep (AC #1). check is 'not implemented' (exit 2) in this build.
+CLI baseline from TASK10: parse_ensure accepts --flag value and --flag=value; repeated scalar flags, unknown flags, relative PATH, empty or relative config paths, bare sizes/durations and month durations are usage errors. --json is detected before parsing, so usage failures still emit one object. --roots requires --select; --timeout 0 removes the deadline. Unreadable explicitly selected config is an error, never a fallback. Config symlinks are allowed if protected in root mode. A partial deletion appears in actions and skipped/errors. Check now performs static validation; ensure without --select still lacks config-group execution (TASK20), protect enforcement and ipc live-only remain refused. Full flag-rule sweep and remaining TASK21 criteria are open.
 
-From task-63's review: owners: by name on the static musl binary cannot resolve LDAP/sssd accounts (no NSS; nscd only): task-91. AC #4's name resolution must take it into account.
+2026-10-20 root mode implementation: --allow-root requires a loaded owners: policy. getpwnam_r resolves names at invocation; unknown names, uid <1000 and duplicate resolved UIDs fail before planning. Static musl resolves local passwd users; NSS-only LDAP/sssd requires TASK91. The opened config inode, every original path prefix, and every canonical symlink-target ancestor must be root-owned and not group/other writable. Resolved owner IDs feed the ModelHost-tested eligibility walk for plan and reclaim. Under root mode, process inspection also includes uid 0, without admitting root-owned candidate entries. Generic command and Docker prune actions are refused because they cannot honor owners:. Future Action enum variants require an exhaustive policy decision.
+
+Focused ModelHost ownership and unreadable-root-process tests passed; disabling root-process inclusion made the latter fail, then restoring passed. Disposable Nix container tests passed for positive root-owned symlink policy, root holder in_use then reclaim, and refusal of writable file/ancestor, unsafe origin/target symlinks, unknown/system owner, generic command and Docker prune. Deletion oracle was clean. Full just e2e and QA/MPED integration gates remain pending; do not mark Done. TASK95 still needs a dedicated root-safe system command protocol.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

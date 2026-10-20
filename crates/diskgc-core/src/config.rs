@@ -21,7 +21,7 @@ use serde::de::Deserializer;
 
 use crate::engine::Checkouts;
 use crate::kind::Kind;
-use crate::profile::{Action, Body, DurationSpec, Finds, Library, ProfileSpec, Roots};
+use crate::profile::{Body, DurationSpec, Finds, Library, ProfileSpec, Roots};
 use crate::select::{self, Checked};
 
 /// The largest configuration file read (bytes): far above any real policy,
@@ -372,17 +372,17 @@ impl Config {
         // The built-in library is always loaded. Refuse a command only when
         // a configured tier selects it; an unused built-in must not make an
         // otherwise valid root policy fail static validation.
-        if allow_root
-            && self.groups.iter().flat_map(|group| &group.tiers).any(|tier| {
-                tier.select.expr().terms.iter().any(|term| {
-                    self.library.get(&term.source).is_some_and(|profile| {
-                        matches!(&profile.body,
-                            Body::Source(source) if matches!(&source.action, Action::Command { .. }))
-                    })
-                })
-            })
-        {
-            return Err("command actions are refused under --allow-root".to_owned());
+        if allow_root {
+            for tier in self.groups.iter().flat_map(|group| &group.tiers) {
+                for term in &tier.select.expr().terms {
+                    if let Some(profile) = self.library.get(&term.source)
+                        && let Body::Source(source) = &profile.body
+                        && let Some(error) = source.action.root_mode_error()
+                    {
+                        return Err(error.to_owned());
+                    }
+                }
+            }
         }
         Ok(())
     }

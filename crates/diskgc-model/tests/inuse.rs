@@ -414,6 +414,30 @@ fn unreadable_processes_block_unless_their_status_explains_them() {
     }
 }
 
+/// A root process may hold a file of a configured non-system owner. A denied
+/// process with any root UID blocks, including setuid and capable processes.
+#[test]
+fn root_mode_does_not_excuse_an_unreadable_root_process() {
+    for (name, with) in [
+        ("root", vec!["uid: 0", "proc: denied"]),
+        ("setuid root", vec!["uid: 0", "euid: 2000", "proc: denied"]),
+        (
+            "capable root",
+            vec!["uid: 0", "privileged: true", "proc: denied"],
+        ),
+    ] {
+        let host = model(&format!("{}own_uid: 0\n", processes(&[process(10, &with)])));
+        let (result, scan) = check_c(&host, true);
+        let skip = in_use(result);
+        assert!(skip.detail.contains("pid 10"), "{name}: {skip}");
+        assert!(
+            scan.notes().iter().all(|note| !note.contains("excused")),
+            "{name}: {:?}",
+            scan.notes()
+        );
+    }
+}
+
 /// Every refused process of the user is read again before it is excused,
 /// the setuid and more capable ones too (an exec makes any process look
 /// that way for a moment); only another user's process is not.

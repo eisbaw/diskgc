@@ -26,6 +26,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -159,6 +160,21 @@ impl LinuxHost {
 /// kernel are irrelevant. The O_PATH/fstat/reopen sequence keeps FIFO and
 /// device files from being opened while still following packaged symlinks.
 pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
+    read_config_file_policy(path, limit, false)
+}
+
+/// Read a policy for privileged use. The original lookup path and every
+/// symlink target must be protected by root-owned, non-writable ancestors.
+/// The file is held by fd while it is checked and read.
+pub fn read_root_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
+    read_config_file_policy(path, limit, true)
+}
+
+fn read_config_file_policy(
+    path: &Path,
+    limit: usize,
+    strict_modes: bool,
+) -> Result<Vec<u8>, HostError> {
     let subject = path.display().to_string();
     if !path.is_absolute() {
         return Err(HostError::invalid(
@@ -177,6 +193,9 @@ pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError>
             &subject,
             "not a regular file (only a regular file is read as a configuration file)",
         ));
+    }
+    if strict_modes {
+        check_root_config_modes(path, kind.st_dev, kind.st_ino)?;
     }
     let fd_path = format!("{PROC}/self/fd/{}", fd.as_raw_fd());
     let file = rustix::fs::open(
@@ -207,6 +226,86 @@ pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError>
         ));
     }
     Ok(content)
+}
+
+/// Check both the name used for lookup and its canonical target. Checking
+/// every original prefix catches a link through an untrusted directory;
+/// checking each prefix's target catches symlinks into untrusted trees.
+fn check_root_config_modes(path: &Path, dev: u64, ino: u64) -> Result<(), HostError> {
+    let subject = path.display().to_string();
+    for prefix in path.ancestors() {
+        let target =
+            std::fs::canonicalize(prefix).map_err(|e| io_error("canonicalize", &subject, &e))?;
+        for component in target.ancestors() {
+            let metadata =
+                std::fs::metadata(component).map_err(|e| io_error("stat", &subject, &e))?;
+            if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                return Err(HostError::invalid(
+                    "StrictModes",
+                    &subject,
+                    format!(
+                        "{} must be root-owned and not writable by group or others",
+                        component.display()
+                    ),
+                ));
+            }
+        }
+    }
+    let metadata = std::fs::metadata(path).map_err(|e| io_error("stat", &subject, &e))?;
+    if metadata.dev() != dev || metadata.ino() != ino {
+        return Err(HostError::invalid(
+            "StrictModes",
+            &subject,
+            "configuration changed between opening and validating its path",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve a configured user through the system name service. The system
+/// account cutoff comes from docs/reference.md; the caller also rejects
+/// duplicate resolved UIDs. Static musl builds inherit musl's local-account
+/// resolver limits (TASK91).
+pub fn resolve_owner(name: &str) -> Result<u32, String> {
+    let cname = std::ffi::CString::new(name)
+        .map_err(|_| format!("owners: name {name:?} contains a NUL byte"))?;
+    let mut storage = vec![0u8; 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        // SAFETY: cname and storage remain live across the call; libc writes
+        // the passwd entry and result pointer only within their allocations.
+        let code = unsafe {
+            libc::getpwnam_r(
+                cname.as_ptr(),
+                entry.as_mut_ptr(),
+                storage.as_mut_ptr().cast(),
+                storage.len(),
+                &mut result,
+            )
+        };
+        if code == libc::ERANGE && storage.len() < (1 << 20) {
+            storage.resize(storage.len() * 2, 0);
+            continue;
+        }
+        if code != 0 {
+            return Err(format!(
+                "owners: cannot resolve {name:?}: {}",
+                std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        if result.is_null() {
+            return Err(format!("owners: user {name:?} does not exist"));
+        }
+        // SAFETY: getpwnam_r returned success and a non-null pointer to entry.
+        let uid = unsafe { entry.assume_init().pw_uid };
+        if uid < 1000 {
+            return Err(format!(
+                "owners: user {name:?} resolves to system uid {uid} (< 1000)"
+            ));
+        }
+        return Ok(uid);
+    }
 }
 
 impl LinuxHost {

@@ -33,12 +33,12 @@ use std::time::Duration;
 use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
-use diskgc_core::profile::{Action, Library, describe};
+use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
-use diskgc_linux::host::read_config_file;
+use diskgc_linux::host::{read_config_file, read_root_config_file, resolve_owner};
 
 /// Exit code for usage, config and provisioning errors, including a kernel
 /// older than the minimum (docs/reference.md, Exit codes).
@@ -416,6 +416,7 @@ fn startup() -> Result<LinuxHost, String> {
 fn load_config(
     flag: Option<&OsStr>,
     for_profile_test: bool,
+    strict_modes: bool,
 ) -> Result<(Lookup, Option<Config>), String> {
     let env = Env {
         diskgc_config: std::env::var_os("DISKGC_CONFIG"),
@@ -423,8 +424,13 @@ fn load_config(
         home: std::env::var_os("HOME"),
     };
     let lookup = config::lookup(flag, &env)?;
+    let read = if strict_modes {
+        read_root_config_file
+    } else {
+        read_config_file
+    };
     for path in lookup.paths() {
-        match read_config_file(path, MAX_CONFIG_BYTES) {
+        match read(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
                 let config = if for_profile_test {
                     config::parse_for_profile_test(path, &bytes)
@@ -444,8 +450,11 @@ fn load_config(
 /// `ensure`'s configuration: `None` when none is found and `--select`
 /// makes one optional.
 fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
-    match load_config(args.config.as_deref(), false)? {
+    match load_config(args.config.as_deref(), false, args.allow_root)? {
         (_, Some(config)) => Ok(Some(config)),
+        (_, None) if args.allow_root => {
+            Err("--allow-root requires a configuration file with an owners: list".to_owned())
+        }
         (_, None) if args.select.is_some() => Ok(None),
         (lookup, None) => Err(format!(
             "no configuration file found (tried {}); ensure without --select needs one",
@@ -457,6 +466,26 @@ fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
                 .join(", ")
         )),
     }
+}
+
+/// Translate the configured names once before any planning or deletion.
+/// Two aliases for the same uid would hide a policy error, so refuse them.
+fn resolved_owners(config: &Config) -> Result<Vec<u32>, String> {
+    let names = config
+        .owners
+        .as_ref()
+        .ok_or("--allow-root requires an owners: list")?;
+    let mut ids = Vec::with_capacity(names.len());
+    for name in names {
+        let uid = resolve_owner(name)?;
+        if ids.contains(&uid) {
+            return Err(format!(
+                "owners: user {name:?} resolves to duplicate uid {uid}"
+            ));
+        }
+        ids.push(uid);
+    }
+    Ok(ids)
 }
 
 /// A configuration file that is not there (as opposed to one that cannot
@@ -491,8 +520,8 @@ fn tier(args: &EnsureArgs, config: Option<&Config>, uid: u32) -> Result<Tier, St
 /// checks cover configured tiers; `--select` can choose another built-in or
 /// user profile from the same library.
 fn validate_selected_root_action(allow_root: bool, tier: &Tier) -> Result<(), String> {
-    if allow_root && matches!(tier.action, Action::Command { .. }) {
-        return Err("command actions are refused under --allow-root".to_owned());
+    if allow_root && let Some(error) = tier.action.root_mode_error() {
+        return Err(error.to_owned());
     }
     Ok(())
 }
@@ -532,6 +561,14 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(uid) => uid,
         Err(why) => return fail(why),
     };
+    let owners = if args.allow_root {
+        match resolved_owners(config.as_ref().expect("root mode requires config")) {
+            Ok(owners) => owners,
+            Err(why) => return fail(why),
+        }
+    } else {
+        vec![uid]
+    };
     let tier = match tier(args, config.as_ref(), uid) {
         Ok(tier) => tier,
         Err(why) => return fail(why),
@@ -550,9 +587,9 @@ fn ensure(args: &EnsureArgs) -> Report {
     let mut progress = |line: &str| log(line);
     if args.dry_run {
         // A plain Host: the dry run has no way to reach a deleting method.
-        executor::dry_run(&host, &request, uid, &mut progress)
+        executor::dry_run(&host, &request, &owners, &mut progress)
     } else {
-        executor::ensure(&host, &request, uid, &mut progress)
+        executor::ensure(&host, &request, &owners, &mut progress)
     }
 }
 
@@ -571,6 +608,7 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
     let (_, config) = load_config(
         args.config.as_deref(),
         matches!(&args.command, ProfilesCommand::Test),
+        false,
     )?;
     let config_path = config.as_ref().map(|c| c.path.as_path());
     if let Some(path) = config_path {
@@ -646,7 +684,7 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
 /// Machine-independent policy validation. No `LinuxHost`, kernel version
 /// check, process scan, path traversal or backend invocation occurs here.
 fn check(flag: Option<&OsStr>) -> Result<String, String> {
-    let (lookup, config) = load_config(flag, false)?;
+    let (lookup, config) = load_config(flag, false, false)?;
     let config = config.ok_or_else(|| {
         format!(
             "no configuration file found (tried {})",
@@ -922,6 +960,13 @@ mod tests {
             validate_selected_root_action(true, &command)
                 .unwrap_err()
                 .contains("command actions are refused")
+        );
+        let docker = Tier::select("profile:docker-build-cache", &library, None, 1000)
+            .expect("Docker source");
+        assert!(
+            validate_selected_root_action(true, &docker)
+                .unwrap_err()
+                .contains("owners: cannot bound")
         );
     }
 

@@ -549,7 +549,10 @@ Rules:
   error.
 - **`owners:`** (user names) is required with `--allow-root` and forbidden
   otherwise. Names are resolved at run time (environmental validation);
-  `root` and system users (uid below 1000) are rejected there.
+  unknown names, `root` and system users (uid below 1000) are rejected
+  before planning. On the static musl binary, NSS-only LDAP/sssd names do
+  not resolve yet (TASK91). `--allow-root` refuses generic command and
+  Docker prune actions: neither can be bounded to these owner IDs.
 - **`ipc:`** controls sockets and FIFOs inside a candidate. `block-any`
   (default) refuses a candidate containing any socket or FIFO. `live-only`
   permits stale entries only when neither a process nor the kernel's socket

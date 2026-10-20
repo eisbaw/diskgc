@@ -309,6 +309,15 @@ impl Read {
 /// process list itself cannot be read, or the host answers a read of
 /// several processes with another number of results.
 pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostError> {
+    // `users` is the candidate ownership allowlist, not the complete set of
+    // processes that can use their files. In root mode a root process can
+    // open any listed user's candidate, so an unreadable root process must
+    // not get the OtherUser excuse. This changes only process inspection;
+    // the eligibility walk still admits entries owned solely by `users`.
+    let mut process_users = users.to_vec();
+    if host.effective_uid() == 0 && !process_users.contains(&0) {
+        process_users.push(0);
+    }
     let own = host.own_pid();
     // diskgc's own capabilities and uid_map, to recognise a more capable
     // process while both are in the initial user namespace (see
@@ -395,7 +404,14 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
         for (pid, view) in batch.iter().zip(views) {
             let entry = entries.get_mut(pid).expect("listed");
             entry.merge(outcome(*pid, view));
-            settle(host, *pid, entry, users, own_status.as_ref());
+            settle(
+                host,
+                *pid,
+                entry,
+                &process_users,
+                own_status.as_ref(),
+                host.effective_uid() == 0,
+            );
             if !entry.settled {
                 read_back.push(*pid);
             }
@@ -468,7 +484,14 @@ pub(crate) fn consistent(excuses: &[Option<Excuse>]) -> Option<Excuse> {
 /// Decides, after a read, whether `entry` needs another one. A failed read
 /// is followed by a read of the process's status (which may find it gone);
 /// only another user's refused process settles at once.
-fn settle<H: Host>(host: &H, pid: Pid, entry: &mut Entry, users: &[u32], own: Option<&ProcStatus>) {
+fn settle<H: Host>(
+    host: &H,
+    pid: Pid,
+    entry: &mut Entry,
+    users: &[u32],
+    own: Option<&ProcStatus>,
+    root_mode: bool,
+) {
     let out_of_attempts = entry.attempts > REREAD_PAUSES.len();
     entry.settled = match entry.latest.clone() {
         Some(Latest::Gone) => true,
@@ -481,7 +504,7 @@ fn settle<H: Host>(host: &H, pid: Pid, entry: &mut Entry, users: &[u32], own: Op
                     true
                 }
                 Ok(s) => {
-                    let given = excuse(&error, s, users, own);
+                    let given = excuse(&error, s, users, own, root_mode);
                     entry.excuses.push(given);
                     refused_enough(entry) || given == Some(Excuse::OtherUser)
                 }
@@ -533,14 +556,19 @@ pub(crate) fn is_users(status: &ProcStatus, users: &[u32]) -> bool {
 ///
 /// A same-uid process refused while dumpable and unprivileged (e.g. a shell
 /// running with another group, `newgrp`, which the kernel's check also
-/// compares) blocks.
+/// compares) blocks. In root mode, any uid 0 in a refused process blocks:
+/// root can hold an allowed user's file regardless of setuid or capabilities.
 pub(crate) fn excuse(
     error: &ProcError,
     status: &ProcStatus,
     users: &[u32],
     own: Option<&ProcStatus>,
+    root_mode: bool,
 ) -> Option<Excuse> {
     if !matches!(error, ProcError::Denied(_)) {
+        return None;
+    }
+    if root_mode && status.uid.all().contains(&0) {
         return None;
     }
     if !is_users(status, users) {
@@ -819,9 +847,17 @@ mod tests {
             },
             ..status(1000, 1000, 0, INIT, Some(0))
         };
-        assert_eq!(excuse(&denied(), &half, &me, Some(&own)), None, "{half:?}");
+        assert_eq!(
+            excuse(&denied(), &half, &me, Some(&own), false),
+            None,
+            "{half:?}"
+        );
         for (i, (error, st, own, want)) in cases.into_iter().enumerate() {
-            assert_eq!(excuse(&error, &st, &me, own), want, "case {i}: {st:?}");
+            assert_eq!(
+                excuse(&error, &st, &me, own, false),
+                want,
+                "case {i}: {st:?}"
+            );
         }
     }
 

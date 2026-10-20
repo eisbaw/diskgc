@@ -390,6 +390,9 @@ called `pthread_exit` has no memory map and shows root on some kernels
 while its live threads are dumpable. *The user* means the users whose
 files candidates may hold: diskgc's own uid, or the `owners:` under
 `--allow-root`; a process is the user's when any of its four uids is.
+In root mode the scanner also includes uid 0 processes: root may hold an
+owner's file even though root-owned candidate entries remain forbidden by
+the eligibility walk.
 Then (user decision 2026-10-17: read literally, the earlier rule, every
 unreadable same-user process makes every candidate `in_use`, blocks all
 reclaim on any desktop):
@@ -1769,7 +1772,14 @@ How it holds:
   ours). Nix GC goes through the Nix daemon as a normal user.
 - With `--allow-root`: an `owners:` list is required, command actions are
   refused, and the config file and every directory above it must be owned
-  by root and not writable by others (like sshd's StrictModes).
+  by root and not writable by group or others (like sshd's StrictModes).
+  Both the lookup path and the canonical target of each symlink are checked;
+  a link into a user-writable tree is refused. Owner names resolve through
+  the platform name service at invocation time; uid 0 and system uids below
+  1000 are refused. The static musl build can resolve local passwd users,
+  while NSS-only LDAP/sssd accounts still need TASK91.
+  Docker prune actions are refused too: the daemon's shared cache has no
+  per-entry owner check for `owners:` to enforce.
 
 ## Deadlines
 
