@@ -70,6 +70,7 @@ pub mod inuse_suite;
 pub mod journey_suite;
 pub mod meson_suite;
 pub mod oracle;
+pub mod packaging_suite;
 pub mod probe;
 pub mod proc_locks;
 pub mod profile_vector_suite;

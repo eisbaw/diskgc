@@ -51,9 +51,10 @@
 
       # Source allowlist: only Cargo manifests, the lock file, Rust/TOML
       # files under the crate directories and the crates' listed data files
-      # reach the build. docs/, backlog/, *.md, flake.nix and the justfile are
-      # not build inputs, so editing them never changes an output path (the
-      # one exception is workspaceTestSrc below, for workspace-tests only).
+      # reach the Rust build. Most docs, backlog files, flake.nix and the
+      # justfile are excluded from that source set; docs/example.yaml is a
+      # separate direct input to the package's installed example, and
+      # workspaceTestSrc below adds two docs only for workspace tests.
       workspaceFiles = lib.fileset.unions [
         ./Cargo.toml
         ./Cargo.lock
@@ -125,6 +126,10 @@
           cargoExtraArgs = "--locked --package diskgc";
           # Tests run once, in checks.workspace-tests.
           doCheck = false;
+          postInstall = ''
+            install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
+            install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
+          '';
           meta.mainProgram = "diskgc";
         }
       );
@@ -174,6 +179,11 @@
         cp ${lib.getExe diskgc} $out/bin/diskgc
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
+        # These copies fail the build if the Nix package omits either
+        # shipped file. The test applies the actual drop-in in its container.
+        cp ${diskgc}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
+        cp ${diskgc}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        ln -s ${pkgs.systemd}/bin/systemd-tmpfiles $out/bin/systemd-tmpfiles
         # TASK-97's real Buildah operation runs only in its disposable
         # container. Keep these pinned tools outside the large base image;
         # the runner makes their store closure available read-only there.

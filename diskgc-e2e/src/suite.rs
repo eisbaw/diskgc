@@ -41,8 +41,8 @@ use crate::{
     autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
     cargo_reclaim_suite, cargo_suite, docker_suite, docker_vector_suite, driver_suite,
     embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite,
-    inuse_suite, meson_suite, profile_vector_suite, project_cache_suite, stdout_suite,
-    temp_safety_suite,
+    inuse_suite, meson_suite, packaging_suite, profile_vector_suite, project_cache_suite,
+    stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -107,6 +107,10 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        PACKAGING_TEST,
+        "needs pinned systemd-tmpfiles from the Nix store",
+    ),
     (
         MESON_ANCHOR_TEST,
         "needs the pinned Meson and Ninja from the Nix store",
@@ -201,9 +205,17 @@ pub const MESON_ANCHOR_TEST: &str = "meson_generated_output_uses_surviving_sourc
 pub const AUTOTOOLS_ANCHOR_TEST: &str = "autotools_generated_output_uses_surviving_source_anchor";
 /// Actual West and Zephyr generated output, isolated from host project files.
 pub const WEST_REAL_BUILD_TEST: &str = "west_generated_output_uses_surviving_source_anchor";
+/// The release package's tmpfiles drop-in and example config in a container.
+pub const PACKAGING_TEST: &str = "shipped_tmpfiles_and_example_work_in_container";
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: PACKAGING_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: packaging_suite::shipped_tmpfiles_and_example_work_in_container,
+    },
     Test {
         name: "dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent",
         tier: Tier::Fast,

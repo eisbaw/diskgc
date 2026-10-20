@@ -478,8 +478,11 @@ says), then `/etc/diskgc/config.yaml`; a file that exists but cannot be
 read is exit 2, not a reason to try the next. None found: exit 2, listing
 the paths tried. The configuration file may be a symlink (packaged
 configurations often are); only its content is validated. The
-binary ships built-in *profiles* but **no built-in tiers**; an example config
-ships as `docs/example.yaml`, which packages install as the default.
+binary ships built-in *profiles* but **no built-in tiers**. The example
+config lives at `docs/example.yaml` in the source tree and at
+`share/doc/diskgc/examples/example.yaml` in the Nix package; it is not
+installed as an active default. Copy it to a config search path or select
+it with `--config` after setting deployment roots.
 
 The config holds `version`, optional user `profiles`, optional `protect`,
 optional `owners` (only with `--allow-root`), optional `ipc`, and the tier

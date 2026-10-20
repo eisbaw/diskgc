@@ -541,11 +541,12 @@ filesystem, processes and mounts from the developer's system.
   a Debian image with the static binary, without Nix (Container setup:
   Images; `just e2e-debian`). A separate dind image exercises Docker Engine;
   the Nix and Debian images do not carry a Docker daemon.
-- **Shipped files:** the systemd unit is checked with `systemd-analyze
-  verify` (in `just check`); the tmpfiles drop-in is applied with
-  `systemd-tmpfiles --root=<scratch> --create` in the container harness
-  and the resulting lock file checked. The NixOS module is checked by
-  evaluation in `nix flake check`.
+- **Shipped files:** `shipped_tmpfiles_and_example_work_in_container`
+  applies the packaged drop-in with `systemd-tmpfiles --root=<scratch>
+  --create` in a disposable container, checks the resulting lock file,
+  and validates the packaged example config. The general test harness
+  still provisions its per-test lock by hand; unifying that setup with
+  the shipped drop-in remains TASK66 work.
 
 **Not covered end-to-end (for now):** real block filesystems (ext4 or xfs
 as separate mounts, btrfs) and network filesystems cannot be mounted in a

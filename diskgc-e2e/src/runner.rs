@@ -375,6 +375,7 @@ fn test_mounts(name: &str) -> Vec<String> {
         || name == crate::suite::MESON_ANCHOR_TEST
         || name == crate::suite::AUTOTOOLS_ANCHOR_TEST
         || name == crate::suite::WEST_REAL_BUILD_TEST
+        || name == crate::suite::PACKAGING_TEST
     {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }
