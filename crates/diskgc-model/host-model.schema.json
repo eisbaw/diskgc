@@ -396,7 +396,7 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`,\n`bound_unix_sockets`.",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,\n`bound_unix_sockets`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"
@@ -539,6 +539,13 @@
         "cachedir_tag": {
           "description": "Holds a valid `CACHEDIR.TAG` signature.",
           "type": "boolean"
+        },
+        "content": {
+          "description": "UTF-8 bytes returned by `read_head` for a regular file.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "gid": {
           "description": "Group; default 1000.",

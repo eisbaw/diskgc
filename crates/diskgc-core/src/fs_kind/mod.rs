@@ -65,9 +65,67 @@ pub struct Find {
     pub app_not_running: Option<std::path::PathBuf>,
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
+    pub keep_newest: Option<usize>,
+    pub newest_group: Option<crate::profile::NewestGroup>,
+    pub protect_links: Vec<String>,
+    pub protect_link_dirs: Vec<String>,
+    pub protect_parent_link: Option<String>,
+    pub protect_cursor_extensions: Option<String>,
 }
 
 impl Find {
+    /// Conjoin a positive version filter. More retention wins when two
+    /// `keep_newest` rules occur; conflicting grouping or parent-link
+    /// scopes are errors rather than silently changing either rule.
+    pub fn apply_version_filter(&mut self, where_: &Where) -> Result<(), String> {
+        if let Some(count) = where_.keep_newest {
+            let group = where_
+                .newest_group
+                .unwrap_or(crate::profile::NewestGroup::Siblings);
+            if self.keep_newest.is_some()
+                && self
+                    .newest_group
+                    .unwrap_or(crate::profile::NewestGroup::Siblings)
+                    != group
+            {
+                return Err("keep_newest filters use conflicting newest_group values".to_owned());
+            }
+            self.keep_newest = Some(self.keep_newest.map_or(count, |old| old.max(count)));
+            self.newest_group = Some(group);
+        }
+        if let Some(link) = &where_.protect_parent_link {
+            if self
+                .protect_parent_link
+                .as_ref()
+                .is_some_and(|old| old != link)
+            {
+                return Err("protect_parent_link filters name different links".to_owned());
+            }
+            self.protect_parent_link = Some(link.clone());
+        }
+        for link in &where_.protect_links {
+            if !self.protect_links.contains(link) {
+                self.protect_links.push(link.clone());
+            }
+        }
+        for dir in &where_.protect_link_dirs {
+            if !self.protect_link_dirs.contains(dir) {
+                self.protect_link_dirs.push(dir.clone());
+            }
+        }
+        if let Some(manifest) = &where_.protect_cursor_extensions {
+            if self
+                .protect_cursor_extensions
+                .as_ref()
+                .is_some_and(|old| old != manifest)
+            {
+                return Err("protect_cursor_extensions filters name different manifests".to_owned());
+            }
+            self.protect_cursor_extensions = Some(manifest.clone());
+        }
+        Ok(())
+    }
+
     /// The `find` of `source` for the user `uid`; `None` when the source
     /// is not of kind `fs`.
     pub fn of(source: &Source, uid: u32) -> Option<Self> {
@@ -112,6 +170,12 @@ impl Find {
                 .as_ref()
                 .map(|path| std::path::PathBuf::from(path.replace("{uid}", &uid.to_string()))),
             lacks_entry: where_.lacks_entry.clone(),
+            keep_newest: where_.keep_newest,
+            newest_group: where_.newest_group,
+            protect_links: where_.protect_links.clone(),
+            protect_link_dirs: where_.protect_link_dirs.clone(),
+            protect_parent_link: where_.protect_parent_link.clone(),
+            protect_cursor_extensions: where_.protect_cursor_extensions.clone(),
         }
     }
 }

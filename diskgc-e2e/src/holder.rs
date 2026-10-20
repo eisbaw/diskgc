@@ -30,6 +30,21 @@ impl Holder {
         Self::start(cmd, args, env)
     }
 
+    /// Run a copied probe binary from a candidate directory, so the
+    /// kernel's `/proc/<pid>/exe` and executable mappings name that version.
+    pub fn tester_program(
+        ctx: &Ctx,
+        program: &std::path::Path,
+        args: &[&str],
+    ) -> Result<Self, String> {
+        let mut cmd = Command::new(&ctx.self_exe);
+        cmd.args(["as-tester", "--"])
+            .arg(program)
+            .arg("probe")
+            .args(args);
+        Self::start(cmd, args, &[])
+    }
+
     /// `diskgc-e2e probe ARGS` as container root (it drops privileges or
     /// sets up a namespace itself).
     pub fn root(ctx: &Ctx, args: &[&str]) -> Result<Self, String> {

@@ -403,6 +403,132 @@ pub fn go_mod_cache_builtin_deletes_a_read_only_module_tree(ctx: &Ctx) -> TestRe
     verdict.assert_clean()
 }
 
+/// The real kernel exposes the running release binary through `/proc/exe`.
+/// The oldest unprotected release goes; the old installed one, the running
+/// one, and the two newest remain.
+pub fn codex_version_running_binary_is_in_use(ctx: &Ctx) -> TestResult {
+    let home = &ctx.home;
+    home.mkdirs(".local/bin", 0o755, TESTER)?;
+    home.mkdirs("bin", 0o755, TESTER)?;
+    let releases = ".codex/packages/standalone/releases";
+    let mut dirs = Vec::new();
+    for version in ["v0", "v1", "v2", "v3", "v4"] {
+        dirs.push(home.mkdirs(&format!("{releases}/{version}"), 0o755, TESTER)?);
+        if version != "v2" {
+            home.write_file(
+                &format!("{releases}/{version}/data"),
+                b"release\n",
+                0o644,
+                TESTER,
+            )?;
+        } else {
+            let binary = std::fs::read(&ctx.self_exe)
+                .map_err(|error| format!("read fixture executable: {error}"))?;
+            home.write_file(&format!("{releases}/v2/codex"), &binary, 0o755, TESTER)?;
+        }
+    }
+    home.symlink(
+        ".codex/packages/standalone/current",
+        Path::new("releases/v1"),
+    )?;
+    let candidate_exe = home.path(&format!("{releases}/v2/codex"));
+    let running = Holder::tester_program(ctx, &candidate_exe, &["hold-export", "UNRELATED", "x"])?;
+    let oracle = Oracle::arm(Fixture::new().eligible(dirs[0].clone()))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--min-free",
+            "100%",
+            "--no-index",
+            "--select",
+            "profile:codex-releases",
+            "--roots",
+            "/home/tester",
+            "/home/tester",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let r = report(&run)?;
+    ensure!(
+        column(&r, "actions", "candidate") == [&Value::from(dirs[0].display().to_string())],
+        "unexpected actions: {r}"
+    );
+    ensure!(
+        r["skipped"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["reason"] == "in_use" && entry["candidate"] == dirs[2].display().to_string()
+            })),
+        "running version did not report in_use: {r}"
+    );
+    ensure!(!dirs[0].exists(), "old eligible release remains");
+    ensure!(
+        dirs[1..].iter().all(|dir| dir.exists()),
+        "protected release went"
+    );
+    running.finish()?;
+    verdict.assert_clean()
+}
+
+/// The kernel follows `route` before applying `..`, so `current` reaches
+/// inside v0. A lexical collapse would instead name the sibling v1 and
+/// could expose v0 for deletion. The dry run must retain it.
+pub fn codex_current_internal_dotdot_is_ambiguous(ctx: &Ctx) -> TestResult {
+    let home = &ctx.home;
+    home.mkdirs(".local/bin", 0o755, TESTER)?;
+    home.mkdirs("bin", 0o755, TESTER)?;
+    let base = ".codex/packages/standalone";
+    for version in ["v0", "v1", "v2", "v3"] {
+        home.mkdirs(&format!("{base}/releases/{version}"), 0o755, TESTER)?;
+    }
+    let nested = home.mkdirs(&format!("{base}/releases/v0/releases/v1"), 0o755, TESTER)?;
+    home.mkdirs(&format!("{base}/releases/v0/child"), 0o755, TESTER)?;
+    home.symlink(&format!("{base}/route"), Path::new("releases/v0/child"))?;
+    home.symlink(
+        &format!("{base}/current"),
+        Path::new("route/../releases/v1"),
+    )?;
+    let actual = std::fs::canonicalize(home.path(&format!("{base}/current")))
+        .map_err(|error| format!("resolve current through kernel: {error}"))?;
+    ensure!(
+        actual == nested,
+        "kernel resolved current to {actual:?}, expected {nested:?}"
+    );
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--min-free",
+            "100%",
+            "--no-index",
+            "--select",
+            "profile:codex-releases",
+            "--roots",
+            "/home/tester",
+            "/home/tester",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let r = report(&run)?;
+    let old = home.path(&format!("{base}/releases/v0"));
+    ensure!(
+        r["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"] == old.display().to_string()
+                    && entry["reason"] == "linked_current"
+            })),
+        "ambiguous current did not retain v0: {r}"
+    );
+    ensure!(old.exists(), "dry run touched v0");
+    verdict.assert_clean()
+}
+
 /// `field` of every entry of the report's list `list`.
 pub(crate) fn column<'a>(report: &'a Value, list: &str, field: &str) -> Vec<&'a Value> {
     report[list]

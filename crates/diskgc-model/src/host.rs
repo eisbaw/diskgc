@@ -524,6 +524,7 @@ impl Inner {
                     path,
                     Kind::File {
                         cachedir_tag: false,
+                        content: Vec::new(),
                     },
                 )
                 .map(drop),
@@ -841,7 +842,10 @@ impl Host for ModelHost {
 
     fn read_link(&self, dir: &ModelFd, name: &OsStr) -> Result<PathBuf, HostError> {
         if !is_single_name(name) {
-            violation(format!("read_link of {:?}: expected one entry name", name));
+            violation(format!(
+                "readlink of {} below a directory must name one entry",
+                name.to_string_lossy()
+            ));
         }
         let ofd = self.fd_ofd(dir);
         let full = self.base_path(Base::Dir(dir), Path::new(name));
@@ -849,27 +853,22 @@ impl Host for ModelHost {
         self.call(Op::ReadLink, Some(full), None, |inner| {
             if let Some(e) = inner.injected.take() {
                 return (
-                    Err(HostError::errno("readlinkat", &shown, e)),
+                    Err(HostError::errno("readlink", &shown, e)),
                     None,
                     errno_text(e),
                 );
             }
-            let found = inner.state.child(inner.loc_of(ofd), name);
-            match found {
-                Ok(loc) => match &inner.state.inode(loc).kind {
-                    Kind::Symlink(target) => (
-                        Ok(target.clone()),
-                        Some(inner.state.dev_ino(loc)),
-                        "ok".to_owned(),
-                    ),
-                    _ => (
-                        Err(HostError::errno("readlinkat", &shown, Errno::EINVAL)),
-                        None,
-                        errno_text(Errno::EINVAL),
-                    ),
-                },
+            let parent = inner.loc_of(ofd);
+            let result = inner.state.child(parent, name).and_then(|loc| {
+                match &inner.state.inode(loc).kind {
+                    Kind::Symlink(target) => Ok((loc, target.clone())),
+                    _ => Err(Errno::EINVAL),
+                }
+            });
+            match result {
+                Ok((loc, target)) => (Ok(target), Some(inner.state.dev_ino(loc)), "ok".to_owned()),
                 Err(e) => (
-                    Err(HostError::errno("readlinkat", &shown, e)),
+                    Err(HostError::errno("readlink", &shown, e)),
                     None,
                     errno_text(e),
                 ),
@@ -920,21 +919,31 @@ impl Host for ModelHost {
     }
 
     /// A file marked `cachedir_tag` reads as a valid `CACHEDIR.TAG` (its
-    /// signature line); every other regular file as empty (contents are
-    /// not modelled); anything else is refused, as `LinuxHost` does.
+    /// signature line); another regular file reads its modelled content.
+    /// Anything else is refused, as `LinuxHost` does.
     fn read_head(&self, file: &ModelFd, limit: usize) -> Result<Vec<u8>, HostError> {
         let ofd = self.fd_ofd(file);
         let path = self.base_path(Base::Dir(file), Path::new(""));
         let shown = path.display().to_string();
         self.call(Op::ReadHead, Some(path), None, |inner| {
+            if let Some(error) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("read", &shown, error)),
+                    None,
+                    errno_text(error),
+                );
+            }
             let loc = inner.loc_of(ofd);
             let object = Some(inner.state.dev_ino(loc));
             match inner.state.inode(loc).kind {
-                Kind::File { cachedir_tag } => {
+                Kind::File {
+                    cachedir_tag,
+                    ref content,
+                } => {
                     let mut head = if cachedir_tag {
                         CACHEDIR_TAG_CONTENT.to_vec()
                     } else {
-                        Vec::new()
+                        content.clone()
                     };
                     head.truncate(limit);
                     (Ok(head), object, "ok".to_owned())

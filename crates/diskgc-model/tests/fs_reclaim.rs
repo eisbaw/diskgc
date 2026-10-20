@@ -257,6 +257,40 @@ fn exists(host: &ModelHost, path: &str) -> bool {
     host.stat_path(Path::new(path)).is_some()
 }
 
+#[test]
+fn version_reclaim_keeps_linked_and_newest_files() {
+    let tree = "  /home/mark/.local/share/claude/versions/1: {size: 100M, mtime: 2026-10-01T00:00:00Z}\n  /home/mark/.local/share/claude/versions/2: {size: 100M, mtime: 2026-10-02T00:00:00Z}\n  /home/mark/.local/share/claude/versions/3: {size: 100M, mtime: 2026-10-03T00:00:00Z}\n  /home/mark/.local/share/claude/versions/4: {size: 100M, mtime: 2026-10-04T00:00:00Z}\n  /home/mark/.local/bin/claude: {symlink: ../share/claude/versions/1}\n  /home/mark/bin/.keep: {size: 1K}\n";
+    let host = host(&yaml("", tree, ""));
+    let roots = ["/home/mark".to_owned()];
+    let library = Library::builtin().expect("built-ins");
+    let request = Request {
+        path: PathBuf::from("/home/mark"),
+        min_free: parse_size("100%").expect("size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:claude-code-versions", &library, Some(&roots), 1000)
+            .expect("version tier"),
+    };
+    let report = ensure(&host, &request);
+    assert_eq!(
+        actions(&report),
+        ["/home/mark/.local/share/claude/versions/2"]
+    );
+    assert!(exists(&host, "/home/mark/.local/share/claude/versions/1"));
+    assert!(exists(&host, "/home/mark/.local/share/claude/versions/3"));
+    assert!(exists(&host, "/home/mark/.local/share/claude/versions/4"));
+    assert!(!exists(&host, "/home/mark/.local/share/claude/versions/2"));
+    assert_eq!(
+        unlinked_below(&host, "/home/mark/.local/share/claude/versions/1"),
+        0
+    );
+    assert!(
+        host.trace_count(Op::ReadLink) >= 2,
+        "link checked during tally and reclaim"
+    );
+}
+
 fn actions(report: &Report) -> Vec<String> {
     report
         .actions

@@ -121,6 +121,35 @@ pub struct WhereSpec {
     /// A source safety guard: a written null must not disable it.
     #[serde(default, deserialize_with = "present_non_null_string")]
     pub lacks_entry: Option<String>,
+    #[serde(default, deserialize_with = "present_non_null_usize")]
+    pub keep_newest: Option<usize>,
+    #[serde(default, deserialize_with = "present_non_null_newest_group")]
+    pub newest_group: Option<NewestGroup>,
+    #[serde(default)]
+    pub protect_links: Vec<String>,
+    #[serde(default)]
+    pub protect_link_dirs: Vec<String>,
+    #[serde(default, deserialize_with = "present_non_null_string")]
+    pub protect_parent_link: Option<String>,
+    #[serde(default, deserialize_with = "present_non_null_string")]
+    pub protect_cursor_extensions: Option<String>,
+}
+
+/// How `keep_newest` partitions names in one candidate parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewestGroup {
+    Siblings,
+    CursorExtension,
+}
+
+impl NewestGroup {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Siblings => "siblings",
+            Self::CursorExtension => "cursor_extension",
+        }
+    }
 }
 
 /// `examples:`
@@ -190,6 +219,18 @@ fn present_non_null_string<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
+}
+
+fn present_non_null_usize<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error> {
+    usize::deserialize(deserializer).map(Some)
+}
+
+fn present_non_null_newest_group<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NewestGroup>, D::Error> {
+    NewestGroup::deserialize(deserializer).map(Some)
 }
 
 /// A present null must not silently remove names excluded by a profile.

@@ -28,7 +28,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -892,17 +892,17 @@ impl Host for LinuxHost {
             .map_err(|error| io_error("preflight executable", "working directory", &error))
     }
 
-    fn read_link(&self, dir: &LinuxFd, name: &OsStr) -> Result<std::path::PathBuf, HostError> {
+    fn read_link(&self, dir: &LinuxFd, name: &OsStr) -> Result<PathBuf, HostError> {
         if !is_single_name(name) {
             return Err(HostError::invalid(
-                "readlinkat",
+                "readlink",
                 name.to_string_lossy(),
-                "expected one entry name",
+                "must name one entry below the held directory",
             ));
         }
-        rustix::fs::readlinkat(dir.as_fd(), name, Vec::new())
-            .map(|target| std::path::PathBuf::from(OsString::from_vec(target.into_bytes())))
-            .map_err(|e| HostError::errno("readlinkat", name.to_string_lossy(), errno_of(e)))
+        let text = rustix::fs::readlinkat(dir, name, Vec::new())
+            .map_err(|e| HostError::errno("readlink", name.to_string_lossy(), errno_of(e)))?;
+        Ok(PathBuf::from(OsString::from_vec(text.into_bytes())))
     }
 
     fn read_dir(&self, dir: &LinuxFd, limit: usize) -> Result<DirListing, HostError> {

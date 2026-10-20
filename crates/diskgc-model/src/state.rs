@@ -43,6 +43,7 @@ pub struct Loc {
 pub enum Kind {
     File {
         cachedir_tag: bool,
+        content: Vec<u8>,
     },
     Dir(BTreeMap<OsString, u64>),
     Symlink(PathBuf),
@@ -947,6 +948,7 @@ impl State {
         let kind = match &self.inode(old).kind {
             Kind::File { .. } => Kind::File {
                 cachedir_tag: false,
+                content: Vec::new(),
             },
             Kind::Dir(_) => Kind::Dir(BTreeMap::new()),
             Kind::Symlink(target) => Kind::Symlink(target.clone()),

@@ -105,6 +105,35 @@ fn lacks_entry_cannot_be_silently_disabled_by_a_present_null_or_blank() {
 }
 
 #[test]
+fn version_guards_cannot_be_silently_disabled_by_present_null() {
+    for (field, valid) in [
+        ("keep_newest", "2"),
+        ("newest_group", "cursor_extension"),
+        ("protect_parent_link", "current"),
+        (
+            "protect_cursor_extensions",
+            ".cursor/extensions/extensions.json",
+        ),
+    ] {
+        let source = |value: &str| {
+            format!(
+                "- name: versions\n  find: {{roots: [/tmp], paths: [versions/*], type: dir}}\n  where: {{{field}: {value}}}\n  action: delete\n  examples: {{match: [/tmp/versions/v1]}}\n"
+            )
+        };
+        for null in ["", "~", "null", "NULL"] {
+            let yaml = source(null);
+            assert!(
+                parse_profiles(&yaml).is_err(),
+                "present null {field} was accepted: {yaml}"
+            );
+        }
+        if field != "newest_group" {
+            with_user(&source(valid)).expect("valid version guard");
+        }
+    }
+}
+
+#[test]
 fn example_root_is_absolute_and_only_for_supplied_roots() {
     let source = |roots: &str, root: &str| {
         format!(
@@ -145,6 +174,10 @@ fn the_built_in_library_loads() {
         "chrome-browser-cache",
         "chromium-browser-cache",
         "edge-browser-cache",
+        "claude-code-versions",
+        "codex-releases",
+        "cursor-agent-versions",
+        "cursor-extensions",
         "go-mod-cache",
         "nix-user-cache",
         "pytest-cache",
@@ -686,7 +719,7 @@ fn sources_have_no_idle_for_of_their_own() {
     for where_ in ["{idle_for: 10d}", "{idle_for: 1d, has: CACHEDIR.TAG}"] {
         assert_has(
             &user_errors(&fs_source(&format!("{example}  where: {where_}\n"))),
-            "a source profile's `where` takes only `has`, `has_not`, `app_not_running`, and `lacks_entry`",
+            "a source profile's `where` cannot use `idle_for`",
         );
     }
     let errors = user_errors(

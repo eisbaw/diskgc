@@ -214,6 +214,9 @@ pub struct FileSpec {
     /// Holds a valid `CACHEDIR.TAG` signature.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cachedir_tag: bool,
+    /// UTF-8 bytes returned by `read_head` for a regular file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// Only with `type: socket`: a socket is bound to this file in
     /// diskgc's network namespace (`bound_unix_sockets` reports it).
     #[serde(default, skip_serializing_if = "is_false")]
@@ -422,7 +425,7 @@ pub struct EventSpec {
     /// The call the event is addressed to fails with this errno, given by
     /// name (e.g. `EIO`, `EACCES`), without acting.
     /// Only with an `op` trigger, `when: before`, and an op that can fail
-    /// this way: `openat2`, `statx`, `read_dir`, `unlinkat`, `fchmod`,
+    /// this way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,
     /// `bound_unix_sockets`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,

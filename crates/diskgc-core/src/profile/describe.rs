@@ -228,6 +228,24 @@ fn where_json(where_: &Where) -> Json {
             opt_str(where_.app_not_running.as_deref()),
         ),
         ("lacks_entry", opt_str(where_.lacks_entry.as_deref())),
+        (
+            "keep_newest",
+            Json::opt(where_.keep_newest, |n| Json::U64(n as u64)),
+        ),
+        (
+            "newest_group",
+            Json::opt(where_.newest_group, |g| Json::str(g.name())),
+        ),
+        ("protect_links", strings(&where_.protect_links)),
+        ("protect_link_dirs", strings(&where_.protect_link_dirs)),
+        (
+            "protect_parent_link",
+            opt_str(where_.protect_parent_link.as_deref()),
+        ),
+        (
+            "protect_cursor_extensions",
+            opt_str(where_.protect_cursor_extensions.as_deref()),
+        ),
     ])
 }
 
@@ -401,6 +419,33 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(name) = &where_.lacks_entry {
         parts.push(format!("lacks_entry: {}", yaml_scalar(name)));
+    }
+    if let Some(count) = where_.keep_newest {
+        parts.push(format!("keep_newest: {count}"));
+    }
+    if let Some(group) = where_.newest_group {
+        parts.push(format!("newest_group: {}", group.name()));
+    }
+    if !where_.protect_links.is_empty() {
+        parts.push(format!(
+            "protect_links: {}",
+            yaml_list(&where_.protect_links)
+        ));
+    }
+    if !where_.protect_link_dirs.is_empty() {
+        parts.push(format!(
+            "protect_link_dirs: {}",
+            yaml_list(&where_.protect_link_dirs)
+        ));
+    }
+    if let Some(link) = &where_.protect_parent_link {
+        parts.push(format!("protect_parent_link: {}", yaml_scalar(link)));
+    }
+    if let Some(manifest) = &where_.protect_cursor_extensions {
+        parts.push(format!(
+            "protect_cursor_extensions: {}",
+            yaml_scalar(manifest)
+        ));
     }
     (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(", ")))
 }

@@ -819,8 +819,9 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: diskgc-linux = { path = \"crates/diskgc-linux\" }",
         ],
     ),
-    // Reviewed for task-8 (YAML profile schema): serde (derive) and
-    // serde-saphyr 2.0.0 with only `deserialize`. They parse strings and
+    // Reviewed for task-8 (YAML profile schema) and task-73 (Cursor's
+    // installed-extension registry): serde (derive), serde-saphyr 2.0.0
+    // with only `deserialize`, and serde_json. They parse strings and
     // touch no files or processes: serde-saphyr's filesystem code
     // (`include_fs`, its CLI) and its serializer are features left off, and
     // no crate below names std::fs, std::process or OpenOptions outside
@@ -837,6 +838,8 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: serde = { version = \"1\", features = [\"derive\"] }",
             "serde-saphyr.workspace = true",
             "workspace: serde-saphyr = { version = \"=2.0.0\", default-features = false, features = [\"deserialize\"] }",
+            "serde_json.workspace = true",
+            "workspace: serde_json = \"1\"",
         ],
     ),
     (

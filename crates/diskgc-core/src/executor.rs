@@ -100,7 +100,7 @@ pub enum SourceKind {
     CargoTarget,
     /// Entries matching its `find` (kind `fs`), deleted by the kind's own
     /// protocol ([`fs_kind::reclaim`]) when its action is `delete`.
-    Fs(Find),
+    Fs(Box<Find>),
 }
 
 impl Tier {
@@ -141,25 +141,29 @@ impl Tier {
         };
         // The loader admits only these two finds (the Docker and Nix kinds
         // are refused at load until task-35 / task-36).
-        let kind = match &source.finds {
+        let mut kind = match &source.finds {
             Finds::CargoTargets => SourceKind::CargoTarget,
-            Finds::Paths { .. } => {
-                SourceKind::Fs(Find::of(source, uid).expect("fs source has a filesystem find"))
-            }
+            Finds::Paths { .. } => SourceKind::Fs(Box::new(
+                Find::of(source, uid).expect("fs source has a filesystem find"),
+            )),
         };
-        // `idle_for` is the only predicate this build evaluates in a term:
-        // a `has` / `has_not` filter is refused, never ignored.
-        if let Some(name) = term.factors.iter().find_map(|f| match f {
-            Factor::Filter(name) => match library.get(name).map(|p| &p.body) {
-                Some(Body::Filter(w)) if w.has.is_some() || w.has_not.is_some() => Some(name),
-                _ => None,
-            },
-            _ => None,
-        }) {
-            return Err(not_yet(
-                &format!("`filter:{name}` (a `has` / `has_not` filter)"),
-                "task-16",
-            ));
+        for factor in &term.factors {
+            let Factor::Filter(name) = factor else {
+                continue;
+            };
+            let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
+                return Err(format!("--select `{expr}`: no filter profile `{name}`"));
+            };
+            if where_.has.is_some() || where_.has_not.is_some() {
+                return Err(not_yet(
+                    &format!("`filter:{name}` (a `has` / `has_not` filter)"),
+                    "task-16",
+                ));
+            }
+            if let SourceKind::Fs(find) = &mut kind {
+                find.apply_version_filter(where_)
+                    .map_err(|error| format!("--select `{expr}`: filter:{name}: {error}"))?;
+            }
         }
         let idle_for = library.idle_for(term)?;
         let bound = library

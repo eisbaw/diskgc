@@ -158,6 +158,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::go_mod_cache_builtin_deletes_a_read_only_module_tree,
     },
     Test {
+        name: "codex_version_running_binary_is_in_use",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::codex_version_running_binary_is_in_use,
+    },
+    Test {
+        name: "codex_current_internal_dotdot_is_ambiguous",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::codex_current_internal_dotdot_is_ambiguous,
+    },
+    Test {
         name: "sandbox_trivial",
         tier: Tier::Fast,
         expect: Expect::Pass,

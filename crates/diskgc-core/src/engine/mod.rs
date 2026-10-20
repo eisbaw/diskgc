@@ -495,12 +495,18 @@ pub enum Reason {
     /// deleting it would free nothing there (docs/architecture.md,
     /// Filesystem matching).
     OtherFs,
+    /// A version kept by the source's newest-version rule.
+    NewestVersion,
+    /// A version named by a configured current symlink.
+    LinkedCurrent,
+    /// Listed as installed in Cursor's extension registry, or the registry cannot be trusted.
+    InstalledExtension,
 }
 
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 19] = [
+    pub const ALL: [Reason; 22] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -520,6 +526,9 @@ impl Reason {
         Reason::NotIdle,
         Reason::FutureTime,
         Reason::OtherFs,
+        Reason::NewestVersion,
+        Reason::LinkedCurrent,
+        Reason::InstalledExtension,
     ];
 
     /// The skip reason's name in reports.
@@ -544,6 +553,9 @@ impl Reason {
             Self::NotIdle => "not_idle",
             Self::FutureTime => "future_time",
             Self::OtherFs => "other_fs",
+            Self::NewestVersion => "newest_version",
+            Self::LinkedCurrent => "linked_current",
+            Self::InstalledExtension => "installed_extension",
         }
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::{dir, host};
 use diskgc_core::engine::{Candidate, Checkouts, DeleteOptions, End, Rules, delete, walk};
-use diskgc_core::executor::{self, Request, Tier};
+use diskgc_core::executor::{self, Request, SourceKind, Tier};
 use diskgc_core::inuse::MAX_LISTINGS;
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
@@ -81,6 +81,12 @@ const PROFILES: &str = r#"
     type: dir
   action: delete
   examples: {match: [/tmp/excluded/item], no_match: [/tmp/excluded]}
+- name: generic-versions
+  find: {roots: required, paths: [versions/*], type: dir}
+  action: delete
+  examples: {match: [/home/mark/versions/v1]}
+- name: keep-two
+  where: {keep_newest: 2}
 "#;
 
 fn library() -> Library {
@@ -329,6 +335,485 @@ fn shipped_home_cache_profiles_have_golden_match_sets() {
             report.plan
         );
     }
+    nothing_locked_or_deleted(&host);
+}
+
+/// The shipped version sources rank only matching siblings and protect all
+/// configured installed pointers, including a relative link into an old
+/// version. Every candidate is still visible in the plan with its reason.
+#[test]
+fn shipped_version_profiles_have_golden_judgements() {
+    let host = host(&yaml(
+        r#"  /home/mark/.local/share/cursor-agent/versions/v0: {.: {mtime: 2026-10-01T00:00:00Z}, cursor-agent: {size: 1K}}
+  /home/mark/.local/share/cursor-agent/versions/v1: {.: {mtime: 2026-10-02T00:00:00Z}, cursor-agent: {size: 1K}}
+  /home/mark/.local/share/cursor-agent/versions/v2: {.: {mtime: 2026-10-03T00:00:00Z}, cursor-agent: {size: 1K}}
+  /home/mark/.local/share/cursor-agent/versions/v3: {.: {mtime: 2026-10-04T00:00:00Z}, cursor-agent: {size: 1K}}
+  /home/mark/.local/share/cursor-agent/versions/v4: {.: {mtime: 2026-10-05T00:00:00Z}, cursor-agent: {size: 1K}}
+  /home/mark/.local/bin/agent: {symlink: /home/mark/.local/share/cursor-agent/versions/v1/cursor-agent}
+  /home/mark/.local/bin/cursor-agent: {symlink: ../share/cursor-agent/versions/v2/cursor-agent}
+  /home/mark/.codex/packages/standalone/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, bin: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, bin: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v3: {.: {mtime: 2026-10-03T00:00:00Z}, bin: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v4: {.: {mtime: 2026-10-04T00:00:00Z}, bin: {size: 1K}}
+  /home/mark/.codex/packages/standalone/current: {symlink: releases/v1}
+  /home/mark/.local/share/claude/versions/1: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+  /home/mark/.local/share/claude/versions/2: {size: 1K, mtime: 2026-10-02T00:00:00Z}
+  /home/mark/.local/share/claude/versions/3: {size: 1K, mtime: 2026-10-03T00:00:00Z}
+  /home/mark/.local/share/claude/versions/4: {size: 1K, mtime: 2026-10-04T00:00:00Z}
+  /home/mark/.local/bin/claude: {symlink: ../share/claude/versions/1}
+  /home/mark/bin/claude-0.9: {size: 1K}
+  /home/mark/.cursor/extensions/a.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-4.0.0: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.cursor/extensions/b.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/unknown: {.: {mtime: 2026-09-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/extensions.json: {content: '[{"relativeLocation":"a.ext-1.0.0","location":{"path":"/home/mark/.cursor/extensions/a.ext-1.0.0"}},{"relativeLocation":"b.ext-1.0.0","location":{"path":"/home/mark/.cursor/extensions/b.ext-1.0.0"}}]'}
+"#,
+    ));
+    for (profile, suffixes) in [
+        (
+            "cursor-agent-versions",
+            vec![
+                ("v0", None),
+                ("v1", Some("linked_current")),
+                ("v2", Some("linked_current")),
+                ("v3", Some("newest_version")),
+                ("v4", Some("newest_version")),
+            ],
+        ),
+        (
+            "codex-releases",
+            vec![
+                ("v1", Some("linked_current")),
+                ("v2", None),
+                ("v3", Some("newest_version")),
+                ("v4", Some("newest_version")),
+            ],
+        ),
+        (
+            "claude-code-versions",
+            vec![
+                ("1", Some("linked_current")),
+                ("2", None),
+                ("3", Some("newest_version")),
+                ("4", Some("newest_version")),
+            ],
+        ),
+        (
+            "cursor-extensions",
+            vec![
+                ("a.ext-1.0.0", Some("installed_extension")),
+                ("a.ext-2.0.0", None),
+                ("a.ext-3.0.0", Some("newest_version")),
+                ("a.ext-4.0.0", Some("newest_version")),
+                ("b.ext-1.0.0", Some("installed_extension")),
+                ("unknown", Some("newest_version")),
+            ],
+        ),
+    ] {
+        let prefix = match profile {
+            "cursor-agent-versions" => "/home/mark/.local/share/cursor-agent/versions",
+            "codex-releases" => "/home/mark/.codex/packages/standalone/releases",
+            "claude-code-versions" => "/home/mark/.local/share/claude/versions",
+            _ => "/home/mark/.cursor/extensions",
+        };
+        let report = dry_run(
+            &host,
+            &built_in_request(&format!("profile:{profile}"), "/home/mark"),
+        );
+        assert_eq!(report.status, Status::DryRun, "{profile}: {report:#?}");
+        assert_eq!(
+            report.plan.len(),
+            suffixes.len(),
+            "{profile}: {:#?}",
+            report.plan
+        );
+        for (name, reason) in suffixes {
+            assert_eq!(
+                reason_of(&report, &format!("{prefix}/{name}")),
+                Some(reason),
+                "{profile}: {:#?}",
+                report.plan
+            );
+        }
+    }
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn cursor_extension_groups_keep_each_id_newest_even_with_numeric_publisher() {
+    let primary_host = host(&yaml(
+        r#"  /home/mark/.cursor/extensions/acme-2.tool-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-2.tool-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-2.tool-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-1.0.0: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-2.0.0: {.: {mtime: 2026-10-05T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-3.0.0: {.: {mtime: 2026-10-06T00:00:00Z}}
+  /home/mark/.cursor/extensions/extensions.json: {content: '[]'}
+"#,
+    ));
+    let report = dry_run(
+        &primary_host,
+        &built_in_request("profile:cursor-extensions", "/home/mark"),
+    );
+    let base = "/home/mark/.cursor/extensions/";
+    assert_eq!(
+        reason_of(&report, &format!("{base}acme-2.tool-1.0.0")),
+        Some(None)
+    );
+    assert_eq!(
+        reason_of(&report, &format!("{base}acme-3.tool-1.0.0")),
+        Some(None)
+    );
+    for name in [
+        "acme-2.tool-2.0.0",
+        "acme-2.tool-3.0.0",
+        "acme-3.tool-2.0.0",
+        "acme-3.tool-3.0.0",
+    ] {
+        assert_eq!(
+            reason_of(&report, &format!("{base}{name}")),
+            Some(Some("newest_version")),
+            "{name}: {:#?}",
+            report.plan
+        );
+    }
+    nothing_locked_or_deleted(&primary_host);
+
+    let ambiguous = host(&yaml(
+        r#"  /home/mark/.cursor/extensions/acme-3.tool-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme-3.tool-3.0.0-2.0.0: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.cursor/extensions/extensions.json: {content: '[]'}
+"#,
+    ));
+    let report = dry_run(
+        &ambiguous,
+        &built_in_request("profile:cursor-extensions", "/home/mark"),
+    );
+    for name in ["acme-3.tool-1.0.0", "acme-3.tool-3.0.0-2.0.0"] {
+        assert_eq!(
+            reason_of(&report, &format!("{base}{name}")),
+            Some(Some("newest_version")),
+            "{name}: {:#?}",
+            report.plan
+        );
+    }
+    nothing_locked_or_deleted(&ambiguous);
+}
+
+#[test]
+fn version_profile_guard_mutations_expose_protected_old_candidates() {
+    let cases = [
+        (
+            "codex-releases",
+            r#"  /home/mark/.codex/packages/standalone/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/releases/v3: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/releases/v4: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/current: {symlink: releases/v1}
+"#,
+            "/home/mark/.codex/packages/standalone/releases/v1",
+        ),
+        (
+            "claude-code-versions",
+            r#"  /home/mark/.local/share/claude/versions/1: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+  /home/mark/.local/share/claude/versions/2: {size: 1K, mtime: 2026-10-02T00:00:00Z}
+  /home/mark/.local/share/claude/versions/3: {size: 1K, mtime: 2026-10-03T00:00:00Z}
+  /home/mark/.local/share/claude/versions/4: {size: 1K, mtime: 2026-10-04T00:00:00Z}
+  /home/mark/.local/bin/claude: {symlink: ../share/claude/versions/1}
+"#,
+            "/home/mark/.local/share/claude/versions/1",
+        ),
+        (
+            "cursor-extensions",
+            r#"  /home/mark/.cursor/extensions/acme.tool-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme.tool-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme.tool-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.cursor/extensions/acme.tool-4.0.0: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.cursor/extensions/extensions.json: {content: '[{"relativeLocation":"acme.tool-1.0.0","location":{"path":"/home/mark/.cursor/extensions/acme.tool-1.0.0"}}]'}
+"#,
+            "/home/mark/.cursor/extensions/acme.tool-1.0.0",
+        ),
+    ];
+    for (profile, tree, candidate) in cases {
+        let model = host(&yaml(tree));
+        let mut request = built_in_request(&format!("profile:{profile}"), "/home/mark");
+        let guarded = dry_run(&model, &request);
+        let expected_reason = if profile == "cursor-extensions" {
+            "installed_extension"
+        } else {
+            "linked_current"
+        };
+        assert_eq!(
+            reason_of(&guarded, candidate),
+            Some(Some(expected_reason)),
+            "{profile}: {:#?}",
+            guarded.plan
+        );
+        let SourceKind::Fs(find) = &mut request.tier.source else {
+            panic!("{profile} is a filesystem profile");
+        };
+        match profile {
+            "codex-releases" => find.protect_parent_link = None,
+            "claude-code-versions" => find.protect_link_dirs.clear(),
+            "cursor-extensions" => find.protect_cursor_extensions = None,
+            _ => unreachable!(),
+        }
+        let mutated = dry_run(&model, &request);
+        assert_eq!(
+            reason_of(&mutated, candidate),
+            Some(None),
+            "removing {profile}'s guard must expose {candidate}: {:#?}",
+            mutated.plan
+        );
+        nothing_locked_or_deleted(&model);
+    }
+}
+
+#[test]
+fn keep_newest_filter_really_narrows_a_source_term() {
+    let host = host(&yaml(
+        r#"  /home/mark/versions/v1: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/versions/v2: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/versions/v3: {.: {mtime: 2026-10-03T00:00:00Z}}
+"#,
+    ));
+    let bare = dry_run(
+        &host,
+        &request("profile:generic-versions", &["/home/mark"], "/home/mark"),
+    );
+    assert!(bare.plan.iter().all(|entry| entry.reason.is_none()));
+    let filtered = dry_run(
+        &host,
+        &request(
+            "profile:generic-versions && filter:keep-two",
+            &["/home/mark"],
+            "/home/mark",
+        ),
+    );
+    assert_eq!(reason_of(&filtered, "/home/mark/versions/v1"), Some(None));
+    assert_eq!(
+        reason_of(&filtered, "/home/mark/versions/v2"),
+        Some(Some("newest_version"))
+    );
+    assert_eq!(
+        reason_of(&filtered, "/home/mark/versions/v3"),
+        Some(Some("newest_version"))
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// A dangling launcher inside the source root blocks reclaim; a resolved
+/// launcher for an unrelated tool outside it has no candidate to protect.
+#[test]
+fn unresolvable_installed_link_retains_every_old_version() {
+    let versions = r#"  /home/mark/.local/share/cursor-agent/versions/v1: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v2: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v3: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v4: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.local/bin/cursor-agent: {symlink: ../share/cursor-agent/versions/v4}
+  /tmp/foreign: {size: 1K}
+"#;
+    for (target, expected) in [
+        (
+            "../share/cursor-agent/versions/missing",
+            Some("linked_current"),
+        ),
+        ("/tmp/foreign", None),
+    ] {
+        let entries = format!("{versions}  /home/mark/.local/bin/agent: {{symlink: {target}}}\n");
+        let host = host(&yaml(&entries));
+        let report = dry_run(
+            &host,
+            &built_in_request("profile:cursor-agent-versions", "/home/mark"),
+        );
+        for old in ["v1", "v2"] {
+            assert_eq!(
+                reason_of(
+                    &report,
+                    &format!("/home/mark/.local/share/cursor-agent/versions/{old}")
+                ),
+                Some(expected),
+                "{target}: {:#?}",
+                report.plan
+            );
+        }
+        nothing_locked_or_deleted(&host);
+    }
+}
+
+/// An alias name is not predictable from the app. Clearing the directory
+/// predicate in the otherwise identical compiled tier makes v0 eligible,
+/// so this fixture checks that the alias rule actually changes the plan.
+#[test]
+fn launcher_alias_outside_the_named_links_protects_an_old_version() {
+    let host = host(&yaml(
+        r#"  /home/mark/.local/share/cursor-agent/versions/v0: {.: {mtime: 2026-10-01T00:00:00Z}, agent: {size: 1K}}
+  /home/mark/.local/share/cursor-agent/versions/v1: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v2: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v3: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.local/share/cursor-agent/versions/v4: {.: {mtime: 2026-10-05T00:00:00Z}}
+  /home/mark/.local/bin/agent: {symlink: /home/mark/.local/share/cursor-agent/versions/v4}
+  /home/mark/bin/renamed-launcher: {symlink: /home/mark/.local/share/cursor-agent/versions/v0/agent}
+  /home/mark/bin/unrelated: {symlink: /usr/bin/tool}
+"#,
+    ));
+    let mut request = built_in_request("profile:cursor-agent-versions", "/home/mark");
+    let guarded = dry_run(&host, &request);
+    assert_eq!(
+        reason_of(&guarded, "/home/mark/.local/share/cursor-agent/versions/v0"),
+        Some(Some("linked_current"))
+    );
+    assert_eq!(
+        reason_of(&guarded, "/home/mark/.local/share/cursor-agent/versions/v1"),
+        Some(None)
+    );
+    let SourceKind::Fs(find) = &mut request.tier.source else {
+        panic!("Cursor agent is a filesystem profile")
+    };
+    find.protect_link_dirs.clear();
+    let mutated = dry_run(&host, &request);
+    assert_eq!(
+        reason_of(&mutated, "/home/mark/.local/share/cursor-agent/versions/v0"),
+        Some(None),
+        "removing directory-wide protection must expose the old alias target"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn absent_launcher_directory_is_empty_but_unsafe_or_unreadable_retains() {
+    let versions = r#"  /home/mark/.local/share/claude/versions/1: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+  /home/mark/.local/share/claude/versions/2: {size: 1K, mtime: 2026-10-02T00:00:00Z}
+  /home/mark/.local/share/claude/versions/3: {size: 1K, mtime: 2026-10-03T00:00:00Z}
+  /home/mark/.local/share/claude/versions/4: {size: 1K, mtime: 2026-10-04T00:00:00Z}
+  /home/mark/.local/bin/claude: {symlink: ../share/claude/versions/4}
+"#;
+    for (case, extra, expected) in [
+        ("missing", String::new(), None),
+        (
+            "unsafe symlink directory",
+            "  /home/mark/bin: {symlink: /tmp}\n".to_owned(),
+            Some("linked_current"),
+        ),
+        (
+            "unreadable",
+            "  /home/mark/bin/other: {size: 1K}\nevents:\n  - {at: {op: read_dir, path: /home/mark/bin, when: before}, fail: EACCES}\n".to_owned(),
+            Some("linked_current"),
+        ),
+    ] {
+        let host = host(&yaml(&format!("{versions}{extra}")));
+        let report = dry_run(
+            &host,
+            &built_in_request("profile:claude-code-versions", "/home/mark"),
+        );
+        assert_eq!(
+            reason_of(&report, "/home/mark/.local/share/claude/versions/1"),
+            Some(expected),
+            "{case}: {:#?}",
+            report.plan
+        );
+        nothing_locked_or_deleted(&host);
+    }
+}
+
+#[test]
+fn internal_dotdot_in_current_link_is_ambiguous_and_retains_old_release() {
+    let host = host(&yaml(
+        r#"  /home/mark/.codex/packages/standalone/releases/v0: {.: {mtime: 2026-10-01T00:00:00Z}, releases: {v1: {size: 1K}}, child: {}}
+  /home/mark/.codex/packages/standalone/releases/v1: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/releases/v2: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/releases/v3: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.codex/packages/standalone/route: {symlink: releases/v0/child}
+  /home/mark/.codex/packages/standalone/current: {symlink: route/../releases/v1}
+  /home/mark/.local/bin/.keep: {size: 1K}
+  /home/mark/bin/.keep: {size: 1K}
+"#,
+    ));
+    let report = dry_run(
+        &host,
+        &built_in_request("profile:codex-releases", "/home/mark"),
+    );
+    assert_eq!(
+        reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v0"),
+        Some(Some("linked_current")),
+        "internal .. can cross a symlink before it is evaluated: {:#?}",
+        report.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn cursor_registry_missing_malformed_unsafe_or_unreadable_retains_versions() {
+    let versions = r#"  /home/mark/.cursor/extensions/a.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}}
+  /home/mark/.cursor/extensions/a.ext-4.0.0: {.: {mtime: 2026-10-04T00:00:00Z}}
+  /home/mark/.local/bin/.keep: {size: 1K}
+  /home/mark/bin/.keep: {size: 1K}
+"#;
+    for (case, manifest, event) in [
+        ("missing", "", ""),
+        (
+            "malformed",
+            "  /home/mark/.cursor/extensions/extensions.json: {content: '{bad'}\n",
+            "",
+        ),
+        (
+            "unsafe relative path",
+            "  /home/mark/.cursor/extensions/extensions.json: {content: '[{\"relativeLocation\":\"../a.ext-1.0.0\",\"location\":{\"path\":\"/home/mark/.cursor/extensions/a.ext-1.0.0\"}}]'}\n",
+            "",
+        ),
+        (
+            "unreadable",
+            "  /home/mark/.cursor/extensions/extensions.json: {content: '[]'}\n",
+            "events:\n  - {at: {op: read_head, nth: 1, when: before}, fail: EACCES}\n",
+        ),
+    ] {
+        let host = host(&yaml(&format!("{versions}{manifest}{event}")));
+        let report = dry_run(
+            &host,
+            &built_in_request("profile:cursor-extensions", "/home/mark"),
+        );
+        assert_eq!(
+            reason_of(&report, "/home/mark/.cursor/extensions/a.ext-1.0.0"),
+            Some(Some("installed_extension")),
+            "{case}: {:#?}",
+            report.plan
+        );
+        nothing_locked_or_deleted(&host);
+    }
+}
+
+#[test]
+fn a_running_version_binary_is_in_use_after_version_rules_pass() {
+    let host = host(&yaml(
+        r#"  /home/mark/.codex/packages/standalone/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, codex: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, codex: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v3: {.: {mtime: 2026-10-03T00:00:00Z}, codex: {size: 1K}}
+  /home/mark/.codex/packages/standalone/releases/v4: {.: {mtime: 2026-10-04T00:00:00Z}, codex: {size: 1K}}
+  /home/mark/.codex/packages/standalone/current: {symlink: releases/v1}
+  /home/mark/.local/bin/.keep: {size: 1K}
+  /home/mark/bin/.keep: {size: 1K}
+processes:
+  - {pid: 42, exe: /home/mark/.codex/packages/standalone/releases/v2/codex, cwd: /home/mark, maps: [/home/mark/.codex/packages/standalone/releases/v2/codex], fds: [{path: /home/mark/.codex/packages/standalone/releases/v2/codex}], environ: [PATH=/usr/bin]}
+"#,
+    ));
+    let report = dry_run(
+        &host,
+        &built_in_request("profile:codex-releases", "/home/mark"),
+    );
+    assert_eq!(
+        reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v1"),
+        Some(Some("linked_current"))
+    );
+    assert_eq!(
+        reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v2"),
+        Some(Some("in_use"))
+    );
     nothing_locked_or_deleted(&host);
 }
 

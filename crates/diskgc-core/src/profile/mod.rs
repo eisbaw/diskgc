@@ -44,7 +44,7 @@ pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{
     ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
-    ProfileSpec, RootsSpec, WhereSpec, parse_profiles,
+    NewestGroup, ProfileSpec, RootsSpec, WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -97,7 +97,7 @@ impl Origin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
     Source(Box<Source>),
-    Filter(Where),
+    Filter(Box<Where>),
 }
 
 /// A profile with `find`.
@@ -174,6 +174,17 @@ pub struct Where {
     pub app_not_running: Option<String>,
     /// An entry name of any type that the candidate must not contain.
     pub lacks_entry: Option<String>,
+    /// Keep the N newest version directories in each parent/group.
+    pub keep_newest: Option<usize>,
+    pub newest_group: Option<spec::NewestGroup>,
+    /// Symlinks relative to the bound root whose targets must be retained.
+    pub protect_links: Vec<String>,
+    /// Every symlink in these directories may name an installed version.
+    pub protect_link_dirs: Vec<String>,
+    /// A current symlink beside each candidate's parent directory.
+    pub protect_parent_link: Option<String>,
+    /// Cursor's installed-extension registry, relative to the bound root.
+    pub protect_cursor_extensions: Option<String>,
 }
 
 impl Where {
@@ -185,6 +196,17 @@ impl Where {
             (PredicateName::HasNot, self.has_not.is_some()),
             (PredicateName::AppNotRunning, self.app_not_running.is_some()),
             (PredicateName::LacksEntry, self.lacks_entry.is_some()),
+            (PredicateName::KeepNewest, self.keep_newest.is_some()),
+            (
+                PredicateName::ProtectLinks,
+                !self.protect_links.is_empty()
+                    || !self.protect_link_dirs.is_empty()
+                    || self.protect_parent_link.is_some(),
+            ),
+            (
+                PredicateName::ProtectCursorExtensions,
+                self.protect_cursor_extensions.is_some(),
+            ),
         ];
         used.into_iter()
             .filter_map(|(name, used)| used.then_some(name))

@@ -456,12 +456,24 @@ fn create_node(
                 (None, Some(Special::CharDevice)) => Kind::CharDevice,
                 (None, None) => Kind::File {
                     cachedir_tag: spec.cachedir_tag,
+                    content: spec
+                        .content
+                        .as_ref()
+                        .map_or_else(Vec::new, |s| s.as_bytes().to_vec()),
                 },
             };
-            if !matches!(kind, Kind::File { .. }) && (spec.size.is_some() || spec.cachedir_tag) {
+            if !matches!(kind, Kind::File { .. })
+                && (spec.size.is_some() || spec.cachedir_tag || spec.content.is_some())
+            {
                 return Err(LoadError::new(
                     at,
                     "only regular files have a size or a CACHEDIR.TAG signature",
+                ));
+            }
+            if spec.cachedir_tag && spec.content.is_some() {
+                return Err(LoadError::new(
+                    at,
+                    "a regular file cannot have both content and a CACHEDIR.TAG signature",
                 ));
             }
             if spec.bound && !matches!(kind, Kind::Socket) {
@@ -476,7 +488,9 @@ fn create_node(
             }
             let mtime = timestamp(spec.mtime.map_or(model.clock.0, |t| t.0));
             let inode = state.inode_mut(loc);
-            inode.size = spec.size.map_or(0, |s| s.0);
+            inode.size = spec
+                .size
+                .map_or(spec.content.as_ref().map_or(0, |s| s.len() as u64), |s| s.0);
             inode.mtime = mtime;
             inode.ctime = mtime;
             inode.btime = mtime;
@@ -825,6 +839,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::Statx,
             Op::ReadLink,
             Op::ReadDir,
+            Op::ReadHead,
             Op::Unlinkat,
             Op::Fchmod,
             Op::BoundUnixSockets,

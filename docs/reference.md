@@ -233,8 +233,8 @@ under `profile`:
     "description": "Zephyr test runs left in /tmp",
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
-    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null, "lacks_entry": null},
     "min_idle_for": null,
+    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null},
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
@@ -252,7 +252,7 @@ under `profile`:
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them); `find.paths`, `find.exclude` and `find.type` are `null` for
   `cargo-target`.
-- `where` always has its predicates, `null` when unused;
+- `where` always has its fields, `null` when unused (link lists are empty);
   `idle_for` is a duration (`3d`).
 - `min_idle_for` is a source's mandatory minimum age, or `null`; it is
   `null` for filters. A tier's positive idle filters may require longer.
@@ -359,7 +359,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable"}],
+  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -629,7 +629,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
-| `where` | filters (at least one predicate); optional on sources, `has`, `has_not`, `app_not_running`, `lacks_entry` | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
+| `where` | filters (at least one predicate); optional on sources | See Predicates. A source’s own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; the tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). With `roots: required`, an optional `root: /absolute/sample/root` pins the supplied root used to check path depth in these examples; without it, any absolute ancestor can supply the root. Config load and `check` reject examples that contradict the path patterns. |
@@ -650,13 +650,15 @@ required}}`.
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only if the lock is absent in a safely reached directory, or names this host and a PID proved gone. A live PID, including a reused PID, a foreign host, malformed lock, unreadable lock or unsafe path refuses the candidate. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
+| `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
+| `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
+| `protect_cursor_extensions` | a literal path relative to the bound root to Cursor's `extensions.json`, beside extension candidates. Every `relativeLocation` listed as installed is kept, even if older than the newest N. The JSON array and each entry's `location.path` must agree with that one directory name. A missing, unreadable, malformed, oversized (over 1 MiB) or changing manifest retains all candidates. | `fs` |
 
-In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations),
-`where: {has: CACHEDIR.TAG}` (one file name), or
-`where: {app_not_running: .config/chromium/SingletonLock}`. A present null or
-blank `app_not_running` is a load-time error; omitting the key is allowed.
-Each predicate appears at most once
-per profile, all of a profile's predicates must hold. A predicate on a kind
+In YAML, `where: {idle_for: 3d}` (a duration), `where: {has: CACHEDIR.TAG}`
+(one file name), or `where: {app_not_running: .config/chromium/SingletonLock}`.
+A present null or blank `app_not_running` is a load-time error; omitting the
+key is allowed. Each predicate appears at most once per profile, and all of
+a profile's predicates must hold. A predicate on a kind
 that does not support it is a load-time error. Two `idle_for` in one term
 (its `filter:`s) and the source's `min_idle_for` combine to the longest;
 a `!filter:` is a complement and does not combine. When the measure cannot
@@ -665,6 +667,15 @@ kernel did not answer a timestamp, or the last use lies in the future),
 the candidate passes neither `filter:` nor `!filter:` on `idle_for`: it is
 skipped (`unsupported_fs`, `future_time`). Ownership is not a
 predicate: it is an always-on check ([safety.md](safety.md)).
+
+`keep_newest` and link protection are evaluated on a source's candidates
+after discovery. They can be source `where` predicates or positive
+`filter:` factors. Multiple `keep_newest` rules retain the greatest N;
+conflicting grouping, parent-link scopes or Cursor manifests are rejected. A changed or
+unrecognised version layout retains data. The
+link check occurs again immediately before the deletion walk, but no
+filesystem API makes a link update and deletion atomic: installers must
+coordinate with cleanup if they repoint a link concurrently.
 
 | Kind | `idle_for` means |
 |---|---|
@@ -853,6 +864,8 @@ listed as planned, not shipped.
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
 | containers | `containers-image-tmp` | top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` files or directories; `min_idle_for: 3d` is mandatory | `delete` |
+| agents | `cursor-agent-versions`, `codex-releases`, `claude-code-versions` | versions under a supplied home root; keep the two newest per sibling set and the installed symlink targets. `claude-code-versions` matches native installer version files only, not `~/bin/claude-*` | `delete` |
+| editors | `cursor-extensions` | version directories under `.cursor/extensions` of a supplied home root; keep the two newest of each extension id and every installed directory in `extensions.json` | `delete` |
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
 | browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
 | browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to name a stopped application | `delete` |

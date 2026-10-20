@@ -32,19 +32,22 @@
 //! candidate's lock ([`crate::inuse::Checker`]).
 
 use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use super::discover::{Found, check_deadline};
+use super::pattern::path_matches;
 use super::{Find, PRIVATE_TMP_PREFIX, path_in_private_tmp};
 use crate::engine::{
     self, Candidate, KEEP_MARKER, Reason, Rules, Skip, WalkRecord, WalkStop,
     checkout_metadata_below, may_be_networked, networked_why,
 };
 use crate::host::{
-    Access, Base, Dev, Errno, FileType, Host, HostError, MonoTime, MountEntry, Timestamp,
+    Access, Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry,
+    Timestamp, is_single_name,
 };
 use crate::outcome::{Judged, Stop};
-use crate::profile::{IdleFor, Idleness, Unknown};
+use crate::profile::{IdleFor, Idleness, NewestGroup, Unknown};
 use crate::resolve::{ResolveError, Resolved, Want, mount_for, open_beneath, resolve_in};
 
 /// What a candidate of one tier is judged by: the source's `find` (its own
@@ -161,7 +164,65 @@ impl Judge<'_> {
         if let Some(lock) = &self.find.app_not_running {
             judged!(super::app::check(host, &found.root, lock, deadline));
         }
+        judged!(self.version_where(host, reached.parent(), found, deadline));
         self.walk(host, candidate, found, idle, deadline)
+    }
+
+    /// A sibling rank and configured current links are read afresh for each
+    /// judgement, including the reclaim's locked judgement. Uncertain rank
+    /// or link state retains the candidate.
+    fn version_where<H: Host>(
+        &self,
+        host: &H,
+        parent: &Resolved<H::Fd>,
+        found: &Found,
+        deadline: Option<MonoTime>,
+    ) -> Judged<()> {
+        for link in &self.find.protect_links {
+            judged!(protect_link(
+                host,
+                found,
+                &found.root.join(link),
+                true,
+                deadline
+            ));
+        }
+        for dir in &self.find.protect_link_dirs {
+            judged!(protect_link_directory(
+                host,
+                found,
+                &found.root.join(dir),
+                deadline
+            ));
+        }
+        if let Some(name) = &self.find.protect_parent_link {
+            let Some(parent) = found.path.parent().and_then(Path::parent) else {
+                return Ok(Err(Skip::new(
+                    Reason::LinkedCurrent,
+                    found.path.clone(),
+                    "candidate has no version parent",
+                )));
+            };
+            judged!(protect_link(
+                host,
+                found,
+                &parent.join(name),
+                true,
+                deadline
+            ));
+        }
+        if let Some(manifest) = &self.find.protect_cursor_extensions {
+            judged!(protect_cursor_extension(
+                host,
+                found,
+                &found.root.join(manifest),
+                deadline
+            ));
+        }
+        if let Some(count) = self.find.keep_newest {
+            judged!(keep_newest(host, parent, found, self.find, count, deadline));
+        }
+        Ok(Ok(()))
     }
 
     /// Step 1: what can be judged from the path, the identity found and the
@@ -387,6 +448,639 @@ pub(super) fn skip_or_stop(path: PathBuf, what: &str, e: &HostError) -> Result<S
 /// A file candidate holds nothing. A directory that cannot be read is
 /// neither (`Err`: refused as `unreadable`, never taken). The deadline is
 /// checked before each predicate's I/O.
+/// Retain a candidate unless at least `count` matching siblings have a
+/// strictly newer rank. The name breaks equal-mtime ties deterministically.
+/// Missing timestamps and incomplete listings retain every candidate.
+fn keep_newest<H: Host>(
+    host: &H,
+    parent: &Resolved<H::Fd>,
+    found: &Found,
+    find: &Find,
+    count: usize,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    let retain = |detail: String| Skip::new(Reason::NewestVersion, found.path.clone(), detail);
+    let name = file_name(found)?;
+    let group = match version_group(name, find.newest_group) {
+        Some(group) => group,
+        None => return Ok(Err(retain("candidate version group is unknown".to_owned()))),
+    };
+    check_deadline(host, deadline, &found.path)?;
+    let names = match host.read_dir(&parent.fd, engine::DEFAULT_MAX_ENTRIES) {
+        Ok(crate::host::DirListing::Names(names)) => names,
+        Ok(crate::host::DirListing::TooMany) => {
+            return Ok(Err(retain(
+                "candidate parent has too many entries to rank".to_owned(),
+            )));
+        }
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot list version siblings: {error}"
+            ))));
+        }
+    };
+    let mut ranked = Vec::new();
+    let root = [found.root.as_path()];
+    for sibling in names {
+        let sibling_path = found.path.with_file_name(&sibling);
+        if !path_matches(Some(&root), &find.patterns, &sibling_path) {
+            continue;
+        }
+        let Some(sibling_group) = version_group(&sibling, find.newest_group) else {
+            if sibling.as_bytes().starts_with(&group) {
+                return Ok(Err(retain(format!(
+                    "cannot parse version group of {}",
+                    sibling_path.display()
+                ))));
+            }
+            continue;
+        };
+        if sibling_group != group {
+            continue;
+        }
+        check_deadline(host, deadline, &sibling_path)?;
+        let stat = match host.statx(Base::Dir(&parent.fd), Path::new(&sibling)) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return Ok(Err(retain(format!(
+                    "cannot stat version sibling {}: {error}",
+                    sibling_path.display()
+                ))));
+            }
+        };
+        let same_type = match find.entry_type {
+            crate::profile::EntryType::Dir => stat.file_type == Some(FileType::Directory),
+            crate::profile::EntryType::File => stat.file_type == Some(FileType::Regular),
+            crate::profile::EntryType::Any => matches!(
+                stat.file_type,
+                Some(FileType::Directory | FileType::Regular)
+            ),
+        };
+        if !same_type {
+            continue;
+        }
+        if stat.dev != found.identity.id.dev || stat.mnt_id != Some(parent.mount.id) {
+            return Ok(Err(retain(format!(
+                "version sibling {} is on another or unknown mount",
+                sibling_path.display()
+            ))));
+        }
+        let Some(mtime) = stat.mtime else {
+            return Ok(Err(retain(format!(
+                "version sibling {} has no mtime",
+                sibling_path.display()
+            ))));
+        };
+        ranked.push((mtime, sibling));
+    }
+    ranked.sort();
+    ranked.reverse();
+    let Some(rank) = ranked.iter().position(|(_, sibling)| sibling == name) else {
+        return Ok(Err(retain(
+            "candidate disappeared from its version siblings".to_owned(),
+        )));
+    };
+    if rank < count {
+        return Ok(Err(retain(format!(
+            "version rank {} of {}; keeping newest {count}",
+            rank + 1,
+            ranked.len()
+        ))));
+    }
+    Ok(Ok(()))
+}
+
+/// Extension directory names end in `-<major>.<minor>.<patch>` and an
+/// optional known target platform. The prefix is the extension id. A name
+/// with multiple version-shaped segments is ambiguous and retained.
+fn version_group(name: &OsStr, mode: Option<NewestGroup>) -> Option<Vec<u8>> {
+    match mode.unwrap_or(NewestGroup::Siblings) {
+        NewestGroup::Siblings => Some(Vec::new()),
+        NewestGroup::CursorExtension => {
+            let bytes = name.as_bytes();
+            let mut group = None;
+            let mut seen_version = false;
+            for (split, byte) in bytes.iter().enumerate() {
+                if *byte != b'-' || split == 0 {
+                    continue;
+                }
+                let suffix = &bytes[split + 1..];
+                let number = suffix
+                    .split(|byte| *byte == b'-')
+                    .next()
+                    .unwrap_or_default();
+                if !cursor_version_number(number) {
+                    continue;
+                }
+                if seen_version {
+                    return None;
+                }
+                seen_version = true;
+                if cursor_version_suffix(suffix) {
+                    group = Some(bytes[..split].to_vec());
+                }
+            }
+            group
+        }
+    }
+}
+
+fn cursor_version_suffix(suffix: &[u8]) -> bool {
+    let (version, platform) = match suffix.iter().position(|byte| *byte == b'-') {
+        Some(split) => (&suffix[..split], Some(&suffix[split + 1..])),
+        None => (suffix, None),
+    };
+    if !cursor_version_number(version) {
+        return false;
+    }
+    match platform {
+        None => true,
+        Some(platform) => [
+            b"universal".as_slice(),
+            b"web",
+            b"linux-x64",
+            b"linux-arm64",
+            b"linux-armhf",
+            b"linux-x64-musl",
+            b"linux-arm64-musl",
+            b"darwin-x64",
+            b"darwin-arm64",
+            b"win32-x64",
+            b"win32-arm64",
+            b"win32-ia32",
+        ]
+        .contains(&platform),
+    }
+}
+
+fn cursor_version_number(version: &[u8]) -> bool {
+    let numbers: Vec<_> = version.split(|byte| *byte == b'.').collect();
+    if numbers.len() != 3
+        || numbers
+            .iter()
+            .any(|part| part.is_empty() || !part.iter().all(u8::is_ascii_digit))
+    {
+        return false;
+    }
+    true
+}
+
+/// Cursor records installed extension directories as `relativeLocation`
+/// entries in `extensions.json`. The whole registry must be readable and
+/// internally consistent before any version absent from it can be selected.
+fn protect_cursor_extension<H: Host>(
+    host: &H,
+    found: &Found,
+    path: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+    let retain = |detail: String| Skip::new(Reason::InstalledExtension, found.path.clone(), detail);
+    if path.parent() != found.path.parent() {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} is not beside candidate {}",
+            path.display(),
+            found.path.display()
+        ))));
+    }
+    check_deadline(host, deadline, path)?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot check Cursor registry mount: {error}"
+            ))));
+        }
+    };
+    let opened = match resolve_in(host, &mounts, path, Want::Any) {
+        Ok(opened) => opened,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot reach Cursor registry {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if opened.stat.file_type != Some(FileType::Regular) {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} is not a regular file",
+            path.display()
+        ))));
+    }
+    let bytes = match host.read_head(&opened.fd, MAX_MANIFEST_BYTES + 1) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot read Cursor registry {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} exceeds the {} byte limit",
+            path.display(),
+            MAX_MANIFEST_BYTES
+        ))));
+    }
+    let after = match resolve_in(host, &mounts, path, Want::Any) {
+        Ok(after) => after,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot recheck Cursor registry {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if opened.stat != after.stat {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} changed while read",
+            path.display()
+        ))));
+    }
+    let entries: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} is malformed JSON: {error}",
+                path.display()
+            ))));
+        }
+    };
+    let Some(entries) = entries.as_array() else {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} is not an array",
+            path.display()
+        ))));
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(Err(retain(format!(
+            "Cursor registry {} has no parent",
+            path.display()
+        ))));
+    };
+    for entry in entries {
+        let Some(relative) = entry
+            .get("relativeLocation")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} has an entry without relativeLocation",
+                path.display()
+            ))));
+        };
+        let mut components = Path::new(relative).components();
+        let Some(Component::Normal(name)) = components.next() else {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} has unsafe relativeLocation {relative:?}",
+                path.display()
+            ))));
+        };
+        if components.next().is_some() {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} has unsafe relativeLocation {relative:?}",
+                path.display()
+            ))));
+        }
+        let installed = parent.join(name);
+        let Some(location) = entry
+            .get("location")
+            .and_then(|v| v.get("path"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} has an entry without location.path",
+                path.display()
+            ))));
+        };
+        if Path::new(location) != installed {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} disagrees about installed path {relative:?}",
+                path.display()
+            ))));
+        }
+        if installed == found.path {
+            return Ok(Err(retain(format!(
+                "Cursor registry {} lists this installed extension",
+                path.display()
+            ))));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Every entry in a launcher directory must be listed and statted. The
+/// directory itself must be safely reachable when present. An absent
+/// directory contains no launchers; a partial listing, an unsafe path or an
+/// unreadable entry retains the candidate: an unseen symlink might point
+/// into it. This is repeated during reclaim under its lock.
+fn protect_link_directory<H: Host>(
+    host: &H,
+    found: &Found,
+    path: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    const MAX_LAUNCHER_ENTRIES: usize = 16_384;
+    let retain = |detail: String| Skip::new(Reason::LinkedCurrent, found.path.clone(), detail);
+    check_deadline(host, deadline, path)?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot check launcher mounts: {error}"
+            ))));
+        }
+    };
+    let directory = match resolve_in(host, &mounts, path, Want::Directory) {
+        Ok(directory) => directory,
+        Err(ResolveError::Missing {
+            errno: Errno::ENOENT,
+            ..
+        }) => return Ok(Ok(())),
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot reach launcher directory {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    let names = match host.read_dir(&directory.fd, MAX_LAUNCHER_ENTRIES) {
+        Ok(DirListing::Names(names)) => names,
+        Ok(DirListing::TooMany) => {
+            return Ok(Err(retain(format!(
+                "launcher directory {} has more than {MAX_LAUNCHER_ENTRIES} entries",
+                path.display()
+            ))));
+        }
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot list launcher directory {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    for name in names {
+        if !is_single_name(&name) {
+            return Ok(Err(retain(format!(
+                "launcher directory {} listed an invalid name",
+                path.display()
+            ))));
+        }
+        let link = path.join(&name);
+        check_deadline(host, deadline, &link)?;
+        let stat = match host.statx(Base::Dir(&directory.fd), Path::new(&name)) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return Ok(Err(retain(format!(
+                    "cannot stat launcher entry {}: {error}",
+                    link.display()
+                ))));
+            }
+        };
+        if stat.file_type.is_none() {
+            return Ok(Err(retain(format!(
+                "launcher entry {} has no reported file type",
+                link.display()
+            ))));
+        }
+        if stat.file_type == Some(FileType::Symlink) {
+            judged!(protect_link(host, found, &link, false, deadline));
+        }
+    }
+    let after = match host.statx(Base::Dir(&directory.fd), Path::new("")) {
+        Ok(stat) => stat,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot recheck launcher directory {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if after != directory.stat {
+        return Ok(Err(retain(format!(
+            "launcher directory {} changed while scanned",
+            path.display()
+        ))));
+    }
+    Ok(Ok(()))
+}
+
+/// A named link must exist, remain stable while read, and resolve to an
+/// object inside the bound root without a symlink or mount crossing on its
+/// way. Any uncertainty retains every candidate of this source.
+fn protect_link<H: Host>(
+    host: &H,
+    found: &Found,
+    path: &Path,
+    required: bool,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    let retain = |detail: String| Skip::new(Reason::LinkedCurrent, found.path.clone(), detail);
+    let Some((parent_path, name)) = path.parent().zip(path.file_name()) else {
+        return Ok(Err(retain(format!(
+            "invalid configured link: {}",
+            path.display()
+        ))));
+    };
+    check_deadline(host, deadline, path)?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot check current link mount: {error}"
+            ))));
+        }
+    };
+    let parent = match resolve_in(host, &mounts, parent_path, Want::Directory) {
+        Ok(parent) => parent,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot reach current link {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    let before = match host.statx(Base::Dir(&parent.fd), Path::new(name)) {
+        Ok(stat) => stat,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot stat current link {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if before.file_type != Some(FileType::Symlink) {
+        return Ok(Err(retain(format!(
+            "current link {} is not a symlink",
+            path.display()
+        ))));
+    }
+    let text = match host.read_link(&parent.fd, name) {
+        Ok(text) => text,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot read current link {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    let after = match host.statx(Base::Dir(&parent.fd), Path::new(name)) {
+        Ok(stat) => stat,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot recheck current link {}: {error}",
+                path.display()
+            ))));
+        }
+    };
+    if before != after {
+        return Ok(Err(retain(format!(
+            "current link {} changed while read",
+            path.display()
+        ))));
+    }
+    let Some(target) = normalize_link_target(parent_path, &text) else {
+        return Ok(Err(retain(format!(
+            "current link {} has an invalid target",
+            path.display()
+        ))));
+    };
+    let target = match resolve_link_chain(host, &mounts, &target, &found.root, required) {
+        Ok(target) => target,
+        Err(detail) => {
+            return Ok(Err(retain(format!(
+                "current link {} has an unresolved target: {detail}",
+                path.display()
+            ))));
+        }
+    };
+    if !target.starts_with(&found.root) {
+        if !required {
+            // An unrelated launcher may point to another installed tool.
+            // Its complete chain was resolved without ambiguity above.
+            return Ok(Ok(()));
+        }
+        return Ok(Err(retain(format!(
+            "current link {} resolves outside bound root: {}",
+            path.display(),
+            target.display()
+        ))));
+    }
+    check_deadline(host, deadline, &target)?;
+    if target.starts_with(&found.path) {
+        return Ok(Err(retain(format!(
+            "current link {} points into this version ({})",
+            path.display(),
+            target.display()
+        ))));
+    }
+    Ok(Ok(()))
+}
+
+/// Follow a bounded chain one component at a time. Every symlink is read
+/// below a safely reached parent, and the final object is reached again
+/// without symlinks. This is needed for launcher aliases through another
+/// tool's `current` link; a lexical path alone can name the wrong version.
+fn resolve_link_chain<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    initial: &Path,
+    root: &Path,
+    required: bool,
+) -> Result<PathBuf, String> {
+    let mut path = initial.to_owned();
+    for _ in 0..40 {
+        let mut prefix = PathBuf::from("/");
+        let mut next = None;
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                if component == Component::RootDir {
+                    continue;
+                }
+                return Err(format!("non-normal target {}", path.display()));
+            };
+            let parent_path = prefix.clone();
+            prefix.push(name);
+            let parent = resolve_in(host, mounts, &parent_path, Want::Directory)
+                .map_err(|error| format!("reach {}: {error}", parent_path.display()))?;
+            let before = match host.statx(Base::Dir(&parent.fd), Path::new(name)) {
+                Ok(stat) => stat,
+                Err(error)
+                    if !required
+                        && !prefix.starts_with(root)
+                        && (error.is(Errno::ENOENT) || error.is(Errno::ENOTDIR)) =>
+                {
+                    // A dangling launcher elsewhere (for example an old
+                    // Nix profile) cannot name a candidate below this root.
+                    // Every existing prefix was checked for symlinks first.
+                    return Ok(path);
+                }
+                Err(error) => return Err(format!("stat {}: {error}", prefix.display())),
+            };
+            if before.file_type != Some(FileType::Symlink) {
+                continue;
+            }
+            let text = host
+                .read_link(&parent.fd, name)
+                .map_err(|error| format!("read {}: {error}", prefix.display()))?;
+            let after = host
+                .statx(Base::Dir(&parent.fd), Path::new(name))
+                .map_err(|error| format!("recheck {}: {error}", prefix.display()))?;
+            if before != after {
+                return Err(format!("{} changed while read", prefix.display()));
+            }
+            let mut target = normalize_link_target(&parent_path, &text)
+                .ok_or_else(|| format!("{} has an ambiguous target", prefix.display()))?;
+            target.push(path.strip_prefix(&prefix).expect("prefix of target"));
+            next = Some(target);
+            break;
+        }
+        if let Some(target) = next {
+            path = target;
+            continue;
+        }
+        resolve_in(host, mounts, &path, Want::Any)
+            .map_err(|error| format!("reach {}: {error}", path.display()))?;
+        return Ok(path);
+    }
+    Err(format!(
+        "target {} has more than 40 symlink steps",
+        initial.display()
+    ))
+}
+
+fn normalize_link_target(parent: &Path, text: &Path) -> Option<PathBuf> {
+    let mut path = if text.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        parent.to_owned()
+    };
+    let mut saw_normal = false;
+    for component in text.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                saw_normal = true;
+                path.push(name);
+            }
+            Component::ParentDir => {
+                // After a named component the kernel might follow a symlink
+                // before applying `..`; lexical folding would name a
+                // different object. Leading `..` traverses only ancestors
+                // of the already safely reached link directory.
+                if text.is_absolute() || saw_normal {
+                    return None;
+                }
+                if !path.pop() {
+                    return None;
+                }
+            }
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(path)
+}
+
 pub(super) fn source_where<H: Host>(
     host: &H,
     find: &Find,

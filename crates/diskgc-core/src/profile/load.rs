@@ -201,7 +201,9 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
         Some(find) => source(spec, find, where_, origin, &mut problems)
             .map(Box::new)
             .map(Body::Source),
-        None => filter(spec, where_, &mut problems).map(Body::Filter),
+        None => filter(spec, where_, &mut problems)
+            .map(Box::new)
+            .map(Body::Filter),
     };
     match body {
         Some(body) if problems.is_empty() => Ok(Profile {
@@ -288,8 +290,7 @@ fn source(
     for predicate in where_.predicates() {
         if predicate == PredicateName::IdleFor {
             problems.push(
-                "a source profile's `where` takes only `has`, `has_not`, \
-                 `app_not_running`, and `lacks_entry`: set a mandatory minimum \
+                "a source profile's `where` cannot use `idle_for`: set a mandatory minimum \
                  with `min_idle_for`, or a tier policy with a filter \
                  (`&& filter:idle-3d`)"
                     .to_owned(),
@@ -553,12 +554,52 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
             problems.push("`app_not_running` must name a normalized path ending in `SingletonLock` (absolute or relative to each source root)".to_owned());
         }
     }
+    if spec.keep_newest == Some(0) {
+        problems.push("`keep_newest` must be greater than zero".to_owned());
+    }
+    if spec.newest_group.is_some() && spec.keep_newest.is_none() {
+        problems.push("`newest_group` requires `keep_newest`".to_owned());
+    }
+    for link in &spec.protect_links {
+        if pattern(link).is_err() || link.contains('*') {
+            problems.push(format!(
+                "`protect_links: {link}` must be a literal path relative to the bound root"
+            ));
+        }
+    }
+    for dir in &spec.protect_link_dirs {
+        if pattern(dir).is_err() || dir.contains('*') {
+            problems.push(format!(
+                "`protect_link_dirs: {dir}` must be a literal directory path relative to the bound root"
+            ));
+        }
+    }
+    if let Some(link) = &spec.protect_parent_link
+        && !is_file_name(link)
+    {
+        problems.push(format!(
+            "`protect_parent_link: {link}` must name one symlink"
+        ));
+    }
+    if let Some(manifest) = &spec.protect_cursor_extensions
+        && (pattern(manifest).is_err() || manifest.contains('*'))
+    {
+        problems.push(format!(
+            "`protect_cursor_extensions: {manifest}` must be a literal path relative to the bound root"
+        ));
+    }
     Where {
         idle_for: spec.idle_for.map(|d| IdleFor(d.0)),
         has: spec.has.clone(),
         has_not: spec.has_not.clone(),
         app_not_running: spec.app_not_running.clone(),
         lacks_entry: spec.lacks_entry.clone(),
+        keep_newest: spec.keep_newest,
+        newest_group: spec.newest_group,
+        protect_links: spec.protect_links.clone(),
+        protect_link_dirs: spec.protect_link_dirs.clone(),
+        protect_parent_link: spec.protect_parent_link.clone(),
+        protect_cursor_extensions: spec.protect_cursor_extensions.clone(),
     }
 }
 

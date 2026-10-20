@@ -1053,6 +1053,9 @@ fn predicate_table_matches_the_reference() {
             (PredicateName::HasNot, vec![Kind::Fs]),
             (PredicateName::AppNotRunning, vec![Kind::Fs]),
             (PredicateName::LacksEntry, vec![Kind::Fs]),
+            (PredicateName::KeepNewest, vec![Kind::Fs]),
+            (PredicateName::ProtectLinks, vec![Kind::Fs]),
+            (PredicateName::ProtectCursorExtensions, vec![Kind::Fs]),
         ]
     );
 }

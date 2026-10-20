@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::host::{
@@ -50,6 +50,7 @@ pub const OPS: &[&str] = &[
     "mountinfo",
     "openat2",
     "statx",
+    "read_link",
     "read_dir",
     "read_head",
     "reopen_regular",
@@ -430,11 +431,7 @@ impl<H: Host> Host for Controlled<H> {
         self.host.statx(base, path)
     }
 
-    fn read_link(
-        &self,
-        dir: &Self::Fd,
-        name: &std::ffi::OsStr,
-    ) -> Result<std::path::PathBuf, HostError> {
+    fn read_link(&self, dir: &Self::Fd, name: &OsStr) -> Result<PathBuf, HostError> {
         self.before("read_link");
         self.host.read_link(dir, name)
     }
@@ -602,6 +599,7 @@ mounts:
 tree:
   /tmp/a:
     f: {}
+    link: {symlink: f}
     sub: {.: {}}
 processes:
   - {pid: 42, exe: /tmp/a/f, cwd: /tmp/a, environ: [A=1], maps: [/tmp/a/f], fds: [{fd: 0, path: /tmp/a/f}]}
@@ -627,6 +625,8 @@ processes:
     fn call_everything<H: Delete>(host: &H) {
         let a = resolve(host, Path::new("/tmp/a"), Want::Directory).expect("resolve");
         host.read_dir(&a.fd, 10).expect("read_dir");
+        host.read_link(&a.fd, OsStr::new("link"))
+            .expect("read_link");
         let f = resolve(host, Path::new("/tmp/a/f"), Want::Any).expect("resolve f");
         host.read_head(&f.fd, 8).expect("read_head");
         drop(host.reopen_regular(&f.fd).expect("reopen_regular"));
