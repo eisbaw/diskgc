@@ -892,6 +892,19 @@ impl Host for LinuxHost {
             .map_err(|error| io_error("preflight executable", "working directory", &error))
     }
 
+    fn read_link(&self, dir: &LinuxFd, name: &OsStr) -> Result<std::path::PathBuf, HostError> {
+        if !is_single_name(name) {
+            return Err(HostError::invalid(
+                "readlinkat",
+                name.to_string_lossy(),
+                "expected one entry name",
+            ));
+        }
+        rustix::fs::readlinkat(dir.as_fd(), name, Vec::new())
+            .map(|target| std::path::PathBuf::from(OsString::from_vec(target.into_bytes())))
+            .map_err(|e| HostError::errno("readlinkat", name.to_string_lossy(), errno_of(e)))
+    }
+
     fn read_dir(&self, dir: &LinuxFd, limit: usize) -> Result<DirListing, HostError> {
         let subject = format!("{dir:?}");
         let readable = reopen_readable(dir, &subject)?;
@@ -1016,6 +1029,14 @@ impl Host for LinuxHost {
             .to_str()
             .map(str::to_owned)
             .map_err(|_| HostError::invalid("uname", "release", "not UTF-8"))
+    }
+
+    fn hostname(&self) -> Result<String, HostError> {
+        rustix::system::uname()
+            .nodename()
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|_| HostError::invalid("uname", "nodename", "not UTF-8"))
     }
 
     fn pids(&self) -> Result<Vec<Pid>, HostError> {

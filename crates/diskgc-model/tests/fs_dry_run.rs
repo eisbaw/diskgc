@@ -192,6 +192,79 @@ processes:
     nothing_locked_or_deleted(&host);
 }
 
+/// Every shipped browser source has its own finite cache match set and lock.
+/// Other browsers, profile data, site storage, similarly named directories,
+/// and a file at a cache-shaped path must stay outside discovery. A live
+/// SingletonLock makes every cache of its browser ineligible.
+#[test]
+fn browser_cache_builtins_have_golden_sets_and_refuse_live_locks() {
+    let browsers = [
+        (
+            "brave-browser-cache",
+            "BraveSoftware/Brave-Browser",
+            "BraveSoftware/Brave-Browser",
+        ),
+        ("chrome-browser-cache", "google-chrome", "google-chrome"),
+        ("chromium-browser-cache", "chromium", "chromium"),
+        ("edge-browser-cache", "microsoft-edge", "microsoft-edge"),
+    ];
+    let mut tree = String::new();
+    for (_, cache, config) in browsers {
+        tree.push_str(&format!(
+            r#"  /home/mark/.cache/{cache}/Default/Cache: {{.: {{}}, data: {{size: 4K}}}}
+  /home/mark/.cache/{cache}/Default/Code Cache: {{.: {{}}, js: {{size: 2K}}}}
+  /home/mark/.cache/{cache}/Profile 1/Cache: {{.: {{}}, data: {{size: 1K}}}}
+  /home/mark/.cache/{cache}/Profile 1/Code Cache: {{.: {{}}, js: {{size: 1K}}}}
+  /home/mark/.cache/{cache}/Profile 2/Cache: {{size: 1K}}
+  /home/mark/.cache/{cache}/Profileish/Cache: {{.: {{}}}}
+  /home/mark/.cache/{cache}/Default/Cache.backup: {{.: {{}}}}
+  /home/mark/.config/{config}/Default/WebStorage: {{.: {{}}, site: {{size: 9K}}}}
+  /home/mark/.config/{config}/Default/Service Worker/CacheStorage: {{.: {{}}, site: {{size: 9K}}}}
+"#
+        ));
+    }
+    let stopped_host = host(&yaml(&tree));
+    let mut live_tree = tree.clone();
+    for (_, _, config) in browsers {
+        live_tree.push_str(&format!(
+            "  /home/mark/.config/{config}/SingletonLock: {{symlink: model-host-42}}\n"
+        ));
+    }
+    live_tree.push_str(&format!(
+        "hostname: model-host\nprocesses:\n{}",
+        process(42, "/", "")
+    ));
+    let live_host = host(&yaml(&live_tree));
+
+    for (profile, cache, _) in browsers {
+        let request = built_in_request(&format!("profile:{profile}"), "/home/mark");
+        let mut expected: Vec<(String, Option<&'static str>)> = [
+            "Default/Cache",
+            "Default/Code Cache",
+            "Profile 1/Cache",
+            "Profile 1/Code Cache",
+        ]
+        .into_iter()
+        .map(|suffix| (format!("/home/mark/.cache/{cache}/{suffix}"), None))
+        .collect();
+        expected.sort();
+
+        let mut stopped = plan(&dry_run(&stopped_host, &request));
+        stopped.sort();
+        assert_eq!(stopped, expected, "{profile} stopped match set");
+
+        let mut guarded = plan(&dry_run(&live_host, &request));
+        guarded.sort();
+        let blocked: Vec<_> = expected
+            .iter()
+            .map(|(path, _)| (path.clone(), Some("in_use")))
+            .collect();
+        assert_eq!(guarded, blocked, "{profile} live lock");
+    }
+    nothing_locked_or_deleted(&stopped_host);
+    nothing_locked_or_deleted(&live_host);
+}
+
 /// Each entry is present in the same fixture, including similar but
 /// out-of-scope names. The expected set pins what every built-in matches;
 /// changing it requires a new profile name, even when it narrows a match.

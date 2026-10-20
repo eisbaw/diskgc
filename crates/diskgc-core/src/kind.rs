@@ -55,10 +55,11 @@ pub enum PredicateName {
     IdleFor,
     Has,
     HasNot,
+    AppNotRunning,
 }
 
 impl PredicateName {
-    pub const ALL: [Self; 3] = [Self::IdleFor, Self::Has, Self::HasNot];
+    pub const ALL: [Self; 4] = [Self::IdleFor, Self::Has, Self::HasNot, Self::AppNotRunning];
 
     /// The name used in YAML and messages.
     pub fn name(self) -> &'static str {
@@ -66,6 +67,7 @@ impl PredicateName {
             Self::IdleFor => "idle_for",
             Self::Has => "has",
             Self::HasNot => "has_not",
+            Self::AppNotRunning => "app_not_running",
         }
     }
 
@@ -73,7 +75,7 @@ impl PredicateName {
     pub fn kinds(self) -> &'static [Kind] {
         match self {
             Self::IdleFor => &[Kind::Fs, Kind::CargoTarget, Kind::DockerBuildCache],
-            Self::Has | Self::HasNot => &[Kind::Fs],
+            Self::Has | Self::HasNot | Self::AppNotRunning => &[Kind::Fs],
         }
     }
 

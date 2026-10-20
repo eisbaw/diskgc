@@ -308,6 +308,25 @@ directory (same device and inode): a directory replaced between the open and
 the walk is `changed`. Only directories are locked; a candidate that is a
 single file is not.
 
+**Browser caches need an application lock check too.** A running Chromium
+family browser may hold no file descriptor in its disk cache; its live
+cache can therefore pass the general in-use scan. An `fs` source for such
+a cache uses `where: {app_not_running: .config/chromium/SingletonLock}`
+with each source root set to a home directory (an absolute lock path also
+works).
+The symlink's relative text is `hostname-pid`; diskgc never follows it.
+The source refuses a live PID on this host, including a reused PID, and
+fails closed for a foreign host, a malformed or unreadable lock, or a
+config directory that cannot be reached safely. An absent lock or a PID
+proved gone by a pidfd-backed `/proc` read allows the candidate. It is
+checked during planning and tallying, again under the candidate lock, and
+immediately before deletion or a command action after the process scan.
+The lock PID must be visible in diskgc's PID namespace. Do not use these
+profiles with a host home bind-mounted into a container that has a separate
+PID namespace: a live host PID could appear gone there. A browser started
+after the last check can still race the deletion; Chromium's symlink is
+not a lock diskgc can acquire to exclude that startup.
+
 **Every process, and only once settled.** The scan works in rounds: it
 lists the processes, then reads every one it has not read yet and every
 one that is due to be read again (below), and lists them again, until a

@@ -34,6 +34,9 @@ pub struct HostModel {
     /// What `uname -r` reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
+    /// What `uname -n` reports; default `model-host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     /// The mount table, in mount order (the order of mountinfo lines).
     /// Exactly one mount, at `/`, has no parent.
     pub mounts: Vec<MountSpec>,
@@ -536,6 +539,7 @@ pub enum Op {
     Openat2,
     Statx,
     ExecutableFile,
+    ReadLink,
     ReadDir,
     ReadHead,
     ReopenRegular,
@@ -545,6 +549,7 @@ pub enum Op {
     WallClock,
     Sleep,
     KernelRelease,
+    Hostname,
     Pids,
     ProcFds,
     ProcLinks,
@@ -568,6 +573,7 @@ impl Op {
             Self::Openat2 => "openat2",
             Self::Statx => "statx",
             Self::ExecutableFile => "executable_file",
+            Self::ReadLink => "read_link",
             Self::ReadDir => "read_dir",
             Self::ReadHead => "read_head",
             Self::ReopenRegular => "reopen_regular",
@@ -577,6 +583,7 @@ impl Op {
             Self::WallClock => "wall_clock",
             Self::Sleep => "sleep",
             Self::KernelRelease => "kernel_release",
+            Self::Hostname => "hostname",
             Self::Pids => "pids",
             Self::ProcFds => "proc_fds",
             Self::ProcLinks => "proc_links",

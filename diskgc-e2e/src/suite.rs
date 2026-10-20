@@ -38,8 +38,8 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite, ensure_suite,
-    fs_reclaim_suite, host_suite, inuse_suite,
+    browser_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite, engine_suite,
+    ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
 };
 
 /// Which gate runs a test.
@@ -121,6 +121,12 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "brave_cache_lock_live_then_stale_reclaims_only_cache",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: browser_suite::brave_cache_lock_live_then_stale_reclaims_only_cache,
+    },
     Test {
         name: "fs_reclaim_exact_exclusion_keeps_valuable_cache",
         tier: Tier::Fast,

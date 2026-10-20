@@ -550,6 +550,7 @@ fn reclaim<H: Delete>(
             skip.reason, skip.path, skip.detail
         )),
         Err(Stop::Walk(stop)) => walk_stopped(stop, out),
+        Err(Stop::Stopped(stop)) => out.err_line(format!("stopped {stop}")),
         Err(Stop::Failed(error)) => {
             out.err_line(format!("failed {} {dir:?} -- {error}", cause_tag(&error)));
         }

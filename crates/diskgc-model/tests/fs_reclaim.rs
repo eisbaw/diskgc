@@ -81,6 +81,11 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
   action: {command: [env, "PATH=/usr/bin", rm, -rf, "{path}"]}
   examples: {match: [/tmp/pytest-of-mark]}
+- name: guarded-cleaner
+  find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
+  where: {app_not_running: /tmp/browser-config/SingletonLock}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/pytest-of-mark]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -1206,6 +1211,31 @@ fn an_in_use_command_candidate_never_runs_the_cleaner() {
     assert!(exists(&host, "/tmp/pytest-of-b/f"));
     let plan = dry_run(&host, &request);
     assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+}
+
+/// A browser lock can appear after planning and the general process scan.
+/// The command action must recheck it at its final execution boundary.
+#[test]
+fn a_browser_lock_created_before_command_start_blocks_the_cleaner() {
+    let tree = format!(
+        "  /tmp/pytest-of-b: {}\n  /tmp/browser-config: {{.: {{}}}}\n",
+        old_dir("900M")
+    );
+    let events = "events:\n  - {at: {op: pids, nth: 2, when: after}, create: /tmp/browser-config/SingletonLock}\n";
+    let host = host(&yaml("", &tree, events));
+    let report = ensure(&host, &tmp("profile:guarded-cleaner"));
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-b"),
+        Some("in_use"),
+        "{report:#?}\n{:#?}",
+        host.trace()
+    );
+    assert!(
+        calls(&host, Op::RunCommand).is_empty(),
+        "{:#?}",
+        host.trace()
+    );
+    assert!(exists(&host, "/tmp/pytest-of-b/f"));
 }
 
 #[test]

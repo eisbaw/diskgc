@@ -233,7 +233,7 @@ under `profile`:
     "description": "Zephyr test runs left in /tmp",
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
-    "where": {"idle_for": null, "has": null, "has_not": null},
+    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null},
     "min_idle_for": null,
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
@@ -252,7 +252,7 @@ under `profile`:
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them); `find.paths`, `find.exclude` and `find.type` are `null` for
   `cargo-target`.
-- `where` always has its three predicates, `null` when unused;
+- `where` always has its predicates, `null` when unused;
   `idle_for` is a duration (`3d`).
 - `min_idle_for` is a source's mandatory minimum age, or `null`; it is
   `null` for filters. A tier's positive idle filters may require longer.
@@ -629,7 +629,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
-| `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. |
+| `where` | filters (at least one predicate); optional on sources, `has`, `has_not`, `app_not_running` | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). Config load and `check` reject examples that contradict the path patterns. |
@@ -648,9 +648,13 @@ required}}`.
 |---|---|---|
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
+| `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only if the lock is absent in a safely reached directory, or names this host and a PID proved gone. A live PID, including a reused PID, a foreign host, malformed lock, unreadable lock or unsafe path refuses the candidate. Each source names one application's lock. | `fs` sources only |
 
-In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations) or
-`where: {has: CACHEDIR.TAG}` (one file name); each predicate at most once
+In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations),
+`where: {has: CACHEDIR.TAG}` (one file name), or
+`where: {app_not_running: .config/chromium/SingletonLock}`. A present null or
+blank `app_not_running` is a load-time error; omitting the key is allowed.
+Each predicate appears at most once
 per profile, all of a profile's predicates must hold. A predicate on a kind
 that does not support it is a load-time error. Two `idle_for` in one term
 (its `filter:`s) and the source's `min_idle_for` combine to the longest;
@@ -850,6 +854,7 @@ listed as planned, not shipped.
 | containers | `containers-image-tmp` | top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` files or directories; `min_idle_for: 3d` is mandatory | `delete` |
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
 | browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
+| browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to name a stopped application | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
@@ -898,6 +903,21 @@ set and therefore requires a v2 preset and a new built-in profile name.
 For `mktemp-dir`, a nested match inside another candidate of the same
 profile belongs to the outer candidate only (the existing outer-match
 rule). Thus `tmp.*` below another `tmp.*` is not a second candidate.
+
+The browser cache sources take a home directory as their required root. They
+check that browser's `SingletonLock` before judging and again before deleting
+each cache. Run diskgc in the same PID namespace as the browser: with a host
+home bind-mounted into a container's separate PID namespace, the lock PID may
+appear gone even while the browser runs. They match only `Cache` and `Code
+Cache`; the browser profile, `WebStorage`, and `Service Worker/CacheStorage`
+never match. A custom browser user-data or disk-cache directory is outside
+these built-ins. The lock check
+is specific to the default browser configuration; do not treat it as a
+general process check for arbitrary Electron applications. The surveyed
+Cursor and teams-for-linux installations have cache directories but no
+`SingletonLock` in their application roots, so their profiles are deferred
+until a reliable app-liveness signal is available. Firefox `cache2` also
+needs a different guard and is outside this Chromium-family set.
 
 - `pytest-tmp` takes one test directory per candidate
   (`pytest-of-<user>/pytest-<N>/<test>`), not the whole numbered session.

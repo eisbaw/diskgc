@@ -188,6 +188,65 @@
     no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv]
   verified_with: XDG Base Directory Specification 0.8; host XDG_CACHE_HOME layout surveyed 2026-10-20
 
+# Browser cache paths are below the supplied home root. Each application
+# needs its own source because app_not_running checks one SingletonLock.
+# Never match the profile directory, WebStorage or Service Worker data.
+- name: brave-browser-cache
+  category: browsers
+  description: Brave disk and compiled code caches in standard browser profiles
+  find:
+    roots: required
+    paths: [.cache/BraveSoftware/Brave-Browser/Default/Cache, .cache/BraveSoftware/Brave-Browser/Default/Code Cache, ".cache/BraveSoftware/Brave-Browser/Profile */Cache", ".cache/BraveSoftware/Brave-Browser/Profile */Code Cache"]
+    type: dir
+  where: {app_not_running: .config/BraveSoftware/Brave-Browser/SingletonLock}
+  action: delete
+  examples:
+    match: [/home/mark/.cache/BraveSoftware/Brave-Browser/Default/Cache, /home/mark/.cache/BraveSoftware/Brave-Browser/Profile 1/Code Cache]
+    no_match: [/home/mark/.cache/BraveSoftware/Brave-Browser/Default, /home/mark/.config/BraveSoftware/Brave-Browser/Default/WebStorage, /home/mark/.config/BraveSoftware/Brave-Browser/Default/Service Worker/CacheStorage]
+  verified_with: Brave Browser 154.1.96.61 read-only host layout 2026-10-20
+
+- name: chrome-browser-cache
+  category: browsers
+  description: Google Chrome disk and compiled code caches in standard browser profiles
+  find:
+    roots: required
+    paths: [.cache/google-chrome/Default/Cache, .cache/google-chrome/Default/Code Cache, ".cache/google-chrome/Profile */Cache", ".cache/google-chrome/Profile */Code Cache"]
+    type: dir
+  where: {app_not_running: .config/google-chrome/SingletonLock}
+  action: delete
+  examples:
+    match: [/home/mark/.cache/google-chrome/Default/Cache, /home/mark/.cache/google-chrome/Profile 2/Code Cache]
+    no_match: [/home/mark/.config/google-chrome/Default, /home/mark/.config/google-chrome/Default/Service Worker/CacheStorage, /home/mark/.config/google-chrome/Default/WebStorage]
+  verified_with: Google Chrome 132.0.6834.110 (host Last Version; 2026-10-20 dry run found no cache candidates)
+
+- name: chromium-browser-cache
+  category: browsers
+  description: Chromium disk and compiled code caches in standard browser profiles
+  find:
+    roots: required
+    paths: [.cache/chromium/Default/Cache, .cache/chromium/Default/Code Cache, ".cache/chromium/Profile */Cache", ".cache/chromium/Profile */Code Cache"]
+    type: dir
+  where: {app_not_running: .config/chromium/SingletonLock}
+  action: delete
+  examples:
+    match: [/home/mark/.cache/chromium/Default/Cache, /home/mark/.cache/chromium/Profile 1/Code Cache]
+    no_match: [/home/mark/.config/chromium/Default, /home/mark/.config/chromium/Default/Service Worker/CacheStorage, /home/mark/.config/chromium/Default/WebStorage]
+  verified_with: Chromium 145.0.7632.159 (host Last Version; 2026-10-20 dry run found no cache candidates)
+
+- name: edge-browser-cache
+  category: browsers
+  description: Microsoft Edge disk and compiled code caches in standard browser profiles
+  find:
+    roots: required
+    paths: [.cache/microsoft-edge/Default/Cache, .cache/microsoft-edge/Default/Code Cache, ".cache/microsoft-edge/Profile */Cache", ".cache/microsoft-edge/Profile */Code Cache"]
+    type: dir
+  where: {app_not_running: .config/microsoft-edge/SingletonLock}
+  action: delete
+  examples:
+    match: [/home/mark/.cache/microsoft-edge/Default/Cache, /home/mark/.cache/microsoft-edge/Profile 3/Code Cache]
+    no_match: [/home/mark/.config/microsoft-edge/Default, /home/mark/.config/microsoft-edge/Default/Service Worker/CacheStorage, /home/mark/.config/microsoft-edge/Default/WebStorage]
+  verified_with: Microsoft Edge 132.0.2957.127 (host Last Version and cache layout; 2026-10-20)
+
 - name: idle-1h
   category: filters
   description: not used or changed for an hour, as the source's kind measures it

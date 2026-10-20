@@ -151,6 +151,15 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         .clone()
         .unwrap_or_else(|| DEFAULT_KERNEL.to_owned());
     let mut state = State::new(model.clock.0, kernel);
+    if let Some(hostname) = &model.hostname {
+        if hostname.is_empty() || hostname.contains(['/', '\0']) {
+            return Err(LoadError::new(
+                "hostname",
+                "must be a nonempty host name without `/` or NUL",
+            ));
+        }
+        state.hostname = hostname.clone();
+    }
     if let Some(pid) = model.own_pid {
         state.own_pid = pid;
     }
@@ -814,6 +823,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
         let fallible = [
             Op::Openat2,
             Op::Statx,
+            Op::ReadLink,
             Op::ReadDir,
             Op::Unlinkat,
             Op::Fchmod,

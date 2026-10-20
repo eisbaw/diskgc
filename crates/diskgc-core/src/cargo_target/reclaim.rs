@@ -314,11 +314,11 @@ impl<H: Delete> Run<'_, '_, H> {
             if evidence.is_empty() {
                 Ok(())
             } else {
-                Err(Skip::new(
+                Err(NotDeleted::Skipped(Skip::new(
                     Reason::InUse,
                     target.path.clone(),
                     evidence.join("; "),
-                ))
+                )))
             }
         };
         let done = match clear_and_delete(
@@ -332,6 +332,7 @@ impl<H: Delete> Run<'_, '_, H> {
             Ok(done) => done,
             Err(NotDeleted::Skipped(skip)) => return Err(ReclaimEnd::Skipped(skip)),
             Err(NotDeleted::Failed(error)) => return Err(failed(candidate.path(), error)),
+            Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
         };
         self.removed_entries += done.removed_entries;
         self.removed_bytes = self.removed_bytes.saturating_add(done.removed_bytes);

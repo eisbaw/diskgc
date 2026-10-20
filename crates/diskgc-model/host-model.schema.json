@@ -43,6 +43,13 @@
       "format": "uint32",
       "minimum": 0
     },
+    "hostname": {
+      "description": "What `uname -n` reports; default `model-host`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "kernel": {
       "description": "What `uname -r` reports.",
       "type": [
@@ -800,6 +807,7 @@
         "openat2",
         "statx",
         "executable_file",
+        "read_link",
         "read_dir",
         "read_head",
         "reopen_regular",
@@ -809,6 +817,7 @@
         "wall_clock",
         "sleep",
         "kernel_release",
+        "hostname",
         "pids",
         "proc_fds",
         "proc_links",

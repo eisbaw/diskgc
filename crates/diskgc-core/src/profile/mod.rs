@@ -105,8 +105,9 @@ pub enum Body {
 pub struct Source {
     pub roots: Roots,
     pub finds: Finds,
-    /// The profile's own predicates: `has` / `has_not` only. The source
-    /// can set `min_idle_for`; a tier can require longer with `filter:`s. A term's
+    /// The profile's own predicates: `has`, `has_not`, and
+    /// `app_not_running`. The source can set `min_idle_for`; a tier can
+    /// require longer with `filter:`s. A term's
     /// filters narrow further; `!profile:` and `protect` ignore them
     /// (docs/reference.md, Selection grammar and `protect`).
     pub where_: Where,
@@ -169,6 +170,8 @@ pub struct Where {
     pub has: Option<String>,
     /// A file name the candidate must not contain.
     pub has_not: Option<String>,
+    /// A Chromium-family `SingletonLock` whose process must have exited.
+    pub app_not_running: Option<String>,
 }
 
 impl Where {
@@ -178,6 +181,7 @@ impl Where {
             (PredicateName::IdleFor, self.idle_for.is_some()),
             (PredicateName::Has, self.has.is_some()),
             (PredicateName::HasNot, self.has_not.is_some()),
+            (PredicateName::AppNotRunning, self.app_not_running.is_some()),
         ];
         used.into_iter()
             .filter_map(|(name, used)| used.then_some(name))

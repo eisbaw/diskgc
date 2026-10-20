@@ -845,6 +845,10 @@ pub trait Host {
             "this host does not support command executable preflight",
         ))
     }
+    /// Text of a symlink named by one entry below an already reached
+    /// directory. Does not follow the link. Callers compare the entry's
+    /// identity around this read when replacement matters.
+    fn read_link(&self, dir: &Self::Fd, name: &OsStr) -> Result<PathBuf, HostError>;
 
     /// The names in the open directory `dir` (`getdents64` until the end, on
     /// a fresh `O_RDONLY | O_DIRECTORY` open of `.` below `dir`, so `dir` may
@@ -915,6 +919,9 @@ pub trait Host {
 
     /// The kernel release string (`uname -r`).
     fn kernel_release(&self) -> Result<String, HostError>;
+
+    /// `uname -n`, in the same UTS namespace where the process check runs.
+    fn hostname(&self) -> Result<String, HostError>;
 
     /// The visible processes (thread-group ids; the readers below cover
     /// every task of each).

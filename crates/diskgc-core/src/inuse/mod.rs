@@ -738,6 +738,8 @@ pub enum NotDeleted {
     /// An error of the run: the process list could not be read, or no scan
     /// stayed fresh until the deletion could start.
     Failed(HostError),
+    /// A caller's last safety check hit a run-wide failure or deadline.
+    Stopped(crate::outcome::Stop),
 }
 
 impl Checker<'_> {
@@ -778,7 +780,7 @@ pub fn clear_and_delete<H: Delete>(
     candidate: &Candidate<'_, H::Fd>,
     record: &WalkRecord,
     options: DeleteOptions,
-    also: &mut dyn FnMut(&Scan) -> Result<(), Skip>,
+    also: &mut dyn FnMut(&Scan) -> Result<(), NotDeleted>,
 ) -> Result<Deletion, NotDeleted> {
     let failed = |detail: String| {
         NotDeleted::Failed(HostError::invalid(
@@ -792,7 +794,7 @@ pub fn clear_and_delete<H: Delete>(
             .check(host, candidate, record)
             .map_err(NotDeleted::Failed)?
             .map_err(NotDeleted::Skipped)?;
-        also(checker.latest().expect("the check made or kept one")).map_err(NotDeleted::Skipped)?;
+        also(checker.latest().expect("the check made or kept one"))?;
         match delete_cleared(host, clear, candidate, record, options) {
             Ok(done) => return Ok(done),
             Err(NotCleared::Expired(_)) if attempt == 0 => checker.forget(),

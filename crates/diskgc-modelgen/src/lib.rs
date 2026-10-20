@@ -249,6 +249,7 @@ pub fn host_model(
                 host_model: diskgc_model::spec::FORMAT_VERSION,
                 clock: clock(),
                 kernel: None,
+                hostname: None,
                 mounts,
                 tree: BTreeMap::from([
                     (PathBuf::from(ROOT), NodeSpec::Dir(root)),

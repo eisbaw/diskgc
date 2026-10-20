@@ -430,6 +430,15 @@ impl<H: Host> Host for Controlled<H> {
         self.host.statx(base, path)
     }
 
+    fn read_link(
+        &self,
+        dir: &Self::Fd,
+        name: &std::ffi::OsStr,
+    ) -> Result<std::path::PathBuf, HostError> {
+        self.before("read_link");
+        self.host.read_link(dir, name)
+    }
+
     fn read_dir(&self, dir: &Self::Fd, limit: usize) -> Result<DirListing, HostError> {
         self.before("read_dir");
         self.host.read_dir(dir, limit)
@@ -483,6 +492,11 @@ impl<H: Host> Host for Controlled<H> {
     fn kernel_release(&self) -> Result<String, HostError> {
         self.before("kernel_release");
         self.host.kernel_release()
+    }
+
+    fn hostname(&self) -> Result<String, HostError> {
+        self.before("hostname");
+        self.host.hostname()
     }
 
     fn pids(&self) -> Result<Vec<Pid>, HostError> {

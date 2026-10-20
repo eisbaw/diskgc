@@ -928,6 +928,13 @@ impl Host for Gated {
     fn statx(&self, base: Base<'_, ModelFd>, path: &Path) -> Result<Stat, HostError> {
         self.0.statx(base, path)
     }
+    fn read_link(
+        &self,
+        dir: &ModelFd,
+        name: &std::ffi::OsStr,
+    ) -> Result<std::path::PathBuf, HostError> {
+        self.0.read_link(dir, name)
+    }
     fn read_dir(&self, dir: &ModelFd, limit: usize) -> Result<DirListing, HostError> {
         self.0.read_dir(dir, limit)
     }
@@ -962,6 +969,9 @@ impl Host for Gated {
     }
     fn kernel_release(&self) -> Result<String, HostError> {
         self.0.kernel_release()
+    }
+    fn hostname(&self) -> Result<String, HostError> {
+        self.0.hostname()
     }
     fn pids(&self) -> Result<Vec<Pid>, HostError> {
         self.0.pids()

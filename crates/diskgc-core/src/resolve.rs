@@ -479,6 +479,13 @@ mod tests {
                 _ => panic!("resolve only statxes fds"),
             }
         }
+        fn read_link(
+            &self,
+            _: &usize,
+            _: &std::ffi::OsStr,
+        ) -> Result<std::path::PathBuf, HostError> {
+            unreachable!()
+        }
         fn read_dir(&self, _: &usize, _: usize) -> Result<crate::host::DirListing, HostError> {
             unreachable!()
         }
@@ -512,6 +519,9 @@ mod tests {
             unreachable!()
         }
         fn kernel_release(&self) -> Result<String, HostError> {
+            unreachable!()
+        }
+        fn hostname(&self) -> Result<String, HostError> {
             unreachable!()
         }
         fn pids(&self) -> Result<Vec<Pid>, HostError> {

@@ -148,6 +148,9 @@ fn protocol<H: Delete>(
             )));
         }
         check_deadline(host, deadline, path)?;
+        if let Some(app_lock) = &judge.find.app_not_running {
+            super::app::check(host, &found.root, app_lock, deadline)??;
+        }
         let exit = match host.run_command(cwd_fd, &run) {
             CommandInvocation::Started(result) => {
                 *attempted = true;

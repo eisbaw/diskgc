@@ -226,6 +226,9 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
     if where_.is_empty() {
         problems.push("a filter's `where` names at least one predicate".to_owned());
     }
+    if where_.app_not_running.is_some() {
+        problems.push("`app_not_running` is a source predicate (the lock path belongs to the application whose cache the source finds)".to_owned());
+    }
     for (field, present, why) in [
         (
             "kind",
@@ -282,8 +285,9 @@ fn source(
     for predicate in where_.predicates() {
         if predicate == PredicateName::IdleFor {
             problems.push(
-                "a source profile's `where` takes only `has` and `has_not`: set a mandatory \
-                 minimum with `min_idle_for`, or a tier policy with a filter (`&& filter:idle-3d`)"
+                "a source profile's `where` takes only `has`, `has_not`, and \
+                 `app_not_running`: set a mandatory minimum with `min_idle_for`, \
+                 or a tier policy with a filter (`&& filter:idle-3d`)"
                     .to_owned(),
             );
         } else if !predicate.supported_by(kind) {
@@ -515,10 +519,28 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
             ));
         }
     }
+    if let Some(path) = &spec.app_not_running {
+        if let Err(problem) = placeholders(path) {
+            problems.push(format!("`app_not_running`: {problem}"));
+        }
+        let names = path.strip_prefix('/').unwrap_or(path).split('/');
+        if std::path::Path::new(path)
+            .file_name()
+            .is_none_or(|name| name != "SingletonLock")
+            || names
+                .into_iter()
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || path.contains('\0')
+            || path.starts_with('~')
+        {
+            problems.push("`app_not_running` must name a normalized path ending in `SingletonLock` (absolute or relative to each source root)".to_owned());
+        }
+    }
     Where {
         idle_for: spec.idle_for.map(|d| IdleFor(d.0)),
         has: spec.has.clone(),
         has_not: spec.has_not.clone(),
+        app_not_running: spec.app_not_running.clone(),
     }
 }
 

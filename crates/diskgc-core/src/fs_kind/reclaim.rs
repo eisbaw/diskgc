@@ -150,15 +150,23 @@ fn protocol<H: Delete>(
         make_writable,
         deadline,
     };
-    let deletion =
-        match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| Ok(())) {
-            Ok(deletion) => deletion,
-            Err(NotDeleted::Skipped(skip)) => {
-                check_deadline(host, deadline, path)?;
-                return Err(skip.into());
-            }
-            Err(NotDeleted::Failed(error)) => return Err(failed(error)),
-        };
+    let deletion = match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| {
+        if let Some(lock) = &judge.find.app_not_running {
+            super::app::check(host, &found.root, lock, deadline)
+                .map_err(NotDeleted::Stopped)?
+                .map_err(NotDeleted::Skipped)
+        } else {
+            Ok(())
+        }
+    }) {
+        Ok(deletion) => deletion,
+        Err(NotDeleted::Skipped(skip)) => {
+            check_deadline(host, deadline, path)?;
+            return Err(skip.into());
+        }
+        Err(NotDeleted::Failed(error)) => return Err(failed(error)),
+        Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
+    };
     done.removed_entries = deletion.removed_entries;
     done.removed_bytes = deletion.removed_bytes;
     ReclaimEnd::of(deletion.end)

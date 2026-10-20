@@ -158,6 +158,9 @@ impl Judge<'_> {
         deadline: Option<MonoTime>,
     ) -> Judged<Walked> {
         judged!(self.source_where(host, reached.parent(), found, deadline));
+        if let Some(lock) = &self.find.app_not_running {
+            judged!(super::app::check(host, &found.root, lock, deadline));
+        }
         self.walk(host, candidate, found, idle, deadline)
     }
 

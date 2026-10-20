@@ -28,6 +28,7 @@
 //!   and deleted by the engine's identity-checked delete. Given a
 //!   [`crate::host::Delete`] host.
 
+mod app;
 mod command;
 mod discover;
 mod judge;
@@ -61,6 +62,7 @@ pub struct Find {
     pub has: Option<String>,
     /// ... and one it must not.
     pub has_not: Option<String>,
+    pub app_not_running: Option<std::path::PathBuf>,
 }
 
 impl Find {
@@ -103,6 +105,10 @@ impl Find {
             entry_type,
             has: where_.has.clone(),
             has_not: where_.has_not.clone(),
+            app_not_running: where_
+                .app_not_running
+                .as_ref()
+                .map(|path| std::path::PathBuf::from(path.replace("{uid}", &uid.to_string()))),
         }
     }
 }

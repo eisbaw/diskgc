@@ -223,6 +223,10 @@ fn where_json(where_: &Where) -> Json {
         ),
         ("has", opt_str(where_.has.as_deref())),
         ("has_not", opt_str(where_.has_not.as_deref())),
+        (
+            "app_not_running",
+            opt_str(where_.app_not_running.as_deref()),
+        ),
     ])
 }
 
@@ -389,6 +393,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(name) = &where_.has_not {
         parts.push(format!("has_not: {}", yaml_scalar(name)));
+    }
+    if let Some(path) = &where_.app_not_running {
+        parts.push(format!("app_not_running: {}", yaml_scalar(path)));
     }
     (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(", ")))
 }

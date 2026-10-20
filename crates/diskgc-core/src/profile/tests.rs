@@ -44,6 +44,47 @@ const BUILT_IN_FILTERS: [&str; 7] = [
     "idle-1h", "idle-1d", "idle-2d", "idle-3d", "idle-7d", "idle-10d", "idle-30d",
 ];
 
+#[test]
+fn app_not_running_is_a_validated_fs_source_predicate() {
+    let source = |value: &str| {
+        format!(
+            "- name: browser\n  find: {{roots: [/tmp], paths: [cache], type: dir}}\n  where: {{app_not_running: '{value}'}}\n  action: delete\n  examples: {{match: [/tmp/cache]}}\n"
+        )
+    };
+    let library =
+        with_user(&source("/home/{uid}/.config/chromium/SingletonLock")).expect("valid lock path");
+    with_user(&source(".config/chromium/SingletonLock")).expect("lock relative to each root");
+    let Body::Source(browser) = &library.get("browser").unwrap().body else {
+        panic!("source");
+    };
+    assert_eq!(
+        browser.where_.predicates(),
+        vec![PredicateName::AppNotRunning]
+    );
+    for path in [
+        "../SingletonLock",
+        "/tmp/other",
+        "/tmp/../SingletonLock",
+        "/tmp//SingletonLock",
+    ] {
+        assert_has(&user_errors(&source(path)), "app_not_running");
+    }
+    for value in ["", "~", "null", "NULL"] {
+        let yaml = format!(
+            "- name: browser\n  find: {{roots: [/tmp], paths: [cache], type: dir}}\n  where: {{app_not_running: {value}}}\n  action: delete\n"
+        );
+        assert!(
+            parse_profiles(&yaml).is_err(),
+            "present null app_not_running was accepted: {yaml}"
+        );
+    }
+    assert_has(&user_errors(&source("")), "app_not_running");
+    assert_has(
+        &user_errors("- name: only-filter\n  where: {app_not_running: /tmp/SingletonLock}\n"),
+        "source predicate",
+    );
+}
+
 // ---- AC #3: the shipped built-ins load, and a broken one fails the gate
 
 /// AC #3. The embedded YAML passes every static rule and holds the wave-1
@@ -56,9 +97,13 @@ fn the_built_in_library_loads() {
     let names: Vec<&str> = library.profiles().map(|p| p.name.as_str()).collect();
     let mut want: Vec<&str> = BUILT_IN_FILTERS.to_vec();
     want.extend([
+        "brave-browser-cache",
         "bun-cache",
         "cargo-target",
         "containers-image-tmp",
+        "chrome-browser-cache",
+        "chromium-browser-cache",
+        "edge-browser-cache",
         "go-mod-cache",
         "nix-user-cache",
         "pytest-cache",
@@ -103,6 +148,57 @@ fn the_built_in_library_loads() {
         panic!("pytest-tmp is a source");
     };
     assert_eq!(pytest.checkouts, Checkouts::Allow);
+}
+
+/// The cache deletion units and their application locks are fixed under each
+/// built-in name. Changing a path needs a new profile name, including when a
+/// browser changes where it keeps its profile data.
+#[test]
+fn browser_cache_builtins_have_frozen_paths_and_locks() {
+    let library = Library::builtin().expect("built-ins");
+    for (name, cache, config) in [
+        (
+            "brave-browser-cache",
+            "BraveSoftware/Brave-Browser",
+            "BraveSoftware/Brave-Browser",
+        ),
+        ("chrome-browser-cache", "google-chrome", "google-chrome"),
+        ("chromium-browser-cache", "chromium", "chromium"),
+        ("edge-browser-cache", "microsoft-edge", "microsoft-edge"),
+    ] {
+        let Body::Source(source) = &library.get(name).expect("shipped browser cache").body else {
+            panic!("{name} must be a source")
+        };
+        assert_eq!(source.roots, Roots::Required, "{name}");
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            },
+            "{name}"
+        );
+        assert_eq!(source.checkouts, Checkouts::Refuse, "{name}");
+        assert_eq!(
+            source.where_.app_not_running.as_deref(),
+            Some(format!(".config/{config}/SingletonLock").as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            source.finds,
+            Finds::Paths {
+                patterns: [
+                    format!(".cache/{cache}/Default/Cache"),
+                    format!(".cache/{cache}/Default/Code Cache"),
+                    format!(".cache/{cache}/Profile */Cache"),
+                    format!(".cache/{cache}/Profile */Code Cache"),
+                ]
+                .to_vec(),
+                exclude: Vec::new(),
+                entry_type: EntryType::Dir,
+            },
+            "{name}"
+        );
+    }
 }
 
 /// Built-in examples are checked as patterns, including negative paths.
@@ -541,7 +637,7 @@ fn sources_have_no_idle_for_of_their_own() {
     for where_ in ["{idle_for: 10d}", "{idle_for: 1d, has: CACHEDIR.TAG}"] {
         assert_has(
             &user_errors(&fs_source(&format!("{example}  where: {where_}\n"))),
-            "a source profile's `where` takes only `has` and `has_not`",
+            "a source profile's `where` takes only `has`, `has_not`, and `app_not_running`",
         );
     }
     let errors = user_errors(

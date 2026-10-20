@@ -21,6 +21,8 @@ pub enum Stop {
     /// process list, a scan slower than the freshness bound, a checker
     /// whose options disagree with the walk's rules).
     Failed(HostError),
+    /// A caller's final safety check stopped the run.
+    Stopped(diskgc_core::outcome::Stop),
 }
 
 /// The deletion step for one candidate, in the order of docs/safety.md,
@@ -47,6 +49,7 @@ pub fn delete_unused<H: Delete>(
         .map_err(|e| match e {
             NotDeleted::Skipped(skip) => Stop::Skipped(skip),
             NotDeleted::Failed(error) => Stop::Failed(error),
+            NotDeleted::Stopped(stop) => Stop::Stopped(stop),
         })?;
     drop(lock);
     Ok(done)

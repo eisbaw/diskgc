@@ -839,6 +839,44 @@ impl Host for ModelHost {
         })
     }
 
+    fn read_link(&self, dir: &ModelFd, name: &OsStr) -> Result<PathBuf, HostError> {
+        if !is_single_name(name) {
+            violation(format!("read_link of {:?}: expected one entry name", name));
+        }
+        let ofd = self.fd_ofd(dir);
+        let full = self.base_path(Base::Dir(dir), Path::new(name));
+        let shown = full.display().to_string();
+        self.call(Op::ReadLink, Some(full), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("readlinkat", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let found = inner.state.child(inner.loc_of(ofd), name);
+            match found {
+                Ok(loc) => match &inner.state.inode(loc).kind {
+                    Kind::Symlink(target) => (
+                        Ok(target.clone()),
+                        Some(inner.state.dev_ino(loc)),
+                        "ok".to_owned(),
+                    ),
+                    _ => (
+                        Err(HostError::errno("readlinkat", &shown, Errno::EINVAL)),
+                        None,
+                        errno_text(Errno::EINVAL),
+                    ),
+                },
+                Err(e) => (
+                    Err(HostError::errno("readlinkat", &shown, e)),
+                    None,
+                    errno_text(e),
+                ),
+            }
+        })
+    }
+
     fn command_path(&self) -> OsString {
         OsString::from("/usr/bin:/bin")
     }
@@ -1047,6 +1085,12 @@ impl Host for ModelHost {
     fn kernel_release(&self) -> Result<String, HostError> {
         self.call(Op::KernelRelease, None, None, |inner| {
             (Ok(inner.state.kernel.clone()), None, "ok".to_owned())
+        })
+    }
+
+    fn hostname(&self) -> Result<String, HostError> {
+        self.call(Op::Hostname, None, None, |inner| {
+            (Ok(inner.state.hostname.clone()), None, "ok".to_owned())
         })
     }
 

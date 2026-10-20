@@ -284,6 +284,7 @@ pub struct State {
     /// namespace).
     pub bound_sockets: BTreeSet<DevIno>,
     pub kernel: String,
+    pub hostname: String,
     pub wall_start: jiff::Timestamp,
     /// Virtual time since the start of the run.
     pub elapsed: Duration,
@@ -305,6 +306,7 @@ impl State {
             command_error_after_start: false,
             bound_sockets: BTreeSet::new(),
             kernel,
+            hostname: "model-host".to_owned(),
             wall_start,
             elapsed: Duration::ZERO,
         }
