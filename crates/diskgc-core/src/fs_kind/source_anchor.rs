@@ -1,0 +1,329 @@
+//! Source evidence for a build output. A marker alone cannot establish
+//! rebuildability: the recorded source must still exist outside the output.
+//! This check runs in discovery and again during judgement under the
+//! candidate lock, with no symlink followed at either location.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+use super::discover::check_deadline;
+use super::judge::unreachable_root;
+use crate::engine::{Identity, Reason, Skip};
+use crate::host::{Access, Base, FileType, Host, MonoTime};
+use crate::outcome::{Judged, Stop};
+use crate::profile::SourceAnchor;
+use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
+
+const CMAKE_CACHE: &str = "CMakeCache.txt";
+const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
+const MAX_CMAKE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Evidence recorded when a build output is found. The source file's
+/// identity must agree at every later judgement, including under the lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceEvidence {
+    pub marker: &'static str,
+    pub source: PathBuf,
+    pub source_file: Identity,
+}
+
+/// Evidence the caller expects from a particular candidate. Discovery and
+/// locked judgement use the same values and differ only in how they reach it.
+#[derive(Clone, Copy)]
+pub(super) struct AnchorCheck<'a> {
+    kind: SourceAnchor,
+    root: &'a Path,
+    candidate: &'a Path,
+    expected: Identity,
+    deadline: Option<MonoTime>,
+}
+
+impl<'a> AnchorCheck<'a> {
+    pub(super) fn new(
+        kind: SourceAnchor,
+        root: &'a Path,
+        candidate: &'a Path,
+        expected: Identity,
+        deadline: Option<MonoTime>,
+    ) -> Self {
+        Self {
+            kind,
+            root,
+            candidate,
+            expected,
+            deadline,
+        }
+    }
+}
+
+pub(super) fn check<H: Host>(
+    host: &H,
+    request: AnchorCheck<'_>,
+    parent: &Resolved<H::Fd>,
+    name: &OsStr,
+) -> Judged<Option<SourceEvidence>> {
+    let AnchorCheck {
+        candidate,
+        expected,
+        deadline,
+        ..
+    } = request;
+    check_deadline(host, deadline, candidate)?;
+    let (candidate_fd, candidate_stat) = match open_beneath(
+        host,
+        &parent.fd,
+        parent.mount.id,
+        Path::new(name),
+        Access::Path,
+        Want::Directory,
+    ) {
+        Ok(opened) => opened,
+        Err(error) => return Ok(Err(unreachable_build(candidate, candidate, error)?)),
+    };
+    if Identity::of(&candidate_stat) != Some(expected) {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            candidate.to_owned(),
+            "the candidate changed before its source anchor was read",
+        )));
+    }
+    check_opened(host, request, &candidate_fd, parent.mount.id)
+}
+
+/// Recheck the source through the candidate fd the caller has already
+/// reached. Under reclaim this is the locked directory, not its current name.
+pub(super) fn check_opened<H: Host>(
+    host: &H,
+    request: AnchorCheck<'_>,
+    candidate_fd: &H::Fd,
+    mount_id: u64,
+) -> Judged<Option<SourceEvidence>> {
+    let AnchorCheck {
+        kind,
+        root,
+        candidate,
+        expected,
+        deadline,
+    } = request;
+    check_deadline(host, deadline, candidate)?;
+    let stat = host
+        .statx(Base::Dir(candidate_fd), Path::new(""))
+        .map_err(|error| Stop::Failed {
+            path: candidate.to_owned(),
+            error,
+        })?;
+    if Identity::of(&stat) != Some(expected) {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            candidate.to_owned(),
+            "the reached candidate is not the one whose source was discovered",
+        )));
+    }
+    match kind {
+        SourceAnchor::Cmake => cmake(host, root, candidate, candidate_fd, mount_id, deadline),
+    }
+}
+
+/// One CMake candidate. `None` means its marker does not establish a
+/// surviving source; an unsafe or unreadable path is a visible refusal.
+pub(super) fn cmake<H: Host>(
+    host: &H,
+    root: &Path,
+    candidate: &Path,
+    candidate_fd: &H::Fd,
+    mount_id: u64,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<SourceEvidence>> {
+    let cache_path = candidate.join(CMAKE_CACHE);
+    check_deadline(host, deadline, &cache_path)?;
+    let (cache_fd, cache_stat) = match open_beneath(
+        host,
+        candidate_fd,
+        mount_id,
+        Path::new(CMAKE_CACHE),
+        Access::Path,
+        Want::Any,
+    ) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &cache_path, error)?)),
+    };
+    if cache_stat.file_type != Some(FileType::Regular) {
+        return Ok(Ok(None));
+    }
+    let Some(size) = cache_stat.size else {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedFs,
+            cache_path,
+            "CMakeCache.txt size was not reported",
+        )));
+    };
+    if size > MAX_CMAKE_CACHE_BYTES {
+        return Ok(Err(Skip::new(
+            Reason::TooManyEntries,
+            cache_path,
+            "CMakeCache.txt exceeds the 2 MiB source-anchor read limit",
+        )));
+    }
+    let bytes = match host.read_head(&cache_fd, MAX_CMAKE_CACHE_BYTES as usize + 1) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Err(Skip::new(
+                Reason::Unreadable,
+                cache_path,
+                format!("cannot read CMakeCache.txt: {error}"),
+            )));
+        }
+    };
+    if bytes.len() as u64 != size {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            cache_path,
+            "CMakeCache.txt changed while its source anchor was read",
+        )));
+    }
+    let Some(source) = cmake_source(&bytes, root, candidate) else {
+        return Ok(Ok(None));
+    };
+    check_deadline(host, deadline, &source)?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            return Ok(Err(Skip::new(
+                Reason::UnsupportedFs,
+                source,
+                format!("cannot check source mounts: {error}"),
+            )));
+        }
+    };
+    let source_dir = match resolve_in(host, &mounts, &source, Want::Directory) {
+        Ok(dir) => dir,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &source, error)?)),
+    };
+    if source_dir.mount.id != mount_id {
+        return Ok(Err(Skip::new(
+            Reason::OtherFs,
+            source,
+            "the recorded CMake source is on another filesystem",
+        )));
+    }
+    let source_file_path = source.join("CMakeLists.txt");
+    check_deadline(host, deadline, &source_file_path)?;
+    let (_, source_file_stat) = match open_beneath(
+        host,
+        &source_dir.fd,
+        source_dir.mount.id,
+        Path::new("CMakeLists.txt"),
+        Access::Path,
+        Want::Any,
+    ) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &source_file_path, error)?)),
+    };
+    if source_file_stat.file_type != Some(FileType::Regular) {
+        return Ok(Ok(None));
+    }
+    let Some(source_file) = Identity::of(&source_file_stat) else {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedFs,
+            source_file_path,
+            "CMakeLists.txt identity was not reported",
+        )));
+    };
+    Ok(Ok(Some(SourceEvidence {
+        marker: CMAKE_CACHE,
+        source,
+        source_file,
+    })))
+}
+
+fn cmake_source(bytes: &[u8], root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let mut source = None;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(path) = line.strip_prefix(CMAKE_SOURCE_KEY) {
+            if source.is_some() {
+                return None;
+            }
+            let path = std::str::from_utf8(path).ok()?;
+            let path = PathBuf::from(path);
+            if !normal_absolute(&path)
+                || !path.starts_with(root)
+                || path == candidate
+                || !candidate.starts_with(&path)
+            {
+                return None;
+            }
+            source = Some(path);
+        }
+    }
+    source
+}
+
+fn normal_absolute(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    bytes.first() == Some(&b'/')
+        && !bytes.contains(&0)
+        && bytes[1..]
+            .split(|byte| *byte == b'/')
+            .all(|segment| !segment.is_empty() && segment != b"." && segment != b"..")
+}
+
+fn unreachable_build(
+    candidate: &Path,
+    at: &Path,
+    error: ResolveError,
+) -> Result<Skip, crate::outcome::Stop> {
+    let skip = unreachable_root(at, error)?;
+    Ok(Skip::new(
+        skip.reason,
+        candidate.to_owned(),
+        format!(
+            "cannot verify build source at {}: {}",
+            at.display(),
+            skip.detail
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_normal_ancestor_source_is_accepted() {
+        let root = Path::new("/projects");
+        let build = Path::new("/projects/app/output");
+        let source = |value: &str| {
+            cmake_source(
+                format!("CMAKE_HOME_DIRECTORY:INTERNAL={value}\n").as_bytes(),
+                root,
+                build,
+            )
+        };
+        assert_eq!(
+            source("/projects/app"),
+            Some(PathBuf::from("/projects/app"))
+        );
+        for invalid in [
+            "/projects/app/output",
+            "/projects/other",
+            "/elsewhere/app",
+            "/projects/app/../app",
+            "/projects//app",
+            "projects/app",
+        ] {
+            assert_eq!(source(invalid), None, "{invalid}");
+        }
+        assert_eq!(
+            cmake_source(
+                b"CMAKE_HOME_DIRECTORY:INTERNAL=/projects/app\nCMAKE_HOME_DIRECTORY:INTERNAL=/projects/app\n",
+                root,
+                build,
+            ),
+            None
+        );
+    }
+}

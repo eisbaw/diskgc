@@ -49,7 +49,7 @@ fn verdict(host: &ModelHost) -> Option<Reason> {
     );
     assert!(stop.is_none(), "{stop:?}");
     assert_eq!(plan.judged.len(), 1, "{plan:?}");
-    plan.judged[0].1.as_ref().err().map(|skip| skip.reason)
+    plan.judged[0].2.as_ref().err().map(|skip| skip.reason)
 }
 
 const LOCK: &str = "  /home/user/.config/chromium/SingletonLock: {symlink: model-host-42}";
@@ -91,7 +91,7 @@ fn relative_lock_path_is_bound_to_the_source_root() {
     assert!(stop.is_none(), "{stop:?}");
     assert_eq!(plan.judged.len(), 1);
     assert_eq!(
-        plan.judged[0].1.as_ref().err().map(|skip| skip.reason),
+        plan.judged[0].2.as_ref().err().map(|skip| skip.reason),
         Some(Reason::InUse)
     );
 }

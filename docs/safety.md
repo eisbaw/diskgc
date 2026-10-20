@@ -602,6 +602,34 @@ Any future `.venv` source must retain `checkouts: refuse`. Editable VCS
 installs can place a real checkout under `.venv/src`, which may hold work
 that cannot be recovered by recreating the environment.
 
+### Source-anchored CMake output
+
+`cmake-build-anchored` accepts an output directory of any name only when
+it has a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no
+entry named `CMakeLists.txt`, and the cache records exactly one
+`CMAKE_HOME_DIRECTORY:INTERNAL=` path. The cache is read through a checked
+fd, never through a later path lookup, and may be at most 2 MiB. The
+recorded path must be normalized, lie under the bound root, and be a
+strict ancestor of the candidate. This excludes in-source builds and
+sources that would be deleted with the output. A safely reached regular
+`CMakeLists.txt` must still exist at that source path on the candidate's
+filesystem. Missing, ambiguous or unsafe evidence never makes the output
+eligible. The source file's identity is recorded at discovery and checked
+again during judgement. Reclaim reads the cache through the fd of the
+locked candidate and compares that fd's identity with discovery; a path
+swap cannot redirect the source check to a different build directory.
+The candidate must also be idle for at least three days by the
+ordinary filesystem age measure, pass the checkout guard, and pass every
+general eligibility and in-use check.
+
+This verifies a surviving source file, not that every external build
+dependency is available. It also cannot prove that an uncooperative
+process starts using the output after the in-use scan; that is the general
+deletion race limit below. The profile matches at most five levels below
+each supplied root. Meson, Ninja, OpenWrt, Buildroot, Yocto and Bazel
+markers alone do not establish a surviving source and are not shipped as
+deletion sources.
+
 ### Deletion
 
 For the `delete` action of kind `fs` (`fs_kind` in the core). A dry run,

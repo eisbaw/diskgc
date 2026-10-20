@@ -74,7 +74,17 @@ pub fn tally<H: Host>(
     let mounts = mountinfo(host)?;
     let reached = judged!(judge.approach(host, found, &mounts, deadline));
     let candidate = reached.candidate(found)?;
-    let walked = judged!(judge.contents(host, &reached, &candidate, found, false, deadline));
+    let walked = judged!(judge.contents(
+        host,
+        &reached,
+        super::judge::CandidateView {
+            candidate: &candidate,
+            locked_fd: None
+        },
+        found,
+        false,
+        deadline
+    ));
     Ok(Ok(walked.tally()))
 }
 
@@ -142,8 +152,17 @@ fn protocol<H: Delete>(
     // Step 4: everything judged again, under the lock.
     let mounts = mountinfo(host)?;
     judge.again(host, found, &reached, &mounts, deadline)??;
-    let Walked { record, .. } =
-        judge.contents(host, &reached, &candidate, found, true, deadline)??;
+    let Walked { record, .. } = judge.contents(
+        host,
+        &reached,
+        super::judge::CandidateView {
+            candidate: &candidate,
+            locked_fd: lock.locked().map(|held| held.fd()),
+        },
+        found,
+        true,
+        deadline,
+    )??;
     locked_is_walked(host, &candidate, &lock, &record).map_err(failed)??;
     // Steps 5 and 6.
     let options = DeleteOptions {

@@ -124,6 +124,10 @@ pub struct WhereSpec {
     /// A source safety guard: a written null must not disable it.
     #[serde(default, deserialize_with = "present_non_null_string")]
     pub lacks_entry: Option<String>,
+    /// Parse a build system's recorded source directory and require its
+    /// source file to survive outside the candidate.
+    #[serde(default, deserialize_with = "present_non_null_source_anchor")]
+    pub source_anchor: Option<SourceAnchor>,
     #[serde(default, deserialize_with = "present_non_null_usize")]
     pub keep_newest: Option<usize>,
     #[serde(default, deserialize_with = "present_non_null_newest_group")]
@@ -144,6 +148,21 @@ pub struct WhereSpec {
 pub enum NewestGroup {
     Siblings,
     CursorExtension,
+}
+
+/// A supported build system's source anchor format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAnchor {
+    Cmake,
+}
+
+impl SourceAnchor {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cmake => "cmake",
+        }
+    }
 }
 
 impl NewestGroup {
@@ -234,6 +253,12 @@ fn present_non_null_newest_group<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<NewestGroup>, D::Error> {
     NewestGroup::deserialize(deserializer).map(Some)
+}
+
+fn present_non_null_source_anchor<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SourceAnchor>, D::Error> {
+    SourceAnchor::deserialize(deserializer).map(Some)
 }
 
 /// A present null must not silently remove names excluded by a profile.

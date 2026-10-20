@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{Action, Body, Cwd, EntryType, Finds, Library, Roots, Source};
+use super::{Action, Body, Cwd, EntryType, Finds, Library, Roots, Source, SourceAnchor};
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
 use std::collections::BTreeSet;
@@ -61,6 +61,48 @@ fn cmake_build_has_a_frozen_five_level_match_set_and_markers() {
         ("/home/mark/topics/a/b/c/d/build", true),
         ("/home/mark/topics/a/b/c/d/e/build", false),
         ("/home/mark/other/build", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn anchored_cmake_requires_a_source_and_matches_any_name_through_five_levels() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library
+        .get("cmake-build-anchored")
+        .expect("shipped anchored CMake profile")
+        .body
+    else {
+        panic!("cmake-build-anchored is a source")
+    };
+    assert_eq!(source.roots, Roots::Required);
+    assert_eq!(source.where_.has.as_deref(), Some("CMakeCache.txt"));
+    assert_eq!(source.where_.has_dir.as_deref(), Some("CMakeFiles"));
+    assert_eq!(source.where_.lacks_entry.as_deref(), Some("CMakeLists.txt"));
+    assert_eq!(source.where_.source_anchor, Some(SourceAnchor::Cmake));
+    assert_eq!(
+        source.min_idle_for,
+        Some(super::IdleFor(Duration::from_secs(3 * 24 * 3600)))
+    );
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.action,
+        Action::Delete {
+            make_writable: false
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let root = Path::new("/home/mark/topics");
+    for (path, expected) in [
+        ("/home/mark/topics/app/generated", true),
+        ("/home/mark/topics/a/b/c/d/e", true),
+        ("/home/mark/topics/a/b/c/d/e/f", false),
+        ("/home/mark/other/generated", false),
     ] {
         assert_eq!(
             path_matches(Some(&[root]), &find.patterns, Path::new(path)),

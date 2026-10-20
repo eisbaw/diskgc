@@ -1384,6 +1384,84 @@ fn shipped_cmake_build_finds_depth_five_and_refuses_sources_and_checkouts() {
     nothing_locked_or_deleted(&host);
 }
 
+/// An arbitrary output name is safe only when its CMake cache names an
+/// existing source ancestor outside the output. Marker-only, missing-source,
+/// in-source, recent and checkout cases cannot be eligible.
+#[test]
+fn anchored_cmake_needs_a_surviving_source_and_idle_output() {
+    let old = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /home/mark/src/app/CMakeLists.txt: {old}\n  \
+         /home/mark/src/app/arbitrary-name: {{.: {old}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/app\\n\", mtime: \
+         2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}, rule: {old}}}, obj: {old}}}\n  \
+         /home/mark/src/missing/output: {{.: {old}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/missing\\n\", mtime: \
+         2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}}}}}\n  \
+         /home/mark/src/app/fake-output: {{.: {old}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/other\\n\", mtime: \
+         2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}}}}}\n  \
+         /home/mark/src/recent/CMakeLists.txt: {old}\n  \
+         /home/mark/src/recent/output: {{.: {{mtime: 2026-10-15T02:00:00Z}}, \
+         CMakeCache.txt: {{content: \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/recent\\n\", \
+         mtime: 2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}}}}}\n  \
+         /home/mark/src/checkout/CMakeLists.txt: {old}\n  \
+         /home/mark/src/checkout/output: {{.: {old}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/checkout\\n\", mtime: \
+         2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}}}, .git: {{.: {old}, HEAD: {old}}}}}\n  \
+         /home/mark/src/insource: {{.: {old}, CMakeLists.txt: {old}, CMakeCache.txt: {{content: \
+         \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/insource\\n\", mtime: \
+         2026-10-01T00:00:00Z}}, CMakeFiles: {{.: {old}}}}}\n"
+    )));
+    let report = dry_run(
+        &host,
+        &built_in_request("profile:cmake-build-anchored", "/home/mark/src"),
+    );
+    let mut actual = plan(&report);
+    actual.sort();
+    assert_eq!(
+        actual,
+        [
+            ("/home/mark/src/app/arbitrary-name".to_owned(), None),
+            (
+                "/home/mark/src/checkout/output".to_owned(),
+                Some("contains_checkout")
+            ),
+            ("/home/mark/src/recent/output".to_owned(), Some("not_idle")),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    let evidence = report
+        .plan
+        .iter()
+        .find(|entry| entry.reason.is_none())
+        .unwrap();
+    assert_eq!(
+        evidence.build_evidence.as_ref().unwrap().marker,
+        "CMakeCache.txt"
+    );
+    assert_eq!(
+        evidence.build_evidence.as_ref().unwrap().source,
+        PathBuf::from("/home/mark/src/app")
+    );
+    assert!(
+        evidence
+            .build_evidence
+            .as_ref()
+            .unwrap()
+            .idle_age_seconds
+            .unwrap()
+            >= 3 * 24 * 3600
+    );
+    for skipped in report.plan.iter().filter(|entry| entry.reason.is_some()) {
+        let evidence = skipped.build_evidence.as_ref().unwrap();
+        assert_eq!(evidence.marker, "CMakeCache.txt");
+        assert_eq!(evidence.idle_age_seconds, None);
+    }
+    nothing_locked_or_deleted(&host);
+}
+
 /// Zephyr's own output directory distinguishes west builds from ordinary
 /// CMake builds. Source and checkout guards apply to the entire candidate,
 /// including a build found at the fifth relative depth.

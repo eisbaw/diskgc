@@ -837,6 +837,115 @@ fn west_build_directory_marker_is_rechecked_under_lock() {
     assert!(exists(&host, &format!("{candidate}/CMakeCache.txt")));
 }
 
+/// Losing or replacing the recorded source file after discovery and tally
+/// invalidates the evidence under the candidate lock. No output is unlinked.
+#[test]
+fn anchored_cmake_source_identity_is_rechecked_under_lock() {
+    let candidate = "/home/mark/src/app/arbitrary-name";
+    let source_file = "/home/mark/src/app/CMakeLists.txt";
+    for action in ["remove", "replace"] {
+        let tree = format!(
+            "  {source_file}: {{mtime: {OLD}}}\n  {candidate}: {{.: {{mtime: {OLD}}}, \
+             CMakeCache.txt: {{content: \
+             \"CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/app\\n\", mtime: {OLD}}}, \
+             CMakeFiles: {{.: {{mtime: {OLD}}}}}, object.o: {{size: 1M, mtime: {OLD}}}}}\n"
+        );
+        let event = format!(
+            "events:\n  - {{at: {{op: flock, path: {candidate}, when: after}}, {action}: {source_file}}}\n"
+        );
+        let host = host(&yaml("", &tree, &event));
+        let roots = ["/home/mark/src".to_owned()];
+        let library = Library::builtin().expect("built-ins");
+        let request = Request {
+            path: PathBuf::from("/home/mark"),
+            min_free: parse_size("100%").expect("size"),
+            target_free: None,
+            timeout: Some(Duration::from_secs(600)),
+            tally_budget: None,
+            tier: Tier::select("profile:cmake-build-anchored", &library, Some(&roots), 1000)
+                .expect("anchored CMake tier"),
+        };
+        let report = ensure(&host, &request);
+        assert!(host.unfired_events().is_empty(), "{action}: {report:#?}");
+        assert_eq!(
+            skip_of(&report, candidate),
+            Some("changed"),
+            "{action}: {report:#?}"
+        );
+        assert_eq!(unlinked_below(&host, candidate), 0, "{action}: {report:#?}");
+        assert!(exists(&host, &format!("{candidate}/object.o")));
+    }
+}
+
+/// The source check reads the locked directory, even if its old path now
+/// names a different, equally marked build. The later walk refuses the
+/// replacement by identity; neither tree is deleted.
+#[test]
+fn anchored_cmake_reads_the_locked_candidate_after_its_path_is_swapped() {
+    let candidate = "/home/mark/src/app/output";
+    let moved = "/home/mark/src/app/moved";
+    let replacement = "/home/mark/replacement";
+    let cache = "CMAKE_HOME_DIRECTORY:INTERNAL=/home/mark/src/app\\n";
+    let tree = format!(
+        "  /home/mark/src/app/CMakeLists.txt: {{mtime: {OLD}}}\n  \
+         {candidate}: {{.: {{mtime: {OLD}}}, CMakeCache.txt: {{content: \
+         \"{cache}\", mtime: {OLD}}}, CMakeFiles: {{.: {{mtime: {OLD}}}}}, \
+         original.o: {{mtime: {OLD}}}}}\n  \
+         {replacement}: {{.: {{mtime: {OLD}}}, CMakeCache.txt: {{content: \
+         \"{cache}\", mtime: {OLD}}}, CMakeFiles: {{.: {{mtime: {OLD}}}}}, \
+         precious: {{mtime: {OLD}}}}}\n"
+    );
+    let events = format!(
+        "events:\n  - {{at: {{op: flock, path: {candidate}, when: after}}, \
+         rename: {{from: {candidate}, to: {moved}}}}}\n  - \
+         {{at: {{op: flock, path: {candidate}, when: after}}, \
+         rename: {{from: {replacement}, to: {candidate}}}}}\n"
+    );
+    let host = host(&yaml("", &tree, &events));
+    let roots = ["/home/mark/src".to_owned()];
+    let library = Library::builtin().expect("built-ins");
+    let request = Request {
+        path: PathBuf::from("/home/mark"),
+        min_free: parse_size("100%").expect("size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:cmake-build-anchored", &library, Some(&roots), 1000)
+            .expect("anchored CMake tier"),
+    };
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty(), "{report:#?}");
+    assert_eq!(skip_of(&report, candidate), Some("changed"), "{report:#?}");
+    assert!(exists(&host, &format!("{moved}/original.o")));
+    assert!(exists(&host, &format!("{candidate}/precious")));
+    assert_eq!(unlinked_below(&host, moved), 0);
+    assert_eq!(unlinked_below(&host, candidate), 0);
+
+    let trace = host.trace();
+    let flock = trace
+        .iter()
+        .find(|call| call.op == Op::Flock && call.path.as_deref() == Some(Path::new(candidate)))
+        .expect("candidate flock");
+    let original_cache = trace
+        .iter()
+        .find(|call| {
+            call.op == Op::ReadHead
+                && call.index < flock.index
+                && call.path.as_deref()
+                    == Some(Path::new("/home/mark/src/app/output/CMakeCache.txt"))
+        })
+        .and_then(|call| call.object)
+        .expect("cache read during discovery or tally");
+    assert!(
+        trace.iter().any(|call| {
+            call.op == Op::ReadHead
+                && call.index > flock.index
+                && call.object == Some(original_cache)
+        }),
+        "source check did not read CMakeCache.txt through the locked candidate fd: {trace:#?}"
+    );
+}
+
 /// The candidate must be the object discovery found, at every step that
 /// reaches it again: one replaced between the tally and its lock (a new
 /// object at the same name, here holding someone's file), before or after

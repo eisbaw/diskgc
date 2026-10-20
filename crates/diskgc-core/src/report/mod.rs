@@ -181,6 +181,16 @@ pub struct PlanEntry {
     /// The source profile's `checkouts` setting the candidate was judged
     /// under (docs/safety.md, No source checkout).
     pub checkouts: Checkouts,
+    /// Present only for a build output whose recorded source was verified.
+    pub build_evidence: Option<BuildEvidence>,
+}
+
+/// Source evidence from discovery, with age only after an eligibility walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildEvidence {
+    pub marker: &'static str,
+    pub source: PathBuf,
+    pub idle_age_seconds: Option<u64>,
 }
 
 /// One action (`actions`): a candidate deleted, completely or part-way.
@@ -322,7 +332,7 @@ impl Report {
                     self.plan
                         .iter()
                         .map(|p| {
-                            Json::Obj(vec![
+                            let mut fields = vec![
                                 ("group", Json::str(&p.group)),
                                 ("tier", Json::str(&p.tier)),
                                 ("profile", Json::str(&p.profile)),
@@ -332,7 +342,18 @@ impl Report {
                                 ("estimated_bytes", opt_u64(p.estimated_bytes)),
                                 ("operation", Json::str(&p.operation)),
                                 ("checkouts", Json::str(p.checkouts.as_str())),
-                            ])
+                            ];
+                            if let Some(evidence) = &p.build_evidence {
+                                fields.push((
+                                    "build_evidence",
+                                    Json::Obj(vec![
+                                        ("marker", Json::str(evidence.marker)),
+                                        ("source", path(&evidence.source)),
+                                        ("idle_age_seconds", opt_u64(evidence.idle_age_seconds)),
+                                    ]),
+                                ));
+                            }
+                            Json::Obj(fields)
                         })
                         .collect(),
                 ),
@@ -469,11 +490,20 @@ impl Report {
                         Some(reason) => format!("skip {reason}"),
                     };
                     lines.push(format!(
-                        "  {verdict}  {}  [{} {}: {}]",
+                        "  {verdict}  {}  [{} {}: {}]{}",
                         p.candidate.display(),
                         p.tier,
                         p.profile,
-                        p.operation
+                        p.operation,
+                        p.build_evidence
+                            .as_ref()
+                            .map_or_else(String::new, |e| format!(
+                                " (marker {}, source {}, idle {})",
+                                e.marker,
+                                e.source.display(),
+                                e.idle_age_seconds
+                                    .map_or_else(|| "unknown".to_owned(), |age| format!("{age} s"))
+                            ))
                     ));
                 }
                 if !self.errors.is_empty() {

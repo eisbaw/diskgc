@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use super::judge::{
     check_root, mounted_at_or_inside, skip_or_stop, source_where, unreachable_root,
 };
+use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Skip};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
@@ -60,6 +61,8 @@ pub struct Found {
     /// Its identity when found (`statx`, not followed). Reached again, it
     /// must be the same object (`changed` otherwise).
     pub identity: Identity,
+    /// The recorded source that proved this output rebuildable when found.
+    pub source_evidence: Option<SourceEvidence>,
 }
 
 /// What [`discover`] found.
@@ -420,12 +423,30 @@ impl<H: Host> Walk<'_, H> {
                 return Ok(false);
             }
         }
+        let source_evidence = if let Some(kind) = self.find.source_anchor {
+            match source_anchor::check(
+                self.host,
+                source_anchor::AnchorCheck::new(kind, self.root, at, identity, self.deadline),
+                dir,
+                name,
+            )? {
+                Ok(Some(evidence)) => Some(evidence),
+                Ok(None) => return Ok(false),
+                Err(skip) => {
+                    self.out.refused.push(skip);
+                    return Ok(false);
+                }
+            }
+        } else {
+            None
+        };
         self.out.candidates.push((
             at.to_owned(),
             Ok(Found {
                 root: self.root.to_owned(),
                 path: at.to_owned(),
                 identity,
+                source_evidence,
             }),
         ));
         Ok(true)

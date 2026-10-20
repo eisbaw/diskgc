@@ -51,7 +51,7 @@ use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, Body, Finds, IdleFor, Library};
 use crate::report::{
-    ActionEntry, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
+    ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
 };
 use crate::resolve::{Resolved, Want, resolve};
@@ -631,6 +631,7 @@ fn plan_entry(
         estimated_bytes: bytes,
         operation: tier.operation(),
         checkouts: tier.checkouts,
+        build_evidence: None,
     }
 }
 
@@ -789,7 +790,7 @@ fn plan_fs<H: Host>(
     if !misconfigured.is_empty() {
         return planned;
     }
-    for (path, verdict) in &found.judged {
+    for (path, source_evidence, verdict) in &found.judged {
         match verdict {
             Ok(e) => {
                 log(&format!(
@@ -801,15 +802,33 @@ fn plan_fs<H: Host>(
                     e.newest_change
                         .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
                 ));
-                planned
-                    .eligible
-                    .push((e.newest_change, plan_entry(tier, path, None, Some(e.bytes))));
+                let mut entry = plan_entry(tier, path, None, Some(e.bytes));
+                if let (Some(source), Some(newest)) = (&e.source_evidence, e.newest_change) {
+                    let now = host.wall_clock();
+                    let age_ns = (i128::from(now.secs) - i128::from(newest.secs)) * 1_000_000_000
+                        + i128::from(now.nanos)
+                        - i128::from(newest.nanos);
+                    entry.build_evidence = Some(BuildEvidence {
+                        marker: source.marker,
+                        source: source.source.clone(),
+                        idle_age_seconds: Some(
+                            u64::try_from(age_ns.max(0) / 1_000_000_000).unwrap_or(u64::MAX),
+                        ),
+                    });
+                }
+                planned.eligible.push((e.newest_change, entry));
             }
             Err(skip) => {
                 log(&format!("{} {}: skip {skip}", tier.name, path.display()));
-                planned
-                    .skipped
-                    .push(plan_entry(tier, path, Some(skip.reason.as_str()), None));
+                let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                if let Some(source) = source_evidence {
+                    entry.build_evidence = Some(BuildEvidence {
+                        marker: source.marker,
+                        source: source.source.clone(),
+                        idle_age_seconds: None,
+                    });
+                }
+                planned.skipped.push(entry);
             }
         }
     }

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use super::discover::{Discovery, check_deadline, discover};
 use super::judge::{Judge, Tally, mountinfo};
+use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
 use crate::engine::{Rules, Skip};
 use crate::host::{Dev, Host, MonoTime};
@@ -25,7 +26,7 @@ use crate::profile::IdleFor;
 #[derive(Debug, Default)]
 pub struct Planned {
     /// Every candidate judged, in the order found.
-    pub judged: Vec<(PathBuf, Result<Tally, Skip>)>,
+    pub judged: Vec<(PathBuf, Option<SourceEvidence>, Result<Tally, Skip>)>,
     /// Roots and directories on the way that could not be read or must not
     /// be (discovery's, [`Discovery::refused`]).
     pub refused: Vec<Skip>,
@@ -85,6 +86,10 @@ pub fn plan<H: Host>(
     let mut checker = Checker::for_plan(rules);
     let total = candidates.len();
     for (path, candidate) in candidates {
+        let source_evidence = candidate
+            .as_ref()
+            .ok()
+            .and_then(|found| found.source_evidence.clone());
         let verdict = match candidate {
             Err(skip) => Err(skip),
             Ok(found) => match judge_one(host, &judge, &found, &mut checker, deadline) {
@@ -95,7 +100,7 @@ pub fn plan<H: Host>(
                 }
             },
         };
-        out.judged.push((path, verdict));
+        out.judged.push((path, source_evidence, verdict));
         if out.judged.len().is_multiple_of(10_000) {
             log(&format!(
                 "{} of {total} candidates judged so far",
@@ -119,7 +124,17 @@ fn judge_one<H: Host>(
     let mounts = mountinfo(host)?;
     let reached = judged!(judge.approach(host, found, &mounts, deadline));
     let candidate = reached.candidate(found)?;
-    let walked = judged!(judge.contents(host, &reached, &candidate, found, true, deadline));
+    let walked = judged!(judge.contents(
+        host,
+        &reached,
+        super::judge::CandidateView {
+            candidate: &candidate,
+            locked_fd: None
+        },
+        found,
+        true,
+        deadline
+    ));
     let scan = checker.current(host).map_err(|error| Stop::Failed {
         path: found.path.clone(),
         error,

@@ -42,6 +42,7 @@ fn full() -> Report {
         estimated_bytes: bytes,
         operation: "cargo lock protocol".into(),
         checkouts: Checkouts::Allow,
+        build_evidence: None,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some("not_idle"), None)];
     r.actions = vec![ActionEntry {

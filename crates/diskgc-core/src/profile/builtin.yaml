@@ -117,6 +117,25 @@
     no_match: [/home/mark/src/app/.mypy_cache/3.13, /home/mark/src/app/a/b/c/d/.mypy_cache]
   verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20
 
+# A narrower source-anchored recognizer for build output of any directory
+# name. It requires the cache's recorded source to be an ancestor outside
+# the candidate; a missing source cannot be rebuilt and is retained.
+- name: cmake-build-anchored
+  category: c / c++
+  description: Source-anchored CMake output of any name through depth five
+  find:
+    roots: required
+    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+    type: dir
+  where: {has: CMakeCache.txt, has_dir: CMakeFiles, lacks_entry: CMakeLists.txt, source_anchor: cmake}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
+    no_match: [/home/mark/src/app/sub/a/b/c/deeper]
+  verified_with: CMake 3.30.5, recorded CMAKE_HOME_DIRECTORY and surviving CMakeLists.txt in host tracy builds, 2026-10-20
+
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.

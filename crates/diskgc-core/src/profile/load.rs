@@ -237,6 +237,9 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
     if where_.has_dir.is_some() {
         problems.push("`where.has_dir` is a source predicate, not a tier filter".to_owned());
     }
+    if where_.source_anchor.is_some() {
+        problems.push("`where.source_anchor` is a source predicate, not a tier filter".to_owned());
+    }
     for (field, present, why) in [
         (
             "kind",
@@ -599,6 +602,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         has_not: spec.has_not.clone(),
         app_not_running: spec.app_not_running.clone(),
         lacks_entry: spec.lacks_entry.clone(),
+        source_anchor: spec.source_anchor,
         keep_newest: spec.keep_newest,
         newest_group: spec.newest_group,
         protect_links: spec.protect_links.clone(),

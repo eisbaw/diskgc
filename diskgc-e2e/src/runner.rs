@@ -350,6 +350,17 @@ fn fuse_device(name: &str) -> Vec<String> {
     }
 }
 
+/// The real Buildah fixture uses pinned executables reached through the
+/// under-test mount. Expose their Nix closure read-only for this one test,
+/// without changing or reloading the multi-gigabyte base image.
+fn test_mounts(name: &str) -> Vec<String> {
+    let mut extra = fuse_device(name);
+    if name == crate::suite::BUILDAH_SPOOL_TEST {
+        extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
+    }
+    extra
+}
+
 /// `podman run` arguments shared by every container of a run, with `extra`
 /// options for this one (before the image).
 fn podman_run_args(config: &Config, name: &str, keep: bool, extra: &[String]) -> Vec<String> {
@@ -526,7 +537,7 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
                     config,
                     &container,
                     keep,
-                    &fuse_device(&test.name),
+                    &test_mounts(&test.name),
                 ))
                 .args(["run", &test.name])
                 .stdin(Stdio::null())

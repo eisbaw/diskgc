@@ -44,7 +44,7 @@ pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{
     ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
-    NewestGroup, ProfileSpec, RootsSpec, WhereSpec, parse_profiles,
+    NewestGroup, ProfileSpec, RootsSpec, SourceAnchor, WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -176,6 +176,8 @@ pub struct Where {
     pub app_not_running: Option<String>,
     /// An entry name of any type that the candidate must not contain.
     pub lacks_entry: Option<String>,
+    /// A build system's recorded source path and source file.
+    pub source_anchor: Option<SourceAnchor>,
     /// Keep the N newest version directories in each parent/group.
     pub keep_newest: Option<usize>,
     pub newest_group: Option<spec::NewestGroup>,
@@ -199,6 +201,7 @@ impl Where {
             (PredicateName::HasNot, self.has_not.is_some()),
             (PredicateName::AppNotRunning, self.app_not_running.is_some()),
             (PredicateName::LacksEntry, self.lacks_entry.is_some()),
+            (PredicateName::SourceAnchor, self.source_anchor.is_some()),
             (PredicateName::KeepNewest, self.keep_newest.is_some()),
             (
                 PredicateName::ProtectLinks,

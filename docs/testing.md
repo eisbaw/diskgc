@@ -434,6 +434,15 @@ filesystem, processes and mounts from the developer's system.
   12,000 entries in the fast tier and 100,000 in the full tier, judged by
   the oracle; stale sockets and FIFOs; and a FUSE mount whose server
   never answers (below).
+- **Buildah's live containers/image spool:** a rootless Buildah commit from a
+  small offline payload is stopped while it holds a tester-owned
+  `/var/tmp/container_images_storage*` file open. The cleaner must report
+  that directory as `in_use`, and the deletion oracle must remain clean;
+  Buildah then resumes and completes. This Nix-only test bind-mounts the
+  pinned Buildah and UID mapping tool closure read-only from the host's Nix
+  store into its disposable container. Its fixture uses a one-second idle
+  floor to exercise the in-use check without waiting for the shipped
+  profile's three-day floor.
 - **Dormant shells:** real `nix-shell` and `nix develop` sessions left idle
   with their `TMPDIR` under `/tmp`: their directories are skipped.
 - **Docker** in its own container (`docker:dind` under rootless Podman,

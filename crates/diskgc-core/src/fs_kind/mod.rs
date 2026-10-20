@@ -35,6 +35,7 @@ mod judge;
 mod pattern;
 mod plan;
 mod reclaim;
+mod source_anchor;
 
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
 pub use plan::{Planned, plan};
 pub use reclaim::{Reclaimed, reclaim, tally};
+pub use source_anchor::SourceEvidence;
 
 use crate::profile::{EntryType, Finds, Source, Where};
 
@@ -67,6 +69,7 @@ pub struct Find {
     pub app_not_running: Option<std::path::PathBuf>,
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
+    pub source_anchor: Option<crate::profile::SourceAnchor>,
     pub keep_newest: Option<usize>,
     pub newest_group: Option<crate::profile::NewestGroup>,
     pub protect_links: Vec<String>,
@@ -173,6 +176,7 @@ impl Find {
                 .as_ref()
                 .map(|path| std::path::PathBuf::from(path.replace("{uid}", &uid.to_string()))),
             lacks_entry: where_.lacks_entry.clone(),
+            source_anchor: where_.source_anchor,
             keep_newest: where_.keep_newest,
             newest_group: where_.newest_group,
             protect_links: where_.protect_links.clone(),

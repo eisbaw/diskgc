@@ -2,7 +2,8 @@
 //! entry type and the names of its direct regular-file and directory children. This
 //! uses the same compiled `fs` patterns as discovery; it opens no path.
 //!
-//! YAML's path-only examples cannot state an entry type or contents. For
+//! YAML's path-only examples cannot state an entry type, contents or an
+//! external source anchor. For
 //! them the fixture uses the declared type (a directory for `any`) and
 //! includes the source's required `has` and `has_dir` markers. Golden/model fixtures
 //! separately pin type and `where` behavior on real layouts.

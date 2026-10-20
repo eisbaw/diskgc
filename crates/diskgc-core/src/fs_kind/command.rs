@@ -102,8 +102,17 @@ fn protocol<H: Delete>(
     }
     let mounts = mountinfo(host)?;
     judge.again(host, found, &reached, &mounts, deadline)??;
-    let Walked { record, .. } =
-        judge.contents(host, &reached, &candidate, found, true, deadline)??;
+    let Walked { record, .. } = judge.contents(
+        host,
+        &reached,
+        super::judge::CandidateView {
+            candidate: &candidate,
+            locked_fd: lock.locked().map(|held| held.fd()),
+        },
+        found,
+        true,
+        deadline,
+    )??;
     locked_is_walked(host, &candidate, &lock, &record).map_err(stopped)??;
     let use_candidate = match cwd {
         Some(Cwd::Candidate) => true,

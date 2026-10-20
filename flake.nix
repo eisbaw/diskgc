@@ -162,6 +162,12 @@
         cp ${lib.getExe diskgc} $out/bin/diskgc
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
+        # TASK-97's real Buildah operation runs only in its disposable
+        # container. Keep these pinned tools outside the large base image;
+        # the runner makes their store closure available read-only there.
+        ln -s ${pkgs.buildah}/bin/buildah $out/bin/buildah
+        ln -s ${pkgs.shadow}/bin/newuidmap $out/bin/newuidmap
+        ln -s ${pkgs.shadow}/bin/newgidmap $out/bin/newgidmap
       '';
 
       # The release package's dependency tree as built (--locked, normal and

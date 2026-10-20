@@ -230,6 +230,10 @@ fn where_json(where_: &Where) -> Json {
         ),
         ("lacks_entry", opt_str(where_.lacks_entry.as_deref())),
         (
+            "source_anchor",
+            Json::opt(where_.source_anchor, |anchor| Json::str(anchor.name())),
+        ),
+        (
             "keep_newest",
             Json::opt(where_.keep_newest, |n| Json::U64(n as u64)),
         ),
@@ -423,6 +427,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(name) = &where_.lacks_entry {
         parts.push(format!("lacks_entry: {}", yaml_scalar(name)));
+    }
+    if let Some(anchor) = where_.source_anchor {
+        parts.push(format!("source_anchor: {}", anchor.name()));
     }
     if let Some(count) = where_.keep_newest {
         parts.push(format!("keep_newest: {count}"));

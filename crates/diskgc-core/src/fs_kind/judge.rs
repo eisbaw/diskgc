@@ -37,6 +37,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::discover::{Found, check_deadline};
 use super::pattern::path_matches;
+use super::source_anchor::{self, SourceEvidence};
 use super::{Find, PRIVATE_TMP_PREFIX, path_in_private_tmp};
 use crate::engine::{
     self, Candidate, KEEP_MARKER, Reason, Rules, Skip, WalkRecord, WalkStop,
@@ -68,11 +69,13 @@ pub struct Judge<'r> {
 pub struct Walked {
     pub record: WalkRecord,
     pub newest_change: Option<Timestamp>,
+    /// The build source checked under this judgement, if required.
+    pub source_evidence: Option<SourceEvidence>,
 }
 
 /// What a judgement measured of a candidate: the tier's order key and its
 /// size (the tally's result, and an eligible plan entry's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tally {
     /// The newest mtime or ctime in its tree; `None` when some time was not
     /// reported (ordered last, never idle).
@@ -81,6 +84,14 @@ pub struct Tally {
     pub entries: usize,
     /// Their allocated bytes, each object once ([`Walked::bytes`]).
     pub bytes: u64,
+    pub source_evidence: Option<SourceEvidence>,
+}
+
+/// The reached candidate and, during reclaim, its locked directory fd.
+/// Source checks must read through the locked fd when one exists.
+pub(crate) struct CandidateView<'a, F> {
+    pub candidate: &'a Candidate<'a, F>,
+    pub locked_fd: Option<&'a F>,
 }
 
 impl Walked {
@@ -90,6 +101,7 @@ impl Walked {
             newest_change: self.newest_change,
             entries: self.record.entries(),
             bytes: self.bytes(),
+            source_evidence: self.source_evidence.clone(),
         }
     }
 
@@ -155,17 +167,26 @@ impl Judge<'_> {
         &self,
         host: &H,
         reached: &Reached<H::Fd>,
-        candidate: &Candidate<'_, H::Fd>,
+        candidate_view: CandidateView<'_, H::Fd>,
         found: &Found,
         idle: bool,
         deadline: Option<MonoTime>,
     ) -> Judged<Walked> {
         judged!(self.source_where(host, reached.parent(), found, deadline));
+        let source_evidence = judged!(self.source_anchor(
+            host,
+            reached.parent(),
+            candidate_view.locked_fd,
+            found,
+            deadline
+        ));
         if let Some(lock) = &self.find.app_not_running {
             judged!(super::app::check(host, &found.root, lock, deadline));
         }
         judged!(self.version_where(host, reached.parent(), found, deadline));
-        self.walk(host, candidate, found, idle, deadline)
+        let mut walked = judged!(self.walk(host, candidate_view.candidate, found, idle, deadline));
+        walked.source_evidence = source_evidence;
+        Ok(Ok(walked))
     }
 
     /// A sibling rank and configured current links are read afresh for each
@@ -277,6 +298,55 @@ impl Judge<'_> {
         }
     }
 
+    fn source_anchor<H: Host>(
+        &self,
+        host: &H,
+        parent: &Resolved<H::Fd>,
+        opened_candidate: Option<&H::Fd>,
+        found: &Found,
+        deadline: Option<MonoTime>,
+    ) -> Judged<Option<SourceEvidence>> {
+        let Some(kind) = self.find.source_anchor else {
+            return Ok(Ok(None));
+        };
+        let name = file_name(found)?;
+        let evidence = if let Some(fd) = opened_candidate {
+            judged!(source_anchor::check_opened(
+                host,
+                source_anchor::AnchorCheck::new(
+                    kind,
+                    &found.root,
+                    &found.path,
+                    found.identity,
+                    deadline
+                ),
+                fd,
+                parent.mount.id,
+            ))
+        } else {
+            judged!(source_anchor::check(
+                host,
+                source_anchor::AnchorCheck::new(
+                    kind,
+                    &found.root,
+                    &found.path,
+                    found.identity,
+                    deadline
+                ),
+                parent,
+                name,
+            ))
+        };
+        if evidence.as_ref() != found.source_evidence.as_ref() {
+            return Ok(Err(Skip::new(
+                Reason::Changed,
+                found.path.clone(),
+                "the recorded build source or CMakeLists.txt identity changed since discovery",
+            )));
+        }
+        Ok(Ok(evidence))
+    }
+
     /// Step 4: the eligibility walk of `candidate` (the object `found`,
     /// reached), its root matched against the identity found, and, when
     /// `idle` is asked for, the term's idle requirement on its newest
@@ -305,6 +375,7 @@ impl Judge<'_> {
         Ok(Ok(Walked {
             record,
             newest_change,
+            source_evidence: None,
         }))
     }
 }

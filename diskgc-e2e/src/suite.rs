@@ -38,9 +38,9 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    browser_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite, driver_suite,
-    embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
-    project_cache_suite,
+    browser_suite, buildah_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite,
+    driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite,
+    inuse_suite, project_cache_suite,
 };
 
 /// Which gate runs a test.
@@ -105,6 +105,10 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        BUILDAH_SPOOL_TEST,
+        "needs pinned Buildah and UID mapping tools from the Nix store",
+    ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
     (
@@ -144,8 +148,17 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
 /// host has it): only these mount a FUSE filesystem.
 pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touched"];
 
+/// The one test whose container receives the pinned Buildah closure.
+pub const BUILDAH_SPOOL_TEST: &str = "containers_image_spool_held_by_buildah_is_in_use";
+
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: BUILDAH_SPOOL_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: buildah_suite::containers_image_spool_held_by_buildah_is_in_use,
+    },
     Test {
         name: "python_pycache_reclaims_only_selected_project_caches",
         tier: Tier::Fast,
@@ -235,6 +248,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: fs_reclaim_suite::fs_reclaim_cmake_guard_keeps_a_dangling_source_symlink,
+    },
+    Test {
+        name: "fs_reclaim_anchored_cmake_keeps_unrebuildable_outputs",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_anchored_cmake_keeps_unrebuildable_outputs,
     },
     Test {
         name: "fs_reclaim_image_temp_minimum_idle_and_open_file",
@@ -1053,6 +1072,16 @@ impl Ctx {
 /// (docs/testing.md, Grounding): the Cargo toolchains under test are
 /// several 10,000 files on the overlay root, which nothing deletes.
 fn bind_read_only(path: &Path) -> Result<(), String> {
+    // A test-specific Podman volume can already be read-only. Remounting a
+    // container bind of the host's Nix store is denied by the outer user
+    // namespace; the existing read-only mount satisfies the same invariant.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| format!("read /proc/self/mountinfo: {e}"))?;
+    let mounts = snapshot::parse_mountinfo(&mountinfo)?;
+    let exact: Vec<_> = mounts.iter().filter(|m| m.mount_point == path).collect();
+    if !exact.is_empty() && exact.iter().all(|m| m.read_only) {
+        return Ok(());
+    }
     rustix::mount::mount_bind(path, path)
         .map_err(|e| format!("bind mount {}: {e}", path.display()))?;
     rustix::mount::mount_remount(path, MountFlags::BIND | MountFlags::RDONLY, c"")

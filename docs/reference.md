@@ -248,7 +248,7 @@ under `profile`:
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
-    "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null},
+    "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "source_anchor": null},
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
@@ -399,6 +399,13 @@ JSON result (field names are part of the contract):
   [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate));
   `operation` is human-readable text (`cargo lock protocol`, a command's
   argv), not an enum: it is for reading, not for matching.
+  A `cmake-build-anchored` candidate whose source was established at
+  discovery has `build_evidence` with `marker`, `source` and
+  `idle_age_seconds`. The age is measured from the newest change in an
+  eligible candidate. It is `null` when a skip stopped the eligibility
+  walk before an age was established; the skip reason is retained. Source
+  evidence on a skipped row records discovery and may not have survived
+  every later recheck. Rows without established source evidence omit it.
 - `avail_delta_bytes` is signed: the observed net change in available space
   around an action, never "bytes freed by this action" (see
   [architecture.md](architecture.md#measuring-space)); `null` when a
@@ -667,6 +674,7 @@ the built-in profile has no implicit or fixed temp root.
 | `has_dir` | contains a directory of this name directly in the candidate directory (not followed); checked again under the candidate lock before reclaim | `fs` source only |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only when the lock is absent in a safely reached directory. Every present lock retains it, even if its PID appears gone: that PID may be live in another namespace sharing the home directory. Unreadable locks and unsafe paths also retain it. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
+| `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; its identity is checked again under the candidate lock | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
 | `protect_cursor_extensions` | a literal path relative to the bound root to Cursor's `extensions.json`, beside extension candidates. Every `relativeLocation` listed as installed is kept, even if older than the newest N. The JSON array and each entry's `location.path` must agree with that one directory name. A missing, unreadable, malformed, oversized (over 1 MiB) or changing manifest retains all candidates. | `fs` |
@@ -896,6 +904,7 @@ listed as planned, not shipped.
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
+| c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |

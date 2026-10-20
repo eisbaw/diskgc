@@ -17,7 +17,7 @@ use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, UnmountFlags};
 use serde_json::Value;
 
-use crate::ensure_suite::report;
+use crate::ensure_suite::{ensure_run, report};
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
@@ -56,6 +56,148 @@ profiles:
     action: delete
     examples: {match: [/tmp/cmake-free-build]}
 "#;
+
+/// The built-in's three-day floor cannot be reached by newly created
+/// tmpfs fixtures (ctime is current). This exercises its exact anchor
+/// predicate and checkout guard with no floor; the built-in dry run below
+/// separately confirms the floor on the same real tree.
+const CMAKE_ANCHOR_KERNEL_PROFILE: &str = r#"version: 1
+profiles:
+  - name: cmake-anchor-kernel
+    find: {roots: required, paths: ["*", "*/*"], type: dir}
+    where: {has: CMakeCache.txt, has_dir: CMakeFiles, lacks_entry: CMakeLists.txt, source_anchor: cmake}
+    action: delete
+    examples: {root: /tmp, match: [/tmp/cmake-app/odd-output]}
+"#;
+
+/// The real LinuxHost deletes an anchored out-of-source output while a
+/// missing build file, in-source tree and nested checkout survive.
+pub fn fs_reclaim_anchored_cmake_keeps_unrebuildable_outputs(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        CMAKE_ANCHOR_KERNEL_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    for rel in [
+        "cmake-app/odd-output/CMakeFiles",
+        "cmake-missing/odd-output/CMakeFiles",
+        "cmake-insource/CMakeFiles",
+        "cmake-checkout/odd-output/CMakeFiles",
+        "cmake-checkout/odd-output/.git",
+    ] {
+        s.mkdirs(rel, 0o700, TESTER)?;
+    }
+    s.write_file("cmake-app/CMakeLists.txt", b"project(app)\n", 0o600, TESTER)?;
+    s.write_file(
+        "cmake-insource/CMakeLists.txt",
+        b"project(in)\n",
+        0o600,
+        TESTER,
+    )?;
+    s.write_file(
+        "cmake-checkout/CMakeLists.txt",
+        b"project(checkout)\n",
+        0o600,
+        TESTER,
+    )?;
+    for (rel, source) in [
+        ("cmake-app/odd-output", "/tmp/cmake-app"),
+        ("cmake-missing/odd-output", "/tmp/cmake-missing"),
+        ("cmake-insource", "/tmp/cmake-insource"),
+        ("cmake-checkout/odd-output", "/tmp/cmake-checkout"),
+    ] {
+        s.write_file(
+            &format!("{rel}/CMakeCache.txt"),
+            format!("CMAKE_HOME_DIRECTORY:INTERNAL={source}\n").as_bytes(),
+            0o600,
+            TESTER,
+        )?;
+    }
+    s.write_file(
+        "cmake-app/odd-output/object.o",
+        b"rebuildable",
+        0o600,
+        TESTER,
+    )?;
+    s.write_file("cmake-missing/odd-output/precious", b"keep", 0o600, TESTER)?;
+    s.write_file("cmake-insource/source.c", b"keep", 0o600, TESTER)?;
+    s.write_file(
+        "cmake-checkout/odd-output/.git/HEAD",
+        b"keep",
+        0o600,
+        TESTER,
+    )?;
+
+    let eligible = s.path("cmake-app/odd-output");
+    let missing = s.path("cmake-missing/odd-output");
+    let insource = s.path("cmake-insource");
+    let checkout = s.path("cmake-checkout/odd-output");
+    let oracle = Oracle::arm(Fixture::new().eligible(eligible.clone()))?;
+    let plan = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--dry-run",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cmake-build-anchored",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ],
+    )?;
+    plan.expect_code(0)?;
+    let built_in = report(&plan)?;
+    ensure!(
+        built_in["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"].as_str() == eligible.to_str()
+                    && entry["reason"].as_str() == Some("not_idle")
+                    && entry["build_evidence"]["source"].as_str() == Some("/tmp/cmake-app")
+            })),
+        "built-in anchor or idle floor was not observed: {built_in}"
+    );
+
+    let run = ensure_tmp(
+        ctx,
+        &[
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cmake-anchor-kernel",
+            "--roots",
+            "/tmp",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&plan, &run])?;
+    run.expect_code(1)?;
+    let (skipped, actions) = outcome(&report(&run)?);
+    ensure!(actions == [eligible.display().to_string()], "{actions:?}");
+    ensure!(
+        skipped
+            .get(&checkout.display().to_string())
+            .map(String::as_str)
+            == Some("contains_checkout"),
+        "checkout was not refused: {skipped:?}"
+    );
+    ensure!(!eligible.exists(), "eligible CMake output remains");
+    ensure!(
+        missing.join("precious").exists(),
+        "missing-source output was removed"
+    );
+    ensure!(
+        insource.join("source.c").exists(),
+        "in-source tree was removed"
+    );
+    ensure!(checkout.join(".git/HEAD").exists(), "checkout was removed");
+    verdict.assert_clean()
+}
 
 /// Linux must report even a dangling CMakeLists.txt symlink as present.
 /// A following stat would miss it and permit deletion of this source tree.
