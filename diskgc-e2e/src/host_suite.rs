@@ -77,6 +77,24 @@ fn dev_field(line: &str) -> Option<&str> {
     line.split(' ').find_map(|f| f.strip_prefix("dev="))
 }
 
+/// A readable open of a FIFO with no writer returns promptly and carries
+/// O_NONBLOCK. The probe has a two-second alarm, so removing that flag
+/// fails this test on the real kernel without hanging the whole suite.
+pub fn host_read_open_of_fifo_does_not_wait_for_writer(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.fifo("unopened-fifo", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.probe_as_tester(&["host-read-fifo", "/tmp", "unopened-fifo"])?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.trim() == "nonblock=true",
+        "readable FIFO open lost its safe flags: {:?}",
+        run.stdout
+    );
+    verdict.assert_clean()
+}
+
 /// A symlink anywhere in a configured path is refused as `unsafe_path`
 /// (`ELOOP` from `RESOLVE_NO_SYMLINKS`): as the first component below the
 /// mount, in the middle, at the end (dangling too), and in the

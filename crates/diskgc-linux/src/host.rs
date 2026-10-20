@@ -291,9 +291,14 @@ impl ProcRoot<'_> {
     /// The owner of `rel` itself (`statx`, not followed); `None` if the
     /// kernel did not report it.
     fn owner(self, rel: &str) -> Result<Option<u32>, HostError> {
-        rustix::fs::statx(self.0, rel, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-            .map(|x| stat_from_statx(&x).uid)
-            .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))
+        rustix::fs::statx(
+            self.0,
+            rel,
+            AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT,
+            STATX_MASK,
+        )
+        .map(|x| stat_from_statx(&x).uid)
+        .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))
     }
 
     /// A magic link: its text and the object it refers to (`statx`
@@ -302,9 +307,14 @@ impl ProcRoot<'_> {
         // A FUSE server may have stopped answering after a task entered its
         // mount. Use cached attributes for the magic-link target rather than
         // asking that server to refresh them during the in-use scan.
-        let stat = rustix::fs::statx(self.0, rel, AtFlags::STATX_DONT_SYNC, STATX_MASK)
-            .map(|x| stat_from_statx(&x))
-            .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))?;
+        let stat = rustix::fs::statx(
+            self.0,
+            rel,
+            AtFlags::STATX_DONT_SYNC | AtFlags::NO_AUTOMOUNT,
+            STATX_MASK,
+        )
+        .map(|x| stat_from_statx(&x))
+        .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))?;
         let text = rustix::fs::readlinkat(self.0, rel, Vec::new())
             .map_err(|e| HostError::errno("readlink", Self::shown(rel), errno_of(e)))?;
         Ok(LinkTarget {
@@ -426,7 +436,10 @@ fn oflags(how: OpenHow) -> OFlags {
     let mut flags = OFlags::CLOEXEC;
     flags |= match how.access {
         Access::Path => OFlags::PATH,
-        Access::Read => OFlags::RDONLY,
+        // A readable open can reach a FIFO or a device before the caller
+        // checks its type. Never wait for a FIFO writer or acquire a
+        // controlling terminal while opening a candidate entry.
+        Access::Read => OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY,
     };
     if how.directory {
         flags |= OFlags::DIRECTORY;
@@ -855,7 +868,9 @@ impl Host for LinuxHost {
             Base::Dir(fd) if empty => (fd.as_fd(), AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH),
             Base::Dir(fd) => (fd.as_fd(), AtFlags::SYMLINK_NOFOLLOW),
         };
-        rustix::fs::statx(dir, path, flags, STATX_MASK)
+        // statx on an autofs point must inspect the point, not trigger its
+        // mount (which may lead to an unresponsive network filesystem).
+        rustix::fs::statx(dir, path, flags | AtFlags::NO_AUTOMOUNT, STATX_MASK)
             .map(|x| stat_from_statx(&x))
             .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))
     }
@@ -2302,6 +2317,18 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn readable_open_flags_cannot_wait_for_a_fifo_or_acquire_a_terminal() {
+        let flags = oflags(OpenHow {
+            access: Access::Read,
+            directory: false,
+            nofollow: false,
+            resolve: Default::default(),
+        });
+        assert!(flags.contains(OFlags::NONBLOCK));
+        assert!(flags.contains(OFlags::NOCTTY));
     }
 
     #[test]

@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-18 03:55'
+updated_date: '2026-10-20 08:58'
 labels:
   - wave-1
   - hardening
@@ -91,6 +91,10 @@ From task-53's deep gate (mped H4-H6, cargo-target reclaim protocol):
 - H4: measure the lock hold time (Reclaimed::locks_held, driver cargo-reclaim held_us) on a per-unit (nightly) target with many units: phase A deletes each build/<pkg>/<hash>/fingerprint as its own part, each with a lock re-listing (read_dir + statx of every profile entry), an open of its unit dir and an in-use check; measured so far only on a classic target with 100k files in deps/ (0.49 s untraced).
 - H5 (optional refactor): keep the inspected ProfileDir inside ProfileWalk, so reclaim needs no parallel 'walked' vector; it needs a clone of inspected data or a lifetime on the public ProfileWalk, so not done in task-53.
 - H6: a lock file hard-linked into two profile directories (same inode) makes the protocol's second flock on it fail against diskgc's own first lock, so the target is 'locked' with a message blaming 'another process'. Safe (nothing deleted) but misleading: detect duplicate lock identities across the target (e.g. in judge_layout -> unsupported_layout) or word the message.
+
+Group A (2026-10-20, partial): LinuxHost readable openat2 now uses O_NONBLOCK|O_NOCTTY; a fast disposable-container FIFO probe with no writer and a 2s alarm is added to catch regressions. All LinuxHost statx calls now use AT_NO_AUTOMOUNT, including proc magic links; proc magic-link target statx retains AT_STATX_DONT_SYNC. docs/safety.md records the remaining dead-NFS kernel lookup/deadline limit and autofs path-traversal limit. This is not TASK64 completion: B-K are separate, and D5 cannot be bounded by a cooperative deadline while a synchronous kernel syscall waits. Focused E2E and review still pending at note time.
+
+Group A verification update (2026-10-20): disposable Nix container `just e2e-one host_read_open_of_fifo_does_not_wait_for_writer` passed 1/1 after correction. Initial test incorrectly expected F_GETFL to retain O_NOCTTY; it does not, so the container now tests FIFO nonblocking behavior and the pure host unit test checks the O_NOCTTY flag mapping. No diskgc reclaim was run on a developer host.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -32,6 +32,7 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
     match (cmd, args) {
         ("host-resolve", [want, paths @ ..]) => resolve_paths(&host, want, paths),
         ("host-beneath", [root, want, rels @ ..]) => beneath(&host, root, want, rels),
+        ("host-read-fifo", [root, rel]) => read_fifo(&host, root, rel),
         ("host-stat", paths) => stat_paths(&host, paths),
         ("host-statvfs", [path]) => statvfs(&host, path),
         ("host-lock", [how, path]) if how == "try" => lock_try(&host, path),
@@ -151,6 +152,34 @@ fn beneath(host: &LinuxHost, root: &str, want_text: &str, rels: &[String]) -> Re
             Err(e) => println!("{}", err_line(i, &e)),
         }
     }
+    Ok(())
+}
+
+/// Exercises the rare `Access::Read, Want::Any` opening with a FIFO whose
+/// writer is absent. The alarm bounds a regression that omits O_NONBLOCK:
+/// a blocking open must fail the test promptly instead of consuming the
+/// whole container test budget.
+fn read_fifo(host: &LinuxHost, root: &str, rel: &str) -> Result<(), String> {
+    let root = resolve(host, Path::new(root), Want::Directory).map_err(|e| e.to_string())?;
+    // SAFETY: this probe runs alone in a disposable process; SIGALRM's
+    // default action terminates a blocked open after two seconds.
+    unsafe { libc::alarm(2) };
+    let (fd, stat) = open_beneath(
+        host,
+        &root.fd,
+        root.mount.id,
+        Path::new(rel),
+        Access::Read,
+        Want::Any,
+    )
+    .map_err(|e| e.to_string())?;
+    unsafe { libc::alarm(0) };
+    if stat.file_type != Some(diskgc_core::host::FileType::Fifo) {
+        return Err(format!("expected a FIFO, found {:?}", stat.file_type));
+    }
+    let flags = rustix::fs::fcntl_getfl(fd.as_fd()).map_err(|e| format!("fcntl FIFO: {e}"))?;
+    // F_GETFL does not retain O_NOCTTY, which affects only the open itself.
+    println!("nonblock={}", flags.contains(rustix::fs::OFlags::NONBLOCK));
     Ok(())
 }
 

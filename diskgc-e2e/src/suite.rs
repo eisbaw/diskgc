@@ -493,6 +493,12 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_resolve_refuses_symlinks,
     },
     Test {
+        name: "host_read_open_of_fifo_does_not_wait_for_writer",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_read_open_of_fifo_does_not_wait_for_writer,
+    },
+    Test {
         name: "host_resolve_refuses_mount_crossings",
         tier: Tier::Fast,
         expect: Expect::Pass,

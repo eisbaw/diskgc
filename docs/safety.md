@@ -42,6 +42,10 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
   its tally and its deletion, and once more under its lock (Deletion). The
   shared eligibility walk also reads it before statting the candidate or
   any descendant; this protects nested mounts in Cargo profile entries.
+  `statx` uses `AT_NO_AUTOMOUNT` for a candidate entry, so merely checking
+  an autofs trigger at that entry does not ask the kernel to mount it.
+  Path traversal and a pre-existing mounted network path can still block
+  in the kernel; the flag cannot interrupt a lookup already in progress.
 - **No network filesystems.** A candidate's filesystem is never one that
   another host may be using (`unsupported_fs`): a root on one is refused
   by its `mountinfo` line before it is opened, and discovery never crosses
@@ -556,14 +560,15 @@ once; none of them makes diskgc take a live process for gone):
 
 **A process using a dead mount:** the scan `statx`es every visible
 process's fds, working directory and root through `/proc` (above). For
-FUSE, these calls use `AT_STATX_DONT_SYNC` so a stalled server does not
-hold the in-use scan while its cached attributes are available. A
-disposable-container test holds an fd and cwd in a mount, stops its server,
-and checks that ensure exits within its deadline without deleting the
-held candidate. This does not help NFS: lookup through a `/proc` magic
-link can revalidate the dentry (`d_weak_revalidate`) and wait for the
-server. A process using a dead NFS mount remains a possible hang, never
-a deletion; the deadline cannot interrupt that kernel wait (Deadlines).
+FUSE, these calls use `AT_STATX_DONT_SYNC | AT_NO_AUTOMOUNT` so a stalled
+server does not hold the in-use scan while its cached attributes are
+available. A disposable-container test holds an fd and cwd in a mount,
+stops its server, and checks that ensure exits within its deadline
+without deleting the held candidate. This does not help NFS: lookup
+through a `/proc` magic link can revalidate the dentry
+(`d_weak_revalidate`) and wait for the server. A process using a dead
+NFS mount remains a possible hang, never a deletion; the deadline
+cannot interrupt that kernel wait (Deadlines).
 
 **Overlay and btrfs:** `maps` can report a different (device, inode) than
 `stat` on overlayfs and btrfs subvolumes (the layer's or volume's device,
@@ -1566,6 +1571,14 @@ trusted only when the kernel says it answered them: each field only when
 its bit is set in `stx_mask`, each attribute only when its bit is set in
 `stx_attributes_mask`. A check the kernel cannot answer skips the candidate
 (`unsupported_fs`).
+
+A readable `openat2` uses `O_NONBLOCK | O_NOCTTY`. If a FIFO appears at
+the name before the caller checks its type, opening it cannot wait for a
+writer; opening a terminal cannot acquire it as the controlling terminal.
+These flags do not make arbitrary device opens free of side effects. In
+the built-in filesystem and Cargo reclaim paths, `openat2` requests a
+readable fd only with `O_DIRECTORY`; lock and marker files are opened
+`O_PATH`, checked as regular files, and reopened through that fd.
 
 Minimum kernel: Linux 5.8 (`STATX_MNT_ID` and `STATX_ATTR_MOUNT_ROOT`;
 `openat2` is 5.6); older kernels exit 2 at startup. Every command checks it
