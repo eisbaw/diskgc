@@ -8,6 +8,11 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Real West-generated build output in the disposable TASK-101 fixture.
+    zephyr-src = {
+      url = "github:zephyrproject-rtos/zephyr/v4.3.0";
+      flake = false;
+    };
   };
 
   outputs =
@@ -16,6 +21,7 @@
       nixpkgs,
       crane,
       rust-overlay,
+      zephyr-src,
     }:
     let
       # diskgc is Linux-only. Only x86_64 is built and tested; another system
@@ -137,6 +143,12 @@
       };
       e2eDeps = craneLib.buildDepsOnly e2eArgs;
 
+      # Zephyr 4.3.0's compiled West fixture uses the same interpreter
+      # for the West entry point and Zephyr's CMake Python scripts.
+      westPython = pkgs.python3.withPackages (ps: with ps; [
+        west pyelftools pyyaml pykwalify jsonschema packaging
+      ]);
+
       # ---- Container e2e harness (docs/testing.md, Container setup) ----
 
       # The diskgc-e2e binaries: the in-container harness and tests, the
@@ -173,6 +185,28 @@
         ln -s ${pkgs.autoconf}/bin/autoconf $out/bin/autoconf
         ln -s ${pkgs.ninja}/bin/ninja $out/bin/ninja
         ln -s ${pkgs.coreutils}/bin/du $out/bin/du
+        # The source and tools are immutable Nix inputs; the West build output
+        # itself is created under the container's scratch tmpfs.
+        ln -s ${zephyr-src} $out/bin/zephyr-src
+        ln -s ${westPython}/bin/west $out/bin/west
+        ln -s ${westPython}/bin/python3 $out/bin/python3
+        ln -s ${pkgs.cmake}/bin/cmake $out/bin/cmake
+        ln -s ${pkgs.dtc}/bin/dtc $out/bin/dtc
+        ln -s ${pkgs.gperf}/bin/gperf $out/bin/gperf
+        ln -s ${pkgs.stdenv.cc}/bin/cc $out/bin/cc
+        ln -s ${pkgs.stdenv.cc}/bin/gcc $out/bin/gcc
+        ln -s ${pkgs.stdenv.cc}/bin/g++ $out/bin/g++
+        ln -s ${pkgs.binutils}/bin/ar $out/bin/ar
+        ln -s ${pkgs.binutils}/bin/ranlib $out/bin/ranlib
+        ln -s ${pkgs.binutils}/bin/ld $out/bin/ld
+        ln -s ${pkgs.binutils}/bin/ld.bfd $out/bin/ld.bfd
+        ln -s ${pkgs.binutils}/bin/readelf $out/bin/readelf
+        ln -s ${pkgs.binutils}/bin/objcopy $out/bin/objcopy
+        ln -s ${pkgs.binutils}/bin/objdump $out/bin/objdump
+        ln -s ${pkgs.binutils}/bin/nm $out/bin/nm
+        ln -s ${pkgs.binutils}/bin/size $out/bin/size
+        ln -s ${pkgs.binutils}/bin/strip $out/bin/strip
+        ln -s ${pkgs.gnumake}/bin/make $out/bin/make
       '';
 
       # The release package's dependency tree as built (--locked, normal and

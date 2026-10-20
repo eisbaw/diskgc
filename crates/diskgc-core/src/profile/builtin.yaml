@@ -280,7 +280,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
-  verified_with: Zephyr west build directory layout in Zephyr 4.3 documentation and CMake 3.30.5 recorded source path; model and disposable-container tests 2026-10-20
+  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 compiled build with CMake 4.4.3 in a disposable container; source-anchor ModelHost vector and guarded reclaim 2026-10-20
 
 - name: platformio-cache
   category: embedded

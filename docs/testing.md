@@ -867,7 +867,13 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   /nix/store`, `toolchains manifest`, `tests all`. `just e2e`, `just
   e2e-full`. The Autotools source-anchor case runs pinned GNU Autoconf 2.73
   and its generated `configure` entirely in the disposable container, with
-  the tool closure mounted read-only for that test.
+  the tool closure mounted read-only for that test. The West source-anchor
+  case builds a real Zephyr 4.3.0 `native_sim/native/64` application through
+  pinned West 1.5.0. Zephyr source is a flake-locked input bound read-only
+  inside the container's offline West workspace; the application and both
+  generated build trees live on scratch tmpfs. The shipped profile's dry run
+  sees the fresh build but applies its idle floor, while a no-floor test
+  profile reclaims only the build whose application source survives.
 - **Debian image** (`localhost/diskgc-e2e-debian`): no Nix inside. Its
   userland is the official Rust image for the fast toolchain's release
   (`rust:1.99.1-slim-trixie`, Debian 13), pinned by digest in flake.nix:

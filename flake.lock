@@ -35,7 +35,8 @@
       "inputs": {
         "crane": "crane",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "zephyr-src": "zephyr-src"
       }
     },
     "rust-overlay": {
@@ -55,6 +56,23 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "zephyr-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1763048108,
+        "narHash": "sha256-NSv0utc4dqeJClldgFxezt0/qNJ1Xb0sh7zN5qa3uVk=",
+        "owner": "zephyrproject-rtos",
+        "repo": "zephyr",
+        "rev": "3568e1b6d5cdd51a6b964a2a1d6d29200fea2056",
+        "type": "github"
+      },
+      "original": {
+        "owner": "zephyrproject-rtos",
+        "ref": "v4.3.0",
+        "repo": "zephyr",
         "type": "github"
       }
     }

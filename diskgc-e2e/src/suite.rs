@@ -116,6 +116,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs pinned GNU Autoconf from the Nix store",
     ),
     (
+        WEST_REAL_BUILD_TEST,
+        "needs pinned West, Zephyr source and host build tools from the Nix store",
+    ),
+    (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
     ),
@@ -195,6 +199,8 @@ pub const BUILDAH_SPOOL_TEST: &str = "containers_image_spool_held_by_buildah_is_
 pub const MESON_ANCHOR_TEST: &str = "meson_generated_output_uses_surviving_source_anchor";
 /// The test whose container receives the pinned GNU Autoconf closure.
 pub const AUTOTOOLS_ANCHOR_TEST: &str = "autotools_generated_output_uses_surviving_source_anchor";
+/// Actual West and Zephyr generated output, isolated from host project files.
+pub const WEST_REAL_BUILD_TEST: &str = "west_generated_output_uses_surviving_source_anchor";
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -227,6 +233,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: autotools_suite::autotools_generated_output_uses_surviving_source_anchor,
+    },
+    Test {
+        name: WEST_REAL_BUILD_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: embedded_suite::west_generated_output_uses_surviving_source_anchor,
     },
     Test {
         name: DOCKER_DIND_TEST,

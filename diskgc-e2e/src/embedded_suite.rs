@@ -1,9 +1,12 @@
 //! Shipped embedded build profile against real filesystem entries.
 
+use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::process::Command;
 
 use crate::ensure_suite::{ensure_run, report};
 use crate::oracle::{Fixture, Oracle};
+use crate::snapshot::parse_mountinfo;
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
@@ -167,6 +170,186 @@ pub fn anchored_west_build_keeps_unrebuildable_outputs(ctx: &Ctx) -> TestResult 
         home.path("project/outside-root/build/zephyr/precious.elf")
             .exists(),
         "out-of-root source output data was removed"
+    );
+    verdict.assert_clean()
+}
+
+/// Configure and compile a real Zephyr application through pinned West in the
+/// disposable container. Both the source and all generated output live on its
+/// scratch tmpfs; the immutable Zephyr source and tools come from the Nix store.
+fn west_build(ctx: &Ctx, project: &str) -> TestResult {
+    let source = ctx.scratch.mkdirs(project, 0o700, TESTER)?;
+    ctx.scratch
+        .mkdirs(&format!("{project}/src"), 0o700, TESTER)?;
+    ctx.scratch.write_file(
+        &format!("{project}/CMakeLists.txt"),
+        b"cmake_minimum_required(VERSION 3.20.0)\nfind_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})\nproject(diskgc_west_fixture)\ntarget_sources(app PRIVATE src/main.c)\n",
+        0o600,
+        TESTER,
+    )?;
+    ctx.scratch.write_file(
+        &format!("{project}/src/main.c"),
+        b"#include <zephyr/kernel.h>\nint main(void) { return 0; }\n",
+        0o600,
+        TESTER,
+    )?;
+    ctx.scratch
+        .write_file(&format!("{project}/prj.conf"), b"\n", 0o600, TESTER)?;
+    let output = source.join("build");
+    let result = Command::new(ctx.bin_dir.join("west"))
+        .current_dir(&source)
+        // The 32-bit native_sim variant needs multilib headers, which are
+        // intentionally absent from this pinned x86_64 container closure.
+        .args(["build", "-b", "native_sim/native/64", "-s"])
+        .arg(&source)
+        .arg("-d")
+        .arg(&output)
+        .env_clear()
+        .env("PATH", format!("{}:/bin", ctx.bin_dir.display()))
+        .env("HOME", "/home/tester")
+        .env("LANG", "C.UTF-8")
+        .env("ZEPHYR_BASE", ctx.scratch.path("zephyr"))
+        .env("ZEPHYR_TOOLCHAIN_VARIANT", "host/gnu")
+        .uid(TESTER.uid)
+        .gid(TESTER.gid)
+        .output()
+        .map_err(|error| format!("run pinned West for {project}: {error}"))?;
+    ensure!(
+        result.status.success(),
+        "West build for {project} failed: status {}, stdout {}, stderr {}; Kconfig outputs: {:?}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr),
+        std::fs::read_dir(output.join("Kconfig")).map(|entries| entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect::<Vec<_>>())
+    );
+    ensure!(
+        output.join("CMakeCache.txt").is_file()
+            && output.join("zephyr").is_dir()
+            && output.join("zephyr/zephyr.elf").is_file(),
+        "West did not produce CMakeCache.txt, zephyr/ and zephyr.elf in {}",
+        output.display()
+    );
+    let cache = std::fs::read_to_string(output.join("CMakeCache.txt"))
+        .map_err(|error| format!("read West CMakeCache.txt: {error}"))?;
+    ensure!(
+        cache
+            .lines()
+            .any(|line| line == format!("CMAKE_HOME_DIRECTORY:INTERNAL={}", source.display())),
+        "West did not record its application source at {}",
+        source.display()
+    );
+    Ok(())
+}
+
+/// The shipped profile recognizes actual West output and keeps an equally
+/// genuine build after its source file disappears. The no-idle-floor variant
+/// proves deletion only for the rebuildable output on the container kernel.
+pub fn west_generated_output_uses_surviving_source_anchor(ctx: &Ctx) -> TestResult {
+    // West requires workspace metadata before it loads Zephyr's build command.
+    // Point a local, network-isolated workspace at the exact flake-pinned
+    // Zephyr tree; West itself generates all build output below each app.
+    ctx.scratch.mkdirs(".west", 0o700, TESTER)?;
+    ctx.scratch.write_file(
+        ".west/config",
+        b"[manifest]\npath = zephyr\n",
+        0o600,
+        TESTER,
+    )?;
+    // A symlink resolves into /nix/store, outside West's workspace. Bind
+    // the pinned source read-only at the workspace path so Zephyr's own
+    // CMake subprocess can run `west topdir` from inside that workspace.
+    let zephyr = ctx.scratch.mkdirs("zephyr", 0o755, TESTER)?;
+    rustix::mount::mount_bind(ctx.bin_dir.join("zephyr-src"), &zephyr)
+        .map_err(|error| format!("bind pinned Zephyr source into West workspace: {error}"))?;
+    // Podman locked the source mount read-only in its outer namespace, so
+    // remounting this bind is forbidden. Check the inherited mount flag.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("read Zephyr mount flags: {error}"))?;
+    ensure!(
+        parse_mountinfo(&mountinfo)?
+            .iter()
+            .any(|mount| { mount.mount_point == zephyr && mount.read_only }),
+        "pinned Zephyr source bind at {} is not read-only",
+        zephyr.display()
+    );
+    ctx.home.mkdirs(".cache", 0o700, TESTER)?;
+    west_build(ctx, "west-app")?;
+    west_build(ctx, "west-missing")?;
+    ctx.scratch.remove_file("west-missing/CMakeLists.txt")?;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        WEST_ANCHOR_KERNEL_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let eligible = ctx.scratch.path("west-app/build");
+    let missing = ctx.scratch.path("west-missing/build");
+    let oracle = Oracle::arm(Fixture::new().eligible(eligible.clone()))?;
+    let built_in = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--dry-run",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:west-build-anchored",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ],
+    )?;
+    built_in.expect_code(0)?;
+    let plan = report(&built_in)?;
+    ensure!(
+        plan["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"].as_str() == eligible.to_str()
+                    && entry["reason"].as_str() == Some("not_idle")
+                    && entry["build_evidence"]["marker"].as_str() == Some("CMakeCache.txt")
+                    && entry["build_evidence"]["source"].as_str() == Some("/tmp/west-app")
+            })),
+        "shipped West profile did not recognize genuine output with source and idle floor: {plan}"
+    );
+    ensure!(
+        plan["plan"].as_array().is_some_and(|entries| entries
+            .iter()
+            .all(|entry| { entry["candidate"].as_str() != missing.to_str() })),
+        "shipped West profile planned genuine output with missing source: {plan}"
+    );
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc.yaml",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:west-anchor-kernel",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&built_in, &run])?;
+    run.expect_code(1)?;
+    let outcome = report(&run)?;
+    ensure!(
+        outcome["actions"].as_array().is_some_and(|actions| {
+            actions.len() == 1 && actions[0]["candidate"].as_str() == eligible.to_str()
+        }),
+        "West reclaim selected unexpected output: {outcome}"
+    );
+    ensure!(!eligible.exists(), "rebuildable West output remains");
+    ensure!(
+        missing.join("zephyr/zephyr.elf").exists(),
+        "missing-source West output was removed"
     );
     verdict.assert_clean()
 }
