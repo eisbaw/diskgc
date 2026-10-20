@@ -664,6 +664,29 @@ output, or generated artifacts can all be recreated. The profile covers
 Meson's Ninja backend only; other backends lack the required
 `build.ninja` marker.
 
+### Source-anchored Autotools output
+
+`autotools-build-anchored` covers GNU Autoconf out-of-source Makefile
+builds. It requires regular `config.status`, `config.log` and `Makefile`,
+and no `configure.ac` entry in the candidate. The status script is read as
+data through the reached candidate fd; diskgc never executes it. Its
+single-quoted `ac_pwd` assignment must name that exact normalized build
+directory. Its `srcdir` must name a strict ancestor under the bound root,
+either as a normalized absolute path or only `..` components. A regular
+`configure.ac` must survive at that source on the same filesystem. Unusual
+shell quoting, duplicate assignments, paths outside the bound root, or
+status files above 2 MiB are refused. Source identity and the status file
+are checked again under the candidate lock. A copied or moved build retains
+its old `ac_pwd` and is refused.
+
+The ordinary ownership, checkout, in-use and three-day idle guards also
+apply. The profile accepts only the generated assignment form tested with
+GNU Autoconf 2.73 and only builds with a generated `Makefile` and a source
+`configure.ac`; other Autotools layouts stay unselected. A surviving
+`configure.ac` establishes a rebuild description, but cannot prove that
+external dependencies, local build-only edits or generated deliverables
+are recoverable.
+
 ### Deletion
 
 For the `delete` action of kind `fs` (`fs_kind` in the core). A dry run,

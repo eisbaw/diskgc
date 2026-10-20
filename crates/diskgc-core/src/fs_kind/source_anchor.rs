@@ -21,6 +21,8 @@ const MAX_CMAKE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const MESON_INFO: &str = "meson-info/meson-info.json";
 const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
 const MAX_MESON_INFO_BYTES: u64 = 1024 * 1024;
+const AUTOTOOLS_STATUS: &str = "config.status";
+const MAX_AUTOTOOLS_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Deserialize into structs so duplicate `directories`, `source` or `build`
 /// fields fail instead of letting a JSON map silently keep one value.
@@ -141,6 +143,9 @@ pub(super) fn check_opened<H: Host>(
     match kind {
         SourceAnchor::Cmake => cmake(host, root, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Meson => meson(host, root, candidate, candidate_fd, mount_id, deadline),
+        SourceAnchor::Autotools => {
+            autotools(host, root, candidate, candidate_fd, mount_id, deadline)
+        }
     }
 }
 
@@ -403,6 +408,150 @@ fn meson<H: Host>(
     )
 }
 
+/// GNU Autoconf records both the current build directory (`ac_pwd`) and
+/// its source directory (`srcdir`) in generated config.status. Never run the
+/// shell script: read two deliberately narrow assignments as inert bytes.
+fn autotools<H: Host>(
+    host: &H,
+    root: &Path,
+    candidate: &Path,
+    candidate_fd: &H::Fd,
+    mount_id: u64,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<SourceEvidence>> {
+    for generated in ["config.log", "Makefile"] {
+        let path = candidate.join(generated);
+        check_deadline(host, deadline, &path)?;
+        let (_, stat) = match open_beneath(
+            host,
+            candidate_fd,
+            mount_id,
+            Path::new(generated),
+            Access::Path,
+            Want::Any,
+        ) {
+            Ok(opened) => opened,
+            Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+            Err(error) => return Ok(Err(unreachable_build(candidate, &path, error)?)),
+        };
+        if stat.file_type != Some(FileType::Regular) {
+            return Ok(Ok(None));
+        }
+    }
+
+    let status_path = candidate.join(AUTOTOOLS_STATUS);
+    check_deadline(host, deadline, &status_path)?;
+    let (status_fd, status_stat) = match open_beneath(
+        host,
+        candidate_fd,
+        mount_id,
+        Path::new(AUTOTOOLS_STATUS),
+        Access::Path,
+        Want::Any,
+    ) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &status_path, error)?)),
+    };
+    if status_stat.file_type != Some(FileType::Regular) {
+        return Ok(Ok(None));
+    }
+    let Some(size) = status_stat.size else {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedFs,
+            status_path,
+            "config.status size was not reported",
+        )));
+    };
+    if size > MAX_AUTOTOOLS_STATUS_BYTES {
+        return Ok(Err(Skip::new(
+            Reason::TooManyEntries,
+            status_path,
+            "config.status exceeds the 2 MiB source-anchor read limit",
+        )));
+    }
+    let bytes = match host.read_head(&status_fd, MAX_AUTOTOOLS_STATUS_BYTES as usize + 1) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Err(Skip::new(
+                Reason::Unreadable,
+                status_path,
+                format!("cannot read config.status: {error}"),
+            )));
+        }
+    };
+    if bytes.len() as u64 != size {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            status_path,
+            "config.status changed while its source anchor was read",
+        )));
+    }
+    let Some(source) = autotools_source(&bytes, root, candidate) else {
+        return Ok(Ok(None));
+    };
+    verify_source_file(
+        host,
+        candidate,
+        source,
+        mount_id,
+        AUTOTOOLS_STATUS,
+        "configure.ac",
+        deadline,
+    )
+}
+
+fn autotools_source(bytes: &[u8], root: &Path, candidate: &Path) -> Option<PathBuf> {
+    // Autoconf 2.73 emits these as single-quoted shell assignments. Unusual
+    // shell escaping is refused, so parsing can never reinterpret script code.
+    fn assignment<'a>(bytes: &'a [u8], key: &[u8]) -> Option<&'a str> {
+        let mut found = None;
+        let assignment_prefix = &key[..key.len() - 1];
+        for line in bytes.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.starts_with(assignment_prefix) && !line.starts_with(key) {
+                return None;
+            }
+            if let Some(value) = line.strip_prefix(key) {
+                if found.is_some() || !value.ends_with(b"'") {
+                    return None;
+                }
+                let value = &value[..value.len() - 1];
+                if value.contains(&b'\'') || value.contains(&0) {
+                    return None;
+                }
+                found = Some(std::str::from_utf8(value).ok()?);
+            }
+        }
+        found
+    }
+
+    if assignment(bytes, b"ac_pwd='")? != candidate.to_str()? {
+        return None;
+    }
+    let srcdir = assignment(bytes, b"srcdir='")?;
+    let source = if srcdir.starts_with('/') {
+        PathBuf::from(srcdir)
+    } else {
+        let mut source = candidate.to_owned();
+        for segment in srcdir.split('/') {
+            if segment != ".." {
+                return None;
+            }
+            source = source.parent()?.to_owned();
+        }
+        source
+    };
+    if !normal_absolute(&source)
+        || !source.starts_with(root)
+        || source == candidate
+        || !candidate.starts_with(&source)
+    {
+        return None;
+    }
+    Some(source)
+}
+
 fn cmake_source(bytes: &[u8], root: &Path, candidate: &Path) -> Option<PathBuf> {
     let mut source = None;
     for line in bytes.split(|byte| *byte == b'\n') {
@@ -488,6 +637,47 @@ mod tests {
                 build,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn autotools_requires_exact_build_path_and_strict_ancestor_source() {
+        let root = Path::new("/projects");
+        let build = Path::new("/projects/app/output");
+        let status = |pwd: &str, srcdir: &str| {
+            autotools_source(
+                format!("ac_pwd='{pwd}'\nsrcdir='{srcdir}'\n").as_bytes(),
+                root,
+                build,
+            )
+        };
+        assert_eq!(status("/projects/app/output", ".."), Some(root.join("app")));
+        for (pwd, srcdir) in [
+            ("/projects/app/other", ".."),
+            ("/projects/app/output", "."),
+            ("/projects/app/output", "../other"),
+            ("/projects/app/output", "../../.."),
+            ("/projects/app/output", "/projects/other"),
+            ("/projects/app/output", "/projects/app/output"),
+            ("/projects/app/output", "/projects/app/../app"),
+        ] {
+            assert_eq!(status(pwd, srcdir), None, "{pwd} {srcdir}");
+        }
+        assert_eq!(
+            autotools_source(
+                b"ac_pwd='/projects/app/output'\nac_pwd='/projects/app/output'\nsrcdir='..'\n",
+                root,
+                build
+            ),
+            None,
+        );
+        assert_eq!(
+            autotools_source(
+                b"ac_pwd='/projects/app/output'\nac_pwd=other\nsrcdir='..'\n",
+                root,
+                build
+            ),
+            None,
         );
     }
 }

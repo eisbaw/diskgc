@@ -39,6 +39,7 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod autotools_suite;
 pub mod browser_suite;
 pub mod buildah_suite;
 pub mod cache_suite;

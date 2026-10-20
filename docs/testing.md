@@ -850,7 +850,9 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   pip, uv, Go, npm, pnpm, Yarn Classic, ccache, PlatformIO and Jest cleaners, and the Cargo
   toolchains under test from the Nix store; descriptor `read-only
   /nix/store`, `toolchains manifest`, `tests all`. `just e2e`, `just
-  e2e-full`.
+  e2e-full`. The Autotools source-anchor case runs pinned GNU Autoconf 2.73
+  and its generated `configure` entirely in the disposable container, with
+  the tool closure mounted read-only for that test.
 - **Debian image** (`localhost/diskgc-e2e-debian`): no Nix inside. Its
   userland is the official Rust image for the fast toolchain's release
   (`rust:1.99.1-slim-trixie`, Debian 13), pinned by digest in flake.nix:

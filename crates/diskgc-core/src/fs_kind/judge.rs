@@ -341,7 +341,7 @@ impl Judge<'_> {
             return Ok(Err(Skip::new(
                 Reason::Changed,
                 found.path.clone(),
-                "the recorded build source or CMakeLists.txt identity changed since discovery",
+                "the recorded build source or source file identity changed since discovery",
             )));
         }
         Ok(Ok(evidence))

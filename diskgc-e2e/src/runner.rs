@@ -371,7 +371,10 @@ fn fuse_device(name: &str) -> Vec<String> {
 /// without changing or reloading the multi-gigabyte base image.
 fn test_mounts(name: &str) -> Vec<String> {
     let mut extra = fuse_device(name);
-    if name == crate::suite::BUILDAH_SPOOL_TEST || name == crate::suite::MESON_ANCHOR_TEST {
+    if name == crate::suite::BUILDAH_SPOOL_TEST
+        || name == crate::suite::MESON_ANCHOR_TEST
+        || name == crate::suite::AUTOTOOLS_ANCHOR_TEST
+    {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }
     if crate::suite::DOCKER_ONLY_TESTS

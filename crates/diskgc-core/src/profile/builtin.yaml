@@ -154,6 +154,25 @@
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
   verified_with: Meson 1.7.0 generated meson-info.json and coredata.dat in disposable Debian 13 container, 2026-10-20
 
+# GNU Autoconf's generated config.status binds its build path to a source
+# ancestor. Only out-of-source Makefile builds with surviving configure.ac
+# are accepted; copied or moved output retains its old ac_pwd and is refused.
+- name: autotools-build-anchored
+  category: c / c++
+  description: Source-anchored Autoconf Makefile output of any name through depth five
+  find:
+    roots: required
+    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+    type: dir
+  where: {has: config.status, lacks_entry: configure.ac, source_anchor: autotools}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
+    no_match: [/home/mark/src/app/sub/a/b/c/deeper]
+  verified_with: GNU Autoconf 2.73 generated config.status and Makefile in a disposable Nix test container, 2026-10-20
+
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.

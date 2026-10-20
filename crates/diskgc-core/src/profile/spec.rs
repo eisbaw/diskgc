@@ -156,6 +156,7 @@ pub enum NewestGroup {
 pub enum SourceAnchor {
     Cmake,
     Meson,
+    Autotools,
 }
 
 impl SourceAnchor {
@@ -163,6 +164,7 @@ impl SourceAnchor {
         match self {
             Self::Cmake => "cmake",
             Self::Meson => "meson",
+            Self::Autotools => "autotools",
         }
     }
 }

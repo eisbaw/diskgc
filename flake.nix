@@ -170,6 +170,7 @@
         ln -s ${pkgs.shadow}/bin/newgidmap $out/bin/newgidmap
         # TASK-101 runs a real Meson setup inside a disposable E2E container.
         ln -s ${pkgs.meson}/bin/meson $out/bin/meson
+        ln -s ${pkgs.autoconf}/bin/autoconf $out/bin/autoconf
         ln -s ${pkgs.ninja}/bin/ninja $out/bin/ninja
         ln -s ${pkgs.coreutils}/bin/du $out/bin/du
       '';

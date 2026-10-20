@@ -38,10 +38,10 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    browser_suite, buildah_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite,
-    docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
-    fs_reclaim_suite, host_suite, inuse_suite, meson_suite, profile_vector_suite,
-    project_cache_suite, stdout_suite, temp_safety_suite,
+    autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
+    cargo_reclaim_suite, cargo_suite, docker_suite, docker_vector_suite, driver_suite,
+    embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
+    meson_suite, profile_vector_suite, project_cache_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -111,6 +111,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs the pinned Meson and Ninja from the Nix store",
     ),
     (
+        AUTOTOOLS_ANCHOR_TEST,
+        "needs pinned GNU Autoconf from the Nix store",
+    ),
+    (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
     ),
@@ -173,6 +177,8 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 pub const BUILDAH_SPOOL_TEST: &str = "containers_image_spool_held_by_buildah_is_in_use";
 /// The test whose container receives the pinned Meson and Ninja closure.
 pub const MESON_ANCHOR_TEST: &str = "meson_generated_output_uses_surviving_source_anchor";
+/// The test whose container receives the pinned GNU Autoconf closure.
+pub const AUTOTOOLS_ANCHOR_TEST: &str = "autotools_generated_output_uses_surviving_source_anchor";
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -193,6 +199,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: meson_suite::meson_generated_output_uses_surviving_source_anchor,
+    },
+    Test {
+        name: AUTOTOOLS_ANCHOR_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: autotools_suite::autotools_generated_output_uses_surviving_source_anchor,
     },
     Test {
         name: DOCKER_DIND_TEST,

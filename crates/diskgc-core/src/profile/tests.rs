@@ -193,6 +193,7 @@ fn the_built_in_library_loads() {
         "brave-browser-cache",
         "bun-cache",
         "cargo-target",
+        "autotools-build-anchored",
         "cmake-build",
         "cmake-build-anchored",
         "meson-build-anchored",
