@@ -1314,10 +1314,11 @@ once the fingerprints are gone).
 Each Docker operation is bound to **one backend**, determined in the
 preflight and used for tally, preflight and execution alike:
 
-- **Endpoint:** the active Docker context must be the system daemon's local
-  Unix socket; a remote context is skipped (`remote_backend`), rootless
-  Docker (a socket under `$XDG_RUNTIME_DIR`) is not supported in v1
-  (`unsupported_backend`).
+- **Endpoint:** the active Docker context must be the default context on the
+  system daemon's local Unix socket. A named context is skipped
+  (`unsupported_backend`); a remote `DOCKER_HOST` or default-context endpoint
+  is skipped (`remote_backend`). Rootless Docker (a socket under
+  `$XDG_RUNTIME_DIR`) is not supported in v1 (`unsupported_backend`).
 - **Builder** (`docker-build-cache`): the prune child sets
   `DOCKER_BUILDKIT=0`, selecting the Docker CLI's Engine command. That
   command calls `BuildCachePrune` on the pinned daemon, independently of
@@ -1589,14 +1590,15 @@ these features backported, and an unparseable release is refused too.
   to a device and mount; `owners:` names resolve to non-system users;
   executables of command actions resolve; Docker and Nix backends are bound
   and reachable.
-  - A missing path or tool, another filesystem, or a remote Docker context
+  - A missing path or tool, another filesystem, or a remote Docker endpoint
     is normal: that tier is skipped with its reason (`missing`, `other_fs`,
-    `remote_backend`).
-  - A misconfiguration (`unsafe_path`, `unsupported_store`,
-    `unsupported_backend`) excludes that tier and is reported as an error
-    (exit 3 if the goal is then not met). The other tiers still run:
-    refusing all cleanup because one tier is broken would let the disk
-    fill.
+    `remote_backend`). A named Docker context is `unsupported_backend`.
+  - An unsafe tier root (`unsafe_path`) excludes that tier and is reported
+    as an error (exit 3 if the goal is then not met). An unsupported store
+    or backend also excludes its tier, but is reported as a skip; with no
+    other error and the goal unmet, the run is exhausted (exit 1). The
+    other tiers still run: refusing all cleanup because one tier is broken
+    would let the disk fill.
   - A daemon that is installed but down is a backend error: reported, and
     `watch` retries soon.
 

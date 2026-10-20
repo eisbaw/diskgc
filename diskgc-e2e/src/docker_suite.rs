@@ -943,6 +943,78 @@ pub fn native_docker_dangling_and_build_cache_prune(ctx: &Ctx) -> TestResult {
         ("DOCKER_CONFIG".to_owned(), "/tmp/docker-client".to_owned()),
         ("BUILDX_BUILDER".to_owned(), "side-builder".to_owned()),
     ];
+    // Endpoint selection must fail before any prune. The remote context is
+    // real client configuration, but its endpoint is deliberately unreachable.
+    docker_ok(
+        ctx,
+        &[
+            "context",
+            "create",
+            "diskgc-remote",
+            "--docker",
+            "host=tcp://127.0.0.1:2375",
+        ],
+        true,
+    )?;
+    let mut remote_env: Vec<_> = env
+        .iter()
+        .filter(|(key, _)| key != "DOCKER_HOST")
+        .cloned()
+        .collect();
+    remote_env.push(("DOCKER_CONTEXT".to_owned(), "diskgc-remote".to_owned()));
+    let mut rootless_env = env.clone();
+    rootless_env
+        .iter_mut()
+        .find(|(key, _)| key == "DOCKER_HOST")
+        .ok_or("Docker fixture has no DOCKER_HOST")?
+        .1 = "unix:///run/user/1000/docker.sock".to_owned();
+    let cache_before_rejected = reclaimable_build_cache(ctx)?;
+    ensure!(
+        !cache_before_rejected.is_empty(),
+        "rejected backends had no build cache to preserve"
+    );
+    for (case, rejected_env, reason) in [
+        ("remote context", &remote_env, "unsupported_backend"),
+        ("rootless socket", &rootless_env, "unsupported_backend"),
+    ] {
+        let args = [
+            "ensure",
+            "--json",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:docker-build-cache",
+            "/var/lib/docker",
+        ];
+        let oracle = Oracle::arm(
+            Fixture::new()
+                .concurrent_writer("/var/lib/docker")
+                .concurrent_writer("/var/lib/containerd")
+                .concurrent_writer("/run/docker"),
+        )?;
+        let run = under_test::run_as_tester_with_env(
+            &ctx.ledger,
+            &ctx.records,
+            Path::new("/"),
+            rejected_env,
+            &ctx.diskgc(),
+            &args,
+        )?;
+        oracle.judge(&run)?.assert_clean()?;
+        run.expect_code(1)?;
+        let result = report(&run)?;
+        ensure!(
+            result["skipped"].as_array().is_some_and(|skipped| {
+                !skipped.is_empty() && skipped.iter().all(|item| item["reason"] == reason)
+            }) && result["actions"].as_array().is_some_and(Vec::is_empty),
+            "{case} was not refused before pruning: {result}"
+        );
+        ensure!(
+            reclaimable_build_cache(ctx)? == cache_before_rejected,
+            "{case} pruned BuildKit cache despite the rejected binding"
+        );
+    }
     let bad_cli_dir = ctx.scratch.mkdir("docker-bad-cli", 0o755, TESTER)?;
     ctx.scratch.write_file(
         "docker-bad-cli/docker",

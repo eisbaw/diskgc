@@ -170,8 +170,13 @@ pub fn inspect_backend<H: Host>(
             host,
             "unix:///var/run/docker.sock" | "unix:///run/docker.sock"
         ) {
+            let reason = if host.starts_with("unix://") {
+                "unsupported_backend"
+            } else {
+                "remote_backend"
+            };
             return Ok(skip(
-                "remote_backend",
+                reason,
                 format!("DOCKER_HOST is {value:?}, not the local system socket"),
             ));
         }

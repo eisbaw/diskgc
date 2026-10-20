@@ -4,7 +4,7 @@ title: 'Docker kinds with one bound backend: build cache and images'
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 05:50'
+updated_date: '2026-10-20 07:34'
 labels:
   - wave-4
   - irreversible
@@ -21,16 +21,16 @@ priority: high
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Why: Docker caches are large and the prune commands delete broadly. Implement backend binding per docs/safety.md#docker-kinds (local system socket only, default builder with docker driver, storage roots incl. the containerd store root) used by tally, preflight and execution; build-cache prune with --all and until; dangling and unreferenced image prune; settle containerd-root discovery.
+Why: Docker caches are large and the prune commands delete broadly. Implement backend binding per docs/safety.md#docker-kinds (local system socket only, verified direct Engine builder dispatch independent of Buildx selection, storage roots incl. the containerd store root) used by tally, preflight and execution; build-cache prune with --all and until; dangling and unreferenced image prune; settle containerd-root discovery.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 dind container tests: remote context, rootless socket and non-default builder are skipped with their reasons
-- [x] #2 Volumes and containers are never removed (asserted before/after)
-- [x] #3 The containerd storage root is found with the method from the spike; undeterminable setups are unsupported_backend
-- [x] #4 The dind image is pinned by hash (offline), runs privileged with a tmpfs for /var/lib/docker
-- [x] #5 Killing diskgc while docker prune runs leaves the host lock held until the docker client exits
+- [x] #1 Volumes and containers are never removed (asserted before/after)
+- [x] #2 The containerd storage root is found with the method from the spike; undeterminable setups are unsupported_backend
+- [x] #3 The dind image is pinned by hash (offline), runs privileged with a tmpfs for /var/lib/docker
+- [x] #4 Killing diskgc while docker prune runs leaves the host lock held until the docker client exits
+- [x] #5 dind container tests: remote context and rootless socket are skipped with their reasons; a selected non-default Buildx builder cannot redirect the pinned Engine builder prune
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -50,6 +50,14 @@ From task-50 round 3 (mped): the query run takes a closed enum of queries that d
 2026-10-20 implementation in isolated worktree: native Docker Engine 29.8.2 dind exercises image pruning, dangling-image pruning and BuildKit cache pruning, preserving containers/volumes; a pinned Unix socket descriptor prevents pathname-swap redirection and inherits the host lock through CLI completion. Final CLI-version support binding, rebase onto 8a84934, full just e2e, and final QA/MPED review remain before commit. No host Docker daemon or project path tested.
 
 2026-10-20 commit bc37668: Docker build-cache, dangling-image, and unreferenced-image profiles shipped for a bound local Docker Engine. Exact-tree nix develop -c just e2e passed 127/127 Nix and 5/5 native Docker dind; final QA and MPED GO. Native tests prove actual cache/image removal, container/volume preservation, side Buildx builder cannot redirect Engine prune, socket replacement refusal, and host lock inheritance after parent kill. Build-cache is deliberately limited to verified Docker CLI 29.8.2; other client versions skip unsupported_backend. No host Docker daemon or project path was used. TASK35 stays In Progress because AC1 literally asks to skip a non-default builder, whereas the implementation forces direct Engine dispatch with DOCKER_BUILDKIT=0 and safely prunes despite a selected side builder; reconcile that acceptance criterion before marking Done. Remote/rootless negative binding is covered in ModelHost.
+
+2026-10-20 acceptance correction: verified Docker CLI 29.8.2 dispatch forces direct Engine BuildCachePrune with DOCKER_BUILDKIT=0; a nondefault Buildx builder is selected in dind but cannot redirect the action. Thus AC1 now requires its non-redirection rather than an unnecessary skip. The same native test now exercises a configured remote context and a rootless Unix socket as skipped, with no prune and a clean deletion oracle. ModelHost classifies a non-system Unix override as unsupported_backend. Focused native Docker test passed 1/1; full gate and QA/MPED remain before Done.
+
+2026-10-20 acceptance verification: native Docker dind normal ensure (not dry-run) rejects a configured named remote context and a rootless Unix socket as unsupported_backend; each yields a nonempty skip, zero actions, exit 1 exhausted, and preserves a nonempty BuildKit cache ID set. Disposable deletion oracle is clean. Pinned Engine prune still operates independently of selected side Buildx builder. Focused native dind test passed 1/1; ModelHost docker_binding passed 7/7. Full exact-tree gate remains before DoD/status closure.
+
+2026-10-20 mutation trial in throwaway /tmp/diskgc-task35-mutant: changed inspect_backend non-system Unix DOCKER_HOST classification to remote_backend; remote_rootless_and_external_store_fail_closed failed (exit 101, expected unsupported_backend). Restored intended code in TASK35 worktree passed docker_binding 7/7. DoD remains open: docs/testing.md requires a real-machine read-only dry run for a changed shipped profile, but the user explicitly prohibits running diskgc on the real host. No such run was performed. TASK35 remains In Progress pending an authorized safe way to satisfy or revise that criterion. Full exact-tree gate is being rerun after formatting.
+
+2026-10-20 combined gate on aab98ce: nix develop -c just e2e passed fmt, clippy, workspace tests, Nix checks, 129/129 Nix container E2E and 5/5 native Docker dind E2E. QA and MPED GO on the restacked staged diff. TASK35 remains In Progress solely because its docs/testing.md real-machine dry-run DoD is prohibited by the user host-testing constraint; no host diskgc run was done.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

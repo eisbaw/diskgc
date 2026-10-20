@@ -121,6 +121,12 @@ fn remote_rootless_and_external_store_fail_closed() {
     let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
     assert!(matches!(result, Binding::Skipped(ref s) if s.reason == "remote_backend"));
     assert_eq!(host.trace_count(Op::DockerQuery), 0);
+
+    let model = format!("{BUNDLED}\n  host: unix:///run/user/1000/docker.sock\n");
+    let host = ModelHost::from_yaml(&model).expect("valid fake host");
+    let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
+    assert!(matches!(result, Binding::Skipped(ref s) if s.reason == "unsupported_backend"));
+    assert_eq!(host.trace_count(Op::DockerQuery), 0);
 }
 
 #[test]
