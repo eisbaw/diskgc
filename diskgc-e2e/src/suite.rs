@@ -180,10 +180,10 @@ pub static TESTS: &[Test] = &[
         run: cache_suite::ccache_cleaner,
     },
     Test {
-        name: "brave_cache_lock_live_then_stale_reclaims_only_cache",
+        name: "brave_cache_lock_blocks_until_absent_then_reclaims_only_cache",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: browser_suite::brave_cache_lock_live_then_stale_reclaims_only_cache,
+        run: browser_suite::brave_cache_lock_blocks_until_absent_then_reclaims_only_cache,
     },
     Test {
         name: "fs_reclaim_exact_exclusion_keeps_valuable_cache",

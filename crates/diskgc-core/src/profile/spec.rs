@@ -114,8 +114,8 @@ pub struct WhereSpec {
     pub has: Option<String>,
     #[serde(default)]
     pub has_not: Option<String>,
-    /// A Chromium-family `SingletonLock` symlink, absolute or relative to
-    /// each source root.
+    /// A Chromium-family `SingletonLock` entry, absolute or relative to
+    /// each source root. Any present entry blocks the candidate.
     #[serde(default, deserialize_with = "present_non_null_string")]
     pub app_not_running: Option<String>,
     /// A source safety guard: a written null must not disable it.

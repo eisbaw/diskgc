@@ -314,18 +314,19 @@ cache can therefore pass the general in-use scan. An `fs` source for such
 a cache uses `where: {app_not_running: .config/chromium/SingletonLock}`
 with each source root set to a home directory (an absolute lock path also
 works).
-The symlink's relative text is `hostname-pid`; diskgc never follows it.
-The source refuses a live PID on this host, including a reused PID, and
-fails closed for a foreign host, a malformed or unreadable lock, or a
-config directory that cannot be reached safely. An absent lock or a PID
-proved gone by a pidfd-backed `/proc` read allows the candidate. It is
-checked during planning and tallying, again under the candidate lock, and
-immediately before deletion or a command action after the process scan.
-The lock PID must be visible in diskgc's PID namespace. Do not use these
-profiles with a host home bind-mounted into a container that has a separate
-PID namespace: a live host PID could appear gone there. A browser started
-after the last check can still race the deletion; Chromium's symlink is
-not a lock diskgc can acquire to exclude that startup.
+The symlink's relative text is `hostname-pid`; diskgc neither follows nor
+interprets it.
+Any present lock retains the cache, including one naming a PID that appears
+gone here. A browser in another PID namespace can share this home directory
+while its lock names only the PID inside that namespace; looking up that PID
+in our `/proc` can falsely report that the browser exited. Malformed and
+unreadable locks, foreign hosts and config directories that cannot be reached
+safely also retain the cache. Only an absent lock in a safely reached config
+directory permits it. The check runs during planning and tallying, again
+under the candidate lock, and immediately before deletion or a command
+action after the process scan. A browser started after the last check can
+still race deletion; Chromium's symlink is not a lock diskgc can acquire to
+exclude that startup.
 
 **Every process, and only once settled.** The scan works in rounds: it
 lists the processes, then reads every one it has not read yet and every

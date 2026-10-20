@@ -1,5 +1,5 @@
-//! Chromium SingletonLock is checked through the Host port, with the
-//! relative link text interpreted as a host name and a PID, never followed.
+//! Chromium SingletonLock is checked through the Host port. Its target is
+//! never interpreted: a PID may be live in a different process namespace.
 
 use std::path::{Path, PathBuf};
 
@@ -56,15 +56,15 @@ const LOCK: &str = "  /home/user/.config/chromium/SingletonLock: {symlink: model
 const LIVE: &str = "processes:\n  - {pid: 42, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], fds: [{path: /usr/bin/tool}], environ: [PATH=/usr/bin]}";
 
 #[test]
-fn missing_and_stale_relative_locks_permit_a_candidate() {
+fn missing_lock_permits_but_a_stale_pid_cannot_prove_the_browser_stopped() {
     assert_eq!(verdict(&host("", "", "")), None);
-    assert_eq!(verdict(&host(LOCK, "", "")), None);
+    assert_eq!(verdict(&host(LOCK, "", "")), Some(Reason::InUse));
 }
 
 #[test]
-fn live_pid_and_reused_pid_both_block() {
-    // The process's executable need not be Chromium. A reused PID is a
-    // conservative false negative rather than permission to delete.
+fn a_present_lock_blocks_regardless_of_which_process_has_its_pid() {
+    // A matching host PID does not prove that the lock belongs to this
+    // process namespace or that this process is the browser.
     assert_eq!(verdict(&host(LOCK, LIVE, "")), Some(Reason::InUse));
 }
 
@@ -118,7 +118,7 @@ fn foreign_malformed_and_non_symlink_locks_fail_closed() {
 
 #[test]
 fn unreadable_lock_fails_closed() {
-    let event = "events:\n  - {at: {op: read_link, path: /home/user/.config/chromium/SingletonLock, when: before}, fail: EACCES}";
+    let event = "events:\n  - {at: {op: statx, path: /home/user/.config/chromium/SingletonLock, when: before}, fail: EACCES}";
     assert_eq!(verdict(&host(LOCK, "", event)), Some(Reason::Unreadable));
 }
 

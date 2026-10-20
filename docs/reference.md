@@ -648,7 +648,7 @@ required}}`.
 |---|---|---|
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
-| `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only if the lock is absent in a safely reached directory, or names this host and a PID proved gone. A live PID, including a reused PID, a foreign host, malformed lock, unreadable lock or unsafe path refuses the candidate. Each source names one application's lock. | `fs` sources only |
+| `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only when the lock is absent in a safely reached directory. Every present lock retains it, even if its PID appears gone: that PID may be live in another namespace sharing the home directory. Unreadable locks and unsafe paths also retain it. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
@@ -868,7 +868,7 @@ listed as planned, not shipped.
 | editors | `cursor-extensions` | version directories under `.cursor/extensions` of a supplied home root; keep the two newest of each extension id and every installed directory in `extensions.json` | `delete` |
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
 | browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
-| browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to name a stopped application | `delete` |
+| browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to be absent | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
@@ -928,10 +928,10 @@ rule). Thus `tmp.*` below another `tmp.*` is not a second candidate.
 
 The browser cache sources take a home directory as their required root. They
 check that browser's `SingletonLock` before judging and again before deleting
-each cache. Run diskgc in the same PID namespace as the browser: with a host
-home bind-mounted into a container's separate PID namespace, the lock PID may
-appear gone even while the browser runs. They match only `Cache` and `Code
-Cache`; the browser profile, `WebStorage`, and `Service Worker/CacheStorage`
+each cache. Any present lock retains the cache, even when its PID appears
+gone; a browser in another PID namespace can share this home directory and
+write a PID that appears absent in diskgc's namespace. They match only
+`Cache` and `Code Cache`; the browser profile, `WebStorage`, and `Service Worker/CacheStorage`
 never match. A custom browser user-data or disk-cache directory is outside
 these built-ins. The lock check
 is specific to the default browser configuration; do not treat it as a

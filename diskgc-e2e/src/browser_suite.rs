@@ -17,10 +17,11 @@ const CACHE_ROOT: &str = ".cache/BraveSoftware/Brave-Browser/Default";
 const CONFIG_ROOT: &str = ".config/BraveSoftware/Brave-Browser";
 const LOCK: &str = ".config/BraveSoftware/Brave-Browser/SingletonLock";
 
-/// A live Chromium-style lock protects both named caches even though the
-/// browser process has no descriptor in either cache. After that same PID
-/// exits, the lock becomes stale and only those caches may be removed.
-pub fn brave_cache_lock_live_then_stale_reclaims_only_cache(ctx: &Ctx) -> TestResult {
+/// A Chromium-style lock protects both named caches even though its process
+/// has no descriptor in either cache. A stale PID still blocks because the
+/// browser may run in another PID namespace. Removing the lock permits only
+/// the named cache directories to be reclaimed.
+pub fn brave_cache_lock_blocks_until_absent_then_reclaims_only_cache(ctx: &Ctx) -> TestResult {
     let home = &ctx.home;
     for rel in [
         format!("{CACHE_ROOT}/Cache"),
@@ -129,22 +130,42 @@ pub fn brave_cache_lock_live_then_stale_reclaims_only_cache(ctx: &Ctx) -> TestRe
         !proc_path.exists(),
         "holder pid {pid} remains after reaping"
     );
-    let stale_oracle = Oracle::arm(
-        Fixture::new()
-            .eligible(cache.clone())
-            .eligible(code_cache.clone()),
-    )?;
+    let stale_oracle = Oracle::arm(Fixture::new())?;
     let stale = ensure_run(ctx, &args)?;
     let stale_verdict = stale_oracle.judge(&stale)?;
     stale.expect_code(1)?;
     let stale_report = report(&stale)?;
     ensure!(
-        candidates(&stale_report, "actions")? == expected,
-        "stale lock did not reclaim exactly the caches: {stale_report}"
+        candidates(&stale_report, "actions")?.is_empty(),
+        "stale lock triggered cache deletion: {stale_report}"
+    );
+    ensure!(
+        candidates_with_reason(&stale_report, "in_use")? == expected,
+        "stale lock did not keep both caches: {stale_report}"
+    );
+    ensure!(
+        cache.exists() && code_cache.exists(),
+        "stale lock removed caches"
+    );
+    stale_verdict.assert_clean()?;
+
+    home.remove_file(LOCK)?;
+    let absent_oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(cache.clone())
+            .eligible(code_cache.clone()),
+    )?;
+    let absent = ensure_run(ctx, &args)?;
+    let absent_verdict = absent_oracle.judge(&absent)?;
+    absent.expect_code(1)?;
+    let absent_report = report(&absent)?;
+    ensure!(
+        candidates(&absent_report, "actions")? == expected,
+        "absent lock did not reclaim exactly the caches: {absent_report}"
     );
     ensure!(
         !cache.exists() && !code_cache.exists(),
-        "stale caches remain"
+        "caches remain after the lock was removed"
     );
     for rel in [
         format!("{CACHE_ROOT}/Service Worker/CacheStorage/site"),
@@ -155,10 +176,10 @@ pub fn brave_cache_lock_live_then_stale_reclaims_only_cache(ctx: &Ctx) -> TestRe
         ensure!(home.path(&rel).exists(), "browser data was removed: {rel}");
     }
     ensure!(
-        std::fs::symlink_metadata(&lock).is_ok(),
-        "stale SingletonLock was removed"
+        std::fs::symlink_metadata(&lock).is_err(),
+        "absent SingletonLock reappeared"
     );
-    stale_verdict.assert_clean()
+    absent_verdict.assert_clean()
 }
 
 fn candidates(report: &Value, field: &str) -> Result<BTreeSet<String>, String> {

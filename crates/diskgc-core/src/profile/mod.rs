@@ -170,7 +170,7 @@ pub struct Where {
     pub has: Option<String>,
     /// A file name the candidate must not contain.
     pub has_not: Option<String>,
-    /// A Chromium-family `SingletonLock` whose process must have exited.
+    /// A Chromium-family `SingletonLock` that must be absent.
     pub app_not_running: Option<String>,
     /// An entry name of any type that the candidate must not contain.
     pub lacks_entry: Option<String>,
