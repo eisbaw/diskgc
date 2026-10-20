@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-19 11:48'
-updated_date: '2026-10-20 02:47'
+updated_date: '2026-10-20 10:03'
 labels:
   - library
 dependencies:
@@ -31,4 +31,6 @@ Why: /var holds regenerable system cruft diskgc does not cover: the systemd jour
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-20 feasibility: mainline `Config::validate_mode` explicitly refuses any selected command action under `--allow-root` (`command actions are refused under --allow-root`), matching docs/safety.md root policy: a trusted cleaner launched in a user-controlled directory can load user code/config. journald uses 4,302,761,984 B and systemd coredumps 4,269,649,920 B on this host (read-only du/journalctl query). A YAML command profile for journalctl/coredumpctl would fail static validation. Needs a dedicated root-safe system kind/privileged command protocol and isolated systemd fixture; do not relax the generic command restriction merely to make the profile load. No host files changed or vacuumed.
+
+2026-10-20 post-TASK21 call-path audit: root mode now resolves named non-system owners for bounded filesystem and Cargo actions, but Config::validate_mode and final CLI tier validation still reject every generic command or Docker prune action under --allow-root; LinuxHost::run_command also rejects effective uid 0. Thus journald vacuum and coredump reclaim cannot be implemented as YAML command profiles. Keep the generic root-command refusal. A future dedicated code-backed systemd operation needs fixed argv, trusted executable/config, sanitized environment, safe cwd, bounded storage identity, deadline/report accounting, and an isolated systemd fixture. Coredump bounded semantics remain unproven; no /var cleanup was run.
 <!-- SECTION:NOTES:END -->

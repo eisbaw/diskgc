@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-20 04:05'
+updated_date: '2026-10-20 09:27'
 labels:
   - wave-2
   - release
@@ -50,6 +50,7 @@ The v1 release (task-49) builds on this one.
 - [ ] #2 All MVP evidence is green: Cargo race tests 1-9 on every pinned toolchain; the journeys for the CI operator, the /tmp laptop owner and the agent harness; the contract freeze review (task-26); wave-1 and wave-2 hardening (task-13, task-64, and task-27's mutation-testing slice on selection and the executor)
 - [ ] #3 Release notes list the limits and the deferred scope
 - [ ] #4 A dry-run on a real machine is reviewed before the first real run
+- [ ] #5 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
 <!-- AC:END -->
 
 ## Implementation Notes

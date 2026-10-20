@@ -4,7 +4,7 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 05:49'
+updated_date: '2026-10-20 10:08'
 labels:
   - wave-4
   - irreversible
@@ -42,6 +42,10 @@ In LinuxHost each gets exactly one wrapper. The deleting one takes a Permit from
 From task-50 round 3 (mped): the query run takes a closed enum of queries that diskgc-linux maps to argv (docs/architecture.md, The Host port). It never takes argv from the caller or from config. Its LinuxHost wrapper is a GATED_ALLOWED entry marked Gate::Ungated with its reason; the deleting run's wrapper is marked Gate::Permit (checked: its signature must take the Permit).
 
 2026-10-20 disposable-container Nix 2.34.8 feasibility proof: NIX_REMOTE=local with NIX_STATE_DIR=/tmp/state-A and /tmp/state-B reports the same store info {url: local, version: 2.34.8}; builtins.storeDir remains /nix/store while the root databases differ. NIX_STORE_DIR can also change without altering URL. The daemon URL does not attest the physical store or socket target. Therefore URL plus logical store-dir checks cannot establish the GC root set, and a GC could delete paths that are live in the actual root DB. No nix-store profile shipped. docs/safety.md records the physical store plus root database binding requirement. Need a verifiable binding protocol or strictly pinned local configuration with independent root DB proof, then ModelHost and disposable-store E2E. No host GC or project path tested.
+
+2026-10-20 disposable Nix 2.34.8 container: an explicit direct-local store URL with store=/nix/store, real=/tmp/real and state=/tmp/state-a overrode conflicting NIX_REMOTE and NIX_CONFIG for root query and bounded GC. A root in state A survived its GC; registering the same path in state B on the same physical real directory and collecting through B deleted the path still rooted in A. The child URL pins only its selected database, not the daemon database or exclusive ownership of the physical store. No nix-garbage profile shipped. A safe implementation needs a pinned daemon connection with independently verified physical-store and root-database identity held through GC, or a proven exclusive direct-local deployment, plus ModelHost and disposable-container tests. No host GC was run.
+
+Clarification of the preceding state-A/state-B experiment: state B recorded the same physical store path as a valid store path, without adding a GC root in B. The GC root for that path existed only in state A. GC through B therefore removed it despite the root in A; no claim is made that GC removed a path rooted in B.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

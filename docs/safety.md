@@ -1430,6 +1430,24 @@ another mount namespace. Until a binding check covers both the physical
 store and the state directory, the `nix-store` kind remains unshipped
 (TASK-36); a URL or logical store directory alone must never enable GC.
 
+A disposable Nix 2.34.8 container confirmed a narrower command primitive:
+`--store 'local?store=/nix/store&real=/tmp/real&state=/tmp/state-a'`
+overrode conflicting `NIX_REMOTE` and `NIX_CONFIG` values for both the
+read-only root query and `nix-store --gc --max-freed 1`. That GC preserved a
+root in state A and removed an unrooted path. State B then recorded that
+same physical store path as valid, without a GC root in B; collecting through
+the same physical `real` path with `state=/tmp/state-b` removed it despite
+the GC root in A. Explicit command arguments can identify
+which database a *direct local* child uses, but they do not identify the
+database used by the machine's Nix daemon or rule out another root database
+over the same physical store. A shipped daemon-backed profile needs a pinned
+daemon connection with independently verified physical store and state/root
+database identity for that very connection, maintained through GC; merely
+forcing an explicit local URL would also exclude ordinary unprivileged
+daemon users. Nix documents `real` and `state` as separate settings for the
+[local store](https://nix.dev/manual/nix/2.34/store/types/local-store) and
+[local daemon client](https://nix.dev/manual/nix/2.34/store/types/local-daemon-store.html).
+
 Verified on Nix 2.34.8 (2026-10-15): an untrusted, non-root user can delete
 dead store paths through the daemon (`nix-store --delete` on a freshly
 added path; `--gc --max-freed` uses the same daemon operation but was not
