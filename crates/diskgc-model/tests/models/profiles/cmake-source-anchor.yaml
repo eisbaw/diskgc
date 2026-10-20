@@ -1,0 +1,56 @@
+# A recorded source with CMakeLists.txt is rebuildable. A missing source
+# and an in-source build are outside the recognizer; a nested checkout and
+# a recently touched output fail later safety checks.
+profile_vector: 1
+profile: cmake-build-anchored
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/app/CMakeLists.txt: {content: "project(app)\n"}
+    /home/tester/project/app/output:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/app\n", mtime: 2026-10-01T00:00:00Z}
+      CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}
+      object.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+    /home/tester/project/missing/output:
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/missing\n"}
+      CMakeFiles: {.: {}}
+      precious: {size: 8K}
+    /home/tester/project/checkout/CMakeLists.txt: {content: "project(checkout)\n"}
+    /home/tester/project/checkout/output:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/checkout\n", mtime: 2026-10-01T00:00:00Z}
+      CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}
+      .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/project/fresh/CMakeLists.txt: {content: "project(fresh)\n"}
+    /home/tester/project/fresh/output:
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/fresh\n"}
+      CMakeFiles: {.: {}}
+    /home/tester/project/insource:
+      CMakeLists.txt: {content: "project(insource)\n"}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/project/insource\n"}
+      CMakeFiles: {.: {}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/output, source: /home/tester/project/app}
+    - {candidate: /home/tester/project/checkout/output, reason: contains_checkout, source: /home/tester/project/checkout}
+    - {candidate: /home/tester/project/fresh/output, reason: not_idle, source: /home/tester/project/fresh}
+  reclaim_exit: 1
+  actions: [/home/tester/project/app/output]
+  skipped:
+    - {candidate: /home/tester/project/checkout/output, reason: contains_checkout}
+    - {candidate: /home/tester/project/fresh/output, reason: not_idle}
+  preserved:
+    - /home/tester/project/app/CMakeLists.txt
+    - /home/tester/project/missing/output/precious
+    - /home/tester/project/checkout/output/.git/HEAD
+    - /home/tester/project/fresh/output/CMakeCache.txt
+    - /home/tester/project/insource/CMakeLists.txt

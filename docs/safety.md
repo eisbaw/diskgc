@@ -626,9 +626,32 @@ This verifies a surviving source file, not that every external build
 dependency is available. It also cannot prove that an uncooperative
 process starts using the output after the in-use scan; that is the general
 deletion race limit below. The profile matches at most five levels below
-each supplied root. Meson, Ninja, OpenWrt, Buildroot, Yocto and Bazel
+each supplied root. Generic Ninja, OpenWrt, Buildroot, Yocto and Bazel
 markers alone do not establish a surviving source and are not shipped as
 deletion sources.
+
+### Source-anchored Meson output
+
+`meson-build-anchored` applies the same ownership, checkout, in-use and
+three-day idle checks. It requires a regular `build.ninja`, a direct
+`meson-private/` directory with a regular `coredata.dat`, no entry named
+`meson.build` in the output, and a regular
+`meson-info/meson-info.json` of at most 1 MiB. The generated JSON must have
+`error: false`; its `directories.build` must equal the candidate and
+`directories.info` must equal its `meson-info/` directory. Its normalized
+`directories.source` must be a strict ancestor under the bound root.
+That source must still hold a safely reached regular `meson.build` on the
+same filesystem. JSON with duplicate required fields, malformed paths,
+missing files or mismatched paths is refused. Discovery and judgement
+read the JSON through the reached candidate fd; reclaim rechecks it and
+the source file identity under the candidate lock. A copied or moved
+Meson output does not match until Meson reconfigures it for the new path.
+
+These checks establish a surviving build description. They cannot prove
+that external dependencies, local configuration files stored only in the
+output, or generated artifacts can all be recreated. The profile covers
+Meson's Ninja backend only; other backends lack the required
+`build.ninja` marker.
 
 ### Deletion
 

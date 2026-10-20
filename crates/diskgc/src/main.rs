@@ -21,10 +21,11 @@
 //! `profiles list | show | test` and `check` read the configuration without
 //! host startup and print the library's profiles or checked tiers.
 //!
-//! stdout carries only the result (`--json`: exactly one object, for every
-//! exit code); stderr carries progress logs and errors.
+//! stdout carries only the result (`--json`: exactly one object when stdout
+//! accepts the write); stderr carries progress logs and errors.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -42,6 +43,10 @@ use diskgc_linux::host::read_config_file;
 /// Exit code for usage, config and provisioning errors, including a kernel
 /// older than the minimum (docs/reference.md, Exit codes).
 const EXIT_USAGE: u8 = 2;
+
+/// A result that could not be written is a run error even if the operation
+/// itself had another result: callers cannot rely on a missing report.
+const EXIT_OUTPUT_ERROR: u8 = 3;
 
 /// `--timeout`'s default (docs/reference.md, `ensure`).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -65,8 +70,8 @@ PATH: the directory whose filesystem must have --min-free available (that
   in --roots DIR. --min-free is required, also with --dry-run.
 Without --dry-run, ensure DELETES what the selection finds and the safety
   checks allow, until the goal is met.
---json prints exactly one JSON object on stdout for every exit; --help
-  prints the help as text.
+--json prints exactly one JSON object on stdout for every exit when stdout
+  accepts the write; --help prints the help as text.
 Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
@@ -696,74 +701,97 @@ fn log(line: &str) {
     eprintln!("diskgc: {line}");
 }
 
-/// Prints the result and returns the exit code (errors were logged as
-/// they were recorded).
+/// Write the entire result, including any trailing newline. A failed write
+/// or flush overrides the operation's exit code because its report is lost.
+/// Reporting the failure to stderr is best effort: that stream can fail too.
+fn write_result<W: Write, E: Write>(
+    stdout: &mut W,
+    stderr: &mut E,
+    body: &str,
+    exit_code: u8,
+) -> ExitCode {
+    match stdout
+        .write_all(body.as_bytes())
+        .and_then(|_| stdout.flush())
+    {
+        Ok(()) => ExitCode::from(exit_code),
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "diskgc: error: could not write result to stdout: {error}"
+            );
+            ExitCode::from(EXIT_OUTPUT_ERROR)
+        }
+    }
+}
+
+fn output(body: &str, exit_code: u8) -> ExitCode {
+    write_result(
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        body,
+        exit_code,
+    )
+}
+
+/// Write the result and return the operation's exit code when it succeeds.
 fn finish(report: &Report, json: bool) -> ExitCode {
     if json {
-        println!("{}", report.to_json());
+        output(&format!("{}\n", report.to_json()), report.exit_code())
     } else if let Some(summary) = report.summary() {
-        println!("{summary}");
+        output(&format!("{summary}\n"), report.exit_code())
+    } else {
+        ExitCode::from(report.exit_code())
     }
-    ExitCode::from(report.exit_code())
 }
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    // `--json` holds for every exit code, usage errors included: decided
-    // before the command line is understood. `ensure` prints its report,
-    // every other command `error_json`.
+    // `--json` holds for every exit code when stdout works, usage errors
+    // included: decided before the command line is understood. `ensure`
+    // prints its report; every other command prints `error_json`.
     let json = json_requested(&args);
     let report = args.first().is_some_and(|c| c == "ensure");
     match parse(&args) {
-        Invocation::Version => {
-            println!("diskgc {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
-        }
+        Invocation::Version => output(&format!("diskgc {}\n", env!("CARGO_PKG_VERSION")), 0),
         Invocation::Help => match builtin_library() {
-            Ok(library) => {
-                print!("{USAGE}{}", describe::help_section(&library));
-                ExitCode::SUCCESS
-            }
+            Ok(library) => output(&format!("{USAGE}{}", describe::help_section(&library)), 0),
             Err(why) => {
-                print!("{USAGE}");
                 log(&format!("error: {why}"));
-                ExitCode::from(EXIT_USAGE)
+                output(USAGE, EXIT_USAGE)
             }
         },
         Invocation::Ensure(args) => finish(&ensure(&args), json),
         Invocation::Check(config) => match check(config.as_deref()) {
-            Ok(out) => {
-                print!("{out}");
-                ExitCode::SUCCESS
-            }
+            Ok(out) => output(&out, 0),
             Err(why) => {
                 log(&format!("error: {why}"));
                 if json {
-                    println!("{}", error_json(&why));
+                    output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+                } else {
+                    ExitCode::from(EXIT_USAGE)
                 }
-                ExitCode::from(EXIT_USAGE)
             }
         },
         Invocation::Profiles(args) => match profiles(&args, json) {
-            Ok((out, failed)) => {
-                print!("{out}");
-                ExitCode::from(u8::from(failed))
-            }
+            Ok((out, failed)) => output(&out, u8::from(failed)),
             Err(why) => {
                 log(&format!("error: {why}"));
                 if json {
-                    println!("{}", error_json(&why));
+                    output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+                } else {
+                    ExitCode::from(EXIT_USAGE)
                 }
-                ExitCode::from(EXIT_USAGE)
             }
         },
         Invocation::NotYet { command, task } => {
             let why = format!("{command} is not implemented in this build yet ({task})");
             eprintln!("diskgc: {why}");
             if json {
-                println!("{}", error_json(&why));
+                output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+            } else {
+                ExitCode::from(EXIT_USAGE)
             }
-            ExitCode::from(EXIT_USAGE)
         }
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
@@ -782,20 +810,25 @@ fn main() -> ExitCode {
             match (json, report) {
                 (true, true) => {
                     eprintln!("diskgc: error: {reason}");
-                    println!(
-                        "{}",
-                        Report::new(Status::UsageError, None)
-                            .usage_error(reason)
-                            .to_json()
-                    );
+                    output(
+                        &format!(
+                            "{}\n",
+                            Report::new(Status::UsageError, None)
+                                .usage_error(reason)
+                                .to_json()
+                        ),
+                        EXIT_USAGE,
+                    )
                 }
                 (true, false) => {
                     eprintln!("diskgc: error: {reason}");
-                    println!("{}", error_json(&reason));
+                    output(&format!("{}\n", error_json(&reason)), EXIT_USAGE)
                 }
-                (false, _) => eprint!("diskgc: {reason}\n{USAGE}"),
+                (false, _) => {
+                    eprint!("diskgc: {reason}\n{USAGE}");
+                    ExitCode::from(EXIT_USAGE)
+                }
             }
-            ExitCode::from(EXIT_USAGE)
         }
     }
 }
@@ -803,6 +836,65 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWriter {
+        errno: i32,
+        on_flush: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.on_flush {
+                Ok(bytes.len())
+            } else {
+                Err(io::Error::from_raw_os_error(self.errno))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.on_flush {
+                Err(io::Error::from_raw_os_error(self.errno))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn stdout_write_and_flush_errors_override_the_operation_exit_code() {
+        const LINUX_ENOSPC: i32 = 28;
+        const LINUX_EPIPE: i32 = 32;
+        for (errno, label) in [
+            (LINUX_ENOSPC, "No space left on device"),
+            (LINUX_EPIPE, "Broken pipe"),
+        ] {
+            for on_flush in [false, true] {
+                for operation_code in [0, EXIT_USAGE] {
+                    let mut stdout = FailingWriter { errno, on_flush };
+                    let mut stderr = Vec::new();
+                    let exit = write_result(&mut stdout, &mut stderr, "result\n", operation_code);
+                    assert_eq!(exit, ExitCode::from(EXIT_OUTPUT_ERROR));
+                    let message = String::from_utf8(stderr).expect("UTF-8 error message");
+                    assert!(
+                        message.contains("diskgc: error: could not write result to stdout:"),
+                        "{message}"
+                    );
+                    assert!(message.contains(label), "{message}");
+                    assert_eq!(message.lines().count(), 1, "{message}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successful_stdout_write_preserves_result_and_operation_exit_code() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = write_result(&mut stdout, &mut stderr, "result\n", EXIT_USAGE);
+        assert_eq!(exit, ExitCode::from(EXIT_USAGE));
+        assert_eq!(stdout, b"result\n");
+        assert!(stderr.is_empty());
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()

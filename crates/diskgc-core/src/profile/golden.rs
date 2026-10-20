@@ -113,6 +113,48 @@ fn anchored_cmake_requires_a_source_and_matches_any_name_through_five_levels() {
 }
 
 #[test]
+fn anchored_meson_requires_generated_metadata_and_matches_any_name_through_five_levels() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library
+        .get("meson-build-anchored")
+        .expect("shipped anchored Meson profile")
+        .body
+    else {
+        panic!("meson-build-anchored is a source")
+    };
+    assert_eq!(source.roots, Roots::Required);
+    assert_eq!(source.where_.has.as_deref(), Some("build.ninja"));
+    assert_eq!(source.where_.has_dir.as_deref(), Some("meson-private"));
+    assert_eq!(source.where_.lacks_entry.as_deref(), Some("meson.build"));
+    assert_eq!(source.where_.source_anchor, Some(SourceAnchor::Meson));
+    assert_eq!(
+        source.min_idle_for,
+        Some(super::IdleFor(Duration::from_secs(3 * 24 * 3600)))
+    );
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.action,
+        Action::Delete {
+            make_writable: false
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let root = Path::new("/home/mark/topics");
+    for (path, expected) in [
+        ("/home/mark/topics/app/generated", true),
+        ("/home/mark/topics/a/b/c/d/e", true),
+        ("/home/mark/topics/a/b/c/d/e/f", false),
+        ("/home/mark/other/generated", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn west_build_has_a_frozen_five_level_match_set_and_zephyr_markers() {
     let library = Library::builtin().expect("built-ins");
     let Body::Source(source) = &library.get("west-build").expect("west-build").body else {

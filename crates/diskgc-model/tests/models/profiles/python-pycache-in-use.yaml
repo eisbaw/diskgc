@@ -1,0 +1,31 @@
+# A live process has a bytecode file open. The source profile has no idle
+# floor, so this isolates the in-use verdict from age filtering.
+profile_vector: 1
+profile: python-pycache
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python: {}
+    /home/tester/project/app/__pycache__:
+      held.pyc: {size: 8K}
+  processes:
+    - {pid: 42, exe: /usr/bin/python, cwd: /home/tester/project,
+       maps: [/usr/bin/python], fds: [{path: /home/tester/project/app/__pycache__/held.pyc}],
+       environ: [PATH=/usr/bin]}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/__pycache__, reason: in_use}
+  reclaim_exit: 1
+  actions: []
+  skipped:
+    - {candidate: /home/tester/project/app/__pycache__, reason: in_use}
+  preserved:
+    - /home/tester/project/app/__pycache__/held.pyc

@@ -3,6 +3,7 @@
 //! This check runs in discovery and again during judgement under the
 //! candidate lock, with no symlink followed at either location.
 
+use serde::Deserialize;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,24 @@ use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
 const CMAKE_CACHE: &str = "CMakeCache.txt";
 const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
 const MAX_CMAKE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
+const MESON_INFO: &str = "meson-info/meson-info.json";
+const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
+const MAX_MESON_INFO_BYTES: u64 = 1024 * 1024;
+
+/// Deserialize into structs so duplicate `directories`, `source` or `build`
+/// fields fail instead of letting a JSON map silently keep one value.
+#[derive(Deserialize)]
+struct MesonInfo {
+    directories: MesonDirectories,
+    error: bool,
+}
+
+#[derive(Deserialize)]
+struct MesonDirectories {
+    source: String,
+    build: String,
+    info: String,
+}
 
 /// Evidence recorded when a build output is found. The source file's
 /// identity must agree at every later judgement, including under the lock.
@@ -121,6 +140,7 @@ pub(super) fn check_opened<H: Host>(
     }
     match kind {
         SourceAnchor::Cmake => cmake(host, root, candidate, candidate_fd, mount_id, deadline),
+        SourceAnchor::Meson => meson(host, root, candidate, candidate_fd, mount_id, deadline),
     }
 }
 
@@ -185,6 +205,26 @@ pub(super) fn cmake<H: Host>(
     let Some(source) = cmake_source(&bytes, root, candidate) else {
         return Ok(Ok(None));
     };
+    verify_source_file(
+        host,
+        candidate,
+        source,
+        mount_id,
+        CMAKE_CACHE,
+        "CMakeLists.txt",
+        deadline,
+    )
+}
+
+fn verify_source_file<H: Host>(
+    host: &H,
+    candidate: &Path,
+    source: PathBuf,
+    mount_id: u64,
+    marker: &'static str,
+    build_file: &'static str,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<SourceEvidence>> {
     check_deadline(host, deadline, &source)?;
     let mounts = match host.mountinfo() {
         Ok(mounts) => mounts,
@@ -205,16 +245,16 @@ pub(super) fn cmake<H: Host>(
         return Ok(Err(Skip::new(
             Reason::OtherFs,
             source,
-            "the recorded CMake source is on another filesystem",
+            "the recorded build source is on another filesystem",
         )));
     }
-    let source_file_path = source.join("CMakeLists.txt");
+    let source_file_path = source.join(build_file);
     check_deadline(host, deadline, &source_file_path)?;
     let (_, source_file_stat) = match open_beneath(
         host,
         &source_dir.fd,
         source_dir.mount.id,
-        Path::new("CMakeLists.txt"),
+        Path::new(build_file),
         Access::Path,
         Want::Any,
     ) {
@@ -229,14 +269,138 @@ pub(super) fn cmake<H: Host>(
         return Ok(Err(Skip::new(
             Reason::UnsupportedFs,
             source_file_path,
-            "CMakeLists.txt identity was not reported",
+            format!("{build_file} identity was not reported"),
         )));
     };
     Ok(Ok(Some(SourceEvidence {
-        marker: CMAKE_CACHE,
+        marker,
         source,
         source_file,
     })))
+}
+
+/// Meson's generated metadata records both the source and build roots. A
+/// matching `build` path prevents a copied output from borrowing another
+/// project's source evidence. The marker is read through the candidate fd,
+/// including during reclaim after the directory is locked.
+fn meson<H: Host>(
+    host: &H,
+    root: &Path,
+    candidate: &Path,
+    candidate_fd: &H::Fd,
+    mount_id: u64,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<SourceEvidence>> {
+    let core_data_path = candidate.join(MESON_CORE_DATA);
+    check_deadline(host, deadline, &core_data_path)?;
+    let (_, core_data_stat) = match open_beneath(
+        host,
+        candidate_fd,
+        mount_id,
+        Path::new(MESON_CORE_DATA),
+        Access::Path,
+        Want::Any,
+    ) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &core_data_path, error)?)),
+    };
+    if core_data_stat.file_type != Some(FileType::Regular) {
+        return Ok(Ok(None));
+    }
+
+    let info_path = candidate.join(MESON_INFO);
+    check_deadline(host, deadline, &info_path)?;
+    let (info_fd, info_stat) = match open_beneath(
+        host,
+        candidate_fd,
+        mount_id,
+        Path::new(MESON_INFO),
+        Access::Path,
+        Want::Any,
+    ) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(None)),
+        Err(error) => return Ok(Err(unreachable_build(candidate, &info_path, error)?)),
+    };
+    if info_stat.file_type != Some(FileType::Regular) {
+        return Ok(Ok(None));
+    }
+    let Some(size) = info_stat.size else {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedFs,
+            info_path,
+            "Meson info size was not reported",
+        )));
+    };
+    if size > MAX_MESON_INFO_BYTES {
+        return Ok(Err(Skip::new(
+            Reason::TooManyEntries,
+            info_path,
+            "Meson info exceeds the 1 MiB source-anchor read limit",
+        )));
+    }
+    let bytes = match host.read_head(&info_fd, MAX_MESON_INFO_BYTES as usize + 1) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Err(Skip::new(
+                Reason::Unreadable,
+                info_path,
+                format!("cannot read Meson info: {error}"),
+            )));
+        }
+    };
+    if bytes.len() as u64 != size {
+        return Ok(Err(Skip::new(
+            Reason::Changed,
+            info_path,
+            "Meson info changed while its source anchor was read",
+        )));
+    }
+    let info: MesonInfo = match serde_json::from_slice(&bytes) {
+        Ok(info) => info,
+        Err(error) => {
+            return Ok(Err(Skip::new(
+                Reason::UnsupportedLayout,
+                info_path,
+                format!("invalid Meson source metadata: {error}"),
+            )));
+        }
+    };
+    if info.error {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedLayout,
+            info_path,
+            "Meson reports an incomplete configuration",
+        )));
+    }
+    let source = PathBuf::from(info.directories.source);
+    let build = PathBuf::from(info.directories.build);
+    let info_dir = PathBuf::from(info.directories.info);
+    if !normal_absolute(&source)
+        || !source.starts_with(root)
+        || source == candidate
+        || !candidate.starts_with(&source)
+        || !normal_absolute(&build)
+        || build != candidate
+        || !normal_absolute(&info_dir)
+        || info_dir != candidate.join("meson-info")
+    {
+        return Ok(Err(Skip::new(
+            Reason::UnsupportedLayout,
+            info_path,
+            "Meson source, build or info path does not identify this out-of-source output",
+        )));
+    }
+    verify_source_file(
+        host,
+        candidate,
+        source,
+        mount_id,
+        MESON_INFO,
+        "meson.build",
+        deadline,
+    )
 }
 
 fn cmake_source(bytes: &[u8], root: &Path, candidate: &Path) -> Option<PathBuf> {

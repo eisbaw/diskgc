@@ -136,6 +136,24 @@
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
   verified_with: CMake 3.30.5, recorded CMAKE_HOME_DIRECTORY and surviving CMakeLists.txt in host tracy builds, 2026-10-20
 
+# Meson's generated metadata records both source and build paths. Only an
+# output nested beneath its source is accepted; a copied output is refused.
+- name: meson-build-anchored
+  category: c / c++
+  description: Source-anchored Meson Ninja output of any name through depth five
+  find:
+    roots: required
+    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+    type: dir
+  where: {has: build.ninja, has_dir: meson-private, lacks_entry: meson.build, source_anchor: meson}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
+    no_match: [/home/mark/src/app/sub/a/b/c/deeper]
+  verified_with: Meson 1.7.0 generated meson-info.json and coredata.dat in disposable Debian 13 container, 2026-10-20
+
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.

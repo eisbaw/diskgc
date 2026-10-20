@@ -113,10 +113,10 @@ process runs, even if that Cargo works in an unrelated directory; see
   would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
   interrupted); JSON `status` is `dry_run`.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
-  code including usage errors. Any argument `--json` (or `--json=...`, a
-  usage error) asks for it, wherever it stands, also where the parser takes
-  it as another flag's value (`--config --json`). `--help` (or `-h`) wins
-  over it: the help is printed as text, exit 0.
+  code including usage errors, when stdout accepts the write. Any argument
+  `--json` (or `--json=...`, a usage error) asks for it, wherever it stands,
+  also where the parser takes it as another flag's value (`--config --json`).
+  `--help` (or `-h`) wins over it: the help is printed as text, exit 0.
 
 ### `watch`
 
@@ -214,11 +214,12 @@ stderr (`diskgc: config PATH`).
   printed; 2 for a usage error, a configuration that is missing (when
   given) or does not load, or an unknown `NAME`. These read-only commands
   need no kernel or process-inspection startup check. `test` also exits 1
-  on a failing example.
+  on a failing example. Any failed stdout write exits 3.
 
-`--json` prints exactly one JSON object on stdout, for every exit code
-(any argument `--json` asks for it, as for `ensure`). A profile is the
-same object in `list` and `show`: every field of the schema, always
+`--json` prints exactly one JSON object on stdout, for every exit code when
+stdout accepts the write (any argument `--json` asks for it, as for
+`ensure`). A profile is the same object in `list` and `show`: every field of
+the schema, always
 present, `null` where the profile's role or kind has none. Values that are
 YAML identifiers keep their YAML spelling (kind names, `delete`,
 `command`, `dir`); values only the JSON has are snake_case, like the
@@ -301,9 +302,10 @@ with `--json`). It reads no configuration. `--help` and `--version` exit
 
 Static validation only, machine-independent: load the config, print the
 resolved config path and each tier's expression normalised with the
-profiles it resolves to, exit 0 or 2. It needs nothing from the deployment
-machine (no `PATH` lookups, no filesystem access beyond reading the config),
-so packaging and configuration tools run it before deploying (the NixOS
+profiles it resolves to, exit 0 or 2 (3 if writing stdout fails). It needs
+nothing from the deployment machine (no `PATH` lookups, no filesystem access
+beyond reading the config), so packaging and configuration tools run it
+before deploying (the NixOS
 module at build time, also when cross-building). Everything that depends on
 the machine is checked at run time; see
 [safety.md](safety.md#validation).
@@ -330,11 +332,14 @@ The first matching row wins:
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
 | 124 | Deadline reached during reclaim, below `--min-free`. |
-| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`, or the final sample could not be taken. Something may have been deleted; the report says what. |
+| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`, or the final sample could not be taken. Something may have been deleted; the report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
-The mapping is explicit in code and covered by tests. `ensure` exits with
-no code but those in the table, or 101 when it panics (a bug, see task-88),
+The mapping is explicit in code and covered by tests. A failed stdout write
+(including a failed flush) takes precedence over the operation's code and
+exits 3. This also applies to `--help`, `--version`, `check`, and `profiles`.
+`ensure` exits with no code but those in the table; an unexpected panic still
+exits 101,
 so a wrapper can use any other code below 126 for its own errors without a
 collision (the shell reports 126 and 127 for a command it cannot run, and
 128+N for one a signal ended; the example hook,
@@ -355,7 +360,9 @@ pre-release sandbox gate, [safety.md](safety.md#pre-release-sandbox-gate)),
 ## Output
 
 - stdout carries only the result. Human mode: silent when nothing needed
-  doing (like `cp`); otherwise a short summary. `--json`: always one object.
+  doing (like `cp`); otherwise a short summary. `--json`: one object when
+  stdout accepts the write. A failed write can leave no result or a partial
+  one; exit 3 and a stderr error identify that failure.
 - stderr carries progress logs: one line per action with tier, profile,
   candidate, observed change in available space, duration. Output of child
   commands (Docker, Nix, command actions) goes to stderr, prefixed with the
@@ -399,7 +406,7 @@ JSON result (field names are part of the contract):
   [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate));
   `operation` is human-readable text (`cargo lock protocol`, a command's
   argv), not an enum: it is for reading, not for matching.
-  A `cmake-build-anchored` candidate whose source was established at
+  A source-anchored build candidate whose source was established at
   discovery has `build_evidence` with `marker`, `source` and
   `idle_age_seconds`. The age is measured from the newest change in an
   eligible candidate. It is `null` when a skip stopped the eligibility
@@ -674,7 +681,7 @@ the built-in profile has no implicit or fixed temp root.
 | `has_dir` | contains a directory of this name directly in the candidate directory (not followed); checked again under the candidate lock before reclaim | `fs` source only |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only when the lock is absent in a safely reached directory. Every present lock retains it, even if its PID appears gone: that PID may be live in another namespace sharing the home directory. Unreadable locks and unsafe paths also retain it. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
-| `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; its identity is checked again under the candidate lock | `fs` source only |
+| `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; `meson`: require regular generated `meson-info/meson-info.json` with matching build and info paths, a normalized strict-ancestor source under the root, regular `meson-private/coredata.dat` and surviving regular source `meson.build`. Source identity and metadata are rechecked under the candidate lock. | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
 | `protect_cursor_extensions` | a literal path relative to the bound root to Cursor's `extensions.json`, beside extension candidates. Every `relativeLocation` listed as installed is kept, even if older than the newest N. The JSON array and each entry's `location.path` must agree with that one directory name. A missing, unreadable, malformed, oversized (over 1 MiB) or changing manifest retains all candidates. | `fs` |
@@ -905,6 +912,7 @@ listed as planned, not shipped.
 | python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
+| c / c++ | `meson-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |

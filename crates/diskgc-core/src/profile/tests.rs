@@ -195,6 +195,7 @@ fn the_built_in_library_loads() {
         "cargo-target",
         "cmake-build",
         "cmake-build-anchored",
+        "meson-build-anchored",
         "containers-image-tmp",
         "chrome-browser-cache",
         "chromium-browser-cache",

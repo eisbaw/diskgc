@@ -35,6 +35,7 @@ use crate::{UNDER_TEST_BIN_DIR, exit, info};
 
 const USAGE: &str = "\
 usage: diskgc-e2e-runner --image-stream PATH --image-ref REF --under-test DIR
+                         [--runtime standard|dind]
                          [--log-dir DIR] COMMAND
 commands:
   run --suite fast|full [--budget-secs N] [--jobs N]
@@ -54,6 +55,15 @@ pub struct Config {
     pub under_test: PathBuf,
     /// Where per-test logs go (on the host).
     pub log_dir: PathBuf,
+    /// The dind image has an entrypoint and needs extra isolation for its
+    /// daemon. The normal images keep the existing Podman invocation.
+    pub runtime: Runtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runtime {
+    Standard,
+    Dind,
 }
 
 /// Which tests to run.
@@ -89,11 +99,17 @@ pub fn parse_args(args: &[String]) -> Result<(Config, Selection), String> {
     }
     let mut take = |name: &str| flags.remove(name);
     let required = |v: Option<String>, name: &str| v.ok_or_else(|| format!("--{name} is required"));
+    let runtime = match take("runtime").as_deref() {
+        None | Some("standard") => Runtime::Standard,
+        Some("dind") => Runtime::Dind,
+        other => return Err(format!("--runtime must be standard or dind, got {other:?}")),
+    };
     let config = Config {
         image_stream: PathBuf::from(required(take("image-stream"), "image-stream")?),
         image_ref: required(take("image-ref"), "image-ref")?,
         under_test: PathBuf::from(required(take("under-test"), "under-test")?),
         log_dir: PathBuf::from(take("log-dir").unwrap_or_else(|| "target/e2e-logs".to_owned())),
+        runtime,
     };
     let selection = match words.as_slice() {
         [cmd] if cmd == "run" => {
@@ -355,8 +371,17 @@ fn fuse_device(name: &str) -> Vec<String> {
 /// without changing or reloading the multi-gigabyte base image.
 fn test_mounts(name: &str) -> Vec<String> {
     let mut extra = fuse_device(name);
-    if name == crate::suite::BUILDAH_SPOOL_TEST {
+    if name == crate::suite::BUILDAH_SPOOL_TEST || name == crate::suite::MESON_ANCHOR_TEST {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
+    }
+    if name == crate::suite::DOCKER_DIND_TEST {
+        extra.extend([
+            "--privileged".to_owned(),
+            "--tmpfs".to_owned(),
+            "/var/lib/docker:rw,mode=0700,size=512m".to_owned(),
+            "--tmpfs".to_owned(),
+            "/var/lib/containerd:rw,mode=0700,size=512m".to_owned(),
+        ]);
     }
     extra
 }
@@ -387,8 +412,19 @@ fn podman_run_args(config: &Config, name: &str, keep: bool, extra: &[String]) ->
         args.push("--rm".to_owned());
     }
     args.extend_from_slice(extra);
+    if config.runtime == Runtime::Dind {
+        // The official dind image starts dockerd as its entrypoint. The
+        // harness starts it only inside the smoke test, after its interlock
+        // and private scratch mounts have been checked.
+        args.extend([
+            "--entrypoint".to_owned(),
+            format!("{UNDER_TEST_BIN_DIR}/diskgc-e2e"),
+        ]);
+    }
     args.push(config.image_ref.clone());
-    args.push(format!("{UNDER_TEST_BIN_DIR}/diskgc-e2e"));
+    if config.runtime == Runtime::Standard {
+        args.push(format!("{UNDER_TEST_BIN_DIR}/diskgc-e2e"));
+    }
     args
 }
 

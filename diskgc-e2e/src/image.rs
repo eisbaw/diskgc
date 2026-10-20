@@ -10,8 +10,8 @@
 //!   manifest`: the manifest [`crate::cargo_under_test::MANIFEST`] must be
 //!   there, and the Cargo tests are listed per toolchain) or none
 //!   (`toolchains none`: no Cargo test is listed, and no manifest is read);
-//! - which tests it runs (`tests all`, or `tests portable`: every test
-//!   but [`crate::suite::NIX_ONLY_TESTS`]).
+//! - which tests it runs (`tests all`, `tests portable`, or `tests docker`:
+//!   the last runs only [`crate::suite::DOCKER_ONLY_TESTS`]).
 //!
 //! The format is one `KEY VALUE` per line, `#` comments and blank lines
 //! ignored; every key but `read-only` exactly once, unknown keys and values
@@ -40,6 +40,8 @@ pub enum Tests {
     /// Every test but [`crate::suite::NIX_ONLY_TESTS`] (a Cargo test by
     /// its name before `@TOOLCHAIN`).
     Portable,
+    /// Only tests that need a native Docker Engine daemon.
+    Docker,
 }
 
 /// A parsed descriptor.
@@ -110,8 +112,11 @@ impl Image {
                     let parsed = match value {
                         "all" => Tests::All,
                         "portable" => Tests::Portable,
+                        "docker" => Tests::Docker,
                         other => {
-                            return Err(format!("tests must be all or portable, got {other:?}"));
+                            return Err(format!(
+                                "tests must be all, portable or docker, got {other:?}"
+                            ));
                         }
                     };
                     set_once(&mut tests, key, parsed)?;
@@ -127,16 +132,22 @@ impl Image {
         })
     }
 
-    /// Whether the image runs the test listed as `listed` (`NAME` or
-    /// `NAME@TOOLCHAIN`): everything, or everything but `nix_only` (name,
-    /// reason) on a `tests portable` image.
-    pub fn runs(&self, listed: &str, nix_only: &[(&str, &str)]) -> bool {
+    /// Whether the image runs `listed` (`NAME` or `NAME@TOOLCHAIN`). Docker
+    /// tests are kept off images without a Docker Engine daemon.
+    pub fn runs(
+        &self,
+        listed: &str,
+        nix_only: &[(&str, &str)],
+        docker_only: &[(&str, &str)],
+    ) -> bool {
+        let base = listed.split('@').next().unwrap_or(listed);
         match self.tests {
-            Tests::All => true,
+            Tests::All => !docker_only.iter().any(|(name, _)| *name == base),
             Tests::Portable => {
-                let base = listed.split('@').next().unwrap_or(listed);
-                !nix_only.iter().any(|(name, _)| *name == base)
+                !docker_only.iter().any(|(name, _)| *name == base)
+                    && !nix_only.iter().any(|(name, _)| *name == base)
             }
+            Tests::Docker => docker_only.iter().any(|(name, _)| *name == base),
         }
     }
 }
@@ -163,15 +174,20 @@ mod tests {
         assert_eq!(nix.read_only, [PathBuf::from("/nix/store")]);
         assert_eq!(nix.toolchains, Toolchains::Manifest);
         let nix_only = [("cargo_race_4", "needs the nightly")];
-        assert!(nix.runs("cargo_race_4@1.99.1", &nix_only));
+        let docker_only = [("native_docker_engine_dind_smoke", "needs dockerd")];
+        assert!(nix.runs("cargo_race_4@1.99.1", &nix_only, &docker_only));
+        assert!(!nix.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
         let debian =
             Image::parse("name debian\nread-only /usr\ntoolchains manifest\ntests portable\n")
                 .unwrap();
         assert_eq!(debian.tests, Tests::Portable);
-        assert!(debian.runs("journey@debian-1.99.1", &nix_only));
-        assert!(debian.runs("sandbox_trivial", &nix_only));
-        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only));
-        assert!(!debian.runs("cargo_race_4", &nix_only));
+        assert!(debian.runs("journey@debian-1.99.1", &nix_only, &docker_only));
+        assert!(debian.runs("sandbox_trivial", &nix_only, &docker_only));
+        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only, &docker_only));
+        assert!(!debian.runs("cargo_race_4", &nix_only, &docker_only));
+        let docker = Image::parse("name docker\ntoolchains none\ntests docker\n").unwrap();
+        assert!(docker.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
+        assert!(!docker.runs("sandbox_trivial", &nix_only, &docker_only));
         let bare = Image::parse("name bare\ntoolchains none\ntests portable\n").unwrap();
         assert!(bare.read_only.is_empty());
         assert_eq!(bare.toolchains, Toolchains::None);
@@ -215,7 +231,10 @@ mod tests {
                 "given twice",
             ),
             ("name x\ntoolchains maybe\ntests all\n", "manifest or none"),
-            ("name x\ntoolchains none\ntests some\n", "all or portable"),
+            (
+                "name x\ntoolchains none\ntests some\n",
+                "all, portable or docker",
+            ),
             (
                 "name x\nread-only usr\ntoolchains none\ntests all\n",
                 "absolute",

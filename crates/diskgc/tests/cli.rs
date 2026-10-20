@@ -453,8 +453,8 @@ fn help_starts_an_agent_with_a_dry_run() {
         "PATH: the directory whose filesystem must have --min-free available",
         "--min-free is required, also with --dry-run",
         "Without --dry-run, ensure DELETES",
-        "--json prints exactly one JSON object on stdout for every exit; --help",
-        "prints the help as text",
+        "--json prints exactly one JSON object on stdout for every exit when stdout",
+        "accepts the write; --help prints the help as text",
     ] {
         assert!(start.contains(needle), "{needle:?}:\n{start}");
     }

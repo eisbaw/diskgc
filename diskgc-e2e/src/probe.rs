@@ -26,6 +26,11 @@ pub const ESCAPE_CASES: &[&str] = &["absolute", "dotdot", "symlink", "bind-mount
 
 /// Runs probe `args[0]` with the remaining arguments; returns the exit code.
 pub fn main(args: &[String]) -> i32 {
+    if let [cmd, mode, binary, rest @ ..] = args
+        && cmd == "stdout-error"
+    {
+        return crate::stdout_suite::redirected_stdout(mode, Path::new(binary), rest);
+    }
     if let [cmd, rest @ ..] = args
         && crate::cargo_probe::PROBES.contains(&cmd.as_str())
     {

@@ -168,6 +168,10 @@
         ln -s ${pkgs.buildah}/bin/buildah $out/bin/buildah
         ln -s ${pkgs.shadow}/bin/newuidmap $out/bin/newuidmap
         ln -s ${pkgs.shadow}/bin/newgidmap $out/bin/newgidmap
+        # TASK-101 runs a real Meson setup inside a disposable E2E container.
+        ln -s ${pkgs.meson}/bin/meson $out/bin/meson
+        ln -s ${pkgs.ninja}/bin/ninja $out/bin/ninja
+        ln -s ${pkgs.coreutils}/bin/du $out/bin/du
       '';
 
       # The release package's dependency tree as built (--locked, normal and
@@ -421,11 +425,47 @@
         };
       };
 
+      # A native Docker Engine, separate from the host's Podman-backed
+      # `docker` command. The manifest digest and Nix hash pin the exact
+      # upstream dind image; the derived image adds the same test interlock
+      # and users as every other e2e image. The daemon starts only inside
+      # docker_suite's disposable test container, never in the host runner.
+      dockerDindImage = pkgs.dockerTools.pullImage {
+        imageName = "library/docker";
+        imageDigest = "sha256:1e08cdb63405ca788aea94ef35b792d1e299607c667d33d7bcbcae1fd2611ced";
+        hash = "sha256-dM+7He+/ypfWJvPcekbICoyda3XT+xc3r2Ru9kIDi+4=";
+        finalImageName = "library/docker";
+        finalImageTag = "29.8.2-dind";
+        os = "linux";
+        arch = "amd64";
+      };
+      e2eDockerImage = pkgs.dockerTools.streamLayeredImage {
+        name = "localhost/diskgc-e2e-dind";
+        fromImage = dockerDindImage;
+        fakeRootCommands = ''
+          ${e2eImageCommon [
+            "name docker-dind"
+            "toolchains none"
+            "tests docker"
+          ]}
+          # The static strace binary is copied as a file. No Nix store is
+          # mounted into the test container.
+          mkdir -p bin
+          cp ${pkgs.pkgsStatic.strace}/bin/strace bin/strace
+          chmod 0755 bin/strace
+        '';
+        config = {
+          Cmd = [ "/bin/sh" ];
+          Env = [ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ];
+          WorkingDir = "/";
+        };
+      };
+
       # The host-side runner with the image and binaries baked into its
       # arguments: `nix run .#e2e-runner -- run --suite fast`. A compiled
       # wrapper (makeBinaryWrapper), not a shell script.
       mkE2eRunner =
-        name: image:
+        name: image: runtime:
         pkgs.runCommand name
           {
             nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
@@ -435,19 +475,23 @@
             makeBinaryWrapper ${e2eBins}/bin/diskgc-e2e-runner $out/bin/diskgc-e2e-runner \
               --add-flags "--image-stream ${image}" \
               --add-flags "--image-ref ${image.imageName}:${image.imageTag}" \
+              --add-flags "--runtime ${runtime}" \
               --add-flags "--under-test ${e2eUnderTest}"
           '';
-      e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage;
+      e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage "standard";
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
-      e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage;
+      e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard";
+      e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind";
     in
     {
       packages.${system} = {
         default = diskgc;
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
+        e2e-runner-docker = e2eRunnerDocker;
         e2e-base-image = e2eBaseImage;
         e2e-debian-image = e2eDebianImage;
+        e2e-docker-image = e2eDockerImage;
         e2e-under-test = e2eUnderTest;
       };
 
@@ -540,6 +584,7 @@
         # `just e2e-debian`, not here.
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
+        e2e-runner-docker = e2eRunnerDocker;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

@@ -1,0 +1,36 @@
+# Real Buildah uses these two name families under /var/tmp. An old free
+# spool is eligible; a fresh one and a live one remain.
+profile_vector: 1
+profile: containers-image-tmp
+path: /var/tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/buildah: {}
+    /var/tmp/container_images_storage-old: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+    /var/tmp/buildah-fresh: {size: 8K, mtime: 2026-10-14T00:00:00Z}
+    /var/tmp/container_images_storage-held: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+    /var/tmp/containers/storage: {.: {}, image: {size: 8K}}
+  processes:
+    - {pid: 42, exe: /usr/bin/buildah, cwd: /,
+       maps: [/usr/bin/buildah], fds: [{path: /var/tmp/container_images_storage-held}],
+       environ: [PATH=/usr/bin]}
+expect:
+  plan:
+    - {candidate: /var/tmp/buildah-fresh, reason: not_idle}
+    - {candidate: /var/tmp/container_images_storage-held, reason: in_use}
+    - {candidate: /var/tmp/container_images_storage-old}
+  reclaim_exit: 1
+  actions: [/var/tmp/container_images_storage-old]
+  skipped:
+    - {candidate: /var/tmp/buildah-fresh, reason: not_idle}
+    - {candidate: /var/tmp/container_images_storage-held, reason: in_use}
+  preserved:
+    - /var/tmp/buildah-fresh
+    - /var/tmp/container_images_storage-held
+    - /var/tmp/containers/storage/image

@@ -155,12 +155,14 @@ pub enum NewestGroup {
 #[serde(rename_all = "snake_case")]
 pub enum SourceAnchor {
     Cmake,
+    Meson,
 }
 
 impl SourceAnchor {
     pub fn name(self) -> &'static str {
         match self {
             Self::Cmake => "cmake",
+            Self::Meson => "meson",
         }
     }
 }

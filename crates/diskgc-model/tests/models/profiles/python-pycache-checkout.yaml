@@ -1,0 +1,34 @@
+# A CPython bytecode cache below a project root and a checkout hidden under
+# a second cache. The checkout must prevent the second directory's deletion.
+profile_vector: 1
+profile: python-pycache
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/app/main.py: {content: "print('app')\n"}
+    /home/tester/project/app/__pycache__:
+      main.cpython-313.pyc: {size: 8K}
+    /home/tester/project/checkout/__pycache__:
+      .git: {HEAD: {content: "ref: refs/heads/main\n"}}
+      generated.pyc: {size: 8K}
+    /home/tester/project/app/__pycache__-backup: {.: {}, keep: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/__pycache__}
+    - {candidate: /home/tester/project/checkout/__pycache__, reason: contains_checkout}
+  reclaim_exit: 1
+  actions: [/home/tester/project/app/__pycache__]
+  skipped:
+    - {candidate: /home/tester/project/checkout/__pycache__, reason: contains_checkout}
+  preserved:
+    - /home/tester/project/app/main.py
+    - /home/tester/project/checkout/__pycache__/.git/HEAD
+    - /home/tester/project/app/__pycache__-backup/keep

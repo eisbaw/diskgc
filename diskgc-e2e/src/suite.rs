@@ -39,8 +39,8 @@ use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     browser_suite, buildah_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite,
-    driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite,
-    inuse_suite, project_cache_suite,
+    docker_suite, driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite,
+    host_suite, inuse_suite, meson_suite, profile_vector_suite, project_cache_suite, stdout_suite,
 };
 
 /// Which gate runs a test.
@@ -106,6 +106,10 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
+        MESON_ANCHOR_TEST,
+        "needs the pinned Meson and Ninja from the Nix store",
+    ),
+    (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
     ),
@@ -144,15 +148,50 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Tests that require the digest-pinned Docker Engine dind image. They are
+/// never listed by the Nix or Debian images, which have no Docker daemon.
+pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[(
+    DOCKER_DIND_TEST,
+    "needs the native Docker Engine daemon in the pinned dind image",
+)];
+
+pub const DOCKER_DIND_TEST: &str = "native_docker_engine_dind_smoke";
+
 /// The tests whose container gets the FUSE device (`/dev/fuse`, when the
 /// host has it): only these mount a FUSE filesystem.
 pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touched"];
 
 /// The one test whose container receives the pinned Buildah closure.
 pub const BUILDAH_SPOOL_TEST: &str = "containers_image_spool_held_by_buildah_is_in_use";
+/// The test whose container receives the pinned Meson and Ninja closure.
+pub const MESON_ANCHOR_TEST: &str = "meson_generated_output_uses_surviving_source_anchor";
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "checked_in_python_profile_vector_replays_in_container",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: profile_vector_suite::checked_in_python_profile_vector_replays_in_container,
+    },
+    Test {
+        name: MESON_ANCHOR_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: meson_suite::meson_generated_output_uses_surviving_source_anchor,
+    },
+    Test {
+        name: DOCKER_DIND_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_suite::native_docker_engine_dind_smoke,
+    },
+    Test {
+        name: "ensure_stdout_failures_exit_three_without_panicking",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: stdout_suite::ensure_stdout_failures_exit_three_without_panicking,
+    },
     Test {
         name: BUILDAH_SPOOL_TEST,
         tier: Tier::Fast,
@@ -770,7 +809,7 @@ fn listing() -> Result<(String, Vec<(String, Tier)>), String> {
         .map(|t| (t.name.to_owned(), t.tier))
         .chain(cargo_suite::listing(&toolchains));
     let lines: Vec<_> = all
-        .filter(|(name, _)| image.runs(name, NIX_ONLY_TESTS))
+        .filter(|(name, _)| image.runs(name, NIX_ONLY_TESTS, DOCKER_ONLY_TESTS))
         .collect();
     ensure!(!lines.is_empty(), "image {} lists no test", image.name);
     Ok((image.name, lines))
@@ -826,14 +865,15 @@ pub fn run(name: &str) -> i32 {
         }
     };
     let image = match Image::load() {
-        Ok(image) if !image.runs(name, NIX_ONLY_TESTS) => {
+        Ok(image) if !image.runs(name, NIX_ONLY_TESTS, DOCKER_ONLY_TESTS) => {
             let base = name.split('@').next().unwrap_or(name);
             let why = NIX_ONLY_TESTS
                 .iter()
+                .chain(DOCKER_ONLY_TESTS.iter())
                 .find(|(n, _)| *n == base)
                 .map_or("", |(_, why)| *why);
             eprintln!(
-                "diskgc-e2e: {name} is not run on the {} image (NIX_ONLY_TESTS: {why})",
+                "diskgc-e2e: {name} is not run on the {} image: {why}",
                 image.name
             );
             return exit::USAGE;

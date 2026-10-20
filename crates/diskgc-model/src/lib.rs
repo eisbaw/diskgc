@@ -11,6 +11,7 @@
 pub mod harness;
 pub mod host;
 pub mod load;
+pub mod profile_vector;
 pub mod spec;
 pub mod state;
 pub mod support;

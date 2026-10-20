@@ -1,0 +1,68 @@
+# An arbitrary-name Meson output needs generated metadata that binds this
+# exact build path to a surviving source meson.build. The checkout and fresh
+# output reach later guards; missing source and in-source output survive.
+profile_vector: 1
+profile: meson-build-anchored
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/app/meson.build: {content: "project('app')\n"}
+    /home/tester/project/app/odd-output:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      build.ninja: {mtime: 2026-10-01T00:00:00Z}
+      meson-private:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        coredata.dat: {content: coredata, mtime: 2026-10-01T00:00:00Z}
+      meson-info:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        meson-info.json: {content: '{"directories":{"source":"/home/tester/project/app","build":"/home/tester/project/app/odd-output","info":"/home/tester/project/app/odd-output/meson-info"},"error":false}', mtime: 2026-10-01T00:00:00Z}
+      object.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+    /home/tester/project/missing/output:
+      build.ninja: {}
+      meson-private: {coredata.dat: {content: coredata}}
+      meson-info:
+        meson-info.json: {content: '{"directories":{"source":"/home/tester/project/missing","build":"/home/tester/project/missing/output","info":"/home/tester/project/missing/output/meson-info"},"error":false}'}
+      precious: {size: 8K}
+    /home/tester/project/checkout/meson.build: {content: "project('checkout')\n"}
+    /home/tester/project/checkout/output:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      build.ninja: {mtime: 2026-10-01T00:00:00Z}
+      meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {content: coredata, mtime: 2026-10-01T00:00:00Z}}
+      meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {content: '{"directories":{"source":"/home/tester/project/checkout","build":"/home/tester/project/checkout/output","info":"/home/tester/project/checkout/output/meson-info"},"error":false}', mtime: 2026-10-01T00:00:00Z}}
+      .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/project/fresh/meson.build: {content: "project('fresh')\n"}
+    /home/tester/project/fresh/output:
+      build.ninja: {}
+      meson-private: {coredata.dat: {content: coredata}}
+      meson-info:
+        meson-info.json: {content: '{"directories":{"source":"/home/tester/project/fresh","build":"/home/tester/project/fresh/output","info":"/home/tester/project/fresh/output/meson-info"},"error":false}'}
+    /home/tester/project/insource:
+      meson.build: {content: "project('insource')\n"}
+      build.ninja: {}
+      meson-private: {coredata.dat: {content: coredata}}
+      meson-info:
+        meson-info.json: {content: '{"directories":{"source":"/home/tester/project/insource","build":"/home/tester/project/insource","info":"/home/tester/project/insource/meson-info"},"error":false}'}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/odd-output, source: /home/tester/project/app}
+    - {candidate: /home/tester/project/checkout/output, reason: contains_checkout, source: /home/tester/project/checkout}
+    - {candidate: /home/tester/project/fresh/output, reason: not_idle, source: /home/tester/project/fresh}
+  reclaim_exit: 1
+  actions: [/home/tester/project/app/odd-output]
+  skipped:
+    - {candidate: /home/tester/project/checkout/output, reason: contains_checkout}
+    - {candidate: /home/tester/project/fresh/output, reason: not_idle}
+  preserved:
+    - /home/tester/project/app/meson.build
+    - /home/tester/project/missing/output/precious
+    - /home/tester/project/checkout/output/.git/HEAD
+    - /home/tester/project/fresh/output/build.ninja
+    - /home/tester/project/insource/meson.build

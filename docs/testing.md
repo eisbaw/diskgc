@@ -213,6 +213,43 @@ redacted. The sketch above is the fixture
 through the executor (`tests/sketch.rs`: `ensure --min-free 15G --select
 profile:cargo-target --roots /home/mark/src /home/mark/src`).
 
+**Checked-in profile vectors.** `crates/diskgc-model/tests/models/profiles/*.yaml`
+wrap an ordinary `host_model: 1` under `host:` with a selected built-in
+`profile`, `path`, optional `roots`, `min_free`, and explicit `expect` data.
+The shared `tests/profile_vectors.rs` runner loads every YAML file, runs
+`--dry-run` and reclaim on *separate* `ModelHost` copies, and compares the
+complete plan, action, and skip sets. `expect.preserved` also names paths
+that must survive, including missing-source outputs that discovery cannot
+plan. It checks that dry-run never called `unlinkat`, that each action
+actually removed its path, and that reclaim unlinked nothing outside the
+expected actions. The Python vector's matcher mutation changes every
+`__pycache__` path pattern to `__wrong_cache__`; the unchanged vector then
+fails at its expected plan, proving the gate bites.
+
+To add a vector, copy a case in that directory, keep `profile_vector: 1`,
+model the candidate and protected neighbors under `host.tree`, and write
+the expected plan and reclaim results independently of diskgc's report.
+Put the candidate's recorded source text in a file's `content:` when the
+profile reads one. Use `processes[].fds` for an in-use file and model
+`mtime` for an age boundary. Then run
+`nix develop -c cargo test -p diskgc-model --test profile_vectors` and
+`nix develop -c just check`. Unknown YAML keys and invalid host references
+fail loading; a new YAML file is picked up without registering a Rust test.
+
+`checked_in_python_profile_vector_replays_in_container` embeds the Python
+positive/checkout YAML case into the destructive-test binary, materializes
+its ordinary files and directories on the container's private tmpfs, and
+compares the real binary's plan, actions, skips, and surviving paths to
+that same expected data. It also uses the mandatory deletion oracle. Run
+it with `nix develop -c just e2e-one
+checked_in_python_profile_vector_replays_in_container`, then run
+`nix develop -c just e2e` before committing. This replay currently accepts
+only plain files and directories without modelled time or processes; it
+fails explicitly on other model features. The host Docker-compatible CLI
+for this gate is **Podman**, not native Docker Engine. A native Docker Engine
+run inside isolated dind is a separate gate and must be reported separately
+until actually verified.
+
 How the format reads (the schema documents every key):
 
 - **Tree:** keys are absolute paths; missing parents are created. A mapping
@@ -445,10 +482,12 @@ filesystem, processes and mounts from the developer's system.
   profile's three-day floor.
 - **Dormant shells:** real `nix-shell` and `nix develop` sessions left idle
   with their `TMPDIR` under `/tmp`: their directories are skipped.
-- **Docker** in its own container (`docker:dind` under rootless Podman,
-  verified to work on the development machine), images preloaded offline;
-  backend binding: a non-default builder or a remote context is skipped
-  with its reason.
+- **Native Docker Engine smoke** in its own digest-pinned dind image under
+  rootless Podman (`just e2e-docker-one native_docker_engine_dind_smoke`).
+  The harness starts `dockerd` on a private Unix socket, imports an image
+  from an offline scratch payload, creates a container and volume, and
+  verifies their identities survive a traced diskgc run and the deletion
+  oracle. Backend binding and prune cases remain with task-35.
 - **Nix GC** in a container with its own store and daemon.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
   process.**
@@ -470,10 +509,10 @@ filesystem, processes and mounts from the developer's system.
   `ensure_exits_1_when_every_candidate_was_processed_below_min_free`;
   selection by model tests and by the test driver's `--idle-for 1s`
   (`cargo_target_suite.rs`).
-- **Not only Nix:** every test but the Nix-only ones in a container from
+- **Not only Nix:** every test but the Nix-only and Docker-only ones in a container from
   a Debian image with the static binary, without Nix (Container setup:
-  Images; `just e2e-debian`). Neither image has Docker; a variant with
-  Docker (dind) comes with the Docker kinds (task-46).
+  Images; `just e2e-debian`). A separate dind image exercises Docker Engine;
+  the Nix and Debian images do not carry a Docker daemon.
 - **Shipped files:** the systemd unit is checked with `systemd-analyze
   verify` (in `just check`); the tmpfiles drop-in is applied with
   `systemd-tmpfiles --root=<scratch> --create` in the container harness
@@ -775,21 +814,21 @@ anything and each test checks its root mount, and both refuse
 fuse-overlayfs or another storage driver, whose inode numbers and birth
 times the snapshot keys were not validated on.
 
-**Images.** There are two test images, each with its own runner (`nix run
-.#e2e-runner`, `.#e2e-runner-debian`) and the same binaries under test, the
-static musl ones. Both carry, baked in by the same commands (flake.nix,
+**Images.** There are three test images, each with its own runner (`nix run
+.#e2e-runner`, `.#e2e-runner-debian`, `.#e2e-runner-docker`) and the same
+static musl binaries under test. All carry, baked in by the same commands (flake.nix,
 `e2eImageCommon`), the sandbox marker, the users, the overlay-root fixture
 file, the mount points and a **descriptor**, `/.diskgc-test-image`
 (`diskgc-e2e/src/image.rs`), which says what would otherwise be assumed
 about Nix: which directories setup bind-mounts read-only over themselves
 (`read-only`), whether the image has Cargo toolchains under test
 (`toolchains manifest`, the manifest above, or `none`: no manifest is read
-and no Cargo test listed) and which tests it runs (`tests all`, or
-`portable`: every test but `NIX_ONLY_TESTS` in `suite.rs`, each listed
-with why, so a test that cannot run on an image fails there rather than
-being left out). A missing or malformed descriptor fails the listing and
-every test's setup; nothing falls back to "a Nix image". The runner names
-the image in its summary.
+and no Cargo test listed) and which tests it runs (`tests all` excludes
+Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
+  `tests docker` runs only `DOCKER_ONLY_TESTS` in `suite.rs`). A missing
+  or malformed descriptor fails the listing and every test's setup;
+  nothing falls back to "a Nix image". The runner names the image in its
+  summary.
 
 - **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned
   pip, uv, Go, npm, pnpm, Yarn Classic, ccache, PlatformIO and Jest cleaners, and the Cargo
@@ -831,18 +870,36 @@ the image in its summary.
     `PASS`. The build-directory checks are not vacuous there: they accept a
     missing build directory only from the release measured to ignore
     `CARGO_BUILD_BUILD_DIR` (1.90.0), never from "the oldest toolchain".
+- **Docker image** (`localhost/diskgc-e2e-dind`): official
+  `library/docker:29.8.2-dind`, pinned by manifest digest and Nix hash in
+  flake.nix, with the common sandbox marker/users and static strace copied
+  to `/bin/strace`; descriptor `toolchains none`, `tests docker`. Podman is
+  only the outer runtime. The runner overrides the upstream dockerd
+  entrypoint so the interlock runs first, then gives the smoke test
+  `--privileged` and separate tmpfs mounts at `/var/lib/docker` and
+  `/var/lib/containerd` (512 MiB maximum each). The test starts native
+  `dockerd` with a container-local Unix socket, no network bridge or
+  iptables, and the `vfs` storage driver for nested rootless operation;
+  `docker version` must report Docker Engine 29.8.2. Its
+  scratch image comes from a local tar stream, with no registry access.
+  The only host bind mount is the read-only Nix output holding the binaries
+  under test; no host Docker socket or developer project path is mounted.
+  This proves the native Docker fixture, not containerd snapshotter root
+  discovery or Docker prune safety (tasks 57 and 35). Run its smoke with
+  `nix develop -c just e2e-docker-one native_docker_engine_dind_smoke`.
 - **GC roots.** The container recipes build each runner to an out-link
   in `.gcroots/` at the repository root (gitignored, outside `target/`,
   so `cargo clean` does not drop it) and run it from there; `just e2e`,
-  `e2e-full` and `e2e-debian` also root the dev shell's inputs
+  `e2e-full`, `e2e-debian` and `e2e-docker` also root the dev shell's inputs
   (`.gcroots/dev`, its `inputDerivation`). A runner's closure holds its
-  image's inputs (the toolchains, the pinned Debian image, the built
+  image's inputs (the toolchains, the pinned Debian and Docker images, the built
   layers), so a Nix garbage collection on a low disk does not delete them
   and force a re-download. Each build replaces its link, so roots do not
   accumulate. What stays on disk, measured 2026-10-19: closures of 3.0 GB
   (the Nix runner), 1.2 GB (the Debian runner) and 1.5 GB (the dev shell),
-  4.4 GB together. Podman's own copies of the loaded images (2.84 GB and
-  0.93 GB) come on top. Loading an image needs room beyond what it keeps:
+  4.4 GB together before adding the Docker runner. Podman's own copies of
+  the loaded Nix and Debian images (2.84 GB and 0.93 GB) come on top.
+  Loading an image needs room beyond what it keeps:
   the Debian image's load took 2.8 GB of free space at its peak, 1.9 GB
   of it only during the load (one measurement, sampled every 100 ms; the
   Nix image's load was not measured). To give it all back: `just
@@ -873,11 +930,13 @@ CI settings). Three layers:
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus the fast container tests: interlock, deletion oracle, core filesystem scenarios, the Cargo toolchain tests on the fast toolchain | before every commit (the gate); budget under 5 minutes for the container phase (canary, image check, every test), durations reported per test; over budget it fails, and tests still running at the deadline are killed |
-| `e2e-full` | every container test, fast and full tiers: all race tests on all toolchains, dind, the Nix daemon, per-tool caches, differential tests; then `e2e-debian`'s run | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; a 1-hour deadline only guards against hangs |
+| `e2e` | `check` plus fast Nix-image tests and the native Docker smoke | before every commit (the gate); each runner has a 5-minute budget including setup |
+| `e2e-full` | every Nix-image test, then the Debian and native Docker suites | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
+| `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
 | `e2e-debian-one NAME` | the same on the Debian image | while working on one there |
+| `e2e-docker-one NAME` | one native Docker test in a disposable dind container | while working on one there |
 | `soak` | property tests with many cases | before a release, nightly CI |
 | `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |
 | `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
