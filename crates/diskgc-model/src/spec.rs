@@ -64,18 +64,32 @@ pub struct HostModel {
     pub own_uid: Option<u32>,
     /// The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):
     /// `open` (the default; the model deletes nothing real), `closed`
-    /// (outside a test container: `may_delete`, `unlinkat` and `fchmod`
-    /// are refused with `Cause::SandboxGate`, nothing is attempted), or
+    /// (outside a test container: `may_delete`, `unlinkat`, `fchmod` and
+    /// `run_command` are refused with `Cause::SandboxGate`, nothing is
+    /// attempted), or
     /// `refuses_deletes` (`may_delete` answers open but the deleting calls
     /// are refused: what a caller that asked first must still survive).
     #[serde(default, skip_serializing_if = "GateSpec::is_open")]
     pub sandbox_gate: GateSpec,
+    /// Exit code returned by a modelled command action (default 0). A
+    /// deadline already passed returns `DeadlineBeforeStart` instead. The model runs
+    /// no child and changes no filesystem state for the command itself.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub command_exit: u8,
+    /// Model an output-forwarding or wait failure after the command was
+    /// spawned. The filesystem itself is unchanged by the model command.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub command_error_after_start: bool,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
     /// What the scenario must produce (checked by the harness).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<Expect>,
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 impl HostModel {
@@ -521,6 +535,7 @@ pub enum Op {
     Mountinfo,
     Openat2,
     Statx,
+    ExecutableFile,
     ReadDir,
     ReadHead,
     ReopenRegular,
@@ -543,6 +558,7 @@ pub enum Op {
     MayDelete,
     Unlinkat,
     Fchmod,
+    RunCommand,
 }
 
 impl Op {
@@ -551,6 +567,7 @@ impl Op {
             Self::Mountinfo => "mountinfo",
             Self::Openat2 => "openat2",
             Self::Statx => "statx",
+            Self::ExecutableFile => "executable_file",
             Self::ReadDir => "read_dir",
             Self::ReadHead => "read_head",
             Self::ReopenRegular => "reopen_regular",
@@ -573,6 +590,7 @@ impl Op {
             Self::MayDelete => "may_delete",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",
+            Self::RunCommand => "run_command",
         }
     }
 }

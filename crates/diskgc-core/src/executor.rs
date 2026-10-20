@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
+use crate::command_action::{self, Preflight, Ready};
 use crate::engine::{Checkouts, Reason, Rules, Skip};
 use crate::fs_kind::{self, Find};
 use crate::host::{Delete, Dev, Host, HostError, MonoTime, Space, Timestamp};
@@ -336,20 +337,18 @@ pub fn ensure<H: Delete>(
     // Before anything else (the gate, the first sample, the host lock):
     // only a source whose removal this build implements is reclaimed. An
     // allowlist: kind cargo-target through its lock protocol, kind fs
-    // through its own deletion protocol when its action is `delete`
-    // ([`fs_kind::reclaim`]). Anything else (a command action, task-37; a
-    // kind added later) is refused here, never attempted, until its
-    // reclaim exists ([`Reclaim::walk`] matches the kinds exhaustively).
+    // through its own deletion or checked command protocol. Anything else
+    // is refused here, never approximated by a different kind's protocol.
     match (&request.tier.source, &request.tier.action) {
         (SourceKind::CargoTarget, Action::CargoLockProtocol)
-        | (SourceKind::Fs(_), Action::Delete { .. }) => {}
+        | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. }) => {}
         (_, action) => {
             return usage(
                 report,
                 log,
                 format!(
                     "--select `{}`: `{}` removes with `{action}`, which this build does not \
-                     run (command actions are task-37): a reclaiming ensure refuses it; use \
+                     run: a reclaiming ensure refuses it; use \
                      --dry-run for a read-only plan",
                     request.tier.select, request.tier.profile
                 ),
@@ -357,7 +356,6 @@ pub fn ensure<H: Delete>(
         }
     }
     let mut report = report;
-    let deadline = deadline_of(host, request.timeout);
     if let Err(gate) = host.may_delete() {
         return usage(
             report,
@@ -367,6 +365,69 @@ pub fn ensure<H: Delete>(
             ),
         );
     }
+    let deadline = deadline_of(host, request.timeout);
+    let command_ready = if let Action::Command { argv, .. } = &request.tier.action {
+        match command_action::preflight(host, argv) {
+            Ok(Preflight::Ready(ready)) => {
+                log(&format!(
+                    "{}: command executables: {}",
+                    request.tier.name,
+                    ready
+                        .executables
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                Some(ready)
+            }
+            Ok(Preflight::Missing(program)) => {
+                let measured = match measure(host, request, &mut report) {
+                    Ok(measured) => measured,
+                    Err(error) => return usage(report, log, error),
+                };
+                log(&format!(
+                    "{}: profile `{}` is missing executable {program:?}",
+                    request.tier.name, request.tier.profile
+                ));
+                report.skipped.push(SkipEntry {
+                    tier: request.tier.name.clone(),
+                    profile: request.tier.profile.clone(),
+                    candidate: PathBuf::new(),
+                    count: 1,
+                    examples: Vec::new(),
+                    reason: Reason::Missing.as_str(),
+                });
+                report.avail_after_bytes = Some(report.avail_before_bytes.expect("measured"));
+                report.status = conclude(
+                    Final::of(report.avail_after_bytes, measured.min),
+                    false,
+                    false,
+                );
+                return report;
+            }
+            Err(error) => {
+                let measured = match measure(host, request, &mut report) {
+                    Ok(measured) => measured,
+                    Err(message) => return usage(report, log, message),
+                };
+                record_error(
+                    &mut report,
+                    log,
+                    run_error(&request.tier, error.to_string()),
+                );
+                report.avail_after_bytes = Some(report.avail_before_bytes.expect("measured"));
+                report.status = conclude(
+                    Final::of(report.avail_after_bytes, measured.min),
+                    false,
+                    true,
+                );
+                return report;
+            }
+        }
+    } else {
+        None
+    };
     let measured = match measure(host, request, &mut report) {
         Ok(m) => m,
         Err(e) => return usage(report, log, e),
@@ -423,6 +484,7 @@ pub fn ensure<H: Delete>(
         measured: &measured,
         deadline,
         tally_budget: request.tally_budget,
+        command_ready,
         report: &mut report,
         log,
         deadline_hit: false,
@@ -455,6 +517,39 @@ pub fn dry_run<H: Host>(
         Err(e) => return usage(report, log, e),
     };
     let tier = &request.tier;
+    if let Action::Command { argv, .. } = &tier.action {
+        match command_action::preflight(host, argv) {
+            Ok(Preflight::Ready(ready)) => log(&format!(
+                "{}: command executables: {}",
+                tier.name,
+                ready
+                    .executables
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Ok(Preflight::Missing(program)) => {
+                log(&format!(
+                    "{}: profile `{}` is missing executable {program:?}",
+                    tier.name, tier.profile
+                ));
+                report.plan.push(plan_entry(
+                    tier,
+                    Path::new(""),
+                    Some(Reason::Missing.as_str()),
+                    None,
+                ));
+                report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+                return report;
+            }
+            Err(error) => {
+                record_error(&mut report, log, run_error(tier, error.to_string()));
+                report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+                return report;
+            }
+        }
+    }
     let owners = [uid];
     let rules = rules(tier, &owners, log);
     let mut checker = Checker::for_plan(&rules);
@@ -913,6 +1008,7 @@ struct Reclaim<'a, 'l, H: Delete> {
     measured: &'a Measured<H::Fd>,
     deadline: Option<MonoTime>,
     tally_budget: Option<Duration>,
+    command_ready: Option<Ready>,
     report: &'a mut Report,
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
@@ -1118,6 +1214,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 started,
                 before: avail,
                 removed_entries: done.removed_entries,
+                attempted_command: false,
                 end: done.end,
                 note: held,
             };
@@ -1134,13 +1231,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// order ([`fs_kind::reclaim`], which judges every candidate again
     /// under its lock), re-sampling after each, until the goal is observed.
     fn walk_fs(&mut self, find: &Find, rules: &Rules<'_>, checker: &mut Checker<'_>) {
-        let Action::Delete { make_writable } = self.tier.action else {
-            // `ensure` refuses every other action before the gate.
-            return self.run_error(format!(
-                "`{}` removes with `{}`: no fs reclaim runs it",
-                self.tier.profile, self.tier.action
-            ));
-        };
+        let action = &self.tier.action;
         let judge = fs_kind::Judge {
             find,
             rules,
@@ -1236,20 +1327,51 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 ),
             });
             let started = self.host.now();
-            let done = fs_kind::reclaim(
-                self.host,
-                &judge,
-                found,
-                make_writable,
-                checker,
-                self.deadline,
-            );
-            let outcome = Outcome {
-                started,
-                before: avail,
-                removed_entries: done.removed_entries,
-                end: done.end,
-                note: String::new(),
+            let outcome = match action {
+                Action::Delete { make_writable } => {
+                    let done = fs_kind::reclaim(
+                        self.host,
+                        &judge,
+                        found,
+                        *make_writable,
+                        checker,
+                        self.deadline,
+                    );
+                    Outcome {
+                        started,
+                        before: avail,
+                        removed_entries: done.removed_entries,
+                        attempted_command: false,
+                        end: done.end,
+                        note: String::new(),
+                    }
+                }
+                Action::Command { argv, cwd } => {
+                    let ready = self.command_ready.as_ref().expect("command preflighted");
+                    let done = fs_kind::run_command(
+                        self.host,
+                        &judge,
+                        found,
+                        ready,
+                        argv,
+                        *cwd,
+                        checker,
+                        self.measured.target.saturating_sub(avail),
+                        &self.measured.at.mount.mount_point,
+                        &self.tier.profile,
+                        format!("{}/{}", self.tier.name, self.tier.profile),
+                        self.deadline,
+                    );
+                    Outcome {
+                        started,
+                        before: avail,
+                        removed_entries: 0,
+                        attempted_command: done.attempted,
+                        end: done.end,
+                        note: String::new(),
+                    }
+                }
+                Action::CargoLockProtocol => unreachable!("fs action admitted by ensure"),
             };
             match self.record(&found.path, outcome) {
                 Some(after) => avail = after,
@@ -1286,22 +1408,34 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let delta = after
             .map(|a| i64::try_from(i128::from(a) - i128::from(outcome.before)).unwrap_or(i64::MAX));
         let complete = matches!(outcome.end, ReclaimEnd::Complete);
-        if complete || outcome.removed_entries > 0 {
-            (self.log)(&format!(
-                "{}: {} {}: {} {} entries, observed change {}, {} ms{}",
-                self.tier.name,
-                self.tier.profile,
-                candidate.display(),
-                if complete {
-                    "reclaimed"
-                } else {
-                    "deleted part-way:"
-                },
-                outcome.removed_entries,
-                signed_bytes(delta),
-                took.as_millis(),
-                outcome.note
-            ));
+        if complete || outcome.removed_entries > 0 || outcome.attempted_command {
+            if outcome.attempted_command {
+                (self.log)(&format!(
+                    "{}: {} {}: command finished with {:?}, observed change {}, {} ms",
+                    self.tier.name,
+                    self.tier.profile,
+                    candidate.display(),
+                    outcome.end,
+                    signed_bytes(delta),
+                    took.as_millis()
+                ));
+            } else {
+                (self.log)(&format!(
+                    "{}: {} {}: {} {} entries, observed change {}, {} ms{}",
+                    self.tier.name,
+                    self.tier.profile,
+                    candidate.display(),
+                    if complete {
+                        "reclaimed"
+                    } else {
+                        "deleted part-way:"
+                    },
+                    outcome.removed_entries,
+                    signed_bytes(delta),
+                    took.as_millis(),
+                    outcome.note
+                ));
+            }
             self.report.actions.push(ActionEntry {
                 tier: self.tier.name.clone(),
                 profile: self.tier.profile.clone(),
@@ -1343,6 +1477,7 @@ struct Outcome {
     /// The available space before it.
     before: u64,
     removed_entries: usize,
+    attempted_command: bool,
     end: ReclaimEnd,
     /// Appended to the action's log line.
     note: String,

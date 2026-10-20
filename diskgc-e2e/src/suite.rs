@@ -428,6 +428,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::ensure_claude_and_pytest_tmp_profiles_keep_open_units,
     },
     Test {
+        name: "command_profile_checks_candidate_and_reports_nonzero_exit",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_profile_checks_candidate_and_reports_nonzero_exit,
+    },
+    Test {
+        name: "command_profile_deletes_only_an_eligible_file",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_profile_deletes_only_an_eligible_file,
+    },
+    Test {
         name: "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
         tier: Tier::Fast,
         expect: Expect::Pass,
@@ -462,6 +474,54 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: ensure_suite::ensure_host_lock_is_inherited_by_children_and_released_only_by_close,
+    },
+    Test {
+        name: "command_action_child_holds_host_lock_after_parent_is_killed",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_child_holds_host_lock_after_parent_is_killed,
+    },
+    Test {
+        name: "command_action_never_changes_inherited_stderr_flags",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_never_changes_inherited_stderr_flags,
+    },
+    Test {
+        name: "command_action_timeout_kills_descendant_after_leader_exits",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_timeout_kills_descendant_after_leader_exits,
+    },
+    Test {
+        name: "command_action_long_output_is_bounded_and_prefixed",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_long_output_is_bounded_and_prefixed,
+    },
+    Test {
+        name: "command_action_orphaned_output_is_killed_before_reap",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_orphaned_output_is_killed_before_reap,
+    },
+    Test {
+        name: "command_action_stalled_stderr_fails_without_hanging",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_stalled_stderr_fails_without_hanging,
+    },
+    Test {
+        name: "command_action_leader_exit_drain_obeys_tier_deadline",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_leader_exit_drain_obeys_tier_deadline,
+    },
+    Test {
+        name: "command_action_closed_pipe_descendant_is_killed",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_closed_pipe_descendant_is_killed,
     },
     Test {
         name: "inuse_a_held_file_cwd_mapping_or_environment_keeps_the_candidate",
@@ -830,6 +890,23 @@ impl Ctx {
         args: &[&str],
     ) -> Result<under_test::Spawned, String> {
         under_test::spawn_as_tester(&self.ledger, &self.records, Path::new("/"), program, args)
+    }
+
+    /// A traced tester whose stderr is an fd supplied by the harness.
+    pub fn spawn_as_tester_with_stderr(
+        &self,
+        program: &Path,
+        args: &[&str],
+        stderr: std::os::fd::OwnedFd,
+    ) -> Result<under_test::Spawned, String> {
+        under_test::spawn_as_tester_with_stderr(
+            &self.ledger,
+            &self.records,
+            Path::new("/"),
+            program,
+            args,
+            stderr,
+        )
     }
 
     /// Runs a probe as the code under test (`tester`, traced).

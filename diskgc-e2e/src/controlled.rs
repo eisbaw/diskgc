@@ -33,9 +33,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Base, BoundSocket, Delete, DirListing, Environ, Host, HostError, LinkTarget, LockMode, Locked,
-    MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
-    ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
+    Base, BoundSocket, CommandInvocation, CommandRun, Delete, DirListing, Environ, Host, HostError,
+    LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
+    ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
 
 use crate::exit;
@@ -71,6 +71,7 @@ pub const OPS: &[&str] = &[
     "bound_unix_sockets",
     "unlinkat",
     "fchmod",
+    "run_command",
 ];
 
 /// A position on the port-call trace.
@@ -565,6 +566,11 @@ impl<H: Delete> Delete for Controlled<H> {
         self.before("fchmod");
         self.host.fchmod(dir, perm)
     }
+
+    fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation {
+        self.before("run_command");
+        self.host.run_command(cwd, run)
+    }
 }
 
 #[cfg(test)]
@@ -651,6 +657,20 @@ processes:
         host.unlinkat(&a.fd, OsStr::new("sub"), Unlink::Dir)
             .expect("unlinkat");
         host.fchmod(&a.fd, 0o755).expect("fchmod");
+        let run = CommandRun {
+            executable: Path::new("/usr/bin/tool").to_owned(),
+            arguments: Vec::new(),
+            environment: Vec::new(),
+            output_prefix: "test".to_owned(),
+            deadline: host
+                .now()
+                .checked_add(Duration::from_secs(1))
+                .expect("deadline"),
+        };
+        assert!(matches!(
+            host.run_command(&a.fd, &run),
+            CommandInvocation::Started(Ok(diskgc_core::host::CommandExit::Exited(0)))
+        ));
     }
 
     #[test]

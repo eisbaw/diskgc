@@ -28,6 +28,7 @@
 //!   and deleted by the engine's identity-checked delete. Given a
 //!   [`crate::host::Delete`] host.
 
+mod command;
 mod discover;
 mod judge;
 mod pattern;
@@ -37,6 +38,7 @@ mod reclaim;
 #[cfg(test)]
 mod tests;
 
+pub use command::{CommandResult, run_command};
 pub use discover::{Discovery, Found, discover};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};

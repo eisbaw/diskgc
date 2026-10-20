@@ -807,7 +807,7 @@ candidate path as one argument or inside one, never through a shell; use
 file`, and for `type: any` decided per candidate the same way; `cwd:
 candidate` with `type: file` or `type: any` is a load-time error). The
 program (`command[0]`) is a name or path without `{path}`: it is resolved
-and shown before anything runs ([safety.md](safety.md#command-actions)),
+and logged to stderr before anything runs ([safety.md](safety.md#command-actions)),
 so it is never the candidate. The tier's `timeout`
 bounds it (Tier fields). Two sources have the same action only if the
 action and every option are equal; the "one action" error shows a command
@@ -818,6 +818,13 @@ the working directory, so the command must name the location explicitly
 (`pip --cache-dir {path} cache purge`, `env GOCACHE={path} go clean
 -cache`). A non-zero exit is an error in the report (exit 3 if the goal is
 not met).
+
+No Podman image-prune example ships yet. A read-only dry run on rootless
+Podman storage found subuid-owned overlay files, so a command profile using
+`containers/storage` as its candidate fails the required ownership walk with
+`not_owner`. Running `podman image prune` against a different checked path
+would not protect the image store it changes. Task-93 covers a Podman-specific
+protocol that uses Podman's own pruning rules.
 
 ### Built-in profile library
 

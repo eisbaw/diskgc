@@ -8,6 +8,17 @@
       "description": "Wall-clock time when the run starts (RFC 3339, e.g.\n`2026-10-15T03:00:00Z`). Default time stamp of tree entries.",
       "$ref": "#/$defs/WallTime"
     },
+    "command_error_after_start": {
+      "description": "Model an output-forwarding or wait failure after the command was\nspawned. The filesystem itself is unchanged by the model command.",
+      "type": "boolean"
+    },
+    "command_exit": {
+      "description": "Exit code returned by a modelled command action (default 0). A\ndeadline already passed returns `DeadlineBeforeStart` instead. The model runs\nno child and changes no filesystem state for the command itself.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0
+    },
     "events": {
       "description": "Changes applied between two `Host` calls, or at a point in time.",
       "type": "array",
@@ -86,7 +97,7 @@
       }
     },
     "sandbox_gate": {
-      "description": "The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):\n`open` (the default; the model deletes nothing real), `closed`\n(outside a test container: `may_delete`, `unlinkat` and `fchmod`\nare refused with `Cause::SandboxGate`, nothing is attempted), or\n`refuses_deletes` (`may_delete` answers open but the deleting calls\nare refused: what a caller that asked first must still survive).",
+      "description": "The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):\n`open` (the default; the model deletes nothing real), `closed`\n(outside a test container: `may_delete`, `unlinkat`, `fchmod` and\n`run_command` are refused with `Cause::SandboxGate`, nothing is\nattempted), or\n`refuses_deletes` (`may_delete` answers open but the deleting calls\nare refused: what a caller that asked first must still survive).",
       "$ref": "#/$defs/GateSpec"
     },
     "tree": {
@@ -788,6 +799,7 @@
         "mountinfo",
         "openat2",
         "statx",
+        "executable_file",
         "read_dir",
         "read_head",
         "reopen_regular",
@@ -809,7 +821,8 @@
         "bound_unix_sockets",
         "may_delete",
         "unlinkat",
-        "fchmod"
+        "fchmod",
+        "run_command"
       ]
     },
     "ProcAccess": {

@@ -237,7 +237,11 @@ How the format reads (the schema documents every key):
   models running as root), and `sandbox_gate` the pre-release gate as
   `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
   deleting calls are refused; `refuses_deletes`: only the deleting calls
-  are). `locks` give their holder an fd of its own. As on
+  are). `command_exit` is the exit code of a modelled command action
+  (default 0); `command_error_after_start: true` models a forwarding or
+  wait error after spawn, so the executor must still report an action and
+  observed space change. The model records argv, environment and checked
+  cwd but starts no real child. `locks` give their holder an fd of its own. As on
   `LinuxHost`, an empty fd table, map or environment, or no `exe`, reads
   as `Failed` (an
   empty read of a live process is never the answer there). diskgc itself
@@ -312,6 +316,31 @@ Model scenarios required by [safety.md](safety.md) and
 - deadline overruns: a blocking operation that exceeds the deadline is
   reported as an overrun, and no new work starts after it;
 - command actions under `--allow-root`: refused at load.
+- `command_action_child_holds_host_lock_after_parent_is_killed`: the
+  `Delete::run_command` child starts in a checked directory with the host
+  lock inherited; after the driver is killed, the child alone keeps the
+  lock until it exits.
+- `command_action_never_changes_inherited_stderr_flags`: the harness keeps
+  a duplicate of the blocking stderr pipe's write end; its status flags
+  stay blocking while a command runs and after the driver is killed.
+- `command_action_timeout_kills_descendant_after_leader_exits`: a leader
+  exits on TERM while its descendant ignores TERM; the command port keeps
+  the leader's process-group ID pinned until KILL has stopped the descendant,
+  and forwards output the leader emitted on TERM under a separate bounded
+  post-deadline window.
+- `command_action_long_output_is_bounded_and_prefixed`: two concurrent
+  128 KiB streams without newlines must complete and arrive on stderr as
+  bounded prefixed segments, with no child bytes on result-only stdout.
+- `command_action_orphaned_output_is_killed_before_reap`: a leader exits
+  normally while its descendant holds the output pipes open; the bounded
+  drain fails, kills the still-reserved process group, and releases the lock.
+- `command_action_stalled_stderr_fails_without_hanging`: an unread full
+  parent stderr pipe fails output forwarding promptly and kills the child
+  group.
+- `command_action_leader_exit_drain_obeys_tier_deadline`: a descendant holds
+  output open after leader exit, but draining ends at the tier deadline.
+- `command_action_closed_pipe_descendant_is_killed`: a descendant closes both
+  output pipes and still gets killed before the successful leader is reaped.
 
 ## 3. Property tests
 

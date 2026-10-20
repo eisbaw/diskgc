@@ -818,6 +818,34 @@ pub trait Host {
     /// [`crate::resolve`].
     fn statx(&self, base: Base<'_, Self::Fd>, path: &Path) -> Result<Stat, HostError>;
 
+    /// Read-only environmental preflight of one absolute command path.
+    /// Follows executable symlinks as the kernel will at exec, and answers
+    /// false for a missing, non-regular or non-executable object. The
+    /// command runner receives only a path accepted by this check.
+    fn executable_file(&self, path: &Path) -> Result<bool, HostError> {
+        Err(HostError::invalid(
+            "preflight executable",
+            path.display(),
+            "this host does not support command executable preflight",
+        ))
+    }
+
+    /// `PATH` used for command-action preflight, captured from this host's
+    /// execution environment. The model supplies a deterministic value.
+    fn command_path(&self) -> OsString {
+        OsString::new()
+    }
+
+    /// The directory relative PATH entries and relative program paths refer
+    /// to before the command child switches to its checked working directory.
+    fn command_origin(&self) -> Result<PathBuf, HostError> {
+        Err(HostError::invalid(
+            "preflight executable",
+            "working directory",
+            "this host does not support command executable preflight",
+        ))
+    }
+
     /// The names in the open directory `dir` (`getdents64` until the end, on
     /// a fresh `O_RDONLY | O_DIRECTORY` open of `.` below `dir`, so `dir` may
     /// be an `O_PATH` fd and every call is a listing of its own), without
@@ -971,6 +999,46 @@ pub enum Unlink {
     Dir,
 }
 
+/// Output prefixes are limited so a forwarded output segment has a fixed
+/// maximum size independent of profile configuration.
+pub const MAX_COMMAND_OUTPUT_PREFIX_BYTES: usize = 256;
+
+/// One already-resolved command action. The caller resolves `executable`
+/// during environmental preflight, substitutes `{path}` in `arguments` and
+/// `environment`, and checks the candidate before handing its open directory
+/// fd to [`Delete::run_command`]. The Linux implementation never invokes a
+/// shell implicitly. `deadline` is the tier's monotonic deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRun {
+    pub executable: PathBuf,
+    pub arguments: Vec<OsString>,
+    pub environment: Vec<(OsString, OsString)>,
+    /// Human label supplied by the executor (tier and profile). Every
+    /// child-output line is written to stderr with this prefix; child bytes
+    /// never reach diskgc's result-only stdout.
+    pub output_prefix: String,
+    pub deadline: MonoTime,
+}
+
+/// A completed command action. The caller reports a non-zero exit, signal,
+/// or timeout as an action error; none of those is a successful reclaim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandExit {
+    Exited(i32),
+    Signaled(i32),
+    TimedOut,
+}
+
+/// Whether a deleting command actually started. Once `spawn` succeeds,
+/// errors from output forwarding or waiting still describe an attempted
+/// action: the caller must sample space and include the action in its report.
+#[derive(Debug)]
+pub enum CommandInvocation {
+    NotStarted(HostError),
+    DeadlineBeforeStart,
+    Started(Result<CommandExit, HostError>),
+}
+
 /// Whether `name` is a single path component: not empty, no `/`, not `.`
 /// or `..`. Only such a name can be unlinked safely: `unlinkat` follows
 /// symlinks in every earlier component of a longer path.
@@ -1015,6 +1083,16 @@ pub trait Delete: Host {
     /// deletion. The deletion engine's `make_writable` is its only caller
     /// (docs/reference.md, Actions; docs/safety.md, Deletion).
     fn fchmod(&self, dir: &Self::Fd, perm: u32) -> Result<(), HostError>;
+
+    /// Runs a deleting command with `cwd` set by `fchdir` to the checked
+    /// directory fd, in its own process group. `executable` must be an
+    /// absolute path obtained by preflight; the caller performs the
+    /// candidate's walk and last in-use check before this call. LinuxHost
+    /// asks the sandbox gate before starting a child, terminates its process
+    /// group at `deadline`, and waits for the leader. The caller must have
+    /// called [`Host::inherit_lock`] on the host lock before this call: the
+    /// child inherits that fd across exec and holds the lock if diskgc dies.
+    fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation;
 }
 
 #[cfg(test)]

@@ -266,6 +266,8 @@ pub fn host_model(
                 own_uid_map: None,
                 own_uid: None,
                 sandbox_gate: diskgc_model::spec::GateSpec::Open,
+                command_exit: 0,
+                command_error_after_start: false,
                 events: Vec::new(),
                 expect: None,
             }

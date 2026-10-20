@@ -1018,4 +1018,15 @@ impl Delete for Gated {
             "not in a test container",
         ))
     }
+    fn run_command(
+        &self,
+        _: &ModelFd,
+        _: &diskgc_core::host::CommandRun,
+    ) -> diskgc_core::host::CommandInvocation {
+        diskgc_core::host::CommandInvocation::NotStarted(HostError::sandbox_gate(
+            "run command",
+            "?",
+            "not in a test container",
+        ))
+    }
 }

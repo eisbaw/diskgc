@@ -38,6 +38,7 @@
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -268,7 +269,30 @@ pub fn spawn_as_tester_with_env<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
 ) -> Result<Spawned, String> {
-    spawn_traced(ledger, records, cwd, env, program, args, As::Tester)
+    spawn_traced(ledger, records, cwd, env, program, args, As::Tester, None)
+}
+
+/// Start a traced tester with the caller's stderr fd. The harness can keep
+/// another fd for the same pipe and inspect its status flags while the
+/// tracee runs; this is for command-output lifetime regressions.
+pub fn spawn_as_tester_with_stderr<S: AsRef<OsStr>>(
+    ledger: &Ledger,
+    records: &Scratch,
+    cwd: &Path,
+    program: &Path,
+    args: &[S],
+    stderr: OwnedFd,
+) -> Result<Spawned, String> {
+    spawn_traced(
+        ledger,
+        records,
+        cwd,
+        &[],
+        program,
+        args,
+        As::Tester,
+        Some(stderr),
+    )
 }
 
 /// Who the traced code under test runs as.
@@ -294,7 +318,7 @@ pub fn run_as_root<S: AsRef<OsStr>>(
     args: &[S],
 ) -> Result<Run, String> {
     let env = [("HOME".to_owned(), "/root".to_owned())];
-    spawn_traced(ledger, records, cwd, &env, program, args, As::Root)?.wait()
+    spawn_traced(ledger, records, cwd, &env, program, args, As::Root, None)?.wait()
 }
 
 fn spawn_traced<S: AsRef<OsStr>>(
@@ -305,6 +329,7 @@ fn spawn_traced<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
     user: As,
+    stderr_fd: Option<OwnedFd>,
 ) -> Result<Spawned, String> {
     let n = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let record_dir: PathBuf = records.mkdir(&format!("strace-{n}"), 0o700, crate::ROOT)?;
@@ -335,6 +360,7 @@ fn spawn_traced<S: AsRef<OsStr>>(
     if user == As::Tester {
         command.arg(&self_exe).args(["as-tester", "--"]);
     }
+    let stderr = stderr_fd.map_or_else(Stdio::piped, Stdio::from);
     let mut strace = command
         .arg(program)
         .args(args)
@@ -344,12 +370,12 @@ fn spawn_traced<S: AsRef<OsStr>>(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(stderr)
         .spawn()
         .map_err(|e| format!("spawn {STRACE}: {e}"))?;
     let stdin = strace.stdin.take();
     let out = strace.stdout.take().ok_or("strace has no stdout pipe")?;
-    let err = strace.stderr.take().ok_or("strace has no stderr pipe")?;
+    let err = strace.stderr.take();
     let (sender, lines) = mpsc::channel();
     let stdout = std::thread::spawn(move || {
         let mut reader = BufReader::new(out);
@@ -375,10 +401,13 @@ fn spawn_traced<S: AsRef<OsStr>>(
         }
         all
     });
-    let stderr = std::thread::spawn(move || {
-        let mut all = Vec::new();
-        let _ = BufReader::new(err).read_to_end(&mut all);
-        String::from_utf8_lossy(&all).into_owned()
+    let stderr = std::thread::spawn(move || match err {
+        Some(err) => {
+            let mut all = Vec::new();
+            let _ = BufReader::new(err).read_to_end(&mut all);
+            String::from_utf8_lossy(&all).into_owned()
+        }
+        None => String::new(),
     });
     Ok(Spawned {
         argv,

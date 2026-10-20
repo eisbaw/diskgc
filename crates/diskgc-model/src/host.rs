@@ -35,14 +35,17 @@
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, Delete, DevIno, DirListing, Environ, Errno, Host, HostError, Ids,
-    LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
-    ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink, WaitLock, is_single_name,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
+    DirListing, Environ, Errno, FileType, Host, HostError, Ids, LinkTarget, LockMode, Locked,
+    MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError,
+    ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
+    is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -81,6 +84,9 @@ pub struct Call {
     /// The directory entry a `statx` or `unlinkat` of a name below a
     /// directory fd names: (the directory, the name).
     pub entry: Option<(DevIno, OsString)>,
+    /// Full command request, including argv and environment, only for
+    /// `RunCommand`; the checked cwd is in `path` and `object`.
+    pub command: Option<CommandRun>,
     /// `ok`, an errno, `busy`, `deadline passed`, `gone`, `denied` or
     /// `failed`.
     pub result: String,
@@ -304,7 +310,7 @@ impl ModelHost {
         how: Option<OpenHow>,
         run: impl FnOnce(&mut Inner) -> (R, Option<DevIno>, String),
     ) -> R {
-        self.call_on(op, path, how, None, run)
+        self.call_on(op, path, how, None, None, run)
     }
 
     /// [`Self::call`] for a call that names a directory entry.
@@ -314,6 +320,7 @@ impl ModelHost {
         path: Option<PathBuf>,
         how: Option<OpenHow>,
         entry: Option<(DevIno, OsString)>,
+        command: Option<CommandRun>,
         run: impl FnOnce(&mut Inner) -> (R, Option<DevIno>, String),
     ) -> R {
         let mut inner = self.inner.borrow_mut();
@@ -334,6 +341,7 @@ impl ModelHost {
             how,
             object,
             entry,
+            command,
             result: text,
         });
         inner.fire_calls(index, op, path.as_deref(), When::After);
@@ -760,7 +768,7 @@ impl Host for ModelHost {
         let full = self.base_path(base, path);
         let shown = full.display().to_string();
         let entry = (!name.is_empty()).then(|| (self.fd_object(ofd), name.to_owned()));
-        self.call_on(Op::Statx, Some(full), None, entry, |inner| {
+        self.call_on(Op::Statx, Some(full), None, entry, None, |inner| {
             if let Some(e) = inner.injected.take() {
                 return (
                     Err(HostError::errno("statx", &shown, e)),
@@ -786,6 +794,57 @@ impl Host for ModelHost {
                 ),
             }
         })
+    }
+
+    fn executable_file(&self, path: &Path) -> Result<bool, HostError> {
+        if !path.is_absolute() {
+            return Err(HostError::invalid(
+                "preflight executable",
+                path.display(),
+                "the executable path must be absolute",
+            ));
+        }
+        let shown = path.display().to_string();
+        self.call(Op::ExecutableFile, Some(path.to_owned()), None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("preflight executable", &shown, errno)),
+                    None,
+                    errno_text(errno),
+                );
+            }
+            match inner.state.lookup(path) {
+                Ok(loc) => {
+                    let stat = inner.state.stat(loc);
+                    let executable = stat.file_type == Some(FileType::Regular)
+                        && stat.perm.is_some_and(|perm| perm & 0o111 != 0);
+                    (
+                        Ok(executable),
+                        Some(inner.state.dev_ino(loc)),
+                        executable.to_string(),
+                    )
+                }
+                Err(Fault::Errno(Errno::ENOENT | Errno::ENOTDIR)) => {
+                    (Ok(false), None, "missing".to_owned())
+                }
+                Err(Fault::Errno(errno)) => (
+                    Err(HostError::errno("preflight executable", &shown, errno)),
+                    None,
+                    errno_text(errno),
+                ),
+                Err(Fault::Model(message)) => {
+                    model_error(format!("preflight executable {shown}: {message}"))
+                }
+            }
+        })
+    }
+
+    fn command_path(&self) -> OsString {
+        OsString::from("/usr/bin:/bin")
+    }
+
+    fn command_origin(&self) -> Result<PathBuf, HostError> {
+        Ok(PathBuf::from("/"))
     }
 
     fn read_dir(&self, dir: &ModelFd, limit: usize) -> Result<DirListing, HostError> {
@@ -1210,6 +1269,7 @@ impl Delete for ModelHost {
             Some(full),
             None,
             Some(entry.clone()),
+            None,
             |inner| {
                 // The identity check is the call right before: a successful
                 // statx of this name in this directory (through any fd of
@@ -1298,5 +1358,123 @@ impl Delete for ModelHost {
             inode.ctime = now;
             (Ok(()), object, format!("{perm:04o}"))
         })
+    }
+
+    fn run_command(&self, cwd: &ModelFd, run: &CommandRun) -> CommandInvocation {
+        let ofd = self.fd_ofd(cwd);
+        let path = self.base_path(Base::Dir(cwd), Path::new(""));
+        let subject = run.executable.display().to_string();
+        self.call_on(
+            Op::RunCommand,
+            Some(path),
+            None,
+            None,
+            Some(run.clone()),
+            |inner| {
+                let loc = inner.loc_of(ofd);
+                let object = Some(inner.state.dev_ino(loc));
+                if let Some(errno) = inner.injected.take() {
+                    return (
+                        CommandInvocation::NotStarted(HostError::errno("run command", &subject, errno)),
+                        object,
+                        errno_text(errno),
+                    );
+                }
+                if !inner.state.sandbox_gate.is_open() {
+                    return (
+                        CommandInvocation::NotStarted(gate_refusal("run command", &subject)),
+                        object,
+                        "refused".to_owned(),
+                    );
+                }
+                if inner.state.own_uid == 0 {
+                    return (
+                        CommandInvocation::NotStarted(HostError::invalid(
+                            "run command",
+                            &subject,
+                            "command actions are refused when diskgc runs as root",
+                        )),
+                        object,
+                        "root refused".to_owned(),
+                    );
+                }
+                if !run.executable.is_absolute() {
+                    return (
+                        CommandInvocation::NotStarted(HostError::invalid(
+                            "run command",
+                            &subject,
+                            "executable was not resolved to an absolute path during preflight",
+                        )),
+                        object,
+                        "invalid executable".to_owned(),
+                    );
+                }
+                if run.output_prefix.is_empty()
+                    || run.output_prefix.len() > MAX_COMMAND_OUTPUT_PREFIX_BYTES
+                    || run.output_prefix.contains('\n')
+                    || run.output_prefix.contains('\r')
+                {
+                    return (
+                        CommandInvocation::NotStarted(HostError::invalid(
+                            "run command",
+                            &subject,
+                            format!(
+                                "output prefix must be non-empty, at most {MAX_COMMAND_OUTPUT_PREFIX_BYTES} bytes, and contain no line break"
+                            ),
+                        )),
+                        object,
+                        "invalid output prefix".to_owned(),
+                    );
+                }
+                for (key, value) in &run.environment {
+                    if key.is_empty()
+                        || key.as_bytes().contains(&b'=')
+                        || key.as_bytes().contains(&0)
+                        || value.as_bytes().contains(&0)
+                    {
+                        return (
+                            CommandInvocation::NotStarted(HostError::invalid(
+                                "run command",
+                                &subject,
+                                format!("invalid environment assignment for {key:?}"),
+                            )),
+                            object,
+                            "invalid environment".to_owned(),
+                        );
+                    }
+                }
+                if inner.state.inode(loc).entries().is_none() {
+                    return (
+                        CommandInvocation::NotStarted(HostError::invalid(
+                            "run command",
+                            &subject,
+                            "checked working-directory fd is no longer a directory",
+                        )),
+                        object,
+                        "invalid cwd".to_owned(),
+                    );
+                }
+                if run.deadline.0 <= UPTIME_AT_START + inner.state.elapsed {
+                    return (
+                        CommandInvocation::DeadlineBeforeStart,
+                        object,
+                        "DeadlineBeforeStart".to_owned(),
+                    );
+                }
+                if inner.state.command_error_after_start {
+                    return (
+                        CommandInvocation::Started(Err(HostError::invalid(
+                            "forward command output",
+                            &subject,
+                            "modelled failure after spawn",
+                        ))),
+                        object,
+                        "started: output error".to_owned(),
+                    );
+                }
+                let answer = CommandExit::Exited(i32::from(inner.state.command_exit));
+                (CommandInvocation::Started(Ok(answer)), object, format!("{answer:?}"))
+            },
+        )
     }
 }

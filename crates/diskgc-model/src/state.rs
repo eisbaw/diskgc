@@ -277,6 +277,9 @@ pub struct State {
     pub own_uid: u32,
     /// The modelled sandbox gate.
     pub sandbox_gate: crate::spec::GateSpec,
+    /// Exit code of modelled command actions; a real child is never run.
+    pub command_exit: u8,
+    pub command_error_after_start: bool,
     /// The socket files a socket is bound to (in diskgc's network
     /// namespace).
     pub bound_sockets: BTreeSet<DevIno>,
@@ -298,6 +301,8 @@ impl State {
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
             own_uid: DEFAULT_ID,
             sandbox_gate: crate::spec::GateSpec::Open,
+            command_exit: 0,
+            command_error_after_start: false,
             bound_sockets: BTreeSet::new(),
             kernel,
             wall_start,

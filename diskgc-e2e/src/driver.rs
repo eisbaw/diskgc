@@ -76,7 +76,9 @@ use diskgc_core::cargo_target::{self, Layout, ReclaimEnd};
 use diskgc_core::engine::{
     self, Candidate, DEFAULT_MAX_ENTRIES, DeleteOptions, Deletion, End, Rules, WalkStop,
 };
-use diskgc_core::host::{Access, Base, Delete, DirListing, FileType, Host};
+use diskgc_core::host::{
+    Access, Base, CommandExit, CommandInvocation, CommandRun, Delete, DirListing, FileType, Host,
+};
 use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT};
 use diskgc_core::profile::{IdleFor, Library};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
@@ -120,6 +122,21 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
     host-lock GATE                take the host lock, start a child that
                                   inherits it and waits for the file GATE,
                                   close the driver's copy, exit
+    command-lock GATE CWD         take the host lock and run a gated command
+                                  in checked CWD until GATE exists
+    command-timeout CWD           run a group with a TERM-exiting leader and
+                                  TERM-ignoring descendant, bounded by the
+                                  command port's deadline
+    command-output CWD            write long no-newline output on both
+                                  streams through the command port
+    command-orphan CWD            exit the group leader while a descendant
+                                  keeps the command output pipes open
+    command-short-drain CWD PID    exit the leader while a descendant holds
+                                  output open past a short tier deadline
+    command-closed-pipes CWD PID   exit the leader while a descendant closes
+                                  output pipes and continues running
+    command-stalled-stderr CWD PID fill the driver's stderr pipe with no
+                                  reader before forwarding command output
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -291,6 +308,21 @@ pub fn run<H: Delete>(
             cargo_reclaim(host, owner, flags, roots, &mut out)?;
         }
         ("host-lock", [gate]) => host_lock(host, Path::new(gate), &mut out)?,
+        ("command-lock", [gate, cwd]) => {
+            command_lock(host, Path::new(gate), Path::new(cwd), &mut out)?;
+        }
+        ("command-timeout", [cwd]) => command_timeout(host, Path::new(cwd), &mut out)?,
+        ("command-output", [cwd]) => command_output(host, Path::new(cwd), &mut out)?,
+        ("command-orphan", [cwd]) => command_orphan(host, Path::new(cwd), &mut out)?,
+        ("command-short-drain", [cwd, pid]) => {
+            command_descendant(host, Path::new(cwd), Path::new(pid), false, true, &mut out)?;
+        }
+        ("command-closed-pipes", [cwd, pid]) => {
+            command_descendant(host, Path::new(cwd), Path::new(pid), true, false, &mut out)?;
+        }
+        ("command-stalled-stderr", [cwd, pid]) => {
+            command_stalled_stderr(host, Path::new(cwd), Path::new(pid), &mut out)?;
+        }
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
     Ok(Outcome { failed: out.failed })
@@ -645,6 +677,248 @@ fn host_lock<H: Host>(host: &H, gate: &Path, out: &mut Lines<'_>) -> Result<(), 
     // inherited copy keeps the lock.
     drop(lock);
     out.ok("closed".to_owned());
+    Ok(())
+}
+
+/// Exercises the actual deleting child-start port with the acquired host
+/// lock. The shell announces when it has exec'd, then waits for `gate`;
+/// the container test kills this driver and proves the child still holds
+/// the lock before allowing the shell to exit.
+fn started_command(result: CommandInvocation) -> Result<CommandExit, String> {
+    match result {
+        CommandInvocation::Started(Ok(exit)) => Ok(exit),
+        CommandInvocation::Started(Err(error)) => Err(error.to_string()),
+        CommandInvocation::NotStarted(error) => Err(format!("command did not start: {error}")),
+        CommandInvocation::DeadlineBeforeStart => {
+            Err("command deadline passed before spawn".to_owned())
+        }
+    }
+}
+
+fn command_lock<H: Delete>(
+    host: &H,
+    gate: &Path,
+    cwd: &Path,
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let ready = gate.with_extension("ready");
+    out.ok(format!("parent pid={}", host.own_pid().0));
+    std::io::Write::flush(&mut std::io::stdout()).map_err(|e| e.to_string())?;
+    let deadline = host
+        .now()
+        .checked_add(std::time::Duration::from_secs(15))
+        .ok_or("deadline overflow")?;
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(
+                "printf 'command-cwd=%s\\ncommand-child-ready\\n' \"$(stat -Lc '%d:%i' .)\" > \"$2\"; while [ ! -e \"$1\" ]; do sleep 0.05; done",
+            ),
+            OsString::from("sh"),
+            gate.as_os_str().to_owned(),
+            ready.as_os_str().to_owned(),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline,
+    };
+    let exit = started_command(host.run_command(&checked.fd, &run))?;
+    out.ok(format!("command exit={exit:?}"));
+    Ok(())
+}
+
+/// The leader exits promptly on TERM while its descendant ignores TERM.
+/// The port must keep the leader unreaped until it KILLs the entire group;
+/// otherwise the group ID may be recycled before that signal.
+fn command_timeout<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let deadline = host
+        .now()
+        .checked_add(std::time::Duration::from_millis(300))
+        .ok_or("deadline overflow")?;
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(
+                "(trap '' TERM; exec sleep 30) & echo command-descendant-pid=$!; echo command-stderr-probe >&2; trap 'echo command-term-output >&2; exit 0' TERM; wait",
+            ),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline,
+    };
+    let exit = started_command(host.run_command(&checked.fd, &run))?;
+    out.ok(format!("command exit={exit:?}"));
+    Ok(())
+}
+
+/// Both pipes receive 128 KiB without a newline. The Linux port must
+/// drain them concurrently enough that neither pipe blocks the command,
+/// while splitting each into bounded, prefixed stderr lines.
+fn command_output<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let deadline = host
+        .now()
+        .checked_add(std::time::Duration::from_secs(5))
+        .ok_or("deadline overflow")?;
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(
+                "(i=0; while [ \"$i\" -lt 1024 ]; do printf '%0128d' 0; i=$((i+1)); done) >&2 & i=0; while [ \"$i\" -lt 1024 ]; do printf '%0128d' 0; i=$((i+1)); done; wait",
+            ),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline,
+    };
+    let exit = started_command(host.run_command(&checked.fd, &run))?;
+    out.ok(format!("command exit={exit:?}"));
+    Ok(())
+}
+
+/// The leader exits while a descendant keeps stdout and stderr open. The
+/// port must retain the leader as a zombie until its bounded drain ends,
+/// then kill the still-reserved process group and reap the leader.
+fn command_orphan<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let deadline = host
+        .now()
+        .checked_add(std::time::Duration::from_secs(5))
+        .ok_or("deadline overflow")?;
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from("sleep 30 & echo command-descendant-pid=$!; exit 0"),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline,
+    };
+    match host.run_command(&checked.fd, &run) {
+        CommandInvocation::Started(Err(error)) => out.ok(format!("command error={error}")),
+        other => return Err(format!("orphaned output returned {other:?}")),
+    }
+    Ok(())
+}
+
+/// A descendant that either retains or closes the output pipes. Its pid is
+/// written through the checked cwd so the harness can prove it was killed.
+fn command_descendant<H: Delete>(
+    host: &H,
+    cwd: &Path,
+    pid_file: &Path,
+    closed_pipes: bool,
+    short_deadline: bool,
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let duration = if short_deadline {
+        std::time::Duration::from_millis(400)
+    } else {
+        std::time::Duration::from_secs(5)
+    };
+    let deadline = host
+        .now()
+        .checked_add(duration)
+        .ok_or("deadline overflow")?;
+    let script = if closed_pipes {
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$1\"; exit 0"
+    } else {
+        "sleep 30 & echo $! > \"$1\"; exit 0"
+    };
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(script),
+            OsString::from("sh"),
+            pid_file.as_os_str().to_owned(),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline,
+    };
+    let started = host.now();
+    let exit = started_command(host.run_command(&checked.fd, &run))?;
+    out.ok(format!("command exit={exit:?}"));
+    out.ok(format!(
+        "command duration_ms={}",
+        host.now().saturating_since(started).as_millis()
+    ));
+    Ok(())
+}
+
+/// A full blocking pipe as fd 2 exposes any synchronous forwarding that
+/// would wait forever for a consumer. The real stderr is restored before
+/// this operation reports its result to the harness.
+fn command_stalled_stderr<H: Delete>(
+    host: &H,
+    cwd: &Path,
+    pid_file: &Path,
+    out: &mut Lines<'_>,
+) -> Result<(), String> {
+    let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
+    let _lock = diskgc_core::hostlock::acquire(host, None).map_err(|e| e.to_string())?;
+    let saved = rustix::io::dup(rustix::stdio::stderr()).map_err(|e| e.to_string())?;
+    let (read_end, write_end) = rustix::pipe::pipe_with(
+        rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+    )
+    .map_err(|e| e.to_string())?;
+    let fill = [b'x'; 4096];
+    loop {
+        match rustix::io::write(&write_end, &fill) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::AGAIN) => break,
+            Err(e) => return Err(format!("fill stderr pipe: {e}")),
+        }
+    }
+    let flags = rustix::fs::fcntl_getfl(&write_end).map_err(|e| e.to_string())?;
+    rustix::fs::fcntl_setfl(&write_end, flags & !rustix::fs::OFlags::NONBLOCK)
+        .map_err(|e| e.to_string())?;
+    rustix::stdio::dup2_stderr(&write_end).map_err(|e| e.to_string())?;
+    let run = CommandRun {
+        executable: PathBuf::from("/bin/sh"),
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from("sleep 30 & echo $! > \"$1\"; echo command-output"),
+            OsString::from("sh"),
+            pid_file.as_os_str().to_owned(),
+        ],
+        environment: Vec::new(),
+        output_prefix: "test-tier/test-profile".to_owned(),
+        deadline: host
+            .now()
+            .checked_add(std::time::Duration::from_secs(2))
+            .ok_or("deadline overflow")?,
+    };
+    let started = host.now();
+    let result = host.run_command(&checked.fd, &run);
+    let stderr_flags = rustix::fs::fcntl_getfl(rustix::stdio::stderr());
+    rustix::stdio::dup2_stderr(&saved).map_err(|e| format!("restore stderr: {e}"))?;
+    drop(read_end);
+    let stderr_flags = stderr_flags.map_err(|e| format!("read command stderr flags: {e}"))?;
+    if stderr_flags.contains(rustix::fs::OFlags::NONBLOCK) {
+        return Err("command port left the driver's stderr nonblocking".to_owned());
+    }
+    match result {
+        CommandInvocation::Started(Err(error)) => out.ok(format!("command error={error}")),
+        other => return Err(format!("stalled stderr returned {other:?}")),
+    }
+    out.ok(format!(
+        "command duration_ms={}",
+        host.now().saturating_since(started).as_millis()
+    ));
     Ok(())
 }
 

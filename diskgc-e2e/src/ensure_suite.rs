@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -191,6 +192,173 @@ pub(crate) fn report(run: &Run) -> Result<Value, String> {
     let lines: Vec<&str> = run.stdout.lines().collect();
     ensure!(lines.len() == 1, "--json prints one line: {:?}", run.stdout);
     serde_json::from_str(lines[0]).map_err(|e| format!("{e}: {:?}", lines[0]))
+}
+
+/// A configured command profile must pass every candidate safety check
+/// before exec. Once the holder exits, the same real CLI path runs the
+/// cleaner in the checked candidate, supplies its environment, and reports
+/// a nonzero exit as an action error without contaminating JSON stdout.
+pub fn command_profile_checks_candidate_and_reports_nonzero_exit(ctx: &Ctx) -> TestResult {
+    let candidate = ctx.scratch.mkdir("command-product", 0o755, TESTER)?;
+    let held_file = ctx
+        .scratch
+        .write_file("command-product/held", b"held", 0o644, TESTER)?;
+    let cleaner = ctx.scratch.path("command-product-cleaner");
+    ctx.scratch.write_file(
+        "command-product-cleaner",
+        b"#!/bin/sh\nset -eu\ntest \"$DISKGC_PATH\" = \"$1\"\ntest \"$DISKGC_PROFILE\" = command-product\ntest -n \"$DISKGC_NEED_BYTES\"\ntest \"$(/bin/stat -Lc '%d:%i' .)\" = \"$2\"\nprintf 'command-product-verified\\n'\nexit 7\n",
+        0o755,
+        TESTER,
+    )?;
+    let meta = std::fs::metadata(&candidate)
+        .map_err(|error| format!("stat {}: {error}", candidate.display()))?;
+    let config = format!(
+        "version: 1\nprofiles:\n  - name: command-product\n    find: {{roots: [/tmp], paths: [command-product], type: dir}}\n    action: {{command: [{}, \"{{path}}\", \"{}:{}\"]}}\n    examples: {{match: [/tmp/command-product]}}\n",
+        cleaner.display(),
+        meta.dev(),
+        meta.ino()
+    );
+    ctx.home
+        .write_file("diskgc-command.yaml", config.as_bytes(), 0o644, TESTER)?;
+    let args = [
+        "--json",
+        "--config",
+        "/home/tester/diskgc-command.yaml",
+        "--min-free",
+        "100%",
+        "--timeout",
+        "10s",
+        "--select",
+        "profile:command-product",
+        "/tmp",
+    ];
+    let holder = Holder::tester(
+        ctx,
+        &[
+            "hold",
+            held_file.to_str().ok_or("non-UTF-8 held file")?,
+            "/",
+        ],
+        &[],
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let held = ensure_run(ctx, &args)?;
+    let judged = oracle.judge(&held)?;
+    held.expect_code(1)?;
+    let held_report = report(&held)?;
+    ensure!(
+        held_report["skipped"][0]["reason"] == "in_use"
+            && held_report["actions"].as_array().is_some_and(Vec::is_empty),
+        "in-use candidate reached command action: {held_report}"
+    );
+    ensure!(
+        !held.stderr.contains("command-product-verified"),
+        "in-use candidate ran the cleaner"
+    );
+    judged.assert_clean()?;
+    holder.finish()?;
+
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(ctx, &args)?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(3)?;
+    let result = report(&run)?;
+    ensure!(
+        result["status"] == "error"
+            && result["actions"][0]["candidate"] == candidate.to_string_lossy().as_ref()
+            && result["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("status 7")),
+        "command error was not reported: {result}"
+    );
+    ensure!(
+        run.stderr
+            .contains("diskgc: --select/command-product: command-product-verified"),
+        "command output was not prefixed on stderr: {}",
+        run.stderr
+    );
+    judged.assert_clean()
+}
+
+/// A successful command action reaches the real CLI, removes only its
+/// checked file, and reports the available-space change around that action.
+/// The sibling with an open descriptor must never reach the cleaner.
+pub fn command_profile_deletes_only_an_eligible_file(ctx: &Ctx) -> TestResult {
+    let candidate = ctx.scratch.write_file(
+        "command-success.bin",
+        &vec![0x5a; 1024 * 1024],
+        0o644,
+        TESTER,
+    )?;
+    let held_file = ctx
+        .scratch
+        .write_file("command-held.bin", b"held", 0o644, TESTER)?;
+    let cleaner = ctx.scratch.path("command-cleaner");
+    ctx.scratch.write_file(
+        "command-cleaner",
+        b"#!/bin/sh\nset -eu\ntest \"$DISKGC_PATH\" = \"$1\"\ntest \"$DISKGC_PROFILE\" = command-success\ntest \"$(/bin/pwd -P)\" = /tmp\n/bin/rm -- \"$1\"\n",
+        0o755,
+        TESTER,
+    )?;
+    let config = format!(
+        "version: 1\nprofiles:\n  - name: command-success\n    find: {{roots: [/tmp], paths: [command-success.bin, command-held.bin], type: file}}\n    action: {{command: [{}, \"{{path}}\"], cwd: parent}}\n    examples: {{match: [/tmp/command-success.bin, /tmp/command-held.bin]}}\n",
+        cleaner.display()
+    );
+    ctx.home.write_file(
+        "diskgc-command-success.yaml",
+        config.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let holder = Holder::tester(
+        ctx,
+        &[
+            "hold",
+            held_file.to_str().ok_or("non-UTF-8 held file")?,
+            "/",
+        ],
+        &[],
+    )?;
+    let oracle = Oracle::arm(Fixture::new().eligible(candidate.clone()))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-command-success.yaml",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "--select",
+            "profile:command-success",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let result = report(&run)?;
+    ensure!(!candidate.exists(), "successful cleaner left its candidate");
+    ensure!(held_file.exists(), "in-use sibling was removed");
+    ensure!(
+        result["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.len() == 1)
+            && result["actions"][0]["candidate"] == candidate.to_string_lossy().as_ref()
+            && result["actions"][0]["avail_delta_bytes"]
+                .as_i64()
+                .is_some_and(|delta| delta > 0)
+            && result["errors"].as_array().is_some_and(Vec::is_empty)
+            && result["skipped"].as_array().is_some_and(|skipped| {
+                skipped.iter().any(|entry| {
+                    entry["candidate"] == held_file.to_string_lossy().as_ref()
+                        && entry["reason"] == "in_use"
+                })
+            }),
+        "successful command action or held sibling was misreported: {result}"
+    );
+    holder.finish()?;
+    judged.assert_clean()
 }
 
 /// The shipped Go module cache profile must carry `make_writable` through
@@ -579,6 +747,443 @@ pub fn ensure_host_lock_is_inherited_by_children_and_released_only_by_close(
         "the host lock is still held after the child exited"
     );
     judged.assert_clean()
+}
+
+/// The actual `Delete::run_command` child holds the host lock after its
+/// parent is killed. Waiting for the parent's `/proc` entry to disappear
+/// makes the lock check prove child inheritance rather than a race with the
+/// still-live parent.
+pub fn command_action_child_holds_host_lock_after_parent_is_killed(ctx: &Ctx) -> TestResult {
+    let gate = ctx.scratch.path("command-go");
+    let cwd = ctx.scratch.mkdir("command-cwd", 0o755, TESTER)?;
+    let cwd_meta = std::fs::metadata(&cwd).map_err(|e| format!("stat {}: {e}", cwd.display()))?;
+    let expected_cwd = format!("command-cwd={}:{}", cwd_meta.dev(), cwd_meta.ino());
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut spawned = ctx.spawn_as_tester(
+        &ctx.driver(),
+        &[
+            "command-lock",
+            gate.to_str().ok_or("non-UTF-8 gate")?,
+            cwd.to_str().ok_or("non-UTF-8 cwd")?,
+        ],
+    )?;
+    let parent = spawned.next_line("parent pid=")?;
+    let pid: u32 = parent
+        .rsplit("pid=")
+        .next()
+        .ok_or("missing parent pid")?
+        .parse()
+        .map_err(|e| format!("invalid parent pid: {e}"))?;
+    let ready = gate.with_extension("ready");
+    let ready_deadline = Instant::now() + Duration::from_secs(3);
+    let actual_cwd = loop {
+        match std::fs::read_to_string(&ready) {
+            Ok(text) if text.contains("command-child-ready") => {
+                break text.lines().next().unwrap_or("").to_owned();
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("read {}: {e}", ready.display())),
+        }
+        ensure!(
+            Instant::now() < ready_deadline,
+            "command child did not write readiness file {}",
+            ready.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    ensure!(
+        actual_cwd == expected_cwd,
+        "command cwd dev:ino {actual_cwd:?} != checked {expected_cwd:?}"
+    );
+    let raw = rustix::process::Pid::from_raw(pid.cast_signed()).ok_or("invalid parent pid")?;
+    rustix::process::kill_process(raw, rustix::process::Signal::KILL)
+        .map_err(|e| format!("kill command parent {pid}: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !process_exited(pid)? {
+        ensure!(
+            Instant::now() < deadline,
+            "command parent {pid} remained alive after SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ensure!(
+        held_by_someone()?,
+        "host lock was free after the command parent died while its child was running"
+    );
+    ctx.scratch.write_file("command-go", b"", 0o644, TESTER)?;
+    let run = spawned.wait()?;
+    let judged = oracle.judge(&run)?;
+    ensure!(
+        run.signal == Some(9),
+        "command parent was not killed by SIGKILL: code {:?}, signal {:?}",
+        run.code,
+        run.signal
+    );
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after command exit"
+    );
+    judged.assert_clean()
+}
+
+/// The harness keeps a duplicate of the blocking stderr pipe's write end.
+/// The command runner must never change status flags on that shared open
+/// file description, including when its parent is killed mid-command.
+pub fn command_action_never_changes_inherited_stderr_flags(ctx: &Ctx) -> TestResult {
+    let gate = ctx.scratch.path("stderr-flags-go");
+    let ready = gate.with_extension("ready");
+    let cwd = ctx.scratch.mkdir("stderr-flags-cwd", 0o755, TESTER)?;
+    let (read_end, write_end) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+        .map_err(|e| format!("make blocking stderr pipe: {e}"))?;
+    let passed_write = rustix::io::fcntl_dupfd_cloexec(&write_end, 3)
+        .map_err(|e| format!("duplicate stderr pipe write end: {e}"))?;
+    let before = rustix::fs::fcntl_getfl(&write_end)
+        .map_err(|e| format!("read initial stderr flags: {e}"))?;
+    ensure!(
+        !before.contains(rustix::fs::OFlags::NONBLOCK),
+        "test stderr pipe was not blocking"
+    );
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut spawned = ctx.spawn_as_tester_with_stderr(
+        &ctx.driver(),
+        &[
+            "command-lock",
+            gate.to_str().ok_or("non-UTF-8 gate")?,
+            cwd.to_str().ok_or("non-UTF-8 cwd")?,
+        ],
+        passed_write,
+    )?;
+    let parent = spawned.next_line("parent pid=")?;
+    let pid: u32 = parent
+        .rsplit("pid=")
+        .next()
+        .ok_or("missing parent pid")?
+        .parse()
+        .map_err(|e| format!("invalid parent pid: {e}"))?;
+    let ready_deadline = Instant::now() + Duration::from_secs(3);
+    while !ready.exists() {
+        ensure!(
+            Instant::now() < ready_deadline,
+            "command child did not write readiness file"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let active = rustix::fs::fcntl_getfl(&write_end)
+        .map_err(|e| format!("read active stderr flags: {e}"))?;
+    let raw = rustix::process::Pid::from_raw(pid.cast_signed()).ok_or("invalid parent pid")?;
+    rustix::process::kill_process(raw, rustix::process::Signal::KILL)
+        .map_err(|e| format!("kill command parent {pid}: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !process_exited(pid)? {
+        ensure!(
+            Instant::now() < deadline,
+            "command parent {pid} remained alive after SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let after = rustix::fs::fcntl_getfl(&write_end)
+        .map_err(|e| format!("read stderr flags after SIGKILL: {e}"))?;
+    let child_held_lock = held_by_someone()?;
+    ctx.scratch
+        .write_file("stderr-flags-go", b"", 0o644, TESTER)?;
+    let run = spawned.wait()?;
+    let judged = oracle.judge(&run)?;
+    drop(read_end);
+    ensure!(
+        !active.contains(rustix::fs::OFlags::NONBLOCK)
+            && !after.contains(rustix::fs::OFlags::NONBLOCK),
+        "shared stderr pipe acquired O_NONBLOCK: active={active:?}, after kill={after:?}"
+    );
+    ensure!(
+        child_held_lock,
+        "command child lost host lock after parent SIGKILL"
+    );
+    ensure!(
+        run.signal == Some(9),
+        "command parent was not killed by SIGKILL"
+    );
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after command exit"
+    );
+    judged.assert_clean()
+}
+
+/// SIGTERM makes the leader exit; its descendant ignores TERM. The port
+/// must still KILL that descendant without signaling a reused group ID.
+pub fn command_action_timeout_kills_descendant_after_leader_exits(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("timeout-cwd", 0o755, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &["command-timeout", cwd.to_str().ok_or("non-UTF-8 cwd")?],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.contains("command exit=TimedOut")
+            && !run.stdout.contains("command-descendant-pid=")
+            && !run.stdout.contains("command-stderr-probe"),
+        "command did not time out: {}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    ensure!(
+        run.stderr
+            .contains("diskgc: test-tier/test-profile: command-descendant-pid=")
+            && run
+                .stderr
+                .contains("diskgc: test-tier/test-profile: command-stderr-probe")
+            && run
+                .stderr
+                .contains("diskgc: test-tier/test-profile: command-term-output"),
+        "child stdout, stderr, and TERM output were not all prefixed on stderr: {}",
+        run.stderr
+    );
+    let descendant: u32 = run
+        .stderr
+        .lines()
+        .find_map(|line| {
+            line.split_once("command-descendant-pid=")
+                .map(|(_, pid)| pid)
+        })
+        .ok_or_else(|| format!("no descendant pid in {}", run.stderr))?
+        .parse()
+        .map_err(|e| format!("invalid descendant pid: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_exited(descendant)? {
+        ensure!(
+            Instant::now() < deadline,
+            "command descendant {descendant} survived group SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ensure!(!held_by_someone()?, "host lock remained held after timeout");
+    judged.assert_clean()
+}
+
+/// Two 128 KiB streams without line breaks must be forwarded as bounded
+/// prefixed segments on stderr. If either pipe were left unread, the child
+/// would block after filling it and miss the short deadline.
+pub fn command_action_long_output_is_bounded_and_prefixed(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("output-cwd", 0o755, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &["command-output", cwd.to_str().ok_or("non-UTF-8 cwd")?],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.contains("command exit=Exited(0)") && !run.stdout.contains("0000000000000000"),
+        "child output reached stdout or command failed: {}",
+        run.stdout
+    );
+    let prefix = "diskgc: test-tier/test-profile: ";
+    let segments: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(prefix))
+        .collect();
+    ensure!(
+        segments.len() == 64,
+        "expected 64 bounded stderr segments, got {}",
+        segments.len()
+    );
+    ensure!(
+        segments
+            .iter()
+            .all(|part| part.len() == 4096 && part.bytes().all(|b| b == b'0')),
+        "child output was truncated, unprefixed or not split at 4096 bytes"
+    );
+    judged.assert_clean()
+}
+
+/// A normally exiting leader must remain unreaped until a descendant that
+/// inherited its output pipes is killed. Reaping it first would permit the
+/// process-group ID to be reused before cleanup.
+pub fn command_action_orphaned_output_is_killed_before_reap(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("orphan-cwd", 0o755, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let started = Instant::now();
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &["command-orphan", cwd.to_str().ok_or("non-UTF-8 cwd")?],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        started.elapsed() < Duration::from_secs(4),
+        "orphaned output cleanup exceeded the bounded drain"
+    );
+    ensure!(
+        run.stdout.contains("command error=")
+            && run.stdout.contains("output pipe remained open")
+            && !run.stdout.contains("command-descendant-pid="),
+        "orphaned output was not reported as an error: {}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    let descendant: u32 = run
+        .stderr
+        .lines()
+        .find_map(|line| {
+            line.split_once("command-descendant-pid=")
+                .map(|(_, pid)| pid)
+        })
+        .ok_or_else(|| format!("no prefixed descendant pid in {}", run.stderr))?
+        .parse()
+        .map_err(|e| format!("invalid descendant pid: {e}"))?;
+    ensure!(
+        process_exited(descendant)?,
+        "orphaned descendant {descendant} survived group SIGKILL"
+    );
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after orphan cleanup"
+    );
+    judged.assert_clean()
+}
+
+/// A full blocking fd 2 must fail forwarding promptly and kill the command
+/// group. The test driver fills an unread pipe before invoking the port.
+pub fn command_action_stalled_stderr_fails_without_hanging(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("stalled-stderr-cwd", 0o755, TESTER)?;
+    let pid_file = cwd.join("child.pid");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &[
+            "command-stalled-stderr",
+            cwd.to_str().ok_or("non-UTF-8 cwd")?,
+            pid_file.to_str().ok_or("non-UTF-8 pid file")?,
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.contains("command error=")
+            && run
+                .stdout
+                .contains("stderr is not accepting output without blocking"),
+        "stalled stderr was not reported: {}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    ensure_command_duration_below(&run.stdout, 700)?;
+    ensure_command_descendant_exited(&pid_file)?;
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after forwarding failed"
+    );
+    judged.assert_clean()
+}
+
+/// Draining an output pipe held open after leader exit may not extend the
+/// action beyond its tier deadline by starting a fresh one-second wait.
+pub fn command_action_leader_exit_drain_obeys_tier_deadline(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("short-drain-cwd", 0o755, TESTER)?;
+    let pid_file = cwd.join("child.pid");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &[
+            "command-short-drain",
+            cwd.to_str().ok_or("non-UTF-8 cwd")?,
+            pid_file.to_str().ok_or("non-UTF-8 pid file")?,
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.contains("command exit=TimedOut"),
+        "leader-exit drain ignored tier deadline: {}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    ensure_command_duration_below(&run.stdout, 850)?;
+    ensure_command_descendant_exited(&pid_file)?;
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after drain timeout"
+    );
+    judged.assert_clean()
+}
+
+/// A descendant may deliberately close both output pipes. The leader's
+/// successful exit must still trigger group cleanup before it is reaped.
+pub fn command_action_closed_pipe_descendant_is_killed(ctx: &Ctx) -> TestResult {
+    let cwd = ctx.scratch.mkdir("closed-pipes-cwd", 0o755, TESTER)?;
+    let pid_file = cwd.join("child.pid");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &ctx.driver(),
+        &[
+            "command-closed-pipes",
+            cwd.to_str().ok_or("non-UTF-8 cwd")?,
+            pid_file.to_str().ok_or("non-UTF-8 pid file")?,
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.contains("command exit=Exited(0)"),
+        "leader's successful exit was lost: {}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    ensure_command_descendant_exited(&pid_file)?;
+    ensure!(
+        !held_by_someone()?,
+        "host lock remained held after leader exit"
+    );
+    judged.assert_clean()
+}
+
+fn ensure_command_duration_below(stdout: &str, limit_ms: u128) -> TestResult {
+    let elapsed: u128 = stdout
+        .lines()
+        .find_map(|line| line.split_once("command duration_ms=").map(|(_, ms)| ms))
+        .ok_or_else(|| format!("no command duration in {stdout}"))?
+        .parse()
+        .map_err(|e| format!("invalid command duration: {e}"))?;
+    ensure!(
+        elapsed < limit_ms,
+        "command took {elapsed} ms, exceeding the {limit_ms} ms test bound"
+    );
+    Ok(())
+}
+
+fn ensure_command_descendant_exited(pid_file: &Path) -> TestResult {
+    let pid: u32 = std::fs::read_to_string(pid_file)
+        .map_err(|e| format!("read {}: {e}", pid_file.display()))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid command descendant pid: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_exited(pid)? {
+        if Instant::now() >= deadline {
+            // Keep a failing test from leaving its fixture process behind.
+            if let Some(raw) = rustix::process::Pid::from_raw(pid.cast_signed()) {
+                let _ = rustix::process::kill_process(raw, rustix::process::Signal::KILL);
+            }
+            return Err(format!("command descendant {pid} survived group cleanup"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// A zombie has already closed every fd, so it cannot hold the host lock.
+fn process_exited(pid: u32) -> Result<bool, String> {
+    match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(text) => Ok(text
+            .lines()
+            .any(|line| line.starts_with("State:\tZ") || line.starts_with("State:\tX"))),
+        Err(e) => Err(format!("read process {pid} status: {e}")),
+    }
 }
 
 /// Whether someone holds the host lock: a non-blocking exclusive `flock`

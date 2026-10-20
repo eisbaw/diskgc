@@ -23,17 +23,24 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
+use std::process;
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::thread;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, Delete, DirListing, Environ, Errno, FileType, Host, HostError,
-    LinkTarget, LockMode, Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd,
-    ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock,
-    is_single_name, read_proc_view,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DirListing,
+    Environ, Errno, FileType, Host, HostError, LinkTarget, LockMode, Locked,
+    MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError,
+    ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink,
+    WaitLock, is_single_name, read_proc_view,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
@@ -850,6 +857,41 @@ impl Host for LinuxHost {
             .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))
     }
 
+    fn executable_file(&self, path: &Path) -> Result<bool, HostError> {
+        if !path.is_absolute() {
+            return Err(HostError::invalid(
+                "preflight executable",
+                path.display(),
+                "the executable path must be absolute",
+            ));
+        }
+        match std::fs::metadata(path) {
+            Ok(meta) => Ok(meta.is_file() && meta.permissions().mode() & 0o111 != 0),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(io_error(
+                "preflight executable",
+                path.display().to_string(),
+                &error,
+            )),
+        }
+    }
+
+    fn command_path(&self) -> OsString {
+        std::env::var_os("PATH").unwrap_or_default()
+    }
+
+    fn command_origin(&self) -> Result<std::path::PathBuf, HostError> {
+        std::env::current_dir()
+            .map_err(|error| io_error("preflight executable", "working directory", &error))
+    }
+
     fn read_dir(&self, dir: &LinuxFd, limit: usize) -> Result<DirListing, HostError> {
         let subject = format!("{dir:?}");
         let readable = reopen_readable(dir, &subject)?;
@@ -1299,6 +1341,75 @@ impl Delete for LinuxHost {
         fchmod_permitted(&permit, dir, Mode::from_raw_mode(perm))
             .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))
     }
+
+    fn run_command(&self, cwd: &LinuxFd, run: &CommandRun) -> CommandInvocation {
+        let subject = run.executable.display().to_string();
+        let permit = match gate("run command", &subject) {
+            Ok(permit) => permit,
+            Err(error) => return CommandInvocation::NotStarted(error),
+        };
+        if self.effective_uid() == 0 {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run command",
+                &subject,
+                "command actions are refused when diskgc runs as root",
+            ));
+        }
+        if !run.executable.is_absolute() {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run command",
+                &subject,
+                "executable was not resolved to an absolute path during preflight",
+            ));
+        }
+        if run.output_prefix.is_empty()
+            || run.output_prefix.len() > MAX_COMMAND_OUTPUT_PREFIX_BYTES
+            || run.output_prefix.contains('\n')
+            || run.output_prefix.contains('\r')
+        {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run command",
+                &subject,
+                format!(
+                    "output prefix must be non-empty, at most {MAX_COMMAND_OUTPUT_PREFIX_BYTES} bytes, and contain no line break"
+                ),
+            ));
+        }
+        for (key, value) in &run.environment {
+            if key.is_empty()
+                || key.as_bytes().contains(&b'=')
+                || key.as_bytes().contains(&0)
+                || value.as_bytes().contains(&0)
+            {
+                return CommandInvocation::NotStarted(HostError::invalid(
+                    "run command",
+                    &subject,
+                    format!("invalid environment assignment for {key:?}"),
+                ));
+            }
+        }
+        if run.deadline <= self.now() {
+            return CommandInvocation::DeadlineBeforeStart;
+        }
+        let stat = match rustix::fs::fstat(cwd) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return CommandInvocation::NotStarted(HostError::errno(
+                    "fstat command cwd",
+                    format!("{cwd:?}"),
+                    errno_of(error),
+                ));
+            }
+        };
+        if FileType::from_mode(stat.st_mode) != FileType::Directory {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run command",
+                format!("{cwd:?}"),
+                "checked working-directory fd is no longer a directory",
+            ));
+        }
+        run_command_permitted(&permit, self, cwd, run)
+    }
 }
 
 /// `dir` itself, opened anew `O_RDONLY | O_DIRECTORY`: `.` below `dir`
@@ -1339,6 +1450,500 @@ fn unlinkat_permitted(
 /// [`Permit`] proves the gate allowed it.
 fn fchmod_permitted(_gate: &Permit, dir: &LinuxFd, mode: Mode) -> rustix::io::Result<()> {
     rustix::fs::fchmod(dir, mode)
+}
+
+/// The only child-starting site in diskgc-linux. The held `Permit` is the
+/// sandbox proof. `pre_exec` uses only the async-signal-safe `fchdir` syscall
+/// on the already checked fd; `process_group(0)` makes the child a new group
+/// leader before it can run any profile code.
+// At most one such segment is buffered for each of the two pipes. A line
+// without a newline is emitted as successive segments, rather than held
+// until EOF. The read buffer for each drain has this size too.
+const COMMAND_OUTPUT_CHUNK: usize = 4096;
+const COMMAND_READS_PER_PUMP: usize = 16;
+const COMMAND_OUTPUT_DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
+const COMMAND_STDERR_BACKPRESSURE: Duration = Duration::from_millis(50);
+
+struct OutputMessage {
+    fd: OwnedFd,
+    bytes: Vec<u8>,
+    done: SyncSender<std::io::Result<()>>,
+}
+
+/// One writer for the process, ever. The zero-capacity channel holds no
+/// queued output. If a consumer stalls the writer in `write_all`, later
+/// actions fail to hand off output; they never create another blocked thread.
+static COMMAND_OUTPUT_WRITER: OnceLock<Result<SyncSender<OutputMessage>, String>> = OnceLock::new();
+
+fn command_output_writer(subject: &str) -> Result<&'static SyncSender<OutputMessage>, HostError> {
+    match COMMAND_OUTPUT_WRITER.get_or_init(|| {
+        let (send, receive) = mpsc::sync_channel::<OutputMessage>(0);
+        thread::Builder::new()
+            .name("diskgc-command-output".to_owned())
+            .spawn(move || {
+                for message in receive {
+                    let result = std::fs::File::from(message.fd).write_all(&message.bytes);
+                    let _ = message.done.send(result);
+                }
+            })
+            .map_err(|error| format!("start command output writer: {error}"))?;
+        Ok(send)
+    }) {
+        Ok(send) => Ok(send),
+        Err(error) => Err(HostError::invalid("forward command output", subject, error)),
+    }
+}
+
+fn run_command_permitted(
+    _gate: &Permit,
+    host: &LinuxHost,
+    cwd: &LinuxFd,
+    run: &CommandRun,
+) -> CommandInvocation {
+    let subject = run.executable.display().to_string();
+    let mut command = process::Command::new(&run.executable);
+    command
+        .args(&run.arguments)
+        .envs(run.environment.iter().cloned());
+    command
+        .process_group(0)
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped());
+    let cwd_fd = cwd.as_fd().as_raw_fd();
+    // SAFETY: the closure calls one syscall on an fd held by the parent
+    // through spawn; the child inherits it until pre_exec returns. It does
+    // not allocate, lock, or inspect shared state.
+    unsafe {
+        command.pre_exec(move || {
+            // SAFETY: `cwd` is alive through `spawn`; after fork this child
+            // owns its copy of the same fd until exec.
+            let fd = BorrowedFd::borrow_raw(cwd_fd);
+            rustix::process::fchdir(fd).map_err(std::io::Error::from)
+        });
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return CommandInvocation::NotStarted(io_error("spawn command", &subject, &error));
+        }
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(child.id().cast_signed()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return CommandInvocation::Started(Err(HostError::invalid(
+            "run command",
+            &subject,
+            "spawned child returned an invalid pid",
+        )));
+    };
+    let mut leader_reaped = false;
+    let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_reaped);
+    if result.is_err() && !leader_reaped {
+        // An output or wait failure must not leave a trusted cleaner
+        // running after the caller has been told the action failed.
+        let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+        let _ = child.wait();
+    }
+    CommandInvocation::Started(result)
+}
+
+/// Reads both pipes in bounded, nonblocking chunks while monitoring the
+/// deadline. A child cannot fill one pipe and block this thread from
+/// observing the other or the deadline. Its output is forwarded to stderr
+/// with a prefix; diskgc's stdout stays reserved for the result.
+fn drive_command_output(
+    host: &LinuxHost,
+    run: &CommandRun,
+    subject: &str,
+    pid: rustix::process::Pid,
+    child: &mut process::Child,
+    leader_reaped: &mut bool,
+) -> Result<CommandExit, HostError> {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        HostError::invalid("run command", subject, "spawned child has no stdout pipe")
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        HostError::invalid("run command", subject, "spawned child has no stderr pipe")
+    })?;
+    for fd in [stdout.as_fd(), stderr.as_fd()] {
+        let flags = rustix::fs::fcntl_getfl(fd)
+            .map_err(|e| HostError::errno("fcntl command output", subject, errno_of(e)))?;
+        rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK)
+            .map_err(|e| HostError::errno("fcntl command output", subject, errno_of(e)))?;
+    }
+    let prefix = format!("diskgc: {}: ", run.output_prefix);
+    let target = OutputTarget {
+        host,
+        deadline: run.deadline,
+        prefix: &prefix,
+        subject,
+    };
+    let mut out_line = OutputLine::default();
+    let mut err_line = OutputLine::default();
+    let poll = Duration::from_millis(20);
+    loop {
+        let forwarded = drain_command_output(&mut stdout, &mut out_line, target)
+            .and_then(|()| drain_command_output(&mut stderr, &mut err_line, target));
+        if let Err(error) = forwarded {
+            if host.now() >= run.deadline {
+                return terminate_timed_out_command(
+                    host,
+                    subject,
+                    pid,
+                    child,
+                    leader_reaped,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut out_line,
+                    &mut err_line,
+                    target,
+                );
+            }
+            return Err(error);
+        }
+        if rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOHANG
+                | rustix::process::WaitIdOptions::NOWAIT,
+        )
+        .map_err(|e| HostError::errno("observe command exit", subject, errno_of(e)))?
+        .is_some()
+        {
+            // Leave the exited leader waitable while draining descendant
+            // output. It pins the process-group ID if a descendant holds a
+            // pipe open past the drain limit and must be KILLed on error.
+            let drain = match finish_command_output(
+                &mut stdout,
+                &mut stderr,
+                &mut out_line,
+                &mut err_line,
+                target,
+            ) {
+                Ok(drain) => drain,
+                Err(_) if host.now() >= run.deadline => OutputDrain::Deadline,
+                Err(error) => return Err(error),
+            };
+            // A background cleaner may close its inherited output pipes.
+            // Kill any surviving member before reaping the leader; its
+            // waitable PID still reserves the process-group ID here.
+            signal_command_group(pid, rustix::process::Signal::KILL, subject)?;
+            let status = child
+                .wait()
+                .map_err(|e| io_error("wait command", subject, &e))?;
+            *leader_reaped = true;
+            return if drain == OutputDrain::Deadline {
+                Ok(CommandExit::TimedOut)
+            } else {
+                command_exit(status, subject)
+            };
+        }
+        if host.now() >= run.deadline {
+            return terminate_timed_out_command(
+                host,
+                subject,
+                pid,
+                child,
+                leader_reaped,
+                &mut stdout,
+                &mut stderr,
+                &mut out_line,
+                &mut err_line,
+                target,
+            );
+        }
+        host.sleep(poll.min(run.deadline.saturating_since(host.now())));
+    }
+}
+
+/// After the tier deadline, TERM output has its own bounded forwarding
+/// window. A stalled parent stderr cannot delay KILL indefinitely. Output
+/// loss in this cleanup window does not turn a timed-out action into an
+/// unrelated forwarding error; the primary outcome is still the deadline.
+#[allow(clippy::too_many_arguments)]
+fn terminate_timed_out_command(
+    host: &LinuxHost,
+    subject: &str,
+    pid: rustix::process::Pid,
+    child: &mut process::Child,
+    leader_reaped: &mut bool,
+    stdout: &mut process::ChildStdout,
+    stderr: &mut process::ChildStderr,
+    out_line: &mut OutputLine,
+    err_line: &mut OutputLine,
+    target: OutputTarget<'_>,
+) -> Result<CommandExit, HostError> {
+    signal_command_group(pid, rustix::process::Signal::TERM, subject)?;
+    let grace = host
+        .now()
+        .checked_add(Duration::from_millis(250))
+        .ok_or_else(|| HostError::invalid("run command", subject, "clock overflow"))?;
+    let grace_target = OutputTarget {
+        deadline: grace,
+        ..target
+    };
+    while host.now() < grace {
+        // The leader remains waitable so its PID pins the group until KILL.
+        if drain_command_output(stdout, out_line, grace_target).is_err()
+            || drain_command_output(stderr, err_line, grace_target).is_err()
+        {
+            break;
+        }
+        host.sleep(Duration::from_millis(20).min(grace.saturating_since(host.now())));
+    }
+    signal_command_group(pid, rustix::process::Signal::KILL, subject)?;
+    child
+        .wait()
+        .map_err(|e| io_error("wait command", subject, &e))?;
+    *leader_reaped = true;
+    // Already-readable bytes and unterminated lines get one further bounded
+    // chance to reach stderr. Failure is expected when its consumer stalled.
+    let tail_deadline = host
+        .now()
+        .checked_add(COMMAND_STDERR_BACKPRESSURE)
+        .ok_or_else(|| HostError::invalid("run command", subject, "clock overflow"))?;
+    let tail_target = OutputTarget {
+        deadline: tail_deadline,
+        ..target
+    };
+    let _ = drain_command_output(stdout, out_line, tail_target);
+    let _ = drain_command_output(stderr, err_line, tail_target);
+    let _ = out_line.flush(tail_target);
+    let _ = err_line.flush(tail_target);
+    Ok(CommandExit::TimedOut)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputDrain {
+    Complete,
+    Deadline,
+}
+
+#[derive(Clone, Copy)]
+struct OutputTarget<'a> {
+    host: &'a LinuxHost,
+    deadline: MonoTime,
+    prefix: &'a str,
+    subject: &'a str,
+}
+
+fn finish_command_output(
+    stdout: &mut process::ChildStdout,
+    stderr: &mut process::ChildStderr,
+    out_line: &mut OutputLine,
+    err_line: &mut OutputLine,
+    target: OutputTarget<'_>,
+) -> Result<OutputDrain, HostError> {
+    let until = target
+        .host
+        .now()
+        .checked_add(COMMAND_OUTPUT_DRAIN_AFTER_EXIT)
+        .ok_or_else(|| {
+            HostError::invalid("read command output", target.subject, "clock overflow")
+        })?;
+    while !(out_line.eof && err_line.eof) {
+        if target.host.now() >= target.deadline {
+            return Ok(OutputDrain::Deadline);
+        }
+        drain_command_output(stdout, out_line, target)?;
+        drain_command_output(stderr, err_line, target)?;
+        if out_line.eof && err_line.eof {
+            break;
+        }
+        if target.host.now() >= target.deadline {
+            return Ok(OutputDrain::Deadline);
+        }
+        if target.host.now() >= until {
+            return Err(HostError::invalid(
+                "read command output",
+                target.subject,
+                "output pipe remained open after the command leader exited; output may be incomplete",
+            ));
+        }
+        target.host.sleep(
+            Duration::from_millis(5).min(target.deadline.saturating_since(target.host.now())),
+        );
+    }
+    out_line.flush(target)?;
+    err_line.flush(target)?;
+    Ok(if target.host.now() >= target.deadline {
+        OutputDrain::Deadline
+    } else {
+        OutputDrain::Complete
+    })
+}
+
+#[derive(Default)]
+struct OutputLine {
+    bytes: Vec<u8>,
+    eof: bool,
+}
+
+impl OutputLine {
+    fn push(&mut self, bytes: &[u8], target: OutputTarget<'_>) -> Result<(), HostError> {
+        for &byte in bytes {
+            self.bytes.push(byte);
+            if byte == b'\n' || self.bytes.len() == COMMAND_OUTPUT_CHUNK {
+                self.flush(target)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self, target: OutputTarget<'_>) -> Result<(), HostError> {
+        if self.bytes.is_empty() {
+            return Ok(());
+        }
+        let mut segment = Vec::with_capacity(target.prefix.len() + self.bytes.len() + 1);
+        segment.extend_from_slice(target.prefix.as_bytes());
+        segment.extend_from_slice(&self.bytes);
+        if !self.bytes.ends_with(b"\n") {
+            segment.push(b'\n');
+        }
+        write_command_stderr(segment, target)?;
+        self.bytes.clear();
+        Ok(())
+    }
+}
+
+fn write_command_stderr(bytes: Vec<u8>, target: OutputTarget<'_>) -> Result<(), HostError> {
+    let writer = command_output_writer(target.subject)?;
+    let fd = rustix::io::fcntl_dupfd_cloexec(std::io::stderr().as_fd(), 3)
+        .map_err(|e| HostError::errno("duplicate stderr", target.subject, errno_of(e)))?;
+    let (done_send, done_receive) = mpsc::sync_channel(1);
+    let mut message = OutputMessage {
+        fd,
+        bytes,
+        done: done_send,
+    };
+    let backpressure_until = target
+        .host
+        .now()
+        .checked_add(COMMAND_STDERR_BACKPRESSURE)
+        .unwrap_or(target.deadline)
+        .min(target.deadline);
+    loop {
+        match writer.try_send(message) {
+            Ok(()) => break,
+            Err(TrySendError::Full(held)) => {
+                message = held;
+                let now = target.host.now();
+                if now >= backpressure_until {
+                    return Err(HostError::invalid(
+                        "forward command output",
+                        target.subject,
+                        "stderr writer is not accepting output without blocking",
+                    ));
+                }
+                target
+                    .host
+                    .sleep(Duration::from_millis(2).min(backpressure_until.saturating_since(now)));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(HostError::invalid(
+                    "forward command output",
+                    target.subject,
+                    "stderr writer stopped",
+                ));
+            }
+        }
+    }
+    loop {
+        // A completion already in the channel wins at the boundary. Do not
+        // call an otherwise completed write a timeout due to scheduler lag.
+        match done_receive.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => {
+                return Err(io_error("forward command output", target.subject, &error));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(HostError::invalid(
+                    "forward command output",
+                    target.subject,
+                    "stderr writer stopped without a result",
+                ));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let now = target.host.now();
+        if now >= backpressure_until {
+            return Err(HostError::invalid(
+                "forward command output",
+                target.subject,
+                "stderr is not accepting output without blocking",
+            ));
+        }
+        match done_receive
+            .recv_timeout(Duration::from_millis(2).min(backpressure_until.saturating_since(now)))
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => {
+                return Err(io_error("forward command output", target.subject, &error));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(HostError::invalid(
+                    "forward command output",
+                    target.subject,
+                    "stderr writer stopped without a result",
+                ));
+            }
+        }
+    }
+}
+
+fn drain_command_output<R: Read>(
+    source: &mut R,
+    line: &mut OutputLine,
+    target: OutputTarget<'_>,
+) -> Result<(), HostError> {
+    if line.eof {
+        return Ok(());
+    }
+    let mut bytes = [0_u8; COMMAND_OUTPUT_CHUNK];
+    // Cap each drain so a continuously writing child cannot starve the
+    // other pipe or the deadline check.
+    for _ in 0..COMMAND_READS_PER_PUMP {
+        match source.read(&mut bytes) {
+            Ok(0) => {
+                line.eof = true;
+                line.flush(target)?;
+                return Ok(());
+            }
+            Ok(n) => line.push(&bytes[..n], target)?,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(io_error("read command output", target.subject, &e)),
+        }
+    }
+    Ok(())
+}
+
+fn signal_command_group(
+    pid: rustix::process::Pid,
+    signal: rustix::process::Signal,
+    subject: &str,
+) -> Result<(), HostError> {
+    match rustix::process::kill_process_group(pid, signal) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(e) => Err(HostError::errno(
+            "signal command group",
+            subject,
+            errno_of(e),
+        )),
+    }
+}
+
+fn command_exit(status: process::ExitStatus, subject: &str) -> Result<CommandExit, HostError> {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => Ok(CommandExit::Exited(code)),
+        (_, Some(signal)) => Ok(CommandExit::Signaled(signal)),
+        _ => Err(HostError::invalid(
+            "wait command",
+            subject,
+            format!("unrecognized exit status {status:?}"),
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -158,6 +158,8 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         state.own_uid = uid;
     }
     state.sandbox_gate = model.sandbox_gate;
+    state.command_exit = model.command_exit;
+    state.command_error_after_start = model.command_error_after_start;
     match model.own_uid_map.as_deref() {
         None => {}
         Some("none") => state.own_uid_map = None,

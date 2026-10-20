@@ -73,6 +73,14 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
   action: {command: [rm, -rf, "{path}"]}
   examples: {match: [/tmp/pytest-of-mark]}
+- name: missing-cleaner
+  find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
+  action: {command: [diskgc-no-such-tool, "{path}"]}
+  examples: {match: [/tmp/pytest-of-mark]}
+- name: env-cleaner
+  find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
+  action: {command: [env, "PATH=/usr/bin", rm, -rf, "{path}"]}
+  examples: {match: [/tmp/pytest-of-mark]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -99,6 +107,8 @@ mounts:
   - {{id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, other_used: 500M, parent: 1}}
 {mounts}tree:
   /usr/bin/tool: {{}}
+  /usr/bin/rm: {{mode: "0755"}}
+  /usr/bin/env: {{mode: "0755"}}
 {HOST_LOCK}{tree}processes:
   - {{pid: 7, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], fds: [{{path: /usr/bin/tool}}], environ: [PATH=/usr/bin]}}
 {rest}"#
@@ -1181,34 +1191,143 @@ fn make_writable_is_the_profiles_option() {
     assert!(calls(&host, Op::Fchmod).is_empty());
 }
 
-/// A reclaiming `ensure` refuses an fs profile whose action it does not
-/// run (a command, task-37) before anything else: no gate question, no
-/// sample, no lock, no call on the host at all (exit 2). Its dry run
-/// still plans it.
+/// The product flow reaches a command only after the same fresh in-use
+/// check as deletion. A held file makes the candidate a skip, with no
+/// RunCommand call at all.
 #[test]
-fn a_command_action_is_refused_before_anything() {
+fn an_in_use_command_candidate_never_runs_the_cleaner() {
     let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
-    let host = host(&yaml("", &tree, ""));
+    let held = "  - {pid: 8, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], fds: [{path: /tmp/pytest-of-b/f}], environ: [PATH=/usr/bin]}\n";
+    let host = host(&yaml("", &tree, held));
     let request = tmp("profile:cleaner");
-    let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
-    let calls_before = host.trace().len();
-    let report = executor::ensure(&host, &request, uid, &mut |_| {});
-    assert_eq!(report.status, Status::UsageError, "{report:#?}");
-    assert_eq!(report.exit_code(), 2);
-    assert!(
-        report.errors[0].message.contains("task-37"),
-        "{}",
-        report.errors[0].message
-    );
-    assert_eq!(
-        host.trace().len(),
-        calls_before,
-        "{:#?}",
-        &host.trace()[calls_before..]
-    );
+    let report = ensure(&host, &request);
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some("in_use"));
+    assert_eq!(calls(&host, Op::RunCommand).len(), 0);
     assert!(exists(&host, "/tmp/pytest-of-b/f"));
     let plan = dry_run(&host, &request);
     assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+}
+
+#[test]
+fn a_command_candidate_with_a_checkout_is_refused_before_exec() {
+    let tree =
+        format!("  /tmp/pytest-of-b: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{mtime: {OLD}}}}}}}\n");
+    let host = host(&yaml("", &tree, ""));
+    let report = ensure(&host, &tmp("profile:cleaner"));
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-b"),
+        Some("contains_checkout"),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::RunCommand).is_empty());
+    assert!(exists(&host, "/tmp/pytest-of-b/.git/HEAD"));
+}
+
+#[test]
+fn a_missing_command_tool_skips_the_profile_without_starting_a_child() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, ""));
+    let report = ensure(&host, &tmp("profile:missing-cleaner"));
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(report.skipped.len(), 1, "{report:#?}");
+    assert_eq!(report.skipped[0].reason, "missing");
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(calls(&host, Op::RunCommand).is_empty());
+    assert!(exists(&host, "/tmp/pytest-of-b/f"));
+    let plan = dry_run(
+        &common::host(&yaml("", &tree, "")),
+        &tmp("profile:missing-cleaner"),
+    );
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert_eq!(plan.plan[0].reason, Some("missing"));
+}
+
+#[test]
+fn a_missing_command_cannot_bypass_the_reclaim_gate() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, "sandbox_gate: closed\n"));
+    let report = ensure(&host, &tmp("profile:missing-cleaner"));
+    assert_eq!(report.status, Status::UsageError, "{report:#?}");
+    assert_eq!(report.exit_code(), 2);
+    assert!(report.errors[0].message.contains("sandbox gate"));
+    let ops: Vec<Op> = host.trace().iter().map(|call| call.op).collect();
+    assert!(ops.contains(&Op::MayDelete));
+    for op in [Op::Statvfs, Op::Openat2, Op::Flock, Op::RunCommand] {
+        assert!(!ops.contains(&op), "{op} after a closed gate: {ops:?}");
+    }
+}
+
+#[test]
+fn a_nonzero_command_exit_is_reported_with_exit_three() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, "command_exit: 7\n"));
+    let report = ensure(&host, &tmp("profile:cleaner"));
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert!(report.errors[0].message.contains("status 7"), "{report:#?}");
+    let calls = calls(&host, Op::RunCommand);
+    assert_eq!(calls.len(), 1);
+    let run = calls[0].command.as_ref().expect("traced command request");
+    assert_eq!(run.executable, Path::new("/usr/bin/rm"));
+    assert_eq!(run.arguments[1], "/tmp/pytest-of-b");
+    assert_eq!(
+        calls[0].path.as_deref(),
+        Some(Path::new("/tmp/pytest-of-b"))
+    );
+}
+
+#[test]
+fn env_invokes_the_inner_executable_resolved_during_preflight() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, "command_exit: 7\n"));
+    let report = ensure(&host, &tmp("profile:env-cleaner"));
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    let calls = calls(&host, Op::RunCommand);
+    assert_eq!(calls.len(), 1);
+    let run = calls[0].command.as_ref().expect("traced command request");
+    assert_eq!(run.executable, Path::new("/usr/bin/env"));
+    assert_eq!(run.arguments[0], "PATH=/usr/bin");
+    assert_eq!(run.arguments[1], "/usr/bin/rm");
+    assert_eq!(run.arguments[3], "/tmp/pytest-of-b");
+}
+
+#[test]
+fn env_repeated_terminator_is_refused_in_preflight() {
+    let host = host(&yaml("", "", ""));
+    let argv = ["env", "--", "--", "rm"].map(str::to_owned);
+    let error = diskgc_core::command_action::preflight(&host, &argv).unwrap_err();
+    assert!(error.detail.contains("repeated `--`"), "{error}");
+}
+
+#[test]
+fn an_output_failure_after_spawn_is_an_action_with_an_observed_delta() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, "command_error_after_start: true\n"));
+    let report = ensure(&host, &tmp("profile:cleaner"));
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].avail_delta_bytes, Some(0));
+    assert!(
+        report.errors[0].message.contains("after spawn"),
+        "{report:#?}"
+    );
+    assert_eq!(calls(&host, Op::RunCommand).len(), 1);
+}
+
+#[test]
+fn a_deadline_expired_at_the_port_starts_no_reported_action() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let event = "events:\n  - {at: {op: run_command, nth: 1, when: before}, advance: 700s}\n";
+    let host = host(&yaml("", &tree, event));
+    let report = ensure(&host, &tmp("profile:cleaner"));
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(calls(&host, Op::RunCommand).len(), 1);
+    assert_eq!(
+        calls(&host, Op::RunCommand)[0].result,
+        "DeadlineBeforeStart"
+    );
 }
 
 /// Each kind runs its own protocol only (both directions). An fs tier

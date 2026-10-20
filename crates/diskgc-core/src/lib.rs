@@ -35,6 +35,7 @@ macro_rules! judged {
 }
 
 pub mod cargo_target;
+pub mod command_action;
 pub mod config;
 pub mod engine;
 pub mod executor;

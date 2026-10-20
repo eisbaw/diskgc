@@ -1221,13 +1221,47 @@ elsewhere. Lix and other Nix variants are not verified.
   guarantees end at the `exec`. Where the tool allows it, the command should
   use `.` with the candidate as working directory (entered via `fchdir`, so
   it is the checked directory).
-- **Executables** are resolved at run time, in the preflight, from the
-  `PATH` diskgc runs with; every executable the command will run is shown
-  in the report (for `[env, GOCACHE={path}, go, ...]` that includes `go`,
-  not only `env`). A tool that is not installed makes the profile `missing`
-  (skipped), not an error.
+- **Configured executables** are resolved at run time, in the preflight. The
+  first executable uses diskgc's `PATH`; an `env` wrapper's inner executable
+  uses any `PATH` assignment in its arguments. Their resolved paths are logged
+  to stderr before the command runs (for `[env, GOCACHE={path}, go, ...]`, this includes
+  `go` as well as `env`). The resolved `go` path is passed to `env`, so its
+  lookup cannot select a different tool after preflight. Programs launched
+  later by the configured tool are outside this preflight.
+  A tool that is not installed makes the profile `missing` (skipped),
+  not an error.
 - Runs in its own process group; killed after the tier's `timeout`;
   inherits the host lock (below).
+
+The deleting child-start port takes the already checked working-directory fd,
+an absolute executable from preflight, argument and environment arrays, and
+the tier's monotonic deadline. It changes directory with `fchdir` in the
+child, so a replacement at the path cannot redirect the working directory.
+At the deadline it sends `SIGTERM` to the process group, waits a short grace
+period, then sends `SIGKILL` to the group and reaps the leader. The host lock
+fd has close-on-exec cleared before starting the child; descendants inherit
+it too unless the cleaner explicitly closes it.
+On normal leader exit, the port still kills any surviving group members
+before reaping the leader, including descendants that closed both output
+pipes. The waitable leader pins the group ID until that cleanup is done.
+
+The child's stdout and stderr are read through separate nonblocking pipes and
+forwarded to diskgc's stderr with the action label on every line. An output
+line longer than 4096 bytes is emitted in 4096-byte segments, each with its
+own prefix, so even a child that never writes a newline cannot grow diskgc's
+output buffer without bound. The action label is limited to 256 bytes, so a
+forwarded segment also has a fixed maximum size. Failure to read or forward
+output fails the action; if the group leader is still held, diskgc kills its process group
+before returning the error. The result on diskgc's stdout is never mixed
+with child output. One process-wide writer thread forwards complete segments
+through close-on-exec duplicates of stderr. No inherited stderr flags are
+changed, and no stdio mutex is held during a write. Its zero-capacity channel
+holds no queued segments: a stalled consumer can block at most that one
+writer thread, while the action fails after at most 50 ms of backpressure
+(or at the earlier tier deadline) and kills its child group. Later actions
+fail to hand off output while the writer remains blocked; they cannot start
+more blocked writers. A leader-exit drain stops at the tier deadline, even
+when the output pipes remain open.
 
 ## Path traversal
 
