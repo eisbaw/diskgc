@@ -1597,11 +1597,15 @@ these features backported, and an unparseable release is refused too.
   f /run/diskgc/lock 0644 root root -
   ```
 
-  Missing → exit 2, printing those two lines. The file is reached like any
-  configured path (no symlink, no mount crossing: Path traversal), opened
-  `O_PATH`, checked to be a regular file and reopened read-only through
-  that fd, so a FIFO or a device at the path is never opened; anything but
-  a regular file there is exit 2 too.
+  A reclaim that needs a missing lock exits 2, printing those two lines.
+  An `ensure` whose space goal is already met checks the same object
+  without taking a `flock`; missing or unusable provisioning warns on
+  stderr but preserves exit 0 and the `met` report. The file is reached
+  like any configured path (no symlink, no mount crossing: Path
+  traversal), opened `O_PATH`, checked to be a regular file and reopened
+  read-only through that fd, so a FIFO or a device at the path is never
+  opened; anything but
+  a regular file there is exit 2 when reclaim is needed.
 - Any local user who can read the file can hold the lock and stall
   reclaims; `ensure` then exits 75 at its deadline.
 - Every child inherits the host lock's file descriptor (close-on-exec

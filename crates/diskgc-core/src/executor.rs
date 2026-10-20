@@ -336,6 +336,12 @@ fn deadline_of<H: Host>(host: &H, timeout: Option<Duration>) -> Option<MonoTime>
     timeout.and_then(|t| host.now().checked_add(t))
 }
 
+fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
+    if let Err(error) = hostlock::readiness(host) {
+        log(&format!("warning: host lock is not ready: {error}"));
+    }
+}
+
 /// Brings `PATH`'s filesystem to the goal (see the module docs). `uid` is
 /// from [`privileges`]. Progress goes to `log`, one line each.
 pub fn ensure<H: Delete>(
@@ -426,6 +432,9 @@ pub fn ensure<H: Delete>(
                     false,
                     false,
                 );
+                if report.status == Status::Met {
+                    warn_if_host_lock_unready(host, log);
+                }
                 return report;
             }
             Err(error) => {
@@ -458,6 +467,7 @@ pub fn ensure<H: Delete>(
     if avail >= measured.min {
         report.status = Status::Met;
         report.avail_after_bytes = Some(avail);
+        warn_if_host_lock_unready(host, log);
         return report;
     }
     log(&format!(

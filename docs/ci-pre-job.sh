@@ -30,9 +30,9 @@
 # Exit: 0 when the job may start; otherwise diskgc's exit code (docs/
 # reference.md, Exit codes), so the job fails before it starts rather than
 # half-way through, out of disk. The hook's own failures: 2 for a
-# misconfigured hook or an unprovisioned runner (the class diskgc uses for
-# usage and provisioning errors), 4 when diskgc exited 0 but left no
-# report (a code diskgc never uses: docs/reference.md, Exit codes).
+# misconfigured hook (diskgc itself uses 2 for usage errors, and for lock
+# provisioning errors when reclaim is needed), 4 when diskgc exited 0
+# but left no report (a code diskgc never uses: docs/reference.md, Exit codes).
 #
 # The exit code is authoritative. The one-line summary printed at the end
 # is informational: a few top-level fields of the report, read without jq.
@@ -59,16 +59,6 @@ if [ -n "${DISKGC_REPORT:-}" ]; then
     report=$DISKGC_REPORT
 elif ! report=$(mktemp "${TMPDIR:-/tmp}/diskgc-pre-job.XXXXXX"); then
     echo "pre-job: cannot make a report file in ${TMPDIR:-/tmp}" >&2
-    exit 2
-fi
-
-# The host lock is provisioned at boot (the tmpfiles.d drop-in). diskgc
-# looks for it only when it has to reclaim, so a runner set up without it
-# would find out on the first job that runs low on disk. Check every time.
-if [ ! -f /run/diskgc/lock ]; then
-    echo "pre-job: /run/diskgc/lock is missing; provision it at boot (tmpfiles.d):" >&2
-    echo "pre-job:   d /run/diskgc      0755 root root -" >&2
-    echo "pre-job:   f /run/diskgc/lock 0644 root root -" >&2
     exit 2
 fi
 

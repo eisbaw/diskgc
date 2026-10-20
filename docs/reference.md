@@ -71,7 +71,12 @@ process runs, even if that Cargo works in an unrelated directory; see
   [safety.md](safety.md#path-traversal)). The resolved mount point is
   printed in every report.
 - `--min-free` (required): if available space is at least this, do nothing
-  and exit 0, without taking the lock.
+  and exit 0, without taking the lock. `ensure` still checks that
+  `/run/diskgc/lock` is a safely reachable, readable regular file. If it
+  is missing or unusable, stderr warns with the provisioning detail (and
+  the tmpfiles lines when missing); exit 0 and the JSON `met` report are
+  unchanged. A later run needing to reclaim exits 2 if the lock is still
+  unusable. This readiness check does not take a `flock`.
 - `--target-free` (default: same as `--min-free`): once triggered, keep
   reclaiming until this much is available. Setting it higher is the
   hysteresis: a fleet of CI jobs then does one larger cleanup instead of a
@@ -352,8 +357,9 @@ taken nothing was measured or done, and it is exit 2, like an unusable
 `PATH`. A dry run keeps its exits (0, 2, 124, 130/143) and reports a final
 sample it could not take as `avail_after_bytes: null` with an `errors`
 entry. The JSON `status` of each: 2 `usage_error` (also for a refusal to
-run as root, a missing host lock file and, in development builds, the
-pre-release sandbox gate, [safety.md](safety.md#pre-release-sandbox-gate)),
+run as root, a missing host lock file when reclaim is needed and, in
+development builds, the pre-release sandbox gate,
+[safety.md](safety.md#pre-release-sandbox-gate)),
 130 / 143 `interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124
 `deadline`, 3 `error`, 1 `exhausted`.
 

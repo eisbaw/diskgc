@@ -132,20 +132,56 @@ fn exists(host: &ModelHost, path: &str) -> bool {
     host.stat_path(Path::new(path)).is_some()
 }
 
-/// AC #1: at or above `--min-free`, exit 0 without the host lock. The
-/// model has no `/run/diskgc` at all, and nothing below it is reached.
+/// An already-met ensure verifies provisioning but never takes the lock.
+/// Missing and unusable lock objects produce a warning, not a false setup
+/// success or an exit failure.
 #[test]
-fn above_min_free_exits_0_without_touching_the_host_lock() {
-    let host = host(&yaml(false, ""));
-    let report = ensure(&host, &cargo("1G", None));
-    assert_eq!(report.status, Status::Met, "{report:?}");
-    assert_eq!(report.exit_code(), 0);
-    assert!(host_lock_untouched(&host), "{:#?}", host.trace());
-    assert!(calls(&host, Op::Flock).is_empty());
-    assert!(calls(&host, Op::Unlinkat).is_empty());
-    assert_eq!(report.avail_after_bytes, report.avail_before_bytes);
-    assert_eq!(report.mount.as_deref(), Some(Path::new("/home")));
-    assert_eq!(report.summary(), None, "nothing needed doing: silent");
+fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
+    for (case, model, expected) in [
+        (
+            "missing",
+            yaml(false, ""),
+            "host lock /run/diskgc/lock is missing",
+        ),
+        (
+            "fifo",
+            yaml(false, "").replacen(
+                "tree:\n",
+                "tree:\n  /run/diskgc/lock: {type: fifo, uid: 0}\n",
+                1,
+            ),
+            "host lock /run/diskgc/lock is unusable",
+        ),
+        ("ready", yaml(true, ""), ""),
+    ] {
+        let host = host(&model);
+        let uid = executor::privileges(&host, false).unwrap();
+        let mut lines = Vec::new();
+        let report = executor::ensure(&host, &cargo("1G", None), uid, &mut |line| {
+            lines.push(line.to_owned());
+        });
+        let output = lines.join("\n");
+        assert_eq!(report.status, Status::Met, "{case}: {report:?}");
+        assert_eq!(report.exit_code(), 0);
+        if case == "ready" {
+            assert!(!output.contains("host lock is not ready"), "{output}");
+        } else {
+            assert!(
+                output.contains("warning: host lock is not ready"),
+                "{output}"
+            );
+            assert!(output.contains(expected), "{output}");
+        }
+        assert!(
+            calls(&host, Op::Flock).is_empty(),
+            "{case}: {:#?}",
+            host.trace()
+        );
+        assert!(calls(&host, Op::Unlinkat).is_empty(), "{case}");
+        assert_eq!(report.avail_after_bytes, report.avail_before_bytes);
+        assert_eq!(report.mount.as_deref(), Some(Path::new("/home")));
+        assert_eq!(report.summary(), None, "nothing needed doing: silent");
+    }
 }
 
 /// AC #2: below `--min-free` with no `/run/diskgc/lock`: exit 2, the

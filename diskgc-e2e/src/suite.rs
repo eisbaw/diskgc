@@ -697,6 +697,12 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines,
     },
     Test {
+        name: "ensure_goal_met_warns_about_an_unready_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_goal_met_warns_about_an_unready_host_lock,
+    },
+    Test {
         name: "ensure_as_root_without_allow_root_exits_2",
         tier: Tier::Fast,
         expect: Expect::Pass,

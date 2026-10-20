@@ -639,6 +639,50 @@ pub fn ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
     judged.assert_clean()
 }
 
+/// A met goal still checks host-lock provisioning without taking the lock.
+/// Missing and nonregular lock objects warn on stderr while JSON stays met.
+pub fn ensure_goal_met_warns_about_an_unready_host_lock(ctx: &Ctx) -> TestResult {
+    work_dir(ctx)?;
+    unprovision(ctx)?;
+    for (case, expected) in [
+        ("missing", "host lock /run/diskgc/lock is missing"),
+        ("fifo", "host lock /run/diskgc/lock is unusable"),
+    ] {
+        if case == "fifo" {
+            ctx.run_diskgc.fifo("lock", 0o644, ROOT)?;
+        }
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = ensure_run(
+            ctx,
+            &[
+                "--min-free",
+                "1K",
+                "--json",
+                "--select",
+                "profile:cargo-target",
+                "--roots",
+                "/tmp/w",
+                "/tmp/w",
+            ],
+        )?;
+        oracle.judge(&run)?.assert_clean()?;
+        run.expect_code(0)?;
+        ensure!(
+            run.stderr.contains("warning: host lock is not ready") && run.stderr.contains(expected),
+            "{case}: no provisioning warning: {}",
+            run.stderr
+        );
+        let report = report(&run)?;
+        ensure!(
+            report["status"] == "met"
+                && report["errors"].as_array().is_some_and(Vec::is_empty)
+                && report["actions"].as_array().is_some_and(Vec::is_empty),
+            "{case}: {report}"
+        );
+    }
+    Ok(())
+}
+
 /// AC #4 and exit 2: run as root (uid 0 in the container's user
 /// namespace) without `--allow-root`, `ensure` exits 2 before measuring
 /// anything; `--allow-root` is refused too in this build (it needs

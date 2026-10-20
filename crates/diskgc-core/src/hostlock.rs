@@ -98,13 +98,15 @@ impl fmt::Display for LockError {
 
 impl std::error::Error for LockError {}
 
-/// Takes the host lock, waiting for it until `deadline` (`None`: no
-/// deadline). See the module docs.
-pub fn acquire<H: Host>(
-    host: &H,
-    deadline: Option<MonoTime>,
-) -> Result<HostLock<H::Fd>, LockError> {
-    let started = host.now();
+/// Check that the provisioned lock can be opened without taking it. An
+/// already-met `ensure` uses this to report a broken installation early.
+pub fn readiness<H: Host>(host: &H) -> Result<(), LockError> {
+    drop(open_lock(host)?);
+    Ok(())
+}
+
+/// Reach and reopen exactly the lock object that [`acquire`] will flock.
+fn open_lock<H: Host>(host: &H) -> Result<H::Fd, LockError> {
     let dir = resolve(host, Path::new(HOST_LOCK_DIR), Want::Directory).map_err(unreachable)?;
     let (fd, stat) = open_beneath(
         host,
@@ -129,6 +131,17 @@ pub fn acquire<H: Host>(
     }
     let readable = host.reopen_regular(&fd).map_err(LockError::Failed)?;
     drop(fd);
+    Ok(readable)
+}
+
+/// Takes the host lock, waiting for it until `deadline` (`None`: no
+/// deadline). See the module docs.
+pub fn acquire<H: Host>(
+    host: &H,
+    deadline: Option<MonoTime>,
+) -> Result<HostLock<H::Fd>, LockError> {
+    let started = host.now();
+    let readable = open_lock(host)?;
     // Read-only is enough for flock, and is what the file's mode (0644
     // root) gives every user (docs/safety.md, Host lock).
     let locked = match host

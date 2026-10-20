@@ -96,8 +96,9 @@ fn target_of(rel: &str) -> PathBuf {
 ///   in human mode;
 /// - the hook on a fresh runner without a builds directory yet (it makes
 ///   it; exit 0), misconfigured (an unwritable report path, a relative or
-///   unset builds directory) and on a runner without the host lock: exit 2
-///   from the hook's own checks, before diskgc runs; with a diskgc on
+///   unset builds directory): exit 2 from the hook's own checks; and on a
+///   runner without the host lock: diskgc warns and the hook exits 0 when
+///   the space goal is met; with a diskgc on
 ///   `PATH` that exits 0 without a report (exit 4) or cannot be executed
 ///   (126 or 127).
 ///
@@ -414,29 +415,33 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         );
     }
 
-    // A runner set up without the host lock: the hook's own check stops it
-    // even though the goal is met (diskgc would exit 0 without looking).
+    // A runner set up without the host lock: diskgc itself warns on the
+    // already-met path, so the hook needs no duplicate provisioning check.
     unprovision(ctx)?;
     let oracle = Oracle::arm(Fixture::new())?;
     let unprovisioned = pre_job(ctx, "unprovisioned", &[("DISKGC_MIN_FREE", Some("1K"))])?;
     let run = unprovisioned.run;
     oracle.judge(&run)?.assert_clean()?;
-    run.expect_code(2)?;
+    run.expect_code(0)?;
     for line in [
         "d /run/diskgc      0755 root root -",
         "f /run/diskgc/lock 0644 root root -",
     ] {
         ensure!(
             run.stderr.contains(line),
-            "the hook prints the tmpfiles line {line:?}: {}",
+            "diskgc warns with the tmpfiles line {line:?}: {}",
             run.stderr
         );
     }
     ensure!(
-        !run.stdout.contains("diskgc ensure exited"),
-        "the hook ran diskgc without the host lock: {}",
+        run.stderr.contains("warning: host lock is not ready")
+            && run.stdout.contains("diskgc ensure exited 0"),
+        "the hook did not pass on diskgc's warning: {}{}",
+        run.stderr,
         run.stdout
     );
+    let report = unprovisioned.report?;
+    ensure!(report["status"] == "met", "{report}");
 
     ensure!(
         all_lock_inodes(&all_targets)? == locks,
