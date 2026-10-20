@@ -295,7 +295,11 @@ pub fn resolve_owner(name: &str) -> Result<u32, String> {
             ));
         }
         if result.is_null() {
-            return Err(format!("owners: user {name:?} does not exist"));
+            return Err(format!(
+                "owners: user {name:?} does not exist in this binary's account resolver \
+                 (static musl builds cannot load LDAP/sssd NSS modules; use a trusted \
+                 {{uid: N}} entry, a local passwd entry, or nscd)"
+            ));
         }
         // SAFETY: getpwnam_r returned success and a non-null pointer to entry.
         let uid = unsafe { entry.assume_init().pw_uid };

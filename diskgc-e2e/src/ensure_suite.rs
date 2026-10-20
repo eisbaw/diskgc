@@ -23,7 +23,7 @@ use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, HOST_LOCK, TestResult};
 use crate::under_test::Run;
-use crate::{ROOT, TESTER, ensure, info};
+use crate::{Owner, ROOT, TESTER, ensure, info};
 
 /// Available bytes of the filesystem holding `path`, as an unprivileged
 /// writer may use them (`f_bavail × f_frsize`): the harness's own measure.
@@ -820,6 +820,119 @@ pub fn root_mode_uses_protected_config_and_named_owner(ctx: &Ctx) -> TestResult 
     judged.assert_clean()
 }
 
+/// A static binary can honor a trusted numeric UID without an account name
+/// in the image. The root policy is protected and every deletion is judged.
+pub fn root_mode_uses_explicit_uid_without_passwd_entry(ctx: &Ctx) -> TestResult {
+    const NUMERIC_OWNER: Owner = Owner {
+        uid: 2001,
+        gid: 2001,
+    };
+    let passwd = std::fs::read_to_string("/etc/passwd")
+        .map_err(|e| format!("read container passwd: {e}"))?;
+    ensure!(
+        !passwd
+            .lines()
+            .any(|line| line.split(':').nth(2) == Some("2001")),
+        "the fixture UID unexpectedly has a passwd entry"
+    );
+    let s = &ctx.scratch;
+    s.mkdir("numeric-owner-work", 0o755, NUMERIC_OWNER)?;
+    s.mkdir("numeric-owner-work/reclaim", 0o755, NUMERIC_OWNER)?;
+    s.write_file(
+        "numeric-owner-work/reclaim/payload",
+        &[1u8; 4096],
+        0o600,
+        NUMERIC_OWNER,
+    )?;
+    let config = b"version: 1\nowners: [{uid: 2001}]\nprofiles:\n  - name: numeric-owner-fixture\n    find: {roots: required, paths: [reclaim], type: dir}\n    action: delete\n    examples: {root: /tmp/numeric-owner-work, match: [/tmp/numeric-owner-work/reclaim]}\n";
+    ctx.run_diskgc
+        .write_file("numeric-owner.yaml", config, 0o600, ROOT)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("numeric-owner-work/reclaim")))?;
+    let run = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--allow-root",
+            "--json",
+            "--min-free",
+            "100%",
+            "--config",
+            "/run/diskgc/numeric-owner.yaml",
+            "--select",
+            "profile:numeric-owner-fixture",
+            "--roots",
+            "/tmp/numeric-owner-work",
+            "/tmp/numeric-owner-work",
+        ],
+    )?;
+    let judged = oracle.judge_runs(&[&run])?;
+    ensure!(
+        !s.path("numeric-owner-work/reclaim").exists(),
+        "numeric owner was not reclaimed: {}",
+        run.stderr
+    );
+    ensure!(
+        report(&run)?["status"] != "usage_error",
+        "numeric owner was rejected: {}",
+        run.stderr
+    );
+    judged.assert_clean()
+}
+
+/// `{uid}` would expand to root's 0, even if owners names one or several
+/// other users. The selected built-in must be refused before a plan exists.
+pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("claude-0", 0o755, TESTER)?;
+    s.mkdir("claude-0/-project", 0o755, TESTER)?;
+    s.mkdir("claude-0/-project/session", 0o755, TESTER)?;
+    s.write_file("claude-0/-project/session/payload", b"keep", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut runs = Vec::new();
+    for (name, owners) in [("one", "[tester]"), ("two", "[tester, {uid: 2001}]")] {
+        let config = format!("version: 1\nowners: {owners}\n");
+        let file = format!("uid-placeholder-{name}.yaml");
+        ctx.run_diskgc
+            .write_file(&file, config.as_bytes(), 0o600, ROOT)?;
+        let path = format!("/run/diskgc/{file}");
+        for dry_run in [false, true] {
+            let mut args = vec!["ensure", "--allow-root", "--json", "--min-free", "100%"];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            args.extend([
+                "--config",
+                &path,
+                "--select",
+                "profile:claude-code-tmp",
+                "/tmp",
+            ]);
+            let run = ctx.run_as_root(&ctx.diskgc(), &args)?;
+            run.expect_code(2)?;
+            ensure!(
+                run.stderr.contains("`{uid}`")
+                    && run.stderr.contains("find.paths")
+                    && run.stderr.contains("claude-code-tmp"),
+                "{name}, dry_run={dry_run}: {}",
+                run.stderr
+            );
+            let result = report(&run)?;
+            ensure!(
+                result["status"] == "usage_error"
+                    && result["plan"].as_array().is_some_and(Vec::is_empty),
+                "{name}, dry_run={dry_run}: {result}"
+            );
+            runs.push(run);
+        }
+    }
+    let judged = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;
+    ensure!(
+        s.path("claude-0/-project/session/payload").exists(),
+        "root `{{uid}}` selection deleted another owner's session"
+    );
+    judged.assert_clean()
+}
+
 /// Mode checks cover the actual file, an unsafe original ancestor, a link's
 /// target ancestor, and system-account resolution before any deletion.
 pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestResult {
@@ -856,6 +969,17 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
     );
     ctx.run_diskgc
         .write_file("unknown-owner.yaml", unknown_policy.as_bytes(), 0o600, ROOT)?;
+    let duplicate_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
+        "owners: [tester]",
+        "owners: [tester, {uid: 1000}]",
+        1,
+    );
+    ctx.run_diskgc.write_file(
+        "duplicate-owner.yaml",
+        duplicate_policy.as_bytes(),
+        0o600,
+        ROOT,
+    )?;
     let command_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
         "action: delete",
         "action: {command: [/bin/true, '{path}']}",
@@ -863,6 +987,27 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
     );
     ctx.run_diskgc
         .write_file("command.yaml", command_policy.as_bytes(), 0o600, ROOT)?;
+    let literal_guard_policy = std::str::from_utf8(policy).expect("static YAML").replacen(
+        "    action: delete",
+        "    where: {protect_links: ['bin/{uid}/current']}\n    action: delete",
+        1,
+    );
+    ctx.run_diskgc.write_file(
+        "literal-guard.yaml",
+        literal_guard_policy.as_bytes(),
+        0o600,
+        ROOT,
+    )?;
+    let protected_policy = format!(
+        "{}protect:\n  - {{profile: root-rejected-fixture, roots: [/tmp/root-rejected]}}\n",
+        std::str::from_utf8(policy).expect("static YAML")
+    );
+    ctx.run_diskgc.write_file(
+        "protected-source.yaml",
+        protected_policy.as_bytes(),
+        0o600,
+        ROOT,
+    )?;
     let oracle = Oracle::arm(Fixture::new())?;
     let mut runs = Vec::new();
     for (config, reason) in [
@@ -871,8 +1016,20 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
         ("/run/diskgc/linked.yaml", "StrictModes"),
         ("/tmp/root-link-original.yaml", "StrictModes"),
         ("/run/diskgc/system-owner.yaml", "system uid"),
-        ("/run/diskgc/unknown-owner.yaml", "does not exist"),
+        (
+            "/run/diskgc/unknown-owner.yaml",
+            "static musl builds cannot load",
+        ),
+        ("/run/diskgc/duplicate-owner.yaml", "duplicate uid 1000"),
         ("/run/diskgc/command.yaml", "command actions are refused"),
+        (
+            "/run/diskgc/literal-guard.yaml",
+            "is literal and does not expand it",
+        ),
+        (
+            "/run/diskgc/protected-source.yaml",
+            "ensure cannot enforce it in this build yet",
+        ),
     ] {
         let run = ctx.run_as_root(
             &ctx.diskgc(),

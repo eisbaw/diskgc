@@ -761,6 +761,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::root_mode_uses_protected_config_and_named_owner,
     },
     Test {
+        name: "root_mode_uses_explicit_uid_without_passwd_entry",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::root_mode_uses_explicit_uid_without_passwd_entry,
+    },
+    Test {
+        name: "root_mode_refuses_uid_placeholder_for_one_or_two_owners",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::root_mode_refuses_uid_placeholder_for_one_or_two_owners,
+    },
+    Test {
         name: "root_mode_refuses_untrusted_policy_and_system_owner",
         tier: Tier::Fast,
         expect: Expect::Pass,

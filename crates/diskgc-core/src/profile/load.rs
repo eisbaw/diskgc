@@ -592,12 +592,13 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         ("has_not", &spec.has_not),
         ("lacks_entry", &spec.lacks_entry),
     ] {
-        if let Some(name) = name
-            && !is_file_name(name)
-        {
-            problems.push(format!(
-                "`{predicate}: {name}` must name one entry (no `/`, not `.` or `..`)"
-            ));
+        if let Some(name) = name {
+            literal_without_uid(predicate, name, problems);
+            if !is_file_name(name) {
+                problems.push(format!(
+                    "`{predicate}: {name}` must name one entry (no `/`, not `.` or `..`)"
+                ));
+            }
         }
     }
     if let Some(path) = &spec.app_not_running {
@@ -624,6 +625,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         problems.push("`newest_group` requires `keep_newest`".to_owned());
     }
     for link in &spec.protect_links {
+        literal_without_uid("protect_links", link, problems);
         if pattern(link).is_err() || link.contains('*') {
             problems.push(format!(
                 "`protect_links: {link}` must be a literal path relative to the bound root"
@@ -631,25 +633,28 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         }
     }
     for dir in &spec.protect_link_dirs {
+        literal_without_uid("protect_link_dirs", dir, problems);
         if pattern(dir).is_err() || dir.contains('*') {
             problems.push(format!(
                 "`protect_link_dirs: {dir}` must be a literal directory path relative to the bound root"
             ));
         }
     }
-    if let Some(link) = &spec.protect_parent_link
-        && !is_file_name(link)
-    {
-        problems.push(format!(
-            "`protect_parent_link: {link}` must name one symlink"
-        ));
+    if let Some(link) = &spec.protect_parent_link {
+        literal_without_uid("protect_parent_link", link, problems);
+        if !is_file_name(link) {
+            problems.push(format!(
+                "`protect_parent_link: {link}` must name one symlink"
+            ));
+        }
     }
-    if let Some(manifest) = &spec.protect_cursor_extensions
-        && (pattern(manifest).is_err() || manifest.contains('*'))
-    {
-        problems.push(format!(
-            "`protect_cursor_extensions: {manifest}` must be a literal path relative to the bound root"
-        ));
+    if let Some(manifest) = &spec.protect_cursor_extensions {
+        literal_without_uid("protect_cursor_extensions", manifest, problems);
+        if pattern(manifest).is_err() || manifest.contains('*') {
+            problems.push(format!(
+                "`protect_cursor_extensions: {manifest}` must be a literal path relative to the bound root"
+            ));
+        }
     }
     Where {
         idle_for: spec.idle_for.map(|d| IdleFor(d.0)),
@@ -665,6 +670,16 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         protect_link_dirs: spec.protect_link_dirs.clone(),
         protect_parent_link: spec.protect_parent_link.clone(),
         protect_cursor_extensions: spec.protect_cursor_extensions.clone(),
+    }
+}
+
+/// These predicates compare literal file names or paths at judgement time;
+/// unlike find paths and app_not_running, they never substitute `{uid}`.
+fn literal_without_uid(field: &str, value: &str, problems: &mut Vec<String>) {
+    if value.contains("{uid}") {
+        problems.push(format!(
+            "`{field}: {value}` uses `{{uid}}`, but this field is literal and does not expand it"
+        ));
     }
 }
 

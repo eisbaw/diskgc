@@ -1793,9 +1793,12 @@ How it holds:
   by root and not writable by group or others (like sshd's StrictModes).
   Both the lookup path and the canonical target of each symlink are checked;
   a link into a user-writable tree is refused. Owner names resolve through
-  the platform name service at invocation time; uid 0 and system uids below
-  1000 are refused. The static musl build can resolve local passwd users,
-  while NSS-only LDAP/sssd accounts still need TASK91.
+  the platform name service at invocation time; explicit `{uid: N}` entries
+  avoid that lookup. UID 0 and system UIDs below 1000 are refused. The
+  static musl build can resolve local passwd users (and nscd if available),
+  while NSS-only LDAP/sssd names are unavailable without nscd; a protected
+  policy may instead pin their trusted numeric UIDs. UID reuse changes who
+  the policy names and must be controlled by the deployment.
   Docker prune actions are refused too: the daemon's shared cache has no
   per-entry owner check for `owners:` to enforce.
 

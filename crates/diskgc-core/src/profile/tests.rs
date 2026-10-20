@@ -86,6 +86,33 @@ fn app_not_running_is_a_validated_fs_source_predicate() {
 }
 
 #[test]
+fn literal_source_and_filter_guards_reject_uid_placeholder() {
+    for (field, value) in [
+        ("has", "'marker-{uid}'"),
+        ("has_dir", "'generated-{uid}'"),
+        ("has_not", "'source-{uid}'"),
+        ("lacks_entry", "'keep-{uid}'"),
+        ("protect_links", "['bin/{uid}/current']"),
+        ("protect_link_dirs", "['bin/{uid}']"),
+        ("protect_parent_link", "'current-{uid}'"),
+        (
+            "protect_cursor_extensions",
+            "'.cursor/{uid}/extensions.json'",
+        ),
+    ] {
+        let source = format!(
+            "- name: guarded\n  find: {{roots: [/tmp], paths: [cache], type: dir}}\n  where: {{{field}: {value}}}\n  action: delete\n  examples: {{match: [/tmp/cache]}}\n"
+        );
+        let filter = format!("- name: guarded-filter\n  where: {{{field}: {value}}}\n");
+        for yaml in [&source, &filter] {
+            let errors = user_errors(yaml);
+            assert_has(&errors, "is literal and does not expand it");
+            assert_has(&errors, field);
+        }
+    }
+}
+
+#[test]
 fn lacks_entry_cannot_be_silently_disabled_by_a_present_null_or_blank() {
     let source = |value: &str| {
         format!(

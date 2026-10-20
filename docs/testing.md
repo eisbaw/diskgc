@@ -489,6 +489,12 @@ filesystem, processes and mounts from the developer's system.
   12,000 entries in the fast tier and 100,000 in the full tier, judged by
   the oracle; stale sockets and FIFOs; and a FUSE mount whose server
   never answers (below).
+- **Root-mode owner resolution:** the static binary runs under container
+  root with a protected config that names a numeric UID absent from
+  `/etc/passwd`; an oracle-checked reclaim proves the UID owns every removed
+  entry. A separate negative fixture rejects an unknown name with the musl
+  NSS limit in its exit-2 message, and rejects a name plus explicit UID that
+  resolve to the same owner before any deletion.
 - **Buildah's live containers/image spool:** a rootless Buildah commit from a
   small offline payload is stopped while it holds a tester-owned
   `/var/tmp/container_images_storage*` file open. The cleaner must report

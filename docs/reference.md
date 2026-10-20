@@ -322,9 +322,9 @@ repository contents; a path pattern ending in only wildcards warns when a
 fixed or tier-bound root lies outside `/tmp` and `/var/tmp`. Warnings do
 not make the configuration invalid.
 
-`check` validates an `owners:` list's shape; whether it is permitted is
-checked when `ensure` is invoked with or without `--allow-root`. User-name
-resolution remains a run-time check.
+`check` validates an `owners:` list's shape and rejects system UIDs; whether
+it is permitted is checked when `ensure` is invoked with or without
+`--allow-root`. User-name resolution remains a run-time check.
 
 ## Exit codes (`ensure`)
 
@@ -547,12 +547,18 @@ Rules:
   keep their own roots. A `roots: required` profile without roots, or
   `roots:` on a tier with no `roots: required` profile, is a load-time
   error.
-- **`owners:`** (user names) is required with `--allow-root` and forbidden
-  otherwise. Names are resolved at run time (environmental validation);
-  unknown names, `root` and system users (uid below 1000) are rejected
-  before planning. On the static musl binary, NSS-only LDAP/sssd names do
-  not resolve yet (TASK91). `--allow-root` refuses generic command and
-  Docker prune actions: neither can be bounded to these owner IDs.
+- **`owners:`** is required with `--allow-root` and forbidden otherwise.
+  Entries are user names or explicit UID mappings, for example
+  `owners: [tester, {uid: 2001}]`. Names resolve at run time; an unknown
+  name is exit 2 before planning. UID mappings are accepted only for
+  non-system IDs (1000 or greater); numeric-looking names must use the
+  explicit mapping. A static musl binary cannot load LDAP/sssd NSS modules,
+  so a fleet without local passwd entries or nscd can use trusted numeric
+  UIDs. The operator must keep those UIDs stable: the policy applies to
+  whoever owns that number at run time. Duplicate entries, including names
+  that resolve to the same UID as another entry, are refused. `--allow-root`
+  refuses generic command and Docker prune actions: neither can be bounded
+  to these owner IDs.
 - **`ipc:`** controls sockets and FIFOs inside a candidate. `block-any`
   (default) refuses a candidate containing any socket or FIFO. `live-only`
   permits stale entries only when neither a process nor the kernel's socket
@@ -560,7 +566,16 @@ Rules:
   in-use scanner together. See [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate).
 - **Paths** must be absolute. `~` is rejected: it would mean `/root` for one
   caller and `/home/mark` for another. The only placeholder is `{uid}` (the
-  effective user's id, e.g. in `/tmp/claude-{uid}`).
+  effective user's id, e.g. in `/tmp/claude-{uid}`). Under `--allow-root`, a
+  selected source using `{uid}` in its roots, paths, exclusions or
+  `app_not_running` path is refused before planning: uid 0 cannot stand for
+  one or more `owners:` entries. Supplied `--roots` using `{uid}` are refused
+  for the same reason.
+- **Literal guards:** `where.has`, `has_dir`, `has_not`, `lacks_entry`, and
+  `protect_links`, `protect_link_dirs`, `protect_parent_link`,
+  `protect_cursor_extensions` compare names or paths literally. They reject
+  `{uid}` at config load because they do not expand it. The source's
+  `app_not_running` path does expand it and follows the root-mode rule above.
 - **Validation:** the config is validated completely at load, before
   anything is deleted; the full list of static and run-time checks is in
   [safety.md](safety.md#validation). `version` is mandatory; tier names are
@@ -570,10 +585,11 @@ Rules:
 In this development build, `check` validates these fields, including all
 configured groups. `ensure --select` still accepts one positive source
 term, optionally narrowed by a positive idle filter; run-time union and
-negation are deferred. It refuses a nonempty `protect`, `ipc: live-only`,
-and `--allow-root` until
-the selection, executor and root-mode tasks implement their run-time
-semantics (tasks 16, 20 and 21). It never ignores a safety setting.
+negation are deferred. It refuses a nonempty `protect` and `ipc: live-only`
+until their run-time checks are implemented (tasks 16 and 21). Root mode
+requires a protected config with `owners:`, resolves those owners before
+planning, and refuses generic command, Docker prune and `{uid}` sources.
+It never ignores a safety setting.
 
 ### Tier fields
 

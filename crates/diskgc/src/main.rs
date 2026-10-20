@@ -30,10 +30,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES};
+use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Owner};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
-use diskgc_core::profile::{Library, describe};
+use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::{Size, parse_duration, parse_size};
@@ -468,20 +468,21 @@ fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
     }
 }
 
-/// Translate the configured names once before any planning or deletion.
-/// Two aliases for the same uid would hide a policy error, so refuse them.
+/// Translate configured owners once before any planning or deletion. Two
+/// names or entries resolving to the same uid hide a policy error.
 fn resolved_owners(config: &Config) -> Result<Vec<u32>, String> {
-    let names = config
+    let entries = config
         .owners
         .as_ref()
         .ok_or("--allow-root requires an owners: list")?;
-    let mut ids = Vec::with_capacity(names.len());
-    for name in names {
-        let uid = resolve_owner(name)?;
+    let mut ids = Vec::with_capacity(entries.len());
+    for owner in entries {
+        let uid = match owner {
+            Owner::Name(name) => resolve_owner(name)?,
+            Owner::Uid(explicit) => explicit.uid,
+        };
         if ids.contains(&uid) {
-            return Err(format!(
-                "owners: user {name:?} resolves to duplicate uid {uid}"
-            ));
+            return Err(format!("owners: entries resolve to duplicate uid {uid}"));
         }
         ids.push(uid);
     }
@@ -496,7 +497,12 @@ fn is_absent(e: &diskgc_core::host::HostError) -> bool {
 
 /// The tier `--select` makes, against the configuration's library or the
 /// built-ins alone.
-fn tier(args: &EnsureArgs, config: Option<&Config>, uid: u32) -> Result<Tier, String> {
+fn tier(
+    args: &EnsureArgs,
+    config: Option<&Config>,
+    uid: u32,
+    allow_root: bool,
+) -> Result<Tier, String> {
     let Some(expr) = &args.select else {
         return Err(format!(
             "config {}: ensure without --select runs the config's groups, which this build \
@@ -513,7 +519,52 @@ fn tier(args: &EnsureArgs, config: Option<&Config>, uid: u32) -> Result<Tier, St
         }
     };
     let roots = (!args.roots.is_empty()).then_some(args.roots.as_slice());
-    Tier::select(expr, library, roots, uid)
+    let selected = Tier::select(expr, library, roots, uid)?;
+    if allow_root {
+        let Some(Body::Source(source)) = library.get(&selected.profile).map(|p| &p.body) else {
+            return Err(format!("--select `{expr}`: selected source is missing"));
+        };
+        reject_root_uid_placeholder(&selected.profile, source, &args.roots)?;
+    }
+    Ok(selected)
+}
+
+/// In root mode `{uid}` expands to uid 0, not to each configured owner. A
+/// root-owned namespace can therefore select a different user's files.
+/// Refuse the source before its substituted find can plan or reclaim.
+fn reject_root_uid_placeholder(
+    profile: &str,
+    source: &Source,
+    supplied_roots: &[String],
+) -> Result<(), String> {
+    let in_field = if supplied_roots.iter().any(|root| root.contains("{uid}")) {
+        Some("--roots")
+    } else if matches!(&source.roots, Roots::Fixed(roots) if roots.iter().any(|root| root.contains("{uid}")))
+    {
+        Some("find.roots")
+    } else if matches!(&source.finds, Finds::Paths { patterns, .. } if patterns.iter().any(|path| path.contains("{uid}")))
+    {
+        Some("find.paths")
+    } else if matches!(&source.finds, Finds::Paths { exclude, .. } if exclude.iter().any(|path| path.contains("{uid}")))
+    {
+        Some("find.exclude")
+    } else if source
+        .where_
+        .app_not_running
+        .as_deref()
+        .is_some_and(|path| path.contains("{uid}"))
+    {
+        Some("where.app_not_running")
+    } else {
+        None
+    };
+    if let Some(field) = in_field {
+        return Err(format!(
+            "--allow-root refuses `{{uid}}` in {field} of selected profile `{profile}`: \
+             it would expand to root (uid 0), not to an owners: entry"
+        ));
+    }
+    Ok(())
 }
 
 /// Check the action that this invocation actually selected. Static config
@@ -569,7 +620,7 @@ fn ensure(args: &EnsureArgs) -> Report {
     } else {
         vec![uid]
     };
-    let tier = match tier(args, config.as_ref(), uid) {
+    let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
         Ok(tier) => tier,
         Err(why) => return fail(why),
     };
@@ -967,6 +1018,57 @@ mod tests {
             validate_selected_root_action(true, &docker)
                 .unwrap_err()
                 .contains("owners: cannot bound")
+        );
+    }
+
+    #[test]
+    fn root_mode_refuses_each_uid_placeholder_input() {
+        let library = Library::builtin().expect("built-ins");
+        let Some(Body::Source(source)) = library.get("claude-code-tmp").map(|p| &p.body) else {
+            panic!("missing built-in")
+        };
+        let mut source = (**source).clone();
+        source.roots = Roots::Required;
+        let Finds::Paths {
+            patterns, exclude, ..
+        } = &mut source.finds
+        else {
+            panic!("expected fs source")
+        };
+        *patterns = vec!["cache".to_owned()];
+        exclude.clear();
+        let check = |source: &Source, roots: &[String]| {
+            reject_root_uid_placeholder("fixture", source, roots)
+        };
+        assert!(check(&source, &[]).is_ok());
+        assert!(
+            check(&source, &["/tmp/u-{uid}".to_owned()])
+                .unwrap_err()
+                .contains("--roots")
+        );
+        source.roots = Roots::Fixed(vec!["/tmp/u-{uid}".to_owned()]);
+        assert!(check(&source, &[]).unwrap_err().contains("find.roots"));
+        source.roots = Roots::Required;
+        if let Finds::Paths { patterns, .. } = &mut source.finds {
+            *patterns = vec!["u-{uid}".to_owned()];
+        }
+        assert!(check(&source, &[]).unwrap_err().contains("find.paths"));
+        if let Finds::Paths {
+            patterns, exclude, ..
+        } = &mut source.finds
+        {
+            *patterns = vec!["cache".to_owned()];
+            *exclude = vec!["u-{uid}".to_owned()];
+        }
+        assert!(check(&source, &[]).unwrap_err().contains("find.exclude"));
+        if let Finds::Paths { exclude, .. } = &mut source.finds {
+            exclude.clear();
+        }
+        source.where_.app_not_running = Some("/tmp/u-{uid}/SingletonLock".to_owned());
+        assert!(
+            check(&source, &[])
+                .unwrap_err()
+                .contains("where.app_not_running")
         );
     }
 

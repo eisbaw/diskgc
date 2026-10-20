@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-20 09:27'
+updated_date: '2026-10-20 10:26'
 labels:
   - wave-2
   - release
@@ -51,6 +51,7 @@ The v1 release (task-49) builds on this one.
 - [ ] #3 Release notes list the limits and the deferred scope
 - [ ] #4 A dry-run on a real machine is reviewed before the first real run
 - [ ] #5 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
+- [ ] #6 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -59,6 +60,8 @@ The v1 release (task-49) builds on this one.
 From task-63's review: the e2e images run the development build with the pre-release sandbox gate. Before 0.1 ships, run the Debian image's set (just e2e-debian) against the actual release artifact (the gate lifted), not the development build, e.g. a runner variant whose under-test directory holds the release binary.
 
 2026-10-20 user constraint supersedes prior test approach: do not test diskgc on developer host filesystem. AC4 currently requires a real-machine dry run and must be reconciled before release; substitute a reviewed disposable Docker Engine / real-kernel fixture only if it proves the relevant deployment contract, otherwise keep release blocked. The pre-release sandbox gate remains enabled until all other dependencies and this evidence are satisfied.
+
+Compass domain review: implementing a v1 built-in does not authorize it in 0.1. Current builtin.yaml embeds more profiles than PRD.md 0.1 scope; release catalog must be enforced in the actual release artifact, or a reviewed PRD scope change must precede gate lift.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

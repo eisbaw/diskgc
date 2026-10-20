@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-18 23:18'
+updated_date: '2026-10-20 10:27'
 labels:
   - wave-2
   - irreversible
@@ -57,6 +57,8 @@ From task-68's review (mped S2): this build refuses a reclaiming ensure over a n
 From task-68 r2 (mped N3): executor::discover's fs arm is unreachable through ensure (the allowlist guard runs first) and only bites under mutation; add a crate-internal test calling discover with an fs tier, or give Reclaim a cargo-only tier type so the arm cannot exist. Cosmetic: unwrap_or_default() puts an empty path in that error when roots are empty.
 
 From task-80: executor::Tier carries the source profile's checkouts setting (one field, rules(tier, owners, log) builds the walk rules from it and logs an allow). With unions (task-16), combine the sources' settings as refuse-if-any: refuse wins (docs/safety.md, No source checkout).
+
+Compass root-mode finding (TASK21 AC5): {uid} currently expands from process UID 0 under --allow-root. Before config-group execution is enabled for root, define how each tier/source expands per authorized owner (one or many) and deduplicates overlapping candidates; reject ambiguous cases before the first action.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

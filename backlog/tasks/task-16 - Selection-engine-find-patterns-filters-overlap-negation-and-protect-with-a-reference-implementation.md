@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-19 23:29'
+updated_date: '2026-10-20 10:27'
 labels:
   - wave-2
   - irreversible
@@ -60,6 +60,8 @@ From task-80: overlap and the checkout setting. When one candidate is found by s
 2026-10-20 pure evaluator checkpoint: select::eligible uses Facts tri-state filters, component overlap, separate tier-bound !profile vs protection with its own bound roots, random-tree reference differential tests, union monotonicity, whole Claude container exclusion. Integrated just check and just e2e 90/90 passed. Executor discovery/deletion-time wiring and irreversible full e2e/review remain, so task stays To Do.
 
 Final checkpoint gate: parallel QA and MPED re-reviews GO for the pure evaluator API; task remains open for runtime enforcement and irreversible full gate.
+
+Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must use the same authorized-owner expansion as positive sources; {uid} from process UID 0 would miss /tmp/claude-1000 and could erase intended exclusions. Add single- and multi-owner reference cases before runtime protect is enabled.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

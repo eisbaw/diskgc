@@ -1,9 +1,10 @@
 ---
 id: TASK-91
 title: 'Static binary: owners: by name cannot resolve LDAP/sssd users (no NSS in musl)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 04:49'
+updated_date: '2026-10-20 10:38'
 labels:
   - wave-2
   - safety
@@ -25,11 +26,25 @@ Options: accept numeric uids in `owners:` (a schema decision, before the freeze,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The resolution rule for owners: names on a static binary is decided and written in reference.md (owners) with the static-binary limit stated
-- [ ] #2 A name that does not resolve is exit 2 with a message naming the cause; covered by a test
+- [x] #1 The resolution rule for owners: names on a static binary is decided and written in reference.md (owners) with the static-binary limit stated
+- [x] #2 A name that does not resolve is exit 2 with a message naming the cause; covered by a test
+- [x] #3 Explicit {uid: N} owners are accepted only for non-system UIDs; the protected policy documents stable UID assignment and a disposable-container deletion oracle proves a UID absent from passwd is honored
+- [x] #4 A mixed name and explicit UID resolving to the same owner is rejected before planning or deletion
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Compass domain review: explicit UID policy is coherent, but stable fleet UID assignment is an operator contract; test the numeric path and resolved-UID collision before closing.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Static musl owner policy accepts explicit non-system {uid: N} mappings for accounts absent from passwd, retains name resolution and fail-fast unknown names, and rejects resolved-UID aliases. Docs state the stable-UID contract. Focused ModelHost/unit and disposable-container positive/negative cases passed; exact-tree full E2E and QA/MPED commit gates are being run by integration.
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

@@ -114,8 +114,8 @@ pub struct Config {
     pub library: Library,
     pub groups: Vec<Group>,
     pub protect: Vec<Protection>,
-    /// User names; resolution to non-system UIDs is environmental validation.
-    pub owners: Option<Vec<String>>,
+    /// User names or explicit non-system UIDs. Names are resolved at run time.
+    pub owners: Option<Vec<Owner>>,
     pub warnings: Vec<String>,
     pub ipc: IpcPolicy,
 }
@@ -140,6 +140,21 @@ pub struct Tier {
 pub struct Protection {
     pub profile: String,
     pub roots: Vec<String>,
+}
+
+/// A root-mode owner. The explicit mapping avoids treating a numeric-looking
+/// user name as a UID; static musl builds can use UIDs for NSS-only accounts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(untagged)]
+pub enum Owner {
+    Name(String),
+    Uid(UidOwner),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UidOwner {
+    pub uid: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -174,7 +189,7 @@ struct ConfigSpec {
     #[serde(default)]
     protect: Vec<ProtectSpec>,
     #[serde(default, deserialize_with = "present")]
-    owners: Option<Vec<String>>,
+    owners: Option<Vec<Owner>>,
     #[serde(default)]
     groups: Vec<GroupSpec>,
     #[serde(default, deserialize_with = "present")]
@@ -340,12 +355,30 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         });
     }
     if let Some(owners) = &spec.owners {
-        if owners.is_empty() || owners.iter().any(|o| o.trim().is_empty()) {
-            return Err(error("owners: list and names must be non-empty".to_owned()));
+        if owners.is_empty() {
+            return Err(error("owners: list must be non-empty".to_owned()));
+        }
+        for owner in owners {
+            match owner {
+                Owner::Name(name) if name.trim().is_empty() => {
+                    return Err(error("owners: names must be non-empty".to_owned()));
+                }
+                Owner::Name(name) if name.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    return Err(error(format!(
+                        "owners: numeric user name {name:?} is ambiguous; use {{uid: {name}}}"
+                    )));
+                }
+                Owner::Uid(UidOwner { uid }) if *uid < 1000 => {
+                    return Err(error(format!(
+                        "owners: system uid {uid} (< 1000) is forbidden"
+                    )));
+                }
+                _ => {}
+            }
         }
         let unique: BTreeSet<_> = owners.iter().collect();
         if unique.len() != owners.len() {
-            return Err(error("owners: user names must be unique".to_owned()));
+            return Err(error("owners: entries must be unique".to_owned()));
         }
     }
     let warnings = profile_warnings(&library, &groups, &protect);
@@ -552,10 +585,7 @@ mod tests {
             ("profiles: []\n", "version"),
             ("version: 2\n", "version: 2 is not supported"),
             ("version: 1\nprotect: [not-there]\n", "unknown profile"),
-            (
-                "version: 1\nowners: []\n",
-                "owners: list and names must be non-empty",
-            ),
+            ("version: 1\nowners: []\n", "owners: list must be non-empty"),
             ("version: 1\ntiers: []\n", "tiers"),
             (
                 "version: 1\nprofiles:\n  - name: cargo-target\n    kind: cargo-target\n    \
@@ -748,6 +778,29 @@ mod tests {
                 .unwrap_err()
                 .contains("command actions")
         );
+    }
+
+    #[test]
+    fn explicit_owner_uids_are_distinct_from_names_and_checked_statically() {
+        let config = parsed(&policy("owners: [tester, {uid: 2001}]\n")).expect("loads");
+        assert_eq!(
+            config.owners,
+            Some(vec![
+                Owner::Name("tester".to_owned()),
+                Owner::Uid(UidOwner { uid: 2001 }),
+            ])
+        );
+        assert!(config.validate_mode(true).is_ok());
+        for (owners, reason) in [
+            ("[{uid: 0}]", "system uid"),
+            ("[{uid: 999}]", "system uid"),
+            ("[{uid: 2001}, {uid: 2001}]", "unique"),
+            ("['2001']", "ambiguous"),
+            ("[{uid: 2001, name: tester}]", "owners"),
+        ] {
+            let error = parsed(&policy(&format!("owners: {owners}\n"))).unwrap_err();
+            assert!(error.contains(reason), "{owners}: {error}");
+        }
     }
 
     #[test]
