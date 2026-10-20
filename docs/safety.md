@@ -341,6 +341,11 @@ under the candidate lock, and immediately before deletion or a command
 action after the process scan. A browser started after the last check can
 still race deletion; Chromium's symlink is not a lock diskgc can acquire to
 exclude that startup.
+When given the XDG cache directory itself as its required root,
+`xdg-cache-entry-v2` excludes the top-level cache roots of Brave,
+Chrome, Chromium, Edge and Mozilla. The exclusions are relative to that
+supplied root. Supplying a root *inside* an application cache directory
+defeats this boundary; do not use this broad profile on such a root.
 
 **Every process, and only once settled.** The scan works in rounds: it
 lists the processes, then reads every one it has not read yet and every

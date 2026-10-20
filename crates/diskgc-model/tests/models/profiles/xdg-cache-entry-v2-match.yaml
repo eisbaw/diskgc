@@ -1,0 +1,39 @@
+# An unknown cache entry is eligible; known app roots and cleaner-owned stores stay intact.
+profile_vector: 1
+profile: xdg-cache-entry-v2
+path: /home/tester/.cache
+roots: [/home/tester/.cache]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.cache/nix-index: {size: 8K, mtime: 2026-08-01T00:00:00Z}
+    /home/tester/.cache/huggingface: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/BraveSoftware: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/google-chrome: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/chromium: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/microsoft-edge: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/mozilla: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/yarn: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/.cache/sccache: {.: {mtime: 2026-08-01T00:00:00Z}, state: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/nix-index}
+  reclaim_exit: 1
+  actions: [/home/tester/.cache/nix-index]
+  removed: [/home/tester/.cache/nix-index]
+  skipped: []
+  preserved:
+    - /home/tester/.cache/huggingface/payload
+    - /home/tester/.cache/BraveSoftware/state
+    - /home/tester/.cache/google-chrome/state
+    - /home/tester/.cache/chromium/state
+    - /home/tester/.cache/microsoft-edge/state
+    - /home/tester/.cache/mozilla/state
+    - /home/tester/.cache/yarn/state
+    - /home/tester/.cache/sccache/state

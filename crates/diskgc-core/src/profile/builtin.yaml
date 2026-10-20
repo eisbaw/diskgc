@@ -405,7 +405,7 @@
     no_match: [/tmp/buildah3558241755, /var/tmp/buildah3558241755/content, /var/tmp/containers/storage]
   verified_with: Podman 5.8.7 observed temporary directories 2026-10-20
 
-- name: xdg-cache-entry
+- name: xdg-cache-entry-v2
   category: generic
   description: Top-level entries of a supplied XDG_CACHE_HOME, excluding known state and dedicated caches
   find:
@@ -413,14 +413,14 @@
     paths: ["*"]
     # These are exact names relative to XDG_CACHE_HOME. Keep user data,
     # credentials, repository caches and entries owned by dedicated profiles.
-    exclude: [.bun, borg, ccache, claude, containers, cursor_api_sessions, dconf, gh, ghidra, go-build, gpauth, huggingface, Microsoft, nix, opencode, "Palo Alto Networks", pip, pre-commit, sdkmanager, sessions, teleport-device, torch, uv, wine]
+    exclude: [.bun, borg, BraveSoftware, ccache, claude, containers, chromium, cursor_api_sessions, dconf, gh, ghidra, go-build, google-chrome, gpauth, huggingface, Microsoft, microsoft-edge, mozilla, nix, opencode, "Palo Alto Networks", pip, pre-commit, sccache, sdkmanager, sessions, teleport-device, torch, uv, wine, yarn]
     type: any
   min_idle_for: 30d
   checkouts: refuse
   action: delete
   examples:
-    match: [/home/mark/.cache/nix-index, /home/mark/.cache/microsoft-edge, /home/mark/.cache/icon-cache.kcache]
-    no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv]
+    match: [/home/mark/.cache/nix-index, /home/mark/.cache/icon-cache.kcache]
+    no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv, /home/mark/.cache/BraveSoftware, /home/mark/.cache/google-chrome, /home/mark/.cache/chromium, /home/mark/.cache/microsoft-edge, /home/mark/.cache/mozilla, /home/mark/.cache/yarn, /home/mark/.cache/sccache]
   verified_with: XDG Base Directory Specification 0.8; host XDG_CACHE_HOME layout surveyed 2026-10-20
 
 # Browser cache paths are below the supplied home root. Each application

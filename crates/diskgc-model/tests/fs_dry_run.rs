@@ -912,12 +912,19 @@ fn xdg_cache_entry_golden_match_and_idle_policy() {
   /home/mark/.cache/borg: {.: {mtime: 2026-09-01T00:00:00Z}}
   /home/mark/.cache/nix: {.: {mtime: 2026-09-01T00:00:00Z}, gitv3: {.: {mtime: 2026-09-01T00:00:00Z}}}
   /home/mark/.cache/.bun: {.: {mtime: 2026-09-01T00:00:00Z}}
+  /home/mark/.cache/BraveSoftware: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/google-chrome: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/chromium: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/microsoft-edge: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/mozilla: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/yarn: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
+  /home/mark/.cache/sccache: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
   /home/mark/.cache/pre-commit: {.: {mtime: 2026-09-01T00:00:00Z}, .git: {.: {mtime: 2026-09-01T00:00:00Z}}}
 "#,
     ));
     let report = dry_run(
         &host,
-        &built_in_request("profile:xdg-cache-entry", "/home/mark/.cache"),
+        &built_in_request("profile:xdg-cache-entry-v2", "/home/mark/.cache"),
     );
     assert_eq!(report.status, Status::DryRun, "{report:#?}");
     let mut actual = plan(&report);

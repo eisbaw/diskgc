@@ -125,6 +125,43 @@ pub fn brave_cache_lock_blocks_until_absent_then_reclaims_only_cache(ctx: &Ctx) 
     );
     live_verdict.assert_clean()?;
 
+    // With the cache home as root, the broad XDG source must not reach
+    // this live browser's whole cache tree around the dedicated check.
+    home.mkdirs(".cache/nix-index", 0o700, TESTER)?;
+    home.write_file(".cache/nix-index/index", b"rebuildable", 0o600, TESTER)?;
+    let broad_oracle = Oracle::arm(Fixture::new())?;
+    let broad = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:xdg-cache-entry-v2",
+            "--roots",
+            "/home/tester/.cache",
+            "/home/tester/.cache",
+        ],
+    )?;
+    broad_oracle.judge(&broad)?.assert_clean()?;
+    broad.expect_code(0)?;
+    let broad_report = report(&broad)?;
+    let planned = candidates(&broad_report, "plan")?;
+    ensure!(
+        planned == BTreeSet::from(["/home/tester/.cache/nix-index".to_owned()]),
+        "broad XDG profile reached browser data or missed positive sibling: {broad_report}"
+    );
+    ensure!(
+        broad_report["plan"][0]["reason"] == "not_idle",
+        "fresh positive sibling should be planned but kept by the 30-day floor: {broad_report}"
+    );
+    ensure!(
+        cache.exists() && code_cache.exists(),
+        "broad dry run touched browser cache"
+    );
+
     holder.finish()?;
     ensure!(
         !proc_path.exists(),

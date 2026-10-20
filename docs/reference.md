@@ -935,7 +935,7 @@ listed as planned, not shipped.
 | embedded | `platformio-cache` | `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
 | generic | `mktemp-dir` | planned: `tmp.*` directories under `/tmp`'s temp-prefix v1 preset; a live shell can use one as `TMPDIR` after exec, invisible to the process scan | no safe action yet |
-| generic | `xdg-cache-entry` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known data and dedicated cache names; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
+| generic | `xdg-cache-entry-v2` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known state, browser roots and dedicated/deferred caches; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
 
 The command cache profiles use the tools' own cleaners on the exact measured
@@ -1051,7 +1051,7 @@ needs a different guard and is outside this Chromium-family set.
 - `pytest-cache` finds only `.pytest_cache` through three directory levels
   below each supplied root. Supply project roots for deeper trees. It
   deletes pytest's result cache, which pytest recreates on the next run.
-- `xdg-cache-entry` takes the cache directory itself as a required root,
+- `xdg-cache-entry-v2` takes the cache directory itself as a required root,
   normally `$XDG_CACHE_HOME` or `~/.cache`, and enforces a 30-day minimum age
   even when selected without a filter. It explicitly refuses checkouts: a cache entry such as
   `pre-commit` can hold hook repositories with local changes. Its exact-name
@@ -1061,10 +1061,20 @@ needs a different guard and is outside this Chromium-family set.
   and `teleport-device` (session, credential or application state),
   `containers` (container storage), `torch` (models), `wine` (prefix data),
   and `pre-commit`
-  (repository cache). It also excludes `.bun`, `ccache`, `go-build`, `nix`,
-  `pip`, and `uv` so dedicated profiles retain their narrower boundaries
-  and cleaner actions. A redirected cache root is supplied explicitly;
-  the profile never infers an environment variable. Unknown applications
+  (repository cache). It excludes `BraveSoftware`, `google-chrome`,
+  `chromium`, `microsoft-edge`, and `mozilla` so this broad profile cannot
+  bypass the browser profiles' narrower cache paths and live-app checks.
+  It also excludes `.bun`, `ccache`, `go-build`, `nix`, `pip`, `uv`, and
+  `yarn` so dedicated profiles retain their narrower boundaries and
+  cleaner actions. `sccache` remains excluded because its active server
+  state is not safely classifiable by an idle timestamp. The former
+  `xdg-cache-entry` name was withdrawn before release: v2 narrows the
+  match set, which requires a new built-in name. These exact-name
+  exclusions apply to children of the supplied root. Supply the XDG
+  cache directory itself, never a directory inside a browser or other
+  application's cache. A redirected cache root is supplied explicitly;
+  the profile never infers an environment variable.
+  Unknown applications
   can still store valuable data under the cache root, and a 30-day idle
   threshold only measures filesystem changes. Review its read-only plan
   and add `protect` rules or `.diskgc-keep` markers for local data before

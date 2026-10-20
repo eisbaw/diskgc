@@ -4,7 +4,7 @@ title: 'Profile: xdg-cache-entry (top-level ~/.cache entries, idle-gated)'
 status: Done
 assignee: []
 created_date: '2026-10-18 20:54'
-updated_date: '2026-10-20 01:10'
+updated_date: '2026-10-20 06:46'
 labels:
   - home
   - wave-4
@@ -37,4 +37,14 @@ Implementation in isolated worktree /tmp/diskgc-profile-xdg: adds declarative fi
 Focused real-kernel container test fs_reclaim_exact_exclusion_keeps_valuable_cache passed: an excluded cache holding valuable data remained untouched, and an eligible sibling was deleted under the oracle. Nested positive path under an excluded intermediate is covered by the exact_exclusion_still_traverses_a_deeper_positive_pattern model test. A present null or blank find.exclude is rejected by the parser. Full just check/e2e integration remains pending.
 
 Final integration on 2026-10-20: post-fix nix develop -c just e2e passed 93/93, including real-kernel exact-exclusion deletion oracle and model excluded-mount regression; QA and MPED reviews GO. This task covers an opt-in 30d idle cache profile, not a guarantee that every unknown app stores only rebuildable data; docs require local plan/protect review.
+
+2026-10-20 Compass overlap audit: shipped xdg-cache-entry can match entire BraveSoftware, google-chrome, chromium and microsoft-edge cache roots, bypassing dedicated app-not-running guards; it also matches yarn and sccache despite dedicated/deferred cleaner policy. The positive microsoft-edge example is unsafe. Reopened AC3. A pre-release v2 profile will replace v1 with exact exclusions; retain a positive unknown cache sibling and test all known guarded roots. No real-host deletion.
+
+2026-10-20 safety correction: retired the pre-release xdg-cache-entry name and shipped xdg-cache-entry-v2 with exact browser-root (BraveSoftware, google-chrome, chromium, microsoft-edge, mozilla), Yarn and sccache exclusions. Golden and checked-in ModelHost vector cover all seven excluded roots; real-kernel Brave E2E shows a live browser root absent from the generic plan while a fresh positive sibling is planned not_idle. Exclusions are relative to the supplied XDG cache directory; docs state that root contract explicitly. Focused tests and full 129/129 Nix plus 5/5 native Docker e2e passed; QA and MPED GO. TASK78 records why Firefox and Electron profiles remain unshipped.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Replaced unsafe generic xdg-cache-entry with versioned xdg-cache-entry-v2, excluding known browser roots and cleaner-owned/deferred stores. The normal XDG cache-root overlap is proven by ModelHost vector and disposable browser-container regression; docs state the required root boundary. Full Nix and Docker E2E and parallel QA/MPED passed. Firefox/Electron remain unshipped under TASK78.
+<!-- SECTION:FINAL_SUMMARY:END -->

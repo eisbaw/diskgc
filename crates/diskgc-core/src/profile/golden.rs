@@ -554,6 +554,13 @@ const TREE: &[(&str, Option<EntryType>)] = &[
     ("/home/mark/.cache/huggingface", Some(EntryType::Dir)),
     ("/home/mark/.cache/nix", Some(EntryType::Dir)),
     ("/home/mark/.cache/.bun", Some(EntryType::Dir)),
+    ("/home/mark/.cache/BraveSoftware", Some(EntryType::Dir)),
+    ("/home/mark/.cache/google-chrome", Some(EntryType::Dir)),
+    ("/home/mark/.cache/chromium", Some(EntryType::Dir)),
+    ("/home/mark/.cache/microsoft-edge", Some(EntryType::Dir)),
+    ("/home/mark/.cache/mozilla", Some(EntryType::Dir)),
+    ("/home/mark/.cache/yarn", Some(EntryType::Dir)),
+    ("/home/mark/.cache/sccache", Some(EntryType::Dir)),
     ("/home/mark/.cache/nix-index", Some(EntryType::Dir)),
     ("/home/mark/.cache/icon-cache.kcache", Some(EntryType::File)),
     ("/home/mark/.cache/unknown-repo", Some(EntryType::Dir)),
@@ -792,8 +799,8 @@ fn containers_image_tmp_has_a_frozen_idle_gated_golden_set() {
 #[test]
 fn xdg_cache_entry_has_a_frozen_exclusion_and_golden_set() {
     let library = Library::builtin().expect("built-ins");
-    let Body::Source(source) = &library.get("xdg-cache-entry").expect("built-in").body else {
-        panic!("xdg-cache-entry is a source");
+    let Body::Source(source) = &library.get("xdg-cache-entry-v2").expect("built-in").body else {
+        panic!("xdg-cache-entry-v2 is a source");
     };
     assert_eq!(source.roots, Roots::Required);
     assert_eq!(
@@ -803,28 +810,35 @@ fn xdg_cache_entry_has_a_frozen_exclusion_and_golden_set() {
             exclude: [
                 ".bun",
                 "borg",
+                "BraveSoftware",
                 "ccache",
                 "claude",
                 "containers",
+                "chromium",
                 "cursor_api_sessions",
                 "dconf",
                 "gh",
                 "ghidra",
                 "go-build",
+                "google-chrome",
                 "gpauth",
                 "huggingface",
                 "Microsoft",
+                "microsoft-edge",
+                "mozilla",
                 "nix",
                 "opencode",
                 "Palo Alto Networks",
                 "pip",
                 "pre-commit",
+                "sccache",
                 "sdkmanager",
                 "sessions",
                 "teleport-device",
                 "torch",
                 "uv",
                 "wine",
+                "yarn",
             ]
             .into_iter()
             .map(str::to_owned)

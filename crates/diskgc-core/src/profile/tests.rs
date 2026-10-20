@@ -217,7 +217,7 @@ fn the_built_in_library_loads() {
         "zephyr-tmp",
         "renode-tmp",
         "west-build",
-        "xdg-cache-entry",
+        "xdg-cache-entry-v2",
         "ccache",
         "go-build-cache",
         "docker-build-cache",
