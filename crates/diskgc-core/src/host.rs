@@ -836,6 +836,23 @@ pub trait Host {
         OsString::new()
     }
 
+    /// Docker client redirects captured from this host's process
+    /// environment. The binder rejects any value it cannot prove targets
+    /// the local system daemon and default builder.
+    fn docker_environment(&self) -> DockerEnvironment {
+        DockerEnvironment::default()
+    }
+
+    /// Run one constant-argv Docker query and return bounded UTF-8 output.
+    /// A query cannot prune and does not ask the pre-release deletion gate.
+    fn docker_query(&self, _query: DockerQuery) -> Result<String, HostError> {
+        Err(HostError::invalid(
+            "query Docker",
+            "backend",
+            "this host does not provide Docker queries",
+        ))
+    }
+
     /// The directory relative PATH entries and relative program paths refer
     /// to before the command child switches to its checked working directory.
     fn command_origin(&self) -> Result<PathBuf, HostError> {
@@ -1020,11 +1037,34 @@ pub struct CommandRun {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
+    /// For Docker prune, pin the validated local socket inode and recheck
+    /// this daemon identity through that same inode before starting prune.
+    pub docker_info: Option<crate::docker_backend::DockerInfo>,
     /// Human label supplied by the executor (tier and profile). Every
     /// child-output line is written to stderr with this prefix; child bytes
     /// never reach diskgc's result-only stdout.
     pub output_prefix: String,
     pub deadline: MonoTime,
+}
+
+/// Closed set of read-only Docker client queries. LinuxHost alone maps each
+/// variant to constant argv; profiles and config cannot supply shell words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DockerQuery {
+    Version,
+    ClientVersion,
+    ContextShow,
+    ContextEndpoint,
+    Info,
+}
+
+/// Client variables that can redirect a Docker command away from its active
+/// context. The backend binder checks these
+/// before querying or pruning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DockerEnvironment {
+    pub host: Option<OsString>,
+    pub context: Option<OsString>,
 }
 
 /// A completed command action. The caller reports a non-zero exit, signal,

@@ -77,6 +77,8 @@ pub struct FindSpec {
 pub enum RootsSpec {
     Fixed(Vec<String>),
     Required,
+    /// The kind obtains its storage roots from one checked backend.
+    Backend,
 }
 
 /// `type:` of a `find`: what a found entry must be (docs/reference.md,
@@ -200,6 +202,8 @@ pub struct ExamplesSpec {
 pub enum ActionSpec {
     Delete { make_writable: bool },
     Command { argv: Vec<String>, cwd: Option<Cwd> },
+    DockerBuilderPrune,
+    DockerImagePrune { all: bool },
 }
 
 /// Where a command action runs (docs/reference.md, Actions).
@@ -390,6 +394,8 @@ impl<'de> Deserialize<'de> for RootsSpec {
             fn visit_str<E: de::Error>(self, text: &str) -> Result<RootsSpec, E> {
                 if text == "required" {
                     Ok(RootsSpec::Required)
+                } else if text == "daemon" {
+                    Ok(RootsSpec::Backend)
                 } else {
                     Err(E::custom(format!(
                         "roots `{text}`: write a list (`roots: [{text}]`) or `required`"
@@ -438,6 +444,9 @@ impl<'de> Deserialize<'de> for ActionSpec {
                     "delete" => Ok(ActionSpec::Delete {
                         make_writable: false,
                     }),
+                    "docker-builder-prune" => Ok(ActionSpec::DockerBuilderPrune),
+                    "docker-image-prune" => Ok(ActionSpec::DockerImagePrune { all: false }),
+                    "docker-image-prune-all" => Ok(ActionSpec::DockerImagePrune { all: true }),
                     "command" => Err(E::custom(
                         "a command action is a mapping: `{command: [argv...]}`",
                     )),

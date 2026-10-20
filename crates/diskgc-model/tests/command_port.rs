@@ -13,6 +13,7 @@ use diskgc_model::spec::Op;
 
 fn request(host: &impl Host) -> CommandRun {
     CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/true"),
         arguments: vec![OsString::from("--one"), OsString::from("/tmp/a")],
         environment: vec![(OsString::from("DISKGC_PATH"), OsString::from("/tmp/a"))],

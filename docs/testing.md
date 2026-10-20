@@ -140,6 +140,14 @@ implements it. A bullet without a test is a gap, filed as a task.
     - a golden match set (Profile golden sets, below; task-17);
     - `verified_with`: the tool version the profile was checked against,
       the one of that dry run.
+  - For daemon-backed profiles with no pathname matcher, the `examples`
+    and path golden-set requirements are met by a checked-in ModelHost
+    backend fixture with an exact golden plan root and prune action for
+    each profile. Their read-only dry run uses the real daemon inside a
+    disposable test container, not a developer or production host path.
+    The fixture also proves the backend refuses unsupported endpoints and
+    storage roots before any prune. Its Buildx selection test proves the
+    fixed Engine `docker builder prune` still acts on the bound daemon.
 
 ## 1. Planner tests: plain data
 
@@ -896,7 +904,7 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   flake.nix, with the common sandbox marker/users and static strace copied
   to `/bin/strace`; descriptor `toolchains none`, `tests docker`. Podman is
   only the outer runtime. The runner overrides the upstream dockerd
-  entrypoint so the interlock runs first, then gives the smoke test
+  entrypoint so the interlock runs first, then gives each native Docker test
   `--privileged` and separate tmpfs mounts at `/var/lib/docker` and
   `/var/lib/containerd` (512 MiB maximum each). The test starts native
   `dockerd` with a container-local Unix socket, no network bridge or
@@ -905,11 +913,11 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   scratch image comes from a local tar stream, with no registry access.
   The only host bind mount is the read-only Nix output holding the binaries
   under test; no host Docker socket or developer project path is mounted.
-  The smoke checks that imported image blobs exist under the bundled
+  The smoke test checks that imported image blobs exist under the bundled
   containerd root derived from `docker info`. A separate system containerd
-  socket still maps to `unsupported_backend`; Docker prune safety remains
-  TASK-35. Run the fixture smoke with
-  `nix develop -c just e2e-docker-one native_docker_engine_dind_smoke`.
+  socket still maps to `unsupported_backend`. Native prune tests cover cache
+  and image deletion, preservation, and socket replacement. Run the full
+  Docker suite with `nix develop -c just e2e-docker`.
 - **GC roots.** The container recipes build each runner to an out-link
   in `.gcroots/` at the repository root (gitignored, outside `target/`,
   so `cargo clean` does not drop it) and run it from there; `just e2e`,

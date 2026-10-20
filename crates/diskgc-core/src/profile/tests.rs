@@ -220,6 +220,9 @@ fn the_built_in_library_loads() {
         "xdg-cache-entry",
         "ccache",
         "go-build-cache",
+        "docker-build-cache",
+        "docker-dangling",
+        "docker-unreferenced",
         "jest-cache",
         "npm-cache",
         "pip-cache",
@@ -1556,8 +1559,8 @@ fn the_one_action_error_shows_what_differs() {
     }
 }
 
-/// Every `action:` form in docs/reference.md (Actions) loads, and they are
-/// three different actions.
+/// Every `action:` form in docs/reference.md (Actions) loads with its kind,
+/// and each one names a distinct action.
 #[test]
 fn the_documented_action_forms_load() {
     let actions_md = section(&reference_md(), "### Actions");
@@ -1566,13 +1569,22 @@ fn the_documented_action_forms_load() {
         .expect("one YAML block in Actions");
     let mut seen = Vec::new();
     for (i, line) in block.lines().enumerate() {
-        let yaml = format!(
-            "- name: p{i}\n  find: {{roots: required, paths: [c], type: dir}}\n  {line}\n  examples: {{match: [/home/u/c]}}\n"
-        );
+        let yaml = if line.contains("docker-") {
+            let kind = if line.contains("builder") {
+                "docker-build-cache"
+            } else {
+                "docker-images"
+            };
+            format!("- name: p{i}\n  kind: {kind}\n  find: {{roots: daemon}}\n  {line}\n")
+        } else {
+            format!(
+                "- name: p{i}\n  find: {{roots: required, paths: [c], type: dir}}\n  {line}\n  examples: {{match: [/home/u/c]}}\n"
+            )
+        };
         let library = with_user(&yaml).unwrap_or_else(|e| panic!("{line}: {e}"));
         let action = action(&library, &format!("p{i}"));
         assert!(!seen.contains(&action), "{line} repeats an action");
         seen.push(action);
     }
-    assert_eq!(seen.len(), 3);
+    assert_eq!(seen.len(), 6);
 }

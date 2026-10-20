@@ -712,6 +712,7 @@ fn command_lock<H: Delete>(
         .checked_add(std::time::Duration::from_secs(15))
         .ok_or("deadline overflow")?;
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
@@ -742,6 +743,7 @@ fn command_timeout<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resu
         .checked_add(std::time::Duration::from_millis(300))
         .ok_or("deadline overflow")?;
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
@@ -769,6 +771,7 @@ fn command_output<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resul
         .checked_add(std::time::Duration::from_secs(5))
         .ok_or("deadline overflow")?;
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
@@ -796,6 +799,7 @@ fn command_orphan<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resul
         .checked_add(std::time::Duration::from_secs(5))
         .ok_or("deadline overflow")?;
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
@@ -839,6 +843,7 @@ fn command_descendant<H: Delete>(
         "sleep 30 & echo $! > \"$1\"; exit 0"
     };
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
@@ -889,6 +894,7 @@ fn command_stalled_stderr<H: Delete>(
         .map_err(|e| e.to_string())?;
     rustix::stdio::dup2_stderr(&write_end).map_err(|e| e.to_string())?;
     let run = CommandRun {
+        docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),

@@ -441,6 +441,7 @@ fn profile_warnings(library: &Library, groups: &[Group], protect: &[Protection])
                         .flat_map(|p| &p.roots)
                         .any(|root| outside_temp(root))
             }
+            Roots::Backend => false,
         };
         if broad && roots_outside {
             warnings.push(format!("profile `{}` ends a path pattern with only wildcards outside /tmp or /var/tmp; verify its matches", profile.name));

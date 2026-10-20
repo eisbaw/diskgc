@@ -23,22 +23,8 @@ use crate::profile::{self, Library};
 /// says which and why).
 const TEST_PROFILES: &str = include_str!("test-profiles.yaml");
 
-/// STAND-INS for built-in profiles of kinds that have no profile schema
-/// yet (docker-*, nix-store: wave 4), with their documented actions.
-const NOT_BUILT_IN_KINDS: &[(&str, Kind, &str)] = &[
-    (
-        "docker-build-cache",
-        Kind::DockerBuildCache,
-        "docker builder prune",
-    ),
-    ("docker-dangling", Kind::DockerImages, "docker image prune"),
-    (
-        "docker-unreferenced",
-        Kind::DockerImages,
-        "docker image prune --all",
-    ),
-    ("nix-garbage", Kind::NixStore, "nix GC"),
-];
+/// STAND-INS for kinds that have no profile schema yet.
+const NOT_BUILT_IN_KINDS: &[(&str, Kind, &str)] = &[("nix-garbage", Kind::NixStore, "nix GC")];
 
 /// A source's action: a real one, or a stand-in's description.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -269,6 +269,7 @@ pub fn host_model(
                 sandbox_gate: diskgc_model::spec::GateSpec::Open,
                 command_exit: 0,
                 command_error_after_start: false,
+                docker: Default::default(),
                 events: Vec::new(),
                 expect: None,
             }

@@ -166,6 +166,7 @@ pub struct Context<'a> {
 /// the open, checked cwd fd separately to `Delete::run_command`.
 pub fn request(ready: &Ready, argv: &[String], context: Context<'_>) -> CommandRun {
     CommandRun {
+        docker_info: None,
         executable: ready.program.clone(),
         arguments: argv[1..]
             .iter()

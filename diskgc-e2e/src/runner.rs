@@ -379,7 +379,7 @@ fn test_mounts(name: &str) -> Vec<String> {
     }
     if crate::suite::DOCKER_ONLY_TESTS
         .iter()
-        .any(|(docker_test, _)| *docker_test == name)
+        .any(|(test, _)| *test == name)
     {
         extra.extend([
             "--privileged".to_owned(),

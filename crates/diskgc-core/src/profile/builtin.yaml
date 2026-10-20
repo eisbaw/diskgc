@@ -7,6 +7,30 @@
 # diskgc-core's tests load this file (profile::tests), so a broken entry
 # fails `just check` and the flake's workspace-tests check.
 
+- name: docker-build-cache
+  category: containers
+  description: BuildKit cache of the local system Docker Engine
+  kind: docker-build-cache
+  find: {roots: daemon}
+  action: docker-builder-prune
+  verified_with: Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind, 2026-10-20
+
+- name: docker-dangling
+  category: containers
+  description: Dangling images in the local system Docker daemon
+  kind: docker-images
+  find: {roots: daemon}
+  action: docker-image-prune
+  verified_with: Docker Engine 29.8.2 in digest-pinned dind, 2026-10-20
+
+- name: docker-unreferenced
+  category: containers
+  description: Images not referenced by any container in the local system Docker daemon
+  kind: docker-images
+  find: {roots: daemon}
+  action: docker-image-prune-all
+  verified_with: Docker Engine 29.8.2 in digest-pinned dind, 2026-10-20
+
 - name: cargo-target
   category: rust
   description: >-

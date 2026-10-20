@@ -42,10 +42,10 @@ use std::time::Duration;
 
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
-    DirListing, Environ, Errno, FileType, Host, HostError, Ids, LinkTarget, LockMode, Locked,
-    MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError,
-    ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
-    is_single_name,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, Ids,
+    LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
+    OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink,
+    WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -878,6 +878,55 @@ impl Host for ModelHost {
 
     fn command_path(&self) -> OsString {
         OsString::from("/usr/bin:/bin")
+    }
+
+    fn docker_environment(&self) -> DockerEnvironment {
+        let inner = self.inner.borrow();
+        let docker = &inner.state.docker;
+        DockerEnvironment {
+            host: docker.host.as_ref().map(OsString::from),
+            context: docker.context.as_ref().map(OsString::from),
+        }
+    }
+
+    fn docker_query(&self, query: DockerQuery) -> Result<String, HostError> {
+        let name = match query {
+            DockerQuery::Version => "version",
+            DockerQuery::ClientVersion => "client_version",
+            DockerQuery::ContextShow => "context_show",
+            DockerQuery::ContextEndpoint => "context_endpoint",
+            DockerQuery::Info => "info",
+        };
+        let path = PathBuf::from(format!("/docker/{name}"));
+        self.call(Op::DockerQuery, Some(path), None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("query Docker", name, errno)),
+                    None,
+                    errno.to_string(),
+                );
+            }
+            let docker = &inner.state.docker;
+            let response = match query {
+                DockerQuery::Version => &docker.version,
+                DockerQuery::ClientVersion => &docker.client_version,
+                DockerQuery::ContextShow => &docker.context_show,
+                DockerQuery::ContextEndpoint => &docker.context_endpoint,
+                DockerQuery::Info => &docker.info,
+            };
+            match response {
+                Some(text) => (Ok(text.clone()), None, "ok".to_owned()),
+                None => (
+                    Err(HostError::invalid(
+                        "query Docker",
+                        name,
+                        "no response in host model",
+                    )),
+                    None,
+                    "unmodelled".to_owned(),
+                ),
+            }
+        })
     }
 
     fn command_origin(&self) -> Result<PathBuf, HostError> {

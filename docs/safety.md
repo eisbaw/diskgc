@@ -1301,12 +1301,19 @@ preflight and used for tally, preflight and execution alike:
   Unix socket; a remote context is skipped (`remote_backend`), rootless
   Docker (a socket under `$XDG_RUNTIME_DIR`) is not supported in v1
   (`unsupported_backend`).
-- **Builder** (`docker-build-cache`): the default builder with the `docker`
-  driver (the daemon's own BuildKit). Other builders (`docker-container`,
-  `kubernetes`, `remote`) are not supported in v1 (`unsupported_backend`).
-- **Storage root:** `DockerRootDir` for build cache; for images, the image
-  store's root (the containerd root when the containerd image store is in
-  use, which is the default on Docker 29). If the storage that an operation
+- **Builder** (`docker-build-cache`): the prune child sets
+  `DOCKER_BUILDKIT=0`, selecting the Docker CLI's Engine command. That
+  command calls `BuildCachePrune` on the pinned daemon, independently of
+  Buildx's selected builder. Querying Buildx would write client config
+  during a dry run. The read-only binding admits only Docker CLI 29.8.2,
+  whose dispatch was verified in the disposable fixture. Other client
+  versions skip as `unsupported_backend` until tested. Image profiles do
+  not depend on this builder dispatch and do not carry the client-version
+  limit.
+- **Storage root:** `DockerRootDir` and its `buildkit` child for build cache;
+  for images, both `DockerRootDir` and the image store's root (the
+  containerd root when the containerd image store is in use, which is the
+  default on Docker 29). If the storage that an operation
   frees is not on the requested filesystem, the tier is skipped
   (`other_fs`); if it cannot be determined, or spans several filesystems,
   it is skipped as `unsupported_backend` and reported.
@@ -1332,10 +1339,32 @@ image root. The system containerd configuration may move it away from
 `/var/lib/containerd`; without an independently verified root, diskgc
 reports `unsupported_backend` and does not prune images. The verified classic
 `vfs` driver uses `DockerRootDir`; other classic drivers remain unsupported
-until their storage roots are proven. These are binding rules; Docker prune support
-still requires the same backend to be checked immediately before deletion.
+until their storage roots are proven. diskgc rechecks the daemon ID, endpoint
+and storage roots immediately before deletion. At execution it opens
+the local Unix socket with `O_PATH | O_NOFOLLOW`, queries `docker info`
+through that pinned socket inode, compares the complete daemon identity and
+storage facts, then gives the prune child the same inherited socket fd via
+`/proc/self/fd/N`. Replacing the socket pathname between query and prune
+cannot redirect the prune to another daemon. A disposable dind race test
+replaces the pathname with a 503 decoy after the child starts and verifies
+that the original daemon receives the prune while the decoy receives no
+connection. The service user also
+needs search permission on `DockerRootDir` and every component down to the
+reported image store root or `<DockerRootDir>/buildkit` for build cache, so
+diskgc can verify the actual filesystem. The
+usual `0700` Docker data root gives an unprivileged caller `EACCES`; diskgc
+fails closed without pruning. The disposable dind test grants execute-only
+`0711` on those directories, then proves that an unreferenced image is removed
+while a stopped container, its image, and a volume remain. This prerequisite
+does not grant read or write access to the store.
 See [Docker daemon storage configuration](https://docs.docker.com/engine/daemon/#configure-the-data-directory)
 and [Docker storage backends](https://docs.docker.com/engine/storage/drivers/select-storage-driver/).
+The pinned CLI's [builder dispatch](https://github.com/docker/cli/blob/v29.8.2/cmd/docker/builder.go)
+forwards `docker builder` to Buildx by default but stays with its Engine
+command when `DOCKER_BUILDKIT=0`. That [Engine prune command](https://github.com/docker/cli/blob/v29.8.2/cli/command/builder/prune.go)
+calls `BuildCachePrune` directly. A native regression selects a separate
+Buildx builder and proves the pinned daemon's own BuildKit records are
+preserved by `until=1h` then removed by the unfiltered action.
 
 Operations:
 
@@ -1343,7 +1372,9 @@ Operations:
   --filter until=<idle_for>`. Without `--all`, Docker removes only dangling
   cache. The `until` filter counts from **last use** (verified on Docker
   29.9 in a disposable `docker:dind`: entries used 5 s earlier survived
-  `until=30s`; after 45 s idle they were removed).
+  `until=30s`; after 45 s idle they were removed). The pinned 29.8.2 native
+  fixture also checks that recent cache IDs survive `until=1h` and cache IDs
+  aged beyond `until=1s` disappear.
 - `docker-images`: `docker-dangling` runs `docker image prune --force`;
   `docker-unreferenced` runs `docker image prune --all --force`, which also
   removes tagged images no container references. No age option: the image

@@ -122,6 +122,9 @@ fn action_type(action: &Action) -> &'static str {
         Action::Delete { .. } => "delete",
         Action::Command { .. } => "command",
         Action::CargoLockProtocol => "cargo_lock_protocol",
+        Action::DockerBuilderPrune => "docker_builder_prune",
+        Action::DockerImagePrune { all: false } => "docker_image_prune",
+        Action::DockerImagePrune { all: true } => "docker_image_prune_all",
     }
 }
 
@@ -185,6 +188,7 @@ pub fn list_text(library: &Library) -> String {
                 match &s.roots {
                     Roots::Fixed(list) => list.join(","),
                     Roots::Required => "required".to_owned(),
+                    Roots::Backend => "daemon".to_owned(),
                 },
                 s.checkouts.as_str().to_owned(),
             ),
@@ -261,6 +265,7 @@ fn action_json(action: &Action) -> Json {
         Action::Delete { make_writable } => (Json::Bool(*make_writable), None, None),
         Action::Command { argv, cwd } => (Json::Null, Some(argv), *cwd),
         Action::CargoLockProtocol => (Json::Null, None, None),
+        Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => (Json::Null, None, None),
     };
     Json::Obj(vec![
         ("type", Json::str(action_type(action))),
@@ -282,10 +287,12 @@ fn find_json(source: &Source) -> Json {
             Json::str(entry_type.name()),
         ),
         Finds::CargoTargets => (Json::Null, Json::Null, Json::Null),
+        Finds::DockerBuildCache | Finds::DockerImages => (Json::Null, Json::Null, Json::Null),
     };
     let (roots, required) = match &source.roots {
         Roots::Fixed(list) => (strings(list), false),
         Roots::Required => (Json::Null, true),
+        Roots::Backend => (Json::str("daemon"), false),
     };
     Json::Obj(vec![
         ("roots", roots),
@@ -479,6 +486,9 @@ fn yaml_action(action: &Action) -> String {
             "  # action: the Cargo lock protocol, fixed by kind cargo-target (docs/safety.md)\n"
                 .to_owned()
         }
+        Action::DockerBuilderPrune => "  action: docker-builder-prune\n".to_owned(),
+        Action::DockerImagePrune { all: false } => "  action: docker-image-prune\n".to_owned(),
+        Action::DockerImagePrune { all: true } => "  action: docker-image-prune-all\n".to_owned(),
     }
 }
 
@@ -527,6 +537,7 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
                 match &source.roots {
                     Roots::Fixed(list) => yaml_list(list),
                     Roots::Required => "required".to_owned(),
+                    Roots::Backend => "daemon".to_owned(),
                 }
             ));
             if let Finds::Paths {

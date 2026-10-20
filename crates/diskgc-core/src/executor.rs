@@ -39,14 +39,19 @@
 //! `Stopped(Failed)` errors of the run, which stop it;
 //! `Stopped(DeadlinePassed)` the deadline path.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
+use crate::docker_backend::{self, Binding, Storage};
 use crate::engine::{Checkouts, Reason, Rules, Skip};
 use crate::fs_kind::{self, Find};
-use crate::host::{Delete, Dev, Host, HostError, MonoTime, Space, Timestamp};
+use crate::host::{
+    Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
+    Space, Timestamp,
+};
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, Body, Finds, IdleFor, Library};
@@ -101,6 +106,8 @@ pub enum SourceKind {
     /// Entries matching its `find` (kind `fs`), deleted by the kind's own
     /// protocol ([`fs_kind::reclaim`]) when its action is `delete`.
     Fs(Box<Find>),
+    DockerBuildCache,
+    DockerImages,
 }
 
 impl Tier {
@@ -139,13 +146,14 @@ impl Tier {
                 term.source
             ));
         };
-        // The loader admits only these two finds (the Docker and Nix kinds
-        // are refused at load until task-35 / task-36).
+        // The loader admits only these finds, each paired with its action.
         let mut kind = match &source.finds {
             Finds::CargoTargets => SourceKind::CargoTarget,
             Finds::Paths { .. } => SourceKind::Fs(Box::new(
                 Find::of(source, uid).expect("fs source has a filesystem find"),
             )),
+            Finds::DockerBuildCache => SourceKind::DockerBuildCache,
+            Finds::DockerImages => SourceKind::DockerImages,
         };
         for factor in &term.factors {
             let Factor::Filter(name) = factor else {
@@ -345,7 +353,9 @@ pub fn ensure<H: Delete>(
     // is refused here, never approximated by a different kind's protocol.
     match (&request.tier.source, &request.tier.action) {
         (SourceKind::CargoTarget, Action::CargoLockProtocol)
-        | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. }) => {}
+        | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. })
+        | (SourceKind::DockerBuildCache, Action::DockerBuilderPrune)
+        | (SourceKind::DockerImages, Action::DockerImagePrune { .. }) => {}
         (_, action) => {
             return usage(
                 report,
@@ -370,7 +380,15 @@ pub fn ensure<H: Delete>(
         );
     }
     let deadline = deadline_of(host, request.timeout);
-    let command_ready = if let Action::Command { argv, .. } = &request.tier.action {
+    let docker_argv = ["docker".to_owned()];
+    let command_argv = match &request.tier.action {
+        Action::Command { argv, .. } => Some(argv.as_slice()),
+        Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
+            Some(docker_argv.as_slice())
+        }
+        _ => None,
+    };
+    let command_ready = if let Some(argv) = command_argv {
         match command_action::preflight(host, argv) {
             Ok(Preflight::Ready(ready)) => {
                 log(&format!(
@@ -521,6 +539,34 @@ pub fn dry_run<H: Host>(
         Err(e) => return usage(report, log, e),
     };
     let tier = &request.tier;
+    if matches!(
+        tier.source,
+        SourceKind::DockerBuildCache | SourceKind::DockerImages
+    ) {
+        match docker_backend::inspect_backend(host, measured.dev, docker_storage(tier)) {
+            Ok(Binding::Bound(bound)) => {
+                let candidate = docker_candidate(tier, &bound);
+                log(&format!(
+                    "{}: Docker backend bound to {}",
+                    tier.name,
+                    candidate.display()
+                ));
+                report.plan.push(plan_entry(tier, &candidate, None, None));
+            }
+            Ok(Binding::Skipped(skip)) => {
+                log(&format!(
+                    "{}: skip Docker backend: {}: {}",
+                    tier.name, skip.reason, skip.detail
+                ));
+                report
+                    .plan
+                    .push(plan_entry(tier, Path::new(""), Some(skip.reason), None));
+            }
+            Err(error) => record_error(&mut report, log, run_error(tier, error.to_string())),
+        }
+        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+        return report;
+    }
     if let Action::Command { argv, .. } = &tier.action {
         match command_action::preflight(host, argv) {
             Ok(Preflight::Ready(ready)) => log(&format!(
@@ -578,6 +624,7 @@ pub fn dry_run<H: Host>(
             &mut report,
             log,
         ),
+        SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
     };
     let Planned {
         mut eligible,
@@ -632,6 +679,22 @@ fn plan_entry(
         operation: tier.operation(),
         checkouts: tier.checkouts,
         build_evidence: None,
+    }
+}
+
+fn docker_candidate(tier: &Tier, bound: &docker_backend::Bound) -> PathBuf {
+    match &tier.source {
+        SourceKind::DockerBuildCache => bound.info.docker_root.join("buildkit"),
+        SourceKind::DockerImages => bound.info.image_store.root().to_owned(),
+        _ => unreachable!("Docker candidate for a non-Docker tier"),
+    }
+}
+
+fn docker_storage(tier: &Tier) -> Storage {
+    match tier.source {
+        SourceKind::DockerBuildCache => Storage::BuildCache,
+        SourceKind::DockerImages => Storage::Images,
+        _ => unreachable!("Docker storage for a non-Docker tier"),
     }
 }
 
@@ -900,6 +963,16 @@ fn discover<H: Host>(
                 ),
             });
         }
+        SourceKind::DockerBuildCache | SourceKind::DockerImages => {
+            return Err(Stop::Failed {
+                path: PathBuf::new(),
+                error: HostError::invalid(
+                    "discover",
+                    &tier.profile,
+                    "Docker tiers do not use Cargo discovery",
+                ),
+            });
+        }
     }
     let found = cargo_target::discover(host, &tier.roots, deadline)?;
     log(&format!(
@@ -1038,6 +1111,178 @@ struct Reclaim<'a, 'l, H: Delete> {
 }
 
 impl<H: Delete> Reclaim<'_, '_, H> {
+    fn skip_docker(&mut self, candidate: &Path, reason: &'static str, detail: &str) {
+        (self.log)(&format!(
+            "{}: skip Docker backend: {reason}: {detail}",
+            self.tier.name
+        ));
+        self.report.skipped.push(SkipEntry {
+            tier: self.tier.name.clone(),
+            profile: self.tier.profile.clone(),
+            candidate: candidate.to_owned(),
+            count: 1,
+            examples: Vec::new(),
+            reason,
+        });
+    }
+
+    fn walk_docker(&mut self) {
+        let bound = match docker_backend::inspect_backend(
+            self.host,
+            self.measured.dev,
+            docker_storage(self.tier),
+        ) {
+            Ok(Binding::Bound(bound)) => bound,
+            Ok(Binding::Skipped(skip)) => {
+                self.skip_docker(Path::new(""), skip.reason, &skip.detail);
+                return;
+            }
+            Err(error) => {
+                self.run_error(format!("bind Docker backend: {error}"));
+                return;
+            }
+        };
+        let candidate = docker_candidate(self.tier, &bound);
+        let before = match sample(self.host, self.measured) {
+            Ok(space) => space.avail_bytes,
+            Err(error) => {
+                self.run_error(error);
+                return;
+            }
+        };
+        if self.goal_reached(before) {
+            return;
+        }
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            return;
+        }
+        // The daemon and its storage can change while the host lock is held;
+        // compare the full binding, including Docker's server ID, just before
+        // the deleting child is started.
+        match docker_backend::inspect_backend(
+            self.host,
+            self.measured.dev,
+            docker_storage(self.tier),
+        ) {
+            Ok(Binding::Bound(rebound)) if rebound == bound => {}
+            Ok(Binding::Bound(_)) => {
+                self.skip_docker(
+                    &candidate,
+                    "changed",
+                    "Docker daemon, context, builder or storage changed before prune",
+                );
+                return;
+            }
+            Ok(Binding::Skipped(skip)) => {
+                self.skip_docker(&candidate, skip.reason, &skip.detail);
+                return;
+            }
+            Err(error) => {
+                self.run_error(format!("recheck Docker backend: {error}"));
+                return;
+            }
+        }
+        let cwd = match resolve(self.host, Path::new("/"), Want::Directory) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                self.run_error(format!("open Docker command cwd: {error}"));
+                return;
+            }
+        };
+        let mut arguments: Vec<OsString> = vec!["--host=unix:///var/run/docker.sock".into()];
+        match &self.tier.action {
+            Action::DockerBuilderPrune => {
+                arguments.extend(["builder", "prune", "--all", "--force"].map(OsString::from));
+                if let Some(idle) = self.tier.idle_for {
+                    arguments.push("--filter".into());
+                    arguments.push(format!("until={}s", idle.0.as_secs()).into());
+                }
+            }
+            Action::DockerImagePrune { all } => {
+                arguments.extend(["image", "prune", "--force"].map(OsString::from));
+                if *all {
+                    arguments.push("--all".into());
+                }
+            }
+            _ => unreachable!("Docker tier with non-Docker action admitted by ensure"),
+        }
+        let ready = self
+            .command_ready
+            .as_ref()
+            .expect("Docker executable preflighted");
+        let run = CommandRun {
+            executable: ready.program.clone(),
+            arguments,
+            environment: vec![
+                ("DOCKER_HOST".into(), "unix:///var/run/docker.sock".into()),
+                ("DOCKER_CONTEXT".into(), "default".into()),
+                // Docker CLI 29 forwards `docker builder` to Buildx unless
+                // DOCKER_BUILDKIT=0 selects the Engine command. The latter
+                // calls BuildCachePrune on the pinned daemon directly.
+                ("DOCKER_BUILDKIT".into(), "0".into()),
+            ],
+            docker_info: Some(bound.info.clone()),
+            output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+            deadline: self.deadline.unwrap_or(MonoTime(Duration::MAX)),
+        };
+        let started = self.host.now();
+        let invocation = self.host.run_command(&cwd.fd, &run);
+        let attempted = matches!(invocation, CommandInvocation::Started(_));
+        let end = match invocation {
+            CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
+                ReclaimEnd::GateRefused {
+                    path: candidate.clone(),
+                    error,
+                }
+            }
+            CommandInvocation::NotStarted(error) => ReclaimEnd::Failed {
+                path: candidate.clone(),
+                error,
+            },
+            CommandInvocation::DeadlineBeforeStart => ReclaimEnd::Stopped(Stop::DeadlinePassed {
+                path: candidate.clone(),
+            }),
+            CommandInvocation::Started(Ok(CommandExit::Exited(0))) => ReclaimEnd::Complete,
+            CommandInvocation::Started(Ok(CommandExit::Exited(code))) => ReclaimEnd::Failed {
+                path: candidate.clone(),
+                error: HostError::invalid(
+                    "Docker prune",
+                    candidate.display(),
+                    format!("Docker client exited {code}"),
+                ),
+            },
+            CommandInvocation::Started(Ok(CommandExit::Signaled(signal))) => ReclaimEnd::Failed {
+                path: candidate.clone(),
+                error: HostError::invalid(
+                    "Docker prune",
+                    candidate.display(),
+                    format!("Docker client died from signal {signal}"),
+                ),
+            },
+            CommandInvocation::Started(Ok(CommandExit::TimedOut)) => {
+                ReclaimEnd::Stopped(Stop::DeadlinePassed {
+                    path: candidate.clone(),
+                })
+            }
+            CommandInvocation::Started(Err(error)) => ReclaimEnd::Failed {
+                path: candidate.clone(),
+                error,
+            },
+        };
+        let _ = self.record(
+            &candidate,
+            Outcome {
+                started,
+                before,
+                removed_entries: 0,
+                attempted_command: attempted,
+                end,
+                note: String::new(),
+            },
+        );
+    }
+
     fn skip(&mut self, candidate: &Path, skip: &Skip) {
         log_skip(self.log, self.tier, skip);
         self.report.skipped.push(SkipEntry {
@@ -1091,6 +1336,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         match &self.tier.source {
             SourceKind::CargoTarget => self.walk_cargo(&rules, &mut checker),
             SourceKind::Fs(find) => self.walk_fs(find, &rules, &mut checker),
+            SourceKind::DockerBuildCache | SourceKind::DockerImages => self.walk_docker(),
         }
         self.report.held_by_deleted_files =
             held(self.host, &mut checker, self.measured.dev, self.log);
@@ -1394,7 +1640,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         note: String::new(),
                     }
                 }
-                Action::CargoLockProtocol => unreachable!("fs action admitted by ensure"),
+                Action::CargoLockProtocol
+                | Action::DockerBuilderPrune
+                | Action::DockerImagePrune { .. } => unreachable!("fs action admitted by ensure"),
             };
             match self.record(&found.path, outcome) {
                 Some(after) => avail = after,

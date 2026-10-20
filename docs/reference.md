@@ -250,7 +250,7 @@ under `profile`:
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
     "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "source_anchor": null},
-    "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
+    "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
     "verified_with": null
@@ -625,14 +625,16 @@ profiles apply and when.
   positive pattern, but is never a candidate. `find` names candidates *positively*;
   nothing that no source profile
   found is ever a candidate.
-- **Roots are fixed or required.** A profile either has fixed roots (`/tmp`,
-  `/var/tmp`) or declares `roots: required` (machine-specific locations such
-  as `cargo-target`, `pytest-cache`), which only a tier, `--roots` or a
-  `protect` entry can supply.
+- **Roots are fixed, required, or daemon-derived.** Filesystem profiles can
+  use fixed roots (`/tmp`, `/var/tmp`) or `roots: required` (machine-specific
+  locations such as `cargo-target`, `pytest-cache`). Docker profiles use
+  `roots: daemon`: diskgc obtains the storage root from the bound local
+  daemon and checks its filesystem against the requested path.
 - **Filter profiles** have only `where` (predicates). They narrow a source's
   candidates; they never find anything.
-- **`action`** says how a source profile's candidates are removed. For the
-  code-backed kinds the kind fixes the action.
+- **`action`** says how a source profile's candidates are removed. Docker
+  profiles declare one of the fixed Docker prune actions. Other code-backed
+  kinds fix their action.
 - **`kind`** (default `fs`): `fs` (a file or directory), or a code-backed
   kind: `cargo-target`, `docker-build-cache`, `docker-images`, `nix-store`.
 - **`examples`**: paths that must and must not match. They check that the
@@ -653,13 +655,13 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `name` | every profile | A `NAME` (see Selection grammar), unique among built-in and user profiles. |
 | `category`, `description` | every profile; required on built-ins | Free text, shown by `profiles list`. |
 | `kind` | sources | Default `fs`. |
-| `find.roots` | sources | A list of absolute directories, or `required`. |
+| `find.roots` | sources | A list of absolute directories, `required`, or `daemon` for Docker kinds. |
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
 | `where` | filters (at least one predicate); optional on sources | See Predicates. A source’s own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; the tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
-| `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
+| `action` | kinds `fs` and Docker, required | See Actions. Cargo and Nix kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). With `roots: required`, an optional `root: /absolute/sample/root` pins the supplied root used to check path depth in these examples; without it, any absolute ancestor can supply the root. Config load and `check` reject examples that contradict the path patterns. |
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
@@ -838,7 +840,10 @@ action `delete`) and `f` (`idle_for`):
 |---|---|
 | `delete` | diskgc's own deletion ([safety.md](safety.md#deletion)). Option `make_writable: true` adds owner write permission to directories during the delete walk, after the last in-use recheck, for read-only trees such as Go's module cache or files copied from the Nix store. Opt-in per profile, since a read-only directory can be a deliberate protection. |
 | `command` | an argv list run per candidate, e.g. `[env, "GOCACHE={path}", go, clean, -cache]`. Trusted, arbitrary command execution; never run as root. See [safety.md](safety.md#command-actions). |
-| kind actions | Cargo lock protocol, Docker prune, Nix GC: fixed by the kind ([safety.md](safety.md#cargo-target)). |
+| `docker-builder-prune` | Prune the bound Docker Engine's built-in BuildKit cache with `--all`, adding `--filter until=...` when the tier selects `idle_for`. One action covers the daemon cache. |
+| `docker-image-prune` | Prune dangling images in the bound Docker daemon. |
+| `docker-image-prune-all` | Prune all images unused by containers in the bound Docker daemon. |
+| kind actions | Cargo lock protocol and Nix GC are fixed by their kinds ([safety.md](safety.md#cargo-target)). |
 
 In YAML:
 
@@ -846,6 +851,9 @@ In YAML:
 action: delete
 action: {delete: {make_writable: true}}
 action: {command: [env, "GOCACHE={path}", go, clean, -cache], cwd: parent}
+action: docker-builder-prune
+action: docker-image-prune
+action: docker-image-prune-all
 ```
 
 Command action fields: `command` (argv; `{path}` is replaced by the
@@ -892,7 +900,7 @@ listed as planned, not shipped.
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
 | nix | `nix-garbage` | dead store paths | Nix GC |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
-| containers | `docker-build-cache` | BuildKit cache of the default builder | prune |
+| containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
 | containers | `containers-image-tmp` | top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` files or directories; `min_idle_for: 3d` is mandatory | `delete` |

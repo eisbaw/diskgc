@@ -131,6 +131,8 @@ impl Source {
         match self.finds {
             Finds::Paths { .. } => Kind::Fs,
             Finds::CargoTargets => Kind::CargoTarget,
+            Finds::DockerBuildCache => Kind::DockerBuildCache,
+            Finds::DockerImages => Kind::DockerImages,
         }
     }
 }
@@ -149,6 +151,10 @@ pub enum Finds {
     /// Kind `cargo-target`: Cargo target directories, recognised by their
     /// structure (docs/safety.md, cargo-target: Discovery).
     CargoTargets,
+    /// The bound Docker daemon's default builder cache, one whole unit.
+    DockerBuildCache,
+    /// The bound Docker daemon's image store, one whole unit.
+    DockerImages,
 }
 
 /// Where a source profile looks (docs/reference.md, Profiles).
@@ -159,6 +165,8 @@ pub enum Roots {
     /// Machine-specific: a tier's `roots:`, `--roots` or a `protect` entry
     /// supplies them ([`Library::bind_roots`]).
     Required,
+    /// The storage location comes from a checked backend query.
+    Backend,
 }
 
 /// A profile's predicates (docs/reference.md, Predicates). Empty for a
@@ -239,7 +247,9 @@ pub struct Examples {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// diskgc's own deletion (docs/safety.md, Deletion).
-    Delete { make_writable: bool },
+    Delete {
+        make_writable: bool,
+    },
     /// An argv run per candidate (docs/safety.md, Command actions).
     Command {
         argv: Vec<String>,
@@ -251,6 +261,11 @@ pub enum Action {
     /// Kind `cargo-target`'s lock protocol (docs/safety.md, Reclaim
     /// protocol), fixed by the kind.
     CargoLockProtocol,
+    /// Fixed Docker prune modes, not user-supplied argv.
+    DockerBuilderPrune,
+    DockerImagePrune {
+        all: bool,
+    },
 }
 
 /// What the "one action" error shows: enough to see what differs, every
@@ -280,6 +295,9 @@ impl fmt::Display for Action {
                 }
             }
             Self::CargoLockProtocol => f.write_str("cargo lock protocol"),
+            Self::DockerBuilderPrune => f.write_str("docker builder prune --all"),
+            Self::DockerImagePrune { all: false } => f.write_str("docker image prune"),
+            Self::DockerImagePrune { all: true } => f.write_str("docker image prune --all"),
         }
     }
 }

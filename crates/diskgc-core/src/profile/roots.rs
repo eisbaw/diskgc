@@ -122,6 +122,10 @@ impl Library {
                     required.push((*name).to_owned());
                     supplied.map(<[String]>::to_vec).unwrap_or_default()
                 }
+                Roots::Backend => {
+                    fixed.push((*name).to_owned());
+                    Vec::new()
+                }
             };
             bound.insert((*name).to_owned(), roots);
         }

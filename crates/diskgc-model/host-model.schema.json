@@ -19,6 +19,10 @@
       "maximum": 255,
       "minimum": 0
     },
+    "docker": {
+      "description": "Closed Docker query responses and client redirects for backend model\ntests. No real daemon or filesystem is contacted by ModelHost.",
+      "$ref": "#/$defs/DockerSpec"
+    },
     "events": {
       "description": "Changes applied between two `Host` calls, or at a point in time.",
       "type": "array",
@@ -284,6 +288,54 @@
           ],
           "format": "uint32",
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "DockerSpec": {
+      "type": "object",
+      "properties": {
+        "client_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_show": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "info": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -838,7 +890,8 @@
         "may_delete",
         "unlinkat",
         "fchmod",
-        "run_command"
+        "run_command",
+        "docker_query"
       ]
     },
     "ProcAccess": {

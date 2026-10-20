@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -33,14 +33,14 @@ use std::process;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DirListing,
-    Environ, Errno, FileType, Host, HostError, LinkTarget, LockMode, Locked,
-    MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError,
-    ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink,
-    WaitLock, is_single_name, read_proc_view,
+    DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, LinkTarget,
+    LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow,
+    Pid, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock,
+    UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
 };
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, ResolveFlags};
@@ -890,6 +890,17 @@ impl Host for LinuxHost {
         std::env::var_os("PATH").unwrap_or_default()
     }
 
+    fn docker_environment(&self) -> DockerEnvironment {
+        DockerEnvironment {
+            host: std::env::var_os("DOCKER_HOST"),
+            context: std::env::var_os("DOCKER_CONTEXT"),
+        }
+    }
+
+    fn docker_query(&self, query: DockerQuery) -> Result<String, HostError> {
+        run_docker_query_ungated(query, None, DOCKER_QUERY_TIMEOUT)
+    }
+
     fn command_origin(&self) -> Result<std::path::PathBuf, HostError> {
         std::env::current_dir()
             .map_err(|error| io_error("preflight executable", "working directory", &error))
@@ -1488,6 +1499,205 @@ const COMMAND_READS_PER_PUMP: usize = 16;
 const COMMAND_OUTPUT_DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
 const COMMAND_STDERR_BACKPRESSURE: Duration = Duration::from_millis(50);
 
+const DOCKER_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const DOCKER_QUERY_MAX_OUTPUT: usize = 1024 * 1024;
+
+/// An `O_PATH` reference to the verified socket inode. A Docker client
+/// connecting through `/proc/self/fd/N` reaches this inode even if another
+/// process replaces `/var/run/docker.sock` after the backend recheck.
+struct DockerSocketPin {
+    fd: OwnedFd,
+    host: String,
+}
+
+fn pin_docker_socket() -> Result<DockerSocketPin, HostError> {
+    const SOCKET: &str = "/var/run/docker.sock";
+    let fd = rustix::fs::open(
+        SOCKET,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| HostError::errno("pin Docker socket", SOCKET, errno_of(error)))?;
+    let stat = rustix::fs::fstat(&fd)
+        .map_err(|error| HostError::errno("stat pinned Docker socket", SOCKET, errno_of(error)))?;
+    if FileType::from_mode(stat.st_mode) != FileType::Socket {
+        return Err(HostError::invalid(
+            "pin Docker socket",
+            SOCKET,
+            "endpoint is not a Unix socket inode",
+        ));
+    }
+    let host = format!("unix:///proc/self/fd/{}", fd.as_raw_fd());
+    Ok(DockerSocketPin { fd, host })
+}
+
+/// The sole ungated child-starting site: fixed, read-only Docker queries.
+/// The caller supplies an enum, never argv. Both pipes are drained within a
+/// byte bound, and the whole process group is killed if the query hangs.
+fn run_docker_query_ungated(
+    query: DockerQuery,
+    pinned: Option<(&Path, &DockerSocketPin)>,
+    timeout: Duration,
+) -> Result<String, HostError> {
+    let args: &[&str] = match query {
+        DockerQuery::Version => &["version", "--format", "{{json .Server}}"],
+        DockerQuery::ClientVersion => &["version", "--format", "{{json .Client}}"],
+        DockerQuery::ContextShow => &["context", "show"],
+        DockerQuery::ContextEndpoint => &[
+            "context",
+            "inspect",
+            "default",
+            "--format",
+            "{{json .Endpoints.docker.Host}}",
+        ],
+        DockerQuery::Info => &["info", "--format", "{{json .}}"],
+    };
+    let subject = format!("docker {args:?}");
+    let mut command =
+        process::Command::new(pinned.map_or(Path::new("docker"), |(program, _)| program));
+    if let Some((_, pin)) = pinned {
+        command
+            .arg(format!("--host={}", pin.host))
+            .env("DOCKER_HOST", &pin.host)
+            .env("DOCKER_CONTEXT", "default");
+        let raw_fd = pin.fd.as_raw_fd();
+        // SAFETY: after fork the child changes only one inherited descriptor
+        // flag by syscall. The parent keeps its descriptor close-on-exec.
+        unsafe {
+            command.pre_exec(move || {
+                let fd = BorrowedFd::borrow_raw(raw_fd);
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
+                    .map_err(std::io::Error::from)
+            });
+        }
+    }
+    let mut child = command
+        .args(args)
+        .process_group(0)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped())
+        .spawn()
+        .map_err(|error| io_error("start Docker query", &subject, &error))?;
+    let pid = match rustix::process::Pid::from_raw(child.id().cast_signed()) {
+        Some(pid) => pid,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(HostError::invalid(
+                "start Docker query",
+                &subject,
+                "child has invalid pid",
+            ));
+        }
+    };
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let out = thread::Builder::new()
+        .name("diskgc-docker-query-stdout".to_owned())
+        .spawn(move || read_docker_query_pipe(stdout));
+    let err = thread::Builder::new()
+        .name("diskgc-docker-query-stderr".to_owned())
+        .spawn(move || read_docker_query_pipe(stderr));
+    let (out, err) = match (out, err) {
+        (Ok(out), Ok(err)) => (out, err),
+        (out, err) => {
+            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+            let _ = child.wait();
+            if let Ok(out) = out {
+                let _ = out.join();
+            }
+            if let Ok(err) = err {
+                let _ = err.join();
+            }
+            return Err(HostError::invalid(
+                "start Docker query",
+                &subject,
+                "cannot start bounded output readers",
+            ));
+        }
+    };
+    let deadline = Instant::now() + timeout.min(DOCKER_QUERY_TIMEOUT);
+    let status = loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+                let _ = child.wait();
+                let _ = out.join();
+                let _ = err.join();
+                return Err(io_error("wait Docker query", &subject, &error));
+            }
+        };
+        if let Some(status) = status
+            && out.is_finished()
+            && err.is_finished()
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+            let _ = child.wait();
+            let _ = out.join();
+            let _ = err.join();
+            return Err(HostError::invalid(
+                "query Docker",
+                &subject,
+                format!("read-only query exceeded {timeout:?}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout_result = out.join();
+    let stderr_result = err.join();
+    let (stdout, out_truncated) = stdout_result
+        .map_err(|_| HostError::invalid("query Docker", &subject, "stdout reader panicked"))?
+        .map_err(|error| io_error("read Docker stdout", &subject, &error))?;
+    let (stderr, err_truncated) = stderr_result
+        .map_err(|_| HostError::invalid("query Docker", &subject, "stderr reader panicked"))?
+        .map_err(|error| io_error("read Docker stderr", &subject, &error))?;
+    if out_truncated || err_truncated {
+        return Err(HostError::invalid(
+            "query Docker",
+            &subject,
+            "output exceeded 1 MiB",
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&stderr);
+    if !status.success() {
+        return Err(HostError::invalid(
+            "query Docker",
+            &subject,
+            format!("exited {status}: {stderr}"),
+        ));
+    }
+    String::from_utf8(stdout).map_err(|error| {
+        HostError::invalid(
+            "query Docker",
+            &subject,
+            format!("stdout is not UTF-8: {error}"),
+        )
+    })
+}
+
+fn read_docker_query_pipe(mut pipe: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    let mut too_long = false;
+    let mut chunk = [0u8; 4096];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok((bytes, too_long)),
+            Ok(n) => {
+                let remaining = DOCKER_QUERY_MAX_OUTPUT.saturating_sub(bytes.len());
+                bytes.extend_from_slice(&chunk[..n.min(remaining)]);
+                too_long |= n > remaining;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 struct OutputMessage {
     fd: OwnedFd,
     bytes: Vec<u8>,
@@ -1525,15 +1735,78 @@ fn run_command_permitted(
     run: &CommandRun,
 ) -> CommandInvocation {
     let subject = run.executable.display().to_string();
+    let docker_pin = if let Some(expected) = &run.docker_info {
+        if run.arguments.first().and_then(|arg| arg.to_str())
+            != Some("--host=unix:///var/run/docker.sock")
+        {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "pin Docker prune",
+                &subject,
+                "Docker action has no fixed local socket argument",
+            ));
+        }
+        let pin = match pin_docker_socket() {
+            Ok(pin) => pin,
+            Err(error) => return CommandInvocation::NotStarted(error),
+        };
+        let remaining = run.deadline.0.saturating_sub(host.now().0);
+        if remaining.is_zero() {
+            return CommandInvocation::DeadlineBeforeStart;
+        }
+        let info = match run_docker_query_ungated(
+            DockerQuery::Info,
+            Some((&run.executable, &pin)),
+            remaining,
+        ) {
+            Ok(info) => info,
+            Err(error) => {
+                if run.deadline <= host.now() {
+                    return CommandInvocation::DeadlineBeforeStart;
+                }
+                return CommandInvocation::NotStarted(error);
+            }
+        };
+        let actual = match diskgc_core::docker_backend::DockerInfo::parse(&info) {
+            Ok(actual) => actual,
+            Err(error) => {
+                return CommandInvocation::NotStarted(HostError::invalid(
+                    "pin Docker prune",
+                    &subject,
+                    error,
+                ));
+            }
+        };
+        if &actual != expected {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "pin Docker prune",
+                &subject,
+                format!("pinned daemon info changed: expected {expected:?}, got {actual:?}"),
+            ));
+        }
+        Some(pin)
+    } else {
+        None
+    };
+    let mut arguments = run.arguments.clone();
+    if let Some(pin) = &docker_pin {
+        arguments[0] = format!("--host={}", pin.host).into();
+    }
     let mut command = process::Command::new(&run.executable);
     command
-        .args(&run.arguments)
+        .args(&arguments)
         .envs(run.environment.iter().cloned());
+    if let Some(pin) = &docker_pin {
+        command.env("DOCKER_HOST", &pin.host);
+    }
+    if run.deadline <= host.now() {
+        return CommandInvocation::DeadlineBeforeStart;
+    }
     command
         .process_group(0)
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::piped());
     let cwd_fd = cwd.as_fd().as_raw_fd();
+    let docker_fd: Option<RawFd> = docker_pin.as_ref().map(|pin| pin.fd.as_raw_fd());
     // SAFETY: the closure calls one syscall on an fd held by the parent
     // through spawn; the child inherits it until pre_exec returns. It does
     // not allocate, lock, or inspect shared state.
@@ -1542,7 +1815,13 @@ fn run_command_permitted(
             // SAFETY: `cwd` is alive through `spawn`; after fork this child
             // owns its copy of the same fd until exec.
             let fd = BorrowedFd::borrow_raw(cwd_fd);
-            rustix::process::fchdir(fd).map_err(std::io::Error::from)
+            rustix::process::fchdir(fd).map_err(std::io::Error::from)?;
+            if let Some(raw_fd) = docker_fd {
+                let fd = BorrowedFd::borrow_raw(raw_fd);
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
+                    .map_err(std::io::Error::from)?;
+            }
+            Ok(())
         });
     }
     let mut child = match command.spawn() {

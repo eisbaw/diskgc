@@ -672,6 +672,7 @@ processes:
             .expect("unlinkat");
         host.fchmod(&a.fd, 0o755).expect("fchmod");
         let run = CommandRun {
+            docker_info: None,
             executable: Path::new("/usr/bin/tool").to_owned(),
             arguments: Vec::new(),
             environment: Vec::new(),

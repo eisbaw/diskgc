@@ -281,6 +281,7 @@ pub struct State {
     /// Exit code of modelled command actions; a real child is never run.
     pub command_exit: u8,
     pub command_error_after_start: bool,
+    pub docker: crate::spec::DockerSpec,
     /// The socket files a socket is bound to (in diskgc's network
     /// namespace).
     pub bound_sockets: BTreeSet<DevIno>,
@@ -305,6 +306,7 @@ impl State {
             sandbox_gate: crate::spec::GateSpec::Open,
             command_exit: 0,
             command_error_after_start: false,
+            docker: crate::spec::DockerSpec::default(),
             bound_sockets: BTreeSet::new(),
             kernel,
             hostname: "model-host".to_owned(),

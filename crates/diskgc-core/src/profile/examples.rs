@@ -44,6 +44,7 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
             .root
             .as_ref()
             .map(|root| vec![PathBuf::from(root.replace("{uid}", &uid.to_string()))]),
+        Roots::Backend => None,
     };
     let root_refs: Option<Vec<&Path>> = roots
         .as_ref()

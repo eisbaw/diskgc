@@ -155,6 +155,9 @@ fn schema_form(json: &Value) -> Value {
                     serde_json::json!({"command": action["command"], "cwd": action["cwd"]})
                 }
                 Some("cargo_lock_protocol") => continue,
+                Some("docker_builder_prune") => Value::from("docker-builder-prune"),
+                Some("docker_image_prune") => Value::from("docker-image-prune"),
+                Some("docker_image_prune_all") => Value::from("docker-image-prune-all"),
                 other => panic!("action type {other:?}"),
             },
             _ => value.clone(),

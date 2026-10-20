@@ -950,6 +950,12 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         gate: Gate::Permit,
         matches: 1,
     },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "run_docker_query_ungated",
+        gate: Gate::Ungated("closed DockerQuery enum maps only to read-only constant argv"),
+        matches: 1,
+    },
     // `RecvFlags::TRUNC` (MSG_TRUNC) is a receive flag of the socket
     // diagnostics query: it reports a datagram's real length so a cut-short
     // one is detected. It truncates nothing on disk.

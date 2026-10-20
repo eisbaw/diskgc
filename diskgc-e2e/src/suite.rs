@@ -165,6 +165,18 @@ pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
         DOCKER_VECTOR_TEST,
         "replays a checked-in profile vector while native Docker Engine runs",
     ),
+    (
+        "native_docker_image_prune_preserves_containers_volumes",
+        "needs the native Docker Engine daemon in the pinned dind image",
+    ),
+    (
+        "native_docker_prune_child_keeps_lock_after_parent_kill",
+        "needs the native Docker Engine daemon in the pinned dind image",
+    ),
+    (
+        "native_docker_dangling_and_build_cache_prune",
+        "needs native Docker Engine and BuildKit in the pinned dind image",
+    ),
 ];
 
 pub const DOCKER_DIND_TEST: &str = "native_docker_engine_dind_smoke";
@@ -221,6 +233,24 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: docker_vector_suite::checked_in_python_profile_vector_replays_under_native_docker,
+    },
+    Test {
+        name: "native_docker_image_prune_preserves_containers_volumes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_suite::native_docker_image_prune_preserves_containers_volumes,
+    },
+    Test {
+        name: "native_docker_prune_child_keeps_lock_after_parent_kill",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_suite::native_docker_prune_child_keeps_lock_after_parent_kill,
+    },
+    Test {
+        name: "native_docker_dangling_and_build_cache_prune",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_suite::native_docker_dangling_and_build_cache_prune,
     },
     Test {
         name: "ensure_stdout_failures_exit_three_without_panicking",

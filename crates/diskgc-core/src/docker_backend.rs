@@ -7,6 +7,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::host::{Dev, DockerEnvironment, DockerQuery, Errno, Host, HostError};
+use crate::resolve::{self, ResolveError, Want};
+
 /// The image store that a bound Docker daemon uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageStore {
@@ -28,6 +31,8 @@ impl ImageStore {
 /// Parsing is strict because a wrong root can make filesystem matching lie.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerInfo {
+    /// Daemon identity, compared again immediately before deletion.
+    pub id: String,
     pub docker_root: PathBuf,
     pub image_store: ImageStore,
 }
@@ -36,6 +41,11 @@ impl DockerInfo {
     pub fn parse(json: &str) -> Result<Self, String> {
         let info: Value = serde_json::from_str(json)
             .map_err(|error| format!("Docker info is not JSON: {error}"))?;
+        let id = info["ID"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("Docker info has no daemon ID")?
+            .to_owned();
         let root = info["DockerRootDir"]
             .as_str()
             .ok_or("Docker info has no DockerRootDir")?;
@@ -87,16 +97,217 @@ impl DockerInfo {
             }
             ImageStore::BundledContainerd(root.join("containerd/daemon"))
         } else {
-            // Only vfs has been observed with a null DriverStatus in the
-            // disposable fixture. Other classic drivers need their own
-            // binding proof before they can become deletion backends.
+            // Only vfs with null DriverStatus has been verified as classic.
             ImageStore::Classic(root.clone())
         };
         Ok(Self {
+            id,
             docker_root: root,
             image_store,
         })
     }
+}
+
+/// A backend whose endpoint and storage roots were checked against
+/// the requested filesystem. Re-run `bind` and compare before a prune: a
+/// context or daemon can change between planning and execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub info: DockerInfo,
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    pub reason: &'static str,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    Bound(Bound),
+    Skipped(Skipped),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Storage {
+    Images,
+    BuildCache,
+}
+
+fn skip(reason: &'static str, detail: impl Into<String>) -> Binding {
+    Binding::Skipped(Skipped {
+        reason,
+        detail: detail.into(),
+    })
+}
+
+fn query<H: Host>(host: &H, what: DockerQuery) -> Result<Result<String, Binding>, HostError> {
+    match host.docker_query(what) {
+        Ok(output) => Ok(Ok(output)),
+        Err(error) if error.is(Errno::ENOENT) => {
+            Ok(Err(skip("missing", "Docker client is not installed")))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Bind the local system Docker backend. Every decision is from one Host
+/// port, so ModelHost can reproduce remote, rootless, and mount
+/// failures without touching a developer's daemon.
+pub fn inspect_backend<H: Host>(
+    host: &H,
+    target: Dev,
+    storage: Storage,
+) -> Result<Binding, HostError> {
+    let DockerEnvironment {
+        host: override_host,
+        context,
+    } = host.docker_environment();
+    if let Some(value) = override_host {
+        let host = value.to_str().unwrap_or("");
+        if !matches!(
+            host,
+            "unix:///var/run/docker.sock" | "unix:///run/docker.sock"
+        ) {
+            return Ok(skip(
+                "remote_backend",
+                format!("DOCKER_HOST is {value:?}, not the local system socket"),
+            ));
+        }
+    }
+    if let Some(value) = context
+        && value != "default"
+    {
+        return Ok(skip(
+            "unsupported_backend",
+            format!("DOCKER_CONTEXT selects {value:?}, not default"),
+        ));
+    }
+    let context = match query(host, DockerQuery::ContextShow)? {
+        Ok(value) => value,
+        Err(skipped) => return Ok(skipped),
+    };
+    if context.trim() != "default" {
+        return Ok(skip(
+            "unsupported_backend",
+            format!("active Docker context is {:?}, not default", context.trim()),
+        ));
+    }
+    let endpoint = match query(host, DockerQuery::ContextEndpoint)? {
+        Ok(value) => value,
+        Err(skipped) => return Ok(skipped),
+    };
+    let endpoint: String = match serde_json::from_str(endpoint.trim()) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(skip(
+                "unsupported_backend",
+                format!("Docker context endpoint is not JSON: {error}"),
+            ));
+        }
+    };
+    if !matches!(
+        endpoint.as_str(),
+        "unix:///var/run/docker.sock" | "unix:///run/docker.sock"
+    ) {
+        let reason = if endpoint.starts_with("unix://") {
+            "unsupported_backend"
+        } else {
+            "remote_backend"
+        };
+        return Ok(skip(
+            reason,
+            format!("Docker context endpoint {endpoint:?} is not the local system socket"),
+        ));
+    }
+    let version = match query(host, DockerQuery::Version)? {
+        Ok(value) => value,
+        Err(skipped) => return Ok(skipped),
+    };
+    let server: Value = match serde_json::from_str(&version) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(skip(
+                "unsupported_backend",
+                format!("Docker server identity is not JSON: {error}"),
+            ));
+        }
+    };
+    let name = server["Platform"]["Name"].as_str().unwrap_or("");
+    if !name.starts_with("Docker Engine") {
+        return Ok(skip(
+            "unsupported_backend",
+            format!("server is {name:?}, not Docker Engine"),
+        ));
+    }
+    if storage == Storage::BuildCache {
+        // Docker CLI 29.8.2 forwards `docker builder` to Buildx unless the
+        // prune child sets DOCKER_BUILDKIT=0. This dispatch was checked in
+        // the pinned native fixture. Other client versions may dispatch
+        // differently and must not act on an unbound Buildx store.
+        let client_text = match query(host, DockerQuery::ClientVersion)? {
+            Ok(value) => value,
+            Err(skipped) => return Ok(skipped),
+        };
+        let client: Value = match serde_json::from_str(&client_text) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(skip(
+                    "unsupported_backend",
+                    format!("Docker client identity is not JSON: {error}"),
+                ));
+            }
+        };
+        if client["Version"].as_str() != Some("29.8.2") {
+            return Ok(skip(
+                "unsupported_backend",
+                format!(
+                    "Docker client version {:?} has unverified builder dispatch; 29.8.2 required",
+                    client["Version"]
+                ),
+            ));
+        }
+    }
+    let info_text = match query(host, DockerQuery::Info)? {
+        Ok(value) => value,
+        Err(skipped) => return Ok(skipped),
+    };
+    let info = match DockerInfo::parse(&info_text) {
+        Ok(info) => info,
+        Err(error) => return Ok(skip("unsupported_backend", error)),
+    };
+    let build_cache = info.docker_root.join("buildkit");
+    let roots = match storage {
+        Storage::BuildCache => [info.docker_root.as_path(), build_cache.as_path()],
+        Storage::Images => [info.docker_root.as_path(), info.image_store.root()],
+    };
+    for path in roots {
+        match resolve::resolve(host, path, Want::Directory) {
+            Ok(resolved) if resolved.stat.dev == target => {}
+            Ok(resolved) => {
+                return Ok(skip(
+                    "other_fs",
+                    format!(
+                        "Docker storage {} is on {}, requested filesystem is {target}",
+                        path.display(),
+                        resolved.stat.dev
+                    ),
+                ));
+            }
+            Err(ResolveError::Host(error)) => return Err(error),
+            Err(error) => {
+                return Ok(skip(
+                    error.reason(),
+                    format!(
+                        "Docker storage {} cannot be safely resolved: {error}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(Binding::Bound(Bound { info, endpoint }))
 }
 
 fn absolute_clean_path(text: &str, label: &str) -> Result<PathBuf, String> {
@@ -119,8 +330,8 @@ mod tests {
 
     #[test]
     fn bundled_store_uses_docker_root_and_refuses_external_containerd() {
-        let json = "{\"DockerRootDir\":\"/private/docker\",\"Driver\":\"overlayfs\",\"DriverStatus\":[[\"driver-type\",\"io.containerd.snapshotter.v1\"]],\"Containerd\":{\"Address\":\"/run/docker/containerd/containerd.sock\"}}";
-        let info = DockerInfo::parse(json).unwrap();
+        let json = serde_json::json!({"ID":"daemon-1","DockerRootDir":"/private/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}).to_string();
+        let info = DockerInfo::parse(&json).unwrap();
         assert_eq!(
             info.image_store.root(),
             Path::new("/private/docker/containerd/daemon")
@@ -138,22 +349,21 @@ mod tests {
 
     #[test]
     fn classic_store_uses_docker_root_and_rejects_ambiguous_input() {
-        let json =
-            "{\"DockerRootDir\":\"/private/docker\",\"Driver\":\"vfs\",\"DriverStatus\":null}";
+        let json = serde_json::json!({"ID":"daemon-1","DockerRootDir":"/private/docker","Driver":"vfs","DriverStatus":null}).to_string();
         assert_eq!(
-            DockerInfo::parse(json).unwrap().image_store,
+            DockerInfo::parse(&json).unwrap().image_store,
             ImageStore::Classic(PathBuf::from("/private/docker"))
         );
         assert!(DockerInfo::parse(&json.replace("/private/docker", "relative/../docker")).is_err());
         assert!(DockerInfo::parse(&json.replace("\"vfs\"", "\"unknown\"")).is_err());
         assert!(DockerInfo::parse(&json.replace(",\"DriverStatus\":null", "")).is_err());
-        let malformed = "{\"DockerRootDir\":\"/private/docker\",\"Driver\":\"overlayfs\",\"DriverStatus\":[[\"driver-type\",\"io.containerd.snapshotter.v1\"],42],\"Containerd\":{\"Address\":\"/run/docker/containerd/containerd.sock\"}}";
-        assert!(DockerInfo::parse(malformed).is_err());
-        let duplicate = "{\"DockerRootDir\":\"/private/docker\",\"Driver\":\"overlayfs\",\"DriverStatus\":[[\"driver-type\",\"io.containerd.snapshotter.v1\"],[\"driver-type\",\"io.containerd.snapshotter.v1\"]],\"Containerd\":{\"Address\":\"/run/docker/containerd/containerd.sock\"}}";
-        assert!(DockerInfo::parse(duplicate).is_err());
-        let unknown = "{\"DockerRootDir\":\"/private/docker\",\"Driver\":\"overlayfs\",\"DriverStatus\":[[\"driver-type\",\"unknown\"]]}";
+        let malformed = serde_json::json!({"ID":"daemon-1","DockerRootDir":"/private/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"],42],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}).to_string();
+        assert!(DockerInfo::parse(&malformed).is_err());
+        let duplicate = serde_json::json!({"ID":"daemon-1","DockerRootDir":"/private/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"],["driver-type","io.containerd.snapshotter.v1"]],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}).to_string();
+        assert!(DockerInfo::parse(&duplicate).is_err());
+        let unknown = serde_json::json!({"ID":"daemon-1","DockerRootDir":"/private/docker","Driver":"overlayfs","DriverStatus":[["driver-type","unknown"]]}).to_string();
         assert!(
-            DockerInfo::parse(unknown)
+            DockerInfo::parse(&unknown)
                 .unwrap_err()
                 .contains("unsupported_backend")
         );

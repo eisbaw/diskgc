@@ -83,12 +83,41 @@ pub struct HostModel {
     /// spawned. The filesystem itself is unchanged by the model command.
     #[serde(default, skip_serializing_if = "is_false")]
     pub command_error_after_start: bool,
+    /// Closed Docker query responses and client redirects for backend model
+    /// tests. No real daemon or filesystem is contacted by ModelHost.
+    #[serde(default, skip_serializing_if = "DockerSpec::is_empty")]
+    pub docker: DockerSpec,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
     /// What the scenario must produce (checked by the harness).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<Expect>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DockerSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_show: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
+}
+
+impl DockerSpec {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 fn is_zero_u8(value: &u8) -> bool {
@@ -567,6 +596,7 @@ pub enum Op {
     Unlinkat,
     Fchmod,
     RunCommand,
+    DockerQuery,
 }
 
 impl Op {
@@ -601,6 +631,7 @@ impl Op {
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",
             Self::RunCommand => "run_command",
+            Self::DockerQuery => "docker_query",
         }
     }
 }

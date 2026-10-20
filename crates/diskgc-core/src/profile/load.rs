@@ -284,6 +284,9 @@ fn source(
 ) -> Option<Source> {
     let kind = spec.kind.map_or(Kind::Fs, |k| k.0);
     let roots = roots(&find.roots, problems);
+    if matches!(kind, Kind::Fs | Kind::CargoTarget) && matches!(roots, Some(Roots::Backend)) {
+        problems.push(format!("kind {kind} cannot use `find.roots: daemon`"));
+    }
     let min_idle_for = spec.min_idle_for.map(|duration| IdleFor(duration.0));
     if let Some(minimum) = min_idle_for {
         if minimum.0.is_zero() {
@@ -346,7 +349,55 @@ fn source(
                 Examples::default(),
             )
         }
-        Kind::DockerBuildCache | Kind::DockerImages | Kind::NixStore => {
+        Kind::DockerBuildCache | Kind::DockerImages => {
+            for (field, present) in [
+                ("find.paths", find.paths.is_some()),
+                ("find.exclude", find.exclude.is_some()),
+                ("find.type", find.r#type.is_some()),
+                ("examples", spec.examples.is_some()),
+            ] {
+                if present {
+                    problems.push(format!(
+                        "kind {kind} is a whole backend and has no `{field}`"
+                    ));
+                }
+            }
+            if spec
+                .checkouts
+                .is_some_and(|setting| setting.0 == Checkouts::Allow)
+            {
+                problems.push(format!(
+                    "kind {kind} cannot allow checkouts: it has no file candidates"
+                ));
+            }
+            if !matches!(roots, Some(Roots::Backend)) {
+                problems.push(format!("kind {kind} needs `find.roots: daemon`"));
+            }
+            let action = match (kind, &spec.action) {
+                (Kind::DockerBuildCache, Some(ActionSpec::DockerBuilderPrune)) => {
+                    Some(Action::DockerBuilderPrune)
+                }
+                (Kind::DockerImages, Some(ActionSpec::DockerImagePrune { all })) => {
+                    Some(Action::DockerImagePrune { all: *all })
+                }
+                _ => {
+                    problems.push(format!(
+                        "kind {kind} needs its matching Docker prune action"
+                    ));
+                    None
+                }
+            };
+            (
+                if kind == Kind::DockerBuildCache {
+                    Finds::DockerBuildCache
+                } else {
+                    Finds::DockerImages
+                },
+                action?,
+                Examples::default(),
+            )
+        }
+        Kind::NixStore => {
             problems.push(format!("kind {kind} is not supported yet"));
             return None;
         }
@@ -419,6 +470,10 @@ fn fs(
             make_writable: *make_writable,
         }),
         Some(ActionSpec::Command { argv, cwd }) => command(argv, *cwd, entry_type, problems),
+        Some(ActionSpec::DockerBuilderPrune | ActionSpec::DockerImagePrune { .. }) => {
+            problems.push("kind fs cannot use a Docker prune action".to_owned());
+            None
+        }
     };
     let examples = examples(spec.examples.as_ref(), problems);
     Some((
@@ -511,6 +566,7 @@ fn examples(spec: Option<&ExamplesSpec>, problems: &mut Vec<String>) -> Examples
 fn roots(spec: &RootsSpec, problems: &mut Vec<String>) -> Option<Roots> {
     match spec {
         RootsSpec::Required => Some(Roots::Required),
+        RootsSpec::Backend => Some(Roots::Backend),
         RootsSpec::Fixed(list) if list.is_empty() => {
             problems.push(
                 "`find.roots` is empty: list directories, or write `roots: required`".to_owned(),
