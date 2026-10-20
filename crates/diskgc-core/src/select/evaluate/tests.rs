@@ -384,7 +384,7 @@ fn tmp_entry_excludes_entire_claude_session_container() {
         PathBuf::from("/tmp/claude-1000"),
         PathBuf::from("/tmp/other"),
     ];
-    let claude_session = PathBuf::from("/tmp/claude-1000/project/session");
+    let claude_session = PathBuf::from("/tmp/claude-1000/-project/session");
     let facts = PatternFacts {
         source: candidates
             .iter()

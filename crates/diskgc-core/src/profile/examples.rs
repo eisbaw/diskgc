@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{Body, EntryType, Finds, Library, Roots, Source};
-use crate::fs_kind::{Find, path_matches};
+use crate::fs_kind::{Find, path_matches_except};
 
 /// One candidate in the example model. `files` are regular files directly
 /// inside a directory; none of them are looked up on the host.
@@ -42,11 +42,15 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
     let root_refs: Option<Vec<&Path>> = roots
         .as_ref()
         .map(|roots| roots.iter().map(PathBuf::as_path).collect());
-    path_matches(root_refs.as_deref(), &find.patterns, entry.path)
-        && find
-            .has
-            .as_deref()
-            .is_none_or(|name| entry.files.contains(&name))
+    path_matches_except(
+        root_refs.as_deref(),
+        &find.patterns,
+        &find.exclude,
+        entry.path,
+    ) && find
+        .has
+        .as_deref()
+        .is_none_or(|name| entry.files.contains(&name))
         && find
             .has_not
             .as_deref()
@@ -160,5 +164,12 @@ mod tests {
             failures(&bad),
             ["scratch: match example /tmp/scratch-ok was not found"]
         );
+    }
+
+    #[test]
+    fn required_root_examples_apply_exclusions_at_the_same_depth() {
+        let yaml = "- name: scratch\n  find: {roots: required, paths: [a/b], exclude: [b], type: dir}\n  action: delete\n  examples: {match: [/tmp/a/b]}\n";
+        let library = Library::with_user_profiles(&parse_profiles(yaml).unwrap()).unwrap();
+        assert!(failures(&library).is_empty());
     }
 }

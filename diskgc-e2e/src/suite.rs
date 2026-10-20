@@ -122,6 +122,18 @@ pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touche
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
     Test {
+        name: "fs_reclaim_exact_exclusion_keeps_valuable_cache",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_exact_exclusion_keeps_valuable_cache,
+    },
+    Test {
+        name: "fs_reclaim_image_temp_minimum_idle_and_open_file",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_image_temp_minimum_idle_and_open_file,
+    },
+    Test {
         name: "nix_evaluation_keeps_its_user_eval_cache_in_use",
         tier: Tier::Fast,
         expect: Expect::Pass,
@@ -408,6 +420,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: ensure_suite::ensure_above_min_free_exits_0_without_the_host_lock,
+    },
+    Test {
+        name: "ensure_claude_and_pytest_tmp_profiles_keep_open_units",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_claude_and_pytest_tmp_profiles_keep_open_units,
     },
     Test {
         name: "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",

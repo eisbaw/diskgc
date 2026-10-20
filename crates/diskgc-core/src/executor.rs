@@ -142,10 +142,9 @@ impl Tier {
         // are refused at load until task-35 / task-36).
         let kind = match &source.finds {
             Finds::CargoTargets => SourceKind::CargoTarget,
-            Finds::Paths {
-                patterns,
-                entry_type,
-            } => SourceKind::Fs(Find::new(patterns, *entry_type, &source.where_, uid)),
+            Finds::Paths { .. } => {
+                SourceKind::Fs(Find::of(source, uid).expect("fs source has a filesystem find"))
+            }
         };
         // `idle_for` is the only predicate this build evaluates in a term:
         // a `has` / `has_not` filter is refused, never ignored.

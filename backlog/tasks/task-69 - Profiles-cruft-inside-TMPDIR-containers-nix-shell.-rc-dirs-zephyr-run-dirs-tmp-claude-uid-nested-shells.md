@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:05'
-updated_date: '2026-10-18 13:18'
+updated_date: '2026-10-20 01:10'
 labels:
   - wave-2
   - profiles
@@ -27,7 +27,7 @@ Decision for Mark: (a) keep spelling containers out per profile (status quo; che
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The decision is recorded in docs/reference.md (Profiles or Built-in profile library) and the affected library rows follow it
+- [x] #1 The decision is recorded in docs/reference.md (Profiles or Built-in profile library) and the affected library rows follow it
 - [ ] #2 nix-shell.* dirs below /tmp/claude-{uid} are either reachable by a /tmp profile or documented as out of scope
 <!-- AC:END -->
 
@@ -35,4 +35,8 @@ Decision for Mark: (a) keep spelling containers out per profile (status quo; che
 
 <!-- SECTION:NOTES:BEGIN -->
 Decision by Mark (2026-10-18): a shared temp-dir prefix list (nix-shell.*, /tmp/claude-{uid}, zephyr run dirs, nested shells, ...), defined once and used by every /tmp profile, not repeated per profile: it avoids drift. Define its single home in docs/reference.md.
+
+2026-10-20 implementation: built-in temp-prefix v1 is one finite shared list of 13 prefixes in profile/temp_roots.rs, with its documented order and a literal equality test. mktemp-dir, node-compile-cache, playwright-tmp and renode-tmp expand their base pattern through it; pytest-tmp is also implemented with the same preset but its full real-host dry run remains incomplete. The preset includes claude-{uid}/nix-shell.* and two shell levels, so entries under Claude Code TMPDIR are reachable. No recursive profile references. A changed prefix set requires a v2 preset and new profile name. nix-shell-tmpdir and broad tmp-entry remain planned pending dormant-session protection and full host evidence.
+
+Final integrated nix develop -c just e2e passed 93/93 and QA/MPED reviews GO for the shared temp-prefix v1 preset. AC #2 remains open for the outer nix-shell.* directories below /tmp/claude-{uid}: the preset reaches inner profile matches there, but does not itself make those outer shell directories deletion candidates.
 <!-- SECTION:NOTES:END -->

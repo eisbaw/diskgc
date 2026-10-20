@@ -203,12 +203,12 @@ fn code_block_expressions(doc: &str) -> Vec<String> {
 /// the example config's tiers.
 const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "profile:cargo-target && filter:idle-1d",
-    "(profile:pytest-tmp || profile:nix-shell-rc || profile:zephyr-run) && filter:idle-3d",
+    "(profile:pytest-tmp || profile:mktemp-dir || profile:zephyr-run) && filter:idle-3d",
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",
     "profile:nix-garbage",
     "profile:docker-dangling",
-    "profile:tmp-entry && filter:idle-2d",
+    "profile:chromium-tmp && filter:idle-2d",
     "profile:cargo-target && filter:idle-1h",
 ];
 

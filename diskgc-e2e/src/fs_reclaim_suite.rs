@@ -27,6 +27,140 @@ use crate::{OTHER, ROOT, TESTER, ensure, info};
 /// Where each test writes its configuration (tester's home tmpfs).
 const CONFIG: &str = "/home/tester/diskgc.yaml";
 
+/// The same two temporary name classes as the built-in profile, rooted in
+/// the container's scratch `/tmp`. Its short floor makes an old candidate
+/// possible without changing the container clock; the built-in's exact 3d
+/// floor is pinned by the profile model test.
+const IMAGE_TEMP_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: image-temp-test
+    find: {roots: [/tmp], paths: ["buildah*", "container_images_storage*"], type: any}
+    min_idle_for: 10s
+    action: delete
+    examples: {match: [/tmp/buildah-1, /tmp/container_images_storage-1]}
+"#;
+
+const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: cache-exclusion-test
+    find: {roots: [/tmp], paths: ["huggingface", "nix-index"], exclude: ["huggingface"], type: dir}
+    action: delete
+    examples: {match: [/tmp/nix-index], no_match: [/tmp/huggingface]}
+"#;
+
+/// The kernel discovery path must leave a named cache holding user data
+/// untouched while reclaiming its eligible sibling.
+pub fn fs_reclaim_exact_exclusion_keeps_valuable_cache(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        EXCLUDED_CACHE_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("huggingface", 0o700, TESTER)?;
+    s.write_file("huggingface/model", b"valuable", 0o600, TESTER)?;
+    let free = s.mkdir("nix-index", 0o700, TESTER)?;
+    s.write_file("nix-index/index", b"rebuildable", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(free.clone()))?;
+    let run = ensure_tmp(
+        ctx,
+        &[
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cache-exclusion-test",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&run])?;
+    run.expect_code(1)?;
+    let (skipped, actions) = outcome(&report(&run)?);
+    ensure!(actions == [free.display().to_string()], "{actions:?}");
+    ensure!(
+        !skipped.contains_key("/tmp/huggingface"),
+        "excluded entry was judged: {skipped:?}"
+    );
+    ensure!(
+        exists(&s.path("huggingface/model")),
+        "valuable data was removed"
+    );
+    ensure!(!exists(&free), "eligible cache was kept");
+    verdict.assert_clean()
+}
+
+/// A held Buildah-shaped file is `in_use`, a new entry cannot bypass a
+/// source's mandatory idle floor, and an old free image spool is removed.
+/// The oracle checks that the real binary unlinks only the latter.
+pub fn fs_reclaim_image_temp_minimum_idle_and_open_file(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        IMAGE_TEMP_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("buildah-held", 0o700, TESTER)?;
+    s.write_file("buildah-held/image", b"held", 0o600, TESTER)?;
+    let free = s.write_file("container_images_storage-free", b"free", 0o600, TESTER)?;
+    let held_path = s.path("buildah-held/image");
+    let holder = Holder::tester(ctx, &["hold", held_path.to_str().ok_or("path")?, "/"], &[])?;
+    std::thread::sleep(Duration::from_secs(11));
+    s.mkdir("buildah-fresh", 0o700, TESTER)?;
+    let fresh_since = Instant::now();
+    let oracle = Oracle::arm(Fixture::new().eligible(free.clone()))?;
+    let args = ["--min-free", "100%", "--select", "profile:image-temp-test"];
+    let plan = ensure_tmp(ctx, &["--dry-run", args[0], args[1], args[2], args[3]])?;
+    let run = ensure_tmp(ctx, &args)?;
+    let verdict = oracle.judge_runs(&[&plan, &run])?;
+    holder.finish()?;
+    ensure!(
+        fresh_since.elapsed() < Duration::from_secs(10),
+        "inconclusive: the fresh spool aged past the 10s minimum while judging"
+    );
+    plan.expect_code(0)?;
+    run.expect_code(1)?;
+    let planned = report(&plan)?;
+    let plan_reasons: BTreeMap<String, Option<String>> = planned["plan"]
+        .as_array()
+        .ok_or("plan is not an array")?
+        .iter()
+        .map(|entry| {
+            (
+                entry["candidate"].as_str().unwrap_or_default().to_owned(),
+                entry["reason"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    ensure!(
+        plan_reasons.get("/tmp/buildah-held") == Some(&Some("in_use".to_owned())),
+        "held image spool: {plan_reasons:?}"
+    );
+    ensure!(
+        plan_reasons.get("/tmp/buildah-fresh") == Some(&Some("not_idle".to_owned())),
+        "fresh image spool: {plan_reasons:?}"
+    );
+    ensure!(
+        plan_reasons.get("/tmp/container_images_storage-free") == Some(&None),
+        "free image spool: {plan_reasons:?}"
+    );
+    let (skipped, actions) = outcome(&report(&run)?);
+    ensure!(actions == [free.display().to_string()], "{actions:?}");
+    ensure!(
+        skipped.get("/tmp/buildah-held").map(String::as_str) == Some("in_use"),
+        "held image spool: {skipped:?}"
+    );
+    ensure!(
+        skipped.get("/tmp/buildah-fresh").map(String::as_str) == Some("not_idle"),
+        "fresh image spool: {skipped:?}"
+    );
+    ensure!(
+        exists(&s.path("buildah-held/image")),
+        "held file was deleted"
+    );
+    ensure!(exists(&s.path("buildah-fresh")), "fresh spool was deleted");
+    verdict.assert_clean()
+}
+
 /// The user profiles of these tests (docs/reference.md, Profiles), and a
 /// filter `idle-test` whose `idle_for` the test chooses (`{IDLE}`): what a
 /// fixture made before the run is old enough for, and what it makes right

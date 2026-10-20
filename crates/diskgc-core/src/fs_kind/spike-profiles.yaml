@@ -13,27 +13,29 @@ version: 1
 profiles:
   # ---- the /tmp group -------------------------------------------------
 
-  - name: pytest-tmp
-    category: test
-    description: pytest test dirs in /tmp, /var/tmp and one level down
-    # As reference.md's example: one candidate per test dir
-    # (pytest-of-<user>/pytest-<N>/<test>), not a session or the whole
-    # pytest-of-<user> (task-71; kept per test dir by Mark's decision of
-    # 2026-10-19, its cost is task-70's). type: dir, so the
-    # `*current` symlinks and plain files in a session dir are no
-    # candidates; session dirs and pytest-of-<user> are left. DOC: misses
-    # nested shells (nix-shell.X/nix-shell.Y/pytest-of-*/...) and pytest
-    # dirs inside nix-shell rc dirs and zephyr run dirs; no `**`, so each
-    # container family is a pattern of its own.
+  - name: nix-shell-tmpdir
+    category: nix
+    description: a nix-shell's TMPDIR in /tmp (unshipped probe)
     find:
-      roots: [/tmp, /var/tmp]
-      paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"]
+      roots: [/tmp]
+      paths: ["nix-shell.*"]
       type: dir
-    checkouts: allow  # why: docs/reference.md, Built-in profile library (pytest-tmp)
     action: delete
     examples:
-      match: [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0, /var/tmp/tmp.x1/pytest-of-ci/pytest-12/test_z1]
-      no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0, /home/mark/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/pytest-of-mark/pytest-1/test_x0, /tmp/pytest-of-mark/garbage-1a2b/test_x0]
+      match: [/tmp/nix-shell.8raHjU]
+      no_match: [/tmp/nix-shell-1-2, /tmp/claude-1000/nix-shell.8raHjU]
+
+  - name: tmp-entry
+    category: generic
+    description: any top-level entry of /tmp and /var/tmp (unshipped probe)
+    find:
+      roots: [/tmp, /var/tmp]
+      paths: ["*"]
+      type: any
+    action: delete
+    examples:
+      match: [/tmp/anything, /var/tmp/.hidden, /tmp/claude-1000]
+      no_match: [/tmp/a/b, /home/mark/x]
 
   - name: nix-shell-rc
     category: nix
@@ -47,36 +49,6 @@ profiles:
       match: [/tmp/nix-shell-1144586-3257819220, /tmp/nix-develop-77-123]
       no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586]
 
-  - name: nix-shell-tmpdir
-    category: nix
-    description: a nix-shell's TMPDIR in /tmp
-    find:
-      roots: [/tmp]
-      paths: ["nix-shell.*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/nix-shell.8raHjU]
-      no_match: [/tmp/nix-shell-1-2, /tmp/claude-1000/nix-shell.8raHjU]
-
-  - name: claude-code-tmp
-    category: ai agents
-    description: Claude Code session dirs, /tmp/claude-{uid}/<project>/<session>
-    # DOC (fixed in reference.md by task-68): Claude Code also makes
-    # /tmp/claude-{uid} the TMPDIR of the tools it runs, so depth 1 holds
-    # nix-shell.*, tmp* and loose files next to the project dirs, which are
-    # named after the project's path and so start with `-`. The row's
-    # `*/*` also matched inside those TMPDIR dirs (probe
-    # claude-code-tmp-star below).
-    find:
-      roots: [/tmp]
-      paths: ["claude-{uid}/-*/*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a]
-      no_match: [/tmp/claude-1000/-home-mark-src-app, /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark, /tmp/claude-1001x/-a/b]
-
   - name: claude-code-tmp-star
     category: probes
     description: the earlier claude-code-tmp row, /tmp/claude-{uid}/*/*
@@ -87,104 +59,6 @@ profiles:
     action: delete
     examples:
       match: [/tmp/claude-1000/nix-shell.Ab1/pytest-of-mark]
-
-  - name: chromium-tmp
-    category: browsers
-    description: Chromium and Brave scratch in /tmp
-    # DOC: reference.md says `.org.chromium.Chromium.*`; on this machine
-    # those are FILES (8), and the bulk are DIRECTORIES without the dot
-    # (org.chromium.Chromium.*_chrome_url_fetcher_*, *_Unpacker_*: 260).
-    # Hence both patterns and `type: any`.
-    find:
-      roots: [/tmp]
-      paths: [".org.chromium.Chromium.*", "org.chromium.Chromium.*"]
-      type: any
-    action: delete
-    examples:
-      match: [/tmp/.org.chromium.Chromium.aB3dEf, /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
-      no_match: [/tmp/org.mozilla.firefox.x]
-
-  - name: mktemp-dir
-    category: generic
-    description: coreutils mktemp -d dirs in /tmp
-    # DOC: Python's tempfile.mkdtemp makes /tmp/tmpXXXXXXXX (no dot: 3,457
-    # here, 663 tmp.*); `tmp*` would cover both but also any name starting
-    # with "tmp".
-    find:
-      roots: [/tmp]
-      paths: ["tmp.*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/tmp.AbC123]
-      no_match: [/tmp/tmp00i1c8qs, /tmp/tmp]
-
-  - name: tmp-entry
-    category: generic
-    description: any top-level entry of /tmp and /var/tmp
-    find:
-      roots: [/tmp, /var/tmp]
-      paths: ["*"]
-      type: any
-    action: delete
-    examples:
-      match: [/tmp/anything, /var/tmp/.hidden, /tmp/claude-1000]
-      no_match: [/tmp/a/b, /home/mark/x]
-
-  - name: playwright-tmp
-    category: python / js
-    description: Playwright scratch (artifacts, browser profiles) in /tmp and nix-shell temp dirs
-    # DOC: reference.md says `playwright*` in /tmp; here none is top-level,
-    # all 73 lie in TMPDIR dirs (nix-shell.*, nix-shell-*-*), so the
-    # nix-shell patterns are added (as node-compile-cache's row has them).
-    find:
-      roots: [/tmp]
-      paths: ["playwright*", "nix-shell.*/playwright*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/playwright-artifacts-0a3aQN, /tmp/nix-shell.x1/playwright_chromiumdev_profile-Sw4zrD]
-      no_match: [/tmp/a/playwright-x]
-
-  - name: node-compile-cache
-    category: python / js
-    description: Node's compile cache in /tmp and nix-shell temp dirs
-    find:
-      roots: [/tmp]
-      paths: ["node-compile-cache", "nix-shell.*/node-compile-cache"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/node-compile-cache, /tmp/nix-shell.AbC/node-compile-cache]
-      no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
-
-  - name: zephyr-tmp
-    category: embedded
-    description: Zephyr scratch and zephyr-*-run.* dirs in /tmp
-    # DOC: `zephyr-*` already covers `zephyr-*-run.*`; one pattern.
-    find:
-      roots: [/tmp]
-      paths: ["zephyr-*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/zephyr-h5e5-run.jTm9zGlH, /tmp/zephyr-scratch]
-      no_match: [/tmp/zephyr, /tmp/a/zephyr-x]
-
-  - name: renode-tmp
-    category: embedded
-    description: renode-* in /tmp and nix-shell temp dirs
-    # DOC: top-level renode-* here are crash dumps (renode-<pid>-crash);
-    # most renode-<pid> dirs lie inside zephyr-*-run.* (found by zephyr-tmp
-    # as part of the run dir) and nix-shell.* dirs.
-    find:
-      roots: [/tmp]
-      paths: ["renode-*", "nix-shell.*/renode-*"]
-      type: any
-    action: delete
-    examples:
-      match: [/tmp/renode-1045514-crash, /tmp/nix-shell.Ab1/renode-1000523]
-      no_match: [/tmp/renode, /tmp/zephyr-h5e5-run.x/renode-1]
 
   # ---- plain deletes that need roots ------------------------------------
 

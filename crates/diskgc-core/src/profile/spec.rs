@@ -40,6 +40,10 @@ pub struct ProfileSpec {
     pub find: Option<FindSpec>,
     #[serde(default)]
     pub r#where: Option<WhereSpec>,
+    /// Mandatory minimum age for every candidate of this source. A tier
+    /// may demand longer through an `idle_for` filter, never shorter.
+    #[serde(default, deserialize_with = "present_min_idle_for")]
+    pub min_idle_for: Option<DurationSpec>,
     #[serde(default)]
     pub action: Option<ActionSpec>,
     #[serde(default)]
@@ -61,6 +65,9 @@ pub struct FindSpec {
     pub roots: RootsSpec,
     #[serde(default)]
     pub paths: Option<Vec<String>>,
+    /// Paths relative to each root which this source never finds.
+    #[serde(default, deserialize_with = "present_exclude")]
+    pub exclude: Option<Vec<String>>,
     #[serde(default)]
     pub r#type: Option<EntryType>,
 }
@@ -160,6 +167,38 @@ pub struct KindSpec(pub Kind);
 /// A duration in the syntax of [`parse_duration`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurationSpec(pub Duration);
+
+/// A written null must not silently remove a source's safety floor.
+fn present_min_idle_for<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DurationSpec>, D::Error> {
+    DurationSpec::deserialize(deserializer).map(Some)
+}
+
+/// A present null must not silently remove names excluded by a profile.
+fn present_exclude<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    struct ExcludeList;
+
+    impl<'de> Visitor<'de> for ExcludeList {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a non-null list of excluded paths")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut paths = Vec::new();
+            while let Some(path) = seq.next_element()? {
+                paths.push(path);
+            }
+            Ok(paths)
+        }
+    }
+
+    deserializer.deserialize_any(ExcludeList).map(Some)
+}
 
 // ---- Hand-written deserialisers: a value of one of two shapes, with the
 // error of the shape that was written (an untagged enum would only say

@@ -118,12 +118,12 @@ impl IdleMeasure {
 
 /// See [`Library::idle_for`].
 pub(super) fn longest(library: &Library, term: &Term) -> Result<Option<IdleFor>, String> {
-    if library.source(&term.source).is_none() {
-        return Err(format!("no source profile is named `{}`", term.source));
-    }
-    // A source's own `where` has no `idle_for` (the loader refuses it):
-    // when is the tier's choice, through its filters.
-    let mut longest = None;
+    let source = library
+        .source(&term.source)
+        .ok_or_else(|| format!("no source profile is named `{}`", term.source))?;
+    // The source floor applies even to a bare `profile:NAME`. Positive
+    // filters can make it stricter, while a negated filter cannot lower it.
+    let mut longest = source.min_idle_for;
     for factor in &term.factors {
         let Factor::Filter(name) = factor else {
             continue;

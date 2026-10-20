@@ -66,6 +66,126 @@ pub(crate) fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
     Ok(run)
 }
 
+/// Claude and pytest temp sources see open files through the real Linux
+/// process scan, without suppressing their idle siblings.
+/// All runs are dry: the test checks classification without deleting.
+pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("claude-1000", 0o755, TESTER)?;
+    s.mkdir("claude-1000/-home-tester-proj", 0o755, TESTER)?;
+    s.mkdir("claude-1000/-home-tester-proj/session-live", 0o755, TESTER)?;
+    s.write_file(
+        "claude-1000/-home-tester-proj/session-live/output",
+        b"live",
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("claude-1000/-home-tester-proj/session-stale", 0o755, TESTER)?;
+    let claude = Holder::tester(
+        ctx,
+        &[
+            "hold",
+            "/tmp/claude-1000/-home-tester-proj/session-live/output",
+            "/",
+        ],
+        &[],
+    )?;
+
+    s.mkdir("pytest-of-tester", 0o755, TESTER)?;
+    s.mkdir("pytest-of-tester/pytest-1", 0o755, TESTER)?;
+    s.mkdir("pytest-of-tester/pytest-1/test_live", 0o755, TESTER)?;
+    s.write_file(
+        "pytest-of-tester/pytest-1/test_live/output",
+        b"live",
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("pytest-of-tester/pytest-1/test_stale", 0o755, TESTER)?;
+    let pytest = Holder::tester(
+        ctx,
+        &[
+            "hold",
+            "/tmp/pytest-of-tester/pytest-1/test_live/output",
+            "/",
+        ],
+        &[],
+    )?;
+
+    let oracle = Oracle::arm(Fixture::new())?;
+    let claude_run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--min-free",
+            "1K",
+            "--select",
+            "profile:claude-code-tmp",
+            "/tmp",
+        ],
+    )?;
+    let pytest_run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--min-free",
+            "1K",
+            "--select",
+            "profile:pytest-tmp",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge_runs(&[&claude_run, &pytest_run])?;
+    claude_run.expect_code(0)?;
+    pytest_run.expect_code(0)?;
+    let reasons = |run: &Run| -> Result<Vec<(String, Option<String>)>, String> {
+        let r = report(run)?;
+        ensure!(r["status"] == "dry_run", "{r}");
+        Ok(r["plan"]
+            .as_array()
+            .ok_or("plan is not an array")?
+            .iter()
+            .map(|entry| {
+                (
+                    entry["candidate"].as_str().unwrap_or("").to_owned(),
+                    entry["reason"].as_str().map(str::to_owned),
+                )
+            })
+            .collect())
+    };
+    let claude_plan = reasons(&claude_run)?;
+    let pytest_plan = reasons(&pytest_run)?;
+    ensure!(
+        claude_plan.iter().any(|(path, why)| path
+            == "/tmp/claude-1000/-home-tester-proj/session-live"
+            && why.as_deref() == Some("in_use")),
+        "live Claude session was not kept: {claude_plan:?}"
+    );
+    ensure!(
+        claude_plan.iter().any(|(path, why)| path
+            == "/tmp/claude-1000/-home-tester-proj/session-stale"
+            && why.is_none()),
+        "stale Claude session was not eligible: {claude_plan:?}"
+    );
+    ensure!(
+        pytest_plan.iter().any(
+            |(path, why)| path == "/tmp/pytest-of-tester/pytest-1/test_live"
+                && why.as_deref() == Some("in_use")
+        ),
+        "open pytest test directory was not kept: {pytest_plan:?}"
+    );
+    ensure!(
+        pytest_plan.iter().any(
+            |(path, why)| path == "/tmp/pytest-of-tester/pytest-1/test_stale" && why.is_none()
+        ),
+        "idle pytest sibling was not eligible: {pytest_plan:?}"
+    );
+    claude.finish()?;
+    pytest.finish()?;
+    judged.assert_clean()
+}
+
 /// The one JSON object a `--json` run printed.
 pub(crate) fn report(run: &Run) -> Result<Value, String> {
     let lines: Vec<&str> = run.stdout.lines().collect();

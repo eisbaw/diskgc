@@ -25,7 +25,10 @@ mod idle;
 mod load;
 mod roots;
 mod spec;
+mod temp_roots;
 
+#[cfg(test)]
+mod golden;
 #[cfg(test)]
 mod tests;
 
@@ -93,7 +96,7 @@ impl Origin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
-    Source(Source),
+    Source(Box<Source>),
     Filter(Where),
 }
 
@@ -102,11 +105,14 @@ pub enum Body {
 pub struct Source {
     pub roots: Roots,
     pub finds: Finds,
-    /// The profile's own predicates: `has` / `has_not` only (when a source
-    /// is old enough is the tier's choice, through `filter:`s). A term's
+    /// The profile's own predicates: `has` / `has_not` only. The source
+    /// can set `min_idle_for`; a tier can require longer with `filter:`s. A term's
     /// filters narrow further; `!profile:` and `protect` ignore them
     /// (docs/reference.md, Selection grammar and `protect`).
     pub where_: Where,
+    /// Minimum age this source always requires, even when selected alone.
+    /// A term's positive idle filters may only raise this floor.
+    pub min_idle_for: Option<IdleFor>,
     pub action: Action,
     /// Whether its candidates may hold a VCS checkout (`checkouts:`;
     /// [`Checkouts::Refuse`] when the profile does not say). Applies to the
@@ -136,6 +142,7 @@ pub enum Finds {
     /// the selection engine's (task-16).
     Paths {
         patterns: Vec<String>,
+        exclude: Vec<String>,
         entry_type: EntryType,
     },
     /// Kind `cargo-target`: Cargo target directories, recognised by their
@@ -294,8 +301,8 @@ impl Library {
     /// The longest `idle_for` that `term`'s `filter:` factors require
     /// (docs/reference.md, Predicates: two `idle_for` in one term combine
     /// to the longest). `!filter:` factors are complements and do not
-    /// combine; a source has no `idle_for` of its own. `None`: no idle
-    /// requirement.
+    /// combine; a source's `min_idle_for` is an unconditional floor.
+    /// `None`: no idle requirement.
     ///
     /// The term must come from an expression checked against this library
     /// ([`crate::select::compile`]); a name it does not know is an error.

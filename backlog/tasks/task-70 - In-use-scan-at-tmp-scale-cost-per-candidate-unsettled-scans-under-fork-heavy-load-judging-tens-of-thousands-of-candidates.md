@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:06'
-updated_date: '2026-10-19 23:49'
+updated_date: '2026-10-20 01:10'
 labels:
   - wave-2
   - spike
@@ -47,4 +47,8 @@ From task-68's review (mped S4): there are now two scan-reuse policies. inuse::C
 2026-10-20 verified in isolated task70 worktree: fs_kind::discover plus fs_kind::reclaim completed 40,000 distinct /tmp/entry-* file candidates on the in-memory host model in 43.397 s; exactly 40,000 unlinkat calls and two process scans, with the model clock advanced exactly 1 s after unlink 20,000. This exercises the deletion protocol but omits executor space sampling because ModelHost statvfs recomputes all reachable inodes per candidate and is quadratic at this size. The new deadline model test passes: an unsettled first scan gets its one retry, retry crosses the deadline, and the candidate remains unjudged with exit 124. Isolated nix develop -c just check passed in 62.41 s after correcting that test expectation. Read-only real laptop LinuxHost raw scans in the GNU debug dev build took 431, 393, 411 ms wall (internal scan timing 424, 386, 404 ms); 514-515 processes, six listings each, all settled and unblocked. The raw scan algorithm was not sped up; the change amortizes a scan over candidates within strict freshness. Built-in /tmp profile real-host timing on this patch, integrated e2e, QA and MPED review remain pending. No live deletion. Keep task To Do until integrated gates and review.
 
 2026-10-20 integrated review: task-70 protocol change rebased on 495739b. A 1 s deleting scan reuse caused five Cargo race E2E failures; restored the 500 ms deletion reuse, retaining the strict 1 s deletion freshness bound. The 40,000 candidate direct fs protocol model completes with exactly two scans at a 500 ms virtual clock boundary and 40,000 unlinks; plan scans can reuse for 60 s. Slow blocking scans now reuse for 500 ms from completion, zero reuse requests are respected, a transient unsettled scan retries once after 20 ms, and a final-candidate scan crossing the deadline reports Deadline. Real-host raw scans on the laptop were 431/393/411 ms wall for 514-515 processes; raw scan CPU was not improved. Integrated Nix just e2e passed 90/90; QA and MPED review GO. The 40k model omits executor statvfs and advances only virtual time: it proves scan cadence, not 40k real-host throughput. Per-candidate walk cost and built-in /tmp real-host timing remain open, so TASK-70 remains To Do.
+
+2026-10-20 indexed process environment paths in the in-use scan (integrated profile worktree): a warm-cache read-only host plan judged all 361,495 pytest candidates in 350.56 s with no errors; 361,358 eligible, 137 contains_ipc. Three sampled eligible size estimates exactly matched du -x -B1 -s. Earlier 300 s indexed run judged 203,667 candidates, versus 22,126 in an earlier unindexed run; these are not controlled cold-cache comparisons. The full run followed warm-up scans, so cold-cache completion inside the default 10-minute timeout and 40k real deletion throughput remain unproven. No live host deletion.
+
+Environment-path index integrated; post-fix nix develop -c just e2e passed 93/93 on 2026-10-20 and QA/MPED reviews GO. TASK-70 remains To Do for cold-cache plan timing, peak RSS of ancestor index, and real-host 40k deletion throughput; no live host deletion was attempted.
 <!-- SECTION:NOTES:END -->

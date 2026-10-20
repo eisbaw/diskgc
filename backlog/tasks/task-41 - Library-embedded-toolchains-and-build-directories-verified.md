@@ -4,7 +4,7 @@ title: 'Library: embedded toolchains and build directories, verified'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-19 22:41'
+updated_date: '2026-10-20 00:28'
 labels:
   - wave-4
   - config
@@ -36,6 +36,8 @@ Dogfooding run 2026-10-17 (read-only probe of LinuxHost plus ncdu of $HOME, /tmp
 From task-68: zephyr-tmp (`zephyr-*`, which covers `zephyr-*-run.*`): 2,517 eligible, 2.1 GiB, matches du. renode-tmp: 1,891 eligible, 34 MiB (top-level renode-<pid>-crash files plus renode-* in nix-shell.*; those in zephyr run dirs go with the run dir). cmake-build as documented selected an in-source build (a git checkout with uncommitted changes, 5.6 GiB): the row now requires no CMakeLists.txt (reference.md), and task-71 asks for a general guard. west-build cannot express "plus zephyr/" (task-16) and so also finds plain CMake build/ dirs. platformio-cache: nothing on this laptop.
 
 2026-10-20 partial profile checkpoint: pytest-cache only is embedded, with pytest 9.0.3 examples, golden/model tests, and read-only dry run under /home/mpedersen: 62 candidates, 62 eligible, 0 skips, 13,774,848 bytes, matching du. A distinguishing pattern mutation made its golden test red; restored. Other task-41 profiles remain planned, so ACs/status stay open.
+
+2026-10-20 read-only built-in dry runs on this laptop with --min-free 500G, no deletions, full expanded temp-prefix v1 scope: zephyr-tmp 2,776 candidates, 2,770 eligible, 6 contains_checkout, 220,872,704 eligible bytes; renode-tmp 1,912 candidates, all eligible, 37,482,496 bytes. For each, the three largest extant eligible candidates matched du -s -B1 byte for byte. Both carry match/no_match examples, verified_with, exact-definition and golden fixtures, ModelHost checks, and type mutation tests that distinguish their match sets. west-build, platformio-cache and cmake-build remain planned, and the any-depth rule remains open; TASK-41 stays To Do.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

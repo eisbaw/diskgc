@@ -11,6 +11,7 @@ use super::spec::{
     ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, ProfileSpec, RootsSpec, WhereSpec,
     parse_profiles,
 };
+use super::temp_roots;
 use super::{Action, Body, Examples, Finds, IdleFor, Origin, Profile, Roots, Source, Where};
 use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
@@ -197,7 +198,9 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
         .map(|w| where_(w, &mut problems))
         .unwrap_or_default();
     let body = match &spec.find {
-        Some(find) => source(spec, find, where_, origin, &mut problems).map(Body::Source),
+        Some(find) => source(spec, find, where_, origin, &mut problems)
+            .map(Box::new)
+            .map(Body::Source),
         None => filter(spec, where_, &mut problems).map(Body::Filter),
     };
     match body {
@@ -244,6 +247,11 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
             spec.checkouts.is_some(),
             "whether candidates may hold a checkout is the source's setting",
         ),
+        (
+            "min_idle_for",
+            spec.min_idle_for.is_some(),
+            "a mandatory minimum age is the source's setting",
+        ),
     ] {
         if present {
             problems.push(format!("a filter profile has no `{field}`: {why}"));
@@ -262,11 +270,20 @@ fn source(
 ) -> Option<Source> {
     let kind = spec.kind.map_or(Kind::Fs, |k| k.0);
     let roots = roots(&find.roots, problems);
+    let min_idle_for = spec.min_idle_for.map(|duration| IdleFor(duration.0));
+    if let Some(minimum) = min_idle_for {
+        if minimum.0.is_zero() {
+            problems.push("`min_idle_for` must be greater than zero".to_owned());
+        }
+        if !PredicateName::IdleFor.supported_by(kind) {
+            problems.push(format!("`min_idle_for` is not supported by kind {kind}"));
+        }
+    }
     for predicate in where_.predicates() {
         if predicate == PredicateName::IdleFor {
             problems.push(
-                "a source profile's `where` takes only `has` and `has_not`: when a source is \
-                 old enough is the tier's choice, written as a filter (`&& filter:idle-3d`)"
+                "a source profile's `where` takes only `has` and `has_not`: set a mandatory \
+                 minimum with `min_idle_for`, or a tier policy with a filter (`&& filter:idle-3d`)"
                     .to_owned(),
             );
         } else if !predicate.supported_by(kind) {
@@ -285,11 +302,12 @@ fn source(
                 .to_owned(),
         );
     }
-    let (finds, action, examples) = match kind {
+    let (mut finds, action, examples) = match kind {
         Kind::Fs => fs(spec, find, problems)?,
         Kind::CargoTarget => {
             for (field, present) in [
                 ("find.paths", find.paths.is_some()),
+                ("find.exclude", find.exclude.is_some()),
                 ("find.type", find.r#type.is_some()),
                 ("examples", spec.examples.is_some()),
             ] {
@@ -318,10 +336,17 @@ fn source(
             return None;
         }
     };
+    if let Finds::Paths { patterns, .. } = &mut finds {
+        match temp_roots::effective(origin, &spec.name, patterns.clone()) {
+            Ok(effective) => *patterns = effective,
+            Err(problem) => problems.push(problem),
+        }
+    }
     Some(Source {
         roots: roots?,
         finds,
         where_,
+        min_idle_for,
         action,
         // Absent: refused (fail closed).
         checkouts: spec.checkouts.map_or_else(Checkouts::default, |c| c.0),
@@ -358,6 +383,12 @@ fn fs(
         problems.push("kind fs needs `find.type` (dir, file or any)".to_owned());
         None
     });
+    let exclude = find.exclude.as_deref().unwrap_or_default();
+    for path in exclude {
+        if let Err(problem) = pattern(path) {
+            problems.push(format!("`find.exclude`: {problem}"));
+        }
+    }
     let action = match &spec.action {
         None => {
             problems.push(
@@ -375,6 +406,7 @@ fn fs(
     Some((
         Finds::Paths {
             patterns: patterns?,
+            exclude: exclude.to_vec(),
             entry_type: entry_type?,
         },
         action?,

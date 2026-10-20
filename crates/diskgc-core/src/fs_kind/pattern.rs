@@ -129,10 +129,25 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// required`), any root will do: the path's last names match a pattern.
 /// Paths only: the entry type is not part of an example.
 pub fn path_matches(roots: Option<&[&Path]>, patterns: &[Pattern], path: &Path) -> bool {
+    path_matches_except(roots, patterns, &[], path)
+}
+
+/// As [`path_matches`], but the positive and excluded patterns are checked
+/// against the same root. A required root may be any ancestor, so two
+/// independent suffix checks would wrongly exclude some positive matches.
+pub fn path_matches_except(
+    roots: Option<&[&Path]>,
+    patterns: &[Pattern],
+    exclude: &[Pattern],
+    path: &Path,
+) -> bool {
     let Some(path) = names_of(path) else {
         return false;
     };
-    let below = |rel: &[&OsStr]| patterns.iter().any(|p| p.matches_names(rel));
+    let below = |rel: &[&OsStr]| {
+        patterns.iter().any(|p| p.matches_names(rel))
+            && !exclude.iter().any(|p| p.matches_names(rel))
+    };
     match roots {
         Some(roots) => roots.iter().any(|root| {
             names_of(root).is_some_and(|root| {

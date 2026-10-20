@@ -39,7 +39,7 @@ mod tests;
 
 pub use discover::{Discovery, Found, discover};
 pub use judge::{Judge, Reached, Tally, Walked};
-pub use pattern::{Pattern, RESERVED, Segment, path_matches};
+pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
 pub use plan::{Planned, plan};
 pub use reclaim::{Reclaimed, reclaim, tally};
 
@@ -52,6 +52,7 @@ pub use crate::engine::{PRIVATE_TMP_PREFIX, is_private_tmp, path_in_private_tmp}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Find {
     pub patterns: Vec<Pattern>,
+    pub exclude: Vec<Pattern>,
     pub entry_type: EntryType,
     /// The source's own `where`: a file the candidate must contain
     /// (directly in it, as a regular file) ...
@@ -67,8 +68,15 @@ impl Find {
         match &source.finds {
             Finds::Paths {
                 patterns,
+                exclude,
                 entry_type,
-            } => Some(Self::new(patterns, *entry_type, &source.where_, uid)),
+            } => Some(Self::with_excludes(
+                patterns,
+                exclude,
+                *entry_type,
+                &source.where_,
+                uid,
+            )),
             Finds::CargoTargets => None,
         }
     }
@@ -76,8 +84,20 @@ impl Find {
     /// The `find` of a kind `fs` source with these patterns, entry type and
     /// own `where`, for the user `uid`.
     pub fn new(patterns: &[String], entry_type: EntryType, where_: &Where, uid: u32) -> Self {
+        Self::with_excludes(patterns, &[], entry_type, where_, uid)
+    }
+
+    /// As [`Self::new`], with paths that must never become candidates.
+    pub fn with_excludes(
+        patterns: &[String],
+        exclude: &[String],
+        entry_type: EntryType,
+        where_: &Where,
+        uid: u32,
+    ) -> Self {
         Self {
             patterns: patterns.iter().map(|p| Pattern::compile(p, uid)).collect(),
+            exclude: exclude.iter().map(|p| Pattern::compile(p, uid)).collect(),
             entry_type,
             has: where_.has.clone(),
             has_not: where_.has_not.clone(),

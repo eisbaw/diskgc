@@ -241,12 +241,22 @@ impl<H: Host> Walk<'_, H> {
                 continue;
             }
             let at = path.join(name);
+            // Exclusions remove only the matching candidate. A positive
+            // pattern can still need this path as an intermediate directory.
+            let excluded = !self.find.exclude.is_empty()
+                && crate::fs_kind::path_matches(Some(&[self.root]), &self.find.exclude, &at);
+            let has_deeper = matching
+                .iter()
+                .any(|&i| self.find.patterns[i].depth() > level + 1);
+            if excluded && !has_deeper {
+                continue;
+            }
             let ends = matching
                 .iter()
                 .any(|&i| self.find.patterns[i].depth() == level + 1);
             if self.is_mount_point(&at) {
                 // Never statted: a dead mount would hang it.
-                if ends {
+                if ends && !excluded {
                     self.out.candidates.push((
                         at.clone(),
                         Err(Skip::new(
@@ -279,6 +289,7 @@ impl<H: Host> Walk<'_, H> {
                 continue;
             };
             if ends
+                && !excluded
                 && type_matches(self.find.entry_type, file_type)
                 && self.candidate(dir, &at, name, &stat)?
             {

@@ -35,7 +35,8 @@ impl From<&str> for Protection {
 }
 
 /// Facts observed for one tier. `source_matches` includes a source's own
-/// `where`; `profile_overlaps` deliberately ignores that `where`, and must
+/// `where` and mandatory `min_idle_for`; `profile_overlaps` deliberately
+/// ignores those source conditions, and must
 /// include a match equal to, above, or below `candidate`. Paths must be
 /// absolute and normalised. If discovery of a protected or negated profile
 /// is incomplete, the caller must refuse the affected tier rather than

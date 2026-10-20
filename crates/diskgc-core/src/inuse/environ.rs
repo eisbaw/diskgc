@@ -6,11 +6,41 @@
 //! by nature: a symlinked or relative path, a path of another mount
 //! namespace and a variable changed after `exec` are not recognised.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
+use super::EnvPath;
 use crate::host::Environ;
+
+/// An index of the first environment path inside each possible candidate.
+/// A scan can contain thousands of paths, while a large read-only plan can
+/// check hundreds of thousands of candidates against the same scan. Keep
+/// the source paths in their original order and index their ancestors once.
+/// Both the written and lexically resolved forms are indexed, matching
+/// [`inside`]'s conservative treatment of `.` and `..`.
+#[derive(Debug, Clone, Default)]
+pub(super) struct EnvPathIndex(HashMap<PathBuf, usize>);
+
+impl EnvPathIndex {
+    pub(super) fn new(paths: &[EnvPath]) -> Self {
+        let mut first = HashMap::new();
+        for (i, entry) in paths.iter().enumerate() {
+            for ancestor in entry.path.ancestors() {
+                first.entry(ancestor.to_owned()).or_insert(i);
+            }
+            for ancestor in lexical(&entry.path).ancestors() {
+                first.entry(ancestor.to_owned()).or_insert(i);
+            }
+        }
+        Self(first)
+    }
+
+    pub(super) fn first_inside(&self, candidate: &Path) -> Option<usize> {
+        self.0.get(candidate).copied()
+    }
+}
 
 /// The absolute paths named by `env`: every variable's value split at `:`
 /// (so `PATH`-like lists count component by component), absolute
@@ -103,6 +133,56 @@ mod tests {
         }
         for no in ["/tmp/cc", "/tmp", "/tmp/x/c", "/", "/tmp/x/../cc"] {
             assert!(!inside(Path::new(no), c), "{no}");
+        }
+    }
+
+    #[test]
+    fn indexed_lookup_agrees_with_the_written_and_lexical_prefix_rules() {
+        let paths = [
+            "/tmp/a/../c/file",
+            "/tmp/c/../x",
+            "/tmp//c/f",
+            "/tmp/./d/f",
+            "/tmp/candidate-sibling/f",
+            "/tmp/x/../../var/tmp/e",
+            "/home/u/project/target",
+            "/tmp/\u{00e9}/f",
+        ];
+        let entries: Vec<EnvPath> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| EnvPath {
+                pid: crate::host::Pid(i as u32),
+                var: "TMPDIR".into(),
+                path: (*path).into(),
+            })
+            .collect();
+        let index = EnvPathIndex::new(&entries);
+        for candidate in [
+            "/",
+            "/tmp",
+            "/tmp/a",
+            "/tmp/c",
+            "/tmp/c/..",
+            "/tmp/x",
+            "/tmp/candidate",
+            "/tmp/candidate-sibling",
+            "/tmp/d",
+            "/var/tmp/e",
+            "/home/u/project",
+            "/home/u/project/target",
+            "/home/u/project/targets",
+            "/tmp/\u{00e9}",
+            "/missing",
+        ] {
+            let candidate = Path::new(candidate);
+            let expected = entries.iter().position(|e| inside(&e.path, candidate));
+            assert_eq!(
+                index.first_inside(candidate),
+                expected,
+                "{}",
+                candidate.display()
+            );
         }
     }
 }

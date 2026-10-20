@@ -77,7 +77,7 @@
   <rect x="420" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="440" y="394" class="h3">Composing them in a tier</text>
   <text x="440" y="420" class="mono code">select: (profile:pytest-tmp ||</text>
-  <text x="440" y="438" class="mono code">          profile:nix-shell-rc)</text>
+  <text x="440" y="438" class="mono code">          profile:mktemp-dir)</text>
   <text x="440" y="456" class="mono code">        &amp;&amp; filter:idle-3d</text>
   <text x="440" y="482" class="body">• names qualified: profile:… and filter:…</text>
   <text x="440" y="500" class="body">• term: one profile &amp;&amp; filters, !filter:, !profile:</text>
@@ -87,7 +87,7 @@
   <text x="440" y="576" class="small">a built-in name never changes what it matches</text>
 
   <rect x="800" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
-  <text x="820" y="394" class="h3">Built-in library (v1 targets)</text>
+  <text x="820" y="394" class="h3">Built-in library (v1 targets, some planned)</text>
   <text x="820" y="418" class="body"><tspan font-weight="700">test</tspan>  pytest-tmp, pytest-cache</text>
   <text x="820" y="436" class="body"><tspan font-weight="700">nix</tspan>  nix-shell-rc, nix-shell-tmpdir, nix-garbage</text>
   <text x="820" y="454" class="body"><tspan font-weight="700">rust</tspan>  cargo-target</text>
@@ -149,19 +149,19 @@
   <text x="600" y="872" class="body" text-anchor="middle" font-weight="700">The index is a cache, never an authority: a stale or missing index costs speed, never safety.</text>
 
   <!-- ===================== CONFIG ===================== -->
-  <text x="40" y="924" class="section">CONFIG: GROUPS ESCALATE, TIERS SELECT PROFILES</text>
+  <text x="40" y="924" class="section">CONFIG (SCHEMATIC): GROUPS ESCALATE, TIERS SELECT PROFILES</text>
 
   <rect x="40" y="938" width="740" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
   <circle cx="64" cy="962" r="5" fill="#2f9a5a"/>
   <text x="76" y="967" class="h3">group stale · ranking: random (tiers shuffled within the group)</text>
-  <text x="64" y="992" class="mono code">test-and-shell-cruft  (profile:pytest-tmp || profile:nix-shell-rc) &amp;&amp; filter:idle-3d</text>
+  <text x="64" y="992" class="mono code">test-and-shell-cruft  (profile:pytest-tmp || profile:mktemp-dir) &amp;&amp; filter:idle-3d</text>
   <text x="64" y="1012" class="mono code">cargo-stale           profile:cargo-target &amp;&amp; filter:idle-7d   roots: /home/mark/src</text>
   <text x="64" y="1032" class="mono code">docker-cache-stale    profile:docker-build-cache &amp;&amp; filter:idle-7d</text>
   <text x="64" y="1052" class="mono code">nix-dead              profile:nix-garbage</text>
   <circle cx="64" cy="1084" r="5" fill="#d97706"/>
   <text x="76" y="1089" class="h3">group pressure · ordered (costs rebuild or download time)</text>
   <text x="64" y="1114" class="mono code">docker-dangling       profile:docker-dangling</text>
-  <text x="64" y="1134" class="mono code">tmp-old               profile:tmp-entry &amp;&amp; filter:idle-2d</text>
+  <text x="64" y="1134" class="mono code">tmp-old               profile:mktemp-dir &amp;&amp; filter:idle-2d</text>
   <text x="64" y="1154" class="mono code">cargo-recent          profile:cargo-target &amp;&amp; filter:idle-1h   roots: /home/mark/src</text>
   <text x="64" y="1186" class="mono code">protect: [claude-code-tmp]</text>
   <text x="300" y="1186" class="small">(never deleted by any tier, by overlap)</text>

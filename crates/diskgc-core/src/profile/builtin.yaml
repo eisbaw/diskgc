@@ -68,6 +68,125 @@
     match: [/home/mark/go/pkg/mod]
     no_match: [/home/mark/go/pkg, /home/mark/go/pkg/mod/cache]
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20
+# Each fs source below removes only its own matched entries. The selecting
+# tier sets idle policy unless the source declares a mandatory minimum.
+- name: pytest-tmp
+  category: test
+  description: pytest test directories under the frozen temp-prefix v1 roots
+  find:
+    roots: [/tmp, /var/tmp]
+    # The built-in loader expands this base through temp-prefix v1; `profiles
+    # show` prints every effective pattern. See docs/reference.md.
+    paths: ["pytest-of-*/pytest-*/*"]
+    type: dir
+  checkouts: allow
+  action: delete
+  examples:
+    match: [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0, /var/tmp/tmp.x1/pytest-of-ci/pytest-12/test_z0, /tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-4/test_c0, /tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-ci/pytest-5/test_n0]
+    no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3, /tmp/pytest-of-mark/garbage-1a2b, /home/mark/pytest-of-mark/pytest-3/test_x0]
+  verified_with: pytest 8.3 (read-only survey 2026-10-19)
+
+- name: mktemp-dir
+  category: generic
+  description: coreutils mktemp -d directories under temp-prefix v1 roots in /tmp
+  find: {roots: [/tmp], paths: ["tmp.*"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/tmp.AbC123, /tmp/claude-1000/tmp.AbC123, /tmp/nix-shell.A/tmp.AbC123]
+    no_match: [/tmp/tmp00i1c8qs, /tmp/tmp, /var/tmp/tmp.AbC123]
+  verified_with: GNU coreutils 9.11 (host layout 2026-10-19)
+
+- name: claude-code-tmp
+  category: ai agents
+  description: Claude Code numbered session directories under its per-user temp root
+  find: {roots: [/tmp], paths: ["claude-{uid}/-*/*"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a]
+    no_match: [/tmp/claude-1000/-home-mark-src-app, /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark, /tmp/claude-1001x/-a/b]
+  verified_with: Claude Code 2.1.280 (host layout 2026-10-20; read-only survey 2026-10-18)
+
+- name: chromium-tmp
+  category: browsers
+  description: Chromium and Brave scratch files and directories in /tmp
+  find: {roots: [/tmp], paths: [".org.chromium.Chromium.*", "org.chromium.Chromium.*"], type: any}
+  action: delete
+  examples:
+    match: [/tmp/.org.chromium.Chromium.aB3dEf, /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
+    no_match: [/tmp/org.mozilla.firefox.x, /tmp/sub/org.chromium.Chromium.x]
+  verified_with: Brave Browser 154.1.96.61 (host layout 2026-10-20; read-only survey 2026-10-18)
+
+- name: node-compile-cache
+  category: python / js
+  description: Node compile cache under temp-prefix v1 roots in /tmp
+  find: {roots: [/tmp], paths: ["node-compile-cache"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/node-compile-cache, /tmp/nix-shell.AbC/node-compile-cache, /tmp/claude-1000/nix-shell.Ab1/node-compile-cache]
+    no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
+  verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18)
+
+- name: playwright-tmp
+  category: python / js
+  description: Playwright scratch directories under temp-prefix v1 roots in /tmp
+  find: {roots: [/tmp], paths: ["playwright*"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/playwright-artifacts-0a3aQN, /tmp/nix-shell.x1/playwright_chromiumdev_profile-Sw4zrD, /tmp/nix-develop-1-2/playwright_abc, /tmp/claude-1000/nix-shell.Ab1/playwright-artifacts]
+    no_match: [/tmp/a/playwright-x, /tmp/playwright-artifacts-0a3aQN/log.txt]
+  verified_with: Playwright 1.56.1 (controlled browser TMPDIR probe 2026-10-20)
+
+- name: zephyr-tmp
+  category: embedded
+  description: Zephyr scratch and run directories directly under /tmp
+  find: {roots: [/tmp], paths: ["zephyr-*"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/zephyr-h5e5-run.jTm9zGlH, /tmp/zephyr-scratch]
+    no_match: [/tmp/zephyr, /tmp/a/zephyr-x]
+  verified_with: Zephyr 4.5.0-rc1 (host run log 2026-10-19; read-only survey 2026-10-18)
+
+- name: renode-tmp
+  category: embedded
+  description: Renode temp directories under temp-prefix v1 roots in /tmp
+  find: {roots: [/tmp], paths: ["renode-*"], type: dir}
+  action: delete
+  examples:
+    match: [/tmp/renode-1045514-crash, /tmp/nix-shell.Ab1/renode-1000523, /tmp/zephyr-h5e5-run.jTm9zGlH/renode-1]
+    no_match: [/tmp/renode, /tmp/a/renode-1]
+  verified_with: Renode 1.17.0 (installed TemporaryFilesManager source; host dry-run 2026-10-18)
+
+- name: containers-image-tmp
+  category: containers
+  description: Podman and Buildah temporary image storage left in /var/tmp
+  find:
+    roots: [/var/tmp]
+    paths: ["buildah*", "container_images_storage*"]
+    type: any
+  min_idle_for: 3d
+  action: delete
+  examples:
+    match: [/var/tmp/buildah3558241755, /var/tmp/container_images_storage528829445]
+    no_match: [/tmp/buildah3558241755, /var/tmp/buildah3558241755/content, /var/tmp/containers/storage]
+  verified_with: Podman 5.8.7 observed temporary directories 2026-10-20
+
+- name: xdg-cache-entry
+  category: generic
+  description: Top-level entries of a supplied XDG_CACHE_HOME, excluding known state and dedicated caches
+  find:
+    roots: required
+    paths: ["*"]
+    # These are exact names relative to XDG_CACHE_HOME. Keep user data,
+    # credentials, repository caches and entries owned by dedicated profiles.
+    exclude: [.bun, borg, ccache, claude, containers, cursor_api_sessions, dconf, gh, ghidra, go-build, gpauth, huggingface, Microsoft, nix, opencode, "Palo Alto Networks", pip, pre-commit, sdkmanager, sessions, teleport-device, torch, uv, wine]
+    type: any
+  min_idle_for: 30d
+  checkouts: refuse
+  action: delete
+  examples:
+    match: [/home/mark/.cache/nix-index, /home/mark/.cache/microsoft-edge, /home/mark/.cache/icon-cache.kcache]
+    no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv]
+  verified_with: XDG Base Directory Specification 0.8; host XDG_CACHE_HOME layout surveyed 2026-10-20
 
 - name: idle-1h
   category: filters

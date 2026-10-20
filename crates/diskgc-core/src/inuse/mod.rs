@@ -119,6 +119,9 @@ pub struct Scan {
     /// Memory-map uses by inode number alone (see [`MAPS_BY_INODE`]).
     maps_by_inode: HashMap<u64, Vec<Pid>>,
     environ: Vec<EnvPath>,
+    /// First environment-path match per candidate prefix, built once per
+    /// scan. The original vector remains the source of truth for reports.
+    environ_index: environ::EnvPathIndex,
     unreadable: Vec<Unreadable>,
     environ_failed: Vec<(Pid, HostError)>,
     held_deleted: Vec<HeldDeleted>,
@@ -145,6 +148,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         uses: HashMap::new(),
         maps_by_inode: HashMap::new(),
         environ: Vec::new(),
+        environ_index: environ::EnvPathIndex::default(),
         unreadable: gathered.unreadable,
         environ_failed: gathered.environ_failed,
         held_deleted: Vec::new(),
@@ -170,6 +174,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         }
         s.seen.insert(pid, read.seen);
     }
+    s.environ_index = environ::EnvPathIndex::new(&s.environ);
     Ok(s)
 }
 
@@ -413,7 +418,11 @@ impl Scan {
                 );
             }
         }
-        if let Some(e) = self.environ.iter().find(|e| environ::inside(&e.path, path)) {
+        if let Some(e) = self
+            .environ_index
+            .first_inside(path)
+            .map(|i| &self.environ[i])
+        {
             return in_use(
                 e.path.clone(),
                 format!(

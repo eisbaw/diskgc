@@ -243,12 +243,17 @@ fn action_json(action: &Action) -> Json {
 }
 
 fn find_json(source: &Source) -> Json {
-    let (paths, entry_type) = match &source.finds {
+    let (paths, exclude, entry_type) = match &source.finds {
         Finds::Paths {
             patterns,
+            exclude,
             entry_type,
-        } => (strings(patterns), Json::str(entry_type.name())),
-        Finds::CargoTargets => (Json::Null, Json::Null),
+        } => (
+            strings(patterns),
+            strings(exclude),
+            Json::str(entry_type.name()),
+        ),
+        Finds::CargoTargets => (Json::Null, Json::Null, Json::Null),
     };
     let (roots, required) = match &source.roots {
         Roots::Fixed(list) => (strings(list), false),
@@ -258,6 +263,7 @@ fn find_json(source: &Source) -> Json {
         ("roots", roots),
         ("roots_required", Json::Bool(required)),
         ("paths", paths),
+        ("exclude", exclude),
         ("type", entry_type),
     ])
 }
@@ -267,7 +273,7 @@ fn find_json(source: &Source) -> Json {
 /// kind has none.
 pub fn profile_json(p: &Profile) -> Json {
     let source = match &p.body {
-        Body::Source(source) => Some(source),
+        Body::Source(source) => Some(source.as_ref()),
         Body::Filter(_) => None,
     };
     let where_ = match &p.body {
@@ -284,6 +290,12 @@ pub fn profile_json(p: &Profile) -> Json {
         ("kind", Json::opt(source, |s| Json::str(s.kind().name()))),
         ("find", Json::opt(source, find_json)),
         ("where", where_json(where_)),
+        (
+            "min_idle_for",
+            Json::opt(source.and_then(|s| s.min_idle_for), |d| {
+                Json::str(format_duration(d.0))
+            }),
+        ),
         ("action", Json::opt(source, |s| action_json(&s.action))),
         (
             "checkouts",
@@ -451,14 +463,21 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
             ));
             if let Finds::Paths {
                 patterns,
+                exclude,
                 entry_type,
             } = &source.finds
             {
                 out.push_str(&format!("    paths: {}\n", yaml_list(patterns)));
+                if !exclude.is_empty() {
+                    out.push_str(&format!("    exclude: {}\n", yaml_list(exclude)));
+                }
                 out.push_str(&format!("    type: {}\n", entry_type.name()));
             }
             if let Some(where_) = yaml_where(&source.where_) {
                 out.push_str(&format!("  where: {where_}\n"));
+            }
+            if let Some(minimum) = source.min_idle_for {
+                out.push_str(&format!("  min_idle_for: {}\n", format_duration(minimum.0)));
             }
             out.push_str(&yaml_action(&source.action));
             out.push_str(&format!("  checkouts: {}\n", source.checkouts.as_str()));

@@ -78,6 +78,14 @@ const PROFILES: &str = r#"
   checkouts: allow
   action: delete
   examples: {match: [/srv/a/b/c]}
+- name: excluded-prefix
+  find:
+    roots: [/tmp]
+    paths: ["excluded", "excluded/item", "allowed/item"]
+    exclude: ["excluded"]
+    type: dir
+  action: delete
+  examples: {match: [/tmp/excluded/item], no_match: [/tmp/excluded]}
 "#;
 
 fn library() -> Library {
@@ -137,6 +145,51 @@ fn built_in_request(select: &str, root: &str) -> Request {
         tally_budget: None,
         tier: Tier::select(select, &library, Some(&roots), 1000).unwrap_or_else(|e| panic!("{e}")),
     }
+}
+
+/// The built-in's floor is applied by the real dry-run executor without a
+/// tier filter. The model clock makes 3-day-old, new and future entries
+/// deterministic while a process holds one old file open.
+#[test]
+fn containers_image_tmp_requires_its_source_age_and_refuses_open_files() {
+    let model = yaml(
+        r#"  /var/tmp/buildah-old: {.: {mtime: 2026-10-01T00:00:00Z}, image: {size: 1K, mtime: 2026-10-01T00:00:00Z}}
+  /var/tmp/container_images_storage-old: {size: 2K, mtime: 2026-10-01T00:00:00Z}
+  /var/tmp/buildah-fresh: {size: 1K, mtime: 2026-10-14T00:00:00Z}
+  /var/tmp/container_images_storage-busy: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+  /var/tmp/buildah-future: {size: 1K, mtime: 2026-10-16T00:00:00Z}
+processes:
+  - {pid: 42, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], fds: [{path: /var/tmp/container_images_storage-busy}], environ: [PATH=/usr/bin]}
+"#,
+    );
+    let host = host(&model);
+    let library = Library::builtin().unwrap();
+    let tier = Tier::select("profile:containers-image-tmp", &library, None, 1000).unwrap();
+    assert_eq!(
+        tier.idle_for,
+        Some(diskgc_core::profile::IdleFor(Duration::from_secs(
+            3 * 86_400
+        )))
+    );
+    let request = Request {
+        path: PathBuf::from("/var/tmp"),
+        min_free: parse_size("100G").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier,
+    };
+    let report = dry_run(&host, &request);
+    for (candidate, reason) in [
+        ("/var/tmp/buildah-old", None),
+        ("/var/tmp/container_images_storage-old", None),
+        ("/var/tmp/buildah-fresh", Some("not_idle")),
+        ("/var/tmp/container_images_storage-busy", Some("in_use")),
+        ("/var/tmp/buildah-future", Some("future_time")),
+    ] {
+        assert_eq!(reason_of(&report, candidate), Some(reason), "{candidate}");
+    }
+    nothing_locked_or_deleted(&host);
 }
 
 /// Each entry is present in the same fixture, including similar but
@@ -238,6 +291,56 @@ fn shipped_home_cache_profiles_never_match_regular_files() {
         assert!(plan(&report).is_empty(), "{profile}: {:#?}", report.plan);
         nothing_locked_or_deleted(&host);
     }
+}
+
+/// The broad cache source has a frozen one-level match set, including files.
+/// Named state and dedicated caches are omitted before eligibility. A
+/// checkout not on the name list remains visible, but is refused by the
+/// ordinary checkout guard. The source's mandatory idle floor applies to
+/// both entry types even without a tier filter.
+#[test]
+fn xdg_cache_entry_golden_match_and_idle_policy() {
+    let host = host(&yaml(
+        r#"  /home/mark/.cache/nix-index: {.: {mtime: 2026-09-01T00:00:00Z}, index: {size: 4K, mtime: 2026-09-01T00:00:00Z}}
+  /home/mark/.cache/icon-cache.kcache: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+  /home/mark/.cache/fresh: {.: {mtime: 2026-10-14T00:00:00Z}, data: {size: 1K, mtime: 2026-10-14T00:00:00Z}}
+  /home/mark/.cache/unknown-repo: {.: {mtime: 2026-09-01T00:00:00Z}, .git: {.: {mtime: 2026-09-01T00:00:00Z}}}
+  /home/mark/.cache/huggingface: {.: {mtime: 2026-09-01T00:00:00Z}, model: {size: 100M}}
+  /home/mark/.cache/borg: {.: {mtime: 2026-09-01T00:00:00Z}}
+  /home/mark/.cache/nix: {.: {mtime: 2026-09-01T00:00:00Z}, gitv3: {.: {mtime: 2026-09-01T00:00:00Z}}}
+  /home/mark/.cache/.bun: {.: {mtime: 2026-09-01T00:00:00Z}}
+  /home/mark/.cache/pre-commit: {.: {mtime: 2026-09-01T00:00:00Z}, .git: {.: {mtime: 2026-09-01T00:00:00Z}}}
+"#,
+    ));
+    let report = dry_run(
+        &host,
+        &built_in_request("profile:xdg-cache-entry", "/home/mark/.cache"),
+    );
+    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    let mut actual = plan(&report);
+    actual.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        actual,
+        [
+            ("/home/mark/.cache/fresh".to_owned(), Some("not_idle")),
+            ("/home/mark/.cache/icon-cache.kcache".to_owned(), None),
+            ("/home/mark/.cache/nix-index".to_owned(), None),
+            (
+                "/home/mark/.cache/unknown-repo".to_owned(),
+                Some("contains_checkout")
+            ),
+        ]
+    );
+    let nix = dry_run(
+        &host,
+        &built_in_request("profile:nix-user-cache", "/home/mark"),
+    );
+    assert_eq!(
+        reason_of(&nix, "/home/mark/.cache/nix/gitv3"),
+        Some(None),
+        "the dedicated profile still reaches its narrower cache path"
+    );
+    nothing_locked_or_deleted(&host);
 }
 
 /// The Go cache really can contain read-only module directories. Derive the
@@ -361,6 +464,45 @@ fn nothing_locked_or_deleted(host: &ModelHost) {
     ] {
         assert!(host.trace().iter().all(|c| c.op != op), "{op} in a dry run");
     }
+}
+
+#[test]
+fn exact_exclusion_still_traverses_a_deeper_positive_pattern() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/excluded: {{.: {at}, item: {{.: {at}}}}}\n  /tmp/allowed: {{.: {at}, item: {{.: {at}}}}}\n"
+    )));
+    let report = dry_run(&host, &request("profile:excluded-prefix", &[], "/tmp"));
+    let mut actual = plan(&report);
+    actual.sort();
+    assert_eq!(
+        actual,
+        [
+            ("/tmp/allowed/item".to_owned(), None),
+            ("/tmp/excluded/item".to_owned(), None),
+        ]
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn exact_exclusion_never_reports_an_excluded_mount_candidate() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let model = yaml(&format!(
+        "  /tmp/allowed: {{.: {at}, item: {{.: {at}}}}}\n"
+    ))
+    .replace(
+        "parent: 1}\ntree:",
+        "parent: 1}\n  - {id: 31, at: /tmp/excluded, fs: tmpfs, dev: \"0:43\", size: 1M, parent: 30}\ntree:",
+    );
+    let host = host(&model);
+    let report = dry_run(&host, &request("profile:excluded-prefix", &[], "/tmp"));
+    assert_eq!(
+        plan(&report),
+        [("/tmp/allowed/item".to_owned(), None)],
+        "an exact exclusion must not appear even as a skipped mount candidate"
+    );
+    nothing_locked_or_deleted(&host);
 }
 
 /// AC #1: the patterns find exactly what they say, one level per
@@ -1068,23 +1210,10 @@ fn the_checkout_path_rule_follows_the_profiles_setting() {
     }
 }
 
-/// The spike's profile file (task-68; diskgc-core
-/// `fs_kind/spike-profiles.yaml`) as a library: what the real-machine dry
-/// runs use, so a test of its profiles tests the file itself.
-fn spike_library() -> Library {
-    let text = include_str!("../../diskgc-core/src/fs_kind/spike-profiles.yaml");
-    diskgc_core::config::parse(Path::new("spike-profiles.yaml"), text.as_bytes())
-        .unwrap_or_else(|e| panic!("{e}"))
-        .library
-}
-
-/// task-71 (Mark, 2026-10-18): `pytest-tmp` takes one pytest test dir
-/// per candidate (`pytest-of-<user>/pytest-<N>/<test>`), the test dirs of
-/// two sessions and one inside a nix-shell temp dir. task-80 (Mark,
-/// 2026-10-19): it says `checkouts: allow`, so the test dir where a test
-/// ran `git init` is eligible too. The session dirs, `pytest-of-mark`,
-/// pytest's `*current` symlinks and a plain file in a session dir
-/// (pytest's `.lock`) are never candidates.
+/// The shipped `pytest-tmp` takes one test directory per candidate.
+/// A checkout made by a test stays inside that eligible directory because
+/// this source explicitly allows checkouts. The parent, numbered sessions,
+/// current symlinks and session-level files are not candidates.
 #[test]
 fn pytest_tmp_takes_one_test_dir_per_candidate_checkouts_included() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
@@ -1094,33 +1223,180 @@ fn pytest_tmp_takes_one_test_dir_per_candidate_checkouts_included() {
          test_repo0: {{.: {at}, .git: {{.: {at}, HEAD: {at}}}, f: {at}}}\n      test_repocurrent: \
          {}\n      test_other0: {{.: {at}, g: {at}}}\n    pytest-2: {{.: {at}, test_x0: {{.: {at}, \
          h: {at}}}}}\n    pytest-current: {}\n  \
-         /tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0: {{.: {at}, i: {at}}}\n",
+         /tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0: {{.: {at}, i: {at}}}\n  \
+         /tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-mark/pytest-3/test_z0: {{.: {at}, i: {at}}}\n  \
+         /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark/pytest-4/test_c0: {{.: {at}, i: {at}}}\n",
         link("/tmp/pytest-of-mark/pytest-1/test_repo0"),
         link("/tmp/pytest-of-mark/pytest-2"),
     )));
     let request = Request {
-        tier: Tier::select("profile:pytest-tmp", &spike_library(), None, 1000)
-            .unwrap_or_else(|e| panic!("{e}")),
+        tier: Tier::select(
+            "profile:pytest-tmp",
+            &Library::builtin().expect("built-ins"),
+            None,
+            1000,
+        )
+        .unwrap_or_else(|e| panic!("{e}")),
         ..request("profile:tmp-entry", &[], "/tmp")
     };
     let report = dry_run(&host, &request);
     let mut found = plan(&report);
     found.sort();
-    assert_eq!(
-        found,
-        [
-            (
-                "/tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0".to_owned(),
-                None
-            ),
-            ("/tmp/pytest-of-mark/pytest-1/test_other0".to_owned(), None),
-            ("/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(), None),
-            ("/tmp/pytest-of-mark/pytest-2/test_x0".to_owned(), None),
-            ("/var/tmp".to_owned(), Some("missing")),
-        ],
-        "{:#?}",
-        report.plan
-    );
+    let mut want = vec![
+        (
+            "/tmp/claude-1000/nix-shell.Ab1/pytest-of-mark/pytest-4/test_c0".to_owned(),
+            None,
+        ),
+        (
+            "/tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0".to_owned(),
+            None,
+        ),
+        (
+            "/tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-mark/pytest-3/test_z0".to_owned(),
+            None,
+        ),
+        ("/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(), None),
+        ("/tmp/pytest-of-mark/pytest-1/test_other0".to_owned(), None),
+        ("/tmp/pytest-of-mark/pytest-2/test_x0".to_owned(), None),
+        ("/var/tmp".to_owned(), Some("missing")),
+    ];
+    want.sort();
+    assert_eq!(found, want, "{:#?}", report.plan);
+    nothing_locked_or_deleted(&host);
+}
+
+/// The mktemp source runs through the real planner, including nesting,
+/// ownership and the process scan.
+#[test]
+fn shipped_tmp_sources_find_their_candidates_in_the_model() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/nix-shell.Ab1: {{.: {at}, work: {at}, nix-shell.B2: {{.: {at}}}, tmp.N3: {{.: {at}}}}}\n  \
+         /tmp/tmp.Ab1: {{.: {at}, work: {at}, tmp.Inner: {{.: {at}}}}}\n  \
+         /tmp/claude-1000: {{.: {at}, nix-shell.C3: {{.: {at}}}, tmp.Z4: {{.: {at}}}}}\n  \
+         /tmp/tmp00i1c8qs: {{.: {at}}}\n  \
+         /tmp/loose-file: {at}\n  \
+         /var/tmp/other: {at}\n"
+    )));
+    let report = dry_run(&host, &request("profile:mktemp-dir", &[], "/tmp"));
+    let mut actual: Vec<String> = plan(&report)
+        .into_iter()
+        .filter(|(_, reason)| reason.is_none())
+        .map(|(path, _)| path)
+        .collect();
+    actual.sort();
+    let mut want = vec![
+        "/tmp/nix-shell.Ab1/tmp.N3".to_owned(),
+        "/tmp/tmp.Ab1".to_owned(),
+        "/tmp/claude-1000/tmp.Z4".to_owned(),
+    ];
+    want.sort();
+    assert_eq!(actual, want, "{:#?}", report.plan);
+    nothing_locked_or_deleted(&host);
+}
+
+/// The three additional shipped sources have distinct deletion units:
+/// Claude sessions, Chromium scratch entries, and one Node cache tree per
+/// TMPDIR. Path lookalikes and a nested Node version directory do not
+/// become extra candidates.
+#[test]
+fn claude_chromium_and_node_builtins_plan_only_their_units() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/claude-1000/-home-mark-src-app/session-1: {{.: {at}, output: {at}}}\n  \
+         /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark: {{.: {at}}}\n  \
+         /tmp/.org.chromium.Chromium.A: {at}\n  \
+         /tmp/org.chromium.Chromium.X: {{.: {at}, data: {at}}}\n  \
+         /tmp/org.mozilla.firefox.X: {{.: {at}}}\n  \
+         /tmp/node-compile-cache: {{.: {at}, v24: {{.: {at}}}}}\n  \
+         /tmp/nix-shell.Ab1/node-compile-cache: {{.: {at}}}\n  \
+         /tmp/claude-1000/nix-shell.Ab1/node-compile-cache: {{.: {at}}}\n"
+    )));
+    for (profile, want) in [
+        (
+            "claude-code-tmp",
+            vec!["/tmp/claude-1000/-home-mark-src-app/session-1"],
+        ),
+        (
+            "chromium-tmp",
+            vec![
+                "/tmp/.org.chromium.Chromium.A",
+                "/tmp/org.chromium.Chromium.X",
+            ],
+        ),
+        (
+            "node-compile-cache",
+            vec![
+                "/tmp/node-compile-cache",
+                "/tmp/nix-shell.Ab1/node-compile-cache",
+                "/tmp/claude-1000/nix-shell.Ab1/node-compile-cache",
+            ],
+        ),
+    ] {
+        let report = dry_run(&host, &request(&format!("profile:{profile}"), &[], "/tmp"));
+        let mut actual: Vec<String> = plan(&report)
+            .into_iter()
+            .filter(|(_, reason)| reason.is_none())
+            .map(|(path, _)| path)
+            .collect();
+        actual.sort();
+        let mut want = want;
+        want.sort();
+        assert_eq!(actual, want, "{profile}: {:#?}", report.plan);
+    }
+    nothing_locked_or_deleted(&host);
+}
+
+/// Playwright and Renode share the fixed TMPDIR prefix preset, while Zephyr
+/// itself selects only top-level directories. A file named zephyr-* cannot
+/// be deleted by the directory-only Zephyr source.
+#[test]
+fn playwright_zephyr_and_renode_builtins_plan_only_their_units() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/playwright-artifacts-1: {{.: {at}}}\n  \
+         /tmp/nix-shell.Ab1/playwright_chromiumdev_profile-X: {{.: {at}}}\n  \
+         /tmp/claude-1000/nix-shell.Ab1/playwright-artifacts: {{.: {at}}}\n  \
+         /tmp/zephyr-h5e5-run.X/renode-1: {{.: {at}, work: {at}}}\n  \
+         /tmp/zephyr-scratch: {{.: {at}}}\n  \
+         /tmp/zephyr-log.txt: {at}\n  \
+         /tmp/renode-1045514-crash: {{.: {at}}}\n  \
+         /tmp/renode-log.txt: {at}\n  \
+         /tmp/nix-shell.Ab1/renode-123: {{.: {at}}}\n"
+    )));
+    for (profile, want) in [
+        (
+            "playwright-tmp",
+            vec![
+                "/tmp/playwright-artifacts-1",
+                "/tmp/nix-shell.Ab1/playwright_chromiumdev_profile-X",
+                "/tmp/claude-1000/nix-shell.Ab1/playwright-artifacts",
+            ],
+        ),
+        (
+            "zephyr-tmp",
+            vec!["/tmp/zephyr-h5e5-run.X", "/tmp/zephyr-scratch"],
+        ),
+        (
+            "renode-tmp",
+            vec![
+                "/tmp/renode-1045514-crash",
+                "/tmp/nix-shell.Ab1/renode-123",
+                "/tmp/zephyr-h5e5-run.X/renode-1",
+            ],
+        ),
+    ] {
+        let report = dry_run(&host, &request(&format!("profile:{profile}"), &[], "/tmp"));
+        let mut actual: Vec<String> = plan(&report)
+            .into_iter()
+            .filter(|(_, reason)| reason.is_none())
+            .map(|(path, _)| path)
+            .collect();
+        actual.sort();
+        let mut want = want;
+        want.sort();
+        assert_eq!(actual, want, "{profile}: {:#?}", report.plan);
+    }
     nothing_locked_or_deleted(&host);
 }
 

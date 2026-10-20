@@ -232,8 +232,9 @@ under `profile`:
     "category": "build",
     "description": "Zephyr test runs left in /tmp",
     "kind": "fs",
-    "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "type": "dir | file | any"},
+    "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "where": {"idle_for": null, "has": null, "has_not": null},
+    "min_idle_for": null,
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
@@ -249,10 +250,12 @@ under `profile`:
   `verified_with` is set on built-in sources only.
 - `find.roots` is the list of fixed roots, or `null` when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
-  supplies them); `find.paths` and `find.type` are `null` for
+  supplies them); `find.paths`, `find.exclude` and `find.type` are `null` for
   `cargo-target`.
 - `where` always has its three predicates, `null` when unused;
   `idle_for` is a duration (`3d`).
+- `min_idle_for` is a source's mandatory minimum age, or `null`; it is
+  `null` for filters. A tier's positive idle filters may require longer.
 - `action` has every field: `make_writable` (a boolean) for `delete`;
   `command` (the argv) and `cwd` (`candidate`, `parent`, or `null` when
   it is decided per candidate: `type: any` without `cwd`) for `command`;
@@ -470,7 +473,7 @@ groups:
     ranking: random                # ordered (default) | random
     tiers:
       - name: test-and-shell-cruft
-        select: (profile:pytest-tmp || profile:nix-shell-rc || profile:zephyr-run) && filter:idle-3d
+        select: (profile:pytest-tmp || profile:mktemp-dir || profile:zephyr-run) && filter:idle-3d
       - name: cargo-stale
         select: profile:cargo-target && filter:idle-7d
         roots: [/home/mark/src, /home/mark/topics]
@@ -484,7 +487,7 @@ groups:
       - name: docker-dangling
         select: profile:docker-dangling
       - name: tmp-old
-        select: profile:tmp-entry && filter:idle-2d
+        select: profile:chromium-tmp && filter:idle-2d
       - name: cargo-recent
         select: profile:cargo-target && filter:idle-1h
         roots: [/home/mark/src, /home/mark/topics]
@@ -572,10 +575,10 @@ profiles apply and when.
 ```yaml
 - name: pytest-tmp
   category: test
-  description: pytest test dirs in /tmp, also inside nix-shell and mktemp dirs
+  description: pytest test directories under temp-prefix v1 roots
   find:                              # makes this a *source* profile
     roots: [/tmp, /var/tmp]
-    paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"]
+    paths: ["pytest-of-*/pytest-*/*"]  # built-in preset expands this base (below)
     type: dir
   checkouts: allow                   # default refuse (Built-in profile library)
   action: delete
@@ -588,7 +591,11 @@ profiles apply and when.
 - **Source profiles** have `find`: roots plus path patterns relative to them
   (each pattern segment is one directory level; `**` is not allowed, so
   discovery never walks deeper than the patterns say), and the candidate
-  type. `find` names candidates *positively*; nothing that no source profile
+  type. An optional `find.exclude` omits exact matching paths relative to
+  the same root. An excluded leaf is skipped before stat; an excluded
+  intermediate directory may be statted and opened to follow a deeper
+  positive pattern, but is never a candidate. `find` names candidates *positively*;
+  nothing that no source profile
   found is ever a candidate.
 - **Roots are fixed or required.** A profile either has fixed roots (`/tmp`,
   `/var/tmp`) or declares `roots: required` (machine-specific locations such
@@ -605,6 +612,11 @@ profiles apply and when.
   files are disposable (a human decides that, from `survey --list`).
   Structural recognition (markers, Cargo layouts) is covered by fixtures in
   the test suite, not by path examples.
+- **Built-in temp-prefix v1 preset:** only named built-ins opting in at load
+  expand their base `find.paths` patterns under the fixed prefix list below.
+  User profiles use exactly the paths they write; no placeholder or
+  implicit expansion is added to the public YAML schema. `profiles show`
+  prints a built-in's effective expanded patterns.
 
 Fields (an unknown key anywhere in a profile is a load-time error):
 
@@ -615,8 +627,10 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `kind` | sources | Default `fs`. |
 | `find.roots` | sources | A list of absolute directories, or `required`. |
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
-| `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a symlink candidate could only be refused (`unsafe_path`), and `tmp-entry` would report every symlink in `/tmp`. |
-| `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `idle_for`: when something is old enough is the tier's choice, written with a `filter:` (Key decisions: what vs when). |
+| `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
+| `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
+| `where` | filters (at least one predicate); optional on sources, `has` / `has_not` only | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. |
+| `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). Config load and `check` reject examples that contradict the path patterns. |
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
@@ -639,8 +653,9 @@ In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations) or
 `where: {has: CACHEDIR.TAG}` (one file name); each predicate at most once
 per profile, all of a profile's predicates must hold. A predicate on a kind
 that does not support it is a load-time error. Two `idle_for` in one term
-(its `filter:`s) combine to the longest; a `!filter:` is a complement and
-does not combine. When the measure cannot tell a candidate's age (the
+(its `filter:`s) and the source's `min_idle_for` combine to the longest;
+a `!filter:` is a complement and does not combine. When the measure cannot
+tell a candidate's age (the
 kernel did not answer a timestamp, or the last use lies in the future),
 the candidate passes neither `filter:` nor `!filter:` on `idle_for`: it is
 skipped (`unsupported_fs`, `future_time`). Ownership is not a
@@ -686,12 +701,12 @@ parses back to the same expression):
 | Expression | Normalised | Selects |
 |---|---|---|
 | `profile:pytest-tmp && filter:idle-10d` | `profile:pytest-tmp && filter:idle-10d` | pytest temp dirs idle for 10 days |
-| `(profile:pytest-tmp \|\| profile:nix-shell-rc) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-3d)` | either, idle for 3 days |
-| `profile:tmp-entry && filter:idle-2d && !filter:idle-30d` | `profile:tmp-entry && filter:idle-2d && !filter:idle-30d` | idle for 2 to 30 days |
-| `profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp` | `profile:tmp-entry && filter:idle-2d && !profile:claude-code-tmp` | idle for 2 days, except what overlaps Claude Code's session dirs |
-| `profile:pytest-tmp \|\| profile:nix-shell-rc` | `profile:pytest-tmp \|\| profile:nix-shell-rc` | either, at any age |
-| `(profile:pytest-tmp && filter:idle-3d) \|\| profile:nix-shell-rc` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:nix-shell-rc` | pytest dirs idle for 3 days, nix-shell rc dirs at any age |
-| `((profile:pytest-tmp \|\| profile:nix-shell-rc) && filter:idle-3d) \|\| (profile:tmp-entry && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-3d) \|\| (profile:tmp-entry && filter:idle-30d)` | the first two idle for 3 days, any `/tmp` entry idle for 30 |
+| `(profile:pytest-tmp \|\| profile:mktemp-dir) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:mktemp-dir && filter:idle-3d)` | either, idle for 3 days |
+| `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | Chromium scratch idle for 2 to 30 days |
+| `profile:mktemp-dir && filter:idle-2d && !profile:claude-code-tmp` | `profile:mktemp-dir && filter:idle-2d && !profile:claude-code-tmp` | mktemp dirs idle for 2 days, except what overlaps Claude Code's session dirs |
+| `profile:pytest-tmp \|\| profile:mktemp-dir` | `profile:pytest-tmp \|\| profile:mktemp-dir` | either, at any age |
+| `(profile:pytest-tmp && filter:idle-3d) \|\| profile:mktemp-dir` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:mktemp-dir` | pytest dirs idle for 3 days, mktemp dirs at any age |
+| `((profile:pytest-tmp \|\| profile:mktemp-dir) && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:mktemp-dir && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | the first two idle for 3 days, Chromium scratch idle for 30 |
 
 - **Qualifiers are required.** A term without a `profile:` is rejected by
   the parser; a wrong qualifier (`filter:pytest-tmp`) is a load-time error
@@ -741,8 +756,10 @@ report every broken rule, separated by `;`. Where a message suggests a
 rewrite, the rewrite fixes that error without breaking another rule (if the
 expression has other errors, they still need fixing); a suggestion that would
 itself be rejected is left out (`filter:nix-garbage` below: `!profile:nix-garbage`
-is rejected too). The messages, with the built-in profiles plus
-`a`, `b` (kind `fs`, action `delete`) and `f` (`idle_for`):
+is rejected too). These examples use the parser test catalog, including
+fixture-only names such as `tmp-entry` and `nix-garbage`; those names are not
+necessarily shipped built-ins. The catalog also defines `a`, `b` (kind `fs`,
+action `delete`) and `f` (`idle_for`):
 
 | Expression | Message |
 |---|---|
@@ -813,61 +830,99 @@ listed as planned, not shipped.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
-| test | `pytest-tmp` | pytest's test dirs `pytest-of-*/pytest-*/*` in `/tmp`, `/var/tmp`, and one level down (`nix-shell.*/pytest-of-*/pytest-*/*`, `tmp.*/...`); one candidate per test dir (below the list); `checkouts: allow`: pytest deletes these dirs itself (below the list), so a repository a test made there is a fixture | `delete` |
+| test | `pytest-tmp` | pytest's test directories `pytest-of-*/pytest-*/*` in `/tmp` and `/var/tmp`, under the temp-prefix v1 preset below; one candidate per test directory; `checkouts: allow`: pytest treats these as disposable, including repositories made by tests | `delete` |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
-| nix | `nix-shell-rc` | `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start) | `delete` |
-| nix | `nix-shell-tmpdir` | `/tmp/nix-shell.*` (a shell's `TMPDIR`) | `delete` |
+| nix | `nix-shell-rc` | deferred past 0.1: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*` (rc dirs left by every shell start; live shells may not hold them open) | `delete` |
+| nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset; real dormant-shell container protection and a complete host dry run are pending | `delete` |
 | nix | `nix-garbage` | dead store paths | Nix GC |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the default builder | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
+| containers | `containers-image-tmp` | top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` files or directories; `min_idle_for: 3d` is mandatory | `delete` |
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
 | browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
-| python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | jest's cache dir; `playwright*` in `/tmp` and nix-shell temp dirs; `node-compile-cache` in `/tmp` and nix-shell temp dirs | `delete` |
+| python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | Jest's `$TMPDIR/jest_*` cache (unverified); `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; one holding a checkout is refused anyway, see [`contains_checkout`](safety.md#the-eligibility-walk-mandatory-per-candidate); roots required) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
-| embedded | `renode-tmp` | `renode-*` in `/tmp` and nix-shell temp dirs | `delete` |
+| embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
 | embedded | `platformio-cache` | PlatformIO's `.cache` (roots required) | `delete` |
-| generic | `tmp-entry` | any top-level entry of `/tmp`, `/var/tmp` | `delete` |
-| generic | `mktemp-dir` | `/tmp/tmp.*` | `delete` |
+| generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; real dormant-shell protection and a complete host dry run are pending | `delete` |
+| generic | `mktemp-dir` | `tmp.*` directories under `/tmp`'s temp-prefix v1 preset | `delete` |
+| generic | `xdg-cache-entry` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known data and dedicated cache names; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
 
+**Built-in temp-prefix v1 preset.** `pytest-tmp`, `mktemp-dir`,
+`node-compile-cache`, `playwright-tmp` and `renode-tmp`
+opt in. Each base pattern (`pytest-of-*/pytest-*/*`, `tmp.*`,
+`node-compile-cache`, `playwright*`, `renode-*` respectively)
+is searched under each prefix below,
+relative to each profile's fixed roots. The empty prefix is the root itself.
+The list is finite: nested shell search stops after two shell levels, or
+Claude's temp root plus two. No profile refers to another profile; each
+candidate still belongs to its source profile and goes through its ownership,
+in-use and eligibility checks. The effective expanded patterns are printed
+by `profiles show NAME`. A changed prefix list changes the matching
+set and therefore requires a v2 preset and a new built-in profile name.
+
+| Prefix (relative to the root) |
+|---|
+| *(empty)* |
+| `nix-shell.*` |
+| `tmp.*` |
+| `nix-shell-*-*` |
+| `nix-develop-*-*` |
+| `zephyr-*-run.*` |
+| `claude-{uid}` |
+| `nix-shell.*/nix-shell.*` |
+| `nix-shell.*/tmp.*` |
+| `tmp.*/nix-shell.*` |
+| `claude-{uid}/nix-shell.*` |
+| `claude-{uid}/tmp.*` |
+| `claude-{uid}/nix-shell.*/nix-shell.*` |
+
+For `mktemp-dir`, a nested match inside another candidate of the same
+profile belongs to the outer candidate only (the existing outer-match
+rule). Thus `tmp.*` below another `tmp.*` is not a second candidate.
+
 - `pytest-tmp` takes one test directory per candidate
-  (`pytest-of-<user>/pytest-<N>/<test>`: what pytest's `tmp_path` made for
-  one test), not a session or the whole `pytest-of-<user>`: a test dir
-  that cannot go (one in use, `in_use`) keeps only itself. It says
-  `checkouts: allow` (Mark, 2026-10-19): a test dir holding a `.git`
-  (a test ran `git init`) is eligible like any other. pytest treats these
-  dirs as disposable itself: it keeps only the last
-  `tmp_path_retention_count` sessions (default 3) per base temp dir and
-  deletes the older ones; they pile up because every nix shell has a
-  `TMPDIR` of its own, so each holds its own few sessions that no later
-  pytest run cleans. The per-test-dir granularity was chosen while the
-  guard still applied here; it stays for now and can be revisited (its
-  candidate count is task-70's cost question). Only
-  directories are candidates (`type: dir`): pytest's `*current` symlinks
-  (`pytest-current` next to the sessions, `<test>current` next to the
-  test dirs) and plain files directly in a session dir never are. The
-  session dirs and `pytest-of-<user>` itself are left alone, also once
-  empty; `tmp-entry`, which takes only top-level entries of `/tmp` and
-  `/var/tmp`, may take a whole `/tmp/pytest-of-<user>` (or the
-  `nix-shell.*` or `tmp.*` directory around one), with whatever is still
-  in it, never a session dir on its own. pytest's `garbage-*` directories
-  (an interrupted cleanup of its own) are not matched. Limit: under
-  pytest-xdist the test dirs are one level deeper
-  (`pytest-<N>/popen-gw<K>/<test>`), so a candidate is a whole worker's
-  directory, and one test dir there in use keeps all of that worker's.
+  (`pytest-of-<user>/pytest-<N>/<test>`), not the whole numbered session.
+  With pytest-xdist, the candidate is the `popen-gw<N>` worker directory,
+  which can contain several test directories; an in-use test then keeps
+  that worker directory.
+  An in-use file, mount or keep marker in one test directory keeps that
+  directory. It says `checkouts: allow` (Mark, 2026-10-19): tests make Git
+  fixtures inside these disposable test directories, and a read-only survey of
+  75,253 leftover repositories found only test fixtures. pytest itself
+  retains a bounded number of sessions per base temp directory; separate
+  nix-shell TMPDIRs prevent later runs from cleaning the old ones.
+  Only directories are candidates (`type: dir`): `*current` symlinks,
+  session-level files, numbered sessions and `garbage-*` directories are
+  excluded. The `pytest-of-<user>` parent remains. A running pytest process
+  can hold no descriptor in a particular test directory while still using
+  that live session; a bare `profile:pytest-tmp` can then select the test
+  directory. Use an idle filter and `protect` for active sessions. The
+  missing-descriptor case has not been verified safe to delete during a
+  running test.
+- `claude-code-tmp` sees a live session as `in_use` when a process holds a
+  file or directory in its candidate. An active session can hold no scratch
+  file descriptor; use a tier idle filter and `protect` for sessions that
+  must remain, including the current session.
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs
   a server-aware protocol first.
+- `containers-image-tmp` keeps entries changed in the last 3 days even
+  when selected without a filter. The `fs` idle measure is the newest
+  mtime or ctime anywhere inside a directory; an open file is still
+  refused as `in_use`. It matches only the two observed temporary name
+  prefixes at the top of `/var/tmp`, not Podman's persistent storage.
 - Gradle and Maven caches are protected only by the generic open-file
   checks; a Gradle daemon that is idle may hold nothing open. Use them in
   pressure tiers.
@@ -887,6 +942,27 @@ listed as planned, not shipped.
 - `pytest-cache` finds only `.pytest_cache` through three directory levels
   below each supplied root. Supply project roots for deeper trees. It
   deletes pytest's result cache, which pytest recreates on the next run.
+- `xdg-cache-entry` takes the cache directory itself as a required root,
+  normally `$XDG_CACHE_HOME` or `~/.cache`, and enforces a 30-day minimum age
+  even when selected without a filter. It explicitly refuses checkouts: a cache entry such as
+  `pre-commit` can hold hook repositories with local changes. Its exact-name
+  exclusions keep `borg` and `huggingface` (backup or model data),
+  `claude`, `cursor_api_sessions`, `dconf`, `gh`, `ghidra`, `gpauth`,
+  `Microsoft`, `opencode`, `Palo Alto Networks`, `sdkmanager`, `sessions`,
+  and `teleport-device` (session, credential or application state),
+  `containers` (container storage), `torch` (models), `wine` (prefix data),
+  and `pre-commit`
+  (repository cache). It also excludes `.bun`, `ccache`, `go-build`, `nix`,
+  `pip`, and `uv` so dedicated profiles retain their narrower boundaries
+  and cleaner actions. A redirected cache root is supplied explicitly;
+  the profile never infers an environment variable. Unknown applications
+  can still store valuable data under the cache root, and a 30-day idle
+  threshold only measures filesystem changes. Review its read-only plan
+  and add `protect` rules or `.diskgc-keep` markers for local data before
+  enabling it. The broad source is excluded from an ordinary dedicated
+  cache tier by selecting the dedicated profile alone; selecting the two
+  in separate tiers can still let this profile reach other entries, so its
+  built-in exclusions are the guarantee for the named dedicated paths.
 - Profiles that find at any depth under a project root (`pytest-cache`,
   `cmake-build`, `west-build`) cannot use `**`; they list depths explicitly
   or take one root per project. Settled when they are verified.

@@ -21,10 +21,6 @@
   examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH]}
 
 # Stand-ins, not built in yet.
-- name: pytest-tmp
-  find: {roots: [/tmp, /var/tmp], paths: ["pytest-of-*/pytest-*/*", "nix-shell.*/pytest-of-*/pytest-*/*", "tmp.*/pytest-of-*/pytest-*/*"], type: dir}
-  action: delete
-  examples: {match: [/tmp/pytest-of-mark/pytest-3/test_x0]}
 - name: nix-shell-rc
   find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
   action: delete
@@ -33,18 +29,10 @@
   find: {roots: [/tmp], paths: ["nix-shell.*"], type: dir}
   action: delete
   examples: {match: [/tmp/nix-shell.8raHjU]}
-- name: claude-code-tmp
-  find: {roots: [/tmp], paths: ["claude-{uid}/*/*"], type: dir}
-  action: delete
-  examples: {match: [/tmp/claude-1000/proj/session]}
 - name: tmp-entry
   find: {roots: [/tmp, /var/tmp], paths: ["*"], type: any}
   action: delete
   examples: {match: [/tmp/anything]}
-- name: mktemp-dir
-  find: {roots: [/tmp], paths: ["tmp.*"], type: dir}
-  action: delete
-  examples: {match: [/tmp/tmp.AbC123]}
 - name: pip-cache
   find: {roots: required, paths: [pip], type: dir}
   action: {command: [pip, --cache-dir, "{path}", cache, purge]}

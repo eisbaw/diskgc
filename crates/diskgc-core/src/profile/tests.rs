@@ -58,9 +58,19 @@ fn the_built_in_library_loads() {
     want.extend([
         "bun-cache",
         "cargo-target",
+        "containers-image-tmp",
         "go-mod-cache",
         "nix-user-cache",
         "pytest-cache",
+        "pytest-tmp",
+        "mktemp-dir",
+        "claude-code-tmp",
+        "chromium-tmp",
+        "node-compile-cache",
+        "playwright-tmp",
+        "zephyr-tmp",
+        "renode-tmp",
+        "xdg-cache-entry",
     ]);
     want.sort_unstable();
     assert_eq!(names, want);
@@ -74,7 +84,7 @@ fn the_built_in_library_loads() {
     assert_eq!(source.roots, Roots::Required);
     assert_eq!(source.action, Action::CargoLockProtocol);
     assert!(source.where_.is_empty());
-    // task-80: the one built-in that lets candidates hold checkouts.
+    // Cargo output can contain a checkout made by a build script.
     assert_eq!(source.checkouts, Checkouts::Allow);
 
     let go = library.get("go-mod-cache").expect("go-mod-cache");
@@ -89,6 +99,10 @@ fn the_built_in_library_loads() {
             make_writable: true
         }
     );
+    let Body::Source(pytest) = &library.get("pytest-tmp").expect("pytest-tmp").body else {
+        panic!("pytest-tmp is a source");
+    };
+    assert_eq!(pytest.checkouts, Checkouts::Allow);
 }
 
 /// Built-in examples are checked as patterns, including negative paths.
@@ -669,6 +683,27 @@ fn roots_and_patterns_are_checked_paths() {
 }
 
 #[test]
+fn exclude_patterns_obey_path_rules_and_only_fs_sources_accept_them() {
+    let base = "- name: x\n  find: {roots: [/tmp], paths: ['*'], exclude: [../private], type: dir}\n  action: delete\n  examples: {match: [/tmp/cache]}\n";
+    assert_has(&user_errors(base), "`find.exclude`: pattern `../private`");
+
+    let cargo = "- name: x\n  kind: cargo-target\n  find: {roots: [/tmp], exclude: [private]}\n";
+    assert_has(&user_errors(cargo), "no `find.exclude`");
+
+    for null in ["null", "~"] {
+        let yaml = format!(
+            "- name: x\n  find: {{roots: [/tmp], paths: ['*'], exclude: {null}, type: dir}}\n  action: delete\n"
+        );
+        assert!(
+            parse_profiles(&yaml).is_err(),
+            "present null exclude was accepted: {yaml}"
+        );
+    }
+    let blank = "- name: x\n  find:\n    roots: [/tmp]\n    paths: ['*']\n    exclude:\n    type: dir\n  action: delete\n";
+    assert!(parse_profiles(blank).is_err(), "blank exclude was accepted");
+}
+
+#[test]
 fn names_are_unique_and_built_ins_need_explicit_override() {
     let errors = user_errors(
         "- name: idle-1d\n  where: {idle_for: 2d}\n- name: x\n  where: {idle_for: 1d}\n- name: x\n  where: {idle_for: 2d}\n",
@@ -977,6 +1012,76 @@ fn ac2_idle_filters_in_one_term_combine_to_the_longest() {
     assert_eq!(idle("profile:cargo-target"), None);
     assert_eq!(idle("profile:scratch"), None);
     assert_eq!(idle("profile:cargo-target && !filter:idle-30d"), None);
+}
+
+/// A source's minimum is mandatory for a bare selection and cannot be
+/// weakened by a shorter tier filter. Its name is independent of this rule.
+#[test]
+fn source_minimum_idle_is_a_floor_for_every_term() {
+    let library = with_user(
+        "- name: arbitrary-spool\n  find: {roots: [/var/tmp], paths: [\"spool-*\"], type: any}\n  min_idle_for: 3d\n  action: delete\n  examples: {match: [/var/tmp/spool-1]}\n",
+    )
+    .expect("source with idle floor loads");
+    for (selection, expected) in [
+        ("profile:arbitrary-spool", 3),
+        ("profile:arbitrary-spool && filter:idle-1d", 3),
+        ("profile:arbitrary-spool && filter:idle-7d", 7),
+    ] {
+        let checked = checked(&library, selection);
+        let [term] = checked.expr().terms.as_slice() else {
+            panic!("one term");
+        };
+        assert_eq!(
+            library.idle_for(term).unwrap(),
+            Some(IdleFor(Duration::from_secs(expected * DAY))),
+            "{selection}"
+        );
+    }
+    assert_has(
+        &user_errors("- name: only-filter\n  min_idle_for: 3d\n  where: {idle_for: 1d}\n"),
+        "a filter profile has no `min_idle_for`",
+    );
+    assert_has(
+        &user_errors(
+            "- name: no-floor\n  find: {roots: [/tmp], paths: [\"s-*\"], type: any}\n  min_idle_for: 0s\n  action: delete\n  examples: {match: [/tmp/s-1]}\n",
+        ),
+        "`min_idle_for` must be greater than zero",
+    );
+    assert!(yaml_error("- name: x\n  min_idle_for: null\n  find: {roots: [/tmp], paths: [\"x-*\"], type: any}\n").contains("invalid type"));
+}
+
+#[test]
+fn containers_image_tmp_has_an_immutable_minimum_age_and_exact_scope() {
+    let library = Library::builtin().unwrap();
+    let profile = library.get("containers-image-tmp").unwrap();
+    let Body::Source(source) = &profile.body else {
+        panic!("not a source");
+    };
+    assert_eq!(source.roots, Roots::Fixed(vec!["/var/tmp".into()]));
+    assert_eq!(
+        source.finds,
+        Finds::Paths {
+            patterns: vec!["buildah*".into(), "container_images_storage*".into()],
+            exclude: Vec::new(),
+            entry_type: EntryType::Any,
+        }
+    );
+    assert_eq!(
+        source.min_idle_for,
+        Some(IdleFor(Duration::from_secs(3 * DAY)))
+    );
+    assert_eq!(
+        source.action,
+        Action::Delete {
+            make_writable: false
+        }
+    );
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    let checked = checked(&library, "profile:containers-image-tmp");
+    assert_eq!(
+        library.idle_for(&checked.expr().terms[0]).unwrap(),
+        source.min_idle_for,
+    );
 }
 
 /// S1: the verdict is three-way, and an unknown age passes neither

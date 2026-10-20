@@ -4,7 +4,7 @@ title: 'Library: /tmp and Nix leftovers profiles, verified'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 12:01'
+updated_date: '2026-10-20 00:28'
 labels:
   - wave-4
   - config
@@ -47,6 +47,8 @@ From task-68's dry run on the laptop (2026-10-18; numbers and runtimes in task-6
 - node-compile-cache: 328 eligible, 28 MiB.
 - mktemp-dir: 658 eligible, 145 MiB, 1 not_owner (root-owned file from sudo). Python's tmpXXXXXXXX (3,457 dirs) not covered (task-16, glob).
 - tmp-entry: 79k of 155k entries judged in 20 min (deadline): 3.7 GiB eligible so far; /tmp/claude-1000 is not_owner as a whole because of one root-owned log in one session's scratchpad; 8 contains_special (Cargo targets of agent reviews); .bun-*.node mapped by claude (in_use).
+
+2026-10-20 read-only built-in dry runs on this laptop, --min-free 500G, no deletions, full expanded temp-prefix v1 scope: mktemp-dir 3,360 candidates, 3,353 eligible, skips 5 contains_checkout/1 contains_ipc/1 not_owner, 213,622,784 eligible bytes; claude-code-tmp 326 candidates, 296 eligible, skips 9 in_use/16 contains_checkout/1 not_owner/2 contains_ipc/2 contains_special, 1,258,999,808 bytes; chromium-tmp 282 candidates, 270 eligible, 12 contains_ipc, 7,688,192 bytes; node-compile-cache 334 candidates, all eligible, 49,119,232 bytes; playwright-tmp 445 candidates, 444 eligible, 1 in_use, 2,043,904 bytes. For each profile, the three largest extant eligible candidates matched du -s -B1 byte for byte. Every built-in has match/no_match examples, verified_with, exact-definition/golden tests, ModelHost fixtures; cloned type mutations in golden.rs change every match set, and an intentional YAML type mutation was observed red then restored. Claude active sessions without a held scratch descriptor require tier idle policy or protect. nix-shell-rc, nix-shell-tmpdir and tmp-entry remain unshipped; TASK-39 stays To Do.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
