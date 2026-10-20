@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:05'
-updated_date: '2026-10-20 01:10'
+updated_date: '2026-10-20 02:33'
 labels:
   - wave-2
   - profiles
@@ -39,4 +39,6 @@ Decision by Mark (2026-10-18): a shared temp-dir prefix list (nix-shell.*, /tmp/
 2026-10-20 implementation: built-in temp-prefix v1 is one finite shared list of 13 prefixes in profile/temp_roots.rs, with its documented order and a literal equality test. mktemp-dir, node-compile-cache, playwright-tmp and renode-tmp expand their base pattern through it; pytest-tmp is also implemented with the same preset but its full real-host dry run remains incomplete. The preset includes claude-{uid}/nix-shell.* and two shell levels, so entries under Claude Code TMPDIR are reachable. No recursive profile references. A changed prefix set requires a v2 preset and new profile name. nix-shell-tmpdir and broad tmp-entry remain planned pending dormant-session protection and full host evidence.
 
 Final integrated nix develop -c just e2e passed 93/93 and QA/MPED reviews GO for the shared temp-prefix v1 preset. AC #2 remains open for the outer nix-shell.* directories below /tmp/claude-{uid}: the preset reaches inner profile matches there, but does not itself make those outer shell directories deletion candidates.
+
+2026-10-20 release correction: nix-shell-rc is still unshipped. A private PID namespace can share host /tmp; real-kernel unshare proof found live NSpid 3025375 9 while host /proc/9/status was absent. Nix getpid() would encode 9 in the rc dirname, so a host-only proc_status(Pid(9)) returns Gone despite the live shell. Existing LinuxHost startup check covers only its own namespace. Need cross-namespace liveness proof and fresh pre-delete recheck before shipping rc. Outer nix-shell-tmpdir and tmp-entry also remain unshipped because dormant shells set TMPDIR after exec, absent from /proc environ/cwd/fds. TASK69 AC #2 remains open; no host deletion.
 <!-- SECTION:NOTES:END -->

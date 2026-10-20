@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-19 12:19'
+updated_date: '2026-10-20 03:13'
 labels:
   - library
 dependencies:
@@ -24,3 +25,13 @@ Why: dead Nix store paths were only ~2 GiB, but 19-74 GiB of the 157 GiB store i
 - [ ] #2 Composed with the nix-store GC kind: a dry run reports the store bytes the GC would then free
 - [ ] #3 Verified read-only on this machine
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-20 read-only feasibility audit (Nix 2.34.8 host): /nix/var/nix/gcroots/auto has 393 symlink registrations; 392 target extant out-link symlinks into /nix/store, 183 target user-owned result/result-* out-links, 67 target profile paths, and one is dangling. `nix-hash --type sha1 --base32 --flat /dev/stdin` of the diskgc result path matched its auto-root name. Nix source (https://github.com/NixOS/nix/blob/master/src/libstore/gc.cc, addIndirectRoot/findRoots) confirms auto name = Nix32(SHA1(out-link path)); GC follows auto -> out-link -> store. Do not run nix-store --gc --print-roots or another roots query as a read-only audit: findRoots removes dangling auto entries as a side effect. No host links removed.
+
+Implementation dependency/safety design: The current fs profile EntryType and discovery refuse every symlink candidate, and ordinary engine deletion cannot yet express the root registration check. A dedicated no-follow out-link protocol must verify a user-owned result-style symlink under supplied roots, its absolute store target, exact registration name and readlink content under /nix/var/nix/gcroots/auto, exclude /nix/var/nix/profiles and all system/user profile links, check idle/in-use and ownership, then recheck both link identities/content immediately before fd-relative unlink. Avoid unlinking root-owned auto entries directly; Nix cleans a dangling auto entry during its later GC. This needs model and isolated-Nix-store E2E tests, including forged registration, symlink swap, active result, profiles, and alternative NIX_REMOTE.
+
+AC #2 is blocked by TASK-36 (nix-store kind currently rejected by profile loader) and a further what-if estimation problem: before out-links are removed, Nix still treats them as live, so current dead-path queries cannot report the store bytes that a subsequent GC would free. Implement and verify an explicit hypothetical-root closure analysis or revise the AC to report link count plus a separately measured post-removal GC result; do not call a host GC query read-only because Nix root discovery mutates stale registrations. No profile shipped in this audit.
+<!-- SECTION:NOTES:END -->

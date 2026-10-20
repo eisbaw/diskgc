@@ -3,10 +3,10 @@ id: TASK-37
 title: >-
   Command actions: argv, {path}, cwd, environment, timeouts, process groups,
   root refusal
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 22:22'
+updated_date: '2026-10-20 01:26'
 labels:
   - wave-4
   - irreversible
@@ -26,11 +26,11 @@ Why: special removal needs the tool's own cleaner, and command execution is the 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The candidate's safety checks run before the command (a test with an in-use candidate never runs the command)
-- [ ] #2 A missing tool makes the profile missing, not an error
-- [ ] #3 Non-zero exit is an error in the report and exit 3 when the goal is not met
-- [ ] #4 The command's working directory is the checked candidate (same device and inode, asserted by the test command)
-- [ ] #5 Killing diskgc while a command runs leaves the host lock held until the command exits
+- [x] #1 The candidate's safety checks run before the command (a test with an in-use candidate never runs the command)
+- [x] #2 A missing tool makes the profile missing, not an error
+- [x] #3 Non-zero exit is an error in the report and exit 3 when the goal is not met
+- [x] #4 The command's working directory is the checked candidate (same device and inode, asserted by the test command)
+- [x] #5 Killing diskgc while a command runs leaves the host lock held until the command exits
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -51,9 +51,11 @@ CORRECTION (2026-10-18): the 'until v1' wording above is stale. Development buil
 From task-71 (Mark, 2026-10-18): the checkout guard (contains_checkout: a .git/.hg/.svn entry anywhere in the candidate, or such a name on its path below the root) applies to command-action candidates too, fail closed, until a real case needs an exception: over-protecting trusted code is the safe default. Run command-action candidates through engine::walk (and the fs planner's path checks), never engine::walk_cargo_profile_entry. Rule: docs/safety.md, The eligibility walk, No source checkout.
 
 From task-80: engine::walk_cargo_profile_entry is gone; whether a candidate may hold a checkout is its source profile's checkouts setting (refuse unless the profile says allow), in engine::Rules::checkouts. Command-action candidates get the guard by walking with the tier's rules (engine::walk) and calling engine::checkout_metadata_below(rules.checkouts, root, at) for the path rule; a command profile that legitimately finds repositories would say checkouts: allow (docs/safety.md, No source checkout), nothing in code.
+
+Implemented in adcbc3f. QA and MPED architecture GO; nix develop -c just e2e passed 103/103. Successful command cleaner, in-use refusal, missing executable, nonzero exit, checked cwd, inherited host lock, deadline/process group, post-spawn reporting, and closed-gate order have integrated/model coverage. The earlier Podman example note is superseded by TASK93: real rootless Podman storage contains subuid-owned overlay entries, which generic fs candidate ownership rejects as not_owner; no unsafe example ships.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

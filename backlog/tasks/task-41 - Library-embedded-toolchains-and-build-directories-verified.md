@@ -1,10 +1,10 @@
 ---
 id: TASK-41
 title: 'Library: embedded toolchains and build directories, verified'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 00:28'
+updated_date: '2026-10-20 03:08'
 labels:
   - wave-4
   - config
@@ -24,8 +24,8 @@ Why: Zephyr/west, Renode and PlatformIO leave large scratch on embedded develope
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each profile has examples, a golden set and verified_with
-- [ ] #2 The profiles use the any-depth rule decided in the selection-engine task
+- [x] #1 Each profile has examples, a golden set and verified_with
+- [x] #2 The profiles use the any-depth rule decided in the selection-engine task
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -38,9 +38,11 @@ From task-68: zephyr-tmp (`zephyr-*`, which covers `zephyr-*-run.*`): 2,517 elig
 2026-10-20 partial profile checkpoint: pytest-cache only is embedded, with pytest 9.0.3 examples, golden/model tests, and read-only dry run under /home/mpedersen: 62 candidates, 62 eligible, 0 skips, 13,774,848 bytes, matching du. A distinguishing pattern mutation made its golden test red; restored. Other task-41 profiles remain planned, so ACs/status stay open.
 
 2026-10-20 read-only built-in dry runs on this laptop with --min-free 500G, no deletions, full expanded temp-prefix v1 scope: zephyr-tmp 2,776 candidates, 2,770 eligible, 6 contains_checkout, 220,872,704 eligible bytes; renode-tmp 1,912 candidates, all eligible, 37,482,496 bytes. For each, the three largest extant eligible candidates matched du -s -B1 byte for byte. Both carry match/no_match examples, verified_with, exact-definition and golden fixtures, ModelHost checks, and type mutation tests that distinguish their match sets. west-build, platformio-cache and cmake-build remain planned, and the any-depth rule remains open; TASK-41 stays To Do.
+
+2026-10-20: All six profiles now ship: zephyr-tmp, renode-tmp, pytest-cache, cmake-build, west-build and platformio-cache. west-build uses explicit depths 1–5 and requires a regular CMakeCache.txt and direct zephyr directory while rejecting source checkouts; PlatformIO 6.1.19 uses .platformio/.cache (confirmed against pinned source and a no-override E2E probe), and its prune command runs from the parent directory. Examples, golden/model tests, docs and focused container deletion tests passed. Final nix develop -c just e2e passed 116/116; independent QA and MPED reviews gave GO. Read-only host dry runs for temp profiles were recorded above; no PlatformIO cache exists on this host.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
