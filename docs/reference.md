@@ -510,7 +510,7 @@ groups:
     ranking: random                # ordered (default) | random
     tiers:
       - name: test-and-temp-cruft
-        select: (profile:pytest-tmp || profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d
+        select: (profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d
       - name: cargo-stale
         select: profile:cargo-target && filter:idle-7d
         roots: [/home/mark/src, /home/mark/topics]
@@ -611,19 +611,19 @@ named, composable rules for recognising one kind of cruft. Tiers say which
 profiles apply and when.
 
 ```yaml
-- name: pytest-tmp
-  category: test
-  description: pytest test directories under temp-prefix v1 roots
+- name: python-pycache
+  category: python / js
+  description: Python bytecode cache directories through depth five below a supplied project root
   find:                              # makes this a *source* profile
-    roots: [/tmp, /var/tmp]
-    paths: ["pytest-of-*/pytest-*/*"]  # built-in preset expands this base (below)
+    roots: required
+    paths: [__pycache__, "*/__pycache__", "*/*/__pycache__", "*/*/*/__pycache__", "*/*/*/*/__pycache__"]
     type: dir
-  checkouts: allow                   # default refuse (Built-in profile library)
   action: delete
   examples:                          # checked by `diskgc profiles test` and CI
-    match:    [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0]
-    no_match: [/tmp/pytest-of-mark/pytest-3, /home/mark/pytest-of-mark/pytest-3/test_x0]
-  verified_with: pytest 8.3          # built-in profiles only
+    root: /home/mark/src
+    match: [/home/mark/src/app/__pycache__, /home/mark/src/app/pkg/sub/__pycache__]
+    no_match: [/home/mark/src/app/__pycache__/nested, /home/mark/src/app/a/b/c/d/__pycache__]
+  verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20
 ```
 
 - **Source profiles** have `find`: roots plus path patterns relative to them
@@ -756,7 +756,8 @@ parentheses are never optional.
 
 Examples, with the normalised form that `check` prints (groups
 distributed, the terms of a union that have factors in parentheses; it
-parses back to the same expression):
+parses back to the same expression). The `pytest-tmp` rows here use a
+fixture-only parser catalog; that deletion profile is not shipped:
 
 | Expression | Normalised | Selects |
 |---|---|---|
@@ -817,7 +818,7 @@ rewrite, the rewrite fixes that error without breaking another rule (if the
 expression has other errors, they still need fixing); a suggestion that would
 itself be rejected is left out (`filter:nix-garbage` below: `!profile:nix-garbage`
 is rejected too). These examples use the parser test catalog, including
-fixture-only names such as `tmp-entry` and `nix-garbage`; those names are not
+fixture-only names such as `pytest-tmp`, `tmp-entry` and `nix-garbage`; those names are not
 necessarily shipped built-ins. The catalog also defines `a`, `b` (kind `fs`,
 action `delete`) and `f` (`idle_for`):
 
@@ -903,7 +904,7 @@ listed as planned, not shipped.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
-| test | `pytest-tmp` | pytest's test directories `pytest-of-*/pytest-*/*` in `/tmp` and `/var/tmp`, under the temp-prefix v1 preset below; one candidate per test directory; `checkouts: allow`: pytest treats these as disposable, including repositories made by tests | `delete` |
+| test | `pytest-tmp` | planned: pytest's test directories `pytest-of-*/pytest-*/*`; a live pytest session can have no open descriptor in its test directory, and `tmp_path_retention_policy=none` omits the numbered session `.lock` | no safe action yet |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | planned: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*`; a live shell in a private PID namespace can have a namespace PID absent from host `/proc`, so the current PID guard is insufficient | no safe action yet |
@@ -948,10 +949,9 @@ uv and npm caches contain `.git` metadata; those candidates report
 check merely because the tool has a cleaner. A cache tool must be available
 on `PATH` for its command profile to run.
 
-**Built-in temp-prefix v1 preset.** `pytest-tmp`,
-`node-compile-cache`, `playwright-tmp`, `renode-tmp` and `jest-cache`
-opt in. Each base pattern (`pytest-of-*/pytest-*/*`,
-`node-compile-cache`, `playwright*`, `renode-*`, `jest_*` respectively)
+**Built-in temp-prefix v1 preset.** `node-compile-cache`, `playwright-tmp`,
+`renode-tmp` and `jest-cache` opt in. Each base pattern
+(`node-compile-cache`, `playwright*`, `renode-*`, `jest_*` respectively)
 is searched under each prefix below,
 relative to each profile's fixed roots. The empty prefix is the root itself.
 The list is finite: nested shell search stops after two shell levels, or
@@ -1004,25 +1004,15 @@ Cursor and teams-for-linux installations have cache directories but no
 until a reliable app-liveness signal is available. Firefox `cache2` also
 needs a different guard and is outside this Chromium-family set.
 
-- `pytest-tmp` takes one test directory per candidate
-  (`pytest-of-<user>/pytest-<N>/<test>`), not the whole numbered session.
-  With pytest-xdist, the candidate is the `popen-gw<N>` worker directory,
-  which can contain several test directories; an in-use test then keeps
-  that worker directory.
-  An in-use file, mount or keep marker in one test directory keeps that
-  directory. It says `checkouts: allow` (Mark, 2026-10-19): tests make Git
-  fixtures inside these disposable test directories, and a read-only survey of
-  75,253 leftover repositories found only test fixtures. pytest itself
-  retains a bounded number of sessions per base temp directory; separate
-  nix-shell TMPDIRs prevent later runs from cleaning the old ones.
-  Only directories are candidates (`type: dir`): `*current` symlinks,
-  session-level files, numbered sessions and `garbage-*` directories are
-  excluded. The `pytest-of-<user>` parent remains. A running pytest process
-  can hold no descriptor in a particular test directory while still using
-  that live session; a bare `profile:pytest-tmp` can then select the test
-  directory. Use an idle filter and `protect` for active sessions. The
-  missing-descriptor case has not been verified safe to delete during a
-  running test.
+- `pytest-tmp` is unshipped. The former source selected individual test
+  directories, including Git fixtures made by tests. In a disposable
+  container, pytest 9.1.1 with `tmp_path_retention_policy=none` created
+  `/tmp/pytest-of-root/pytest-0/test_active0` without a session `.lock`;
+  while the test slept, it held no descriptor in that directory. The
+  process scan would mark this live directory eligible. An idle filter
+  cannot prove the session has ended, and a lock-only guard misses this
+  supported pytest configuration. A future profile needs a reliable
+  session-liveness signal checked immediately before deletion.
 - `claude-code-tmp` sees a live session as `in_use` when a process holds a
   file or directory in its candidate. An active session can hold no scratch
   file descriptor; use a tier idle filter and `protect` for sessions that

@@ -21,6 +21,10 @@
   examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH]}
 
 # Stand-ins, not built in yet.
+- name: pytest-tmp
+  find: {roots: [/tmp, /var/tmp], paths: ["pytest-of-*/pytest-*/*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/pytest-of-tester/pytest-0/test_x0]}
 - name: nix-shell-rc
   find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
   action: delete

@@ -299,22 +299,6 @@
   verified_with: PlatformIO Core 6.1.19 (isolated Nix-pinned prune probe, 2026-10-20)
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.
-- name: pytest-tmp
-  category: test
-  description: pytest test directories under the frozen temp-prefix v1 roots
-  find:
-    roots: [/tmp, /var/tmp]
-    # The built-in loader expands this base through temp-prefix v1; `profiles
-    # show` prints every effective pattern. See docs/reference.md.
-    paths: ["pytest-of-*/pytest-*/*"]
-    type: dir
-  checkouts: allow
-  action: delete
-  examples:
-    match: [/tmp/pytest-of-mark/pytest-3/test_x0, /tmp/nix-shell.AbC123/pytest-of-mark/pytest-0/test_y0, /var/tmp/tmp.x1/pytest-of-ci/pytest-12/test_z0, /tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-4/test_c0, /tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-ci/pytest-5/test_n0]
-    no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3, /tmp/pytest-of-mark/garbage-1a2b, /home/mark/pytest-of-mark/pytest-3/test_x0]
-  verified_with: pytest 8.3 (read-only survey 2026-10-19)
-
 - name: claude-code-tmp
   category: ai agents
   description: Claude Code numbered session directories under its per-user temp root

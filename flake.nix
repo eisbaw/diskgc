@@ -378,6 +378,8 @@
           pkgs.busybox
           pkgs.strace
           pkgs.nix
+          # Pinned real pytest for the live no-lock temp-directory counterexample.
+          pkgs.python3Packages.pytest
           nixEvalFixture
           cacheTools
         ];
@@ -398,6 +400,7 @@
           mkdir -p opt/cargo-under-test
           mkdir -p opt/nix-eval
           ln -s ${pkgs.nix}/bin/nix opt/nix-eval/nix
+          ln -s ${pkgs.python3Packages.pytest}/bin/pytest opt/pytest-under-test
           ln -s ${nixEvalFixture} opt/nix-eval/flake
           ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
           ${lib.concatMapStrings (t: ''

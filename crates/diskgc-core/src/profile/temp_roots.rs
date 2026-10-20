@@ -5,7 +5,6 @@
 
 use super::Origin;
 
-const PYTEST_BASE: &str = "pytest-of-*/pytest-*/*";
 const NODE_COMPILE_CACHE_BASE: &str = "node-compile-cache";
 const PLAYWRIGHT_BASE: &str = "playwright*";
 const RENODE_BASE: &str = "renode-*";
@@ -58,7 +57,6 @@ pub(super) fn effective(
         return Ok(patterns);
     }
     let base = match name {
-        "pytest-tmp" => PYTEST_BASE,
         "node-compile-cache" => NODE_COMPILE_CACHE_BASE,
         "playwright-tmp" => PLAYWRIGHT_BASE,
         "renode-tmp" => RENODE_BASE,
@@ -106,7 +104,6 @@ mod tests {
     #[test]
     fn show_form_is_idempotent_and_a_mutated_name_is_rejected() {
         for (name, base) in [
-            ("pytest-tmp", PYTEST_BASE),
             ("node-compile-cache", NODE_COMPILE_CACHE_BASE),
             ("playwright-tmp", PLAYWRIGHT_BASE),
             ("renode-tmp", RENODE_BASE),

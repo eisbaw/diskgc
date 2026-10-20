@@ -190,7 +190,7 @@ fn code_block_expressions(doc: &str) -> Vec<String> {
 const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "profile:cargo-target && filter:idle-1d",
     "profile:cargo-target && filter:idle-7d",
-    "(profile:pytest-tmp || profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d",
+    "(profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d",
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",
     "profile:docker-dangling",

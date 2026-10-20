@@ -64,10 +64,10 @@
 
   <rect x="40" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="60" y="394" class="h3">A profile (built-in YAML, or yours)</text>
-  <text x="60" y="420" class="mono code">name:  pytest-tmp</text>
-  <text x="60" y="440" class="mono code">find:  roots /tmp, /var/tmp</text>
-  <text x="60" y="458" class="mono code">       paths pytest-of-*/pytest-*/*,</text>
-  <text x="60" y="476" class="mono code">       nix-shell.*/pytest-of-*/pytest-*/*</text>
+  <text x="60" y="420" class="mono code">name:  node-compile-cache</text>
+  <text x="60" y="440" class="mono code">find:  roots /tmp</text>
+  <text x="60" y="458" class="mono code">       paths node-compile-cache,</text>
+  <text x="60" y="476" class="mono code">       nix-shell.*/node-compile-cache</text>
   <text x="60" y="496" class="mono code">where: idle_for · has / has_not</text>
   <text x="60" y="516" class="mono code">action: delete | command | kind</text>
   <text x="60" y="536" class="mono code">kind:  fs | cargo-target | docker-*</text>
@@ -76,8 +76,8 @@
 
   <rect x="420" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="440" y="394" class="h3">Composing them in a tier</text>
-  <text x="440" y="420" class="mono code">select: (profile:pytest-tmp ||</text>
-  <text x="440" y="438" class="mono code">          profile:node-compile-cache)</text>
+  <text x="440" y="420" class="mono code">select: (profile:node-compile-cache ||</text>
+  <text x="440" y="438" class="mono code">          profile:playwright-tmp)</text>
   <text x="440" y="456" class="mono code">        &amp;&amp; filter:idle-3d</text>
   <text x="440" y="482" class="body">• names qualified: profile:… and filter:…</text>
   <text x="440" y="500" class="body">• term: one profile &amp;&amp; filters, !filter:, !profile:</text>
@@ -88,7 +88,7 @@
 
   <rect x="800" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="820" y="394" class="h3">Built-in library (v1 targets, some planned)</text>
-  <text x="820" y="418" class="body"><tspan font-weight="700">test</tspan>  pytest-tmp, pytest-cache</text>
+  <text x="820" y="418" class="body"><tspan font-weight="700">test</tspan>  pytest-cache (pytest-tmp planned)</text>
   <text x="820" y="436" class="body"><tspan font-weight="700">nix</tspan>  nix-shell-rc, nix-shell-tmpdir, nix-garbage</text>
   <text x="820" y="454" class="body"><tspan font-weight="700">rust</tspan>  cargo-target</text>
   <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
@@ -154,7 +154,7 @@
   <rect x="40" y="938" width="740" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
   <circle cx="64" cy="962" r="5" fill="#2f9a5a"/>
   <text x="76" y="967" class="h3">group stale · ranking: random (tiers shuffled within the group)</text>
-  <text x="64" y="992" class="mono code">test-and-temp-cruft  (profile:pytest-tmp || profile:node-compile-cache) &amp;&amp; filter:idle-3d</text>
+  <text x="64" y="992" class="mono code">test-and-temp-cruft  profile:node-compile-cache &amp;&amp; filter:idle-3d</text>
   <text x="64" y="1012" class="mono code">cargo-stale           profile:cargo-target &amp;&amp; filter:idle-7d   roots: /home/mark/src</text>
   <text x="64" y="1032" class="mono code">docker-cache-stale    profile:docker-build-cache &amp;&amp; filter:idle-7d</text>
   <text x="64" y="1052" class="small">Nix store GC is planned (TASK36); no tier is shipped.</text>

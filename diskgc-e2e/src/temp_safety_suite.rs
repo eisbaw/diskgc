@@ -10,6 +10,145 @@ use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
+/// A real pytest invocation in the disposable Nix image demonstrates the
+/// supported `tmp_path_retention_policy=none` case. It creates an ordinary
+/// numbered session and test directory, but no `.lock`; while the test sleeps
+/// it holds no descriptor inside the test directory. A user-configured
+/// deletion probe must classify that live directory as eligible, which is
+/// why the same rule cannot ship as a built-in.
+pub fn live_pytest_without_session_lock_is_unsafe_to_reclaim(ctx: &Ctx) -> TestResult {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct StopOnDrop(Child);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let s = &ctx.scratch;
+    s.write_file(
+        "test_active.py",
+        b"from pathlib import Path\nimport time\n\ndef test_active(tmp_path):\n    (tmp_path / 'payload').write_text('live')\n    Path('/tmp/pytest-ready').write_text(str(tmp_path))\n    time.sleep(60)\n    assert (tmp_path / 'payload').read_text() == 'live'\n",
+        0o600,
+        TESTER,
+    )?;
+    ctx.home.write_file(
+        "pytest-unsafe-probe.yaml",
+        b"version: 1\nprofiles:\n  - name: pytest-unsafe-probe\n    find: {roots: [/tmp], paths: ['pytest-of-*/pytest-*/*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/pytest-of-tester/pytest-0/test_active0]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let child = Command::new(&ctx.self_exe)
+        .args([
+            "as-tester",
+            "--",
+            "/opt/pytest-under-test",
+            "-q",
+            "-o",
+            "tmp_path_retention_policy=none",
+            "/tmp/test_active.py",
+        ])
+        .env_clear()
+        .env("PATH", "/bin")
+        .env("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+        .current_dir("/")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("start pinned pytest: {e}"))?;
+    let mut pytest = StopOnDrop(child);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let test_dir = loop {
+        if let Ok(path) = std::fs::read_to_string(s.path("pytest-ready")) {
+            break path.into();
+        }
+        if let Some(status) = pytest
+            .0
+            .try_wait()
+            .map_err(|e| format!("poll pinned pytest: {e}"))?
+        {
+            return Err(format!(
+                "pinned pytest exited before active fixture: {status}"
+            ));
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "pinned pytest did not reach tmp_path fixture"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let test_dir: std::path::PathBuf = test_dir;
+    ensure!(
+        test_dir == s.path("pytest-of-tester/pytest-0/test_active0"),
+        "unexpected pytest test directory: {}",
+        test_dir.display()
+    );
+    ensure!(
+        !s.path("pytest-of-tester/pytest-0/.lock").exists(),
+        "retention_policy=none unexpectedly made a session lock"
+    );
+    let fd_dir = format!("/proc/{}/fd", pytest.0.id());
+    for entry in std::fs::read_dir(&fd_dir).map_err(|e| format!("read {fd_dir}: {e}"))? {
+        let entry = entry.map_err(|e| format!("read pytest fd: {e}"))?;
+        let target = std::fs::read_link(entry.path())
+            .map_err(|e| format!("read pytest fd {}: {e}", entry.path().display()))?;
+        ensure!(
+            !target.starts_with(&test_dir),
+            "pytest unexpectedly holds a descriptor in {}: {}",
+            test_dir.display(),
+            target.display()
+        );
+    }
+    let oracle = Oracle::arm(Fixture::new())?;
+    let list = ctx.run_as_tester(&ctx.diskgc(), &["profiles", "list", "--json"])?;
+    let dry = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--no-index",
+            "--config",
+            "/home/tester/pytest-unsafe-probe.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:pytest-unsafe-probe",
+            "/tmp",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&list, &dry])?;
+    list.expect_code(0)?;
+    dry.expect_code(0)?;
+    let listed = report(&list)?;
+    let names: Vec<&str> = listed["profiles"]
+        .as_array()
+        .ok_or("profiles list has no profiles array")?
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    ensure!(
+        !names.contains(&"pytest-tmp"),
+        "unsafe pytest-tmp is shipped"
+    );
+    let plan = report(&dry)?;
+    ensure!(
+        plan["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"].as_str() == test_dir.to_str() && entry["reason"].is_null()
+            })),
+        "live no-lock pytest test dir was not eligible in unsafe probe: {plan}"
+    );
+    ensure!(
+        test_dir.join("payload").exists(),
+        "dry-run touched pytest payload"
+    );
+    verdict.assert_clean()
+}
+
 pub fn dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     s.mkdir("tmp.active", 0o700, TESTER)?;

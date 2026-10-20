@@ -1,0 +1,35 @@
+# Negative proof: pytest 9.1.1 with tmp_path_retention_policy=none creates
+# this normal numbered-session layout without a .lock. The live test process
+# has no descriptor or initial environment path inside its tmp_path. A plain
+# path matcher would delete it, so pytest-tmp must not ship as a built-in.
+profile_vector: 1
+profile: pytest-tmp-unsafe-probe
+user_profiles:
+  - name: pytest-tmp-unsafe-probe
+    find: {roots: [/tmp], paths: ["pytest-of-*/pytest-*/*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/pytest-of-tester/pytest-0/test_active0]}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python: {}
+    /tmp/pytest-of-tester/pytest-0/test_active0:
+      .: {mtime: 2026-08-01T00:00:00Z}
+      payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}
+  processes:
+    - {pid: 42, exe: /usr/bin/python, cwd: /,
+       maps: [/usr/bin/python], fds: [{path: /usr/bin/python}], environ: [PATH=/usr/bin]}
+expect:
+  plan:
+    - {candidate: /tmp/pytest-of-tester/pytest-0/test_active0}
+  reclaim_exit: 1
+  actions: [/tmp/pytest-of-tester/pytest-0/test_active0]
+  removed: [/tmp/pytest-of-tester/pytest-0/test_active0]
+  skipped: []
+  preserved: [/usr/bin/python]

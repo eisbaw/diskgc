@@ -124,6 +124,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs pinned West, Zephyr source and host build tools from the Nix store",
     ),
     (
+        "live_pytest_without_session_lock_is_unsafe_to_reclaim",
+        "needs pinned pytest in the Nix image",
+    ),
+    (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
     ),
@@ -221,6 +225,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: temp_safety_suite::dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent,
+    },
+    Test {
+        name: "live_pytest_without_session_lock_is_unsafe_to_reclaim",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: temp_safety_suite::live_pytest_without_session_lock_is_unsafe_to_reclaim,
     },
     Test {
         name: "nested_claude_shell_cache_reclaims_only_its_exact_entry",

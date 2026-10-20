@@ -67,8 +67,9 @@ pub(crate) fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
     Ok(run)
 }
 
-/// Claude and pytest temp sources see open files through the real Linux
-/// process scan, without suppressing their idle siblings.
+/// Claude's built-in source and a user-configured pytest probe see open
+/// files through the real Linux process scan. This proves only the held-file
+/// case; a live pytest session can have no descriptor in its test directory.
 /// All runs are dry: the test checks classification without deleting.
 pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
@@ -112,6 +113,13 @@ pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestR
         &[],
     )?;
 
+    ctx.home.write_file(
+        "pytest-probe.yaml",
+        b"version: 1\nprofiles:\n  - name: pytest-unsafe-probe\n    find: {roots: [/tmp], paths: ['pytest-of-*/pytest-*/*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/pytest-of-tester/pytest-1/test_live]}\n",
+        0o600,
+        TESTER,
+    )?;
+
     let oracle = Oracle::arm(Fixture::new())?;
     let claude_run = ensure_run(
         ctx,
@@ -130,10 +138,12 @@ pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestR
         &[
             "--dry-run",
             "--json",
+            "--config",
+            "/home/tester/pytest-probe.yaml",
             "--min-free",
             "1K",
             "--select",
-            "profile:pytest-tmp",
+            "profile:pytest-unsafe-probe",
             "/tmp",
         ],
     )?;

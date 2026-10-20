@@ -12,7 +12,6 @@ use crate::fs_kind::{Find, path_matches};
 use std::collections::BTreeSet;
 
 const TEMP_PROFILE_NAMES: &[&str] = &[
-    "pytest-tmp",
     "claude-code-tmp",
     "chromium-tmp",
     "node-compile-cache",
@@ -599,13 +598,6 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         };
         let (roots, base, entry_type, preset, checkouts): (&[&str], &[&str], _, _, _) = match *name
         {
-            "pytest-tmp" => (
-                &["/tmp", "/var/tmp"],
-                &["pytest-of-*/pytest-*/*"],
-                EntryType::Dir,
-                true,
-                Checkouts::Allow,
-            ),
             "claude-code-tmp" => (
                 &["/tmp"],
                 &["claude-{uid}/-*/*"],
@@ -852,17 +844,6 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
         };
         assert!(matches!(source.finds, Finds::Paths { .. }), "{name} is fs");
         let want: &[&str] = match profile.name.as_str() {
-            "pytest-tmp" => &[
-                "/tmp/pytest-of-mark/pytest-3/test_x0",
-                "/tmp/pytest-of-mark/pytest-3/popen-gw0",
-                "/tmp/nix-shell.AbC123/pytest-of-ci/pytest-4/test_y0",
-                "/tmp/nix-shell.AbC123/nix-shell.B2/pytest-of-ci/pytest-5/test_n0",
-                "/tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-6/test_c0",
-                "/tmp/nix-shell-1-2/pytest-of-ci/pytest-1/test_s0",
-                "/tmp/nix-develop-1-2/pytest-of-ci/pytest-1/test_d0",
-                "/tmp/tmp.AbC123/pytest-of-ci/pytest-5/test_t0",
-                "/var/tmp/pytest-of-ci/pytest-12/test_v0",
-            ],
             "claude-code-tmp" => &["/tmp/claude-1000/-home-mark-src-app/session-1"],
             "chromium-tmp" => &[
                 "/tmp/.org.chromium.Chromium.A",

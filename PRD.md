@@ -64,7 +64,7 @@ v1 is about filesystem bytes; inode exhaustion and quotas are out of scope.
   from `survey` output and checked by the tool.
 - **Tiers say which and when.** The config's tiers select profiles with
   qualified expressions such as
-  `(profile:pytest-tmp || profile:nix-shell-rc) && filter:idle-3d`, grouped
+  `(profile:node-compile-cache || profile:playwright-tmp) && filter:idle-3d`, grouped
   so that stale cruft goes before anything that costs rebuild time.
 - **Gather, then act.** A throttled background tally keeps an index of what
   the profiles find, so freeing space never waits for a survey. The reclaim

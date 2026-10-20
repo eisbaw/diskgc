@@ -510,6 +510,16 @@ filesystem, processes and mounts from the developer's system.
   absent from the built-in library. The user-configured probe is only run
   with `--dry-run`. Protecting real dormant `nix-shell` and `nix develop`
   sessions remains a release blocker for those planned profiles.
+- **Live pytest without a session lock:** pinned pytest 9.1.1 in the
+  disposable Nix image runs a test using `tmp_path` with
+  `tmp_path_retention_policy=none`. While the test sleeps, its normal
+  `pytest-of-tester/pytest-0/test_active0` directory has no numbered-session
+  `.lock` and no open descriptor beneath it. A user-configured path-matching
+  probe marks the directory eligible in `--dry-run`; the deletion oracle
+  verifies that the run touched nothing. The test requires `pytest-tmp` to
+  stay absent from the built-in library. A checked-in ModelHost vector
+  independently proves the same no-descriptor classification with an old
+  candidate timestamp, so adding an idle filter alone cannot certify safety.
 - **Native Docker Engine smoke** in its own digest-pinned dind image under
   rootless Podman (`just e2e-docker-one native_docker_engine_dind_smoke`).
   The harness starts `dockerd` on a private Unix socket, imports an image

@@ -45,6 +45,9 @@ fn every_modelable_builtin_source_has_a_checked_in_vector() {
         let path = path.expect("directory entry").path();
         if path.extension().is_some_and(|ext| ext == "yaml") {
             let vector = read(&path);
+            if !vector.user_profiles.is_empty() {
+                continue;
+            }
             let profile = library.get(vector.profile_name()).expect("shipped profile");
             assert!(
                 matches!(&profile.body, Body::Source(source) if !matches!(source.action, Action::Command { .. })),

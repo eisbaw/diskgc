@@ -443,7 +443,6 @@ fn unknown_names_get_close_names() {
         ("cargo-targets", &["cargo-target"]),
         ("idle-5d", &["idle-1d", "idle-2d", "idle-3d", "idle-7d"]),
         ("idle-1w", &["idle-1d", "idle-1h"]),
-        ("pytest-tmp", &["pytest-tmp"]),
         ("", &[]),
     ] {
         assert_eq!(close_names(&library, name), want, "{name:?}");

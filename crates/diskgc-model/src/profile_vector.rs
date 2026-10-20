@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::profile::Library;
+use diskgc_core::profile::{Library, ProfileSpec};
 use diskgc_core::units::parse_size;
 use serde::Deserialize;
 
@@ -19,6 +19,9 @@ use crate::spec::{HostModel, Op};
 pub struct ProfileVector {
     pub profile_vector: u32,
     pub profile: String,
+    /// Optional user profiles for counterexamples to proposed built-ins.
+    #[serde(default)]
+    pub user_profiles: Vec<ProfileSpec>,
     pub path: PathBuf,
     #[serde(default)]
     pub roots: Vec<String>,
@@ -82,6 +85,15 @@ impl ProfileVector {
     /// The expectations are independent data: no expected path is derived
     /// from diskgc's report. A wrong matcher yields a mismatch here.
     pub fn check(&self, library: &Library) -> Result<(), String> {
+        let user_library = if self.user_profiles.is_empty() {
+            None
+        } else {
+            Some(
+                Library::with_user_profiles(&self.user_profiles)
+                    .map_err(|e| format!("vector user profiles: {e}"))?,
+            )
+        };
+        let library = user_library.as_ref().unwrap_or(library);
         let roots = (!self.roots.is_empty()).then_some(self.roots.as_slice());
         let tier = Tier::select(
             &format!("profile:{}", self.profile),

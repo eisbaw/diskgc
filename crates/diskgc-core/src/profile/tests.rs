@@ -208,7 +208,6 @@ fn the_built_in_library_loads() {
         "nix-user-cache",
         "pytest-cache",
         "platformio-cache",
-        "pytest-tmp",
         "claude-code-tmp",
         "chromium-tmp",
         "node-compile-cache",
@@ -258,10 +257,6 @@ fn the_built_in_library_loads() {
             make_writable: true
         }
     );
-    let Body::Source(pytest) = &library.get("pytest-tmp").expect("pytest-tmp").body else {
-        panic!("pytest-tmp is a source");
-    };
-    assert_eq!(pytest.checkouts, Checkouts::Allow);
 }
 
 #[test]
@@ -278,6 +273,19 @@ fn retired_marker_only_build_profiles_fail_selection() {
             "{expression}: {error}"
         );
     }
+}
+
+#[test]
+fn no_descriptor_live_pytest_cannot_be_selected_as_a_builtin() {
+    let library = Library::builtin().expect("built-ins");
+    assert!(library.get("pytest-tmp").is_none());
+    let error = crate::select::compile("profile:pytest-tmp", &library)
+        .expect_err("unsafe pytest temp deletion profile must not ship");
+    assert!(
+        error
+            .to_string()
+            .contains("no profile or filter is named `pytest-tmp`")
+    );
 }
 
 /// A command profile's paths and argv form one contract: the cleaner must
@@ -1106,8 +1114,17 @@ fn the_reference_examples_load() {
         .try_into()
         .expect("one YAML block in Profiles");
     let library = Library::load(&example, &[]).unwrap_or_else(|e| panic!("{e}"));
-    let pytest = library.get("pytest-tmp").expect("pytest-tmp");
-    let Body::Source(source) = &pytest.body else {
+    let pycache = library.get("python-pycache").expect("python-pycache");
+    let shipped = Library::builtin().expect("built-ins");
+    assert_eq!(
+        pycache.body,
+        shipped
+            .get("python-pycache")
+            .expect("shipped python-pycache")
+            .body,
+        "the documented example must retain the shipped match set"
+    );
+    let Body::Source(source) = &pycache.body else {
         panic!("not a source");
     };
     assert_eq!(
@@ -1117,11 +1134,7 @@ fn the_reference_examples_load() {
         }
     );
     assert_eq!(source.examples.matches.len(), 2);
-    assert_eq!(
-        source.checkouts,
-        Checkouts::Allow,
-        "as its library row says"
-    );
+    assert_eq!(source.checkouts, Checkouts::Refuse, "default checkout rule");
 
     #[derive(serde::Deserialize)]
     struct ConfigProfiles {

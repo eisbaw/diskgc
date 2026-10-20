@@ -21,8 +21,8 @@ use diskgc_model::spec::Op;
 
 /// The user profiles the tests select from. `pytest-of-dir` is a stand-in
 /// with whole `pytest-of-*` dirs as candidates (simple fixtures), not the
-/// library's `pytest-tmp` (one test dir per candidate, tested against the
-/// spike's profile file below). `pytest-cache-fixture` pins an older depth
+/// former built-in `pytest-tmp` (removed after the no-descriptor live-test
+/// counterexample). `pytest-cache-fixture` pins an older depth
 /// rule for the roots test; the shipped cache profile has its own golden
 /// fixture below.
 const PROFILES: &str = r#"
@@ -2002,61 +2002,6 @@ fn the_checkout_path_rule_follows_the_profiles_setting() {
         );
         nothing_locked_or_deleted(&host);
     }
-}
-
-/// The shipped `pytest-tmp` takes one test directory per candidate.
-/// A checkout made by a test stays inside that eligible directory because
-/// this source explicitly allows checkouts. The parent, numbered sessions,
-/// current symlinks and session-level files are not candidates.
-#[test]
-fn pytest_tmp_takes_one_test_dir_per_candidate_checkouts_included() {
-    let at = "{mtime: 2026-10-01T00:00:00Z}";
-    let link = |to: &str| format!("{{symlink: {to}, mtime: 2026-10-01T00:00:00Z}}");
-    let host = host(&yaml(&format!(
-        "  /tmp/pytest-of-mark:\n    .: {at}\n    pytest-1:\n      .: {at}\n      .lock: {at}\n      \
-         test_repo0: {{.: {at}, .git: {{.: {at}, HEAD: {at}}}, f: {at}}}\n      test_repocurrent: \
-         {}\n      test_other0: {{.: {at}, g: {at}}}\n    pytest-2: {{.: {at}, test_x0: {{.: {at}, \
-         h: {at}}}}}\n    pytest-current: {}\n  \
-         /tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0: {{.: {at}, i: {at}}}\n  \
-         /tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-mark/pytest-3/test_z0: {{.: {at}, i: {at}}}\n  \
-         /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark/pytest-4/test_c0: {{.: {at}, i: {at}}}\n",
-        link("/tmp/pytest-of-mark/pytest-1/test_repo0"),
-        link("/tmp/pytest-of-mark/pytest-2"),
-    )));
-    let request = Request {
-        tier: Tier::select(
-            "profile:pytest-tmp",
-            &Library::builtin().expect("built-ins"),
-            None,
-            1000,
-        )
-        .unwrap_or_else(|e| panic!("{e}")),
-        ..request("profile:tmp-entry", &[], "/tmp")
-    };
-    let report = dry_run(&host, &request);
-    let mut found = plan(&report);
-    found.sort();
-    let mut want = vec![
-        (
-            "/tmp/claude-1000/nix-shell.Ab1/pytest-of-mark/pytest-4/test_c0".to_owned(),
-            None,
-        ),
-        (
-            "/tmp/nix-shell.Ab1/pytest-of-mark/pytest-0/test_y0".to_owned(),
-            None,
-        ),
-        (
-            "/tmp/nix-shell.Ab1/nix-shell.B2/pytest-of-mark/pytest-3/test_z0".to_owned(),
-            None,
-        ),
-        ("/tmp/pytest-of-mark/pytest-1/test_repo0".to_owned(), None),
-        ("/tmp/pytest-of-mark/pytest-1/test_other0".to_owned(), None),
-        ("/tmp/pytest-of-mark/pytest-2/test_x0".to_owned(), None),
-        ("/var/tmp".to_owned(), Some("missing")),
-    ];
-    want.sort();
-    assert_eq!(found, want, "{:#?}", report.plan);
-    nothing_locked_or_deleted(&host);
 }
 
 /// A directory used as TMPDIR after exec is indistinguishable from stale
