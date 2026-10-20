@@ -1413,6 +1413,48 @@ elsewhere. Lix and other Nix variants are not verified.
 
 ## Command actions
 
+### Rustup and Elan toolchains (unshipped)
+
+There is no built-in `rustup` or `elan` toolchain profile. A generic
+`command` profile is not a safe substitute: it can pass a candidate path to
+an executable, but `rustup toolchain uninstall` and `elan toolchain uninstall`
+take manager names. An Elan name such as `leanprover/lean4:v4.1.0` is stored
+as `leanprover--lean4---v4.1.0`; a linked toolchain can instead be a symlink.
+The candidate directory name alone is not an authoritative uninstall target.
+
+The managers also cannot certify all pins from their own metadata. A project
+root supplied to diskgc may contain `rust-toolchain`, `rust-toolchain.toml`,
+or `lean-toolchain`; another project or a tool (for example, Kani) may pin a
+toolchain outside those roots. Rustup also has defaults and directory
+overrides. The [Rustup override rules](https://rust-lang.github.io/rustup/overrides.html)
+describe the distinct precedence of the environment, directory overrides,
+project files and defaults. Elan's `toolchain gc --help` in 4.2.1 says a
+project-file pin counts only after Elan has been used in that directory.
+Its [4.2.1 changelog](https://github.com/leanprover/elan/blob/v4.2.1/CHANGELOG.md)
+states the same limit. Neither manager can certify an unseen tool-created
+pin. A configured-root scan can narrow this uncertainty but cannot erase it.
+
+In an offline, disposable `diskgc-e2e-base` container, Elan 4.2.1 saw a
+valid `lean-toolchain` in an unvisited `/tmp/project` naming an installed
+`leanprover/lean4:v4.1.0`, yet `elan toolchain gc --json` reported that
+toolchain in `unused_toolchains`; `gc --delete` uninstalled it. In a second
+disposable container, Rustup 1.29.0 accepted `toolchain uninstall custom`
+after `default custom`: it warned that it was removing the default and then
+removed it. Both checks used fresh manager homes under `/tmp`, no network,
+and a read-only `/nix/store` bind. They demonstrate that a zero-exit manager
+cleaner does not prove preservation of defaults or pins.
+
+A shippable toolchain source needs a manager-backed identifier tied to the
+candidate, a complete pin inventory, explicit authorization of each
+uninstall target, and a recheck while the candidate lock and host lock are
+held. A default or pinned toolchain must be kept even when its name was
+authorized. The recheck must include defaults, directory overrides, every
+configured project root, linked toolchains and declared tool-created pins;
+unknown or unreadable pin state must keep the candidate. Its manager binary
+and home must be bound at preflight and at action time. TASK-94 tracks this
+work. Its real-machine dry-run acceptance criterion remains unverified under
+the current instruction to test only on fake filesystems and in containers.
+
 - **Trusted, arbitrary command execution.** diskgc runs the filesystem
   checks on the candidate *before* the command (ownership of every entry,
   mounts, in use, locks), but cannot limit what the command deletes; the
