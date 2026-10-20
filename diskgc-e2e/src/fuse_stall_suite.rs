@@ -266,8 +266,8 @@ pub fn inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount(ctx: &Ctx) -> 
     stalled.join().map_err(|_| "FUSE probe panicked")?;
     oracle.judge(&run)?.assert_clean()?;
     ensure!(
-        elapsed < Duration::from_secs(6),
-        "in-use scan hung for {elapsed:?}"
+        elapsed < Duration::from_secs(3),
+        "in-use scan exceeded its 3s CLI deadline: {elapsed:?}"
     );
     run.expect_code(1)?;
     let report = crate::ensure_suite::report(&run)?;
