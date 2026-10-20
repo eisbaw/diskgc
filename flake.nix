@@ -367,7 +367,7 @@
         pathsToLink = [ "/bin" ];
       };
 
-      # The Nix base image: busybox, strace, Nix, cache cleaners and the
+      # The Nix base image: busybox, strace, Nix, systemd-tmpfiles, cache cleaners and the
       # Cargo toolchains under test.
       # Nothing here depends on diskgc's or the harness's code, so its tag
       # (the Nix hash of its configuration) changes only when these inputs
@@ -378,6 +378,7 @@
           pkgs.busybox
           pkgs.strace
           pkgs.nix
+          pkgs.systemd
           # Pinned real pytest for the live no-lock temp-directory counterexample.
           pkgs.python3Packages.pytest
           nixEvalFixture
@@ -389,6 +390,7 @@
             "read-only /nix/store"
             "toolchains manifest"
             "tests all"
+            "tmpfiles /opt/diskgc-e2e/bin/systemd-tmpfiles"
           ]}
           # Cargo under test (diskgc-e2e/src/cargo_under_test.rs): one
           # symlink per toolchain and one to the C toolchain, into the
@@ -441,6 +443,20 @@
         arch = "amd64";
       };
       debianRustToolchain = "${debianRustVersion}-x86_64-unknown-linux-gnu";
+      # Debian's standalone implementation of systemd-tmpfiles, pinned like
+      # the Debian base image. Its runtime libraries are already in that
+      # image; this keeps the portable test image free of a Nix store.
+      debianTmpfilesDeb = pkgs.fetchurl {
+        url = "https://deb.debian.org/debian/pool/main/s/systemd/systemd-standalone-tmpfiles_257.13-1~deb13u1_amd64.deb";
+        hash = "sha256-zdW13icGIGsDvy1Qu1VvWaJHAyTE3p5a2pS68MDz5bk=";
+      };
+      debianTmpfiles = pkgs.runCommand "diskgc-debian-systemd-tmpfiles" {
+        nativeBuildInputs = [ pkgs.dpkg ];
+      } ''
+        mkdir unpack
+        dpkg-deb -x ${debianTmpfilesDeb} unpack
+        install -Dm0755 unpack/usr/bin/systemd-tmpfiles $out/bin/systemd-tmpfiles
+      '';
       e2eDebianImage = pkgs.dockerTools.streamLayeredImage {
         name = "localhost/diskgc-e2e-debian";
         fromImage = debianRustImage;
@@ -450,12 +466,15 @@
             "read-only /usr"
             "toolchains manifest"
             "tests portable"
+            "tmpfiles /usr/bin/systemd-tmpfiles"
           ]}
           # strace where the harness runs it (/bin is Debian's link to
           # /usr/bin; this layer must not make a /bin of its own).
           mkdir -p usr/bin
           cp ${pkgs.pkgsStatic.strace}/bin/strace usr/bin/strace
           chmod 0755 usr/bin/strace
+          cp ${debianTmpfiles}/bin/systemd-tmpfiles usr/bin/systemd-tmpfiles
+          chmod 0755 usr/bin/systemd-tmpfiles
 
           # Cargo under test: the image's rustup toolchain (its real cargo
           # and rustc, not rustup's proxies) and Debian's gcc as the C
@@ -495,6 +514,7 @@
             "name docker-dind"
             "toolchains none"
             "tests docker"
+            "tmpfiles none"
           ]}
           # The static strace binary is copied as a file. No Nix store is
           # mounted into the test container.

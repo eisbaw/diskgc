@@ -12,6 +12,8 @@
 //!   (`toolchains none`: no Cargo test is listed, and no manifest is read);
 //! - which tests it runs (`tests all`, `tests portable`, or `tests docker`:
 //!   the last runs only [`crate::suite::DOCKER_ONLY_TESTS`]).
+//! - where this image runs a real tmpfiles implementation (`tmpfiles PATH`),
+//!   or `tmpfiles none` for the Alpine dind image pending a suitable tool.
 //!
 //! The format is one `KEY VALUE` per line, `#` comments and blank lines
 //! ignored; every key but `read-only` exactly once, unknown keys and values
@@ -51,6 +53,7 @@ pub struct Image {
     pub read_only: Vec<PathBuf>,
     pub toolchains: Toolchains,
     pub tests: Tests,
+    pub tmpfiles: Option<PathBuf>,
 }
 
 impl Image {
@@ -78,6 +81,7 @@ impl Image {
         let mut read_only = Vec::new();
         let mut toolchains = None;
         let mut tests = None;
+        let mut tmpfiles = None;
         for line in text.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -121,14 +125,34 @@ impl Image {
                     };
                     set_once(&mut tests, key, parsed)?;
                 }
+                "tmpfiles" => {
+                    let tool = if value == "none" {
+                        None
+                    } else if value.starts_with('/') {
+                        Some(PathBuf::from(value))
+                    } else {
+                        return Err(format!(
+                            "tmpfiles {value:?} is not an absolute path or none"
+                        ));
+                    };
+                    set_once(&mut tmpfiles, key, tool)?;
+                }
                 other => return Err(format!("unknown key {other:?}")),
             }
         }
+        let name = name.ok_or("no name")?;
+        let toolchains = toolchains.ok_or("no toolchains (manifest or none)")?;
+        let tests = tests.ok_or("no tests (all, portable or docker)")?;
+        let tmpfiles = tmpfiles.ok_or("no tmpfiles (absolute path or none)")?;
+        if tmpfiles.is_none() && tests != Tests::Docker {
+            return Err("tmpfiles none is permitted only for Docker-only images".to_owned());
+        }
         Ok(Self {
-            name: name.ok_or("no name")?,
+            name,
             read_only,
-            toolchains: toolchains.ok_or("no toolchains (manifest or none)")?,
-            tests: tests.ok_or("no tests (all or portable)")?,
+            toolchains,
+            tests,
+            tmpfiles,
         })
     }
 
@@ -168,27 +192,36 @@ mod tests {
     #[test]
     fn the_nix_and_debian_descriptors_parse() {
         let nix = Image::parse(
-            "# the Nix base image\nname nix\nread-only /nix/store\ntoolchains manifest\ntests all\n",
+            "# the Nix base image\nname nix\nread-only /nix/store\ntoolchains manifest\ntests all\ntmpfiles /opt/diskgc-e2e/bin/systemd-tmpfiles\n",
         )
         .unwrap();
         assert_eq!(nix.read_only, [PathBuf::from("/nix/store")]);
         assert_eq!(nix.toolchains, Toolchains::Manifest);
+        assert_eq!(
+            nix.tmpfiles,
+            Some(PathBuf::from("/opt/diskgc-e2e/bin/systemd-tmpfiles"))
+        );
         let nix_only = [("cargo_race_4", "needs the nightly")];
         let docker_only = [("native_docker_engine_dind_smoke", "needs dockerd")];
         assert!(nix.runs("cargo_race_4@1.99.1", &nix_only, &docker_only));
         assert!(!nix.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
         let debian =
-            Image::parse("name debian\nread-only /usr\ntoolchains manifest\ntests portable\n")
+            Image::parse("name debian\nread-only /usr\ntoolchains manifest\ntests portable\ntmpfiles /usr/bin/systemd-tmpfiles\n")
                 .unwrap();
         assert_eq!(debian.tests, Tests::Portable);
         assert!(debian.runs("journey@debian-1.99.1", &nix_only, &docker_only));
         assert!(debian.runs("sandbox_trivial", &nix_only, &docker_only));
         assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only, &docker_only));
         assert!(!debian.runs("cargo_race_4", &nix_only, &docker_only));
-        let docker = Image::parse("name docker\ntoolchains none\ntests docker\n").unwrap();
+        let docker =
+            Image::parse("name docker\ntoolchains none\ntests docker\ntmpfiles none\n").unwrap();
+        assert_eq!(docker.tmpfiles, None);
         assert!(docker.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
         assert!(!docker.runs("sandbox_trivial", &nix_only, &docker_only));
-        let bare = Image::parse("name bare\ntoolchains none\ntests portable\n").unwrap();
+        let bare = Image::parse(
+            "name bare\ntoolchains none\ntests portable\ntmpfiles /usr/bin/systemd-tmpfiles\n",
+        )
+        .unwrap();
         assert!(bare.read_only.is_empty());
         assert_eq!(bare.toolchains, Toolchains::None);
     }
@@ -216,7 +249,11 @@ mod tests {
         let unreadable = Image::load_from(dir).unwrap_err();
         assert!(unreadable.contains("descriptor"), "{unreadable}");
         let file = dir.join("descriptor");
-        std::fs::write(&file, "name x\ntoolchains none\ntests all\n").unwrap();
+        std::fs::write(
+            &file,
+            "name x\ntoolchains none\ntests all\ntmpfiles /usr/bin/systemd-tmpfiles\n",
+        )
+        .unwrap();
         assert_eq!(Image::load_from(&file).unwrap().name, "x");
     }
 
@@ -226,6 +263,7 @@ mod tests {
             ("", "no name"),
             ("name x\ntests all\n", "no toolchains"),
             ("name x\ntoolchains none\n", "no tests"),
+            ("name x\ntoolchains none\ntests all\n", "no tmpfiles"),
             (
                 "name x\nname y\ntoolchains none\ntests all\n",
                 "given twice",
@@ -238,6 +276,14 @@ mod tests {
             (
                 "name x\nread-only usr\ntoolchains none\ntests all\n",
                 "absolute",
+            ),
+            (
+                "name x\ntoolchains none\ntests all\ntmpfiles relative\n",
+                "absolute path or none",
+            ),
+            (
+                "name x\ntoolchains none\ntests portable\ntmpfiles none\n",
+                "only for Docker-only images",
             ),
             (
                 "name x\nnix yes\ntoolchains none\ntests all\n",

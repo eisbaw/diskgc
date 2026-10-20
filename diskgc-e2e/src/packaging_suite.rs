@@ -8,6 +8,11 @@ use crate::suite::{Ctx, TestResult};
 use crate::{ROOT, TESTER, ensure};
 
 pub fn shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
+    let tmpfiles = ctx
+        .image
+        .tmpfiles
+        .as_ref()
+        .ok_or("this image has no systemd-tmpfiles implementation")?;
     let root = ctx.scratch.mkdirs("package-root", 0o755, ROOT)?;
     ctx.scratch
         .mkdirs("package-root/usr/lib/tmpfiles.d", 0o755, ROOT)?;
@@ -20,13 +25,13 @@ pub fn shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
         ROOT,
     )?;
 
-    let applied = Command::new(ctx.bin_dir.join("systemd-tmpfiles"))
+    let applied = Command::new(tmpfiles)
         .arg(format!("--root={}", root.display()))
         .arg("--create")
         .env_clear()
         .env("PATH", ctx.bin_dir.as_os_str())
         .output()
-        .map_err(|e| format!("run pinned systemd-tmpfiles: {e}"))?;
+        .map_err(|e| format!("run {}: {e}", tmpfiles.display()))?;
     ensure!(
         applied.status.success(),
         "shipped tmpfiles rule failed: status {}, stderr {}",

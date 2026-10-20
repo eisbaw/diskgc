@@ -559,10 +559,11 @@ filesystem, processes and mounts from the developer's system.
   the Nix and Debian images do not carry a Docker daemon.
 - **Shipped files:** `shipped_tmpfiles_and_example_work_in_container`
   applies the packaged drop-in with `systemd-tmpfiles --root=<scratch>
-  --create` in a disposable container, checks the resulting lock file,
-  and validates the packaged example config. The general test harness
-  still provisions its per-test lock by hand; unifying that setup with
-  the shipped drop-in remains TASK66 work.
+  --create` in disposable Nix and Debian containers, checks the resulting
+  lock file, and validates the packaged example config. Every Nix and Debian
+  test also provisions its per-test host lock from that shipped rule. The
+  Alpine Docker dind image still provisions its lock directly; TASK66 keeps
+  that image's migration and the ungated release package open.
 
 **Not covered end-to-end (for now):** real block filesystems (ext4 or xfs
 as separate mounts, btrfs) and network filesystems cannot be mounted in a
@@ -835,9 +836,8 @@ namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
 code under test's fds for `-y`; the code under test has no capabilities)
 and `--network=none`. The harness runs as container root and mounts a fresh
 tmpfs per test at `/tmp` (the scratch for fixtures), at `/run/diskgc`
-(0755 root, where it provisions the host lock `/run/diskgc/lock`, 0644
-root, as the tmpfiles lines in [safety.md](safety.md#host-lock) do on a
-host whose `/run` is a tmpfs) and at `/home/tester` (0755 tester); it keeps
+(0755 root, where Nix and Debian apply the packaged tmpfiles rule to create
+`/run/diskgc/lock`, 0644 root) and at `/home/tester` (0755 tester); it keeps
 its own records (strace output) on a further, root-only tmpfs. Objects the
 harness creates thus get stable inode numbers and birth times; only what
 the image itself ships stays on the overlay root.
