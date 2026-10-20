@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-20 08:58'
+updated_date: '2026-10-20 11:58'
 labels:
   - wave-1
   - hardening
@@ -68,7 +68,7 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A (blocking or hanging opens and stats: D3, D5, #26): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #2 B (path resolution: D4, D6): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #2 B (path resolution: D4, D6): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #5 E (delete only what was checked: #32, task-6 round 3 (3), #27): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
@@ -77,7 +77,7 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 - [ ] #8 H (host lock tests: #37, H10, D7): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #9 I (roots and config validation: #39, #41): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #10 J (side effects and reporting: #19 O_NOATIME, held_by_deleted_files on btrfs): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #11 K (gate flag test scans nested .cargo/config files): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #11 K (gate flag test scans nested .cargo/config files): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -95,6 +95,12 @@ From task-53's deep gate (mped H4-H6, cargo-target reclaim protocol):
 Group A (2026-10-20, partial): LinuxHost readable openat2 now uses O_NONBLOCK|O_NOCTTY; a fast disposable-container FIFO probe with no writer and a 2s alarm is added to catch regressions. All LinuxHost statx calls now use AT_NO_AUTOMOUNT, including proc magic links; proc magic-link target statx retains AT_STATX_DONT_SYNC. docs/safety.md records the remaining dead-NFS kernel lookup/deadline limit and autofs path-traversal limit. This is not TASK64 completion: B-K are separate, and D5 cannot be bounded by a cooperative deadline while a synchronous kernel syscall waits. Focused E2E and review still pending at note time.
 
 Group A verification update (2026-10-20): disposable Nix container `just e2e-one host_read_open_of_fifo_does_not_wait_for_writer` passed 1/1 after correction. Initial test incorrectly expected F_GETFL to retain O_NOCTTY; it does not, so the container now tests FIFO nonblocking behavior and the pure host unit test checks the O_NOCTTY flag mapping. No diskgc reclaim was run on a developer host.
+
+2026-10-20 group K candidate: sandbox_gate_flag_is_enabled_nowhere now scans .cargo/config and config.toml throughout checkout directories, including symlinked .cargo directories without following arbitrary symlink trees; nested rustflags/alias and symlinked config regressions bite. Focused Nix sandbox tests 13/13 and fmt passed in isolated worktree. Integrated full E2E and independent QA/MPED review are pending; TASK64 B-J remain open.
+
+2026-10-20 group B candidate: LinuxHost root-relative statx now opens with RESOLVE_NO_SYMLINKS and stats the held fd, preserving final-symlink identity while refusing intermediate symlinks. A mount-point final symlink returning ENOTDIR is classified unsafe_path through a no-symlink follow-up stat. Red-before/fixed-after host tests and focused disposable Nix-container host_resolve_refuses_symlinks passed 1/1; interlock canary refused host exit 86. Integrated full E2E and QA/MPED review pending; TASK64 C-J remain open.
+
+2026-10-20 integrated gate: group B and K changes passed nix develop -c just e2e (Nix image 139/139, native Docker 6/6) on the combined staged tree; parallel QA and MPED reviewers found no blocking issue. AC2 and AC11 checked. TASK64 remains open for groups C-J and remaining group A caveat. No diskgc execution on developer host or real project paths.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

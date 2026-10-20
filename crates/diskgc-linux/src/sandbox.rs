@@ -200,6 +200,55 @@ mod tests {
     /// The cargo feature that removes the gate.
     const RELEASE_FLAG: &str = "release-without-sandbox-gate";
 
+    /// Cargo reads `.cargo/config` or `.cargo/config.toml` in the working
+    /// directory and its ancestors. Search the checkout tree so a command run
+    /// from a nested crate cannot silently enable the release-only feature.
+    fn cargo_configs_under(repo: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![PathBuf::new()];
+        let mut configs = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(repo.join(&dir))
+                .unwrap_or_else(|e| panic!("list {}: {e}", repo.join(&dir).display()))
+            {
+                let entry = entry.expect("directory entry");
+                let file_type = entry.file_type().expect("entry type");
+                let name = entry.file_name();
+                let child = dir.join(&name);
+                if name == ".cargo" && (file_type.is_dir() || file_type.is_symlink()) {
+                    // Cargo follows a symlinked `.cargo` directory. Inspect
+                    // only its two config filenames; do not recursively walk
+                    // an arbitrary symlink target outside the checkout.
+                    for name in ["config.toml", "config"] {
+                        let rel = child.join(name);
+                        if repo.join(&rel).is_file() {
+                            configs.push(rel);
+                        }
+                    }
+                }
+                if !file_type.is_dir() || name == ".git" || name == "target" {
+                    continue; // No symlink recursion or generated output.
+                }
+                pending.push(child);
+            }
+        }
+        configs.sort();
+        configs
+    }
+
+    fn gate_enablers(repo: &Path, scanned: &[PathBuf]) -> Vec<String> {
+        let mut found = Vec::new();
+        for rel in scanned {
+            let text = std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("read {}: {e}", rel.display()));
+            for (n, line) in text.lines().enumerate() {
+                if line.contains(RELEASE_FLAG) || line.contains("all-features") {
+                    found.push(format!("{}:{}: {}", rel.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        found
+    }
+
     /// AC #3 of task-50, the compiled half: this test build (`just check`,
     /// and the flake's workspace-tests on the musl target with the features
     /// the manifests give) has the gate.
@@ -271,23 +320,9 @@ mod tests {
                 not_seen.push(rel);
             }
         }
-        // Cargo configuration may set features too; there is none today.
-        for rel in [".cargo/config.toml", ".cargo/config"] {
-            if repo.join(rel).exists() {
-                scanned.push(rel.into());
-            }
-        }
+        scanned.extend(cargo_configs_under(&repo));
 
-        let mut found = Vec::new();
-        for rel in &scanned {
-            let text = std::fs::read_to_string(repo.join(rel))
-                .unwrap_or_else(|e| panic!("read {}: {e}", rel.display()));
-            for (n, line) in text.lines().enumerate() {
-                if line.contains(flag) || line.contains("all-features") {
-                    found.push(format!("{}:{}: {}", rel.display(), n + 1, line.trim()));
-                }
-            }
-        }
+        let found = gate_enablers(&repo, &scanned);
         assert!(
             found.is_empty(),
             "the pre-release sandbox gate is removed by build configuration (only release \
@@ -300,6 +335,61 @@ mod tests {
                  checkout): {not_seen:?}"
             );
         }
+    }
+
+    #[test]
+    fn nested_cargo_config_enabling_release_feature_is_detected() {
+        let root = TempRoot::new("nested-cargo-config");
+        let cargo_dir = root.0.join("crates/example/.cargo");
+        std::fs::create_dir_all(&cargo_dir).expect("create nested Cargo config directory");
+        root.write(
+            "crates/example/.cargo/config.toml",
+            b"[build]\nrustflags = ['--cfg', 'feature=\"release-without-sandbox-gate\"']\n",
+        );
+        let alias_dir = root.0.join("crates/another/.cargo");
+        std::fs::create_dir_all(&alias_dir).expect("create nested Cargo alias directory");
+        root.write(
+            "crates/another/.cargo/config",
+            b"[alias]\ncheck-all = 'check --all-features'\n",
+        );
+        let configs = cargo_configs_under(&root.0);
+        let found = gate_enablers(&root.0, &configs);
+        assert_eq!(found.len(), 2, "nested configs must fail the gate scan");
+        assert!(
+            found
+                .iter()
+                .any(|line| line.starts_with("crates/example/.cargo/config.toml:2:")),
+            "nested rustflags location must be reported: {found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|line| line.starts_with("crates/another/.cargo/config:2:")),
+            "nested alias location must be reported: {found:?}"
+        );
+    }
+
+    #[test]
+    fn symlinked_cargo_config_enabling_release_feature_is_detected() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("symlinked-cargo-config");
+        let linked_config = root.0.join("shared-cargo");
+        std::fs::create_dir_all(&linked_config).expect("create linked Cargo config directory");
+        root.write(
+            "shared-cargo/config.toml",
+            b"[build]\nrustflags = ['--cfg', 'feature=\"release-without-sandbox-gate\"']\n",
+        );
+        let crate_dir = root.0.join("crates/example");
+        std::fs::create_dir_all(&crate_dir).expect("create crate directory");
+        symlink(&linked_config, crate_dir.join(".cargo")).expect("link Cargo config directory");
+
+        let found = gate_enablers(&root.0, &cargo_configs_under(&root.0));
+        assert_eq!(found.len(), 1, "symlinked config must fail the gate scan");
+        assert!(
+            found[0].starts_with("crates/example/.cargo/config.toml:2:"),
+            "symlinked Cargo config location must be reported: {found:?}"
+        );
     }
 
     #[test]

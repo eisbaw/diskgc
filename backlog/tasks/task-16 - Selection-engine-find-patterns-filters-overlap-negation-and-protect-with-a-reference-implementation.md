@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 11:09'
+updated_date: '2026-10-20 11:59'
 labels:
   - wave-2
   - irreversible
@@ -64,6 +64,10 @@ Final checkpoint gate: parallel QA and MPED re-reviews GO for the pure evaluator
 Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must use the same authorized-owner expansion as positive sources; {uid} from process UID 0 would miss /tmp/claude-1000 and could erase intended exclusions. Add single- and multi-owner reference cases before runtime protect is enabled.
 
 2026-10-20 runtime increment: !filter:idle-N is now an exclusive upper age bound for one-source fs and cargo-target expressions. IdleWindow carries positive and negative bounds through dry-run judgement and deletion-time fs candidate/Cargo lock rechecks; too_idle is the explicit skip reason. ModelHost regressions include a clock advance at fs flock; nix develop -c just check and a focused disposable Nix-container fs idle test pass. Union, !profile overlap, protect and has/has_not filter runtime remain unsupported, so TASK16 stays open; no AC/DoD checked by this increment.
+
+2026-10-20 runtime entry-complement slice (isolated /tmp/diskgc-task16-has-neg, pending integration): one-source fs !filter:has and !filter:has_not are evaluated after source discovery in dry run/tally and again through the held candidate fd under reclaim lock. Known mismatch is skipped as filtered; unreadable/unknown child type never becomes a complement match. ModelHost covers both predicates, EACCES and lock-time marker changes; focused disposable Nix-container binary/oracle case passed 1/1. Positive has filters, mixed-predicate filters, unions, !profile and protect remain refused; TASK16 AC/DoD remain open. docs/reference.md must gain filtered in the report skip-reason enum at integration.
+
+2026-10-20 integrated entry-complement checkpoint: docs/reference.md now lists filtered and accurately describes the seven shipped idle filters and supported runtime subset. Full nix develop -c just e2e passed (Nix image 139/139, native Docker 6/6); parallel QA and MPED reviews GO. TASK16 remains open for positive entry filters, unions, !profile overlap and protect; no AC/DoD checked.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

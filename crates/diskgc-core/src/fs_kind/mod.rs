@@ -66,6 +66,9 @@ pub struct Find {
     pub has_dir: Option<String>,
     /// ... and one it must not.
     pub has_not: Option<String>,
+    /// Selection filters are judged after discovery and again under the
+    /// candidate lock. They must not narrow the source's discovered set.
+    pub entry_filters: Vec<EntryFilter>,
     pub app_not_running: Option<std::path::PathBuf>,
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
@@ -76,6 +79,17 @@ pub struct Find {
     pub protect_link_dirs: Vec<String>,
     pub protect_parent_link: Option<String>,
     pub protect_cursor_extensions: Option<String>,
+}
+
+/// One filesystem entry predicate in a selection term. `has` means a
+/// regular direct child; `has_not` means no regular direct child of that
+/// name. Negation complements only a known verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryFilter {
+    pub name: String,
+    pub entry: String,
+    pub has: bool,
+    pub negated: bool,
 }
 
 impl Find {
@@ -172,6 +186,7 @@ impl Find {
             has: where_.has.clone(),
             has_dir: where_.has_dir.clone(),
             has_not: where_.has_not.clone(),
+            entry_filters: Vec::new(),
             app_not_running: where_
                 .app_not_running
                 .as_ref()

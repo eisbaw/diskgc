@@ -173,6 +173,13 @@ impl Judge<'_> {
         deadline: Option<MonoTime>,
     ) -> Judged<Walked> {
         judged!(self.source_where(host, reached.parent(), found, deadline));
+        judged!(self.entry_filters(
+            host,
+            reached.parent(),
+            candidate_view.locked_fd,
+            found,
+            deadline
+        ));
         let source_evidence = judged!(self.source_anchor(
             host,
             reached.parent(),
@@ -296,6 +303,91 @@ impl Judge<'_> {
             ))),
             Err(skip) => Ok(Err(skip)),
         }
+    }
+
+    /// Evaluate each selection entry predicate on the candidate, not at
+    /// source discovery. A failed observation is never treated as the
+    /// complement of a filter. The reclaim uses its locked directory fd.
+    fn entry_filters<H: Host>(
+        &self,
+        host: &H,
+        parent: &Resolved<H::Fd>,
+        locked_fd: Option<&H::Fd>,
+        found: &Found,
+        deadline: Option<MonoTime>,
+    ) -> Judged<()> {
+        if self.find.entry_filters.is_empty() {
+            return Ok(Ok(()));
+        }
+        // A file has no child entries. These are known predicate verdicts,
+        // matching the source `has` / `has_not` semantics.
+        let opened;
+        let candidate_fd = if found.identity.file_type == FileType::Directory {
+            if let Some(fd) = locked_fd {
+                Some(fd)
+            } else {
+                check_deadline(host, deadline, &found.path)?;
+                let name = file_name(found)?;
+                opened = match open_beneath(
+                    host,
+                    &parent.fd,
+                    parent.mount.id,
+                    Path::new(name),
+                    Access::Path,
+                    Want::Directory,
+                ) {
+                    Ok((fd, _)) => fd,
+                    Err(ResolveError::Host(error)) => {
+                        return Ok(Err(skip_or_stop(found.path.clone(), "open", &error)?));
+                    }
+                    Err(error) => {
+                        return Ok(Err(Skip::new(
+                            Reason::Changed,
+                            found.path.clone(),
+                            format!("cannot inspect selection filters: {error}"),
+                        )));
+                    }
+                };
+                Some(&opened)
+            }
+        } else {
+            None
+        };
+        for filter in &self.find.entry_filters {
+            let regular = if let Some(fd) = candidate_fd {
+                let path = found.path.join(&filter.entry);
+                check_deadline(host, deadline, &path)?;
+                match host.statx(Base::Dir(fd), Path::new(&filter.entry)) {
+                    Ok(stat) => match stat.file_type {
+                        Some(file_type) => file_type == FileType::Regular,
+                        None => {
+                            return Ok(Err(Skip::new(
+                                Reason::UnsupportedFs,
+                                path,
+                                format!("filter:{}: kernel did not report entry type", filter.name),
+                            )));
+                        }
+                    },
+                    Err(error) if error.is(Errno::ENOENT) => false,
+                    Err(error) => return Ok(Err(skip_or_stop(path, "stat", &error)?)),
+                }
+            } else {
+                false
+            };
+            let matches = if filter.has { regular } else { !regular };
+            if matches == filter.negated {
+                return Ok(Err(Skip::new(
+                    Reason::Filtered,
+                    found.path.clone(),
+                    format!(
+                        "selection filter {}filter:{} does not admit candidate",
+                        if filter.negated { "!" } else { "" },
+                        filter.name
+                    ),
+                )));
+            }
+        }
+        Ok(Ok(()))
     }
 
     fn source_anchor<H: Host>(

@@ -51,6 +51,8 @@ const PROFILES: &str = r#"
   examples: {root: /home/mark/src, match: [/home/mark/src/build]}
 - name: has-tag
   where: {has: CACHEDIR.TAG}
+- name: has-not-tag
+  where: {has_not: CACHEDIR.TAG}
 - name: unmounted
   find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
   where: {has_not: mounted}
@@ -1563,6 +1565,58 @@ fn has_filters_in_a_term_are_refused_not_ignored() {
         tier.idle_before.map(|idle| idle.0),
         Some(Duration::from_secs(86_400))
     );
+}
+
+#[test]
+fn negated_entry_filters_have_known_and_unknown_verdicts() {
+    let tree = "  /tmp/pytest-of-tagged: {.: {}, CACHEDIR.TAG: {size: 1K}}\n  /tmp/pytest-of-plain: {.: {}, f: {size: 1K}}\n";
+    for (selection, eligible, filtered) in [
+        (
+            "profile:pytest-of-dir && !filter:has-tag",
+            "/tmp/pytest-of-plain",
+            "/tmp/pytest-of-tagged",
+        ),
+        (
+            "profile:pytest-of-dir && !filter:has-not-tag",
+            "/tmp/pytest-of-tagged",
+            "/tmp/pytest-of-plain",
+        ),
+    ] {
+        let host = host(&yaml(tree));
+        let report = dry_run(&host, &request(selection, &[], "/tmp"));
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|p| p.candidate == Path::new(eligible) && p.reason.is_none()),
+            "{report:#?}"
+        );
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|p| p.candidate == Path::new(filtered) && p.reason == Some("filtered")),
+            "{report:#?}"
+        );
+        nothing_locked_or_deleted(&host);
+    }
+
+    let unknown = "events:\n  - {at: {op: statx, path: /tmp/pytest-of-plain/CACHEDIR.TAG, when: before}, fail: EACCES}\n";
+    let host = host(&yaml(&format!("{tree}{unknown}")));
+    let report = dry_run(
+        &host,
+        &request("profile:pytest-of-dir && !filter:has-tag", &[], "/tmp"),
+    );
+    assert!(
+        report
+            .plan
+            .iter()
+            .any(|p| p.candidate == Path::new("/tmp/pytest-of-plain")
+                && p.reason == Some("unreadable")),
+        "{report:#?}"
+    );
+    assert!(host.unfired_events().is_empty());
+    nothing_locked_or_deleted(&host);
 }
 
 /// A dry run reuses one process scan for later candidates for up to

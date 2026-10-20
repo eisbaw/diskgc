@@ -1569,7 +1569,10 @@ candidate:
    `STATX_ATTR_MOUNT_ROOT` set and `stx_mnt_id` equal to the mountinfo id.
    Anything else is `unsafe_path`: a mount point shadowed by a later mount
    over one of its parents, or a mount table that changed between reading
-   and opening (refused, not retried).
+   and opening (refused, not retried). A final symlink at the mount point
+   can make `O_DIRECTORY | O_NOFOLLOW` report `ENOTDIR`; a no-symlink stat
+   distinguishes it from a missing or non-directory path so it is also
+   `unsafe_path`.
 3. Resolve the rest relative to it with
    `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)`; if the
    path is the mount point itself, the rest is `.`. Without `O_NOFOLLOW`,
@@ -1583,8 +1586,11 @@ fails in step 3 (`ELOOP`) and becomes `unsafe_path`. This refuses symlinks
 and any mount crossing below the root, including a bind mount of the same
 filesystem, which a device comparison would miss. A path that lies *on* a
 bind mount resolves on that mount (step 1 picks it), like any other mount.
-(`statx` on the full path is not used to find the mount: it follows
-symlinks in the middle of the path.)
+We do not use a direct `statx` on the full path to find the mount: that
+would follow symlinks in intermediate components.
+The root-relative `statx` host primitive first opens with
+`RESOLVE_NO_SYMLINKS`, then stats the held fd; it reports a final symlink
+as a symlink but refuses intermediate symlinks with `ELOOP`.
 
 The walk and the deletion descend with
 `openat2(... RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS)`; `statx` results are

@@ -952,9 +952,35 @@ impl Host for LinuxHost {
             Base::Root => CWD,
             Base::Dir(fd) => fd.as_fd(),
         };
-        rustix::fs::openat2(dir, path, oflags(how), Mode::empty(), resolve_flags(how))
-            .map(LinuxFd)
-            .map_err(|e| HostError::errno("openat2", shown(&base, path), errno_of(e)))
+        match rustix::fs::openat2(dir, path, oflags(how), Mode::empty(), resolve_flags(how)) {
+            Ok(fd) => Ok(LinuxFd(fd)),
+            Err(error) => {
+                // O_DIRECTORY | O_NOFOLLOW reports a trailing symlink as
+                // ENOTDIR. For a mount-point open, resolve maps that to
+                // "missing". Inspect it without traversing any symlink so
+                // a stale mountinfo entry naming a link fails unsafe_path.
+                let errno = if matches!(base, Base::Root)
+                    && error == rustix::io::Errno::NOTDIR
+                    && how.directory
+                    && how.nofollow
+                    && how.resolve.no_symlinks
+                    && matches!(
+                        self.statx(Base::Root, path),
+                        Ok(Stat {
+                            file_type: Some(FileType::Symlink),
+                            ..
+                        }) | Err(HostError {
+                            cause: diskgc_core::host::Cause::Errno(Errno::ELOOP),
+                            ..
+                        })
+                    ) {
+                    Errno::ELOOP
+                } else {
+                    errno_of(error)
+                };
+                Err(HostError::errno("openat2", shown(&base, path), errno))
+            }
+        }
     }
 
     fn statx(&self, base: Base<'_, LinuxFd>, path: &Path) -> Result<Stat, HostError> {
@@ -967,7 +993,29 @@ impl Host for LinuxHost {
                     "a path from the root must be absolute",
                 ));
             }
-            Base::Root => (CWD, AtFlags::SYMLINK_NOFOLLOW),
+            Base::Root => {
+                // AT_SYMLINK_NOFOLLOW protects only the final component.
+                // Open through the kernel's no-symlink resolver first, then
+                // stat the held object; O_NOFOLLOW still lets us report a
+                // trailing symlink's type to the caller.
+                let fd = rustix::fs::openat2(
+                    CWD,
+                    path,
+                    OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                    ResolveFlags::NO_SYMLINKS,
+                )
+                .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))?;
+                let stat = rustix::fs::statx(
+                    fd.as_fd(),
+                    "",
+                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT,
+                    STATX_MASK,
+                )
+                .map(|x| stat_from_statx(&x))
+                .map_err(|e| HostError::errno("statx", shown(&base, path), errno_of(e)))?;
+                return Ok(stat);
+            }
             Base::Dir(fd) if empty => (fd.as_fd(), AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH),
             Base::Dir(fd) => (fd.as_fd(), AtFlags::SYMLINK_NOFOLLOW),
         };
@@ -2376,7 +2424,7 @@ mod tests {
 
     use super::*;
     use diskgc_core::host::{Cause, Ids};
-    use diskgc_core::resolve::{Want, resolve};
+    use diskgc_core::resolve::{Want, resolve, resolve_in};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::process::CommandExt;
@@ -2810,6 +2858,67 @@ mod tests {
         // /proc/self is a symlink: refused.
         let err = resolve(&host, Path::new("/proc/self"), Want::Any).unwrap_err();
         assert_eq!(err.reason(), "unsafe_path", "{err}");
+    }
+
+    #[test]
+    fn root_statx_refuses_intermediate_symlinks_but_reports_a_final_symlink() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("root-statx-symlink");
+        let actual = dir.0.join("actual");
+        std::fs::create_dir(&actual).expect("create actual directory");
+        std::fs::write(actual.join("file"), b"safe").expect("write file");
+        let link = dir.0.join("link");
+        std::os::unix::fs::symlink(&actual, &link).expect("create symlink");
+
+        let stat = host.statx(Base::Root, &link).expect("stat final link");
+        assert_eq!(stat.file_type, Some(FileType::Symlink));
+        let dangling = dir.0.join("dangling");
+        std::os::unix::fs::symlink("absent", &dangling).expect("create dangling symlink");
+        assert_eq!(
+            host.statx(Base::Root, &dangling)
+                .expect("stat dangling final link")
+                .file_type,
+            Some(FileType::Symlink)
+        );
+        let err = host
+            .statx(Base::Root, &link.join("file"))
+            .expect_err("intermediate link must not be traversed");
+        assert!(err.is(Errno::ELOOP), "{err}");
+    }
+
+    #[test]
+    fn final_mount_point_symlink_is_unsafe_path() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new("mount-point-symlink");
+        let actual = dir.0.join("actual");
+        std::fs::create_dir(&actual).expect("create actual directory");
+        let link = dir.0.join("link");
+        std::os::unix::fs::symlink(&actual, &link).expect("create symlink");
+
+        // A stale mountinfo line names the symlink after the mount point
+        // changed. Resolution must classify the refusal as unsafe_path.
+        let mounts = host.mountinfo().expect("mountinfo");
+        let mut fake = mounts
+            .iter()
+            .find(|entry| entry.mount_point == Path::new("/"))
+            .expect("root mount")
+            .clone();
+        fake.mount_point = link.clone();
+        let err = resolve_in(&host, &[fake], &link, Want::Directory)
+            .expect_err("a symlink cannot be a mount point");
+        assert_eq!(err.reason(), "unsafe_path", "{err}");
+
+        let file = dir.0.join("regular");
+        std::fs::write(&file, b"").expect("create regular file");
+        let mut fake_file = mounts
+            .iter()
+            .find(|entry| entry.mount_point == Path::new("/"))
+            .expect("root mount")
+            .clone();
+        fake_file.mount_point = file.clone();
+        let err = resolve_in(&host, &[fake_file], &file, Want::Directory)
+            .expect_err("a regular file cannot be a mount point");
+        assert_eq!(err.reason(), "missing", "{err}");
     }
 
     #[test]

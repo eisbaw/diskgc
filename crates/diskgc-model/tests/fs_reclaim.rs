@@ -39,6 +39,10 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["*"], type: any}
   action: delete
   examples: {match: [/tmp/x]}
+- name: has-tag
+  where: {has: CACHEDIR.TAG}
+- name: has-not-tag
+  where: {has_not: CACHEDIR.TAG}
 - name: anything
   find: {roots: required, paths: ["*"], type: any}
   action: delete
@@ -180,6 +184,37 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
         host.unfired_events().is_empty(),
         "candidate lock event should fire"
     );
+}
+
+#[test]
+fn negated_entry_filters_are_rechecked_after_candidate_lock() {
+    for (selection, tree, event, candidate) in [
+        (
+            "profile:pytest-of-dir && !filter:has-tag",
+            "  /tmp/pytest-of-a: {.: {}, f: {size: 1M}}\n",
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, create: /tmp/pytest-of-a/CACHEDIR.TAG}\n",
+            "/tmp/pytest-of-a",
+        ),
+        (
+            "profile:pytest-of-dir && !filter:has-not-tag",
+            "  /tmp/pytest-of-a: {.: {}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n",
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, remove: /tmp/pytest-of-a/CACHEDIR.TAG}\n",
+            "/tmp/pytest-of-a",
+        ),
+    ] {
+        let host = host(&yaml("", tree, event));
+        let report = ensure(&host, &tmp(selection));
+        assert!(report.actions.is_empty(), "{report:#?}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.candidate == Path::new(candidate) && s.reason == "filtered"),
+            "{report:#?}"
+        );
+        assert!(exists(&host, candidate));
+        assert!(host.unfired_events().is_empty());
+    }
 }
 
 /// Root-mode owner IDs are an explicit input to the same modelled walk:

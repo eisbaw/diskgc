@@ -386,7 +386,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension"}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -583,10 +583,12 @@ Rules:
 - Disabling a tier = commenting it out. There is no `enabled` field.
 
 In this development build, `check` validates these fields, including all
-configured groups. `ensure --select` still accepts one positive source
-term, optionally narrowed by a positive idle filter; run-time union and
-negation are deferred. It refuses a nonempty `protect` and `ipc: live-only`
-until their run-time checks are implemented (tasks 16 and 21). Root mode
+configured groups. `ensure --select` accepts one positive source term with
+supported idle and version filters, including negated idle filters. Run-time
+unions, negated profiles, and positive entry filters are deferred. Filesystem
+terms can use `!filter:` with a single `has` or `has_not` predicate. It refuses
+a nonempty `protect` and `ipc: live-only` until their run-time checks are
+implemented (tasks 16 and 21). Root mode
 requires a protected config with `owners:`, resolves those owners before
 planning, and refuses generic command, Docker prune and `{uid}` sources.
 It never ignores a safety setting.
@@ -826,7 +828,8 @@ fixture-only parser catalog; that deletion profile is not shipped:
   filter is skipped as `not_idle`; one that matches a negated idle filter is
   skipped as `too_idle`. An unknown age passes neither polarity and is
   skipped as `unsupported_fs` or `future_time`. Other failed filters report
-  their own reason (for example `has_not`).
+  their own reason. A known entry predicate that excludes a candidate reports
+  `filtered`; an unreadable entry cannot pass either polarity.
 
 Errors. A rejected expression is a load-time error (exit 2). The report
 starts with `invalid selection`, the expression as written and, for a
@@ -958,7 +961,10 @@ listed as planned, not shipped.
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
 | generic | `mktemp-dir` | planned: `tmp.*` directories under `/tmp`'s temp-prefix v1 preset; a live shell can use one as `TMPDIR` after exec, invisible to the process scan | no safe action yet |
 | generic | `xdg-cache-entry-v2` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known state, browser roots and dedicated/deferred caches; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
-| filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
+| filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d` | (no `find`) | none |
+
+`has-cachedir-tag` in the selection error examples is a parser-test fixture,
+not a shipped built-in filter.
 
 The command cache profiles use the tools' own cleaners on the exact measured
 directory. They retain the default `checkouts: refuse` safety rule. Some real

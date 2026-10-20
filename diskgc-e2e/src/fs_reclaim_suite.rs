@@ -50,6 +50,18 @@ profiles:
     where: {idle_for: 10s}
 "#;
 
+const ENTRY_NEGATION_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: entry-negation-kernel
+    find: {roots: [/tmp], paths: ["entry-negation-*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/entry-negation-plain, /tmp/entry-negation-tagged]}
+  - name: entry-has-tag
+    where: {has: CACHEDIR.TAG}
+  - name: entry-has-not-tag
+    where: {has_not: CACHEDIR.TAG}
+"#;
+
 const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
 profiles:
   - name: cache-exclusion-test
@@ -420,6 +432,56 @@ pub fn fs_reclaim_negated_idle_filter_keeps_old_candidate(ctx: &Ctx) -> TestResu
     );
     ensure!(old.join("payload").exists(), "old payload was deleted");
     ensure!(!recent.exists(), "recent candidate remains");
+    verdict.assert_clean()
+}
+
+/// Both entry complements use the shipped binary and the scratch tmpfs.
+/// The deletion oracle permits only the candidate selected by each run.
+pub fn fs_reclaim_negated_entry_filters(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        ENTRY_NEGATION_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let plain = s.mkdir("entry-negation-plain", 0o700, TESTER)?;
+    s.write_file("entry-negation-plain/payload", b"delete", 0o600, TESTER)?;
+    let tagged = s.mkdir("entry-negation-tagged", 0o700, TESTER)?;
+    s.write_file("entry-negation-tagged/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(plain.clone())
+            .eligible(tagged.clone()),
+    )?;
+    let no_has = "profile:entry-negation-kernel && !filter:entry-has-tag";
+    let no_has_not = "profile:entry-negation-kernel && !filter:entry-has-not-tag";
+    let first = ensure_tmp(ctx, &["--min-free", "100%", "--select", no_has])?;
+    let second = ensure_tmp(ctx, &["--min-free", "100%", "--select", no_has_not])?;
+    let verdict = oracle.judge_runs(&[&first, &second])?;
+    first.expect_code(1)?;
+    second.expect_code(0)?;
+    let (first_skips, first_actions) = outcome(&report(&first)?);
+    ensure!(
+        first_actions == [plain.display().to_string()],
+        "{first_actions:?}"
+    );
+    ensure!(
+        first_skips
+            .get(tagged.to_str().ok_or("tagged path")?)
+            .map(String::as_str)
+            == Some("filtered"),
+        "{first_skips:?}"
+    );
+    let (_, second_actions) = outcome(&report(&second)?);
+    ensure!(
+        second_actions == [tagged.display().to_string()],
+        "{second_actions:?}"
+    );
+    ensure!(
+        !plain.exists() && !tagged.exists(),
+        "selected candidates remain"
+    );
     verdict.assert_clean()
 }
 

@@ -47,7 +47,7 @@ use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
 use crate::docker_backend::{self, Binding, Storage};
 use crate::engine::{Checkouts, Reason, Rules, Skip};
-use crate::fs_kind::{self, Find};
+use crate::fs_kind::{self, EntryFilter, Find};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
     Space, Timestamp,
@@ -130,7 +130,7 @@ impl Tier {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
-                 kind fs), optionally with `&& filter:idle-...`"
+                 kind fs), optionally with supported idle filters or an fs entry complement"
             )
         };
         let [term] = checked.expr().terms.as_slice() else {
@@ -169,14 +169,36 @@ impl Tier {
                 return Err(format!("--select `{expr}`: no filter profile `{name}`"));
             };
             if negated {
-                if where_.predicates() != [crate::kind::PredicateName::IdleFor] {
+                if where_.predicates() == [crate::kind::PredicateName::IdleFor] {
+                    let bound = where_.idle_for.expect("idle predicate present");
+                    idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
+                    continue;
+                }
+                if !matches!(kind, SourceKind::Fs(_))
+                    || !matches!(
+                        where_.predicates().as_slice(),
+                        [crate::kind::PredicateName::Has | crate::kind::PredicateName::HasNot]
+                    )
+                {
                     return Err(not_yet(
-                        &format!("`!filter:{name}` (non-idle predicates)"),
+                        &format!("`!filter:{name}` (unsupported predicates)"),
                         "task-16",
                     ));
                 }
-                let bound = where_.idle_for.expect("idle predicate present");
-                idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
+                let SourceKind::Fs(find) = &mut kind else {
+                    unreachable!()
+                };
+                find.entry_filters.push(EntryFilter {
+                    name: name.clone(),
+                    entry: where_
+                        .has
+                        .as_ref()
+                        .or(where_.has_not.as_ref())
+                        .expect("entry predicate present")
+                        .clone(),
+                    has: where_.has.is_some(),
+                    negated: true,
+                });
                 continue;
             }
             if where_.has.is_some() || where_.has_dir.is_some() || where_.has_not.is_some() {
