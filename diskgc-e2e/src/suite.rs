@@ -403,6 +403,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_image_temp_minimum_idle_and_open_file,
     },
     Test {
+        name: "fs_reclaim_negated_idle_filter_keeps_old_candidate",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_negated_idle_filter_keeps_old_candidate,
+    },
+    Test {
         name: "nix_evaluation_keeps_its_user_eval_cache_in_use",
         tier: Tier::Fast,
         expect: Expect::Pass,

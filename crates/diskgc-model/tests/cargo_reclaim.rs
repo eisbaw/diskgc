@@ -24,7 +24,7 @@ use diskgc_core::host::{
     ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
 use diskgc_core::inuse::{Checker, Options, REUSE_LIMIT};
-use diskgc_core::profile::IdleFor;
+use diskgc_core::profile::{IdleFor, IdleWindow};
 use diskgc_model::spec::Op;
 use diskgc_model::{Holder, ModelFd, ModelHost};
 
@@ -123,7 +123,15 @@ fn found(host: &ModelHost) -> Target {
 fn reclaimed_with(host: &ModelHost, rules: &Rules<'_>) -> Reclaimed {
     let target = found(host);
     let mut checker = Checker::new(rules, REUSE_LIMIT);
-    reclaim(host, &target, None, rules, None, &mut checker, None)
+    reclaim(
+        host,
+        &target,
+        None,
+        rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    )
 }
 
 fn reclaimed(host: &ModelHost) -> Reclaimed {
@@ -154,11 +162,26 @@ fn a_mounted_manifest_is_never_statted_during_eligibility_or_reclaim() {
         assert!(reached.project.detached, "{root}: {reached:#?}");
         let rules = rules();
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
-        let eligible = eligibility(&host, target, &rules, None, &mut checker, None)
-            .expect("eligibility")
-            .expect("eligible");
+        let eligible = eligibility(
+            &host,
+            target,
+            &rules,
+            IdleWindow::default(),
+            &mut checker,
+            None,
+        )
+        .expect("eligibility")
+        .expect("eligible");
         assert!(eligible.entries > 0, "{root}: {eligible:#?}");
-        let done = reclaim(&host, target, None, &rules, None, &mut checker, None);
+        let done = reclaim(
+            &host,
+            target,
+            None,
+            &rules,
+            IdleWindow::default(),
+            &mut checker,
+            None,
+        );
         assert_eq!(done.end, ReclaimEnd::Complete, "{root}: {done:#?}");
         let touched: Vec<_> = host
             .trace()
@@ -190,11 +213,26 @@ fn a_nested_mount_in_a_profile_entry_is_never_statted() {
     let target = found(&host);
     let rules = rules();
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
-    let eligible = eligibility(&host, &target, &rules, None, &mut checker, None)
-        .expect("eligibility")
-        .expect_err("mounted entry must be refused");
+    let eligible = eligibility(
+        &host,
+        &target,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    )
+    .expect("eligibility")
+    .expect_err("mounted entry must be refused");
     assert_eq!(eligible.reason, Reason::ContainsMount, "{eligible}");
-    let done = reclaim(&host, &target, None, &rules, None, &mut checker, None);
+    let done = reclaim(
+        &host,
+        &target,
+        None,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    );
     let touched: Vec<_> = host
         .trace()
         .into_iter()
@@ -588,13 +626,28 @@ fn a_newer_build_before_the_locks_are_held_is_changed() {
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
         let idle = idle_days.map(|d| IdleFor(DAY * d));
         let judged = judge.then(|| {
-            eligibility(&host, &target, &rules, idle, &mut checker, None)
-                .unwrap_or_else(|e| panic!("{e}"))
-                .unwrap_or_else(|skip| panic!("{skip}"))
-                .last_build
-                .expect("a last build")
+            eligibility(
+                &host,
+                &target,
+                &rules,
+                IdleWindow::at_least(idle),
+                &mut checker,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|skip| panic!("{skip}"))
+            .last_build
+            .expect("a last build")
         });
-        let done = reclaim(&host, &target, judged, &rules, idle, &mut checker, None);
+        let done = reclaim(
+            &host,
+            &target,
+            judged,
+            &rules,
+            IdleWindow::at_least(idle),
+            &mut checker,
+            None,
+        );
         match want {
             Some(reason) => {
                 assert_skipped(&done, reason, "");
@@ -655,11 +708,26 @@ fn a_process_started_between_judging_and_locking_is_seen() {
     let target = found(&host);
     let rules = rules();
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
-    let judged = eligibility(&host, &target, &rules, None, &mut checker, None)
-        .unwrap_or_else(|e| panic!("{e}"))
-        .unwrap_or_else(|skip| panic!("{skip}"))
-        .last_build;
-    let done = reclaim(&host, &target, judged, &rules, None, &mut checker, None);
+    let judged = eligibility(
+        &host,
+        &target,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap_or_else(|skip| panic!("{skip}"))
+    .last_build;
+    let done = reclaim(
+        &host,
+        &target,
+        judged,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    );
     assert_skipped(&done, Reason::InUse, "pid 50");
     assert!(unlinked(&host).is_empty());
 }
@@ -722,7 +790,15 @@ fn a_checker_for_other_users_is_an_error_of_the_run() {
         },
         REUSE_LIMIT,
     );
-    let done = reclaim(&host, &target, None, &rules(), None, &mut checker, None);
+    let done = reclaim(
+        &host,
+        &target,
+        None,
+        &rules(),
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    );
     assert!(
         matches!(done.end, ReclaimEnd::Stopped(Stop::Failed { .. })),
         "{done:?}"
@@ -879,7 +955,15 @@ fn a_deadline_passing_mid_deletion_stops_it() {
     let rules = rules();
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let deadline = host.now().checked_add(Duration::from_secs(60));
-    let done = reclaim(&host, &target, None, &rules, None, &mut checker, deadline);
+    let done = reclaim(
+        &host,
+        &target,
+        None,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        deadline,
+    );
     assert!(
         matches!(done.end, ReclaimEnd::Stopped(Stop::DeadlinePassed { .. })),
         "{done:?}"
@@ -899,7 +983,15 @@ fn a_gate_refusal_is_an_error_of_the_run() {
     };
     let rules = rules();
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
-    let done = reclaim(&host, &target, None, &rules, None, &mut checker, None);
+    let done = reclaim(
+        &host,
+        &target,
+        None,
+        &rules,
+        IdleWindow::default(),
+        &mut checker,
+        None,
+    );
     match &done.end {
         ReclaimEnd::GateRefused { error, .. } => assert_eq!(error.cause, Cause::SandboxGate),
         other => panic!("expected GateRefused, got {other:?}"),

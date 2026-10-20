@@ -54,7 +54,7 @@ use crate::host::{
 };
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
-use crate::profile::{Action, Body, Finds, IdleFor, Library};
+use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library};
 use crate::report::{
     ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
@@ -84,6 +84,9 @@ pub struct Tier {
     pub roots: Vec<PathBuf>,
     /// The term's idle requirement (the longest of its `filter:`s).
     pub idle_for: Option<IdleFor>,
+    /// Every negated idle filter requires a last use strictly newer than
+    /// this shortest bound. Checked again in the kind's reclaim protocol.
+    pub idle_before: Option<IdleFor>,
     /// The source profile's `checkouts` setting: whether a candidate may
     /// hold a VCS checkout (docs/safety.md, No source checkout).
     pub checkouts: Checkouts,
@@ -136,7 +139,7 @@ impl Tier {
         if let Some(factor) = term
             .factors
             .iter()
-            .find(|f| matches!(f, Factor::NotFilter(_) | Factor::NotProfile(_)))
+            .find(|f| matches!(f, Factor::NotProfile(_)))
         {
             return Err(not_yet(&format!("`{factor}`"), "task-16"));
         }
@@ -155,13 +158,27 @@ impl Tier {
             Finds::DockerBuildCache => SourceKind::DockerBuildCache,
             Finds::DockerImages => SourceKind::DockerImages,
         };
+        let mut idle_before: Option<IdleFor> = None;
         for factor in &term.factors {
-            let Factor::Filter(name) = factor else {
-                continue;
+            let (name, negated) = match factor {
+                Factor::Filter(name) => (name, false),
+                Factor::NotFilter(name) => (name, true),
+                Factor::NotProfile(_) => continue,
             };
             let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
                 return Err(format!("--select `{expr}`: no filter profile `{name}`"));
             };
+            if negated {
+                if where_.predicates() != [crate::kind::PredicateName::IdleFor] {
+                    return Err(not_yet(
+                        &format!("`!filter:{name}` (non-idle predicates)"),
+                        "task-16",
+                    ));
+                }
+                let bound = where_.idle_for.expect("idle predicate present");
+                idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
+                continue;
+            }
             if where_.has.is_some() || where_.has_dir.is_some() || where_.has_not.is_some() {
                 return Err(not_yet(
                     &format!("`filter:{name}` (a `has` / `has_dir` / `has_not` filter)"),
@@ -194,6 +211,7 @@ impl Tier {
             source: kind,
             roots,
             idle_for,
+            idle_before,
             checkouts: source.checkouts,
             action: source.action.clone(),
         })
@@ -754,7 +772,10 @@ fn plan_cargo<H: Host>(
                     host,
                     target,
                     rules,
-                    tier.idle_for,
+                    IdleWindow {
+                        at_least: tier.idle_for,
+                        before: tier.idle_before,
+                    },
                     checker,
                     deadline,
                 ) {
@@ -815,7 +836,10 @@ fn plan_fs<H: Host>(
         find,
         dev,
         rules,
-        tier.idle_for,
+        IdleWindow {
+            at_least: tier.idle_for,
+            before: tier.idle_before,
+        },
         deadline,
         log,
     );
@@ -1478,7 +1502,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 target,
                 None,
                 rules,
-                self.tier.idle_for,
+                IdleWindow {
+                    at_least: self.tier.idle_for,
+                    before: self.tier.idle_before,
+                },
                 checker,
                 self.deadline,
             );
@@ -1511,7 +1538,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let judge = fs_kind::Judge {
             find,
             rules,
-            idle_for: self.tier.idle_for,
+            idle: IdleWindow {
+                at_least: self.tier.idle_for,
+                before: self.tier.idle_before,
+            },
             dev: self.measured.dev,
         };
         let (found, stopped) = fs_kind::discover(self.host, &self.tier.roots, find, self.deadline);

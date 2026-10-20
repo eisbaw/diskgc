@@ -386,7 +386,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "count": 1}],
-  "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension"}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension"}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -822,9 +822,11 @@ fixture-only parser catalog; that deletion profile is not shipped:
   predicates are all `idle_for` (`docker-build-cache`), as the whole expression (one term, never in a
   union): they have no per-candidate enumeration.
 - Filters are evaluated from the index where it already knows the answer,
-  and always re-evaluated at deletion time. A candidate that fails a filter
-  is reported as skipped with that filter's reason (`not_idle`, `has_not`,
-  or why its age is unknown: `unsupported_fs`, `future_time`).
+  and always re-evaluated at deletion time. A candidate that fails an idle
+  filter is skipped as `not_idle`; one that matches a negated idle filter is
+  skipped as `too_idle`. An unknown age passes neither polarity and is
+  skipped as `unsupported_fs` or `future_time`. Other failed filters report
+  their own reason (for example `has_not`).
 
 Errors. A rejected expression is a load-time error (exit 2). The report
 starts with `invalid selection`, the expression as written and, for a

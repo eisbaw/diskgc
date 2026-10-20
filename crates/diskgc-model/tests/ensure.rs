@@ -1012,10 +1012,6 @@ fn selections_this_build_cannot_run_are_refused() {
     let roots = vec![SRC.to_owned()];
     for (expr, needle) in [
         (
-            "profile:cargo-target && filter:idle-1d && !filter:idle-30d",
-            "`!filter:idle-30d` is not supported",
-        ),
-        (
             "profile:cargo-target && !profile:cargo-target",
             "`!profile:cargo-target` is not supported",
         ),
@@ -1043,6 +1039,74 @@ fn selections_this_build_cannot_run_are_refused() {
         Some(Duration::from_secs(7 * 86_400))
     );
     assert_eq!(tier.name, "--select");
+}
+
+#[test]
+fn negated_idle_filter_reclaims_only_recent_cargo_target() {
+    let host = host(&yaml(true, ""));
+    let request = request(
+        "profile:cargo-target && filter:idle-1d && !filter:idle-2d",
+        &[SRC],
+        SRC,
+        "11G",
+        None,
+    );
+    let plan = dry_run(&host, &request);
+    assert!(
+        plan.plan
+            .iter()
+            .any(|e| e.candidate == Path::new(NEW) && e.reason.is_none()),
+        "{plan:#?}"
+    );
+    assert!(
+        plan.plan
+            .iter()
+            .any(|e| e.candidate == Path::new(OLD) && e.reason == Some("too_idle")),
+        "{plan:#?}"
+    );
+    let report = ensure(&host, &request);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(
+        report.actions.iter().any(|e| e.candidate == Path::new(NEW)),
+        "{report:#?}"
+    );
+    assert!(
+        !report.actions.iter().any(|e| e.candidate == Path::new(OLD)),
+        "{report:#?}"
+    );
+}
+
+/// The target can age past a negated filter after planning but before its
+/// Cargo locks are acquired. The locked reclaim must judge that age again.
+#[test]
+fn negated_idle_filter_rechecks_cargo_target_after_lock_time_passes() {
+    let model = yaml(
+        true,
+        "events:\n  - {at: {op: flock, path: /home/mark/src/new/target/debug/.cargo-lock, nth: 1, when: before}, advance: 2m}\n",
+    )
+    .replacen(
+        "clock: 2026-10-15T03:00:00Z",
+        "clock: 2026-10-15T23:59:00Z",
+        1,
+    );
+    let host = host(&model);
+    let request = request(
+        "profile:cargo-target && !filter:idle-2d",
+        &[SRC],
+        SRC,
+        "11G",
+        None,
+    );
+    let report = ensure(&host, &request);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|e| e.candidate == Path::new(NEW) && e.reason == "too_idle"),
+        "{report:#?}"
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
 /// The host lock is held exclusively by this run while it reclaims: a

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 10:27'
+updated_date: '2026-10-20 11:09'
 labels:
   - wave-2
   - irreversible
@@ -62,6 +62,8 @@ From task-80: overlap and the checkout setting. When one candidate is found by s
 Final checkpoint gate: parallel QA and MPED re-reviews GO for the pure evaluator API; task remains open for runtime enforcement and irreversible full gate.
 
 Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must use the same authorized-owner expansion as positive sources; {uid} from process UID 0 would miss /tmp/claude-1000 and could erase intended exclusions. Add single- and multi-owner reference cases before runtime protect is enabled.
+
+2026-10-20 runtime increment: !filter:idle-N is now an exclusive upper age bound for one-source fs and cargo-target expressions. IdleWindow carries positive and negative bounds through dry-run judgement and deletion-time fs candidate/Cargo lock rechecks; too_idle is the explicit skip reason. ModelHost regressions include a clock advance at fs flock; nix develop -c just check and a focused disposable Nix-container fs idle test pass. Union, !profile overlap, protect and has/has_not filter runtime remain unsupported, so TASK16 stays open; no AC/DoD checked by this increment.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

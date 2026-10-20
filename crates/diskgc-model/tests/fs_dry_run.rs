@@ -1542,14 +1542,13 @@ fn shipped_project_python_caches_find_only_cache_directories() {
     nothing_locked_or_deleted(&host);
 }
 
-/// A `has` / `has_not` filter in a term is refused (task-16), never
-/// silently ignored; `!filter:` and unions stay refused too.
+/// Unsupported term forms are refused, never silently ignored. An idle
+/// complement is supported and its exclusive bound is retained.
 #[test]
 fn has_filters_in_a_term_are_refused_not_ignored() {
     let library = library();
     for (expr, needle) in [
         ("profile:tmp-entry && filter:has-tag", "`filter:has-tag`"),
-        ("profile:tmp-entry && !filter:idle-1d", "`!filter:idle-1d`"),
         ("profile:tmp-entry || profile:pytest-of-dir", "a union"),
     ] {
         let error = Tier::select(expr, &library, None, 1000).expect_err(expr);
@@ -1558,6 +1557,12 @@ fn has_filters_in_a_term_are_refused_not_ignored() {
             "{expr}: {error}"
         );
     }
+    let tier = Tier::select("profile:tmp-entry && !filter:idle-1d", &library, None, 1000)
+        .expect("an idle complement is runnable");
+    assert_eq!(
+        tier.idle_before.map(|idle| idle.0),
+        Some(Duration::from_secs(86_400))
+    );
 }
 
 /// A dry run reuses one process scan for later candidates for up to

@@ -144,6 +144,44 @@ fn tmp(select: &str) -> Request {
     request(select, &[], "/tmp", "100%")
 }
 
+#[test]
+fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
+    let tree = "  /tmp/pytest-of-recent: {.: {mtime: 2026-10-13T03:01:00Z}, f: {size: 1M, mtime: 2026-10-13T03:01:00Z}}\n  /tmp/pytest-of-ancient: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n";
+    let selection = "profile:pytest-of-dir && !filter:idle-2d";
+    let plan_host = host(&yaml("", tree, ""));
+    let plan = executor::dry_run(&plan_host, &tmp(selection), &[1000], &mut |_| {});
+    assert!(
+        plan.plan
+            .iter()
+            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent") && e.reason.is_none()),
+        "{plan:#?}"
+    );
+    assert!(
+        plan.plan
+            .iter()
+            .any(|e| e.candidate == Path::new("/tmp/pytest-of-ancient")
+                && e.reason == Some("too_idle")),
+        "{plan:#?}"
+    );
+
+    let event =
+        "events:\n  - {at: {op: flock, path: /tmp/pytest-of-recent, when: after}, advance: 120s}\n";
+    let host = host(&yaml("", tree, event));
+    let report = executor::ensure(&host, &tmp(selection), &[1000], &mut |_| {});
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent") && e.reason == "too_idle"),
+        "{report:#?}"
+    );
+    assert!(
+        host.unfired_events().is_empty(),
+        "candidate lock event should fire"
+    );
+}
+
 /// Root-mode owner IDs are an explicit input to the same modelled walk:
 /// a process uid of zero does not silently admit root-owned or other-user
 /// entries when `owners:` contains only the chosen non-system user.
@@ -227,7 +265,7 @@ fn forty_thousand_tmp_candidates_reclaim_once_per_reuse_window() {
     let judge = Judge {
         find: &find,
         rules: &rules,
-        idle_for: None,
+        idle: diskgc_core::profile::IdleWindow::default(),
         dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
@@ -1108,7 +1146,7 @@ fn a_blocking_scan_past_the_deadline_stops_the_reclaim() {
     let judge = Judge {
         find: &find,
         rules: &rules,
-        idle_for: None,
+        idle: diskgc_core::profile::IdleWindow::default(),
         dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);

@@ -14,7 +14,7 @@ use crate::engine::{
 };
 use crate::host::{FileType, Host, MonoTime, Timestamp};
 use crate::inuse::{Checker, Scan};
-use crate::profile::{IdleFor, Idleness, Unknown};
+use crate::profile::{IdleWindow, Idleness, Unknown};
 use crate::resolve::Resolved;
 
 /// What a target holds now, walked but not judged for idleness or use: a
@@ -422,14 +422,14 @@ pub fn eligibility<H: Host>(
     host: &H,
     target: &Target,
     rules: &Rules<'_>,
-    idle_for: Option<IdleFor>,
+    idle: IdleWindow,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Judged<Eligible> {
     let path = &target.path;
     let walked = judged!(walk_target(host, target, rules, deadline));
     let last = last_build(&walked.inspected, &walked.walks);
-    if let Err(skip) = judge_idle(host, path, last, idle_for) {
+    if let Err(skip) = judge_idle(host, path, last, idle) {
         return Ok(Err(skip));
     }
     let scan = checker.current(host).map_err(|error| Stop::Failed {
@@ -562,38 +562,62 @@ pub(super) fn judge_idle<H: Host>(
     host: &H,
     path: &Path,
     last: Option<Timestamp>,
-    idle_for: Option<IdleFor>,
+    idle: IdleWindow,
 ) -> Result<(), Skip> {
-    let Some(idle_for) = idle_for else {
-        return Ok(());
-    };
     let now = host.wall_clock();
     let skip = |reason, detail: String| Err(Skip::new(reason, path.to_owned(), detail));
-    match idle_for.verdict(last, now) {
-        Idleness::Idle => Ok(()),
-        Idleness::NotIdle => skip(
-            Reason::NotIdle,
-            format!(
-                "last build at {} s, {} s before now; idle_for {} s required",
-                last.map_or(0, |t| t.secs),
-                now.secs - last.map_or(0, |t| t.secs),
-                idle_for.0.as_secs()
+    if let Some(idle_for) = idle.at_least {
+        match idle_for.verdict(last, now) {
+            Idleness::Idle => Ok(()),
+            Idleness::NotIdle => skip(
+                Reason::NotIdle,
+                format!(
+                    "last build at {} s, {} s before now; idle_for {} s required",
+                    last.map_or(0, |t| t.secs),
+                    now.secs - last.map_or(0, |t| t.secs),
+                    idle_for.0.as_secs()
+                ),
             ),
-        ),
-        Idleness::Unknown(Unknown::Unanswered) => skip(
-            Reason::UnsupportedFs,
-            "its last build cannot be told: the kernel did not report a time, and an unknown \
+            Idleness::Unknown(Unknown::Unanswered) => skip(
+                Reason::UnsupportedFs,
+                "its last build cannot be told: the kernel did not report a time, and an unknown \
              age is never idle"
-                .to_owned(),
-        ),
-        Idleness::Unknown(Unknown::InFuture) => skip(
-            Reason::FutureTime,
-            format!(
-                "its last build at {} s lies after now ({} s): its age says nothing",
-                last.map_or(0, |t| t.secs),
-                now.secs
+                    .to_owned(),
             ),
-        ),
+            Idleness::Unknown(Unknown::InFuture) => skip(
+                Reason::FutureTime,
+                format!(
+                    "its last build at {} s lies after now ({} s): its age says nothing",
+                    last.map_or(0, |t| t.secs),
+                    now.secs
+                ),
+            ),
+        }?;
+    }
+    if let Some(bound) = idle.before {
+        match bound.verdict(last, now) {
+            Idleness::NotIdle => Ok(()),
+            Idleness::Idle => skip(
+                Reason::TooIdle,
+                format!(
+                    "last build is at least {} s old; !filter:idle-{}s excludes it",
+                    bound.0.as_secs(),
+                    bound.0.as_secs()
+                ),
+            ),
+            Idleness::Unknown(Unknown::Unanswered) => skip(
+                Reason::UnsupportedFs,
+                "last build cannot be told: an unknown age passes neither idle filter polarity"
+                    .to_owned(),
+            ),
+            Idleness::Unknown(Unknown::InFuture) => skip(
+                Reason::FutureTime,
+                "last build lies in the future: an unknown age passes neither idle filter polarity"
+                    .to_owned(),
+            ),
+        }
+    } else {
+        Ok(())
     }
 }
 

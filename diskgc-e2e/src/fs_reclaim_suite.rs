@@ -40,6 +40,16 @@ profiles:
     examples: {match: [/tmp/buildah-1, /tmp/container_images_storage-1]}
 "#;
 
+const IDLE_WINDOW_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: idle-window-kernel
+    find: {roots: [/tmp], paths: ["idle-window-*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/idle-window-old, /tmp/idle-window-recent]}
+  - name: idle-window-test
+    where: {idle_for: 10s}
+"#;
+
 const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
 profiles:
   - name: cache-exclusion-test
@@ -349,6 +359,67 @@ pub fn fs_reclaim_image_temp_minimum_idle_and_open_file(ctx: &Ctx) -> TestResult
         "held file was deleted"
     );
     ensure!(exists(&s.path("buildah-fresh")), "fresh spool was deleted");
+    verdict.assert_clean()
+}
+
+/// An idle complement excludes the old sibling in the real Linux path;
+/// only the recent candidate reaches deletion, as checked by the oracle.
+pub fn fs_reclaim_negated_idle_filter_keeps_old_candidate(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        IDLE_WINDOW_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let old = s.mkdir("idle-window-old", 0o700, TESTER)?;
+    s.write_file("idle-window-old/payload", b"keep", 0o600, TESTER)?;
+    std::thread::sleep(Duration::from_secs(11));
+    let recent = s.mkdir("idle-window-recent", 0o700, TESTER)?;
+    s.write_file("idle-window-recent/payload", b"delete", 0o600, TESTER)?;
+    let recent_since = Instant::now();
+    let oracle = Oracle::arm(Fixture::new().eligible(recent.clone()))?;
+    let expr = "profile:idle-window-kernel && !filter:idle-window-test";
+    let plan = ensure_tmp(ctx, &["--dry-run", "--min-free", "100%", "--select", expr])?;
+    let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", expr])?;
+    let verdict = oracle.judge_runs(&[&plan, &run])?;
+    ensure!(
+        recent_since.elapsed() < Duration::from_secs(10),
+        "inconclusive: the recent candidate aged past the 10s upper bound"
+    );
+    plan.expect_code(0)?;
+    run.expect_code(1)?;
+    let planned = report(&plan)?;
+    let reasons: BTreeMap<String, Option<String>> = planned["plan"]
+        .as_array()
+        .ok_or("plan is not an array")?
+        .iter()
+        .map(|entry| {
+            (
+                entry["candidate"].as_str().unwrap_or_default().to_owned(),
+                entry["reason"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    ensure!(
+        reasons.get(old.to_str().ok_or("old path")?) == Some(&Some("too_idle".to_owned())),
+        "old candidate was not excluded: {reasons:?}"
+    );
+    ensure!(
+        reasons.get(recent.to_str().ok_or("recent path")?) == Some(&None),
+        "recent candidate was not eligible: {reasons:?}"
+    );
+    let (skipped, actions) = outcome(&report(&run)?);
+    ensure!(actions == [recent.display().to_string()], "{actions:?}");
+    ensure!(
+        skipped
+            .get(old.to_str().ok_or("old path")?)
+            .map(String::as_str)
+            == Some("too_idle"),
+        "old candidate was not skipped: {skipped:?}"
+    );
+    ensure!(old.join("payload").exists(), "old payload was deleted");
+    ensure!(!recent.exists(), "recent candidate remains");
     verdict.assert_clean()
 }
 

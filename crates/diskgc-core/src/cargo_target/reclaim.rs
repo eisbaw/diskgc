@@ -65,7 +65,7 @@ use crate::host::{
     Access, Delete, Host, HostError, LockMode, Locked, MonoTime, Timestamp, TryLock,
 };
 use crate::inuse::{Checker, NotDeleted, clear_and_delete};
-use crate::profile::IdleFor;
+use crate::profile::IdleWindow;
 use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath};
 
 /// The order in which a profile directory's lock files are taken: the
@@ -108,7 +108,7 @@ pub fn reclaim<H: Delete>(
     target: &Target,
     judged_last_build: Option<Timestamp>,
     rules: &Rules<'_>,
-    idle_for: Option<IdleFor>,
+    idle: IdleWindow,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Reclaimed {
@@ -121,7 +121,7 @@ pub fn reclaim<H: Delete>(
         removed_bytes: 0,
         locked_at: None,
     };
-    let end = match run.protocol(judged_last_build, rules, idle_for) {
+    let end = match run.protocol(judged_last_build, rules, idle) {
         Ok(()) => ReclaimEnd::Complete,
         Err(end) => end,
     };
@@ -177,7 +177,7 @@ impl<H: Delete> Run<'_, '_, H> {
         &mut self,
         judged_last_build: Option<Timestamp>,
         rules: &Rules<'_>,
-        idle_for: Option<IdleFor>,
+        idle: IdleWindow,
     ) -> Result<(), ReclaimEnd> {
         let (host, target, deadline) = (self.host, self.target, self.deadline);
         let path = &target.path;
@@ -259,7 +259,7 @@ impl<H: Delete> Run<'_, '_, H> {
                 ),
             )));
         }
-        judge_idle(host, path, last, idle_for).map_err(ReclaimEnd::Skipped)?;
+        judge_idle(host, path, last, idle).map_err(ReclaimEnd::Skipped)?;
         // A scan made now, under the locks: one made before them could
         // miss a process started meanwhile.
         self.checker.forget();

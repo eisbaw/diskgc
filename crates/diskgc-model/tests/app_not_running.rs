@@ -43,7 +43,7 @@ fn verdict(host: &ModelHost) -> Option<Reason> {
         &find,
         dev,
         &Rules::new(&[1000]),
-        None,
+        diskgc_core::profile::IdleWindow::default(),
         None,
         &mut |_| {},
     );
@@ -84,7 +84,7 @@ fn relative_lock_path_is_bound_to_the_source_root() {
         &find,
         host.stat_path(Path::new("/tmp")).unwrap().dev,
         &Rules::new(&owners),
-        None,
+        diskgc_core::profile::IdleWindow::default(),
         None,
         &mut |_| {},
     );
@@ -141,7 +141,7 @@ fn lock_created_after_first_judgement_blocks_deletion() {
     let judge = Judge {
         find: &find,
         rules: &rules,
-        idle_for: None,
+        idle: diskgc_core::profile::IdleWindow::default(),
         dev: host.stat_path(Path::new("/tmp")).unwrap().dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);

@@ -17,6 +17,24 @@ use crate::select::{Factor, Term};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IdleFor(pub Duration);
 
+/// The age range a term accepts. Positive idle filters and the source floor
+/// set `at_least`; negated idle filters set the exclusive `before` bound.
+/// An unknown or future age satisfies neither side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdleWindow {
+    pub at_least: Option<IdleFor>,
+    pub before: Option<IdleFor>,
+}
+
+impl IdleWindow {
+    pub const fn at_least(at_least: Option<IdleFor>) -> Self {
+        Self {
+            at_least,
+            before: None,
+        }
+    }
+}
+
 impl IdleFor {
     /// Whether something last used at `last_use` (by its kind's
     /// [`IdleMeasure`]) has been idle for at least this long at `now`.

@@ -39,7 +39,7 @@ use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
 use crate::select::{Catalog, Entry, Term};
 
-pub use idle::{IdleFor, IdleMeasure, Idleness, Unknown};
+pub use idle::{IdleFor, IdleMeasure, IdleWindow, Idleness, Unknown};
 pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{

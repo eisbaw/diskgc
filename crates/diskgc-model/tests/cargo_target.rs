@@ -15,7 +15,7 @@ use diskgc_core::cargo_target::{
 };
 use diskgc_core::engine::{Reason, Rules, Skip};
 use diskgc_core::inuse::{Checker, REUSE_LIMIT};
-use diskgc_core::profile::IdleFor;
+use diskgc_core::profile::{IdleFor, IdleWindow};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
 
@@ -125,7 +125,7 @@ fn judged(host: &ModelHost, target: &Target, idle_days: Option<u32>) -> Result<E
         host,
         target,
         &rules,
-        idle_days.map(|d| IdleFor(DAY * d)),
+        IdleWindow::at_least(idle_days.map(|d| IdleFor(DAY * d))),
         &mut checker,
         None,
     )

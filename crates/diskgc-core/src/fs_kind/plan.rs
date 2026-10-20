@@ -20,7 +20,7 @@ use crate::engine::{Rules, Skip};
 use crate::host::{Dev, Host, MonoTime};
 use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
-use crate::profile::IdleFor;
+use crate::profile::IdleWindow;
 
 /// What [`plan`] found.
 #[derive(Debug, Default)]
@@ -54,7 +54,7 @@ pub fn plan<H: Host>(
     find: &Find,
     dev: Dev,
     rules: &Rules<'_>,
-    idle_for: Option<IdleFor>,
+    idle: IdleWindow,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) -> (Planned, Option<Stop>) {
@@ -80,7 +80,7 @@ pub fn plan<H: Host>(
     let judge = Judge {
         find,
         rules,
-        idle_for,
+        idle,
         dev,
     };
     let mut checker = Checker::for_plan(rules);

@@ -48,7 +48,7 @@ use crate::host::{
     Timestamp, is_single_name,
 };
 use crate::outcome::{Judged, Stop};
-use crate::profile::{IdleFor, Idleness, NewestGroup, Unknown};
+use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown};
 use crate::resolve::{ResolveError, Resolved, Want, mount_for, open_beneath, resolve_in};
 
 /// What a candidate of one tier is judged by: the source's `find` (its own
@@ -59,7 +59,7 @@ use crate::resolve::{ResolveError, Resolved, Want, mount_for, open_beneath, reso
 pub struct Judge<'r> {
     pub find: &'r Find,
     pub rules: &'r Rules<'r>,
-    pub idle_for: Option<IdleFor>,
+    pub idle: IdleWindow,
     pub dev: Dev,
 }
 
@@ -369,7 +369,7 @@ impl Judge<'_> {
             return Ok(Err(skip));
         }
         let newest_change = record.newest_change();
-        if idle && let Err(skip) = judge_idle(host, &found.path, newest_change, self.idle_for) {
+        if idle && let Err(skip) = judge_idle(host, &found.path, newest_change, self.idle) {
             return Ok(Err(skip));
         }
         Ok(Ok(Walked {
@@ -387,39 +387,64 @@ pub(crate) fn judge_idle<H: Host>(
     host: &H,
     at: &Path,
     newest: Option<Timestamp>,
-    idle_for: Option<IdleFor>,
+    idle: IdleWindow,
 ) -> Result<(), Skip> {
-    let Some(idle_for) = idle_for else {
-        return Ok(());
-    };
     let now = host.wall_clock();
-    match idle_for.verdict(newest, now) {
-        Idleness::Idle => Ok(()),
-        Idleness::NotIdle => {
-            let last = newest.map_or(0, |t| t.secs);
-            Err(Skip::new(
-                Reason::NotIdle,
+    if let Some(idle_for) = idle.at_least {
+        match idle_for.verdict(newest, now) {
+            Idleness::Idle => Ok(()),
+            Idleness::NotIdle => {
+                let last = newest.map_or(0, |t| t.secs);
+                Err(Skip::new(
+                    Reason::NotIdle,
+                    at.to_owned(),
+                    format!(
+                        "newest change at {last} s, {} s before now; idle_for {} s required",
+                        now.secs - last,
+                        idle_for.0.as_secs()
+                    ),
+                ))
+            }
+            Idleness::Unknown(unknown) => {
+                let reason = match unknown {
+                    Unknown::Unanswered => Reason::UnsupportedFs,
+                    Unknown::InFuture => Reason::FutureTime,
+                };
+                Err(Skip::new(
+                    reason,
+                    at.to_owned(),
+                    format!(
+                        "its newest change cannot be told ({unknown:?}): an unknown age is never idle"
+                    ),
+                ))
+            }
+        }?;
+    }
+    if let Some(bound) = idle.before {
+        match bound.verdict(newest, now) {
+            Idleness::NotIdle => Ok(()),
+            Idleness::Idle => Err(Skip::new(
+                Reason::TooIdle,
                 at.to_owned(),
                 format!(
-                    "newest change at {last} s, {} s before now; idle_for {} s required",
-                    now.secs - last,
-                    idle_for.0.as_secs()
+                    "newest change is at least {} s old; !filter:idle-{}s excludes it",
+                    bound.0.as_secs(),
+                    bound.0.as_secs()
                 ),
-            ))
-        }
-        Idleness::Unknown(unknown) => {
-            let reason = match unknown {
-                Unknown::Unanswered => Reason::UnsupportedFs,
-                Unknown::InFuture => Reason::FutureTime,
-            };
-            Err(Skip::new(
-                reason,
+            )),
+            Idleness::Unknown(Unknown::Unanswered) => Err(Skip::new(
+                Reason::UnsupportedFs,
                 at.to_owned(),
-                format!(
-                    "its newest change cannot be told ({unknown:?}): an unknown age is never idle"
-                ),
-            ))
+                "newest change cannot be told: an unknown age passes neither idle filter polarity",
+            )),
+            Idleness::Unknown(Unknown::InFuture) => Err(Skip::new(
+                Reason::FutureTime,
+                at.to_owned(),
+                "newest change lies in the future: an unknown age passes neither idle filter polarity",
+            )),
         }
+    } else {
+        Ok(())
     }
 }
 

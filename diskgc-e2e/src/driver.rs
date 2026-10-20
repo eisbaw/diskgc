@@ -80,7 +80,7 @@ use diskgc_core::host::{
     Access, Base, CommandExit, CommandInvocation, CommandRun, Delete, DirListing, FileType, Host,
 };
 use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT};
-use diskgc_core::profile::{IdleFor, Library};
+use diskgc_core::profile::{IdleFor, IdleWindow, Library};
 use diskgc_core::resolve::{ResolveError, Want, open_beneath, resolve};
 use diskgc_linux::LinuxHost;
 use diskgc_model::support::{Stop, delete_unused};
@@ -633,7 +633,14 @@ fn cargo_targets<H: Host>(
             target.path,
             profiles_text(target)
         ));
-        match cargo_target::eligibility(host, target, &rules, idle_for, &mut checker, None) {
+        match cargo_target::eligibility(
+            host,
+            target,
+            &rules,
+            IdleWindow::at_least(idle_for),
+            &mut checker,
+            None,
+        ) {
             Ok(Ok(e)) => out.ok(format!(
                 "eligible {:?} last_build={} entries={} bytes={}",
                 target.path,
@@ -1003,7 +1010,7 @@ fn cargo_reclaim<H: Delete>(
                 host,
                 target,
                 &rules,
-                flags.idle_for,
+                IdleWindow::at_least(flags.idle_for),
                 &mut checker,
                 None,
             ) {
@@ -1031,7 +1038,7 @@ fn cargo_reclaim<H: Delete>(
             target,
             judged,
             &rules,
-            flags.idle_for,
+            IdleWindow::at_least(flags.idle_for),
             &mut checker,
             None,
         );

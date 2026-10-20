@@ -488,6 +488,8 @@ pub enum Reason {
     Empty,
     /// Not idle for as long as the term's `idle_for` requires.
     NotIdle,
+    /// Older than the exclusive upper age bound of a negated idle filter.
+    TooIdle,
     /// Its last use lies in the future, so its age says nothing
     /// (docs/reference.md, Predicates).
     FutureTime,
@@ -506,7 +508,7 @@ pub enum Reason {
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 22] = [
+    pub const ALL: [Reason; 23] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -524,6 +526,7 @@ impl Reason {
         Reason::UnsupportedLayout,
         Reason::Empty,
         Reason::NotIdle,
+        Reason::TooIdle,
         Reason::FutureTime,
         Reason::OtherFs,
         Reason::NewestVersion,
@@ -551,6 +554,7 @@ impl Reason {
             Self::UnsupportedLayout => "unsupported_layout",
             Self::Empty => "empty",
             Self::NotIdle => "not_idle",
+            Self::TooIdle => "too_idle",
             Self::FutureTime => "future_time",
             Self::OtherFs => "other_fs",
             Self::NewestVersion => "newest_version",
