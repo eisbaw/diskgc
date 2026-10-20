@@ -299,7 +299,10 @@ impl ProcRoot<'_> {
     /// A magic link: its text and the object it refers to (`statx`
     /// following it).
     fn link_target(self, rel: &str) -> Result<LinkTarget, HostError> {
-        let stat = rustix::fs::statx(self.0, rel, AtFlags::empty(), STATX_MASK)
+        // A FUSE server may have stopped answering after a task entered its
+        // mount. Use cached attributes for the magic-link target rather than
+        // asking that server to refresh them during the in-use scan.
+        let stat = rustix::fs::statx(self.0, rel, AtFlags::STATX_DONT_SYNC, STATX_MASK)
             .map(|x| stat_from_statx(&x))
             .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))?;
         let text = rustix::fs::readlinkat(self.0, rel, Vec::new())

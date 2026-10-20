@@ -546,19 +546,16 @@ once; none of them makes diskgc take a live process for gone):
    flight in a socket's queue belongs to no process at all: neither is
    seen.
 
-**A process using a dead mount hangs the scan** (a standing condition, no
-event needed; for both kinds, `fs` and `cargo-target`): the scan
-`statx`es every visible process's fds, working directory and root through
-`/proc` (above), and that `statx` waits for an answer from a dead FUSE
-server or a network server that is gone. A shell left in a dead `sshfs`
-mount in `/tmp` therefore hangs every reclaim at its first in-use check,
-although discovery and the judgement never touch the mount (Before the
-walk). It is a hang, never a deletion; the deadline cannot interrupt it
-(Deadlines). The fix is task-102's: `AT_STATX_DONT_SYNC` on those
-`statx` calls makes FUSE answer from its cached attributes without a
-request. It does not help NFS: a lookup through a magic link of `/proc`
-revalidates the dentry (`d_weak_revalidate`), which can still wait for the
-server, so a process using a dead NFS mount stays a limit.
+**A process using a dead mount:** the scan `statx`es every visible
+process's fds, working directory and root through `/proc` (above). For
+FUSE, these calls use `AT_STATX_DONT_SYNC` so a stalled server does not
+hold the in-use scan while its cached attributes are available. A
+disposable-container test holds an fd and cwd in a mount, stops its server,
+and checks that ensure exits within its deadline without deleting the
+held candidate. This does not help NFS: lookup through a `/proc` magic
+link can revalidate the dentry (`d_weak_revalidate`) and wait for the
+server. A process using a dead NFS mount remains a possible hang, never
+a deletion; the deadline cannot interrupt that kernel wait (Deadlines).
 
 **Overlay and btrfs:** `maps` can report a different (device, inode) than
 `stat` on overlayfs and btrfs subvolumes (the layer's or volume's device,
@@ -823,8 +820,8 @@ Each with the number of events outside diskgc it needs:
   stacked on a root between the reading of its `mountinfo` line and its
   resolution: the resolution refuses it (`unsafe_path`), but its `statx`
   of a dead mount's root can hang first.
-- *A process using a dead mount* hangs the in-use scan: a limit of the
-  scan, for both kinds (In use).
+- *A process using a dead NFS mount* can hang the in-use scan: a limit of
+  the scan, for both kinds (In use).
 - *Inode number reuse* (two events: the candidate removed, and another
   object created at its name with its inode number, owner and type, after
   discovery): it passes the identity checks of steps 2 to 4 where the

@@ -545,7 +545,10 @@ Why not FUSE (to model hosts): it has its own `flock`, `statx` and mount-id
 semantics, needs privileges, and is a large extra moving part. One
 container test mounts a FUSE filesystem as a fixture, not a model: a dead
 mount (the harness opens `/dev/fuse`, mounts it and never answers), to
-show that mounts come first (safety.md, Before the walk). It needs
+show that mounts come first (safety.md, Before the walk). Another fixture
+answers enough FUSE requests to let a process hold a directory fd and cwd,
+then stops answering; it proves an ordinary stat blocks before checking
+that `ensure` exits within its deadline and keeps a held candidate. Both need
 `/dev/fuse` in the container: the runner passes it (`--device`) to the
 tests listed in `FUSE_TESTS` (`suite.rs`) only, when the host has it, and
 the test fails saying so when it is missing; it first proves the mount

@@ -40,8 +40,9 @@ use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
     cargo_reclaim_suite, cargo_suite, docker_suite, docker_vector_suite, driver_suite,
-    embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, host_suite, inuse_suite,
-    meson_suite, profile_vector_suite, project_cache_suite, stdout_suite, temp_safety_suite,
+    embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite,
+    inuse_suite, meson_suite, profile_vector_suite, project_cache_suite, stdout_suite,
+    temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -171,7 +172,10 @@ pub const DOCKER_VECTOR_TEST: &str = "checked_in_python_profile_vector_replays_u
 
 /// The tests whose container gets the FUSE device (`/dev/fuse`, when the
 /// host has it): only these mount a FUSE filesystem.
-pub static FUSE_TESTS: &[&str] = &["fs_reclaim_a_dead_fuse_mount_is_never_touched"];
+pub static FUSE_TESTS: &[&str] = &[
+    "fs_reclaim_a_dead_fuse_mount_is_never_touched",
+    "inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount",
+];
 
 /// The one test whose container receives the pinned Buildah closure.
 pub const BUILDAH_SPOOL_TEST: &str = "containers_image_spool_held_by_buildah_is_in_use";
@@ -625,6 +629,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: fs_reclaim_suite::fs_reclaim_a_dead_fuse_mount_is_never_touched,
+    },
+    Test {
+        name: "inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fuse_stall_suite::inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount,
     },
     Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",
