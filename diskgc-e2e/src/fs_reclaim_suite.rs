@@ -62,6 +62,19 @@ profiles:
     where: {has_not: CACHEDIR.TAG}
 "#;
 
+const FS_UNION_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: union-allow-kernel
+    find: {roots: [/tmp], paths: ["union-a*", "union-shared*"], type: dir}
+    checkouts: allow
+    action: delete
+    examples: {match: [/tmp/union-a]}
+  - name: union-refuse-kernel
+    find: {roots: [/tmp], paths: ["union-b*", "union-shared*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/union-b]}
+"#;
+
 const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
 profiles:
   - name: cache-exclusion-test
@@ -481,6 +494,80 @@ pub fn fs_reclaim_negated_entry_filters(ctx: &Ctx) -> TestResult {
     ensure!(
         !plain.exists() && !tagged.exists(),
         "selected candidates remain"
+    );
+    verdict.assert_clean()
+}
+
+/// The real binary unions two user sources, removes an overlapping inode
+/// once, and applies the stricter checkout setting only to shared matches.
+pub fn fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        FS_UNION_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let only_allow = s.mkdir("union-a", 0o700, TESTER)?;
+    s.mkdirs("union-a/.git", 0o700, TESTER)?;
+    s.write_file("union-a/.git/HEAD", b"ref: x\n", 0o600, TESTER)?;
+    let only_refuse = s.mkdir("union-b", 0o700, TESTER)?;
+    s.write_file("union-b/payload", b"delete", 0o600, TESTER)?;
+    let shared = s.mkdir("union-shared-clear", 0o700, TESTER)?;
+    s.write_file("union-shared-clear/payload", b"delete", 0o600, TESTER)?;
+    let protected = s.mkdir("union-shared-checkout", 0o700, TESTER)?;
+    s.mkdirs("union-shared-checkout/.git", 0o700, TESTER)?;
+    s.write_file(
+        "union-shared-checkout/.git/HEAD",
+        b"ref: x\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(only_allow.clone())
+            .eligible(only_refuse.clone())
+            .eligible(shared.clone()),
+    )?;
+    let expr = "profile:union-allow-kernel || profile:union-refuse-kernel";
+    let plan = ensure_tmp(ctx, &["--dry-run", "--min-free", "100%", "--select", expr])?;
+    let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", expr])?;
+    let verdict = oracle.judge_runs(&[&plan, &run])?;
+    plan.expect_code(0)?;
+    run.expect_code(1)?;
+    let planned = report(&plan)?;
+    let shared_entries: Vec<_> = planned["plan"]
+        .as_array()
+        .ok_or("plan is not an array")?
+        .iter()
+        .filter(|entry| entry["candidate"] == shared.display().to_string())
+        .collect();
+    ensure!(
+        shared_entries.len() == 1,
+        "shared inode was planned more than once: {planned}"
+    );
+    ensure!(shared_entries[0]["checkouts"] == "refuse", "{planned}");
+    let (skipped, mut actions) = outcome(&report(&run)?);
+    actions.sort();
+    let mut expected = [only_allow, only_refuse, shared]
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    ensure!(
+        actions == expected,
+        "union deleted {actions:?}, expected {expected:?}"
+    );
+    ensure!(
+        skipped
+            .get(protected.to_str().ok_or("protected path")?)
+            .map(String::as_str)
+            == Some("contains_checkout"),
+        "shared checkout was not refused: {skipped:?}"
+    );
+    ensure!(
+        protected.join(".git/HEAD").exists(),
+        "shared checkout was deleted"
     );
     verdict.assert_clean()
 }

@@ -584,9 +584,14 @@ Rules:
 
 In this development build, `check` validates these fields, including all
 configured groups. `ensure --select` accepts one positive source term with
-supported idle and version filters, including negated idle filters. Run-time
-unions, negated profiles, and positive entry filters are deferred. Filesystem
-terms can use `!filter:` with a single `has` or `has_not` predicate. It refuses
+supported idle and version filters, including negated idle filters, and unions
+of positive filesystem sources with exactly the same `delete` action and
+options. A filesystem union discovers each source separately, deduplicates
+matching candidates by inode identity, and applies `checkouts: refuse` to a
+candidate if any source that found it refuses checkouts. It rechecks each
+term under the candidate lock. Command and other-kind unions, negated
+profiles, and positive entry filters are deferred. Filesystem terms can use
+`!filter:` with a single `has` or `has_not` predicate. It refuses
 a nonempty `protect` and `ipc: live-only` until their run-time checks are
 implemented (tasks 16 and 21). Root mode
 requires a protected config with `owners:`, resolves those owners before

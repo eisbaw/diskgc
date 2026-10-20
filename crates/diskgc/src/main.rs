@@ -521,12 +521,40 @@ fn tier(
     let roots = (!args.roots.is_empty()).then_some(args.roots.as_slice());
     let selected = Tier::select(expr, library, roots, uid)?;
     if allow_root {
-        let Some(Body::Source(source)) = library.get(&selected.profile).map(|p| &p.body) else {
-            return Err(format!("--select `{expr}`: selected source is missing"));
-        };
-        reject_root_uid_placeholder(&selected.profile, source, &args.roots)?;
+        reject_root_uid_selected(&selected, library, &args.roots)?;
     }
     Ok(selected)
+}
+
+/// Root mode must validate every source of a positive union. Checking only
+/// the first would let a later term bind `{uid}` to root's uid 0.
+fn reject_root_uid_selected(
+    selected: &Tier,
+    library: &Library,
+    supplied_roots: &[String],
+) -> Result<(), String> {
+    let profiles: Vec<&str> = if selected.fs_union.is_empty() {
+        vec![&selected.profile]
+    } else {
+        std::iter::once(selected.profile.as_str())
+            .chain(
+                selected
+                    .fs_union
+                    .iter()
+                    .map(|source| source.profile.as_str()),
+            )
+            .collect()
+    };
+    for profile in profiles {
+        let Some(Body::Source(source)) = library.get(profile).map(|p| &p.body) else {
+            return Err(format!(
+                "--select `{}`: selected source `{profile}` is missing",
+                selected.select
+            ));
+        };
+        reject_root_uid_placeholder(profile, source, supplied_roots)?;
+    }
+    Ok(())
 }
 
 /// In root mode `{uid}` expands to uid 0, not to each configured owner. A
@@ -1070,6 +1098,33 @@ mod tests {
                 .unwrap_err()
                 .contains("where.app_not_running")
         );
+    }
+
+    #[test]
+    fn root_mode_checks_uid_placeholder_in_second_union_source() {
+        let specs = diskgc_core::profile::parse_profiles(concat!(
+            "- name: plain-union\n",
+            "  find: {roots: [/tmp], paths: [plain-*], type: dir}\n",
+            "  action: delete\n",
+            "  examples: {match: [/tmp/plain-x]}\n",
+            "- name: uid-union\n",
+            "  find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
+            "  action: delete\n",
+            "  examples: {match: [/tmp/uid-1000]}\n",
+        ))
+        .expect("fixture profiles");
+        let library = Library::with_user_profiles(&specs).expect("fixture library");
+        let selected = Tier::select(
+            "profile:plain-union || profile:uid-union",
+            &library,
+            None,
+            0,
+        )
+        .expect("filesystem union");
+        let error = reject_root_uid_selected(&selected, &library, &[])
+            .expect_err("second source's uid placeholder must be refused");
+        assert!(error.contains("selected profile `uid-union`"), "{error}");
+        assert!(error.contains("find.paths"), "{error}");
     }
 
     #[test]

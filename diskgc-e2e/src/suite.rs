@@ -426,6 +426,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_negated_entry_filters,
     },
     Test {
+        name: "fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout,
+    },
+    Test {
         name: "nix_evaluation_keeps_its_user_eval_cache_in_use",
         tier: Tier::Fast,
         expect: Expect::Pass,

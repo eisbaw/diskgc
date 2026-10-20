@@ -45,7 +45,7 @@
 use super::Found;
 use super::discover::check_deadline;
 use super::judge::{Judge, Tally, Walked, mountinfo, same_object};
-use crate::engine::{DeleteOptions, Identity};
+use crate::engine::{DeleteOptions, Identity, checkout_metadata_below};
 use crate::host::{Base, Delete, Host, MonoTime};
 use crate::inuse::{Checker, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked};
 use crate::outcome::{Judged, ReclaimEnd, Stop};
@@ -60,6 +60,18 @@ pub struct Reclaimed {
     /// measure is the observed change in available space).
     pub removed_bytes: u64,
     pub end: ReclaimEnd,
+    /// Source alternative whose fresh lock-time judgement selected this
+    /// candidate, if any. The executor uses this for truthful reporting.
+    pub selected: Option<usize>,
+}
+
+/// A source term that found the same inode. Every alternative is checked
+/// again while the one candidate lock is held; any surviving term selects
+/// the object, with the caller's common refusal-wins walk rules.
+#[derive(Clone, Copy)]
+pub struct Alternative<'a> {
+    pub judge: Judge<'a>,
+    pub found: &'a Found,
 }
 
 /// The tally of `found` for the tier's order (see the module docs): no
@@ -100,15 +112,37 @@ pub fn reclaim<H: Delete>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Reclaimed {
+    reclaim_alternatives(
+        host,
+        &[Alternative {
+            judge: *judge,
+            found,
+        }],
+        make_writable,
+        checker,
+        deadline,
+    )
+}
+
+/// Reclaim an inode found by one or more positive filesystem terms. The
+/// caller deduplicates by identity and supplies the same effective checkout
+/// policy in every judge.
+pub fn reclaim_alternatives<H: Delete>(
+    host: &H,
+    alternatives: &[Alternative<'_>],
+    make_writable: bool,
+    checker: &mut Checker<'_>,
+    deadline: Option<MonoTime>,
+) -> Reclaimed {
     let mut done = Reclaimed {
         removed_entries: 0,
         removed_bytes: 0,
         end: ReclaimEnd::Complete,
+        selected: None,
     };
     if let Err(end) = protocol(
         host,
-        judge,
-        found,
+        alternatives,
         make_writable,
         checker,
         deadline,
@@ -121,13 +155,13 @@ pub fn reclaim<H: Delete>(
 
 fn protocol<H: Delete>(
     host: &H,
-    judge: &Judge<'_>,
-    found: &Found,
+    alternatives: &[Alternative<'_>],
     make_writable: bool,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
     done: &mut Reclaimed,
 ) -> Result<(), ReclaimEnd> {
+    let found = alternatives[0].found;
     let path = &found.path;
     let failed = |error| {
         ReclaimEnd::from(Stop::Failed {
@@ -135,58 +169,127 @@ fn protocol<H: Delete>(
             error,
         })
     };
-    checker.serves(judge.rules).map_err(failed)?;
-    // Steps 1 and 2: a kept candidate is never locked.
+    checker
+        .serves(alternatives[0].judge.rules)
+        .map_err(failed)?;
+    // A deadline wins over candidate-local skips, as in the single-source
+    // protocol.
     check_deadline(host, deadline, path)?;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        if let Some(skip) = checkout_metadata_below(
+            alternative.judge.rules.checkouts,
+            &alternative.found.root,
+            &alternative.found.path,
+        ) {
+            done.selected = Some(index);
+            return Err(skip.into());
+        }
+    }
+    // Steps 1 and 2: a kept candidate is never locked.
     let mounts = mountinfo(host)?;
-    let reached = judge.approach(host, found, &mounts, deadline)??;
-    let candidate = reached.candidate(found)?;
+    let mut first_skip = None;
+    let mut reached = None;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        match alternative
+            .judge
+            .approach(host, alternative.found, &mounts, deadline)?
+        {
+            Ok(candidate) => {
+                reached = Some((index, alternative.found, candidate));
+                break;
+            }
+            Err(skip) => {
+                first_skip.get_or_insert(skip);
+            }
+        }
+    }
+    let (locked_index, lock_found, reached) =
+        reached.ok_or_else(|| first_skip.expect("nonempty alternatives"))?;
+    let candidate = reached.candidate(lock_found)?;
     // Step 3. Held until this function returns (step 7).
     let lock = lock_candidate(host, &candidate).map_err(failed)??;
     if let Some(locked) = lock.locked() {
         let stat = host
             .statx(Base::Dir(locked.fd()), Path::new(""))
             .map_err(failed)?;
-        same_object(found, Identity::of(&stat), "locked")?;
+        same_object(lock_found, Identity::of(&stat), "locked")?;
     }
-    // Step 4: everything judged again, under the lock.
+    // Step 4: each source term is judged afresh while the same inode is
+    // locked. A term whose predicate changed can lose membership without
+    // preventing another term from selecting the candidate.
     let mounts = mountinfo(host)?;
-    judge.again(host, found, &reached, &mounts, deadline)??;
-    let Walked { record, .. } = judge.contents(
-        host,
-        &reached,
-        super::judge::CandidateView {
-            candidate: &candidate,
-            locked_fd: lock.locked().map(|held| held.fd()),
-        },
-        found,
-        true,
-        deadline,
-    )??;
-    locked_is_walked(host, &candidate, &lock, &record).map_err(failed)??;
-    // Steps 5 and 6.
-    let options = DeleteOptions {
-        make_writable,
-        deadline,
-    };
-    let deletion = match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| {
-        if let Some(lock) = &judge.find.app_not_running {
-            super::app::check(host, &found.root, lock, deadline)
-                .map_err(NotDeleted::Stopped)?
-                .map_err(NotDeleted::Skipped)
+    first_skip = None;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        let found = alternative.found;
+        let judge = &alternative.judge;
+        let other_reached;
+        let reached = if index == locked_index {
+            &reached
         } else {
-            Ok(())
+            other_reached = match judge.approach(host, found, &mounts, deadline)? {
+                Ok(reached) => reached,
+                Err(skip) => {
+                    first_skip.get_or_insert(skip);
+                    continue;
+                }
+            };
+            &other_reached
+        };
+        let candidate = reached.candidate(found)?;
+        match judge.again(host, found, reached, &mounts, deadline)? {
+            Ok(()) => {}
+            Err(skip) => {
+                first_skip.get_or_insert(skip);
+                continue;
+            }
         }
-    }) {
-        Ok(deletion) => deletion,
-        Err(NotDeleted::Skipped(skip)) => {
-            check_deadline(host, deadline, path)?;
-            return Err(skip.into());
-        }
-        Err(NotDeleted::Failed(error)) => return Err(failed(error)),
-        Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
-    };
-    done.removed_entries = deletion.removed_entries;
-    done.removed_bytes = deletion.removed_bytes;
-    ReclaimEnd::of(deletion.end)
+        let walked = match judge.contents(
+            host,
+            reached,
+            super::judge::CandidateView {
+                candidate: &candidate,
+                locked_fd: lock.locked().map(|held| held.fd()),
+            },
+            found,
+            true,
+            deadline,
+        )? {
+            Ok(walked) => walked,
+            Err(skip) => {
+                first_skip.get_or_insert(skip);
+                continue;
+            }
+        };
+        let Walked { record, .. } = walked;
+        locked_is_walked(host, &candidate, &lock, &record).map_err(failed)??;
+        done.selected = Some(index);
+        let options = DeleteOptions {
+            make_writable,
+            deadline,
+        };
+        let deletion =
+            match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| {
+                if let Some(app_lock) = &judge.find.app_not_running {
+                    super::app::check(host, &found.root, app_lock, deadline)
+                        .map_err(NotDeleted::Stopped)?
+                        .map_err(NotDeleted::Skipped)
+                } else {
+                    Ok(())
+                }
+            }) {
+                Ok(deletion) => deletion,
+                Err(NotDeleted::Skipped(skip)) => {
+                    check_deadline(host, deadline, path)?;
+                    return Err(skip.into());
+                }
+                Err(NotDeleted::Failed(error)) => return Err(failed(error)),
+                Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
+            };
+        done.removed_entries = deletion.removed_entries;
+        done.removed_bytes = deletion.removed_bytes;
+        return ReclaimEnd::of(deletion.end);
+    }
+    Err(first_skip
+        .expect("every union alternative has a verdict")
+        .into())
 }

@@ -90,6 +90,27 @@ const PROFILES: &str = r#"
   where: {app_not_running: /tmp/browser-config/SingletonLock}
   action: {command: [rm, -rf, "{path}"]}
   examples: {match: [/tmp/pytest-of-mark]}
+- name: union-allow
+  find: {roots: [/tmp], paths: ["union-a*", "union-shared*"], type: dir}
+  checkouts: allow
+  action: delete
+  examples: {match: [/tmp/union-a]}
+- name: union-refuse
+  find: {roots: [/tmp], paths: ["union-b*", "union-shared*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-b]}
+- name: union-recent
+  find: {roots: [/tmp], paths: ["union-clock*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-clock]}
+- name: union-old
+  find: {roots: [/tmp], paths: ["union-clock*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-clock]}
+- name: union-bad-root
+  find: {roots: [/tmp/untrusted], paths: [item], type: dir}
+  action: delete
+  examples: {match: [/tmp/untrusted/item]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -146,6 +167,20 @@ fn request(select: &str, roots: &[&str], path: &str, min: &str) -> Request {
 /// candidate is processed.
 fn tmp(select: &str) -> Request {
     request(select, &[], "/tmp", "100%")
+}
+
+#[test]
+fn command_action_union_is_explicitly_refused() {
+    let selection = "profile:cleaner || profile:cleaner";
+    let error = Tier::select(selection, &library(), None, 1000)
+        .expect_err("command action union has no lock-time disjunction protocol");
+    assert!(error.contains("a union of this kind or action"), "{error}");
+    assert!(error.contains("task-16"), "{error}");
+    let mixed_delete = "profile:plain-tmp || profile:writable-tmp";
+    assert!(
+        Tier::select(mixed_delete, &library(), None, 1000).is_err(),
+        "different delete options must never share one union action"
+    );
 }
 
 #[test]
@@ -215,6 +250,83 @@ fn negated_entry_filters_are_rechecked_after_candidate_lock() {
         assert!(exists(&host, candidate));
         assert!(host.unfired_events().is_empty());
     }
+}
+
+#[test]
+fn filesystem_union_dedupes_identity_and_refusal_wins_in_both_orders() {
+    let tree = format!(
+        "  /tmp/union-a: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{size: 1K, mtime: {OLD}}}}}}}\n  /tmp/union-b: {}\n  /tmp/union-shared-clear: {}\n  /tmp/union-shared-checkout: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{size: 1K, mtime: {OLD}}}}}}}\n",
+        old_dir("1M"),
+        old_dir("1M"),
+    );
+    for selection in [
+        "profile:union-allow || profile:union-refuse",
+        "profile:union-refuse || profile:union-allow",
+    ] {
+        let host = host(&yaml("", &tree, ""));
+        let request = tmp(selection);
+        let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
+        let shared: Vec<_> = plan
+            .plan
+            .iter()
+            .filter(|entry| entry.candidate == Path::new("/tmp/union-shared-clear"))
+            .collect();
+        assert_eq!(shared.len(), 1, "{selection}: {plan:#?}");
+        assert_eq!(shared[0].checkouts, diskgc_core::engine::Checkouts::Refuse);
+        assert!(
+            plan.plan.iter().any(|entry| entry.candidate
+                == Path::new("/tmp/union-shared-checkout")
+                && entry.reason == Some("contains_checkout")),
+            "{selection}: {plan:#?}"
+        );
+        let report = ensure(&host, &request);
+        let mut done = actions(&report);
+        done.sort();
+        assert_eq!(
+            done,
+            ["/tmp/union-a", "/tmp/union-b", "/tmp/union-shared-clear"],
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/union-shared-checkout"));
+        assert_eq!(unlinked_below(&host, "/tmp/union-shared-checkout"), 0);
+    }
+}
+
+#[test]
+fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
+    let tree = "  /tmp/union-a: {.: {}}\n  /tmp/untrusted: {symlink: /home}\n";
+    let selection = "profile:union-allow || profile:union-bad-root";
+    let planned_host = host(&yaml("", tree, ""));
+    let plan = executor::dry_run(&planned_host, &tmp(selection), &[1000], &mut |_| {});
+    assert_eq!(plan.errors.len(), 1, "{plan:#?}");
+    assert_eq!(plan.errors[0].profile, "union-bad-root");
+    assert!(plan.plan.is_empty(), "{plan:#?}");
+
+    let reclaim_host = host(&yaml("", tree, ""));
+    let report = ensure(&reclaim_host, &tmp(selection));
+    assert_eq!(report.errors.len(), 1, "{report:#?}");
+    assert_eq!(report.errors[0].profile, "union-bad-root");
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(exists(&reclaim_host, "/tmp/union-a"));
+}
+
+#[test]
+fn filesystem_union_rechecks_each_idle_term_under_one_lock() {
+    let tree = "  /tmp/union-clock: {.: {mtime: 2026-10-13T03:01:00Z}, f: {size: 1M, mtime: 2026-10-13T03:01:00Z}}\n";
+    let selection =
+        "(profile:union-recent && !filter:idle-2d) || (profile:union-old && filter:idle-1d)";
+    let event =
+        "events:\n  - {at: {op: flock, path: /tmp/union-clock, when: after}, advance: 120s}\n";
+    let host = host(&yaml("", tree, event));
+    let report = ensure(&host, &tmp(selection));
+    assert_eq!(actions(&report), ["/tmp/union-clock"], "{report:#?}");
+    assert!(!exists(&host, "/tmp/union-clock"));
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(
+        host.trace_count(Op::Flock),
+        2,
+        "host lock plus one candidate lock"
+    );
 }
 
 /// Root-mode owner IDs are an explicit input to the same modelled walk:

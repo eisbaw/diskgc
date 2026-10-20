@@ -113,7 +113,7 @@ pub fn plan<H: Host>(
 
 /// One candidate's judgement for the plan: every step of [`super::judge`],
 /// then the in-use check against the plan's scan.
-fn judge_one<H: Host>(
+pub fn judge_one<H: Host>(
     host: &H,
     judge: &Judge<'_>,
     found: &Found,

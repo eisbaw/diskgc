@@ -174,11 +174,11 @@ Immediately before acting, diskgc walks the candidate's whole tree
     that does not say `allow` refuses a target holding a checkout.
     **Overlap:** where one candidate is found by several source profiles
     of one tier (a union, `a || b`), it may hold a checkout only if every
-    one of them allows checkouts: `refuse` wins. This build runs one
-    source profile per tier (unions arrive with task-16 and task-20), so
-    the rule is stated here for them; each tier judges its own candidates
-    by its own source's setting, and a `protect` entry or `!profile:`
-    covers what its profile finds whatever that profile's `checkouts`.
+    one of them allows checkouts: `refuse` wins. Filesystem delete unions
+    apply this rule during planning and reclaim; other union forms remain
+    unsupported. Each tier judges its own candidates by its source
+    settings. `protect` entries and `!profile:` terms remain unsupported
+    in execution.
   - **Kept too (the accepted cost):** whatever holds a clone is never
     deleted by a profile that refuses checkouts (the default), and that
     can be much of what a profile finds. Seen on the development machine:

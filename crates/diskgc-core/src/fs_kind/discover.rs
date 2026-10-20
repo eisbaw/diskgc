@@ -396,10 +396,6 @@ impl<H: Host> Walk<'_, H> {
             ));
             return Ok(true);
         };
-        if !self.seen.insert(identity.id) {
-            self.out.duplicates.push(at.to_owned());
-            return Ok(true);
-        }
         // Mounts first (docs/safety.md, Before the walk): the source's own
         // `where` looks inside the candidate, and a dead mount there would
         // hang it. Refused whatever `where` would say: it cannot be asked.
@@ -440,6 +436,13 @@ impl<H: Host> Walk<'_, H> {
         } else {
             None
         };
+        // Dedupe only actual source matches. An earlier route to this inode
+        // may fail `where` or its anchor while another root supplies the
+        // source evidence needed to select it.
+        if !self.seen.insert(identity.id) {
+            self.out.duplicates.push(at.to_owned());
+            return Ok(true);
+        }
         self.out.candidates.push((
             at.to_owned(),
             Ok(Found {

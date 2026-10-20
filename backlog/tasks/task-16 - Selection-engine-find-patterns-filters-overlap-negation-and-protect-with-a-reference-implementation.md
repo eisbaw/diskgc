@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 11:59'
+updated_date: '2026-10-20 12:23'
 labels:
   - wave-2
   - irreversible
@@ -68,6 +68,8 @@ Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must
 2026-10-20 runtime entry-complement slice (isolated /tmp/diskgc-task16-has-neg, pending integration): one-source fs !filter:has and !filter:has_not are evaluated after source discovery in dry run/tally and again through the held candidate fd under reclaim lock. Known mismatch is skipped as filtered; unreadable/unknown child type never becomes a complement match. ModelHost covers both predicates, EACCES and lock-time marker changes; focused disposable Nix-container binary/oracle case passed 1/1. Positive has filters, mixed-predicate filters, unions, !profile and protect remain refused; TASK16 AC/DoD remain open. docs/reference.md must gain filtered in the report skip-reason enum at integration.
 
 2026-10-20 integrated entry-complement checkpoint: docs/reference.md now lists filtered and accurately describes the seven shipped idle filters and supported runtime subset. Full nix develop -c just e2e passed (Nix image 139/139, native Docker 6/6); parallel QA and MPED reviews GO. TASK16 remains open for positive entry filters, unions, !profile overlap and protect; no AC/DoD checked.
+
+2026-10-20 positive fs delete-union candidate integrated for review: executor keeps the first term in its existing fields and only additional terms in union state; discovery dedupes exact inode identities, dry run judges a disjunction once per candidate, and reclaim takes one candidate lock to recheck each alternative with refuse-if-any checkout policy among matching sources. Root-mode CLI validates {uid} in every source, including later union terms. Focused ModelHost tests cover order, hardlink identity, shared checkout refusal, once-only actions and lock-time alternative changes; real-binary disposable Nix-container E2E passed 1/1 with deletion oracle clean, and host interlock refused exit 86. Fs command unions and differing delete options remain explicit usage errors; !profile and protect remain refused. Integrated full just e2e and parallel QA/MPED review pending; TASK16 AC/DoD remain open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

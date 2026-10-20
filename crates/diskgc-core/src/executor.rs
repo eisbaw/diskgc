@@ -39,6 +39,7 @@
 //! `Stopped(Failed)` errors of the run, which stop it;
 //! `Stopped(DeadlinePassed)` the deadline path.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,11 +47,11 @@ use std::time::Duration;
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
 use crate::docker_backend::{self, Binding, Storage};
-use crate::engine::{Checkouts, Reason, Rules, Skip};
+use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, EntryFilter, Find};
 use crate::host::{
-    Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
-    Space, Timestamp,
+    Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno, Host, HostError,
+    MonoTime, Space, Timestamp,
 };
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
@@ -67,9 +68,9 @@ use crate::units::{Size, format_bytes};
 /// (docs/reference.md, Commands).
 pub const SELECT_TIER: &str = "--select";
 
-/// One tier as this slice runs it: a single term of one source profile
-/// (kind `cargo-target`, or kind `fs`), its idle
-/// requirement and its roots. Built by [`Tier::select`] only.
+/// One selected tier. Its ordinary fields hold the first source term;
+/// [`Tier::fs_union`] holds any additional positive filesystem delete
+/// terms. Built by [`Tier::select`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier {
     pub group: String,
@@ -92,12 +93,62 @@ pub struct Tier {
     pub checkouts: Checkouts,
     /// The source profile's action (for the code-backed kinds, the kind's).
     pub action: Action,
+    /// Additional positive filesystem terms of a union. The first term is
+    /// held in the tier's ordinary fields, so there is one source of truth.
+    /// Empty for a single-source tier.
+    pub fs_union: Vec<FsUnionSource>,
+}
+
+/// One source contribution to a filesystem union. The same inode may be
+/// found by several entries and is judged once with all its contributors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsUnionSource {
+    pub profile: String,
+    pub find: Find,
+    pub roots: Vec<PathBuf>,
+    pub idle: IdleWindow,
+    pub checkouts: Checkouts,
+}
+
+/// A borrowed view of either the tier's first source or an additional
+/// union term. Discovery indices refer to this ordered list.
+#[derive(Clone, Copy)]
+struct FsUnionSourceRef<'a> {
+    profile: &'a str,
+    find: &'a Find,
+    roots: &'a [PathBuf],
+    idle: IdleWindow,
+    checkouts: Checkouts,
 }
 
 impl Tier {
     /// The action, as the report names it (`operation`, human-readable).
     pub fn operation(&self) -> String {
         self.action.to_string()
+    }
+
+    fn fs_sources(&self) -> Vec<FsUnionSourceRef<'_>> {
+        let SourceKind::Fs(find) = &self.source else {
+            unreachable!("a filesystem union retains a filesystem first source")
+        };
+        let mut sources = vec![FsUnionSourceRef {
+            profile: &self.profile,
+            find,
+            roots: &self.roots,
+            idle: IdleWindow {
+                at_least: self.idle_for,
+                before: self.idle_before,
+            },
+            checkouts: self.checkouts,
+        }];
+        sources.extend(self.fs_union.iter().map(|source| FsUnionSourceRef {
+            profile: &source.profile,
+            find: &source.find,
+            roots: &source.roots,
+            idle: source.idle,
+            checkouts: source.checkouts,
+        }));
+        sources
     }
 }
 
@@ -130,12 +181,63 @@ impl Tier {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
-                 kind fs), optionally with supported idle filters or an fs entry complement"
+                 kind fs), optionally with supported filters, or a positive fs delete union"
             )
         };
-        let [term] = checked.expr().terms.as_slice() else {
-            return Err(not_yet("a union (`||`)", "task-16, task-20"));
-        };
+        let bound = library
+            .bind_roots(&checked, roots)
+            .map_err(|e| format!("--select `{expr}`: {e}"))?;
+        let mut terms = Vec::new();
+        for term in &checked.expr().terms {
+            terms.push(Self::select_term(
+                expr, term, library, &bound, uid, &not_yet,
+            )?);
+        }
+        let mut first = terms.remove(0);
+        if !terms.is_empty() {
+            if !matches!(first.source, SourceKind::Fs(_))
+                || !matches!(first.action, Action::Delete { .. })
+            {
+                return Err(not_yet(
+                    "a union of this kind or action",
+                    "task-16, task-20",
+                ));
+            }
+            if terms.iter().any(|term| term.action != first.action) {
+                return Err(format!(
+                    "--select `{expr}`: filesystem union sources must have exactly the same delete action and options"
+                ));
+            }
+            let mut extra = Vec::with_capacity(terms.len());
+            for tier in &terms {
+                let SourceKind::Fs(find) = &tier.source else {
+                    return Err(not_yet("a union of non-filesystem sources", "task-16"));
+                };
+                extra.push(FsUnionSource {
+                    profile: tier.profile.clone(),
+                    find: (**find).clone(),
+                    roots: tier.roots.clone(),
+                    idle: IdleWindow {
+                        at_least: tier.idle_for,
+                        before: tier.idle_before,
+                    },
+                    checkouts: tier.checkouts,
+                });
+            }
+            first.fs_union = extra;
+            first.select = checked.expr().to_string();
+        }
+        Ok(first)
+    }
+
+    fn select_term(
+        expr: &str,
+        term: &select::Term,
+        library: &Library,
+        bound: &std::collections::BTreeMap<String, Vec<String>>,
+        uid: u32,
+        not_yet: &impl Fn(&str, &str) -> String,
+    ) -> Result<Tier, String> {
         if let Some(factor) = term
             .factors
             .iter()
@@ -213,9 +315,6 @@ impl Tier {
             }
         }
         let idle_for = library.idle_for(term)?;
-        let bound = library
-            .bind_roots(&checked, roots)
-            .map_err(|e| format!("--select `{expr}`: {e}"))?;
         let roots = bound
             .get(&term.source)
             .map(|roots| {
@@ -228,7 +327,7 @@ impl Tier {
         Ok(Tier {
             group: SELECT_TIER.to_owned(),
             name: SELECT_TIER.to_owned(),
-            select: checked.expr().to_string(),
+            select: term.to_string(),
             profile: term.source.clone(),
             source: kind,
             roots,
@@ -236,6 +335,7 @@ impl Tier {
             idle_before,
             checkouts: source.checkouts,
             action: source.action.clone(),
+            fs_union: Vec::new(),
         })
     }
 }
@@ -662,16 +762,22 @@ pub fn dry_run<H: Host>(
             &mut report,
             log,
         ),
-        SourceKind::Fs(find) => plan_fs(
-            host,
-            tier,
-            find,
-            measured.dev,
-            &rules,
-            deadline,
-            &mut report,
-            log,
-        ),
+        SourceKind::Fs(find) => {
+            if tier.fs_union.is_empty() {
+                plan_fs(
+                    host,
+                    tier,
+                    find,
+                    measured.dev,
+                    &rules,
+                    deadline,
+                    &mut report,
+                    log,
+                )
+            } else {
+                plan_fs_union(host, tier, measured.dev, &rules, deadline, &mut report, log)
+            }
+        }
         SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
     };
     let Planned {
@@ -952,13 +1058,222 @@ fn plan_fs<H: Host>(
     planned
 }
 
+/// One inode found by one or more positive filesystem sources. Retaining
+/// every contributing `Found` keeps each root and source predicate available
+/// for the lock-time recheck. Discovery order chooses the report path.
+struct FsUnionCandidate {
+    identity: Identity,
+    found_by: Vec<(usize, fs_kind::Found)>,
+}
+
+fn discover_fs_union<H: Host>(
+    host: &H,
+    sources: &[FsUnionSourceRef<'_>],
+    deadline: Option<MonoTime>,
+) -> (Vec<FsUnionCandidate>, Vec<(usize, Skip)>, Option<Stop>) {
+    let mut candidates: Vec<FsUnionCandidate> = Vec::new();
+    let mut by_inode: HashMap<DevIno, usize> = HashMap::new();
+    let mut refused = Vec::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let (discovery, stopped) = fs_kind::discover(host, source.roots, source.find, deadline);
+        refused.extend(
+            discovery
+                .refused
+                .into_iter()
+                .map(|skip| (source_index, skip)),
+        );
+        for (path, found) in discovery.candidates {
+            let found = match found {
+                Ok(found) => found,
+                Err(skip) => {
+                    refused.push((source_index, skip));
+                    continue;
+                }
+            };
+            if let Some(&index) = by_inode.get(&found.identity.id) {
+                if candidates[index].identity != found.identity {
+                    refused.push((
+                        source_index,
+                        Skip::new(
+                            Reason::Changed,
+                            path,
+                            "the inode changed identity between source discoveries",
+                        ),
+                    ));
+                    // Neither old nor new identity is safe to reclaim from
+                    // this incomplete view of the union.
+                    candidates[index].found_by.clear();
+                } else if !candidates[index].found_by.is_empty() {
+                    candidates[index].found_by.push((source_index, found));
+                }
+            } else {
+                by_inode.insert(found.identity.id, candidates.len());
+                candidates.push(FsUnionCandidate {
+                    identity: found.identity,
+                    found_by: vec![(source_index, found)],
+                });
+            }
+        }
+        if let Some(stop) = stopped {
+            return (candidates, refused, Some(stop));
+        }
+    }
+    candidates.retain(|candidate| !candidate.found_by.is_empty());
+    (candidates, refused, None)
+}
+
+fn union_checkouts(sources: &[FsUnionSourceRef<'_>], candidate: &FsUnionCandidate) -> Checkouts {
+    if candidate
+        .found_by
+        .iter()
+        .any(|(index, _)| sources[*index].checkouts == Checkouts::Refuse)
+    {
+        Checkouts::Refuse
+    } else {
+        Checkouts::Allow
+    }
+}
+
+fn union_checkout_path(
+    candidate: &FsUnionCandidate,
+    checkouts: Checkouts,
+) -> Option<(usize, &Path, Skip)> {
+    candidate.found_by.iter().find_map(|(index, found)| {
+        checkout_metadata_below(checkouts, &found.root, &found.path)
+            .map(|skip| (*index, found.path.as_path(), skip))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_fs_union<H: Host>(
+    host: &H,
+    tier: &Tier,
+    dev: Dev,
+    rules: &Rules<'_>,
+    deadline: Option<MonoTime>,
+    report: &mut Report,
+    log: &mut dyn FnMut(&str),
+) -> Planned {
+    let sources = tier.fs_sources();
+    let (candidates, refused, stopped) = discover_fs_union(host, &sources, deadline);
+    let mut planned = Planned {
+        eligible: Vec::new(),
+        skipped: Vec::new(),
+        stopped,
+    };
+    log(&format!(
+        "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
+        tier.name,
+        tier.select,
+        candidates.len(),
+        sources.len()
+    ));
+    if planned.stopped.is_some() {
+        return planned;
+    }
+    let misconfigured: Vec<_> = refused
+        .iter()
+        .filter(|(index, skip)| is_misconfigured_source(&sources[*index], skip))
+        .collect();
+    for (index, skip) in &misconfigured {
+        let mut entry = run_error(tier, excluded(skip));
+        entry.profile = sources[*index].profile.to_owned();
+        record_error(report, log, entry);
+    }
+    for (index, skip) in refused
+        .iter()
+        .filter(|(index, skip)| !is_misconfigured_source(&sources[*index], skip))
+    {
+        let mut entry = plan_entry(tier, &skip.path, Some(skip.reason.as_str()), None);
+        entry.profile = sources[*index].profile.to_owned();
+        entry.checkouts = sources[*index].checkouts;
+        planned.skipped.push(entry);
+    }
+    if !misconfigured.is_empty() {
+        return planned;
+    }
+    let mut checker = Checker::for_plan(rules);
+    for candidate in &candidates {
+        let checkouts = union_checkouts(&sources, candidate);
+        if let Some((index, path, skip)) = union_checkout_path(candidate, checkouts) {
+            let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+            entry.profile = sources[index].profile.to_owned();
+            entry.checkouts = checkouts;
+            planned.skipped.push(entry);
+            continue;
+        }
+        let rules = Rules {
+            checkouts,
+            ..*rules
+        };
+        let mut first_skip = None;
+        let mut selected = None;
+        for (index, found) in &candidate.found_by {
+            let source = &sources[*index];
+            let judge = fs_kind::Judge {
+                find: source.find,
+                rules: &rules,
+                idle: source.idle,
+                dev,
+            };
+            match fs_kind::judge_one(host, &judge, found, &mut checker, deadline) {
+                Ok(Ok(tally)) => {
+                    selected = Some((*index, found.path.as_path(), tally));
+                    break;
+                }
+                Ok(Err(skip)) => {
+                    first_skip.get_or_insert((*index, found.path.as_path(), skip));
+                }
+                Err(stop) => {
+                    planned.stopped = Some(stop);
+                    return planned;
+                }
+            }
+        }
+        if let Some((index, path, tally)) = selected {
+            let source = &sources[index];
+            let mut entry = plan_entry(tier, path, None, Some(tally.bytes));
+            entry.profile = source.profile.to_owned();
+            entry.checkouts = checkouts;
+            log(&format!(
+                "{}: {}: eligible by `{}` ({} estimated)",
+                tier.name,
+                entry.candidate.display(),
+                source.profile,
+                format_bytes(tally.bytes)
+            ));
+            planned.eligible.push((tally.newest_change, entry));
+        } else {
+            let (index, path, skip) =
+                first_skip.expect("a discovered union candidate has a verdict");
+            log_skip(log, tier, &skip);
+            let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+            entry.profile = sources[index].profile.to_owned();
+            entry.checkouts = checkouts;
+            planned.skipped.push(entry);
+        }
+    }
+    planned
+}
+
 /// The one set of walk rules of `tier`'s run: every entry one of
 /// `owners`', any socket or FIFO refuses (the default policy), the default
 /// entry budget ([`Rules::new`]), and the source profile's `checkouts`
 /// setting. An `allow` is logged, so a run that may delete a checkout says
 /// so where it runs (docs/safety.md, No source checkout).
 fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules<'o> {
-    if tier.checkouts == Checkouts::Allow {
+    if !tier.fs_union.is_empty() {
+        for source in tier
+            .fs_sources()
+            .into_iter()
+            .filter(|source| source.checkouts == Checkouts::Allow)
+        {
+            log(&format!(
+                "{}: profile `{}` says `checkouts: allow`; in a union, a candidate also found by any refusing source uses `checkouts: refuse`",
+                tier.name, source.profile
+            ));
+        }
+    } else if tier.checkouts == Checkouts::Allow {
         log(&format!(
             "{}: profile `{}` says `checkouts: allow`: a candidate holding .git, .hg or .svn, or \
              inside a checkout's metadata, is not refused for that",
@@ -1070,7 +1385,16 @@ fn misconfigured_roots<'f>(tier: &Tier, found: &'f Discovery) -> Vec<&'f Skip> {
 }
 
 fn is_misconfigured(tier: &Tier, skip: &Skip) -> bool {
-    skip.reason == Reason::UnsafePath && tier.roots.contains(&skip.path)
+    skip.reason == Reason::UnsafePath
+        && (tier.roots.contains(&skip.path)
+            || tier
+                .fs_union
+                .iter()
+                .any(|term| term.roots.contains(&skip.path)))
+}
+
+fn is_misconfigured_source(source: &FsUnionSourceRef<'_>, skip: &Skip) -> bool {
+    skip.reason == Reason::UnsafePath && source.roots.contains(&skip.path)
 }
 
 /// The error message of a misconfigured root (the detail without the
@@ -1338,10 +1662,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn skip(&mut self, candidate: &Path, skip: &Skip) {
+        let profile = self.tier.profile.clone();
+        self.skip_as(candidate, &profile, skip);
+    }
+
+    fn skip_as(&mut self, candidate: &Path, profile: &str, skip: &Skip) {
         log_skip(self.log, self.tier, skip);
         self.report.skipped.push(SkipEntry {
             tier: self.tier.name.clone(),
-            profile: self.tier.profile.clone(),
+            profile: profile.to_owned(),
             candidate: candidate.to_owned(),
             count: 1,
             examples: Vec::new(),
@@ -1349,10 +1678,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         });
     }
 
-    fn error(&mut self, candidate: &Path, message: String) {
+    fn error_as(&mut self, candidate: &Path, profile: &str, message: String) {
         let entry = ErrorEntry {
             tier: self.tier.name.clone(),
-            profile: self.tier.profile.clone(),
+            profile: profile.to_owned(),
             candidate: candidate.to_string_lossy().into_owned(),
             message,
         };
@@ -1388,7 +1717,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         // never the fs one.
         match &self.tier.source {
             SourceKind::CargoTarget => self.walk_cargo(&rules, &mut checker),
-            SourceKind::Fs(find) => self.walk_fs(find, &rules, &mut checker),
+            SourceKind::Fs(find) => {
+                if self.tier.fs_union.is_empty() {
+                    self.walk_fs(find, &rules, &mut checker);
+                } else {
+                    self.walk_fs_union(&rules, &mut checker);
+                }
+            }
             SourceKind::DockerBuildCache | SourceKind::DockerImages => self.walk_docker(),
         }
         self.report.held_by_deleted_files =
@@ -1710,6 +2045,177 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
     }
 
+    /// Reclaim each identity once after the union's complete discovery.
+    /// Terms remain attached to the candidate so their predicates can be
+    /// tried again under the one candidate lock.
+    fn walk_fs_union(&mut self, base_rules: &Rules<'_>, checker: &mut Checker<'_>) {
+        let sources = self.tier.fs_sources();
+        let (candidates, refused, stopped) = discover_fs_union(self.host, &sources, self.deadline);
+        (self.log)(&format!(
+            "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
+            self.tier.name,
+            self.tier.select,
+            candidates.len(),
+            sources.len()
+        ));
+        if let Some(stop) = stopped {
+            return self.stop(&stop);
+        }
+        let mut misconfigured = false;
+        for (index, skip) in &refused {
+            let source = &sources[*index];
+            if is_misconfigured_source(source, skip) {
+                let mut entry = run_error(self.tier, excluded(skip));
+                entry.profile = source.profile.to_owned();
+                record_error(self.report, self.log, entry);
+                misconfigured = true;
+            } else {
+                self.skip_as(&skip.path, source.profile, skip);
+            }
+        }
+        if misconfigured {
+            return;
+        }
+        let tally_until = self.tally_until();
+        let mut tallied: Vec<(&FsUnionCandidate, fs_kind::Tally)> = Vec::new();
+        let mut untallied: Vec<&FsUnionCandidate> = Vec::new();
+        for candidate in &candidates {
+            if !untallied.is_empty() {
+                untallied.push(candidate);
+                continue;
+            }
+            let checkouts = union_checkouts(&sources, candidate);
+            if let Some((index, path, skip)) = union_checkout_path(candidate, checkouts) {
+                let profile = sources[index].profile;
+                self.skip_as(path, profile, &skip);
+                continue;
+            }
+            let rules = Rules {
+                checkouts,
+                ..*base_rules
+            };
+            let mut first_skip = None;
+            let mut tally = None;
+            let mut budget_exhausted = false;
+            for (index, found) in &candidate.found_by {
+                let source = &sources[*index];
+                let judge = fs_kind::Judge {
+                    find: source.find,
+                    rules: &rules,
+                    idle: source.idle,
+                    dev: self.measured.dev,
+                };
+                match fs_kind::tally(self.host, &judge, found, tally_until) {
+                    Ok(Ok(value)) => {
+                        tally = Some(value);
+                        break;
+                    }
+                    Ok(Err(skip)) => {
+                        first_skip.get_or_insert((*index, found.path.as_path(), skip));
+                    }
+                    Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
+                        self.budget_spent(&found.path);
+                        untallied.push(candidate);
+                        budget_exhausted = true;
+                        break;
+                    }
+                    Err(stop) => return self.stop(&stop),
+                }
+            }
+            if let Some(tally) = tally {
+                tallied.push((candidate, tally));
+            } else if !budget_exhausted {
+                let (index, path, skip) =
+                    first_skip.expect("a union candidate has a tally verdict");
+                self.skip_as(path, sources[index].profile, &skip);
+            }
+        }
+        oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
+        let queue = tallied
+            .into_iter()
+            .map(|(candidate, tally)| (candidate, Some(tally)))
+            .chain(untallied.into_iter().map(|candidate| (candidate, None)));
+        let mut avail = match sample(self.host, self.measured) {
+            Ok(space) => space.avail_bytes,
+            Err(error) => return self.run_error(error),
+        };
+        for (candidate, tally) in queue {
+            if self.goal_reached(avail) {
+                return;
+            }
+            let path = &candidate.found_by[0].1.path;
+            if self.past_deadline() {
+                self.deadline_hit = true;
+                (self.log)(&format!(
+                    "{}: deadline passed before {}",
+                    self.tier.name,
+                    path.display()
+                ));
+                return;
+            }
+            (self.log)(&format!(
+                "{}: reclaiming {} ({}), found by {} source term(s)",
+                self.tier.name,
+                path.display(),
+                tally
+                    .as_ref()
+                    .map_or_else(|| "not tallied".to_owned(), |t| format_bytes(t.bytes)),
+                candidate.found_by.len(),
+            ));
+            let rules = Rules {
+                checkouts: union_checkouts(&sources, candidate),
+                ..*base_rules
+            };
+            let alternatives: Vec<_> = candidate
+                .found_by
+                .iter()
+                .map(|(index, found)| {
+                    let source = &sources[*index];
+                    fs_kind::Alternative {
+                        judge: fs_kind::Judge {
+                            find: source.find,
+                            rules: &rules,
+                            idle: source.idle,
+                            dev: self.measured.dev,
+                        },
+                        found,
+                    }
+                })
+                .collect();
+            let started = self.host.now();
+            let Action::Delete { make_writable } = self.tier.action else {
+                unreachable!("filesystem unions admit only delete")
+            };
+            let done = fs_kind::reclaim_alternatives(
+                self.host,
+                &alternatives,
+                make_writable,
+                checker,
+                self.deadline,
+            );
+            let profile = done
+                .selected
+                .map(|selected| sources[candidate.found_by[selected].0].profile.to_owned())
+                .unwrap_or_else(|| sources[candidate.found_by[0].0].profile.to_owned());
+            let reported_path = done
+                .selected
+                .map(|selected| &candidate.found_by[selected].1.path)
+                .unwrap_or(path);
+            let outcome = Outcome {
+                started,
+                before: avail,
+                removed_entries: done.removed_entries,
+                attempted_command: false,
+                end: done.end,
+                note: String::new(),
+            };
+            match self.record_as(reported_path, &profile, outcome) {
+                Some(after) => avail = after,
+                None => return,
+            }
+        }
+    }
+
     fn budget_spent(&mut self, at: &Path) {
         (self.log)(&format!(
             "{}: --tally-budget spent at {}: it and the candidates after it are taken after \
@@ -1725,6 +2231,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// an error by how it ended. The available space after it, or `None`
     /// when the run must stop.
     fn record(&mut self, candidate: &Path, outcome: Outcome) -> Option<u64> {
+        let profile = self.tier.profile.clone();
+        self.record_as(candidate, &profile, outcome)
+    }
+
+    fn record_as(&mut self, candidate: &Path, profile: &str, outcome: Outcome) -> Option<u64> {
         let took = self.host.now().saturating_since(outcome.started);
         let after = match sample(self.host, self.measured) {
             Ok(space) => Some(space.avail_bytes),
@@ -1743,7 +2254,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 (self.log)(&format!(
                     "{}: {} {}: command finished with {:?}, observed change {}, {} ms",
                     self.tier.name,
-                    self.tier.profile,
+                    profile,
                     candidate.display(),
                     outcome.end,
                     signed_bytes(delta),
@@ -1753,7 +2264,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 (self.log)(&format!(
                     "{}: {} {}: {} {} entries, observed change {}, {} ms{}",
                     self.tier.name,
-                    self.tier.profile,
+                    profile,
                     candidate.display(),
                     if complete {
                         "reclaimed"
@@ -1768,7 +2279,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             self.report.actions.push(ActionEntry {
                 tier: self.tier.name.clone(),
-                profile: self.tier.profile.clone(),
+                profile: profile.to_owned(),
                 candidate: candidate.to_owned(),
                 avail_delta_bytes: delta,
                 duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
@@ -1777,15 +2288,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         match outcome.end {
             ReclaimEnd::Complete => {}
-            ReclaimEnd::Skipped(skip) => self.skip(candidate, &skip),
+            ReclaimEnd::Skipped(skip) => self.skip_as(candidate, profile, &skip),
             ReclaimEnd::Failed { path, error } => {
                 // An error for this candidate only (an `ENOTEMPTY` from a
                 // file created after its walk, ...): reported, never
                 // retried in this run; the next candidate is still tried.
-                self.error(candidate, format!("{}: {error}", path.display()));
+                self.error_as(candidate, profile, format!("{}: {error}", path.display()));
             }
             ReclaimEnd::GateRefused { path, error } => {
-                self.error(candidate, format!("{}: {error}", path.display()));
+                self.error_as(candidate, profile, format!("{}: {error}", path.display()));
                 (self.log)(&format!(
                     "{}: the sandbox gate refused: nothing more is deleted",
                     self.tier.name

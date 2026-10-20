@@ -94,6 +94,14 @@ const PROFILES: &str = r#"
   examples: {match: [/home/mark/versions/v1]}
 - name: keep-two
   where: {keep_newest: 2}
+- name: union-file-a
+  find: {roots: [/tmp], paths: [link-a], type: file}
+  action: delete
+  examples: {match: [/tmp/link-a]}
+- name: union-file-b
+  find: {roots: [/tmp], paths: [link-b], type: file}
+  action: delete
+  examples: {match: [/tmp/link-b]}
 "#;
 
 fn library() -> Library {
@@ -1547,24 +1555,49 @@ fn shipped_project_python_caches_find_only_cache_directories() {
 /// Unsupported term forms are refused, never silently ignored. An idle
 /// complement is supported and its exclusive bound is retained.
 #[test]
-fn has_filters_in_a_term_are_refused_not_ignored() {
+fn positive_has_filter_is_refused_and_filesystem_union_is_compiled() {
     let library = library();
-    for (expr, needle) in [
-        ("profile:tmp-entry && filter:has-tag", "`filter:has-tag`"),
-        ("profile:tmp-entry || profile:pytest-of-dir", "a union"),
-    ] {
-        let error = Tier::select(expr, &library, None, 1000).expect_err(expr);
-        assert!(
-            error.contains(needle) && error.contains("task-16"),
-            "{expr}: {error}"
-        );
-    }
+    let expr = "profile:tmp-entry && filter:has-tag";
+    let error = Tier::select(expr, &library, None, 1000).expect_err(expr);
+    assert!(
+        error.contains("`filter:has-tag`") && error.contains("task-16"),
+        "{expr}: {error}"
+    );
+    let union = Tier::select(
+        "profile:tmp-entry || profile:pytest-of-dir",
+        &library,
+        None,
+        1000,
+    )
+    .expect("filesystem delete union is runnable");
+    assert_eq!(union.fs_union.len(), 1);
     let tier = Tier::select("profile:tmp-entry && !filter:idle-1d", &library, None, 1000)
         .expect("an idle complement is runnable");
     assert_eq!(
         tier.idle_before.map(|idle| idle.0),
         Some(Duration::from_secs(86_400))
     );
+}
+
+#[test]
+fn filesystem_union_dedupes_hardlink_aliases_by_inode_identity() {
+    let host = host(&yaml(
+        "  /tmp/link-a: {size: 1M}\n  /tmp/link-b: {link: /tmp/link-a}\n",
+    ));
+    let plan = dry_run(
+        &host,
+        &request("profile:union-file-a || profile:union-file-b", &[], "/tmp"),
+    );
+    let aliases: Vec<_> = plan
+        .plan
+        .iter()
+        .filter(|entry| {
+            entry.candidate == Path::new("/tmp/link-a")
+                || entry.candidate == Path::new("/tmp/link-b")
+        })
+        .collect();
+    assert_eq!(aliases.len(), 1, "{plan:#?}");
+    assert_eq!(aliases[0].candidate, Path::new("/tmp/link-a"));
 }
 
 #[test]
