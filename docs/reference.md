@@ -513,8 +513,6 @@ groups:
         roots: [/home/mark/src, /home/mark/topics]
       - name: docker-cache-stale
         select: profile:docker-build-cache && filter:idle-7d
-      - name: nix-dead
-        select: profile:nix-garbage
 
   - name: pressure                 # costs rebuild or download time
     tiers:
@@ -904,7 +902,7 @@ listed as planned, not shipped.
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | planned: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*`; a live shell in a private PID namespace can have a namespace PID absent from host `/proc`, so the current PID guard is insufficient | no safe action yet |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
-| nix | `nix-garbage` | dead store paths | Nix GC |
+| nix | `nix-garbage` | planned: dead store paths; safe store and root-database binding remains unverified (TASK36) | no shipped action yet |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |

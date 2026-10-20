@@ -157,7 +157,7 @@
   <text x="64" y="992" class="mono code">test-and-temp-cruft  (profile:pytest-tmp || profile:node-compile-cache) &amp;&amp; filter:idle-3d</text>
   <text x="64" y="1012" class="mono code">cargo-stale           profile:cargo-target &amp;&amp; filter:idle-7d   roots: /home/mark/src</text>
   <text x="64" y="1032" class="mono code">docker-cache-stale    profile:docker-build-cache &amp;&amp; filter:idle-7d</text>
-  <text x="64" y="1052" class="mono code">nix-dead              profile:nix-garbage</text>
+  <text x="64" y="1052" class="small">Nix store GC is planned (TASK36); no tier is shipped.</text>
   <circle cx="64" cy="1084" r="5" fill="#d97706"/>
   <text x="76" y="1089" class="h3">group pressure · ordered (costs rebuild or download time)</text>
   <text x="64" y="1114" class="mono code">docker-dangling       profile:docker-dangling</text>

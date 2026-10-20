@@ -193,7 +193,6 @@ const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "(profile:pytest-tmp || profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d",
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",
-    "profile:nix-garbage",
     "profile:docker-dangling",
     "profile:chromium-tmp && filter:idle-2d",
     "profile:cargo-target && filter:idle-1h",
