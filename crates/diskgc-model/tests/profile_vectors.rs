@@ -1,10 +1,11 @@
 //! Every YAML file in models/profiles is run through the same planner and
 //! reclaim contract. Adding a fixture does not require another Rust test.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use diskgc_core::profile::{Library, parse_profiles};
+use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_model::profile_vector::ProfileVector;
 
 fn read(path: &Path) -> ProfileVector {
@@ -36,6 +37,41 @@ fn every_checked_in_profile_vector_matches_plan_and_reclaim() {
 }
 
 #[test]
+fn every_modelable_builtin_source_has_a_checked_in_vector() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/profiles");
+    let library = Library::builtin().expect("built-in profiles");
+    let mut covered = BTreeSet::new();
+    for path in fs::read_dir(&directory).expect("profile vector directory") {
+        let path = path.expect("directory entry").path();
+        if path.extension().is_some_and(|ext| ext == "yaml") {
+            let vector = read(&path);
+            let profile = library.get(vector.profile_name()).expect("shipped profile");
+            assert!(
+                matches!(&profile.body, Body::Source(source) if !matches!(source.action, Action::Command { .. })),
+                "{} cannot assert a command cleaner's filesystem effect in ModelHost",
+                path.display()
+            );
+            covered.insert(vector.profile_name().to_owned());
+        }
+    }
+    let modelable: BTreeSet<_> = library
+        .profiles()
+        .filter_map(|profile| match &profile.body {
+            Body::Source(source)
+                if matches!(
+                    source.action,
+                    Action::Delete { .. } | Action::CargoLockProtocol
+                ) =>
+            {
+                Some(profile.name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(covered, modelable, "built-in source vector coverage drift");
+}
+
+#[test]
 fn wrong_python_matcher_is_rejected_by_the_checked_in_vector() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/models/profiles/python-pycache-checkout.yaml");
@@ -64,4 +100,29 @@ fn wrong_python_matcher_is_rejected_by_the_checked_in_vector() {
         error.contains("dry-run plan"),
         "unexpected failure: {error}"
     );
+}
+
+#[test]
+fn expected_filesystem_postconditions_must_exist_before_reclaim() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/models/profiles/python-pycache-checkout.yaml");
+    let library = Library::builtin().expect("built-in profiles");
+
+    let mut removed = read(&path);
+    let action = removed.expect.actions.first().expect("vector action");
+    removed.expect.removed.push(action.join("never-existed"));
+    let error = removed
+        .check(&library)
+        .expect_err("an absent path cannot count as removed");
+    assert!(error.contains("was absent before reclaim"), "{error}");
+
+    let mut preserved = read(&path);
+    preserved
+        .expect
+        .preserved
+        .push("/home/tester/never-existed".into());
+    let error = preserved
+        .check(&library)
+        .expect_err("an absent path cannot count as preserved");
+    assert!(error.contains("was absent before reclaim"), "{error}");
 }

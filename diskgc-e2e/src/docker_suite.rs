@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use diskgc_core::docker_backend::{DockerInfo, ImageStore};
 use serde_json::Value;
 
 use crate::oracle::{Fixture, Oracle};
@@ -28,7 +29,7 @@ const VOLUME: &str = "diskgc-native-volume";
 /// Owns the child daemon so an early test failure still stops it. Podman
 /// removes the entire container, including both data tmpfs mounts, after
 /// the test exits.
-struct Daemon {
+pub(crate) struct Daemon {
     child: Child,
     log_path: PathBuf,
 }
@@ -41,7 +42,7 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
-    fn start(ctx: &Ctx) -> Result<Self, String> {
+    pub(crate) fn start(ctx: &Ctx) -> Result<Self, String> {
         require_tmpfs(Path::new("/var/lib/docker"))?;
         require_tmpfs(Path::new("/var/lib/containerd"))?;
         let log_path = ctx
@@ -63,7 +64,7 @@ impl Daemon {
                 "--ip6tables=false",
                 "--bridge=none",
                 "--tls=false",
-                "--storage-driver=vfs",
+                "--feature=containerd-snapshotter=true",
             ])
             .stdin(Stdio::null())
             .stdout(
@@ -198,6 +199,15 @@ fn validate_server_identity(server: &Value, expected_version: &str) -> TestResul
     Ok(())
 }
 
+/// Require the pinned native Engine behind the socket before a Docker E2E
+/// attributes any result to Docker rather than a compatible CLI server.
+pub(crate) fn assert_native_server_identity(ctx: &Ctx) -> TestResult {
+    let server_text = docker_ok(ctx, &["version", "--format", "{{json .Server}}"], true)?;
+    let server: Value = serde_json::from_str(&server_text)
+        .map_err(|error| format!("parse Docker server identity {server_text:?}: {error}"))?;
+    validate_server_identity(&server, ENGINE_VERSION)
+}
+
 /// A native Docker server, image, container and volume entirely inside the
 /// disposable Podman container. The diskgc binary under test is still run
 /// and judged by the deletion oracle; no Docker kind is required yet.
@@ -227,6 +237,14 @@ pub fn native_docker_engine_dind_smoke(ctx: &Ctx) -> TestResult {
     );
     validate_server_identity(&server, ENGINE_VERSION)?;
     info!("native Docker server: {}", server_text);
+    let info_text = docker_ok(ctx, &["info", "--format", "{{json .}}"], true)?;
+    let daemon_info = DockerInfo::parse(&info_text)?;
+    let ImageStore::BundledContainerd(image_store) = daemon_info.image_store else {
+        return Err(
+            "native Docker fixture did not use its bundled containerd image store".to_owned(),
+        );
+    };
+    info!("native Docker image store: {}", image_store.display());
 
     let tar = Command::new("/bin/tar")
         .args(["-C", "/tmp/docker-source", "-cf", "-", "payload"])
@@ -256,6 +274,40 @@ pub fn native_docker_engine_dind_smoke(ctx: &Ctx) -> TestResult {
         "native Docker import exited {}: {}",
         import.status,
         String::from_utf8_lossy(&import.stderr)
+    );
+    let blobs = image_store.join("io.containerd.content.v1.content/blobs/sha256");
+    let entries = std::fs::read_dir(&blobs)
+        .map_err(|error| format!("read imported image content {}: {error}", blobs.display()))?;
+    let mut found_blob = false;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read image blob entry: {error}"))?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or("non-UTF-8 image blob name")?;
+        let digest_name = name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("stat image blob entry: {error}"))?;
+        if digest_name && kind.is_file() {
+            let size = entry
+                .metadata()
+                .map_err(|error| format!("measure image blob entry: {error}"))?
+                .len();
+            if size > 0 {
+                found_blob = true;
+                break;
+            }
+        }
+    }
+    ensure!(
+        found_blob,
+        "imported image left no blob in {}",
+        blobs.display()
+    );
+    let mut external_entries = std::fs::read_dir("/var/lib/containerd")
+        .map_err(|error| format!("read separate containerd root: {error}"))?;
+    ensure!(
+        external_entries.next().is_none(),
+        "imported image also wrote to separate /var/lib/containerd"
     );
     docker_ok(
         ctx,

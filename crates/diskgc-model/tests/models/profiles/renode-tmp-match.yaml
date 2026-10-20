@@ -1,0 +1,25 @@
+# The exact cache entry is eligible; a similar path or missing marker is preserved.
+profile_vector: 1
+profile: renode-tmp
+path: /tmp
+
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/renode-123-crash: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /tmp/renode: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /tmp/renode-123-crash}
+  reclaim_exit: 1
+  actions: [/tmp/renode-123-crash]
+  removed: [/tmp/renode-123-crash]
+  skipped: []
+  preserved:
+    - /tmp/renode/payload

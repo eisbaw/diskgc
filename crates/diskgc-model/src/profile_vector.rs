@@ -35,6 +35,9 @@ pub struct Expected {
     pub reclaim_exit: i32,
     /// Complete action set, sorted by path.
     pub actions: Vec<PathBuf>,
+    /// Paths that must be gone after reclaim. Actions can retain their
+    /// candidate (for example Cargo keeps the tagged target root).
+    pub removed: Vec<PathBuf>,
     /// Complete reclaim skip set, sorted by path.
     pub skipped: Vec<SkipVerdict>,
     /// Existing paths that must survive reclaim, including candidates not
@@ -123,6 +126,22 @@ impl ProfileVector {
         }
 
         let reclaiming = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        for path in &self.expect.removed {
+            if reclaiming.stat_path(path).is_none() {
+                return Err(format!(
+                    "removed path {} was absent before reclaim",
+                    path.display()
+                ));
+            }
+        }
+        for path in &self.expect.preserved {
+            if reclaiming.stat_path(path).is_none() {
+                return Err(format!(
+                    "preserved path {} was absent before reclaim",
+                    path.display()
+                ));
+            }
+        }
         let uid = executor::privileges(&reclaiming, false).map_err(|e| e.to_string())?;
         let report = executor::ensure(&reclaiming, &request, uid, &mut |_| {});
         if !report.errors.is_empty() {
@@ -162,9 +181,31 @@ impl ProfileVector {
                 self.profile
             ));
         }
-        for path in &expected_actions {
+        for path in &self.expect.removed {
+            if !expected_actions
+                .iter()
+                .any(|action| path.starts_with(action))
+            {
+                return Err(format!(
+                    "removed path {} is outside every action",
+                    path.display()
+                ));
+            }
             if reclaiming.stat_path(path).is_some() {
-                return Err(format!("action {} did not remove its path", path.display()));
+                return Err(format!("removed path {} still exists", path.display()));
+            }
+        }
+        for action in &expected_actions {
+            if !self
+                .expect
+                .removed
+                .iter()
+                .any(|path| path.starts_with(action))
+            {
+                return Err(format!(
+                    "action {} has no explicit removed-path postcondition",
+                    action.display()
+                ));
             }
         }
         for path in &self.expect.preserved {

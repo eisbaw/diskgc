@@ -218,11 +218,14 @@ wrap an ordinary `host_model: 1` under `host:` with a selected built-in
 `profile`, `path`, optional `roots`, `min_free`, and explicit `expect` data.
 The shared `tests/profile_vectors.rs` runner loads every YAML file, runs
 `--dry-run` and reclaim on *separate* `ModelHost` copies, and compares the
-complete plan, action, and skip sets. `expect.preserved` also names paths
-that must survive, including missing-source outputs that discovery cannot
-plan. It checks that dry-run never called `unlinkat`, that each action
-actually removed its path, and that reclaim unlinked nothing outside the
-expected actions. The Python vector's matcher mutation changes every
+complete plan, action, and skip sets. `expect.removed` names paths that
+existed before reclaim and must disappear; `expect.preserved` names paths
+that existed before reclaim and must survive, including missing-source
+outputs that discovery cannot plan. This lets Cargo retain its tagged target
+directory while removing contents. The runner checks that dry-run never
+called `unlinkat`, that each action has a removed-path postcondition, and
+that reclaim unlinked nothing outside the expected actions. The Python
+vector's matcher mutation changes every
 `__pycache__` path pattern to `__wrong_cache__`; the unchanged vector then
 fails at its expected plan, proving the gate bites.
 
@@ -245,10 +248,17 @@ it with `nix develop -c just e2e-one
 checked_in_python_profile_vector_replays_in_container`, then run
 `nix develop -c just e2e` before committing. This replay currently accepts
 only plain files and directories without modelled time or processes; it
-fails explicitly on other model features. The host Docker-compatible CLI
-for this gate is **Podman**, not native Docker Engine. A native Docker Engine
-run inside isolated dind is a separate gate and must be reported separately
-until actually verified.
+fails explicitly on other model features. The standard replay uses rootless
+Podman. The separate
+`checked_in_python_profile_vector_replays_under_native_docker` gate starts
+the pinned Docker Engine daemon in disposable dind, checks its server
+identity, then runs the same vector through real `diskgc ensure` dry-run and
+reclaim calls. It compares the complete plan, action, skip, and surviving
+paths to the checked-in expectations and runs the deletion oracle while the
+daemon remains alive. The daemon's private data and runtime directories are
+declared concurrent writers; the profile candidate and its neighbors remain
+checked. Run `nix develop -c just e2e-docker-one
+checked_in_python_profile_vector_replays_under_native_docker`.
 
 How the format reads (the schema documents every key):
 
@@ -480,8 +490,14 @@ filesystem, processes and mounts from the developer's system.
   store into its disposable container. Its fixture uses a one-second idle
   floor to exercise the in-use check without waiting for the shipped
   profile's three-day floor.
-- **Dormant shells:** real `nix-shell` and `nix develop` sessions left idle
-  with their `TMPDIR` under `/tmp`: their directories are skipped.
+- **Dormant temp users:** a live process sets `TMPDIR` after exec, holds no
+  descriptor in the directory and then sleeps. A ModelHost case and a
+  disposable-container dry-run prove that a `tmp.*` delete profile would
+  mark it eligible; the container test requires `mktemp-dir`,
+  `nix-shell-tmpdir`, `nix-shell-rc` and `tmp-entry` to remain absent from the
+  built-in library. The user-configured probe is never run without
+  `--dry-run`. Protecting real dormant `nix-shell` and `nix develop`
+  sessions remains a release blocker for those planned profiles.
 - **Native Docker Engine smoke** in its own digest-pinned dind image under
   rootless Podman (`just e2e-docker-one native_docker_engine_dind_smoke`).
   The harness starts `dockerd` on a private Unix socket, imports an image
@@ -879,13 +895,15 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   `--privileged` and separate tmpfs mounts at `/var/lib/docker` and
   `/var/lib/containerd` (512 MiB maximum each). The test starts native
   `dockerd` with a container-local Unix socket, no network bridge or
-  iptables, and the `vfs` storage driver for nested rootless operation;
+  iptables, and the containerd snapshotter enabled;
   `docker version` must report Docker Engine 29.8.2. Its
   scratch image comes from a local tar stream, with no registry access.
   The only host bind mount is the read-only Nix output holding the binaries
   under test; no host Docker socket or developer project path is mounted.
-  This proves the native Docker fixture, not containerd snapshotter root
-  discovery or Docker prune safety (tasks 57 and 35). Run its smoke with
+  The smoke checks that imported image blobs exist under the bundled
+  containerd root derived from `docker info`. A separate system containerd
+  socket still maps to `unsupported_backend`; Docker prune safety remains
+  TASK-35. Run the fixture smoke with
   `nix develop -c just e2e-docker-one native_docker_engine_dind_smoke`.
 - **GC roots.** The container recipes build each runner to an out-link
   in `.gcroots/` at the repository root (gitignored, outside `target/`,
@@ -930,7 +948,7 @@ CI settings). Three layers:
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus fast Nix-image tests and the native Docker smoke | before every commit (the gate); each runner has a 5-minute budget including setup |
+| `e2e` | `check` plus fast Nix-image tests, the native Docker smoke, and a profile-vector replay under Docker Engine | before every commit (the gate); each runner has a 5-minute budget including setup |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |

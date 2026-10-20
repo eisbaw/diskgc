@@ -2095,33 +2095,35 @@ fn pytest_tmp_takes_one_test_dir_per_candidate_checkouts_included() {
     nothing_locked_or_deleted(&host);
 }
 
-/// The mktemp source runs through the real planner, including nesting,
-/// ownership and the process scan.
+/// A directory used as TMPDIR after exec is indistinguishable from stale
+/// scratch when the process has no descriptor beneath it. The model only
+/// records the initial environment, as LinuxHost reads from /proc. This
+/// negative case is why the broad temp sources are not built-ins.
 #[test]
-fn shipped_tmp_sources_find_their_candidates_in_the_model() {
+fn dormant_post_exec_tmpdir_is_a_known_process_scan_false_negative() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
     let host = host(&yaml(&format!(
-        "  /tmp/nix-shell.Ab1: {{.: {at}, work: {at}, nix-shell.B2: {{.: {at}}}, tmp.N3: {{.: {at}}}}}\n  \
-         /tmp/tmp.Ab1: {{.: {at}, work: {at}, tmp.Inner: {{.: {at}}}}}\n  \
-         /tmp/claude-1000: {{.: {at}, nix-shell.C3: {{.: {at}}}, tmp.Z4: {{.: {at}}}}}\n  \
-         /tmp/tmp00i1c8qs: {{.: {at}}}\n  \
-         /tmp/loose-file: {at}\n  \
-         /var/tmp/other: {at}\n"
+        "  /tmp/tmp.post-exec: {{.: {at}, scratch: {at}}}\n  \
+         /tmp/tmp.initial: {{.: {at}, scratch: {at}}}\n  \
+         /tmp/nix-shell.post-exec: {{.: {at}, scratch: {at}}}\n  \
+         /tmp/claude-1000/nix-shell.nested: {{.: {at}, scratch: {at}}}\nprocesses:\n{}{}",
+        process(20, "/", ""),
+        process(21, "/", ", TMPDIR=/tmp/tmp.initial"),
     )));
-    let report = dry_run(&host, &request("profile:mktemp-dir", &[], "/tmp"));
-    let mut actual: Vec<String> = plan(&report)
-        .into_iter()
-        .filter(|(_, reason)| reason.is_none())
-        .map(|(path, _)| path)
-        .collect();
-    actual.sort();
-    let mut want = vec![
-        "/tmp/nix-shell.Ab1/tmp.N3".to_owned(),
-        "/tmp/tmp.Ab1".to_owned(),
-        "/tmp/claude-1000/tmp.Z4".to_owned(),
-    ];
-    want.sort();
-    assert_eq!(actual, want, "{:#?}", report.plan);
+    let report = dry_run(&host, &request("profile:tmp-entry", &[], "/tmp"));
+    assert_eq!(reason_of(&report, "/tmp/tmp.post-exec"), Some(None));
+    assert_eq!(reason_of(&report, "/tmp/tmp.initial"), Some(Some("in_use")));
+    assert_eq!(reason_of(&report, "/tmp/nix-shell.post-exec"), Some(None));
+    assert_eq!(reason_of(&report, "/tmp/claude-1000"), Some(None));
+    let shipped = Library::builtin().expect("built-ins");
+    for name in [
+        "mktemp-dir",
+        "nix-shell-tmpdir",
+        "nix-shell-rc",
+        "tmp-entry",
+    ] {
+        assert!(shipped.get(name).is_none(), "{name} must not ship");
+    }
     nothing_locked_or_deleted(&host);
 }
 

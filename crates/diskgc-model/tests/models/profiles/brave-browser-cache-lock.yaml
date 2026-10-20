@@ -1,0 +1,33 @@
+# One stopped browser cache is reclaimable. The SingletonLock for another
+# home blocks that browser; a nearby cache name and profile data survive.
+profile_vector: 1
+profile: brave-browser-cache
+path: /home
+roots: [/home/clear, /home/locked]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/locked/.cache/BraveSoftware/Brave-Browser/Default/Cache: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache-backup: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/locked/.config/BraveSoftware/Brave-Browser/SingletonLock: {symlink: model-host-42}
+    /home/clear/.config/BraveSoftware/Brave-Browser/Default/WebStorage/keep: {size: 8K}
+expect:
+  plan:
+    - {candidate: /home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache}
+    - {candidate: /home/locked/.cache/BraveSoftware/Brave-Browser/Default/Cache, reason: in_use}
+  reclaim_exit: 1
+  actions: [/home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache]
+  removed: [/home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache]
+  skipped:
+    - {candidate: /home/locked/.cache/BraveSoftware/Brave-Browser/Default/Cache, reason: in_use}
+  preserved:
+    - /home/locked/.cache/BraveSoftware/Brave-Browser/Default/Cache/payload
+    - /home/clear/.cache/BraveSoftware/Brave-Browser/Default/Cache-backup/payload
+    - /home/clear/.config/BraveSoftware/Brave-Browser/Default/WebStorage/keep

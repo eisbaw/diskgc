@@ -39,8 +39,9 @@ use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     browser_suite, buildah_suite, cache_suite, cargo_race_suite, cargo_reclaim_suite, cargo_suite,
-    docker_suite, driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite,
-    host_suite, inuse_suite, meson_suite, profile_vector_suite, project_cache_suite, stdout_suite,
+    docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
+    fs_reclaim_suite, host_suite, inuse_suite, meson_suite, profile_vector_suite,
+    project_cache_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -150,12 +151,19 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
 
 /// Tests that require the digest-pinned Docker Engine dind image. They are
 /// never listed by the Nix or Debian images, which have no Docker daemon.
-pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[(
-    DOCKER_DIND_TEST,
-    "needs the native Docker Engine daemon in the pinned dind image",
-)];
+pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        DOCKER_DIND_TEST,
+        "needs the native Docker Engine daemon in the pinned dind image",
+    ),
+    (
+        DOCKER_VECTOR_TEST,
+        "replays a checked-in profile vector while native Docker Engine runs",
+    ),
+];
 
 pub const DOCKER_DIND_TEST: &str = "native_docker_engine_dind_smoke";
+pub const DOCKER_VECTOR_TEST: &str = "checked_in_python_profile_vector_replays_under_native_docker";
 
 /// The tests whose container gets the FUSE device (`/dev/fuse`, when the
 /// host has it): only these mount a FUSE filesystem.
@@ -168,6 +176,12 @@ pub const MESON_ANCHOR_TEST: &str = "meson_generated_output_uses_surviving_sourc
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: temp_safety_suite::dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent,
+    },
     Test {
         name: "checked_in_python_profile_vector_replays_in_container",
         tier: Tier::Fast,
@@ -185,6 +199,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: docker_suite::native_docker_engine_dind_smoke,
+    },
+    Test {
+        name: DOCKER_VECTOR_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_vector_suite::checked_in_python_profile_vector_replays_under_native_docker,
     },
     Test {
         name: "ensure_stdout_failures_exit_three_without_panicking",

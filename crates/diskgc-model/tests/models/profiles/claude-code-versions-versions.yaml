@@ -1,0 +1,37 @@
+# Old unlinked versions are reclaimed; current links, installed extensions,
+# and the two newest entries are preserved by the shipped profile guards.
+profile_vector: 1
+profile: claude-code-versions
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/claude/versions/1: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+    /home/tester/.local/share/claude/versions/2: {size: 8K, mtime: 2026-10-02T00:00:00Z}
+    /home/tester/.local/share/claude/versions/3: {size: 8K, mtime: 2026-10-03T00:00:00Z}
+    /home/tester/.local/share/claude/versions/4: {size: 8K, mtime: 2026-10-04T00:00:00Z}
+    /home/tester/.local/bin/claude: {symlink: ../share/claude/versions/1}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/claude/versions/1, reason: linked_current}
+    - {candidate: /home/tester/.local/share/claude/versions/2}
+    - {candidate: /home/tester/.local/share/claude/versions/3, reason: newest_version}
+    - {candidate: /home/tester/.local/share/claude/versions/4, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.local/share/claude/versions/2]
+  removed: [/home/tester/.local/share/claude/versions/2]
+  skipped:
+    - {candidate: /home/tester/.local/share/claude/versions/1, reason: linked_current}
+    - {candidate: /home/tester/.local/share/claude/versions/3, reason: newest_version}
+    - {candidate: /home/tester/.local/share/claude/versions/4, reason: newest_version}
+  preserved:
+    - /home/tester/.local/share/claude/versions/1
+    - /home/tester/.local/share/claude/versions/3
+    - /home/tester/.local/share/claude/versions/4

@@ -51,6 +51,7 @@ pub mod cargo_target_suite;
 pub mod cargo_under_test;
 pub mod controlled;
 pub mod docker_suite;
+pub mod docker_vector_suite;
 pub mod driver;
 pub mod driver_suite;
 pub mod embedded_suite;
@@ -78,6 +79,7 @@ pub mod snapshot;
 pub mod stdout_suite;
 pub mod strace;
 pub mod suite;
+pub mod temp_safety_suite;
 pub mod under_test;
 
 /// Exit codes of the in-container binaries, read by the runner and by tests

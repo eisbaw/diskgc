@@ -1,0 +1,25 @@
+# The exact cache entry is eligible; a similar path or missing marker is preserved.
+profile_vector: 1
+profile: claude-code-tmp
+path: /tmp
+
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/claude-1000/-home-tester-project/session-one: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /tmp/claude-1001/-home-tester-project/session-two: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /tmp/claude-1000/-home-tester-project/session-one}
+  reclaim_exit: 1
+  actions: [/tmp/claude-1000/-home-tester-project/session-one]
+  removed: [/tmp/claude-1000/-home-tester-project/session-one]
+  skipped: []
+  preserved:
+    - /tmp/claude-1001/-home-tester-project/session-two/payload

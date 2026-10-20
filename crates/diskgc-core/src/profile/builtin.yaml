@@ -288,16 +288,6 @@
     no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3, /tmp/pytest-of-mark/garbage-1a2b, /home/mark/pytest-of-mark/pytest-3/test_x0]
   verified_with: pytest 8.3 (read-only survey 2026-10-19)
 
-- name: mktemp-dir
-  category: generic
-  description: coreutils mktemp -d directories under temp-prefix v1 roots in /tmp
-  find: {roots: [/tmp], paths: ["tmp.*"], type: dir}
-  action: delete
-  examples:
-    match: [/tmp/tmp.AbC123, /tmp/claude-1000/tmp.AbC123, /tmp/nix-shell.A/tmp.AbC123]
-    no_match: [/tmp/tmp00i1c8qs, /tmp/tmp, /var/tmp/tmp.AbC123]
-  verified_with: GNU coreutils 9.11 (host layout 2026-10-19)
-
 - name: claude-code-tmp
   category: ai agents
   description: Claude Code numbered session directories under its per-user temp root

@@ -1,0 +1,28 @@
+# The exact cache entry is eligible; a similar path or missing marker is preserved.
+profile_vector: 1
+profile: mypy-cache
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/.mypy_cache:
+      .: {mtime: 2026-08-01T00:00:00Z}
+      CACHEDIR.TAG: {cachedir_tag: true, mtime: 2026-08-01T00:00:00Z}
+      3.13: {.: {mtime: 2026-08-01T00:00:00Z}, data.json: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+    /home/tester/project/.mypy_cache-old: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/.mypy_cache}
+  reclaim_exit: 1
+  actions: [/home/tester/project/.mypy_cache]
+  removed: [/home/tester/project/.mypy_cache]
+  skipped: []
+  preserved:
+    - /home/tester/project/.mypy_cache-old/payload

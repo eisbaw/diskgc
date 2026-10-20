@@ -209,7 +209,6 @@ fn the_built_in_library_loads() {
         "pytest-cache",
         "platformio-cache",
         "pytest-tmp",
-        "mktemp-dir",
         "claude-code-tmp",
         "chromium-tmp",
         "node-compile-cache",

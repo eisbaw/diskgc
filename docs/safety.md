@@ -299,6 +299,17 @@ A candidate is skipped (`in_use`) if a visible process:
   environment names nothing, and a read caught by an exec clears on the
   re-reads.
 
+The last case is a real safety boundary for temporary directories. A live,
+idle shell can export `TMPDIR=/tmp/tmp.X` after exec while holding no path in
+that directory open. The process scan then judges `/tmp/tmp.X` eligible. A
+disposable-container test reproduces this with a live process and the real
+binary's dry-run; it never performs the unsafe deletion. `mktemp-dir`,
+`nix-shell-tmpdir` and the broad `tmp-entry` are therefore not built-ins.
+An idle-time filter cannot establish liveness. The rc names
+`nix-shell-<pid>-*` and `nix-develop-<pid>-*` also cannot use a host-only
+`/proc/<pid>` check: a shell can share `/tmp` from a different PID namespace
+and put its namespace-local PID in the name. `nix-shell-rc` remains unshipped.
+
 Or it is a directory locked with `flock` by someone else (`locked`), the
 convention systemd-tmpfiles also honours: diskgc opens the candidate
 directory below its parent and takes an exclusive `flock` without waiting
@@ -1279,6 +1290,32 @@ preflight and used for tally, preflight and execution alike:
   frees is not on the requested filesystem, the tier is skipped
   (`other_fs`); if it cannot be determined, or spans several filesystems,
   it is skipped as `unsupported_backend` and reported.
+
+The Docker 29 storage-root spike uses one `docker info --format '{{json .}}'`
+response from the bound server. `DriverStatus` containing
+`["driver-type", "io.containerd.snapshotter.v1"]` identifies the
+containerd image store. When `Containerd.Address` is exactly
+`/run/docker/containerd/containerd.sock`, Docker manages that containerd;
+its image root is `<DockerRootDir>/containerd/daemon`. This was verified
+with pinned Docker Engine 29.8.2 inside the disposable dind fixture: after
+an offline image import, actual image blobs appeared under that derived root
+and the independent `/var/lib/containerd` tmpfs remained empty. The same
+fixture with the classic `vfs` driver instead put image data under
+`<DockerRootDir>/image/vfs` and `<DockerRootDir>/vfs`; selecting `vfs` had
+silently disabled the default containerd image store. The fixture now
+requires the active snapshotter and checks for imported blobs, so that
+regression fails the test.
+
+When Docker reports a different containerd socket (for example the system
+`/run/containerd/containerd.sock`), `DockerRootDir` does not identify its
+image root. The system containerd configuration may move it away from
+`/var/lib/containerd`; without an independently verified root, diskgc
+reports `unsupported_backend` and does not prune images. The verified classic
+`vfs` driver uses `DockerRootDir`; other classic drivers remain unsupported
+until their storage roots are proven. These are binding rules; Docker prune support
+still requires the same backend to be checked immediately before deletion.
+See [Docker daemon storage configuration](https://docs.docker.com/engine/daemon/#configure-the-data-directory)
+and [Docker storage backends](https://docs.docker.com/engine/storage/drivers/select-storage-driver/).
 
 Operations:
 

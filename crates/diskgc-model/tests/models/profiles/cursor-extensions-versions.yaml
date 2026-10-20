@@ -1,0 +1,46 @@
+# Old unlinked versions are reclaimed; current links, installed extensions,
+# and the two newest entries are preserved by the shipped profile guards.
+profile_vector: 1
+profile: cursor-extensions
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.cursor/extensions/a.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-4.0.0: {.: {mtime: 2026-10-04T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-04T00:00:00Z}}
+    /home/tester/.cursor/extensions/b.ext-1.0.0: {.: {mtime: 2026-10-05T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-05T00:00:00Z}}
+    /home/tester/.cursor/extensions/unknown: {.: {mtime: 2026-10-06T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-06T00:00:00Z}}
+    /home/tester/.cursor/extensions/extensions.json: {content: '[{"relativeLocation":"a.ext-1.0.0","location":{"path":"/home/tester/.cursor/extensions/a.ext-1.0.0"}},{"relativeLocation":"b.ext-1.0.0","location":{"path":"/home/tester/.cursor/extensions/b.ext-1.0.0"}}]'}
+expect:
+  plan:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-1.0.0, reason: installed_extension}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-2.0.0}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-4.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/b.ext-1.0.0, reason: installed_extension}
+    - {candidate: /home/tester/.cursor/extensions/unknown, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.cursor/extensions/a.ext-2.0.0]
+  removed: [/home/tester/.cursor/extensions/a.ext-2.0.0]
+  skipped:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-1.0.0, reason: installed_extension}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-4.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/b.ext-1.0.0, reason: installed_extension}
+    - {candidate: /home/tester/.cursor/extensions/unknown, reason: newest_version}
+  preserved:
+    - /home/tester/.cursor/extensions/a.ext-1.0.0/payload
+    - /home/tester/.cursor/extensions/a.ext-3.0.0/payload
+    - /home/tester/.cursor/extensions/a.ext-4.0.0/payload
+    - /home/tester/.cursor/extensions/b.ext-1.0.0/payload
+    - /home/tester/.cursor/extensions/unknown/payload
+    - /home/tester/.cursor/extensions/extensions.json

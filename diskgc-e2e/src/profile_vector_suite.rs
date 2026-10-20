@@ -2,8 +2,8 @@
 //! deliberately limited to ordinary files and directories with no modelled
 //! clock override or process state; unsupported model features fail here.
 //! Each run still goes through the container's tmpfs, strace, and deletion
-//! oracle. This replay currently runs under rootless Podman; a native Docker
-//! Engine replay is tracked separately.
+//! oracle. The same contract is replayed under both standard rootless Podman
+//! and the native Docker Engine dind fixture.
 
 use std::path::Path;
 
@@ -23,6 +23,13 @@ const HOME: &str = "/home/tester";
 /// The model's positive and checkout cases on a real tmpfs and the real
 /// LinuxHost. This proves the vector contract survives the kernel boundary.
 pub fn checked_in_python_profile_vector_replays_in_container(ctx: &Ctx) -> TestResult {
+    replay_python_vector(ctx, &[])
+}
+
+/// Replays the same checked-in expectations with only fixture-owned writers
+/// exempted from the deletion oracle. Dind's daemon storage is concurrent
+/// state; the profile candidate and all neighboring paths remain checked.
+pub(crate) fn replay_python_vector(ctx: &Ctx, concurrent_writers: &[&str]) -> TestResult {
     let vector = ProfileVector::parse(PYTHON_VECTOR)?;
     ensure!(
         vector.host.processes.is_empty(),
@@ -36,12 +43,15 @@ pub fn checked_in_python_profile_vector_replays_in_container(ctx: &Ctx) -> TestR
         }
         materialize(ctx, path, node)?;
     }
-    let fixture = vector
+    let mut fixture = vector
         .expected_actions()
         .iter()
         .fold(Fixture::new(), |fixture, path| {
             fixture.eligible(path.clone())
         });
+    for path in concurrent_writers {
+        fixture = fixture.concurrent_writer(*path);
+    }
     let oracle = Oracle::arm(fixture)?;
     let select = format!("profile:{}", vector.profile_name());
     let path = vector.root_path().to_str().ok_or("non-UTF-8 vector path")?;
@@ -75,10 +85,16 @@ pub fn checked_in_python_profile_vector_replays_in_container(ctx: &Ctx) -> TestR
     actual_plan.sort_by(|a, b| a.candidate.cmp(&b.candidate));
     let mut expected_plan = vector.expect.plan.clone();
     expected_plan.sort_by(|a, b| a.candidate.cmp(&b.candidate));
+    let mut wrong_plan = expected_plan.clone();
+    let first = wrong_plan
+        .first_mut()
+        .ok_or("replay vector has no plan entry")?;
+    first.candidate = "/deliberately-wrong-candidate".into();
     ensure!(
-        actual_plan == expected_plan,
-        "kernel plan {actual_plan:?}, vector {expected_plan:?}"
+        check_plan(&actual_plan, &wrong_plan).is_err(),
+        "kernel replay accepted a deliberately wrong expected candidate"
     );
+    check_plan(&actual_plan, &expected_plan)?;
     let result = report(&run)?;
     let mut actions = paths(&result, "actions")?;
     actions.sort();
@@ -103,6 +119,14 @@ pub fn checked_in_python_profile_vector_replays_in_container(ctx: &Ctx) -> TestR
         ensure!(path.exists(), "replay removed protected {}", path.display());
     }
     verdict.assert_clean()
+}
+
+fn check_plan(actual: &[PlanVerdict], expected: &[PlanVerdict]) -> TestResult {
+    ensure!(
+        actual == expected,
+        "kernel plan {actual:?}, vector {expected:?}"
+    );
+    Ok(())
 }
 
 fn materialize(ctx: &Ctx, path: &Path, node: &NodeSpec) -> TestResult {

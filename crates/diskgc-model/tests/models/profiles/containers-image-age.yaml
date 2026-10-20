@@ -27,6 +27,7 @@ expect:
     - {candidate: /var/tmp/container_images_storage-old}
   reclaim_exit: 1
   actions: [/var/tmp/container_images_storage-old]
+  removed: [/var/tmp/container_images_storage-old]
   skipped:
     - {candidate: /var/tmp/buildah-fresh, reason: not_idle}
     - {candidate: /var/tmp/container_images_storage-held, reason: in_use}

@@ -1,0 +1,37 @@
+# Old unlinked versions are reclaimed; current links, installed extensions,
+# and the two newest entries are preserved by the shipped profile guards.
+profile_vector: 1
+profile: codex-releases
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.codex/packages/standalone/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/v3: {.: {mtime: 2026-10-03T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/v4: {.: {mtime: 2026-10-04T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-04T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/current: {symlink: releases/v1}
+expect:
+  plan:
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v1, reason: linked_current}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v2}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v3, reason: newest_version}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v4, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.codex/packages/standalone/releases/v2]
+  removed: [/home/tester/.codex/packages/standalone/releases/v2]
+  skipped:
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v1, reason: linked_current}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v3, reason: newest_version}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/v4, reason: newest_version}
+  preserved:
+    - /home/tester/.codex/packages/standalone/releases/v1/payload
+    - /home/tester/.codex/packages/standalone/releases/v3/payload
+    - /home/tester/.codex/packages/standalone/releases/v4/payload

@@ -1,0 +1,42 @@
+# A tagged Cargo target with an allowed profile lock is reclaimable. A
+# similarly shaped directory without a valid cache tag is not discovered.
+profile_vector: 1
+profile: cargo-target
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/project/good/Cargo.toml: {content: "[package]\nname = 'good'\nversion = '0.1.0'\n"}
+    /home/tester/project/good/target:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      CACHEDIR.TAG: {cachedir_tag: true, mtime: 2026-10-01T00:00:00Z}
+      debug:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+        .cargo-build-lock: {mtime: 2026-10-01T00:00:00Z}
+        .cargo-artifact-lock: {mtime: 2026-10-01T00:00:00Z}
+        .fingerprint: {.: {mtime: 2026-10-01T00:00:00Z}, good-hash: {.: {mtime: 2026-10-01T00:00:00Z}, bin-good: {mtime: 2026-10-01T00:00:00Z}}}
+        deps: {.: {mtime: 2026-10-01T00:00:00Z}, good: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/project/untagged/Cargo.toml: {content: "[package]\nname = 'untagged'\nversion = '0.1.0'\n"}
+    /home/tester/project/untagged/target:
+      CACHEDIR.TAG: {content: invalid-tag}
+      debug: {.cargo-lock: {}, deps: {keep: {size: 8K}}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/good/target}
+  reclaim_exit: 1
+  actions: [/home/tester/project/good/target]
+  removed: [/home/tester/project/good/target/debug/.fingerprint, /home/tester/project/good/target/debug/deps]
+  skipped: []
+  preserved:
+    - /home/tester/project/good/target
+    - /home/tester/project/good/target/debug/.cargo-lock
+    - /home/tester/project/good/Cargo.toml
+    - /home/tester/project/untagged/target/debug/deps/keep

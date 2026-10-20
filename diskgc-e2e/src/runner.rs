@@ -374,7 +374,10 @@ fn test_mounts(name: &str) -> Vec<String> {
     if name == crate::suite::BUILDAH_SPOOL_TEST || name == crate::suite::MESON_ANCHOR_TEST {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }
-    if name == crate::suite::DOCKER_DIND_TEST {
+    if crate::suite::DOCKER_ONLY_TESTS
+        .iter()
+        .any(|(docker_test, _)| *docker_test == name)
+    {
         extra.extend([
             "--privileged".to_owned(),
             "--tmpfs".to_owned(),

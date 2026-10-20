@@ -26,6 +26,7 @@ expect:
     - {candidate: /home/tester/project/checkout/__pycache__, reason: contains_checkout}
   reclaim_exit: 1
   actions: [/home/tester/project/app/__pycache__]
+  removed: [/home/tester/project/app/__pycache__]
   skipped:
     - {candidate: /home/tester/project/checkout/__pycache__, reason: contains_checkout}
   preserved:

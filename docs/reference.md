@@ -500,8 +500,8 @@ groups:
   - name: stale                    # nobody will miss these
     ranking: random                # ordered (default) | random
     tiers:
-      - name: test-and-shell-cruft
-        select: (profile:pytest-tmp || profile:mktemp-dir || profile:zephyr-run) && filter:idle-3d
+      - name: test-and-temp-cruft
+        select: (profile:pytest-tmp || profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d
       - name: cargo-stale
         select: profile:cargo-target && filter:idle-7d
         roots: [/home/mark/src, /home/mark/topics]
@@ -749,12 +749,12 @@ parses back to the same expression):
 | Expression | Normalised | Selects |
 |---|---|---|
 | `profile:pytest-tmp && filter:idle-10d` | `profile:pytest-tmp && filter:idle-10d` | pytest temp dirs idle for 10 days |
-| `(profile:pytest-tmp \|\| profile:mktemp-dir) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:mktemp-dir && filter:idle-3d)` | either, idle for 3 days |
+| `(profile:pytest-tmp \|\| profile:node-compile-cache) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:node-compile-cache && filter:idle-3d)` | either, idle for 3 days |
 | `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | Chromium scratch idle for 2 to 30 days |
-| `profile:mktemp-dir && filter:idle-2d && !profile:claude-code-tmp` | `profile:mktemp-dir && filter:idle-2d && !profile:claude-code-tmp` | mktemp dirs idle for 2 days, except what overlaps Claude Code's session dirs |
-| `profile:pytest-tmp \|\| profile:mktemp-dir` | `profile:pytest-tmp \|\| profile:mktemp-dir` | either, at any age |
-| `(profile:pytest-tmp && filter:idle-3d) \|\| profile:mktemp-dir` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:mktemp-dir` | pytest dirs idle for 3 days, mktemp dirs at any age |
-| `((profile:pytest-tmp \|\| profile:mktemp-dir) && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:mktemp-dir && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | the first two idle for 3 days, Chromium scratch idle for 30 |
+| `profile:node-compile-cache && filter:idle-2d && !profile:claude-code-tmp` | `profile:node-compile-cache && filter:idle-2d && !profile:claude-code-tmp` | Node cache idle for 2 days, except what overlaps Claude Code's session dirs |
+| `profile:pytest-tmp \|\| profile:node-compile-cache` | `profile:pytest-tmp \|\| profile:node-compile-cache` | either, at any age |
+| `(profile:pytest-tmp && filter:idle-3d) \|\| profile:node-compile-cache` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:node-compile-cache` | pytest dirs idle for 3 days, Node cache at any age |
+| `((profile:pytest-tmp \|\| profile:node-compile-cache) && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:node-compile-cache && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | the first two idle for 3 days, Chromium scratch idle for 30 |
 
 - **Qualifiers are required.** A term without a `profile:` is rejected by
   the parser; a wrong qualifier (`filter:pytest-tmp`) is a load-time error
@@ -889,7 +889,7 @@ listed as planned, not shipped.
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | planned: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*`; a live shell in a private PID namespace can have a namespace PID absent from host `/proc`, so the current PID guard is insufficient | no safe action yet |
-| nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset; real dormant-shell container protection and a complete host dry run are pending | `delete` |
+| nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
 | nix | `nix-garbage` | dead store paths | Nix GC |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the default builder | prune |
@@ -918,8 +918,8 @@ listed as planned, not shipped.
 | embedded | `west-build` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, and no `CMakeLists.txt` entry | `delete` |
 | embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
 | embedded | `platformio-cache` | `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
-| generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; real dormant-shell protection and a complete host dry run are pending | `delete` |
-| generic | `mktemp-dir` | `tmp.*` directories under `/tmp`'s temp-prefix v1 preset | `delete` |
+| generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
+| generic | `mktemp-dir` | planned: `tmp.*` directories under `/tmp`'s temp-prefix v1 preset; a live shell can use one as `TMPDIR` after exec, invisible to the process scan | no safe action yet |
 | generic | `xdg-cache-entry` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known data and dedicated cache names; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d`, `has-cachedir-tag` | (no `find`) | none |
 
@@ -930,9 +930,9 @@ uv and npm caches contain `.git` metadata; those candidates report
 check merely because the tool has a cleaner. A cache tool must be available
 on `PATH` for its command profile to run.
 
-**Built-in temp-prefix v1 preset.** `pytest-tmp`, `mktemp-dir`,
+**Built-in temp-prefix v1 preset.** `pytest-tmp`,
 `node-compile-cache`, `playwright-tmp`, `renode-tmp` and `jest-cache`
-opt in. Each base pattern (`pytest-of-*/pytest-*/*`, `tmp.*`,
+opt in. Each base pattern (`pytest-of-*/pytest-*/*`,
 `node-compile-cache`, `playwright*`, `renode-*`, `jest_*` respectively)
 is searched under each prefix below,
 relative to each profile's fixed roots. The empty prefix is the root itself.
@@ -959,9 +959,10 @@ set and therefore requires a v2 preset and a new built-in profile name.
 | `claude-{uid}/tmp.*` |
 | `claude-{uid}/nix-shell.*/nix-shell.*` |
 
-For `mktemp-dir`, a nested match inside another candidate of the same
-profile belongs to the outer candidate only (the existing outer-match
-rule). Thus `tmp.*` below another `tmp.*` is not a second candidate.
+The preset reaches selected *contents* inside nested shell temp roots. It
+does not make the enclosing `nix-shell.*` directories, including those below
+`/tmp/claude-{uid}`, deletion candidates. Those outer directories remain out
+of scope until dormant-shell liveness can be established at deletion time.
 
 The browser cache sources take a home directory as their required root. They
 check that browser's `SingletonLock` before judging and again before deleting

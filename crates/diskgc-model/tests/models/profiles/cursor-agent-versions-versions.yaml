@@ -1,0 +1,38 @@
+# Old unlinked versions are reclaimed; current links, installed extensions,
+# and the two newest entries are preserved by the shipped profile guards.
+profile_vector: 1
+profile: cursor-agent-versions
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/cursor-agent/versions/v0: {.: {mtime: 2026-10-01T00:00:00Z}, cursor-agent: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v1: {.: {mtime: 2026-10-02T00:00:00Z}, cursor-agent: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v2: {.: {mtime: 2026-10-03T00:00:00Z}, cursor-agent: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v3: {.: {mtime: 2026-10-04T00:00:00Z}, cursor-agent: {size: 8K, mtime: 2026-10-04T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v4: {.: {mtime: 2026-10-05T00:00:00Z}, cursor-agent: {size: 8K, mtime: 2026-10-05T00:00:00Z}}
+    /home/tester/.local/bin/agent: {symlink: /home/tester/.local/share/cursor-agent/versions/v1/cursor-agent}
+    /home/tester/.local/bin/cursor-agent: {symlink: ../share/cursor-agent/versions/v2/cursor-agent}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v0}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v1, reason: linked_current}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v2, reason: linked_current}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v3, reason: newest_version}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v4, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.local/share/cursor-agent/versions/v0]
+  removed: [/home/tester/.local/share/cursor-agent/versions/v0]
+  skipped:
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v1, reason: linked_current}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v2, reason: linked_current}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v3, reason: newest_version}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v4, reason: newest_version}
+  preserved:

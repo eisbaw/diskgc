@@ -1,0 +1,26 @@
+# Go marks downloaded module files and directories read-only. The profile
+# makes this exact cache writable before deletion and preserves a near miss.
+profile_vector: 1
+profile: go-mod-cache
+path: /home/tester
+roots: [/home/tester]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/go/pkg/mod: {.: {mtime: 2026-08-01T00:00:00Z, mode: "0555"}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z, mode: "0444"}}
+    /home/tester/go/pkg/mod-old: {.: {mtime: 2026-08-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-08-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /home/tester/go/pkg/mod}
+  reclaim_exit: 1
+  actions: [/home/tester/go/pkg/mod]
+  removed: [/home/tester/go/pkg/mod]
+  skipped: []
+  preserved:
+    - /home/tester/go/pkg/mod-old/payload

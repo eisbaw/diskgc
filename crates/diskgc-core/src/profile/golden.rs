@@ -13,7 +13,6 @@ use std::collections::BTreeSet;
 
 const TEMP_PROFILE_NAMES: &[&str] = &[
     "pytest-tmp",
-    "mktemp-dir",
     "claude-code-tmp",
     "chromium-tmp",
     "node-compile-cache",
@@ -598,13 +597,6 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
                 true,
                 Checkouts::Allow,
             ),
-            "mktemp-dir" => (
-                &["/tmp"],
-                &["tmp.*"],
-                EntryType::Dir,
-                true,
-                Checkouts::Refuse,
-            ),
             "claude-code-tmp" => (
                 &["/tmp"],
                 &["claude-{uid}/-*/*"],
@@ -855,11 +847,6 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
                 "/tmp/tmp.AbC123/pytest-of-ci/pytest-5/test_t0",
                 "/var/tmp/pytest-of-ci/pytest-12/test_v0",
             ],
-            "mktemp-dir" => &[
-                "/tmp/nix-shell.AbC123/tmp.N3",
-                "/tmp/claude-1000/tmp.X4",
-                "/tmp/tmp.AbC123",
-            ],
             "claude-code-tmp" => &["/tmp/claude-1000/-home-mark-src-app/session-1"],
             "chromium-tmp" => &[
                 "/tmp/.org.chromium.Chromium.A",
@@ -906,14 +893,15 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
 #[test]
 fn changing_a_pattern_without_a_new_name_breaks_the_golden_set() {
     let library = Library::builtin().expect("built-ins");
-    let Body::Source(original) = &library.get("mktemp-dir").expect("mktemp-dir").body else {
-        panic!("mktemp-dir is a source");
+    let Body::Source(original) = &library.get("node-compile-cache").expect("node cache").body
+    else {
+        panic!("node cache is a source");
     };
     let mut changed = original.clone();
     let Finds::Paths { patterns, .. } = &mut changed.finds else {
-        panic!("mktemp-dir has path patterns");
+        panic!("node cache has path patterns");
     };
-    patterns[0] = "tmp*".to_owned();
+    patterns[0] = "node-compile-cachx".to_owned();
     assert_ne!(matches(&changed), matches(original));
 }
 

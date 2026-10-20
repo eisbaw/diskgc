@@ -57,6 +57,7 @@ expect:
     - {candidate: /home/tester/project/fresh/output, reason: not_idle, source: /home/tester/project/fresh}
   reclaim_exit: 1
   actions: [/home/tester/project/app/odd-output]
+  removed: [/home/tester/project/app/odd-output]
   skipped:
     - {candidate: /home/tester/project/checkout/output, reason: contains_checkout}
     - {candidate: /home/tester/project/fresh/output, reason: not_idle}

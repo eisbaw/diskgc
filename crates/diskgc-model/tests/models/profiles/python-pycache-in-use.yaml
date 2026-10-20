@@ -25,6 +25,7 @@ expect:
     - {candidate: /home/tester/project/app/__pycache__, reason: in_use}
   reclaim_exit: 1
   actions: []
+  removed: []
   skipped:
     - {candidate: /home/tester/project/app/__pycache__, reason: in_use}
   preserved:
