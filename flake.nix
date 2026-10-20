@@ -506,6 +506,33 @@
         os = "linux";
         arch = "amd64";
       };
+      # Alpine's standalone tmpfiles implementation and its two runtime
+      # libraries, pinned to the same Alpine 3.24 branch as dockerDindImage.
+      # Extract the APKs without executing their install scripts or reaching
+      # an APK repository when the disposable test image starts.
+      alpineSdToolsApk = pkgs.fetchurl {
+        url = "https://dl-cdn.alpinelinux.org/alpine/v3.24/community/x86_64/sd-tools-0.99.0-r3.apk";
+        hash = "sha256-k8/HfJwnL30Njn44eb0iF3DD4/BEkMx/uAgNLL9REPM=";
+      };
+      alpineAclLibsApk = pkgs.fetchurl {
+        url = "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/acl-libs-2.3.2-r1.apk";
+        hash = "sha256-PwKFHVhsJdl7qLW4RWFarMIJrn6utveEPsp22F2iJJ0=";
+      };
+      alpineLibcap2Apk = pkgs.fetchurl {
+        url = "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libcap2-2.78-r0.apk";
+        hash = "sha256-Qohqe0vN4mNHxxKSXI3H2yArYCnvm4x+6BV3q3vdj60=";
+      };
+      alpineTmpfiles = pkgs.runCommand "diskgc-alpine-sd-tmpfiles" {
+        nativeBuildInputs = [ pkgs.busybox ];
+      } ''
+        mkdir -p $out
+        for archive in ${alpineSdToolsApk} ${alpineAclLibsApk} ${alpineLibcap2Apk}; do
+          busybox tar -xzf "$archive" -C $out
+        done
+        test -x $out/usr/bin/sd-tmpfiles
+        test -f $out/usr/lib/libacl.so.1
+        test -f $out/usr/lib/libcap.so.2
+      '';
       e2eDockerImage = pkgs.dockerTools.streamLayeredImage {
         name = "localhost/diskgc-e2e-dind";
         fromImage = dockerDindImage;
@@ -514,13 +541,18 @@
             "name docker-dind"
             "toolchains none"
             "tests docker"
-            "tmpfiles none"
+            "tmpfiles /usr/bin/sd-tmpfiles"
           ]}
           # The static strace binary is copied as a file. No Nix store is
           # mounted into the test container.
           mkdir -p bin
           cp ${pkgs.pkgsStatic.strace}/bin/strace bin/strace
           chmod 0755 bin/strace
+          mkdir -p usr/bin usr/lib
+          cp ${alpineTmpfiles}/usr/bin/sd-tmpfiles usr/bin/sd-tmpfiles
+          cp -P ${alpineTmpfiles}/usr/lib/libacl.so.1* usr/lib/
+          cp -P ${alpineTmpfiles}/usr/lib/libcap.so.2* usr/lib/
+          cp -P ${alpineTmpfiles}/usr/lib/libpsx.so.2* usr/lib/
         '';
         config = {
           Cmd = [ "/bin/sh" ];

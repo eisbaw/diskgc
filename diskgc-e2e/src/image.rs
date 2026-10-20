@@ -12,8 +12,7 @@
 //!   (`toolchains none`: no Cargo test is listed, and no manifest is read);
 //! - which tests it runs (`tests all`, `tests portable`, or `tests docker`:
 //!   the last runs only [`crate::suite::DOCKER_ONLY_TESTS`]).
-//! - where this image runs a real tmpfiles implementation (`tmpfiles PATH`),
-//!   or `tmpfiles none` for the Alpine dind image pending a suitable tool.
+//! - where this image runs a real tmpfiles implementation (`tmpfiles PATH`).
 //!
 //! The format is one `KEY VALUE` per line, `#` comments and blank lines
 //! ignored; every key but `read-only` exactly once, unknown keys and values
@@ -53,7 +52,7 @@ pub struct Image {
     pub read_only: Vec<PathBuf>,
     pub toolchains: Toolchains,
     pub tests: Tests,
-    pub tmpfiles: Option<PathBuf>,
+    pub tmpfiles: PathBuf,
 }
 
 impl Image {
@@ -126,15 +125,10 @@ impl Image {
                     set_once(&mut tests, key, parsed)?;
                 }
                 "tmpfiles" => {
-                    let tool = if value == "none" {
-                        None
-                    } else if value.starts_with('/') {
-                        Some(PathBuf::from(value))
-                    } else {
-                        return Err(format!(
-                            "tmpfiles {value:?} is not an absolute path or none"
-                        ));
-                    };
+                    if !value.starts_with('/') {
+                        return Err(format!("tmpfiles {value:?} is not an absolute path"));
+                    }
+                    let tool = PathBuf::from(value);
                     set_once(&mut tmpfiles, key, tool)?;
                 }
                 other => return Err(format!("unknown key {other:?}")),
@@ -143,10 +137,7 @@ impl Image {
         let name = name.ok_or("no name")?;
         let toolchains = toolchains.ok_or("no toolchains (manifest or none)")?;
         let tests = tests.ok_or("no tests (all, portable or docker)")?;
-        let tmpfiles = tmpfiles.ok_or("no tmpfiles (absolute path or none)")?;
-        if tmpfiles.is_none() && tests != Tests::Docker {
-            return Err("tmpfiles none is permitted only for Docker-only images".to_owned());
-        }
+        let tmpfiles = tmpfiles.ok_or("no tmpfiles (absolute path)")?;
         Ok(Self {
             name,
             read_only,
@@ -199,7 +190,7 @@ mod tests {
         assert_eq!(nix.toolchains, Toolchains::Manifest);
         assert_eq!(
             nix.tmpfiles,
-            Some(PathBuf::from("/opt/diskgc-e2e/bin/systemd-tmpfiles"))
+            PathBuf::from("/opt/diskgc-e2e/bin/systemd-tmpfiles")
         );
         let nix_only = [("cargo_race_4", "needs the nightly")];
         let docker_only = [("native_docker_engine_dind_smoke", "needs dockerd")];
@@ -213,9 +204,11 @@ mod tests {
         assert!(debian.runs("sandbox_trivial", &nix_only, &docker_only));
         assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only, &docker_only));
         assert!(!debian.runs("cargo_race_4", &nix_only, &docker_only));
-        let docker =
-            Image::parse("name docker\ntoolchains none\ntests docker\ntmpfiles none\n").unwrap();
-        assert_eq!(docker.tmpfiles, None);
+        let docker = Image::parse(
+            "name docker\ntoolchains none\ntests docker\ntmpfiles /usr/bin/sd-tmpfiles\n",
+        )
+        .unwrap();
+        assert_eq!(docker.tmpfiles, PathBuf::from("/usr/bin/sd-tmpfiles"));
         assert!(docker.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
         assert!(!docker.runs("sandbox_trivial", &nix_only, &docker_only));
         let bare = Image::parse(
@@ -279,11 +272,11 @@ mod tests {
             ),
             (
                 "name x\ntoolchains none\ntests all\ntmpfiles relative\n",
-                "absolute path or none",
+                "absolute path",
             ),
             (
                 "name x\ntoolchains none\ntests portable\ntmpfiles none\n",
-                "only for Docker-only images",
+                "absolute path",
             ),
             (
                 "name x\nnix yes\ntoolchains none\ntests all\n",

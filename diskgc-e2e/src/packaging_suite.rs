@@ -7,15 +7,35 @@ use std::process::Command;
 use crate::suite::{Ctx, TestResult};
 use crate::{ROOT, TESTER, ensure};
 
+enum RuleSelection {
+    Discover,
+    Explicit,
+}
+
 pub fn shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
-    let tmpfiles = ctx
-        .image
-        .tmpfiles
-        .as_ref()
-        .ok_or("this image has no systemd-tmpfiles implementation")?;
+    verify_shipped_files(ctx, RuleSelection::Discover)
+}
+
+pub fn docker_shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
+    // sd-tools 0.99.0 crashes when scanning a scratch root's tmpfiles.d
+    // directories. Naming the staged file still proves the rule's effect.
+    verify_shipped_files(ctx, RuleSelection::Explicit)
+}
+
+fn verify_shipped_files(ctx: &Ctx, rule_selection: RuleSelection) -> TestResult {
+    let tmpfiles = &ctx.image.tmpfiles;
     let root = ctx.scratch.mkdirs("package-root", 0o755, ROOT)?;
     ctx.scratch
         .mkdirs("package-root/usr/lib/tmpfiles.d", 0o755, ROOT)?;
+    // With --root, sd-tmpfiles resolves even the rule's named users against
+    // the target root. Give this isolated root the test image's account map.
+    ctx.scratch.mkdirs("package-root/etc", 0o755, ROOT)?;
+    for file in ["passwd", "group"] {
+        let source = format!("/etc/{file}");
+        let contents = std::fs::read(&source).map_err(|e| format!("read {source}: {e}"))?;
+        ctx.scratch
+            .write_file(&format!("package-root/etc/{file}"), &contents, 0o644, ROOT)?;
+    }
     let rule = std::fs::read(ctx.bin_dir.join("diskgc-tmpfiles.conf"))
         .map_err(|e| format!("read shipped tmpfiles rule: {e}"))?;
     ctx.scratch.write_file(
@@ -25,9 +45,14 @@ pub fn shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
         ROOT,
     )?;
 
-    let applied = Command::new(tmpfiles)
+    let mut apply = Command::new(tmpfiles);
+    apply
         .arg(format!("--root={}", root.display()))
-        .arg("--create")
+        .arg("--create");
+    if matches!(rule_selection, RuleSelection::Explicit) {
+        apply.arg(root.join("usr/lib/tmpfiles.d/diskgc.conf"));
+    }
+    let applied = apply
         .env_clear()
         .env("PATH", ctx.bin_dir.as_os_str())
         .output()

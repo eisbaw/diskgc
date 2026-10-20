@@ -560,10 +560,15 @@ filesystem, processes and mounts from the developer's system.
 - **Shipped files:** `shipped_tmpfiles_and_example_work_in_container`
   applies the packaged drop-in with `systemd-tmpfiles --root=<scratch>
   --create` in disposable Nix and Debian containers, checks the resulting
-  lock file, and validates the packaged example config. Every Nix and Debian
-  test also provisions its per-test host lock from that shipped rule. The
-  Alpine Docker dind image still provisions its lock directly; TASK66 keeps
-  that image's migration and the ungated release package open.
+  lock file, and validates the packaged example config. The Docker dind
+  image runs the same proof as
+  `docker_shipped_tmpfiles_and_example_work_in_container` with Alpine
+  `sd-tmpfiles`. That proof names the staged rule file explicitly: Alpine
+  `sd-tools` 0.99.0 crashes when asked to scan a scratch root's tmpfiles.d
+  directories without a file argument, so this test does not establish
+  automatic rule discovery there. Every container test provisions its
+  per-test host lock from the shipped rule. TASK66 remains open until the
+  release package exists.
 
 **Not covered end-to-end (for now):** real block filesystems (ext4 or xfs
 as separate mounts, btrfs) and network filesystems cannot be mounted in a
@@ -836,7 +841,7 @@ namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
 code under test's fds for `-y`; the code under test has no capabilities)
 and `--network=none`. The harness runs as container root and mounts a fresh
 tmpfs per test at `/tmp` (the scratch for fixtures), at `/run/diskgc`
-(0755 root, where Nix and Debian apply the packaged tmpfiles rule to create
+(0755 root, where every image applies the packaged tmpfiles rule to create
 `/run/diskgc/lock`, 0644 root) and at `/home/tester` (0755 tester); it keeps
 its own records (strace output) on a further, root-only tmpfs. Objects the
 harness creates thus get stable inode numbers and birth times; only what
@@ -928,8 +933,10 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
     `CARGO_BUILD_BUILD_DIR` (1.90.0), never from "the oldest toolchain".
 - **Docker image** (`localhost/diskgc-e2e-dind`): official
   `library/docker:29.8.2-dind`, pinned by manifest digest and Nix hash in
-  flake.nix, with the common sandbox marker/users and static strace copied
-  to `/bin/strace`; descriptor `toolchains none`, `tests docker`. Podman is
+  flake.nix, with the common sandbox marker/users, static strace copied
+  to `/bin/strace`, and SHA-256-pinned Alpine 3.24 `sd-tools`, `acl-libs`
+  and `libcap2` APK contents; descriptor `toolchains none`, `tests docker`.
+  No package manager runs inside the test image. Podman is
   only the outer runtime. The runner overrides the upstream dockerd
   entrypoint so the interlock runs first, then gives each native Docker test
   `--privileged` and separate tmpfs mounts at `/var/lib/docker` and

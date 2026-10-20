@@ -166,6 +166,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
 /// never listed by the Nix or Debian images, which have no Docker daemon.
 pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
     (
+        DOCKER_PACKAGING_TEST,
+        "applies the shipped tmpfiles rule with Alpine sd-tmpfiles in the pinned dind image",
+    ),
+    (
         DOCKER_DIND_TEST,
         "needs the native Docker Engine daemon in the pinned dind image",
     ),
@@ -188,6 +192,7 @@ pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
 ];
 
 pub const DOCKER_DIND_TEST: &str = "native_docker_engine_dind_smoke";
+pub const DOCKER_PACKAGING_TEST: &str = "docker_shipped_tmpfiles_and_example_work_in_container";
 pub const DOCKER_VECTOR_TEST: &str = "checked_in_python_profile_vector_replays_under_native_docker";
 
 /// The tests whose container gets the FUSE device (`/dev/fuse`, when the
@@ -263,6 +268,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: docker_suite::native_docker_engine_dind_smoke,
+    },
+    Test {
+        name: DOCKER_PACKAGING_TEST,
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: packaging_suite::docker_shipped_tmpfiles_and_example_work_in_container,
     },
     Test {
         name: DOCKER_VECTOR_TEST,
@@ -1117,7 +1128,7 @@ pub struct Ctx {
     /// tmpfs at `/tmp` (mode 1777), where diskgc's filesystem profiles look.
     pub scratch: Scratch,
     /// tmpfs at `/run/diskgc` (0755 root) holding the host lock created
-    /// from the shipped tmpfiles rule on Nix and Debian images.
+    /// from the shipped tmpfiles rule on every image.
     pub run_diskgc: Scratch,
     /// tmpfs at `/home/tester` (0755 tester), tester's home.
     pub home: Scratch,
@@ -1154,37 +1165,30 @@ impl Ctx {
         let records = Scratch::mount("/run/diskgc-e2e", "0700", ROOT)?;
         let scratch = Scratch::mount("/tmp", "1777", ROOT)?;
         let run_diskgc = Scratch::mount("/run/diskgc", "0755", ROOT)?;
-        if let Some(tool) = &image.tmpfiles {
-            let rule = Path::new(UNDER_TEST_BIN_DIR).join("diskgc-tmpfiles.conf");
-            let applied = Command::new(tool)
-                .arg("--create")
-                .arg(&rule)
-                .env_clear()
-                .env("PATH", UNDER_TEST_BIN_DIR)
-                .output()
-                .map_err(|e| {
-                    format!("run {} on shipped {}: {e}", tool.display(), rule.display())
-                })?;
-            ensure!(
-                applied.status.success(),
-                "{} failed to apply shipped {}: status {}, stdout {}, stderr {}",
-                tool.display(),
-                rule.display(),
-                applied.status,
-                String::from_utf8_lossy(&applied.stdout),
-                String::from_utf8_lossy(&applied.stderr)
-            );
-            expect_meta("/run/diskgc", true, 0o755, 0, 0)?;
-            expect_meta(HOST_LOCK, false, 0o644, 0, 0)?;
-            ensure!(
-                scratch::mount_id(Path::new(HOST_LOCK), false)? == run_diskgc.mnt_id(),
-                "shipped tmpfiles rule created the host lock outside /run/diskgc scratch"
-            );
-        } else {
-            // The Alpine dind image has no systemd-tmpfiles implementation;
-            // keep TASK66 open until its lock also comes from the drop-in.
-            run_diskgc.write_file("lock", b"", 0o644, ROOT)?;
-        }
+        let tool = &image.tmpfiles;
+        let rule = Path::new(UNDER_TEST_BIN_DIR).join("diskgc-tmpfiles.conf");
+        let applied = Command::new(tool)
+            .arg("--create")
+            .arg(&rule)
+            .env_clear()
+            .env("PATH", UNDER_TEST_BIN_DIR)
+            .output()
+            .map_err(|e| format!("run {} on shipped {}: {e}", tool.display(), rule.display()))?;
+        ensure!(
+            applied.status.success(),
+            "{} failed to apply shipped {}: status {}, stdout {}, stderr {}",
+            tool.display(),
+            rule.display(),
+            applied.status,
+            String::from_utf8_lossy(&applied.stdout),
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        expect_meta("/run/diskgc", true, 0o755, 0, 0)?;
+        expect_meta(HOST_LOCK, false, 0o644, 0, 0)?;
+        ensure!(
+            scratch::mount_id(Path::new(HOST_LOCK), false)? == run_diskgc.mnt_id(),
+            "shipped tmpfiles rule created the host lock outside /run/diskgc scratch"
+        );
         let home = Scratch::mount("/home/tester", "0755", TESTER)?;
         home.write_file(".profile", b"# tester profile\n", 0o644, TESTER)?;
         let self_exe =
@@ -1353,8 +1357,7 @@ fn to_str(path: &Path) -> Result<&str, String> {
 /// The harness works end to end: host lock provisioned, scratch mounted,
 /// diskgc runs as tester under strace, and the oracle sees no change.
 fn sandbox_trivial(ctx: &Ctx) -> TestResult {
-    // The lock file and directory come from the shipped tmpfiles rule on
-    // images with an implementation of systemd-tmpfiles.
+    // The lock file and directory come from the shipped tmpfiles rule.
     expect_meta("/run/diskgc", true, 0o755, 0, 0)?;
     expect_meta(HOST_LOCK, false, 0o644, 0, 0)?;
     expect_meta("/home/tester", true, 0o755, TESTER.uid, TESTER.gid)?;
