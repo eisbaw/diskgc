@@ -68,6 +68,23 @@
     match: [/home/mark/go/pkg/mod]
     no_match: [/home/mark/go/pkg, /home/mark/go/pkg/mod/cache]
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20
+
+- name: cmake-build
+  category: c / c++
+  description: Out-of-source CMake build directories through depth five below a supplied root
+  find:
+    roots: required
+    # Explicit depths keep discovery finite; a matching outer build owns
+    # nested FetchContent builds. More depths require a new profile name.
+    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+    type: dir
+  where: {has: CMakeCache.txt, lacks_entry: CMakeLists.txt}
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/build, /home/mark/src/a/b/c/d/build]
+    no_match: [/home/mark/src/a/b/c/d/e/build]
+  verified_with: CMake 3.30.5 (host CMakeCache.txt in retimer out-of-source builds, read-only survey 2026-10-20)
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.
 - name: pytest-tmp

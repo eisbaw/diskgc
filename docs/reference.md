@@ -233,11 +233,11 @@ under `profile`:
     "description": "Zephyr test runs left in /tmp",
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
-    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null},
+    "where": {"idle_for": null, "has": null, "has_not": null, "app_not_running": null, "lacks_entry": null},
     "min_idle_for": null,
     "action": {"type": "delete | command | cargo_lock_protocol", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
-    "examples": {"match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
+    "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
     "verified_with": null
   }
 }
@@ -629,10 +629,10 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
-| `where` | filters (at least one predicate); optional on sources, `has`, `has_not`, `app_not_running` | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. |
+| `where` | filters (at least one predicate); optional on sources, `has`, `has_not`, `app_not_running`, `lacks_entry` | See Predicates. A source's own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; a tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
 | `action` | kind `fs`, required | See Actions. The code-backed kinds fix their action and take no `action`. |
-| `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). Config load and `check` reject examples that contradict the path patterns. |
+| `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). With `roots: required`, an optional `root: /absolute/sample/root` pins the supplied root used to check path depth in these examples; without it, any absolute ancestor can supply the root. Config load and `check` reject examples that contradict the path patterns. |
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
 | `override` | user profiles | See User profiles. |
@@ -649,6 +649,7 @@ required}}`.
 | `idle_for` | not used or changed for this long, as the kind measures it (below) | `fs`, `cargo-target`, `docker-build-cache` |
 | `has` / `has_not` | contains / does not contain a named file (e.g. `CACHEDIR.TAG`): a regular file of that name directly in the candidate directory (not followed; a file candidate contains nothing) | `fs` |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only if the lock is absent in a safely reached directory, or names this host and a PID proved gone. A live PID, including a reused PID, a foreign host, malformed lock, unreadable lock or unsafe path refuses the candidate. Each source names one application's lock. | `fs` sources only |
+| `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
 
 In YAML, `where: {idle_for: 3d}` (a duration, see Sizes and durations),
 `where: {has: CACHEDIR.TAG}` (one file name), or
@@ -860,7 +861,7 @@ listed as planned, not shipped.
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `jest-cache`, `playwright-tmp`, `node-compile-cache` | Jest's `$TMPDIR/jest_*` cache (unverified); `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
-| c / c++ | `cmake-build` | directories containing `CMakeCache.txt` and no `CMakeLists.txt` (an in-source build is a source tree; one holding a checkout is refused anyway, see [`contains_checkout`](safety.md#the-eligibility-walk-mandatory-per-candidate); roots required) | `delete` |
+| c / c++ | `cmake-build` | directories at relative depths 1 through 5 below each supplied root, containing a regular `CMakeCache.txt` and no entry named `CMakeLists.txt` of any type; an in-source build is a source tree, and a checkout inside the candidate is refused (`checkouts: refuse`) | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | `~/.gradle/caches`, `~/.m2/repository` (roots required) | `delete` |
 | embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build` | Zephyr `build/` dirs (`CMakeCache.txt` plus `zephyr/`, no `CMakeLists.txt`; roots required) | `delete` |
@@ -990,9 +991,13 @@ needs a different guard and is outside this Chromium-family set.
   cache tier by selecting the dedicated profile alone; selecting the two
   in separate tiers can still let this profile reach other entries, so its
   built-in exclusions are the guarantee for the named dedicated paths.
-- Profiles that find at any depth under a project root (`pytest-cache`,
+- Profiles that find at several depths under a project root (`pytest-cache`,
   `cmake-build`, `west-build`) cannot use `**`; they list depths explicitly
-  or take one root per project. Settled when they are verified.
+  or take one root per project. `cmake-build` reaches five levels below each
+  root. Supply the project or workspace directory as a root when a build lies
+  deeper. A changed depth bound requires a new built-in name because it
+  changes the profile's matching set. Broader build-output recognition by
+  markers and source anchors is separate from this CMake profile.
 
 **A built-in profile's matching set never changes under its name.** Any
 change to what a built-in matches, narrower or broader, ships under a new

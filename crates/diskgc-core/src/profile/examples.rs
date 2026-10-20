@@ -21,8 +21,8 @@ pub struct Entry<'a> {
 }
 
 /// Whether an `fs` source would find `entry` by path, type and its own
-/// `where`. Required roots are represented by any absolute ancestor that
-/// leaves a pattern-shaped suffix, just as static path examples were.
+/// `where`. A required-root source may pin an illustrative `examples.root`;
+/// otherwise any absolute ancestor may supply the root.
 pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
     let Some(find) = Find::of(source, uid) else {
         return false;
@@ -37,7 +37,11 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
                 .map(|root| PathBuf::from(root.replace("{uid}", &uid.to_string())))
                 .collect(),
         ),
-        Roots::Required => None,
+        Roots::Required => source
+            .examples
+            .root
+            .as_ref()
+            .map(|root| vec![PathBuf::from(root.replace("{uid}", &uid.to_string()))]),
     };
     let root_refs: Option<Vec<&Path>> = roots
         .as_ref()
@@ -53,6 +57,10 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
         .is_none_or(|name| entry.files.contains(&name))
         && find
             .has_not
+            .as_deref()
+            .is_none_or(|name| !entry.files.contains(&name))
+        && find
+            .lacks_entry
             .as_deref()
             .is_none_or(|name| !entry.files.contains(&name))
 }
@@ -171,5 +179,18 @@ mod tests {
         let yaml = "- name: scratch\n  find: {roots: required, paths: [a/b], exclude: [b], type: dir}\n  action: delete\n  examples: {match: [/tmp/a/b]}\n";
         let library = Library::with_user_profiles(&parse_profiles(yaml).unwrap()).unwrap();
         assert!(failures(&library).is_empty());
+    }
+
+    #[test]
+    fn required_root_examples_can_pin_the_depth_they_claim() {
+        let yaml = "- name: build\n  find: {roots: required, paths: ['*', '*/*'], type: dir}\n  action: delete\n  examples: {root: /home/mark/src, match: [/home/mark/src/build, /home/mark/src/a/build], no_match: [/home/mark/src/a/b/build]}\n";
+        let library = Library::with_user_profiles(&parse_profiles(yaml).unwrap()).unwrap();
+        assert!(failures(&library).is_empty(), "{:?}", failures(&library));
+        let without_root = yaml.replace("root: /home/mark/src, ", "");
+        let library = Library::with_user_profiles(&parse_profiles(&without_root).unwrap()).unwrap();
+        assert_eq!(
+            failures(&library),
+            ["build: no_match example /home/mark/src/a/b/build was found"]
+        );
     }
 }

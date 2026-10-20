@@ -229,6 +229,9 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
     if where_.app_not_running.is_some() {
         problems.push("`app_not_running` is a source predicate (the lock path belongs to the application whose cache the source finds)".to_owned());
     }
+    if where_.lacks_entry.is_some() {
+        problems.push("`where.lacks_entry` is a source predicate, not a tier filter".to_owned());
+    }
     for (field, present, why) in [
         (
             "kind",
@@ -285,9 +288,10 @@ fn source(
     for predicate in where_.predicates() {
         if predicate == PredicateName::IdleFor {
             problems.push(
-                "a source profile's `where` takes only `has`, `has_not`, and \
-                 `app_not_running`: set a mandatory minimum with `min_idle_for`, \
-                 or a tier policy with a filter (`&& filter:idle-3d`)"
+                "a source profile's `where` takes only `has`, `has_not`, \
+                 `app_not_running`, and `lacks_entry`: set a mandatory minimum \
+                 with `min_idle_for`, or a tier policy with a filter \
+                 (`&& filter:idle-3d`)"
                     .to_owned(),
             );
         } else if !predicate.supported_by(kind) {
@@ -345,6 +349,9 @@ fn source(
             Ok(effective) => *patterns = effective,
             Err(problem) => problems.push(problem),
         }
+    }
+    if examples.root.is_some() && !matches!(roots.as_ref(), Some(Roots::Required)) {
+        problems.push("`examples.root` is only for `find.roots: required`".to_owned());
     }
     Some(Source {
         roots: roots?,
@@ -477,12 +484,18 @@ fn examples(spec: Option<&ExamplesSpec>, problems: &mut Vec<String>) -> Examples
     if spec.r#match.is_empty() {
         problems.push("`examples` needs at least one `match`".to_owned());
     }
+    if let Some(root) = &spec.root
+        && let Err(problem) = absolute_path(root)
+    {
+        problems.push(format!("example root {problem}"));
+    }
     for path in spec.r#match.iter().chain(&spec.no_match) {
         if let Err(problem) = absolute_path(path) {
             problems.push(format!("example {problem}"));
         }
     }
     Examples {
+        root: spec.root.clone(),
         matches: spec.r#match.clone(),
         no_match: spec.no_match.clone(),
     }
@@ -510,7 +523,11 @@ fn roots(spec: &RootsSpec, problems: &mut Vec<String>) -> Option<Roots> {
 }
 
 fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
-    for (predicate, name) in [("has", &spec.has), ("has_not", &spec.has_not)] {
+    for (predicate, name) in [
+        ("has", &spec.has),
+        ("has_not", &spec.has_not),
+        ("lacks_entry", &spec.lacks_entry),
+    ] {
         if let Some(name) = name
             && !is_file_name(name)
         {
@@ -541,11 +558,12 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         has: spec.has.clone(),
         has_not: spec.has_not.clone(),
         app_not_running: spec.app_not_running.clone(),
+        lacks_entry: spec.lacks_entry.clone(),
     }
 }
 
 fn is_file_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
+    !name.trim().is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
 }
 
 /// A configured path (docs/reference.md, Configuration file: Paths):

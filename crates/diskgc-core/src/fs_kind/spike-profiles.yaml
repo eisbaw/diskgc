@@ -62,25 +62,6 @@ profiles:
 
   # ---- plain deletes that need roots ------------------------------------
 
-  - name: cmake-build
-    category: c / c++
-    description: directories holding a CMakeCache.txt, up to three levels below a root
-    # DOC: "directories containing CMakeCache.txt" is a source `where: {has:}`
-    # over every directory at the spelled-out depths; the outermost one wins
-    # (a candidate is never descended into). The spike found an in-source
-    # build: a git checkout with uncommitted changes (5.6 GiB) holding a
-    # CMakeCache.txt. Hence `has_not: CMakeLists.txt` (fixed in reference.md).
-    find:
-      roots: required
-      paths: ["*", "*/*", "*/*/*"]
-      type: dir
-    where: {has: CMakeCache.txt, has_not: CMakeLists.txt}
-    action: delete
-    # Paths only: every directory matches `*`, so no `no_match` can be
-    # written; what `where` keeps is not part of an example (task-17).
-    examples:
-      match: [/home/mark/src/app/build, /home/mark/src/a/b/c]
-
   - name: west-build
     category: embedded
     description: Zephyr west build/ dirs (CMakeCache.txt; zephyr/ not expressible)

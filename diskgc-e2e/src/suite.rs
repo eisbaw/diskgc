@@ -134,6 +134,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_exact_exclusion_keeps_valuable_cache,
     },
     Test {
+        name: "fs_reclaim_cmake_guard_keeps_a_dangling_source_symlink",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_cmake_guard_keeps_a_dangling_source_symlink,
+    },
+    Test {
         name: "fs_reclaim_image_temp_minimum_idle_and_open_file",
         tier: Tier::Fast,
         expect: Expect::Pass,

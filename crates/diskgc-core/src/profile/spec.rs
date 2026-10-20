@@ -116,14 +116,20 @@ pub struct WhereSpec {
     pub has_not: Option<String>,
     /// A Chromium-family `SingletonLock` symlink, absolute or relative to
     /// each source root.
-    #[serde(default, deserialize_with = "present_app_not_running")]
+    #[serde(default, deserialize_with = "present_non_null_string")]
     pub app_not_running: Option<String>,
+    /// A source safety guard: a written null must not disable it.
+    #[serde(default, deserialize_with = "present_non_null_string")]
+    pub lacks_entry: Option<String>,
 }
 
 /// `examples:`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExamplesSpec {
+    /// An illustrative supplied root for profiles with `roots: required`.
+    #[serde(default, deserialize_with = "present_non_null_string")]
+    pub root: Option<String>,
     #[serde(default)]
     pub r#match: Vec<String>,
     #[serde(default)]
@@ -179,8 +185,8 @@ fn present_min_idle_for<'de, D: Deserializer<'de>>(
     DurationSpec::deserialize(deserializer).map(Some)
 }
 
-/// A written null must not silently disable an application's live-lock guard.
-fn present_app_not_running<'de, D: Deserializer<'de>>(
+/// A written null must not silently disable a source safety guard.
+fn present_non_null_string<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)

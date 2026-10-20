@@ -85,6 +85,46 @@ fn app_not_running_is_a_validated_fs_source_predicate() {
     );
 }
 
+#[test]
+fn lacks_entry_cannot_be_silently_disabled_by_a_present_null_or_blank() {
+    let source = |value: &str| {
+        format!(
+            "- name: build\n  find: {{roots: [/tmp], paths: [build], type: dir}}\n  where: {{has: CMakeCache.txt, lacks_entry: {value}}}\n  action: delete\n  examples: {{match: [/tmp/build]}}\n"
+        )
+    };
+    for value in ["", "~", "null", "NULL"] {
+        let yaml = source(value);
+        assert!(
+            parse_profiles(&yaml).is_err(),
+            "present null lacks_entry was accepted: {yaml}"
+        );
+    }
+    assert_has(&user_errors(&source("''")), "lacks_entry");
+    assert_has(&user_errors(&source("' '")), "lacks_entry");
+    with_user(&source("CMakeLists.txt")).expect("valid source guard");
+}
+
+#[test]
+fn example_root_is_absolute_and_only_for_supplied_roots() {
+    let source = |roots: &str, root: &str| {
+        format!(
+            "- name: build\n  find: {{roots: {roots}, paths: [build], type: dir}}\n  action: delete\n  examples: {{root: {root}, match: [/tmp/build]}}\n"
+        )
+    };
+    with_user(&source("required", "/tmp")).expect("supplied example root");
+    for value in ["", "~", "null", "NULL"] {
+        assert!(parse_profiles(&source("required", value)).is_err());
+    }
+    assert_has(
+        &user_errors(&source("required", "relative")),
+        "example root",
+    );
+    assert_has(
+        &user_errors(&source("[/tmp]", "/tmp")),
+        "only for `find.roots: required`",
+    );
+}
+
 // ---- AC #3: the shipped built-ins load, and a broken one fails the gate
 
 /// AC #3. The embedded YAML passes every static rule and holds the wave-1
@@ -100,6 +140,7 @@ fn the_built_in_library_loads() {
         "brave-browser-cache",
         "bun-cache",
         "cargo-target",
+        "cmake-build",
         "containers-image-tmp",
         "chrome-browser-cache",
         "chromium-browser-cache",
@@ -486,6 +527,14 @@ fn sources_and_filters_have_their_own_fields() {
         ("- name: x\n  where: {has: a/b}\n", "must name one file"),
         ("- name: x\n  where: {has_not: ..}\n", "must name one file"),
         (
+            "- name: x\n  where: {lacks_entry: a/b}\n",
+            "must name one file",
+        ),
+        (
+            "- name: x\n  where: {lacks_entry: marker}\n",
+            "source predicate",
+        ),
+        (
             "- name: x\n  category: \" \"\n  where: {idle_for: 1d}\n",
             "`category` is empty",
         ),
@@ -625,7 +674,7 @@ fn checkouts_is_refuse_unless_a_source_says_allow() {
     );
 }
 
-/// U1: a source's own `where` takes `has` / `has_not`, never `idle_for`
+/// U1: a source's own `where` takes entry predicates, never `idle_for`
 /// ("when" is the tier's, through filters).
 #[test]
 fn sources_have_no_idle_for_of_their_own() {
@@ -637,7 +686,7 @@ fn sources_have_no_idle_for_of_their_own() {
     for where_ in ["{idle_for: 10d}", "{idle_for: 1d, has: CACHEDIR.TAG}"] {
         assert_has(
             &user_errors(&fs_source(&format!("{example}  where: {where_}\n"))),
-            "a source profile's `where` takes only `has`, `has_not`, and `app_not_running`",
+            "a source profile's `where` takes only `has`, `has_not`, `app_not_running`, and `lacks_entry`",
         );
     }
     let errors = user_errors(

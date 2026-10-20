@@ -48,6 +48,55 @@ profiles:
     examples: {match: [/tmp/nix-index], no_match: [/tmp/huggingface]}
 "#;
 
+const CMAKE_GUARD_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: cmake-guard-kernel
+    find: {roots: [/tmp], paths: ["cmake-*-build"], type: dir}
+    where: {has: CMakeCache.txt, lacks_entry: CMakeLists.txt}
+    action: delete
+    examples: {match: [/tmp/cmake-free-build]}
+"#;
+
+/// Linux must report even a dangling CMakeLists.txt symlink as present.
+/// A following stat would miss it and permit deletion of this source tree.
+pub fn fs_reclaim_cmake_guard_keeps_a_dangling_source_symlink(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        CMAKE_GUARD_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let protected = s.mkdir("cmake-linked-build", 0o700, TESTER)?;
+    s.write_file("cmake-linked-build/CMakeCache.txt", b"cache", 0o600, TESTER)?;
+    s.symlink(
+        "cmake-linked-build/CMakeLists.txt",
+        Path::new("/tmp/no-such-source-file"),
+    )?;
+    let free = s.mkdir("cmake-free-build", 0o700, TESTER)?;
+    s.write_file("cmake-free-build/CMakeCache.txt", b"cache", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(free.clone()))?;
+    let run = ensure_tmp(
+        ctx,
+        &[
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cmake-guard-kernel",
+        ],
+    )?;
+    let verdict = oracle.judge_runs(&[&run])?;
+    run.expect_code(1)?;
+    let (_, actions) = outcome(&report(&run)?);
+    ensure!(actions == [free.display().to_string()], "{actions:?}");
+    ensure!(
+        exists(&protected.join("CMakeCache.txt")),
+        "source was deleted"
+    );
+    ensure!(!exists(&free), "free build was retained");
+    verdict.assert_clean()
+}
+
 /// The kernel discovery path must leave a named cache holding user data
 /// untouched while reclaiming its eligible sibling.
 pub fn fs_reclaim_exact_exclusion_keeps_valuable_cache(ctx: &Ctx) -> TestResult {

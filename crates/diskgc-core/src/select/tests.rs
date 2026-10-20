@@ -1052,6 +1052,7 @@ fn predicate_table_matches_the_reference() {
             (PredicateName::Has, vec![Kind::Fs]),
             (PredicateName::HasNot, vec![Kind::Fs]),
             (PredicateName::AppNotRunning, vec![Kind::Fs]),
+            (PredicateName::LacksEntry, vec![Kind::Fs]),
         ]
     );
 }

@@ -69,6 +69,18 @@ fn show_yaml_loads_back_to_the_same_profile() {
     }
 }
 
+#[test]
+fn cmake_lacks_entry_survives_show_and_json() {
+    let library = Library::builtin().expect("built-ins");
+    let profile = library.get("cmake-build").expect("cmake-build");
+    let yaml = show_yaml(profile, None);
+    assert!(yaml.contains("lacks_entry: CMakeLists.txt"), "{yaml}");
+    assert_eq!(&reload(&yaml, Origin::BuiltIn), profile);
+    let json: Value = serde_json::from_str(&profile_json(profile).to_text()).expect("JSON");
+    assert_eq!(json["where"]["lacks_entry"], "CMakeLists.txt");
+    assert_eq!(json["where"]["has_not"], Value::Null);
+}
+
 /// `checkouts` is spelled out for every source, the default too
 /// (docs/reference.md, `profiles` command).
 #[test]

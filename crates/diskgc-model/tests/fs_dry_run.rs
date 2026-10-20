@@ -44,11 +44,6 @@ const PROFILES: &str = r#"
     type: dir
   action: delete
   examples: {match: [/home/mark/src/app/.pytest_cache]}
-- name: cmake-build
-  find: {roots: required, paths: ["*", "*/*"], type: dir}
-  where: {has: CMakeCache.txt, has_not: CMakeLists.txt}
-  action: delete
-  examples: {match: [/home/mark/src/app/build]}
 - name: has-tag
   where: {has: CACHEDIR.TAG}
 - name: unmounted
@@ -784,6 +779,74 @@ fn a_sources_own_has_narrows_what_is_a_candidate() {
         "{:#?}",
         report.plan
     );
+}
+
+/// `has_not` keeps its v1 meaning: a symlink with the marker name is not
+/// a regular file. `lacks_entry` is the stricter guard used by cmake-build.
+#[test]
+fn has_not_still_allows_a_nonregular_entry() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let host = host(&yaml(&format!(
+        "  /tmp/pytest-of-link: {{.: {at}, mounted: {{symlink: /tmp/absent, mtime: \
+         2026-10-01T00:00:00Z}}}}\n  /tmp/pytest-of-file: {{.: {at}, mounted: {at}}}\n"
+    )));
+    let report = dry_run(&host, &request("profile:unmounted", &[], "/tmp"));
+    assert_eq!(
+        plan(&report),
+        [("/tmp/pytest-of-link".to_owned(), None)],
+        "{:#?}",
+        report.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// A project root reaches five relative directory levels. The direct
+/// CMakeCache marker makes an out-of-source build; a source CMakeLists of
+/// any entry type or checkout marker still refuses that same depth. A sixth level is outside
+/// this versioned match set.
+#[test]
+fn shipped_cmake_build_finds_depth_five_and_refuses_sources_and_checkouts() {
+    let at = "{mtime: 2026-10-01T00:00:00Z}";
+    let root = "/home/mark/topics";
+    let base = "/home/mark/topics/retimer-sim/firmware/retimer/out";
+    let host = host(&yaml(&format!(
+        "  {base}/rebuild-A: {{.: {at}, CMakeCache.txt: {at}, object.o: {at}}}\n  \
+         {base}/in-source: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {at}}}\n  \
+         {base}/listed-directory: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{.: {at}}}}}\n  \
+         {base}/listed-link: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{symlink: /tmp/absent, mtime: 2026-10-01T00:00:00Z}}}}\n  \
+         {base}/listed-fifo: {{.: {at}, CMakeCache.txt: {at}, CMakeLists.txt: {{type: fifo, mtime: 2026-10-01T00:00:00Z}}}}\n  \
+         {base}/checkout: {{.: {at}, CMakeCache.txt: {at}, .git: {{.: {at}, HEAD: {at}}}}}\n  \
+         {base}/not-a-file: {{.: {at}, CMakeCache.txt: {{.: {at}}}}}\n  \
+         {base}/deeper/build: {{.: {at}, CMakeCache.txt: {at}}}\n"
+    )));
+    let report = dry_run(&host, &built_in_request("profile:cmake-build", root));
+    let mut actual = plan(&report);
+    actual.sort();
+    assert_eq!(
+        actual,
+        [
+            (format!("{base}/checkout"), Some("contains_checkout")),
+            (format!("{base}/rebuild-A"), None),
+        ],
+        "{:#?}",
+        report.plan
+    );
+    assert_eq!(report.status, Status::DryRun);
+    for name in [
+        "in-source",
+        "listed-directory",
+        "listed-link",
+        "listed-fifo",
+    ] {
+        let marker = PathBuf::from(format!("{base}/{name}/CMakeLists.txt"));
+        assert!(
+            host.trace().iter().any(|call| {
+                call.op == Op::Statx && call.path.as_deref() == Some(marker.as_path())
+            }),
+            "{name}: marker was never checked"
+        );
+    }
+    nothing_locked_or_deleted(&host);
 }
 
 /// A `has` / `has_not` filter in a term is refused (task-16), never

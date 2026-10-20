@@ -47,11 +47,6 @@ const PROFILES: &str = r#"
   find: {roots: required, paths: [".pytest_cache", "*/.pytest_cache"], type: dir}
   action: delete
   examples: {match: [/home/mark/src/app/.pytest_cache]}
-- name: cmake-build
-  find: {roots: required, paths: ["*"], type: dir}
-  where: {has: CMakeCache.txt, has_not: CMakeLists.txt}
-  action: delete
-  examples: {match: [/home/mark/src/build]}
 - name: deep-dirs
   find: {roots: required, paths: ["*/*/*"], type: dir}
   action: delete
@@ -691,7 +686,7 @@ fn every_fuse_filesystem_is_refused() {
 #[test]
 fn every_check_is_made_again_under_the_candidates_lock() {
     let flocked = |path: &str| format!("{{op: flock, path: {path}, when: after}}");
-    let cases: [(&str, String, String, &str, &str); 4] = [
+    let cases: [(&str, String, String, &str, &str); 5] = [
         (
             "profile:pytest-of-dir",
             "/tmp/nix-shell.X/pytest-of-c".to_owned(),
@@ -707,6 +702,16 @@ fn every_check_is_made_again_under_the_candidates_lock() {
             "/home/mark/src/build".to_owned(),
             format!(
                 "  - {{at: {}, remove: /home/mark/src/build/CMakeCache.txt}}\n",
+                flocked("/home/mark/src/build")
+            ),
+            "/home/mark/src/build",
+            "changed",
+        ),
+        (
+            "profile:cmake-build",
+            "/home/mark/src/build".to_owned(),
+            format!(
+                "  - {{at: {}, create: /home/mark/src/build/CMakeLists.txt}}\n",
                 flocked("/home/mark/src/build")
             ),
             "/home/mark/src/build",

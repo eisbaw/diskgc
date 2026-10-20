@@ -227,6 +227,7 @@ fn where_json(where_: &Where) -> Json {
             "app_not_running",
             opt_str(where_.app_not_running.as_deref()),
         ),
+        ("lacks_entry", opt_str(where_.lacks_entry.as_deref())),
     ])
 }
 
@@ -311,6 +312,7 @@ pub fn profile_json(p: &Profile) -> Json {
                 source.filter(|s| matches!(s.finds, Finds::Paths { .. })),
                 |s| {
                     Json::Obj(vec![
+                        ("root", opt_str(s.examples.root.as_deref())),
                         ("match", strings(&s.examples.matches)),
                         ("no_match", strings(&s.examples.no_match)),
                     ])
@@ -396,6 +398,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(path) = &where_.app_not_running {
         parts.push(format!("app_not_running: {}", yaml_scalar(path)));
+    }
+    if let Some(name) = &where_.lacks_entry {
+        parts.push(format!("lacks_entry: {}", yaml_scalar(name)));
     }
     (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(", ")))
 }
@@ -490,6 +495,9 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
             out.push_str(&format!("  checkouts: {}\n", source.checkouts.as_str()));
             if matches!(source.finds, Finds::Paths { .. }) {
                 out.push_str("  examples:\n");
+                if let Some(root) = &source.examples.root {
+                    out.push_str(&format!("    root: {}\n", yaml_scalar(root)));
+                }
                 out.push_str(&format!(
                     "    match: {}\n",
                     yaml_list(&source.examples.matches)

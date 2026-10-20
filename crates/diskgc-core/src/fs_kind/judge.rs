@@ -18,7 +18,7 @@
 //!    candidate itself `statx`ed: gone (`missing`) or not the object found
 //!    (`changed`, [`same_object`]); then [`no_keep_markers`]: a keep marker
 //!    in the root or any directory on the way (`kept`);
-//! 3. [`Judge::source_where`]: the source's own `has` / `has_not` again; a
+//! 3. [`Judge::source_where`]: the source's own entry predicates again; a
 //!    candidate that no longer passes it is `changed`;
 //! 4. [`Judge::walk`]: the deletion engine's eligibility walk with the
 //!    tier's rules (ownership of every entry, keep markers, sockets and
@@ -209,7 +209,7 @@ impl Judge<'_> {
             Ok(false) => Ok(Err(Skip::new(
                 Reason::Changed,
                 found.path.clone(),
-                "no longer passes its source profile's own `where` (has / has_not), which it \
+                "no longer passes its source profile's own `where` (has / has_not / lacks_entry), which it \
                  passed when found",
             ))),
             Err(skip) => Ok(Err(skip)),
@@ -381,8 +381,9 @@ pub(super) fn skip_or_stop(path: PathBuf, what: &str, e: &HostError) -> Result<S
     }
 }
 
-/// The source's own `has` / `has_not` on the entry `name` (at `at`, of
-/// type `file_type`) in `dir`: a regular file of that name directly in it.
+/// The source's own entry predicates on the entry `name` (at `at`, of
+/// type `file_type`) in `dir`. `has` and `has_not` inspect regular files;
+/// `lacks_entry` refuses any directory entry of its name, including a link.
 /// A file candidate holds nothing. A directory that cannot be read is
 /// neither (`Err`: refused as `unreadable`, never taken). The deadline is
 /// checked before each predicate's I/O.
@@ -395,8 +396,8 @@ pub(super) fn source_where<H: Host>(
     file_type: Option<FileType>,
     deadline: Option<MonoTime>,
 ) -> Judged<bool> {
-    let (has, has_not) = (&find.has, &find.has_not);
-    if has.is_none() && has_not.is_none() {
+    let (has, has_not, lacks_entry) = (&find.has, &find.has_not, &find.lacks_entry);
+    if has.is_none() && has_not.is_none() && lacks_entry.is_none() {
         return Ok(Ok(true));
     }
     if file_type != Some(FileType::Directory) {
@@ -434,8 +435,20 @@ pub(super) fn source_where<H: Host>(
     {
         return Ok(Ok(false));
     }
-    if let Some(file) = has_not {
-        return Ok(Ok(!judged!(holds(file))));
+    if let Some(file) = has_not
+        && judged!(holds(file))
+    {
+        return Ok(Ok(false));
+    }
+    if let Some(name) = lacks_entry {
+        check_deadline(host, deadline, &at.join(name))?;
+        match host.statx(Base::Dir(&fd), Path::new(name)) {
+            // Any successful stat means the name exists. In particular, do
+            // not follow a symlink or interpret an unknown type as absence.
+            Ok(_) => return Ok(Ok(false)),
+            Err(e) if e.is(Errno::ENOENT) => {}
+            Err(e) => return Ok(Err(skip_or_stop(at.join(name), "stat", &e)?)),
+        }
     }
     Ok(Ok(true))
 }

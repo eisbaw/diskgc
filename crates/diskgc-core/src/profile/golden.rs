@@ -22,6 +22,53 @@ const TEMP_PROFILE_NAMES: &[&str] = &[
     "renode-tmp",
 ];
 
+#[test]
+fn cmake_build_has_a_frozen_five_level_match_set_and_markers() {
+    let library = Library::builtin().expect("built-ins");
+    let Body::Source(source) = &library
+        .get("cmake-build")
+        .expect("shipped CMake profile")
+        .body
+    else {
+        panic!("cmake-build is a source")
+    };
+    assert_eq!(source.roots, Roots::Required);
+    assert_eq!(
+        source.finds,
+        Finds::Paths {
+            patterns: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            exclude: Vec::new(),
+            entry_type: EntryType::Dir,
+        }
+    );
+    assert_eq!(source.where_.has.as_deref(), Some("CMakeCache.txt"));
+    assert_eq!(source.where_.lacks_entry.as_deref(), Some("CMakeLists.txt"));
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    assert_eq!(
+        source.action,
+        Action::Delete {
+            make_writable: false
+        }
+    );
+    let find = Find::of(source, 1000).expect("filesystem source");
+    let root = Path::new("/home/mark/topics");
+    for (path, expected) in [
+        ("/home/mark/topics/build", true),
+        ("/home/mark/topics/a/b/c/d/build", true),
+        ("/home/mark/topics/a/b/c/d/e/build", false),
+        ("/home/mark/other/build", false),
+    ] {
+        assert_eq!(
+            path_matches(Some(&[root]), &find.patterns, Path::new(path)),
+            expected,
+            "{path}"
+        );
+    }
+}
+
 const TREE: &[(&str, Option<EntryType>)] = &[
     ("/tmp/pytest-of-mark", Some(EntryType::Dir)),
     ("/tmp/pytest-of-mark/pytest-3", Some(EntryType::Dir)),

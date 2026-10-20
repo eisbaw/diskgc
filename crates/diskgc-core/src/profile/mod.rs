@@ -105,9 +105,9 @@ pub enum Body {
 pub struct Source {
     pub roots: Roots,
     pub finds: Finds,
-    /// The profile's own predicates: `has`, `has_not`, and
-    /// `app_not_running`. The source can set `min_idle_for`; a tier can
-    /// require longer with `filter:`s. A term's
+    /// The profile's own predicates: `has`, `has_not`, `app_not_running`, and
+    /// `lacks_entry`. The source can set `min_idle_for`; a tier can require
+    /// longer with `filter:`s. A term's
     /// filters narrow further; `!profile:` and `protect` ignore them
     /// (docs/reference.md, Selection grammar and `protect`).
     pub where_: Where,
@@ -172,6 +172,8 @@ pub struct Where {
     pub has_not: Option<String>,
     /// A Chromium-family `SingletonLock` whose process must have exited.
     pub app_not_running: Option<String>,
+    /// An entry name of any type that the candidate must not contain.
+    pub lacks_entry: Option<String>,
 }
 
 impl Where {
@@ -182,6 +184,7 @@ impl Where {
             (PredicateName::Has, self.has.is_some()),
             (PredicateName::HasNot, self.has_not.is_some()),
             (PredicateName::AppNotRunning, self.app_not_running.is_some()),
+            (PredicateName::LacksEntry, self.lacks_entry.is_some()),
         ];
         used.into_iter()
             .filter_map(|(name, used)| used.then_some(name))
@@ -198,6 +201,7 @@ impl Where {
 /// task-17), not that the matches are disposable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Examples {
+    pub root: Option<String>,
     pub matches: Vec<String>,
     pub no_match: Vec<String>,
 }
