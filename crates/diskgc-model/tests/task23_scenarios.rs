@@ -115,6 +115,12 @@ fn interrupted_delete_makes_the_remaining_directory_not_idle() {
         Idleness::NotIdle,
         "an idle filter on a later run must see the unlink's fresh directory mtime"
     );
+    let later_record = walk(&host, &candidate, &Rules::new(&[1000]), None).unwrap();
+    assert_eq!(
+        idle.verdict(later_record.newest_change(), host.wall_clock()),
+        Idleness::NotIdle,
+        "a later production walk must carry the directory's fresh timestamp into its idle verdict"
+    );
     assert!(host.unfired_events().is_empty());
 }
 

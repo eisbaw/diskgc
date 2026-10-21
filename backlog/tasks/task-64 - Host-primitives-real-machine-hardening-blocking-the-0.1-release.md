@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-21 13:17'
+updated_date: '2026-10-21 13:23'
 labels:
   - wave-1
   - hardening
@@ -131,6 +131,8 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-21 Group F availability limit after MPED review: the anchored task listing temporarily holds one procfs directory fd per listed thread, and TaskStats retains one fd per encountered tid until that process read ends. If a highly threaded process reaches RLIMIT_NOFILE, an open can return EMFILE; ProcError classifies it Failed, so the in-use scan fails closed and reclaim may be delayed. No threshold or old-kernel behavior was measured for this limit. docs/safety.md records it. A direct fake-procfs numeric-TID inode-mismatch test was added; the full gate for these followup edits is pending.
 
 2026-10-21 group F TID integration: each listed TID is pinned by a held procfs task directory through count/listing validation, and task stat/owner reads use the held directory across read brackets. Fresh numeric lookup plus held inode identity catches listing ABA; vanished or unreadable task identity fails closed. Fake same-tick TID replacement and numeric-listing ABA tests bite; real-kernel held-task release probe passed 100/100 in disposable Podman. Stable-tree full nix develop -c just e2e exit 0: Nix container 167/167, native Docker 7/7, Linux unit 138 passed/1 ignored, fmt/clippy passed; QA and MPED reviews GO for this slice. Older-kernel behavior and forced real-kernel same-tick recycle remain untested; RLIMIT_NOFILE can make highly threaded scans conservatively fail. Group G old-kernel/load and H historical lock failure remain open, so TASK64 stays In Progress.
+
+2026-10-21 read-only G/H plan: container images do not change the host kernel. To verify Linux 5.8-6.8 pidfd behavior, run disposable-container probes on actual hosts/VMs with verified uname -r (5.8, 5.15, 6.1, 6.8, and 6.9+ control): retain pidfd after child exit/reap, compare poll/HUP and pidfd_send_signal(0)==ESRCH, then release-during-scan E2E. For loaded fork churn, cap pids/duration and compare 0/1/4/8 worker levels for 30s, recording listing counts, conservative skips, wall time and fixture-only unlink; after storm, retry should settle. Historical flock 1/600 failure remains unexplained despite revised post-exec guarded holder and 600/600 stress; these are mitigation evidence, not root-cause proof. If old-kernel runners unavailable, AC7 and release gate remain open absent reviewed kernel-support scope decision.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

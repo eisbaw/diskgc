@@ -21,6 +21,10 @@ fn target(size: &str, at: &str) -> String {
 }
 
 fn model(extra: &str) -> String {
+    model_with_new_target_time(extra, "2026-10-14T00:00:00Z")
+}
+
+fn model_with_new_target_time(extra: &str, new_target_time: &str) -> String {
     format!(
         r#"host_model: 1
 clock: 2026-10-15T03:00:00Z
@@ -40,7 +44,7 @@ tree:
     debug: {new}
 {extra}"#,
         old = target("8G", "2026-10-01T00:00:00Z"),
-        new = target("4G", "2026-10-14T00:00:00Z"),
+        new = target("4G", new_target_time),
     )
 }
 
@@ -182,8 +186,22 @@ fn sigterm_before_first_unlink_changes_no_candidate() {
 #[test]
 fn a_blocking_candidate_operation_reports_overrun_and_starts_no_next_candidate() {
     let extra = "events:\n  - {at: {op: flock, path: /home/mark/src/old/target/debug/.cargo-lock, nth: 1, when: before}, advance: 20m}\n";
-    let host = common::host(&model(extra));
-    let report = executor::ensure(&host, &request(), &[1000], &mut |_| {});
+    // The second target must be eligible too, or the no-next-work check is
+    // vacuous. It is newer than `old`, but still well beyond idle-3d.
+    let new_target_time = "2026-10-02T00:00:00Z";
+    let plan_host = common::host(&model_with_new_target_time("", new_target_time));
+    let plan = executor::dry_run(&plan_host, &request(), &[1000], &mut |_| {});
+    assert!(
+        plan.plan.iter().any(|entry| {
+            entry.candidate == Path::new("/home/mark/src/new/target") && entry.reason.is_none()
+        }),
+        "the later candidate must be eligible: {plan:#?}"
+    );
+    let host = common::host(&model_with_new_target_time(extra, new_target_time));
+    let mut logs = Vec::new();
+    let report = executor::ensure(&host, &request(), &[1000], &mut |line| {
+        logs.push(line.to_owned())
+    });
     assert_eq!(report.status, Status::Deadline, "{report:#?}");
     assert_eq!(report.exit_code(), 124);
     assert!(
@@ -204,6 +222,11 @@ fn a_blocking_candidate_operation_reports_overrun_and_starts_no_next_candidate()
     assert!(
         host.stat_path(Path::new("/home/mark/src/new/target"))
             .is_some()
+    );
+    assert!(
+        logs.iter()
+            .all(|line| !line.contains("reclaiming /home/mark/src/new/target")),
+        "the next candidate must not even enter reclaim: {logs:#?}"
     );
 }
 
