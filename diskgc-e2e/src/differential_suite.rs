@@ -29,6 +29,8 @@ const BUN_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/bun-cache-match.yaml");
 const MYPY_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/mypy-cache-match.yaml");
+const PYTHON_IN_USE_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
 const DANGLING_LINK: &str = "/home/tester/project/dangling-link";
 
 // The fresh kernel tmpfs gives every new inode a current ctime. These
@@ -68,6 +70,26 @@ pub fn bun_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRes
 /// Exercise a cache marker and explicit old mtimes on both hosts.
 pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
     replay_vector(ctx, MYPY_VECTOR, false)
+}
+
+/// The checked-in in-use vector names a nominal Python executable. The
+/// container probe supplies the same open-file and cwd evidence, so remove
+/// only the nominal executable/mapping/environment fields before replay.
+/// The unchanged expected in-use verdict still comes from the vector.
+pub fn python_in_use_vector_matches_linux(ctx: &Ctx) -> TestResult {
+    replay_model(ctx, python_in_use_probe_vector()?, false)
+}
+
+fn python_in_use_probe_vector() -> Result<ProfileVector, String> {
+    let mut vector = ProfileVector::parse(PYTHON_IN_USE_VECTOR)?;
+    vector.host.tree.remove(Path::new("/usr/bin/python"));
+    let [process] = vector.host.processes.as_mut_slice() else {
+        return Err("Python in-use vector must have exactly one process".into());
+    };
+    process.exe = None;
+    process.maps.clear();
+    process.environ.clear();
+    Ok(vector)
 }
 
 macro_rules! replay_fixture {
@@ -215,7 +237,7 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
     // shared no-op regression must fail here, before comparing the hosts.
     vector.check(&Library::builtin().map_err(|e| e.to_string())?)?;
     let model = model_outcome(&vector)?;
-    model_materialize::materialize(ctx, &vector.host)?;
+    let materialized = model_materialize::materialize(ctx, &vector.host)?;
     if with_dangling_link {
         require_present(&[DANGLING_LINK.into()])?;
     }
@@ -247,7 +269,9 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
     let mut dry_args = vec!["--dry-run"];
     dry_args.extend(&args);
     let dry = ensure_run(ctx, &dry_args)?;
+    materialized.assert_holding()?;
     let reclaim = ensure_run(ctx, &args)?;
+    materialized.assert_holding()?;
     oracle.judge_runs(&[&dry, &reclaim])?.assert_clean()?;
     dry.expect_code(0)?;
     let linux = linux_outcome(
@@ -265,6 +289,7 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
         model == linux,
         "ModelHost/LinuxHost differential mismatch:\nmodel: {model:#?}\nlinux: {linux:#?}"
     );
+    materialized.finish()?;
     Ok(())
 }
 
@@ -560,6 +585,16 @@ mod tests {
                 .check(&library)
                 .expect("independent generated expectation");
         }
+    }
+
+    #[test]
+    fn projected_in_use_vector_keeps_its_independent_expected_verdict() {
+        let mut vector = python_in_use_probe_vector().expect("checked-in in-use vector");
+        adapt_home_mount(&mut vector);
+        model_materialize::validate(&vector.host).expect("probe-supported process shape");
+        vector
+            .check(&Library::builtin().expect("built-in library"))
+            .expect("the checked-in in-use expectation");
     }
 
     #[test]

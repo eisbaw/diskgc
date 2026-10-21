@@ -2,19 +2,67 @@
 //! container's scratch tmpfs. Validation runs before any fixture write, so
 //! model-only fields cannot silently change the meaning of a replay.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use diskgc_model::host::CACHEDIR_TAG_CONTENT;
-use diskgc_model::spec::{FileSpec, GateSpec, HostModel, NodeSpec, Special, WallTime};
+use diskgc_model::spec::{
+    FileSpec, GateSpec, HostModel, NodeSpec, ProcAccess, ProcessSpec, Special, WallTime,
+};
 
+use crate::holder::Holder;
 use crate::scratch::{self, Scratch};
 use crate::suite::Ctx;
 use crate::{Owner, TESTER};
 
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
+
+/// Fixture helpers stay alive until both LinuxHost runs and the deletion
+/// oracle finish. Dropping this guard closes their stdin and waits for them.
+pub struct Materialized {
+    holders: Vec<(Holder, PathBuf)>,
+}
+
+impl Materialized {
+    /// Verify the kernel still exposes each promised open file. A helper
+    /// that exits between planning and reclaim would make an in-use test
+    /// vacuous; this check makes that failure explicit.
+    pub fn assert_holding(&self) -> Result<(), String> {
+        for (holder, path) in &self.holders {
+            let fd_dir = format!("/proc/{}/fd", holder.pid());
+            let entries =
+                fs::read_dir(&fd_dir).map_err(|error| format!("list helper {fd_dir}: {error}"))?;
+            let mut found = false;
+            for entry in entries {
+                let entry = entry.map_err(|error| format!("read helper {fd_dir}: {error}"))?;
+                let target = fs::read_link(entry.path()).map_err(|error| {
+                    format!("read helper fd {}: {error}", entry.path().display())
+                })?;
+                if target == *path {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(format!(
+                    "helper pid {} no longer holds {} open",
+                    holder.pid(),
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<(), String> {
+        for (holder, _) in self.holders {
+            holder.finish()?;
+        }
+        Ok(())
+    }
+}
 
 /// A model field that cannot be represented by this container replay.
 /// Returns the field path, rather than silently skipping the scenario.
@@ -57,11 +105,11 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             "virtual call-time races cannot be replayed as a fixture",
         );
     }
-    if !model.processes.is_empty() || !model.locks.is_empty() {
-        return unsupported(
-            "processes/locks",
-            "helper-process replay is not implemented",
-        );
+    if !model.locks.is_empty() {
+        return unsupported("locks", "flock replay is not implemented");
+    }
+    for (index, process) in model.processes.iter().enumerate() {
+        validate_process(index, process)?;
     }
     if model.mounts.is_empty() {
         return unsupported("mounts", "a root mount is required");
@@ -118,6 +166,49 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
         }
         let _ = destination(path)?;
         validate_node(path, node)?;
+    }
+    Ok(())
+}
+
+fn validate_process(index: usize, process: &ProcessSpec) -> Result<(), String> {
+    let field = format!("processes[{index}]");
+    let unsupported = |name: &str, reason: &str| {
+        Err(format!(
+            "materialize(model): {field}.{name} is model-only: {reason}"
+        ))
+    };
+    if process.proc != ProcAccess::Readable {
+        return unsupported("proc", "the ready helper must be inspectable");
+    }
+    if process.exe.is_some() || !process.maps.is_empty() || !process.environ.is_empty() {
+        return unsupported(
+            "exe/maps/environ",
+            "the harness probe has its own executable, mappings and environment",
+        );
+    }
+    if process.root.is_some()
+        || process.name.is_some()
+        || process.uid.is_some_and(|uid| uid != TESTER.uid)
+        || process.euid.is_some_and(|uid| uid != TESTER.uid)
+        || process.gid.is_some_and(|gid| gid != TESTER.gid)
+        || process.non_dumpable
+        || process.uid_map.is_some()
+        || process.privileged
+    {
+        return unsupported(
+            "root/name/ids/dumpability/uid_map/privileged",
+            "the tester helper has fixed process credentials and namespace",
+        );
+    }
+    if process.fds.len() != 1 || process.fds[0].deleted || process.fds[0].fd.is_some() {
+        return unsupported(
+            "fds",
+            "the helper holds exactly one named, existing file at a kernel-selected fd",
+        );
+    }
+    destination(&process.fds[0].path)?;
+    if let Some(cwd) = &process.cwd {
+        destination(cwd)?;
     }
     Ok(())
 }
@@ -240,7 +331,7 @@ fn destination(path: &Path) -> Result<(&'static str, &Path), String> {
 /// Call only inside the interlocked e2e container. The required model clock
 /// and nominal mount size/device/id are deliberately not materialized;
 /// differential callers must compare outcomes that do not depend on them.
-pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<(), String> {
+pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String> {
     validate(model)?;
     for (path, node) in &model.tree {
         if path == Path::new("/run/diskgc/lock") {
@@ -268,7 +359,29 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<(), String> {
         };
         apply_mtimes(scratch, relative, node)?;
     }
-    Ok(())
+    let mut holders = Vec::new();
+    for process in &model.processes {
+        let path = &process.fds[0].path;
+        let path_text = path
+            .to_str()
+            .ok_or("materialize(model): non-UTF-8 process fd path")?;
+        let cwd_text = process
+            .cwd
+            .as_deref()
+            .unwrap_or(Path::new("/"))
+            .to_str()
+            .ok_or("materialize(model): non-UTF-8 process cwd")?;
+        let holder = Holder::tester(ctx, &["hold", path_text, cwd_text], &[]).map_err(|error| {
+            format!(
+                "materialize(model): helper for pid {}: {error}",
+                process.pid
+            )
+        })?;
+        holders.push((holder, path.clone()));
+    }
+    let materialized = Materialized { holders };
+    materialized.assert_holding()?;
+    Ok(materialized)
 }
 
 fn checked_mtime(mtime: WallTime, path: &Path) -> Result<std::time::SystemTime, String> {
@@ -388,13 +501,15 @@ fn create_file(scratch: &Scratch, rel: &str, file: &FileSpec) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use diskgc_model::profile_vector::ProfileVector;
-    use diskgc_model::spec::StatxField;
+    use diskgc_model::spec::{ProcAccess, StatxField};
 
     use super::*;
 
     const VECTOR: &str = include_str!(
         "../../crates/diskgc-model/tests/models/profiles/python-pycache-checkout.yaml"
     );
+    const IN_USE_VECTOR: &str =
+        include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
 
     #[test]
     fn rejects_model_only_fields_before_materialization() {
@@ -430,6 +545,37 @@ mod tests {
             validate(&vector.host)
                 .unwrap_err()
                 .contains("must match the harness-provisioned")
+        );
+    }
+
+    #[test]
+    fn process_preflight_accepts_only_a_reproducible_open_file_holder() {
+        let mut vector = ProfileVector::parse(IN_USE_VECTOR).expect("checked-in vector");
+        vector.host.tree.remove(Path::new("/usr/bin/python"));
+        vector.host.mounts[1].at = "/home/tester".into();
+        vector.host.mounts[1].fs = "tmpfs".into();
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("exe/maps/environ is model-only")
+        );
+        let process = &mut vector.host.processes[0];
+        process.exe = None;
+        process.maps.clear();
+        process.environ.clear();
+        validate(&vector.host).expect("one tester helper holding one named file");
+        vector.host.processes[0].fds[0].deleted = true;
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("fds is model-only")
+        );
+        vector.host.processes[0].fds[0].deleted = false;
+        vector.host.processes[0].proc = ProcAccess::Denied;
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("proc is model-only")
         );
     }
 }

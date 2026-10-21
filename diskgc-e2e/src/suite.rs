@@ -376,6 +376,12 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::mypy_vector_matches_linux_outcomes_and_deletion_diff,
     },
     Test {
+        name: "python_in_use_vector_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::python_in_use_vector_matches_linux,
+    },
+    Test {
         name: "generated_python_models_match_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,
