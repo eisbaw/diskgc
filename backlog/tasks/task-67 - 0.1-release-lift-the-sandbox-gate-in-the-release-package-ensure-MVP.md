@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-21 13:20'
+updated_date: '2026-10-21 19:55'
 labels:
   - wave-2
   - release
@@ -22,6 +22,7 @@ dependencies:
   - TASK-64
   - TASK-84
   - TASK-88
+  - TASK-106
 references:
   - PRD.md
   - docs/safety.md
@@ -52,6 +53,7 @@ The v1 release (task-49) builds on this one.
 - [ ] #4 A dry-run on a real machine is reviewed before the first real run
 - [ ] #5 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
 - [ ] #6 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
+- [ ] #7 The 0.1 release operator can set checkouts: allow or refuse for an admitted built-in profile in YAML without replacing its find, kind, or action. With no operator setting, the built-in default applies; profiles without an explicit exception refuse checkouts. This setting cannot admit excluded profiles, Docker or command actions, or arbitrary delete patterns. Disposable-container tests cover checkout-marker fixtures for admitted built-ins and verify excluded npm and uv profiles stay excluded.
 <!-- AC:END -->
 
 ## Implementation Notes
