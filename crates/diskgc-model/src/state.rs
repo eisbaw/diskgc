@@ -204,6 +204,8 @@ pub struct Ref {
 
 #[derive(Debug, Clone)]
 pub struct Proc {
+    /// Monotonic process incarnation, independent of pid and virtual time.
+    pub generation: u64,
     pub exe: Option<Ref>,
     pub cwd: Ref,
     pub root: Ref,
@@ -272,6 +274,8 @@ pub struct State {
     /// The open file descriptions diskgc itself holds (one per `ModelFd`).
     pub own_ofds: BTreeSet<u64>,
     pub procs: BTreeMap<u32, Proc>,
+    /// Never reused, even when a process exits and its pid is recycled.
+    pub next_process_generation: u64,
     /// diskgc's own pid (listed with the processes, see `ModelHost`).
     pub own_pid: u32,
     /// diskgc's own `uid_map` (`None`: unreadable).
@@ -303,6 +307,7 @@ impl State {
             ofds: BTreeMap::new(),
             own_ofds: BTreeSet::new(),
             procs: BTreeMap::new(),
+            next_process_generation: 1,
             own_pid: DEFAULT_OWN_PID,
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
             own_uid: DEFAULT_ID,
@@ -752,11 +757,13 @@ impl State {
         if self.procs.contains_key(&child) || child == self.own_pid {
             return Err(Fault::Model(format!("fork: pid {child} exists")));
         }
-        let copy = self
+        let mut copy = self
             .procs
             .get(&pid)
             .ok_or_else(|| Fault::Model(format!("fork: no process {pid}")))?
             .clone();
+        copy.generation = self.next_process_generation;
+        self.next_process_generation += 1;
         self.procs.insert(child, copy);
         Ok(())
     }

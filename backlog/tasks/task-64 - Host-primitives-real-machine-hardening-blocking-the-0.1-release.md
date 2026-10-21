@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-21 08:22'
+updated_date: '2026-10-21 12:40'
 labels:
   - wave-1
   - hardening
@@ -67,7 +67,7 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A (blocking or hanging opens and stats: D3, D5, #26): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #1 A (blocking or hanging opens and stats: D3, D5, #26): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #2 B (path resolution: D4, D6): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
@@ -121,6 +121,12 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-21 group G candidate integrated: Checker rescans for every candidate after an unsettled scan; Linux reader uses pidfd signal 0 to recognize released processes on kernels where poll lacks hang-up and polls briefly before another incomplete round. Model/Linux regressions added for 16-listing bound, rescan, release and poll. Nix cargo check --tests, fmt and diff checks passed in isolated tree. Full E2E, old-kernel and loaded-CI measurements, and independent review pending; persistent fork storm still conservatively reports in_use. AC7 remains unchecked.
 
 2026-10-21 integrated gate: E/I/J changes passed full just e2e (152/152 Nix-container, 6/6 native Docker), workspace tests including 40k candidates, and parallel QA/MPED review. Mixed-root preflight now skips foreign devices; protection and source root discovery screen full mount ancestry before opening, with ModelHost and dead-FUSE container regressions. AC5, AC9 and AC10 checked; A, F, G, H and final release review remain open.
+
+2026-10-21 Group A audit: LinuxHost opens read targets with O_NONBLOCK|O_NOCTTY (host.rs:612-630), proc fd link stat uses DONT_SYNC (host.rs:472-485), and statx suppresses automount (host.rs:1105-1145). FIFO container probe host_suite.rs:83 bites the blocking-open case. docs/safety.md:45-46, 590-599, 874-885 and 1636-1653 explicitly state remaining dead-NFS/autofs/kernel limits. Thus AC1's fix-or-document wording is met; this does not claim all blocking filesystem calls can be interrupted.
+
+2026-10-21 group H stress evidence: built diskgc-linux unit-test binary with `nix develop -c cargo test -p diskgc-linux --lib --locked --no-run`, then ran `host::tests::a_lock_conflicts_until_its_fd_is_closed --exact --test-threads=1` 600 times at xargs -P4 inside a disposable rootless Podman Debian container, with a 15s per-iteration and 180s outer bound. Result: 600/600 runs, 0 failures, 8.9s wall time. No diskgc deletion or host cleanup. `nix develop -c just e2e-one host_flock_release_only_by_close` passed 1/1 in a disposable Nix container (2.32s); release probe recorded Busy before release, 300ms deadline at 300ms, release-during-wait acquisition at 350ms, and clean deletion oracle. The historical 1/600 failure did not reproduce; exact original cause remains unconfirmed. AC8 stays unchecked pending integrated review/decision on that uncertainty.
+
+2026-10-21 PID identity integration: Host now pins each process incarnation for the scan lifetime (Linux held pidfd, ModelHost monotonic generation). Scan detects release/replacement even when numeric PID listing is unchanged, relists after a listed process vanishes before identity open, retains observed uses, and treats pin/check errors or persistent churn as unsettled/in_use. ModelHost regressions include unchanged-number reuse, vanished-before-pin inherited child, and injected pin/check failures. Full just e2e passed 167/167 Nix and 7/7 native Docker. TID reuse within one clock tick remains explicitly documented in docs/safety.md and uncorrected; AC6 remains open pending release safety decision. H historical 1/600 root cause remains unconfirmed despite 600/600 stress.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

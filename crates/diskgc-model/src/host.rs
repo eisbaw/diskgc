@@ -680,6 +680,7 @@ fn check_openat2(from_root: bool, path: &Path, how: OpenHow) {
 
 impl Host for ModelHost {
     type Fd = ModelFd;
+    type ProcIdentity = (Pid, u64);
 
     fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError> {
         self.call(Op::Mountinfo, None, None, |inner| {
@@ -1176,6 +1177,63 @@ impl Host for ModelHost {
             pids.sort_unstable();
             (Ok(pids), None, "ok".to_owned())
         })
+    }
+
+    fn proc_identity(&self, pid: Pid) -> Result<Self::ProcIdentity, ProcError> {
+        self.call(
+            Op::ProcIdentity,
+            Some(PathBuf::from(format!("/proc/{pid}"))),
+            None,
+            |inner| {
+                if let Some(errno) = inner.injected.take() {
+                    return (
+                        Err(ProcError::Failed(HostError::errno(
+                            "pidfd_open",
+                            pid,
+                            errno,
+                        ))),
+                        None,
+                        errno.to_string(),
+                    );
+                }
+                match inner.state.procs.get(&pid.0) {
+                    Some(proc) => (
+                        Ok((pid, proc.generation)),
+                        None,
+                        format!("generation {}", proc.generation),
+                    ),
+                    None => (Err(ProcError::Gone), None, "gone".to_owned()),
+                }
+            },
+        )
+    }
+
+    fn proc_identity_released(&self, identity: &Self::ProcIdentity) -> Result<bool, ProcError> {
+        let (pid, generation) = *identity;
+        self.call(
+            Op::ProcIdentityReleased,
+            Some(PathBuf::from(format!("/proc/{pid}"))),
+            None,
+            |inner| {
+                if let Some(errno) = inner.injected.take() {
+                    return (
+                        Err(ProcError::Failed(HostError::errno(
+                            "poll pidfd",
+                            pid,
+                            errno,
+                        ))),
+                        None,
+                        errno.to_string(),
+                    );
+                }
+                let released = inner
+                    .state
+                    .procs
+                    .get(&pid.0)
+                    .is_none_or(|proc| proc.generation != generation);
+                (Ok(released), None, released.to_string())
+            },
+        )
     }
 
     /// For diskgc's own pid: the fds the code under test holds open.

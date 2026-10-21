@@ -838,6 +838,10 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
         "diskgc-core",
         &[
             "[dependencies]",
+            // The report formats the supplied wall-clock timestamp as UTC.
+            // It uses no timezone database or filesystem lookup.
+            "jiff.workspace = true",
+            "workspace: jiff = { version = \"0.2\", default-features = false, features = [\"std\"] }",
             "serde.workspace = true",
             "workspace: serde = { version = \"1\", features = [\"derive\"] }",
             "serde-saphyr.workspace = true",

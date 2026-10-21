@@ -410,6 +410,7 @@ pub fn stdio_control(hit: &Hit) {
 
 impl<H: Host> Host for Controlled<H> {
     type Fd = H::Fd;
+    type ProcIdentity = H::ProcIdentity;
 
     fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError> {
         self.before("mountinfo");
@@ -503,6 +504,16 @@ impl<H: Host> Host for Controlled<H> {
     fn pids(&self) -> Result<Vec<Pid>, HostError> {
         self.before("pids");
         self.host.pids()
+    }
+
+    fn proc_identity(&self, pid: Pid) -> Result<Self::ProcIdentity, ProcError> {
+        self.before("proc_identity");
+        self.host.proc_identity(pid)
+    }
+
+    fn proc_identity_released(&self, identity: &Self::ProcIdentity) -> Result<bool, ProcError> {
+        self.before("proc_identity_released");
+        self.host.proc_identity_released(identity)
     }
 
     fn proc_fds(&self, pid: Pid) -> Result<Vec<ProcFd>, ProcError> {

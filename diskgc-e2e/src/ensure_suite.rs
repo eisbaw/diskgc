@@ -886,7 +886,7 @@ pub fn ensure_flag_errors_are_single_json_reports(ctx: &Ctx) -> TestResult {
     let judged = oracle.judge_runs(&runs.iter().map(|(_, _, _, run)| run).collect::<Vec<_>>())?;
     for (args, expected, measured, run) in &runs {
         run.expect_code(2)?;
-        let result = report(&run)?;
+        let result = report(run)?;
         let message = result["errors"][0]["message"]
             .as_str()
             .ok_or("usage error has no message")?;

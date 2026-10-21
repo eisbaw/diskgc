@@ -269,12 +269,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     );
     expect_skipped(
         &r,
-        &[
-            (&busy_targets[0], "in_use"),
-            (&busy_targets[1], "locked"),
-            (&idle[0], "empty"),
-            (&idle[1], "empty"),
-        ],
+        &[(&busy_targets[0], "in_use"), (&busy_targets[1], "locked")],
         "B",
     )?;
     expect_summary(&b.run, &r)?;
@@ -302,6 +297,11 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     ensure!(
         human.stdout.starts_with("exhausted: ") && human.stdout.lines().count() == 1,
         "human mode prints a one-line summary: {:?}",
+        human.stdout
+    );
+    ensure!(
+        human.stdout.contains("2 skipped"),
+        "human summary counts only the busy targets, not reclaimed empty targets: {:?}",
         human.stdout
     );
     expect_unchanged(&busy_before, "the human-mode run")?;
@@ -772,7 +772,8 @@ fn kept(report: &Value) -> Result<Vec<(PathBuf, String)>, String> {
 /// Fails unless the report's `skipped` holds exactly `want` (candidate,
 /// reason), in any order: the busy targets kept for what keeps them (the
 /// running test binary `in_use`, the paused build `locked`: Reclaim
-/// protocol, steps 2 and 1), and targets an earlier run reclaimed, `empty`.
+/// protocol, steps 2 and 1). Already reclaimed, empty Cargo targets are
+/// omitted by a live ensure.
 fn expect_skipped(report: &Value, want: &[(&Path, &str)], case: &str) -> TestResult {
     let got = kept(report)?;
     ensure!(

@@ -177,6 +177,9 @@ fn a_missing_given_config_is_exit_2() {
     assert_eq!(out.status.code(), Some(2));
     let report = json(&out);
     assert_eq!(report["status"], "usage_error");
+    assert!(report["started_at"].is_null());
+    assert!(report["duration_ms"].is_null());
+    assert_eq!(report["version"], env!("CARGO_PKG_VERSION"));
     let message = report["errors"][0]["message"].as_str().expect("message");
     assert!(
         message.contains("/nonexistent-diskgc-test/config.yaml") && message.contains("ENOENT"),

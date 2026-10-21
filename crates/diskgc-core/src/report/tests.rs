@@ -28,6 +28,8 @@ fn documented() -> Value {
 /// (two plan entries: one eligible, one skipped).
 fn full() -> Report {
     let mut r = Report::new(Status::Met, Some(&PathBuf::from("/home/mark/src/app")));
+    r.started_at = Some("2026-10-21T12:00:00Z".into());
+    r.duration_ms = Some(123);
     r.seed = Some(42);
     r.mount = Some("/".into());
     r.min_free_bytes = Some(50);
@@ -52,6 +54,7 @@ fn full() -> Report {
         candidate: "/t".into(),
         avail_delta_bytes: Some(-3),
         duration_ms: 4,
+        idle_age_seconds: Some(9),
         count: 1,
     }];
     r.skipped = vec![SkipEntry {
@@ -61,6 +64,8 @@ fn full() -> Report {
         count: 1,
         examples: vec!["/u".into()],
         reason: "locked",
+        detail: Some("another process holds the lock".into()),
+        estimated_bytes: Some(4096),
     }];
     r.held_by_deleted_files = vec![HeldEntry {
         pid: 42,
@@ -224,6 +229,8 @@ fn skip(
         candidate,
         count: 1,
         reason,
+        detail: None,
+        estimated_bytes: None,
     }
 }
 
@@ -236,12 +243,16 @@ fn skips_aggregate_at_21_per_tier_profile_and_reason() {
     assert_eq!(emitted(&r)["skipped"].as_array().unwrap().len(), 20);
     assert_eq!(emitted(&r)["skipped"][0]["candidate"], "/p/0");
 
-    r.skipped
-        .push(skip("/p/20", "tier-a", "profile-a", "locked"));
+    let mut last = skip("/p/20", "tier-a", "profile-a", "locked");
+    last.detail = Some("a particular holder".into());
+    last.estimated_bytes = Some(4096);
+    r.skipped.push(last);
     let compact = emitted(&r);
     assert_eq!(compact["skipped"].as_array().unwrap().len(), 1);
     assert_eq!(compact["skipped"][0]["candidate"], "");
     assert_eq!(compact["skipped"][0]["count"], 21);
+    assert!(compact["skipped"][0]["detail"].is_null());
+    assert!(compact["skipped"][0]["estimated_bytes"].is_null());
     assert_eq!(
         compact["skipped"][0]["examples"].as_array().unwrap().len(),
         20
@@ -270,6 +281,7 @@ fn actions_keep_1000_details_then_one_counted_summary() {
             candidate: format!("/p/{n}").into(),
             avail_delta_bytes: Some(1),
             duration_ms: 2,
+            idle_age_seconds: None,
             count: 1,
         })
         .collect();
@@ -283,6 +295,7 @@ fn actions_keep_1000_details_then_one_counted_summary() {
         candidate: "/p/1000".into(),
         avail_delta_bytes: Some(-3),
         duration_ms: 4,
+        idle_age_seconds: Some(25),
         count: 1,
     });
     let over_limit = emitted(&r);
@@ -291,6 +304,7 @@ fn actions_keep_1000_details_then_one_counted_summary() {
     assert_eq!(over_limit["actions"][1000]["count"], 1);
     assert_eq!(over_limit["actions"][1000]["avail_delta_bytes"], -3);
     assert_eq!(over_limit["actions"][1000]["duration_ms"], 4);
+    assert!(over_limit["actions"][1000]["idle_age_seconds"].is_null());
 
     r.actions.push(ActionEntry {
         tier: "other-tier".to_owned(),
@@ -298,6 +312,7 @@ fn actions_keep_1000_details_then_one_counted_summary() {
         candidate: "/q".into(),
         avail_delta_bytes: Some(5),
         duration_ms: 6,
+        idle_age_seconds: None,
         count: 1,
     });
     let over_limit = emitted(&r);

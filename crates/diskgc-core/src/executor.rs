@@ -78,6 +78,31 @@ fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
     report
 }
 
+/// Measure an entire public run, including early returns and final signal
+/// precedence. The wall clock is used only to label its start; elapsed time
+/// comes from the host's monotonic clock.
+fn timed_report<H: Host>(host: &H, run: impl FnOnce() -> Report) -> Report {
+    let wall = host.wall_clock();
+    let started = host.now();
+    let mut report = run();
+    report.started_at = i32::try_from(wall.nanos)
+        .ok()
+        .and_then(|nanos| jiff::Timestamp::new(wall.secs, nanos).ok())
+        .map(|timestamp| timestamp.to_string());
+    report.duration_ms = u64::try_from(host.now().saturating_since(started).as_millis()).ok();
+    signal_report(host, report)
+}
+
+fn age_seconds(now: Timestamp, newest: Option<Timestamp>) -> Option<u64> {
+    let newest = newest?;
+    let nanos = (i128::from(now.secs) - i128::from(newest.secs)) * 1_000_000_000
+        + i128::from(now.nanos)
+        - i128::from(newest.nanos);
+    (nanos >= 0)
+        .then(|| u64::try_from(nanos / 1_000_000_000).ok())
+        .flatten()
+}
+
 /// Record the stage that was in progress when a cooperative deadline was
 /// crossed. Its caller decides whether a final space sample is still needed.
 fn record_deadline_overrun<H: Host>(
@@ -900,6 +925,8 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 count: 1,
                 examples: Vec::new(),
                 reason: Reason::OtherFs.as_str(),
+                detail: None,
+                estimated_bytes: None,
             }),
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
             Err(ResolveError::UnsafePath { why, .. }) => error(format!(
@@ -1122,7 +1149,7 @@ pub fn ensure<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    signal_report(host, ensure_inner(host, request, owners, log))
+    timed_report(host, || ensure_inner(host, request, owners, log))
 }
 
 fn ensure_inner<H: Delete>(
@@ -1246,6 +1273,8 @@ fn ensure_inner<H: Delete>(
                     count: 1,
                     examples: Vec::new(),
                     reason: Reason::Missing.as_str(),
+                    detail: None,
+                    estimated_bytes: None,
                 });
                 report.avail_after_bytes = Some(report.avail_before_bytes.expect("measured"));
                 report.status = conclude(
@@ -1472,10 +1501,9 @@ pub fn ensure_grouped<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    signal_report(
-        host,
-        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, log),
-    )
+    timed_report(host, || {
+        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, log)
+    })
 }
 
 fn ensure_grouped_inner<H: Delete>(
@@ -1730,6 +1758,8 @@ fn ensure_grouped_inner<H: Delete>(
                         count: 1,
                         examples: Vec::new(),
                         reason: Reason::Missing.as_str(),
+                        detail: None,
+                        estimated_bytes: None,
                     });
                     prepared.push(None);
                     continue;
@@ -1783,6 +1813,8 @@ fn ensure_grouped_inner<H: Delete>(
                         count: 1,
                         examples: Vec::new(),
                         reason: skip.reason,
+                        detail: Some(skip.detail.clone()),
+                        estimated_bytes: None,
                     });
                     prepared.push(None);
                     continue;
@@ -1888,7 +1920,7 @@ pub fn dry_run<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    signal_report(host, dry_run_inner(host, request, owners, log))
+    timed_report(host, || dry_run_inner(host, request, owners, log))
 }
 
 fn dry_run_inner<H: Host>(
@@ -2212,10 +2244,9 @@ pub fn dry_run_grouped<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    signal_report(
-        host,
-        dry_run_grouped_inner(host, request, tiers, tier_timeouts, owners, log),
-    )
+    timed_report(host, || {
+        dry_run_grouped_inner(host, request, tiers, tier_timeouts, owners, log)
+    })
 }
 
 fn dry_run_grouped_inner<H: Host>(
@@ -3322,6 +3353,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             count: 1,
             examples: Vec::new(),
             reason,
+            detail: Some(detail.to_owned()),
+            estimated_bytes: None,
         });
     }
 
@@ -3514,6 +3547,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 started,
                 before,
                 expected_bytes: None,
+                tallied_bytes: None,
+                idle_age_seconds: None,
                 removed_entries: 0,
                 attempted_command: attempted,
                 end,
@@ -3528,6 +3563,22 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn skip_as(&mut self, candidate: &Path, profile: &str, skip: &Skip) {
+        self.skip_as_tallied(candidate, profile, skip, None);
+    }
+
+    fn skip_as_tallied(
+        &mut self,
+        candidate: &Path,
+        profile: &str,
+        skip: &Skip,
+        estimated_bytes: Option<u64>,
+    ) {
+        // Reclaimed Cargo targets keep their profile directories and lock
+        // files. They remain discoverable, but have no work left to skip on
+        // each later ensure. A dry-run records them in `plan` separately.
+        if matches!(self.tier.source, SourceKind::CargoTarget) && skip.reason == Reason::Empty {
+            return;
+        }
         log_skip(self.log, self.tier, skip);
         self.report.skipped.push(SkipEntry {
             tier: self.tier.name.clone(),
@@ -3536,6 +3587,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             count: 1,
             examples: Vec::new(),
             reason: skip.reason.as_str(),
+            detail: Some(skip.detail.clone()),
+            estimated_bytes,
         });
     }
 
@@ -3644,6 +3697,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 count: 1,
                 examples: Vec::new(),
                 reason: skip.reason.as_str(),
+                detail: Some(skip.detail.clone()),
+                estimated_bytes: None,
             });
         }
         for skip in &misconfigured {
@@ -3857,6 +3912,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 ),
             });
             let started = self.host.now();
+            let idle_age_seconds = age_seconds(
+                self.host.wall_clock(),
+                tally.as_ref().and_then(|t| t.last_build),
+            );
             // judged_last_build None: an accepted tally only orders; the
             // protocol's own recheck under the locks and the idle
             // requirement decide.
@@ -3891,6 +3950,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 started,
                 before: avail,
                 expected_bytes: tally.as_ref().map(|t| t.bytes),
+                tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                idle_age_seconds,
                 removed_entries: done.removed_entries,
                 attempted_command: false,
                 end: done.end,
@@ -4074,6 +4135,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 ),
             });
             let started = self.host.now();
+            let idle_age_seconds = age_seconds(
+                self.host.wall_clock(),
+                tally.as_ref().and_then(|t| t.newest_change),
+            );
             let outcome = match action {
                 Action::Delete { make_writable } => {
                     let done = fs_kind::reclaim_alternatives_checked(
@@ -4090,6 +4155,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         started,
                         before: avail,
                         expected_bytes: tally.as_ref().map(|t| t.bytes),
+                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                        idle_age_seconds,
                         removed_entries: done.removed_entries,
                         attempted_command: false,
                         end: done.end,
@@ -4121,6 +4188,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         started,
                         before: avail,
                         expected_bytes: Some(self.measured.target.saturating_sub(avail)),
+                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                        idle_age_seconds,
                         removed_entries: 0,
                         attempted_command: done.attempted,
                         end: done.end,
@@ -4396,6 +4465,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 })
                 .collect();
             let started = self.host.now();
+            let idle_age_seconds = age_seconds(
+                self.host.wall_clock(),
+                tally.as_ref().and_then(|t| t.newest_change),
+            );
             let Action::Delete { make_writable } = self.tier.action else {
                 unreachable!("filesystem unions admit only delete")
             };
@@ -4428,6 +4501,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 started,
                 before: avail,
                 expected_bytes: tally.as_ref().map(|t| t.bytes),
+                tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                idle_age_seconds,
                 removed_entries: done.removed_entries,
                 attempted_command: false,
                 end: done.end,
@@ -4585,12 +4660,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 candidate: candidate.to_owned(),
                 avail_delta_bytes: delta,
                 duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
+                idle_age_seconds: outcome.idle_age_seconds,
                 count: 1,
             });
         }
         match outcome.end {
             ReclaimEnd::Complete => {}
-            ReclaimEnd::Skipped(skip) => self.skip_as(candidate, profile, &skip),
+            ReclaimEnd::Skipped(skip) => {
+                self.skip_as_tallied(candidate, profile, &skip, outcome.tallied_bytes)
+            }
             ReclaimEnd::Failed { path, error } => {
                 // An error for this candidate only (an `ENOTEMPTY` from a
                 // file created after its walk, ...): reported, never
@@ -4623,6 +4701,10 @@ struct Outcome {
     before: u64,
     /// Allocated bytes this action was expected to release, if tallied.
     expected_bytes: Option<u64>,
+    /// Candidate size only after a complete tally; a command's expected
+    /// target delta is deliberately separate from this.
+    tallied_bytes: Option<u64>,
+    idle_age_seconds: Option<u64>,
     removed_entries: usize,
     attempted_command: bool,
     end: ReclaimEnd,

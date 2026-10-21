@@ -181,6 +181,7 @@ dependencies = [
 name = "diskgc-core"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "proptest",
  "serde",
  "serde-saphyr",

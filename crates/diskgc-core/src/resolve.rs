@@ -529,6 +529,7 @@ mod tests {
 
     impl Host for Scripted {
         type Fd = usize;
+        type ProcIdentity = ();
 
         fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError> {
             Ok(self.mounts.clone())
@@ -606,6 +607,12 @@ mod tests {
             unreachable!()
         }
         fn pids(&self) -> Result<Vec<Pid>, HostError> {
+            unreachable!()
+        }
+        fn proc_identity(&self, _: Pid) -> Result<Self::ProcIdentity, ProcError> {
+            unreachable!()
+        }
+        fn proc_identity_released(&self, _: &Self::ProcIdentity) -> Result<bool, ProcError> {
             unreachable!()
         }
         fn proc_fds(&self, _: Pid) -> Result<Vec<ProcFd>, ProcError> {

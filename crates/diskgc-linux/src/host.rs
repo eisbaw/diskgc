@@ -1047,6 +1047,7 @@ fn read_through_live_task(
 
 impl Host for LinuxHost {
     type Fd = LinuxFd;
+    type ProcIdentity = (Pid, OwnedFd);
 
     fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError> {
         let path = "self/mountinfo";
@@ -1356,6 +1357,14 @@ impl Host for LinuxHost {
 
     fn pids(&self) -> Result<Vec<Pid>, HostError> {
         proc_pids(self.root())
+    }
+
+    fn proc_identity(&self, pid: Pid) -> Result<Self::ProcIdentity, ProcError> {
+        open_pidfd(pid).map(|fd| (pid, fd))
+    }
+
+    fn proc_identity_released(&self, identity: &Self::ProcIdentity) -> Result<bool, ProcError> {
+        Ok(poll_pidfd(identity.0, &identity.1, Duration::ZERO)? == PidfdPoll::Hangup)
     }
 
     fn proc_fds(&self, pid: Pid) -> Result<Vec<ProcFd>, ProcError> {

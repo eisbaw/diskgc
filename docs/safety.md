@@ -17,6 +17,10 @@ stated here, once.
 - **Checked at deletion time.** The index only orders work
   ([architecture.md](architecture.md)); every check below runs on the
   current filesystem state immediately before acting.
+- **Report time formatting.** The core uses jiff only to format the host's
+  supplied wall-clock timestamp as UTC in JSON. It does not ask jiff to
+  read a timezone database or the filesystem; deletion still goes through
+  the checked host port and sandbox gate.
 - **Not a defence against a hostile local user.** diskgc protects against
   deleting things that are in use, belong to others, or lie outside
   candidates. It assumes no process deliberately races it by renaming or
@@ -570,14 +574,16 @@ once; none of them makes diskgc take a live process for gone):
    right after the first directory read of the exec'ing thread's fd table,
    a table larger than one read, and that entry's own lookups bound to the
    leader's tid), take a prefix of that table for the whole;
-4. the pidfd pins a process during each reader, not its number across the
-   scan. The scan indexes PID numbers, and every read under `/proc/<pid>`
-   goes by number: when a listed process is released and another one gets
-   its number before a later read or after its last read without a `Gone`
-   observation, the newcomer may be missed (reported as not using files it
-   uses) until the next scan lists it. The one-second scan freshness bound
-   and 500 ms deleting-checker reuse bound limit exposure time, but do not
-   give a churn-rate guarantee;
+4. a scan now holds one pidfd for each listed process incarnation and checks
+   whether it was released after its readers and before accepting the final
+   listing. A replacement with the same numeric PID is read again. The
+   `/proc/<pid>` paths used by the readers still go by number, so a read
+   crossing a replacement can include the newcomer's evidence; this is
+   conservative for a found use. If a pin cannot be opened or checked, or
+   incarnations keep changing, the scan is unsettled and blocks deletion.
+   A low file-descriptor limit can therefore prevent reclamation on a busy
+   host. A process that appears after the final identity check belongs to
+   the check-to-delete race in item 5;
 5. the check and the deletion are not atomic: a process that starts using
    a candidate after its in-use check (including a thread that acquires
    files after a round's count) is not seen. The check is kept fresh (see
@@ -1146,7 +1152,9 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   kernel does not report, or a last build in the future, passes no idle
   filter (`unsupported_fs`, `future_time`): an unknown age is never idle.
 - **Empty:** a target whose profile directories hold nothing but lock files
-  is `empty` and not re-listed on every run.
+  is `empty`. It remains discoverable, but a live `ensure` omits it from
+  `skipped` and the human skipped count. A `--dry-run` plan may list it as
+  ineligible with reason `empty`.
 - The check made for a plan (`--dry-run`, `survey`) takes no lock; whether
   the locks are free is the Reclaim protocol's step 1.
 

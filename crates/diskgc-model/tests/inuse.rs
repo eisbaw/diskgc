@@ -834,6 +834,108 @@ fn a_reused_pid_is_read_as_a_new_process() {
     );
 }
 
+/// Numeric pid listings can be identical even when a settled process was
+/// replaced. The old scan could stop at the second listing without ever
+/// reading the replacement that inherited the candidate's fd.
+#[test]
+fn a_reused_settled_pid_with_unchanged_listing_is_read_again() {
+    let host = model(&format!(
+        "{}events:
+  - {{at: {{op: pids, nth: 2, when: before}}, open: {{pid: 11, path: /tmp/c/a}}}}
+  - {{at: {{op: pids, nth: 2, when: before}}, exit: 10}}
+  - {{at: {{op: pids, nth: 2, when: before}}, fork: {{pid: 11, child: 10}}}}
+  - {{at: {{op: pids, nth: 2, when: before}}, close: {{pid: 11, path: /tmp/c/a}}}}
+",
+        processes(&[process(10, &[]), process(11, &[])])
+    ));
+    let (result, scan) = check_c(&host, true);
+    let skip = in_use(result);
+    assert!(
+        skip.detail.starts_with("pid 10 "),
+        "{skip}; {:?}",
+        scan.notes()
+    );
+    assert!(
+        host.trace_count(Op::ProcIdentity) >= 3,
+        "replacement must be pinned and read"
+    );
+}
+
+/// A process can fork a child and exit after it was listed but before its
+/// identity can be opened. Its child was absent from that listing, so a
+/// failed identity open must force a fresh listing, even with no read batch.
+#[test]
+fn a_process_gone_before_identity_open_does_not_end_the_scan() {
+    let host = model(&format!(
+        "{}events:
+  - {{at: {{op: proc_identity, nth: 1, when: before}}, open: {{pid: 10, path: /tmp/c/a}}}}
+  - {{at: {{op: proc_identity, nth: 1, when: before}}, fork: {{pid: 10, child: 11}}}}
+  - {{at: {{op: proc_identity, nth: 1, when: before}}, close: {{pid: 10, path: /tmp/c/a}}}}
+  - {{at: {{op: proc_identity, nth: 1, when: before}}, exit: 10}}
+",
+        processes(&[process(10, &[])])
+    ));
+    let (result, scan) = check_c(&host, true);
+    let skip = in_use(result);
+    assert!(
+        skip.detail.starts_with("pid 11 "),
+        "{skip}; {:?}",
+        scan.notes()
+    );
+    assert!(
+        host.trace_count(Op::Pids) >= 2,
+        "a vanished pin forces relisting"
+    );
+}
+
+#[test]
+fn an_identity_probe_error_blocks_every_candidate_without_aborting_the_scan() {
+    let host = model(&format!(
+        "{}events:
+  - {{at: {{op: proc_identity_released, nth: 1, when: before}}, fail: EIO}}
+",
+        processes(&[process(10, &[])])
+    ));
+    let (result, scan) = check_c(&host, true);
+    let skip = in_use(result);
+    assert!(
+        skip.detail
+            .contains("process identity could not be checked"),
+        "{skip}"
+    );
+    assert!(
+        scan.notes()
+            .iter()
+            .any(|note| note.contains("process identity could not be checked")),
+        "{:?}",
+        scan.notes()
+    );
+}
+
+#[test]
+fn an_identity_open_error_also_blocks_every_candidate() {
+    let host = model(&format!(
+        "{}events:
+  - {{at: {{op: proc_identity, nth: 1, when: before}}, fail: EIO}}
+",
+        processes(&[process(10, &[])])
+    ));
+    let (result, scan) = check_c(&host, true);
+    let skip = in_use(result);
+    assert!(
+        skip.detail
+            .contains("process identity could not be checked"),
+        "{skip}"
+    );
+    assert!(
+        scan.notes()
+            .iter()
+            .any(|note| note.contains("pidfd_open 10: EIO")),
+        "{:?}",
+        scan.notes()
+    );
+}
+
 /// A process that could not be read is read again after a pause; one that
 /// exits meanwhile is gone and blocks nothing.
 #[test]

@@ -448,7 +448,7 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,\n`bound_unix_sockets`.",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,\n`bound_unix_sockets`, `proc_identity`, or\n`proc_identity_released`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"
@@ -904,6 +904,8 @@
         "kernel_release",
         "hostname",
         "pids",
+        "proc_identity",
+        "proc_identity_released",
         "proc_fds",
         "proc_links",
         "proc_maps",

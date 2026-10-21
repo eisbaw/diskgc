@@ -205,6 +205,8 @@ pub struct ActionEntry {
     /// before or after it failed: never a made-up 0.
     pub avail_delta_bytes: Option<i64>,
     pub duration_ms: u64,
+    /// Age of the candidate's newest change at its completed tally.
+    pub idle_age_seconds: Option<u64>,
     pub count: u64,
 }
 
@@ -218,6 +220,10 @@ pub struct SkipEntry {
     pub count: u64,
     pub examples: Vec<PathBuf>,
     pub reason: &'static str,
+    /// Human diagnostic from the refusal, when one was available.
+    pub detail: Option<String>,
+    /// A complete tally made before this refusal, when available.
+    pub estimated_bytes: Option<u64>,
 }
 
 /// A process holding deleted files on the requested filesystem
@@ -251,6 +257,10 @@ pub struct ErrorEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub status: Status,
+    /// UTC start of the run, when the wall clock was representable.
+    pub started_at: Option<String>,
+    /// Monotonic elapsed time for the whole run, when measured.
+    pub duration_ms: Option<u64>,
     /// The seed used to shuffle configured random groups, if any.
     pub seed: Option<u64>,
     /// The mount point of `path`'s filesystem; `None` before it was
@@ -289,6 +299,7 @@ impl Report {
                 duration_ms: overflow
                     .iter()
                     .fold(0_u64, |sum, action| sum.saturating_add(action.duration_ms)),
+                idle_age_seconds: None,
                 count: overflow
                     .iter()
                     .fold(0_u64, |sum, action| sum.saturating_add(action.count)),
@@ -337,6 +348,8 @@ impl Report {
                         count: *count,
                         examples: examples.clone(),
                         reason: skip.reason,
+                        detail: None,
+                        estimated_bytes: None,
                     });
                 }
             } else {
@@ -350,6 +363,8 @@ impl Report {
     pub fn new(status: Status, path: Option<&Path>) -> Self {
         Self {
             status,
+            started_at: None,
+            duration_ms: None,
             seed: None,
             mount: None,
             path: path.map(Path::to_owned),
@@ -395,6 +410,12 @@ impl Report {
         let opt_u64 = |v: Option<u64>| Json::opt(v, Json::U64);
         Json::Obj(vec![
             ("status", Json::str(self.status.as_str())),
+            (
+                "started_at",
+                Json::opt(self.started_at.as_deref(), Json::str),
+            ),
+            ("duration_ms", opt_u64(self.duration_ms)),
+            ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             ("mount", Json::opt(self.mount.as_deref(), path)),
             ("path", Json::opt(self.path.as_deref(), path)),
             ("seed", Json::opt(self.seed, Json::U64)),
@@ -452,6 +473,7 @@ impl Report {
                                     Json::opt(a.avail_delta_bytes, Json::I64),
                                 ),
                                 ("duration_ms", Json::U64(a.duration_ms)),
+                                ("idle_age_seconds", opt_u64(a.idle_age_seconds)),
                                 ("count", Json::U64(a.count)),
                             ])
                         })
@@ -474,6 +496,8 @@ impl Report {
                                     Json::Arr(s.examples.iter().map(|e| path(e)).collect()),
                                 ),
                                 ("reason", Json::str(s.reason)),
+                                ("detail", Json::opt(s.detail.as_deref(), Json::str)),
+                                ("estimated_bytes", opt_u64(s.estimated_bytes)),
                             ])
                         })
                         .collect(),

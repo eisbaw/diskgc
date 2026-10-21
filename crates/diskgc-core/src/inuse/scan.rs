@@ -1,10 +1,10 @@
-//! The process scan: every visible process read once through the `/proc`
+//! The process scan: every visible process incarnation read through the `/proc`
 //! readers of the port, then classified (docs/safety.md, In use).
 //!
 //! Shape of a scan: rounds, each one a listing of the processes, then the
 //! reads it calls for, until a listing calls for nothing:
 //!
-//! 1. **Every pid new in the listing is read.** A process P listed and then
+//! 1. **Every new process incarnation in the listing is read.** A process P listed and then
 //!    read after it forked C (C inherits P's fd on X) and closed X shows
 //!    nothing, but C was born before P's read, so a later listing shows it
 //!    and it is read. This is the process-level analogue of the per-task
@@ -29,7 +29,10 @@
 //! before a listing, never after the last one, so a child forked during
 //! them is listed and read. Every read only adds: the uses found by any
 //! read of a process count, also when a later read of it fails or finds it
-//! gone. After [`MAX_LISTINGS`] listings that each brought new pids, the
+//! gone. A scan-lifetime identity pin distinguishes a replacement even when
+//! the numeric pid listing is unchanged; release is checked after reads
+//! and before accepting the final listing. After [`MAX_LISTINGS`] listings
+//! that each brought new incarnations, the
 //! scan is *unsettled* and every candidate counts as in use; listings made
 //! only for re-reads do not count against that bound (they are bounded by
 //! the re-reads per process).
@@ -40,7 +43,7 @@
 //! [`Host::proc_views`], which `LinuxHost` runs on several processes at
 //! once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,12 +54,11 @@ use crate::host::{
 
 use super::environ;
 
-/// The most listings that bring new pids a scan makes before it gives up
+/// The most listings that bring new process incarnations a scan makes before it gives up
 /// on a process list that keeps growing. Listings that only lead to
 /// re-reads of processes already listed are not counted: those are bounded
-/// by the re-reads per process ([`REREAD_PAUSES`]; once more for a pid
-/// found gone and listed again). A machine that starts processes faster
-/// than a listing and the reads of its new pids take is unsettled; every
+/// by the re-reads per process ([`REREAD_PAUSES`]). A machine that starts processes faster
+/// than a listing and the reads of its new incarnations take is unsettled; every
 /// candidate then counts as in use.
 pub const MAX_LISTINGS: usize = 16;
 
@@ -240,9 +242,6 @@ struct Entry {
     settled: bool,
     /// When the next re-read is due.
     due: Option<MonoTime>,
-    /// The pid was found gone and listed again (reused) in this scan, and
-    /// is being read as a new process.
-    reused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -324,36 +323,78 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
     // [`Excuse::Privileged`]). Unknown: no such excuse.
     let own_status = host.proc_status(own).ok();
     let mut entries: BTreeMap<Pid, Entry> = BTreeMap::new();
+    let mut identities: BTreeMap<Pid, H::ProcIdentity> = BTreeMap::new();
     let mut listings = 0;
     let mut growing = 0;
-    let unsettled = loop {
+    macro_rules! identity_or_unsettled {
+        ($label:lifetime, $answer:expr) => {
+            match $answer {
+                Ok(value) => value,
+                Err(error) => {
+                    break $label Some(format!(
+                        "a process identity could not be checked: {}",
+                        identity_error(error)
+                    ))
+                }
+            }
+        };
+    }
+    let unsettled = 'scan: loop {
         let listing = host.pids()?;
+        let listed: BTreeSet<Pid> = listing.iter().copied().collect();
         listings += 1;
         let mut batch: Vec<Pid> = Vec::new();
+        let mut vanished_before_read = 0;
         for pid in listing {
             if pid == own {
                 continue;
             }
-            match entries.get_mut(&pid) {
-                None => {
-                    entries.insert(pid, Entry::default());
-                    batch.push(pid);
+            let released = if let Some(identity) = identities.get(&pid) {
+                identity_or_unsettled!('scan, host.proc_identity_released(identity))
+            } else {
+                true
+            };
+            if released {
+                identities.remove(&pid);
+                let entry = entries.entry(pid).or_default();
+                *entry = Entry {
+                    found: std::mem::take(&mut entry.found),
+                    ..Entry::default()
+                };
+                match host.proc_identity(pid) {
+                    Ok(identity) => {
+                        identities.insert(pid, identity);
+                        batch.push(pid);
+                    }
+                    Err(ProcError::Gone) => {
+                        entry.latest = Some(Latest::Gone);
+                        entry.settled = true;
+                        vanished_before_read += 1;
+                    }
+                    Err(e) => identity_or_unsettled!('scan, Err::<(), _>(e)),
                 }
-                // Found gone, listed again: the pid was reused (or the
-                // process is a zombie not yet reaped). Read it as new,
-                // once per scan, keeping what was found under it.
-                Some(e) if matches!(e.latest, Some(Latest::Gone)) && !e.reused => {
-                    *e = Entry {
-                        found: std::mem::take(&mut e.found),
-                        reused: true,
-                        ..Entry::default()
-                    };
-                    batch.push(pid);
-                }
-                Some(_) => {}
             }
         }
-        let new = batch.len();
+        // A process absent from the listing may have been released while
+        // another process forked a replacement at the same number. Clear
+        // its settled state now; the replacement must be seen in a later
+        // listing before this scan can finish.
+        let mut absent_released = Vec::new();
+        for (pid, identity) in &identities {
+            if !listed.contains(pid)
+                && identity_or_unsettled!('scan, host.proc_identity_released(identity))
+            {
+                absent_released.push(*pid);
+            }
+        }
+        for pid in absent_released {
+            identities.remove(&pid);
+            let entry = entries.get_mut(&pid).expect("pinned process was listed");
+            entry.latest = Some(Latest::Gone);
+            entry.settled = true;
+            vanished_before_read += 1;
+        }
+        let new = batch.len() + vanished_before_read;
         let pending: Vec<(Pid, MonoTime)> = entries
             .iter()
             .filter(|(_, e)| !e.settled && e.attempts > 0)
@@ -364,18 +405,33 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
                 )
             })
             .collect();
-        if batch.is_empty() && pending.is_empty() {
-            break None;
-        }
         if new > 0 {
             growing += 1;
             if growing == MAX_LISTINGS {
                 break Some(format!(
-                    "the process list was still growing after {MAX_LISTINGS} listings that \
-                     brought new pids ({new} new in the last one): a process the scan did not \
+                    "the process list was still growing or replacing pids after {MAX_LISTINGS} listings that \
+                     brought new process incarnations ({new} new in the last one): a process the scan did not \
                      read could have inherited any file from one it read"
                 ));
             }
+        }
+        if batch.is_empty() && pending.is_empty() {
+            if vanished_before_read > 0 {
+                // A listed process vanished before it could be read. A
+                // child it forked can be absent from this listing.
+                continue;
+            }
+            // A release after the listing (including a replacement with
+            // exactly the same numeric pid set) invalidates the apparent
+            // fixed point. Re-list before accepting it.
+            let mut released = false;
+            for identity in identities.values() {
+                released |= identity_or_unsettled!('scan, host.proc_identity_released(identity));
+            }
+            if released {
+                continue;
+            }
+            break None;
         }
         let mut now = host.now();
         if batch.is_empty() {
@@ -404,6 +460,19 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
         for (pid, view) in batch.iter().zip(views) {
             let entry = entries.get_mut(pid).expect("listed");
             entry.merge(outcome(*pid, view));
+            let released = if let Some(identity) = identities.get(pid) {
+                identity_or_unsettled!('scan, host.proc_identity_released(identity))
+            } else {
+                false
+            };
+            if released {
+                // The read may have crossed into a replacement. Keep its
+                // uses, but discard all settled/excuse state and re-list.
+                identities.remove(pid);
+                entry.latest = Some(Latest::Gone);
+                entry.settled = true;
+                continue;
+            }
             settle(
                 host,
                 *pid,
@@ -412,6 +481,18 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
                 own_status.as_ref(),
                 host.effective_uid() == 0,
             );
+            let released = if let Some(identity) = identities.get(pid) {
+                identity_or_unsettled!('scan, host.proc_identity_released(identity))
+            } else {
+                false
+            };
+            if released {
+                identities.remove(pid);
+                entry.latest = Some(Latest::Gone);
+                entry.settled = true;
+                entry.excuses.clear();
+                continue;
+            }
             if !entry.settled {
                 read_back.push(*pid);
             }
@@ -459,6 +540,17 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
         environ_failed,
         gone,
     })
+}
+
+fn identity_error(error: ProcError) -> HostError {
+    match error {
+        ProcError::Gone => HostError::invalid(
+            "check process identity",
+            "held process",
+            "a held process identity returned Gone instead of a release result",
+        ),
+        ProcError::Denied(e) | ProcError::Failed(e) => e,
+    }
 }
 
 /// The excuse of a process whose status was read `excuses.len()` times in

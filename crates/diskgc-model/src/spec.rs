@@ -463,7 +463,8 @@ pub struct EventSpec {
     /// name (e.g. `EIO`, `EACCES`), without acting.
     /// Only with an `op` trigger, `when: before`, and an op that can fail
     /// this way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,
-    /// `bound_unix_sockets`.
+    /// `bound_unix_sockets`, `proc_identity`, or
+    /// `proc_identity_released`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,
     /// A new filesystem is mounted on an existing directory (a user's
@@ -599,6 +600,8 @@ pub enum Op {
     KernelRelease,
     Hostname,
     Pids,
+    ProcIdentity,
+    ProcIdentityReleased,
     ProcFds,
     ProcLinks,
     ProcMaps,
@@ -634,6 +637,8 @@ impl Op {
             Self::KernelRelease => "kernel_release",
             Self::Hostname => "hostname",
             Self::Pids => "pids",
+            Self::ProcIdentity => "proc_identity",
+            Self::ProcIdentityReleased => "proc_identity_released",
             Self::ProcFds => "proc_fds",
             Self::ProcLinks => "proc_links",
             Self::ProcMaps => "proc_maps",

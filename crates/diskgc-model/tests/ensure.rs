@@ -92,6 +92,34 @@ fn cargo(min: &str, target: Option<&str>) -> Request {
 }
 
 #[test]
+fn run_report_carries_utc_start_duration_and_build_version() {
+    let host = host(&yaml(true, ""));
+    let report = dry_run(&host, &cargo("100G", None));
+    let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+    assert_eq!(json["started_at"], "2026-10-15T03:00:00Z");
+    assert!(json["duration_ms"].as_u64().is_some());
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn action_age_uses_the_clock_before_reclaim_even_if_reclaim_advances_time() {
+    let host = host(&yaml(
+        true,
+        "events:\n  - {at: {op: unlinkat, nth: 1, when: after}, advance: 1h}\n",
+    ));
+    let mut request = cargo("12G", Some("19G"));
+    request.timeout = Some(Duration::from_secs(2 * 3600));
+    let report = ensure(&host, &request);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(!report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        report.actions[0].idle_age_seconds,
+        Some(14 * 86_400 + 3 * 3600)
+    );
+    assert!(report.duration_ms.unwrap() >= 3_600_000);
+}
+
+#[test]
 fn cargo_protect_uses_its_own_bound_roots_in_dry_run() {
     let config = config::parse(
         Path::new("/tmp/protect.yaml"),
@@ -1952,6 +1980,39 @@ fn a_cargo_target_with_a_marker_between_root_and_its_entries_is_refused() {
 /// A profile directory holding nothing but its lock file, every time `at`.
 fn empty_profile(at: &str) -> String {
     format!("{{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}}}")
+}
+
+/// A reclaimed Cargo target remains discoverable through its lock files.
+/// Later live runs have no work to skip, whether they tally first or judge
+/// directly under the Cargo locks. A plan can still show why it is ineligible.
+#[test]
+fn a_reclaimed_cargo_target_is_not_a_skip_on_later_ensures() {
+    for budget in [None, Some(Duration::ZERO)] {
+        let host = host(&yaml(true, ""));
+        let mut req = cargo("12G", Some("19G"));
+        req.tally_budget = budget;
+        let first = ensure(&host, &req);
+        assert_eq!(first.status, Status::Met, "{budget:?}: {first:#?}");
+        assert_eq!(first.actions.len(), 2, "{budget:?}: {first:#?}");
+
+        let req = cargo("100G", None);
+        let plan = dry_run(&host, &req);
+        for target in [OLD, NEW] {
+            assert_eq!(
+                plan_reason(&plan, target),
+                Some(Some("empty")),
+                "{budget:?}: {plan:#?}"
+            );
+        }
+        for _ in 0..2 {
+            let later = ensure(&host, &req);
+            assert_eq!(later.status, Status::Exhausted, "{budget:?}: {later:#?}");
+            assert!(later.actions.is_empty(), "{budget:?}: {later:#?}");
+            assert!(later.skipped.is_empty(), "{budget:?}: {later:#?}");
+            assert!(later.errors.is_empty(), "{budget:?}: {later:#?}");
+            assert!(later.summary().unwrap().contains("0 skipped"));
+        }
+    }
 }
 
 /// task-81: targets whose profile directories inside a checkout's

@@ -3,10 +3,10 @@ id: TASK-85
 title: >-
   JSON report for CI dashboards: duration, start time, version, skip evidence
   and sizes
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-19 02:14'
-updated_date: '2026-10-19 02:54'
+updated_date: '2026-10-21 12:40'
 labels:
   - cli
   - ux
@@ -40,6 +40,8 @@ Decide at the freeze which of these belong in the contract (a field each, null w
 
 <!-- SECTION:NOTES:BEGIN -->
 task-26 depends on this task: each item is decided at the freeze.
+
+2026-10-21 provisional contract implementation: JSON emits started_at (UTC RFC 3339 string or null before executor/unrepresentable wall clock), duration_ms (u64 or null), version (always string), skipped.detail (advisory string or null), skipped.estimated_bytes (complete prior tally or null), and actions.idle_age_seconds (prior tally change/build age sampled before action, or null). docs/reference and focused report/model/CLI tests cover types, null rules, grouping, and a clock advance during reclaim. Full just e2e passed 167/167 Nix and 7/7 native Docker. Structured process blocker remains undecided: generic in_use may lack a unique process and flock cannot identify its holder; do not parse detail text into PID. AC/DoD remain open until TASK26 freeze and explicit decision.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

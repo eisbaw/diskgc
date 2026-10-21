@@ -1000,6 +1000,7 @@ struct Gated(ModelHost);
 
 impl Host for Gated {
     type Fd = ModelFd;
+    type ProcIdentity = <ModelHost as Host>::ProcIdentity;
 
     fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError> {
         self.0.mountinfo()
@@ -1065,6 +1066,12 @@ impl Host for Gated {
     }
     fn pids(&self) -> Result<Vec<Pid>, HostError> {
         self.0.pids()
+    }
+    fn proc_identity(&self, pid: Pid) -> Result<Self::ProcIdentity, ProcError> {
+        self.0.proc_identity(pid)
+    }
+    fn proc_identity_released(&self, identity: &Self::ProcIdentity) -> Result<bool, ProcError> {
+        self.0.proc_identity_released(identity)
     }
     fn proc_fds(&self, pid: Pid) -> Result<Vec<ProcFd>, ProcError> {
         self.0.proc_fds(pid)

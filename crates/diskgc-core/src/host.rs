@@ -801,6 +801,11 @@ pub trait Host {
     /// lock taken on it).
     type Fd: fmt::Debug;
 
+    /// A scan-lifetime reference to one process incarnation. The host must
+    /// keep the identity pinned until this value is dropped, even if the
+    /// numeric pid is subsequently reused.
+    type ProcIdentity: fmt::Debug;
+
     /// The process's mount table (`/proc/self/mountinfo`), unescaped.
     fn mountinfo(&self) -> Result<Vec<MountEntry>, HostError>;
 
@@ -949,6 +954,15 @@ pub trait Host {
     /// The visible processes (thread-group ids; the readers below cover
     /// every task of each).
     fn pids(&self) -> Result<Vec<Pid>, HostError>;
+
+    /// Pin the process currently named by `pid`. `Gone` means there was no
+    /// live process at this instant. Other errors fail the scan closed.
+    fn proc_identity(&self, pid: Pid) -> Result<Self::ProcIdentity, ProcError>;
+
+    /// Whether that exact incarnation has been released. A zombie still
+    /// occupying its pid is not released; a replacement cannot make this
+    /// return false. Unknown answers fail the scan closed.
+    fn proc_identity_released(&self, identity: &Self::ProcIdentity) -> Result<bool, ProcError>;
 
     /// The open fds of every task of the process (tasks may have fd tables
     /// of their own), each statted through its link, without duplicates.

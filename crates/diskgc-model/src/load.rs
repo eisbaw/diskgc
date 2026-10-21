@@ -592,9 +592,12 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
             },
             Into::into,
         );
+        let generation = state.next_process_generation;
+        state.next_process_generation += 1;
         state.procs.insert(
             spec.pid,
             Proc {
+                generation,
                 exe,
                 cwd,
                 root: proc_root,
@@ -857,6 +860,8 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::Fchmod,
             Op::BoundUnixSockets,
             Op::Statvfs,
+            Op::ProcIdentity,
+            Op::ProcIdentityReleased,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}
