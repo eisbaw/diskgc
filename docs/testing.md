@@ -425,6 +425,17 @@ it under `crates/diskgc-model/tests/regressions/`, where it is replayed.
 Regression files pin the host-model schema and are migrated when it
 changes.
 
+The 0.1 property suite runs five generated properties with 32 cases each in
+`just check` and 1,024 each in `just soak` (`DISKGC_PROPERTY_CASES` overrides
+the count), plus a saved regression replay. It covers independent checks of
+the filesystem deletion trace against modelled paths, owners, symlinks and
+mounts; preservation of generated Cargo lock files during reclaim; exit-code
+precedence; supported filesystem selection expressions; and ordered dry-run
+agreement on stable, non-overlapping candidates. The index-authority property and
+indexed/best-fit dry-run cases follow the index implementation; the complete
+random profile/expression selection reference belongs to TASK-16. A failing
+generated case prints its shrunk host model as YAML for a regression fixture.
+
 **Profile golden sets.** Each built-in profile has a fixture tree and a
 golden set of what it matches there. Any change to that set fails CI unless
 the profile was renamed ([reference.md](reference.md#built-in-profile-library)).

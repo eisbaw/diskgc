@@ -759,10 +759,13 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
     .map_err(|error| format!("pin fixture's original Docker socket: {error}"))?;
 
     let ready = ctx.scratch.path("docker-prune-ready");
+    let ready_tmp = ctx.scratch.path("docker-prune-ready.tmp");
     let gate = ctx.scratch.path("docker-prune-go");
     let bin = ctx.scratch.mkdir("docker-bin", 0o755, TESTER)?;
     let script = format!(
-        "#!/bin/sh\nif [ \"$2\" = image ] && [ \"$3\" = prune ]; then\n  case \"$1\" in --host=unix:///proc/self/fd/*) ;; *) exit 91 ;; esac\n  printf '%s\\n' \"$PPID\" > {}\n  while [ ! -e {} ]; do sleep 0.02; done\nfi\nexec /usr/local/bin/docker \"$@\"\n",
+        "#!/bin/sh\nif [ \"$2\" = image ] && [ \"$3\" = prune ]; then\n  case \"$1\" in --host=unix:///proc/self/fd/*) ;; *) exit 91 ;; esac\n  case \"$PPID\" in ''|*[!0-9]*) exit 92 ;; esac\n  printf '%s\\n' \"$PPID\" > {} || exit 92\n  mv {} {} || exit 92\n  while [ ! -e {} ]; do sleep 0.02; done\nfi\nexec /usr/local/bin/docker \"$@\"\n",
+        ready_tmp.display(),
+        ready_tmp.display(),
         ready.display(),
         gate.display()
     );

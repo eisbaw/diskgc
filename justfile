@@ -103,7 +103,7 @@ gcroots-drop:
 
 # Property tests with many cases.
 soak:
-    @just _not-yet "the soak property suite" task-24
+    DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test properties --locked
 
 # cargo-fuzz targets, in a nightly dev shell.
 fuzz:
