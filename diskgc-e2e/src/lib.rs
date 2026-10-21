@@ -52,6 +52,7 @@ pub mod cargo_suite;
 pub mod cargo_target_suite;
 pub mod cargo_under_test;
 pub mod cli_contract_suite;
+pub mod cli_runtime_suite;
 pub mod controlled;
 pub mod docker_suite;
 pub mod docker_vector_suite;

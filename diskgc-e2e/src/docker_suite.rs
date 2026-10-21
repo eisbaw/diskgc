@@ -796,7 +796,7 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
             .concurrent_writer("/run/docker")
             .concurrent_writer("/run/docker.sock"),
     )?;
-    let spawned = under_test::spawn_as_tester_with_env(
+    let mut spawned = under_test::spawn_as_tester_with_env(
         &ctx.ledger,
         &ctx.records,
         Path::new("/"),
@@ -804,7 +804,8 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
         &ctx.diskgc(),
         &args,
     )?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let gate_started = Instant::now();
+    let deadline = gate_started + Duration::from_secs(10);
     let parent_pid: u32 = loop {
         match std::fs::read_to_string(&ready) {
             Ok(text) => {
@@ -815,12 +816,29 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("read Docker prune gate: {error}")),
         }
+        if spawned.finished()? {
+            let run = spawned.wait()?;
+            oracle.judge(&run)?.assert_clean()?;
+            return Err(format!(
+                "Docker prune child did not reach test gate after {:.2?}; traced run exited {:?}, signal {:?}; stdout: {}; stderr: {}",
+                gate_started.elapsed(),
+                run.code,
+                run.signal,
+                run.stdout,
+                run.stderr
+            ));
+        }
         ensure!(
             Instant::now() < deadline,
-            "Docker prune child did not reach test gate"
+            "Docker prune child did not reach test gate after {:.2?}; traced run is still running",
+            gate_started.elapsed()
         );
         std::thread::sleep(Duration::from_millis(10));
     };
+    info!(
+        "Docker prune child reached test gate in {:.2?}",
+        gate_started.elapsed()
+    );
     ensure!(
         docker_lock_held()?,
         "host lock was free while Docker prune child waited"

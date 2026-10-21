@@ -7,7 +7,216 @@ use serde_json::Value;
 use crate::ensure_suite::{ensure_run, report};
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
+use crate::under_test;
 use crate::{TESTER, ensure};
+
+fn expect_reclaim_result(run: &under_test::Run, result: &Value) -> TestResult {
+    run.expect_code(1)?;
+    ensure!(
+        result["status"] == "exhausted",
+        "reclaim did not exhaust below the pressure goal: {result}"
+    );
+    Ok(())
+}
+
+/// Without a selected profile, ensure needs an installed policy. The
+/// disposable test home and image have neither user nor system config.
+pub fn ensure_without_config_or_select_is_usage_error(ctx: &Ctx) -> TestResult {
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(ctx, &["--json", "--min-free", "100%", "/tmp"])?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(2)?;
+    let result = report(&run)?;
+    ensure!(
+        result["status"] == "usage_error"
+            && result["actions"].as_array().is_some_and(Vec::is_empty)
+            && result["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no configuration file found")
+                    && message.contains("ensure without --select needs one")),
+        "ensure without a policy was not refused: {result}"
+    );
+    Ok(())
+}
+
+/// Normal lookup selects the user's policy, an environment-selected policy
+/// takes precedence over it, and an explicit flag takes precedence over the
+/// environment. Each run reclaims only the candidate named by its policy.
+pub fn config_environment_and_flag_precedence_reclaim_selected_policy(ctx: &Ctx) -> TestResult {
+    let searched = ctx.scratch.mkdir("cli-searched-policy", 0o755, TESTER)?;
+    let from_env = ctx.scratch.mkdir("cli-env-policy", 0o755, TESTER)?;
+    let from_flag = ctx.scratch.mkdir("cli-flag-policy", 0o755, TESTER)?;
+    for name in ["cli-searched-policy", "cli-env-policy", "cli-flag-policy"] {
+        ctx.scratch
+            .write_file(&format!("{name}/payload"), &[3; 8192], 0o644, TESTER)?;
+    }
+    // Keep pressure after all three candidates are removed, so each run
+    // must finish exhausted rather than depending on tmpfs free-block rounding.
+    ctx.scratch
+        .write_file("cli-precedence-pressure", &[9; 8192], 0o644, TESTER)?;
+    ctx.home.mkdir(".config", 0o755, TESTER)?;
+    ctx.home.mkdir(".config/diskgc", 0o755, TESTER)?;
+    for (file, name) in [
+        (".config/diskgc/config.yaml", "cli-searched-policy"),
+        ("cli-env-policy.yaml", "cli-env-policy"),
+        ("cli-flag-policy.yaml", "cli-flag-policy"),
+    ] {
+        let policy = format!(
+            "version: 1\nprofiles:\n  - name: {name}\n    find: {{roots: [/tmp], paths: [{name}], type: dir}}\n    action: delete\n    examples: {{match: [/tmp/{name}]}}\ngroups:\n  - name: policy\n    tiers:\n      - name: policy-tier\n        select: profile:{name}\n"
+        );
+        ctx.home
+            .write_file(file, policy.as_bytes(), 0o600, TESTER)?;
+    }
+    let oracle = Oracle::arm(Fixture::new().eligible(searched.clone()))?;
+    let searched_run = ensure_run(
+        ctx,
+        &["--json", "--min-free", "100%", "--timeout", "10s", "/tmp"],
+    )?;
+    oracle.judge(&searched_run)?.assert_clean()?;
+    let searched_report = report(&searched_run)?;
+    expect_reclaim_result(&searched_run, &searched_report)?;
+    ensure!(
+        searched_report["actions"]
+            .as_array()
+            .is_some_and(|actions| {
+                actions.len() == 1
+                    && actions[0]["candidate"] == searched.to_string_lossy().as_ref()
+                    && actions[0]["profile"] == "cli-searched-policy"
+            })
+            && !searched.exists()
+            && from_env.exists()
+            && from_flag.exists(),
+        "default lookup did not load the searched policy: {searched_report}"
+    );
+    let env = [(
+        "DISKGC_CONFIG".to_owned(),
+        "/home/tester/cli-env-policy.yaml".to_owned(),
+    )];
+    let oracle = Oracle::arm(Fixture::new().eligible(from_env.clone()))?;
+    let env_run = under_test::run_as_tester_with_env(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &env,
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&env_run)?.assert_clean()?;
+    let env_report = report(&env_run)?;
+    expect_reclaim_result(&env_run, &env_report)?;
+    ensure!(
+        env_report["actions"].as_array().is_some_and(|actions| {
+            actions.len() == 1
+                && actions[0]["candidate"] == from_env.to_string_lossy().as_ref()
+                && actions[0]["profile"] == "cli-env-policy"
+        }) && !searched.exists()
+            && !from_env.exists()
+            && from_flag.exists(),
+        "DISKGC_CONFIG did not override the searched policy: {env_report}"
+    );
+
+    let oracle = Oracle::arm(Fixture::new().eligible(from_flag.clone()))?;
+    let flag_run = under_test::run_as_tester_with_env(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &env,
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            "/home/tester/cli-flag-policy.yaml",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&flag_run)?.assert_clean()?;
+    let flag_report = report(&flag_run)?;
+    expect_reclaim_result(&flag_run, &flag_report)?;
+    ensure!(
+        flag_report["actions"].as_array().is_some_and(|actions| {
+            actions.len() == 1
+                && actions[0]["candidate"] == from_flag.to_string_lossy().as_ref()
+                && actions[0]["profile"] == "cli-flag-policy"
+        }) && !searched.exists()
+            && !from_flag.exists(),
+        "--config did not override DISKGC_CONFIG: {flag_report}"
+    );
+    Ok(())
+}
+
+/// The same command-line roots cannot be silently ignored by a fixed-root
+/// profile, and a required-root profile cannot run without them.
+pub fn select_roots_requirements_are_usage_errors(ctx: &Ctx) -> TestResult {
+    let candidate = ctx.scratch.mkdir("cli-roots-candidate", 0o755, TESTER)?;
+    ctx.scratch
+        .write_file("cli-roots-candidate/sentinel", b"keep", 0o644, TESTER)?;
+    ctx.home.write_file(
+        "cli-roots-policy.yaml",
+        b"version: 1\nprofiles:\n  - name: cli-fixed-roots\n    find: {roots: [/tmp], paths: [cli-roots-candidate], type: dir}\n    action: delete\n    examples: {match: [/tmp/cli-roots-candidate]}\n  - name: cli-required-roots\n    find: {roots: required, paths: [cli-roots-candidate], type: dir}\n    action: delete\n    examples: {root: /tmp, match: [/tmp/cli-roots-candidate]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let fixed = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/cli-roots-policy.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cli-fixed-roots",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ],
+    )?;
+    let required = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/cli-roots-policy.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cli-required-roots",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge_runs(&[&fixed, &required])?.assert_clean()?;
+    for (run, expected) in [(&fixed, "fixed roots"), (&required, "no roots were given")] {
+        run.expect_code(2)?;
+        let result = report(run)?;
+        ensure!(
+            result["status"] == "usage_error"
+                && result["actions"].as_array().is_some_and(Vec::is_empty)
+                && result["errors"][0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected)),
+            "--roots validation missed {expected}: {result}"
+        );
+    }
+    ensure!(
+        candidate.join("sentinel").exists(),
+        "invalid --roots command changed candidate"
+    );
+    Ok(())
+}
 
 /// Full ensure must reject a symlink at PATH itself or an intermediate
 /// component before considering reclaim. Neither case may mutate the target.
@@ -185,5 +394,60 @@ pub fn no_index_matches_current_dry_run_plan(ctx: &Ctx) -> TestResult {
         candidate.join("payload").exists(),
         "dry-run removed candidate"
     );
+    Ok(())
+}
+
+/// Dry-run classifies a candidate without attempting its directory flock.
+/// The harness holds a shared lock as container root, outside the selected
+/// owner's process scan, while the tester-owned candidate remains eligible.
+pub fn dry_run_plans_flocked_candidate_as_eligible(ctx: &Ctx) -> TestResult {
+    let candidate = ctx.scratch.mkdir("cli-dry-locked", 0o755, TESTER)?;
+    let sentinel = ctx
+        .scratch
+        .write_file("cli-dry-locked/payload", &[5; 8192], 0o644, TESTER)?;
+    ctx.home.write_file(
+        "cli-dry-locked.yaml",
+        b"version: 1\nprofiles:\n  - name: cli-dry-locked\n    find: {roots: [/tmp], paths: [cli-dry-locked], type: dir}\n    action: delete\n    examples: {match: [/tmp/cli-dry-locked]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let lock = std::fs::File::open(&candidate)
+        .map_err(|error| format!("open candidate {}: {error}", candidate.display()))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared)
+        .map_err(|error| format!("flock candidate {}: {error}", candidate.display()))?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--config",
+            "/home/tester/cli-dry-locked.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cli-dry-locked",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(0)?;
+    let result = report(&run)?;
+    ensure!(
+        result["status"] == "dry_run"
+            && result["plan"].as_array().is_some_and(|plan| {
+                plan.len() == 1
+                    && plan[0]["candidate"] == candidate.to_string_lossy().as_ref()
+                    && plan[0]["eligible"] == true
+                    && plan[0]["reason"].is_null()
+            })
+            && result["actions"].as_array().is_some_and(Vec::is_empty),
+        "dry-run classified a flocked candidate as locked: {result}"
+    );
+    ensure!(
+        sentinel.exists() && candidate.exists(),
+        "dry-run removed the flocked candidate"
+    );
+    drop(lock);
     Ok(())
 }

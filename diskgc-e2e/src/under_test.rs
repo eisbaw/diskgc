@@ -461,6 +461,15 @@ fn spawn_traced<S: AsRef<OsStr>>(
 }
 
 impl Spawned {
+    /// Whether strace and the code under test have exited. The caller must
+    /// still call `wait` and pass the resulting run to the deletion oracle.
+    pub fn finished(&mut self) -> Result<bool, String> {
+        self.strace
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|error| format!("check traced process {:?}: {error}", self.argv))
+    }
+
     /// The pid of strace, the parent of the code under test.
     fn strace_pid(&self) -> u32 {
         self.strace.id()

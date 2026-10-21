@@ -252,3 +252,150 @@ pub fn sigterm_stubborn_command_child_gets_killed_after_grace(ctx: &Ctx) -> Test
     );
     verdict.assert_clean()
 }
+
+/// A real command removes one entry before the tier deadline expires. The
+/// CLI must publish one complete JSON report for the partial action and
+/// must not proceed to the next candidate.
+pub fn deadline_mid_reclaim_reports_one_json_object(ctx: &Ctx) -> TestResult {
+    partial_command_exit(ctx, "deadline", None, 124, "deadline")
+}
+
+/// Send SIGINT to the diskgc process while its command is between two
+/// removals. The CLI's report and exit code must agree about interruption.
+pub fn sigint_mid_reclaim_reports_one_json_object(ctx: &Ctx) -> TestResult {
+    partial_command_exit(ctx, "sigint", Some(libc::SIGINT), 130, "interrupted")
+}
+
+fn partial_command_exit(
+    ctx: &Ctx,
+    prefix: &str,
+    signal: Option<i32>,
+    expected_code: i32,
+    expected_status: &str,
+) -> TestResult {
+    let first_name = format!("{prefix}-first");
+    let second_name = format!("{prefix}-second");
+    let first = ctx.scratch.mkdir(&first_name, 0o700, TESTER)?;
+    let second = ctx.scratch.mkdir(&second_name, 0o700, TESTER)?;
+    let first_removed =
+        ctx.scratch
+            .write_file(&format!("{first_name}/one"), b"one", 0o600, TESTER)?;
+    let first_kept = ctx
+        .scratch
+        .write_file(&format!("{first_name}/two"), b"two", 0o600, TESTER)?;
+    let second_one =
+        ctx.scratch
+            .write_file(&format!("{second_name}/one"), b"one", 0o600, TESTER)?;
+    let second_two =
+        ctx.scratch
+            .write_file(&format!("{second_name}/two"), b"two", 0o600, TESTER)?;
+    let marker_name = format!("{prefix}-ready");
+    let cleaner = ctx.scratch.write_file(
+        &format!("{prefix}-cleaner"),
+        format!(
+            "#!/bin/sh\nset -eu\n/bin/rm -- \"$1/one\"\nprintf '%s\\n' \"$PPID\" > /tmp/{marker_name}\nwhile :; do /bin/sleep 1; done\n"
+        )
+        .as_bytes(),
+        0o755,
+        TESTER,
+    )?;
+    let profile = format!("{prefix}-command");
+    let config_name = format!("diskgc-{prefix}.yaml");
+    let config = format!(
+        "version: 1\nprofiles:\n  - name: {profile}\n    find: {{roots: [/tmp], paths: [{first_name}, {second_name}], type: dir}}\n    action: {{command: [{}, \"{{path}}\"]}}\n    examples: {{match: [{}, {}]}}\n",
+        cleaner.display(),
+        first.display(),
+        second.display(),
+    );
+    ctx.home
+        .write_file(&config_name, config.as_bytes(), 0o644, TESTER)?;
+
+    let oracle = Oracle::arm(Fixture::new().eligible(first.clone()))?;
+    let config_path = format!("/home/tester/{config_name}");
+    let selection = format!("profile:{profile}");
+    let spawned = ctx.spawn_as_tester(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            &config_path,
+            "--min-free",
+            "100%",
+            "--timeout",
+            if signal.is_some() { "30s" } else { "5s" },
+            "--select",
+            &selection,
+            "/tmp",
+        ],
+    )?;
+
+    let marker = ctx.scratch.path(&marker_name);
+    if let Some(signal) = signal {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pid = loop {
+            match fs::read_to_string(&marker) {
+                Ok(text) if text.trim().is_empty() => {}
+                Ok(text) => {
+                    break text.trim().parse::<i32>().map_err(|error| {
+                        format!(
+                            "cleaner wrote invalid diskgc PID to {}: {error}",
+                            marker.display()
+                        )
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("read {}: {error}", marker.display())),
+            }
+            ensure!(Instant::now() < deadline, "{prefix} command never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        ensure!(pid > 0, "invalid diskgc PID {pid}");
+        ensure!(
+            same_file(Path::new(&format!("/proc/{pid}/exe")), &ctx.diskgc())?,
+            "command parent {pid} is not this diskgc binary"
+        );
+        ensure!(
+            !first_removed.exists() && first_kept.exists(),
+            "SIGINT was not sent during a partially processed first candidate"
+        );
+        let sent = unsafe { libc::kill(pid, signal) };
+        ensure!(
+            sent == 0,
+            "signal {signal} to diskgc PID {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let run = spawned.wait()?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(expected_code)?;
+    let json = report(&run)?;
+    ensure!(json.is_object(), "CLI JSON report is not an object: {json}");
+    ensure!(
+        json["status"] == expected_status,
+        "{prefix} status differs from exit {expected_code}: {json}"
+    );
+    let actions = json["actions"]
+        .as_array()
+        .ok_or("actions is not an array")?;
+    ensure!(
+        actions.len() == 1
+            && actions[0]["candidate"] == first.to_string_lossy().as_ref()
+            && actions[0]["count"] == 1,
+        "partial action was not reported exactly once: {json}"
+    );
+    ensure!(
+        marker.exists(),
+        "{prefix} command did not start before exit"
+    );
+    ensure!(
+        !first_removed.exists()
+            && first_kept.exists()
+            && second_one.exists()
+            && second_two.exists()
+            && second.exists(),
+        "{prefix} exit did not preserve the unfinished candidate and next candidate"
+    );
+    verdict.assert_clean()
+}

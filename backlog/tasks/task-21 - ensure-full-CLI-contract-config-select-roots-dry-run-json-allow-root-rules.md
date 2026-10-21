@@ -3,10 +3,10 @@ id: TASK-21
 title: >-
   ensure: full CLI contract (config, --select/--roots, --dry-run, --json,
   --allow-root rules)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-21 11:20'
+updated_date: '2026-10-21 11:59'
 labels:
   - wave-2
   - cli
@@ -26,7 +26,7 @@ Why: CI hooks and harnesses depend on the exact flags and exit codes. Complete e
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every flag and rule in docs/reference.md#ensure has a test
+- [x] #1 Every flag and rule in docs/reference.md#ensure has a test
 - [x] #2 --dry-run deletes nothing and takes no lock (deletion oracle + lock probe)
 - [x] #3 Bare numbers and month durations are usage errors
 - [x] #4 --allow-root: owners required and resolving to non-system users; the config file and every directory above it root-owned and not writable by others; command actions refused
@@ -61,9 +61,11 @@ TASK91 is now Done: explicit {uid: N} owner mapping covers NSS-only accounts whe
 2026-10-21 TASK21 AC1 focused disposable Nix container probes: ensure_refuses_symlinked_path_without_mutation (final and intermediate PATH symlinks, exit 2 usage_error, no mutation), select_replaces_configured_groups (only CLI-selected user profile deleted; configured-group candidate preserved), json_help_precedence_is_text (--json --help and malformed-size --json -h return text help/exit 0), and no_index_matches_current_dry_run_plan (one eligible candidate and equivalent plan with/without --no-index, no deletion) each passed 1/1 via nix develop -c just e2e-one. The independent deletion oracle was armed before every traced run and clean. A PATH on a bind mount is valid per docs/safety.md Path traversal; no mount-refusal claim is made. AC1 and DoD remain open pending complete flag/rule matrix, full integrated gate, and reviews.
 
 2026-10-21 final TASK21 AC1 audit after green 158/158 Nix and 7/7 Docker E2E: still lacks direct binary/container probes for no config and no --select => exit 2, environment config precedence through ensure, operational --timeout 0 and --tally-budget 0 spellings, paired --no-index reclaim parity, JSON objects on exits 124 and SIGINT 130, and --roots validity errors. Parser/model/library tests cover parts indirectly. Keep AC1 and DoD open until these direct probes run; QA/MPED final reviews found no blocker in the implemented slice.
+
+2026-10-21 final AC1/DoD evidence: nine new Fast disposable-container probes cover default/no-config usage, searched config then DISKGC_CONFIG then --config precedence with exact reclaim actions, --roots validity, --timeout 0 versus short nonzero lock behavior, --tally-budget 0 reclaim, --no-index reclaim parity, exit 124 and SIGINT 130 as single JSON reports with partial actions, and dry-run planning of an individually flocked candidate. The stronger >10m no-timeout and tally-bound semantics are covered by ModelHost plus parser tests. The final settled-tree nix develop -c just e2e passed 167/167 Nix image and 7/7 native Docker tests. Parallel qa-test-runner and mped-architect reviews found no blockers; final AC1 audit found no remaining material ensure flag/rule gap. A native Docker prune gate missed its 10s test cutoff once under full load, but two loaded Docker suite repeats and final gate passed; exact cause unproven, timeout unchanged, early-exit diagnostics improved. No host deletion.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

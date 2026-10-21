@@ -39,10 +39,11 @@ use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     agent_journey, autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
-    cargo_reclaim_suite, cargo_suite, cli_contract_suite, docker_suite, docker_vector_suite,
-    driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite,
-    host_suite, inuse_suite, laptop_tmp_journey, meson_suite, packaging_suite,
-    profile_vector_suite, project_cache_suite, signal_suite, stdout_suite, temp_safety_suite,
+    cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, docker_suite,
+    docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
+    fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey, meson_suite,
+    packaging_suite, profile_vector_suite, project_cache_suite, signal_suite, stdout_suite,
+    temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -249,10 +250,64 @@ pub static TESTS: &[Test] = &[
         run: cli_contract_suite::no_index_matches_current_dry_run_plan,
     },
     Test {
+        name: "ensure_without_config_or_select_is_usage_error",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::ensure_without_config_or_select_is_usage_error,
+    },
+    Test {
+        name: "config_environment_and_flag_precedence_reclaim_selected_policy",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::config_environment_and_flag_precedence_reclaim_selected_policy,
+    },
+    Test {
+        name: "select_roots_requirements_are_usage_errors",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::select_roots_requirements_are_usage_errors,
+    },
+    Test {
+        name: "dry_run_plans_flocked_candidate_as_eligible",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::dry_run_plans_flocked_candidate_as_eligible,
+    },
+    Test {
+        name: "timeout_zero_waits_for_a_real_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_runtime_suite::timeout_zero_waits_for_a_real_host_lock,
+    },
+    Test {
+        name: "tally_budget_zero_reaches_reclaim",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_runtime_suite::tally_budget_zero_reaches_reclaim,
+    },
+    Test {
+        name: "no_index_matches_reclaim_on_fresh_fixture",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_runtime_suite::no_index_matches_reclaim_on_fresh_fixture,
+    },
+    Test {
         name: "sigterm_mid_reclaim_reports_partial_action_and_stops",
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: signal_suite::sigterm_mid_reclaim_reports_partial_action_and_stops,
+    },
+    Test {
+        name: "deadline_mid_reclaim_reports_one_json_object",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: signal_suite::deadline_mid_reclaim_reports_one_json_object,
+    },
+    Test {
+        name: "sigint_mid_reclaim_reports_one_json_object",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: signal_suite::sigint_mid_reclaim_reports_one_json_object,
     },
     Test {
         name: "sigterm_stubborn_command_child_gets_killed_after_grace",
