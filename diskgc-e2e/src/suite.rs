@@ -39,8 +39,8 @@ use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
     agent_journey, autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
-    cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, docker_suite,
-    docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
+    cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
+    docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey, meson_suite,
     packaging_suite, profile_vector_suite, project_cache_suite, signal_suite, stdout_suite,
     temp_safety_suite,
@@ -356,6 +356,24 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: profile_vector_suite::checked_in_python_profile_vector_replays_in_container,
+    },
+    Test {
+        name: "python_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::python_vector_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "bun_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::bun_vector_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "mypy_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::mypy_vector_matches_linux_outcomes_and_deletion_diff,
     },
     Test {
         name: MESON_ANCHOR_TEST,
