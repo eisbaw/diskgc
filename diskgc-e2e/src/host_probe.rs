@@ -333,6 +333,7 @@ fn lock_wait(
     {
         WaitLock::Acquired(_) => "Acquired",
         WaitLock::DeadlinePassed(_) => "DeadlinePassed",
+        WaitLock::Interrupted(_) => "Interrupted",
     };
     println!("{outcome} after_ms={}", started.elapsed().as_millis());
     Ok(())

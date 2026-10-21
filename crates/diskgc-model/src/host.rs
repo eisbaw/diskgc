@@ -522,6 +522,10 @@ impl Inner {
     fn apply(&mut self, event: &Event) {
         let state = &mut self.state;
         let outcome = match &event.action {
+            Action::DeliverSignal(signal) => {
+                state.interrupted.get_or_insert(*signal);
+                Ok(())
+            }
             Action::Create(path) => state
                 .create_path(
                     path,
@@ -1095,9 +1099,12 @@ impl Host for ModelHost {
         let got = self.call(Op::Flock, Some(path), None, |inner| {
             let object = Some(inner.state.dev_ino(inner.loc_of(ofd)));
             loop {
+                if let Some(signal) = inner.state.interrupted {
+                    return (Ok(Err(signal)), object, "interrupted".to_owned());
+                }
                 match inner.try_lock(ofd, mode) {
                     Err(e) => return (Err(e), None, errno_text(e)),
-                    Ok(true) => return (Ok(true), object, "acquired".to_owned()),
+                    Ok(true) => return (Ok(Ok(true)), object, "acquired".to_owned()),
                     Ok(false) => {}
                 }
                 let next = inner.next_timed_at();
@@ -1105,7 +1112,7 @@ impl Host for ModelHost {
                     (Some(until), Some(t)) if t <= until => inner.advance_to(t),
                     (Some(until), _) => {
                         inner.advance_to(until);
-                        return (Ok(false), object, "deadline passed".to_owned());
+                        return (Ok(Ok(false)), object, "deadline passed".to_owned());
                     }
                     (None, Some(t)) => inner.advance_to(t),
                     (None, None) => model_error(format!(
@@ -1116,10 +1123,15 @@ impl Host for ModelHost {
             }
         });
         match got {
-            Ok(true) => Ok(WaitLock::Acquired(Locked::granted(fd, mode))),
-            Ok(false) => Ok(WaitLock::DeadlinePassed(fd)),
+            Ok(Ok(true)) => Ok(WaitLock::Acquired(Locked::granted(fd, mode))),
+            Ok(Ok(false)) => Ok(WaitLock::DeadlinePassed(fd)),
+            Ok(Err(signal)) => Ok(WaitLock::Interrupted(signal)),
             Err(e) => Err(HostError::errno("flock", shown, e)),
         }
+    }
+
+    fn interrupted(&self) -> Option<diskgc_core::report::Signal> {
+        self.inner.borrow().state.interrupted
     }
 
     fn now(&self) -> MonoTime {
@@ -1412,6 +1424,17 @@ impl Delete for ModelHost {
                         "refused".to_owned(),
                     );
                 }
+                if inner.state.interrupted.is_some() {
+                    return (
+                        Err(HostError::invalid(
+                            "unlinkat",
+                            &shown,
+                            "interrupted before deletion",
+                        )),
+                        None,
+                        "interrupted".to_owned(),
+                    );
+                }
                 let dir_loc = inner.loc_of(ofd);
                 match inner.state.unlinkat(dir_loc, name, what == Unlink::Dir) {
                     Ok(loc) => (Ok(()), Some(inner.state.dev_ino(loc)), "ok".to_owned()),
@@ -1456,6 +1479,17 @@ impl Delete for ModelHost {
                     Err(gate_refusal("fchmod", &shown)),
                     None,
                     "refused".to_owned(),
+                );
+            }
+            if inner.state.interrupted.is_some() {
+                return (
+                    Err(HostError::invalid(
+                        "fchmod",
+                        &shown,
+                        "interrupted before permission change",
+                    )),
+                    None,
+                    "interrupted".to_owned(),
                 );
             }
             let loc = inner.loc_of(ofd);
@@ -1510,6 +1544,13 @@ impl Delete for ModelHost {
                         CommandInvocation::NotStarted(gate_refusal("run command", &subject)),
                         object,
                         "refused".to_owned(),
+                    );
+                }
+                if inner.state.interrupted.is_some() {
+                    return (
+                        CommandInvocation::NotStarted(HostError::invalid("run command", &subject, "interrupted before child start")),
+                        object,
+                        "interrupted".to_owned(),
                     );
                 }
                 if inner.state.own_uid == 0 {

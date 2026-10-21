@@ -87,14 +87,15 @@
       };
       # diskgc-e2e path-depends on workspace crates, which inherit fields from
       # the root manifest, so its source is the workspace plus its directory,
-      # and the shipped example pre-job hook, which the CI operator's journey
-      # runs as written (diskgc-e2e/src/journey_suite.rs).
+      # and the shipped pre-job hooks, which the CI operator and agent
+      # journeys run as written.
       e2eSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           workspaceFiles
           (craneLib.fileset.commonCargoSources ./diskgc-e2e)
           ./docs/ci-pre-job.sh
+          ./docs/agent-pre-job.py
         ];
       };
 
@@ -200,6 +201,9 @@
         ln -s ${zephyr-src} $out/bin/zephyr-src
         ln -s ${westPython}/bin/west $out/bin/west
         ln -s ${westPython}/bin/python3 $out/bin/python3
+        # The Nix image already contains this interpreter through pytest;
+        # keep the agent hook independent of West's larger Python environment.
+        ln -s ${pkgs.python3}/bin/python3 $out/bin/agent-python3
         ln -s ${pkgs.cmake}/bin/cmake $out/bin/cmake
         ln -s ${pkgs.dtc}/bin/dtc $out/bin/dtc
         ln -s ${pkgs.gperf}/bin/gperf $out/bin/gperf

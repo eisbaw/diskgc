@@ -8,15 +8,16 @@
 //! the exit code from the status.
 //!
 //! `index` is `null`: there is no index before task-28/29, every run
-//! discovers its candidates afresh. `overruns` is always empty until
-//! the deadline work of task-54 can report one. `seed` is `null` unless a
-//! configured group uses random ranking.
+//! discovers its candidates afresh. `overruns` records operations that
+//! returned after the deadline. `seed` is `null` unless a configured group
+//! uses random ranking.
 
 pub mod json;
 
 #[cfg(test)]
 mod tests;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::engine::Checkouts;
@@ -207,8 +208,8 @@ pub struct ActionEntry {
     pub count: u64,
 }
 
-/// One skipped candidate (`skipped`). Not aggregated yet (one entry per
-/// candidate, `count` 1, no `examples`; task-19).
+/// One skipped candidate (`skipped`). Groups with more than 20 candidates
+/// are aggregated in the JSON result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkipEntry {
     pub tier: String,
@@ -270,6 +271,81 @@ pub struct Report {
 }
 
 impl Report {
+    /// Keep the first 1,000 action details. The remainder is one entry with
+    /// no candidate identity, preserving the count and measured totals.
+    fn output_actions(&self) -> Vec<ActionEntry> {
+        const DETAIL_LIMIT: usize = 1_000;
+        let mut output: Vec<_> = self.actions.iter().take(DETAIL_LIMIT).cloned().collect();
+        let overflow = &self.actions[self.actions.len().min(DETAIL_LIMIT)..];
+        if !overflow.is_empty() {
+            let delta = overflow.iter().try_fold(0_i128, |sum, action| {
+                sum.checked_add(i128::from(action.avail_delta_bytes?))
+            });
+            output.push(ActionEntry {
+                tier: String::new(),
+                profile: String::new(),
+                candidate: PathBuf::new(),
+                avail_delta_bytes: delta.and_then(|sum| i64::try_from(sum).ok()),
+                duration_ms: overflow
+                    .iter()
+                    .fold(0_u64, |sum, action| sum.saturating_add(action.duration_ms)),
+                count: overflow
+                    .iter()
+                    .fold(0_u64, |sum, action| sum.saturating_add(action.count)),
+            });
+        }
+        output
+    }
+
+    /// Above 20 candidates, show one row per tier/profile/reason with at
+    /// most 20 example paths. Preserve the first occurrence's output order.
+    fn output_skips(&self) -> Vec<SkipEntry> {
+        const EXAMPLE_LIMIT: usize = 20;
+        type Key<'a> = (&'a str, &'a str, &'a str);
+        let mut groups: BTreeMap<Key<'_>, (u64, Vec<PathBuf>)> = BTreeMap::new();
+        for skip in &self.skipped {
+            let group = groups
+                .entry((&skip.tier, &skip.profile, skip.reason))
+                .or_insert_with(|| (0, Vec::new()));
+            group.0 = group.0.saturating_add(skip.count);
+            if !skip.candidate.as_os_str().is_empty()
+                && group.1.len() < EXAMPLE_LIMIT
+                && !group.1.contains(&skip.candidate)
+            {
+                group.1.push(skip.candidate.clone());
+            }
+            for example in &skip.examples {
+                if group.1.len() == EXAMPLE_LIMIT {
+                    break;
+                }
+                if !group.1.contains(example) {
+                    group.1.push(example.clone());
+                }
+            }
+        }
+        let mut emitted = BTreeSet::new();
+        let mut output = Vec::with_capacity(self.skipped.len());
+        for skip in &self.skipped {
+            let key = (skip.tier.as_str(), skip.profile.as_str(), skip.reason);
+            let (count, examples) = &groups[&key];
+            if *count > EXAMPLE_LIMIT as u64 {
+                if emitted.insert(key) {
+                    output.push(SkipEntry {
+                        tier: skip.tier.clone(),
+                        profile: skip.profile.clone(),
+                        candidate: PathBuf::new(),
+                        count: *count,
+                        examples: examples.clone(),
+                        reason: skip.reason,
+                    });
+                }
+            } else {
+                output.push(skip.clone());
+            }
+        }
+        output
+    }
+
     /// An empty report of `status` for `path`.
     pub fn new(status: Status, path: Option<&Path>) -> Self {
         Self {
@@ -364,7 +440,7 @@ impl Report {
             (
                 "actions",
                 Json::Arr(
-                    self.actions
+                    self.output_actions()
                         .iter()
                         .map(|a| {
                             Json::Obj(vec![
@@ -385,7 +461,7 @@ impl Report {
             (
                 "skipped",
                 Json::Arr(
-                    self.skipped
+                    self.output_skips()
                         .iter()
                         .map(|s| {
                             Json::Obj(vec![

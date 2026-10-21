@@ -693,6 +693,9 @@ fn ensure(args: &EnsureArgs) -> Report {
         log(&format!("error: {why}"));
         Report::new(Status::UsageError, Some(&args.path)).usage_error(why)
     };
+    if let Err(error) = LinuxHost::install_interrupt_handlers() {
+        return fail(format!("install signal handlers: {error}"));
+    }
     let host = match startup() {
         Ok(host) => host,
         Err(why) => return fail(why),

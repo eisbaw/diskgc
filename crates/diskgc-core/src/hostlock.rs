@@ -9,7 +9,7 @@
 //! read-only through the fd ([`Host::reopen_regular`]), so a FIFO or a
 //! device standing at the path is never opened. It then waits for the lock
 //! until the deadline ([`Host::flock_wait`]: non-blocking attempts, so the
-//! deadline holds without signals) and makes the held fd inheritable by
+//! deadline and an observed interruption both stop the wait) and makes the held fd inheritable by
 //! every child ([`Host::inherit_lock`]), so the lock stays held until the
 //! last child exits. It is released only by dropping the [`HostLock`]
 //! (closing the fd); the port has no unlock.
@@ -18,6 +18,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::host::{Access, FileType, Host, HostError, LockMode, Locked, MonoTime, WaitLock};
+use crate::report::Signal;
 use crate::resolve::{ResolveError, Want, open_beneath, resolve};
 
 /// The directory of the host lock. Fixed, not configurable: two configs
@@ -67,6 +68,8 @@ pub enum LockError {
     Unusable { detail: String },
     /// Another reclaim held it until the deadline.
     DeadlinePassed,
+    /// SIGINT or SIGTERM arrived before the lock could be used.
+    Interrupted(Signal),
     /// The host failed (opening, reopening, locking, `fcntl`).
     Failed(HostError),
 }
@@ -90,6 +93,10 @@ impl fmt::Display for LockError {
                 f,
                 "the host lock {} was still held by another reclaim at the deadline",
                 path.display()
+            ),
+            Self::Interrupted(signal) => write!(
+                f,
+                "interrupted by {signal:?} while waiting for the host lock"
             ),
             Self::Failed(e) => write!(f, "the host lock {}: {e}", path.display()),
         }
@@ -140,8 +147,14 @@ pub fn acquire<H: Host>(
     host: &H,
     deadline: Option<MonoTime>,
 ) -> Result<HostLock<H::Fd>, LockError> {
+    if let Some(signal) = host.interrupted() {
+        return Err(LockError::Interrupted(signal));
+    }
     let started = host.now();
     let readable = open_lock(host)?;
+    if let Some(signal) = host.interrupted() {
+        return Err(LockError::Interrupted(signal));
+    }
     // Read-only is enough for flock, and is what the file's mode (0644
     // root) gives every user (docs/safety.md, Host lock).
     let locked = match host
@@ -150,7 +163,11 @@ pub fn acquire<H: Host>(
     {
         WaitLock::Acquired(locked) => locked,
         WaitLock::DeadlinePassed(_) => return Err(LockError::DeadlinePassed),
+        WaitLock::Interrupted(signal) => return Err(LockError::Interrupted(signal)),
     };
+    if let Some(signal) = host.interrupted() {
+        return Err(LockError::Interrupted(signal));
+    }
     host.inherit_lock(&locked).map_err(LockError::Failed)?;
     Ok(HostLock {
         locked,

@@ -529,6 +529,17 @@
             "string",
             "null"
           ]
+        },
+        "signal": {
+          "description": "Deliver SIGINT or SIGTERM to the modelled diskgc run.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSignal"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -751,6 +762,14 @@
       "description": "Permission bits in octal, as a string, e.g. \"0755\".",
       "type": "string",
       "pattern": "^[0-7]{3,4}$"
+    },
+    "ModelSignal": {
+      "description": "Signals the model can deliver to diskgc.",
+      "type": "string",
+      "enum": [
+        "int",
+        "term"
+      ]
     },
     "MountEventSpec": {
       "description": "A mount an event makes: a fresh, empty filesystem of type `fs` on the\nexisting directory `at`, on the mount that directory is on.",

@@ -3,10 +3,10 @@ id: TASK-20
 title: >-
   Executor I: walk order, ranking, per-tier discovery, environmental preflight
   (no index)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-21 08:23'
+updated_date: '2026-10-21 11:18'
 labels:
   - wave-2
   - irreversible
@@ -26,9 +26,9 @@ Why: the walk decides order; policy order is a core promise. Extend the executor
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A pressure tier never runs while an earlier tier has discoverable eligible candidates (model test)
-- [ ] #2 A misconfigured tier is excluded and reported while other tiers still run
-- [ ] #3 Trace assertion: every tier's environmental preflight runs before the first deletion
+- [x] #1 A pressure tier never runs while an earlier tier has discoverable eligible candidates (model test)
+- [x] #2 A misconfigured tier is excluded and reported while other tiers still run
+- [x] #3 Trace assertion: every tier's environmental preflight runs before the first deletion
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -69,9 +69,13 @@ Compass root-mode finding (TASK21 AC5): {uid} currently expands from process UID
 2026-10-21 device-root preflight candidate integrated: before first deletion, check each configured source root including fs-union terms against requested PATH device using safe mountinfo-aware resolution; same-device bind aliases are allowed and foreign, unsafe or networked roots exclude the tier with source-attributed errors. A foreign root containing a nested mount of the requested device must be configured as that nested root explicitly. Initial focused ModelHost checks passed but final edits and combined tests are unverified under no-deletion and build-cache isolation constraints; AC/DoD remain open.
 
 2026-10-21 integrated verification: best-fit, seeded random order, grouped preflight, and mixed-device root skip paths passed full just e2e (152/152 Nix containers, 6/6 Docker) and parallel QA/MPED review. Unsafe roots still exclude the tier; foreign roots are skipped before discovery so a same-device sibling root can run. Acceptance/DoD trace review remains open.
+
+2026-10-21 acceptance verification: ModelHost ensure.rs adds a three-action stale/stale/pressure case, asserts a symlink-misconfigured tier is reported while the good tier acts, and traces distinct roots for every configured tier plus a later command executable before the first unlink. nix develop -c cargo test -p diskgc-model --test ensure passed 54/54, refined composite preflight test passed, and cargo fmt --all -- --check passed. Definition of Done remains open pending just check/e2e and irreversible deep review.
+
+Final integrated gate passed: nix develop -c just e2e (158/158 Nix image, 7/7 native Docker), including grouped order/preflight tests. Parallel qa-test-runner and mped-architect reviews found no blockers. AC1-3 and docs/testing.md DoD are met.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

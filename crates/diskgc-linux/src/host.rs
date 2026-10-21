@@ -32,6 +32,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +44,7 @@ use diskgc_core::host::{
     Pid, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock,
     UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
 };
+use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags};
 
@@ -68,6 +70,48 @@ const PROC: &str = "/proc";
 const LOCK_POLL_FIRST: Duration = Duration::from_millis(10);
 const LOCK_POLL_MAX: Duration = Duration::from_millis(100);
 
+/// A signal handler may only record the signal. The executor does all I/O,
+/// reporting and cleanup after it observes this lock-free flag.
+static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn note_interrupt(signal: i32) {
+    let _ = INTERRUPTED.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// The sole ungated signal-disposition wrapper. It changes only this
+/// process's SIGINT/SIGTERM handlers, never a filesystem or child process.
+/// The source scan counts every raw libc token here for explicit review.
+fn install_interrupt_handlers_ungated() -> Result<(), HostError> {
+    // SAFETY: sigaction writes only our process's signal dispositions;
+    // the handler itself performs one lock-free atomic operation.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = note_interrupt as *const () as usize;
+        if libc::sigemptyset(&mut action.sa_mask) != 0 {
+            return Err(HostError::invalid(
+                "sigemptyset",
+                "signal handler mask",
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        if libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0 {
+            return Err(HostError::invalid(
+                "sigaction",
+                "SIGINT",
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        if libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0 {
+            return Err(HostError::invalid(
+                "sigaction",
+                "SIGTERM",
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// An open file descriptor (close-on-exec). Dropping it closes it.
 #[derive(Debug)]
 pub struct LinuxFd(OwnedFd);
@@ -87,6 +131,12 @@ pub struct LinuxHost {
 }
 
 impl LinuxHost {
+    /// Install the cooperative handlers before an `ensure` starts. The
+    /// binary runs one command then exits, so the first signal is retained.
+    pub fn install_interrupt_handlers() -> Result<(), HostError> {
+        install_interrupt_handlers_ungated()
+    }
+
     /// Checks, failing closed, that the `/proc` readers can work here:
     ///
     /// - the held `/proc` directory is a procfs mount (`fstatfs`), rather
@@ -1234,8 +1284,16 @@ impl Host for LinuxHost {
         let mut fd = fd;
         let mut pause = LOCK_POLL_FIRST;
         loop {
+            if let Some(signal) = self.interrupted() {
+                return Ok(WaitLock::Interrupted(signal));
+            }
             fd = match self.flock_try(fd, mode)? {
-                TryLock::Acquired(locked) => return Ok(WaitLock::Acquired(locked)),
+                TryLock::Acquired(locked) => {
+                    if let Some(signal) = self.interrupted() {
+                        return Ok(WaitLock::Interrupted(signal));
+                    }
+                    return Ok(WaitLock::Acquired(locked));
+                }
                 TryLock::Busy(fd) => fd,
             };
             let now = self.now();
@@ -1246,6 +1304,14 @@ impl Host for LinuxHost {
             };
             self.sleep(nap);
             pause = (pause * 2).min(LOCK_POLL_MAX);
+        }
+    }
+
+    fn interrupted(&self) -> Option<Signal> {
+        match INTERRUPTED.load(Ordering::Relaxed) {
+            signal if signal == rustix::process::Signal::INT.as_raw() => Some(Signal::Int),
+            signal if signal == rustix::process::Signal::TERM.as_raw() => Some(Signal::Term),
+            _ => None,
         }
     }
 
@@ -1585,6 +1651,13 @@ impl Delete for LinuxHost {
     fn unlinkat(&self, dir: &LinuxFd, name: &OsStr, what: Unlink) -> Result<(), HostError> {
         let subject = shown(&Base::Dir(dir), Path::new(name));
         let permit = gate("unlinkat", &subject)?;
+        if self.interrupted().is_some() {
+            return Err(HostError::invalid(
+                "unlinkat",
+                &subject,
+                "interrupted before deletion",
+            ));
+        }
         if !is_single_name(name) {
             return Err(HostError::invalid(
                 "unlinkat",
@@ -1616,6 +1689,13 @@ impl Delete for LinuxHost {
         if deadline.is_some_and(|at| self.now() >= at) {
             return Ok(false);
         }
+        if self.interrupted().is_some() {
+            return Err(HostError::invalid(
+                "fchmod",
+                &subject,
+                "interrupted before permission change",
+            ));
+        }
         fchmod_permitted(&permit, dir, Mode::from_raw_mode(mode | 0o200))
             .map_err(|e| HostError::errno("fchmod", &subject, errno_of(e)))?;
         Ok(true)
@@ -1627,6 +1707,13 @@ impl Delete for LinuxHost {
             Ok(permit) => permit,
             Err(error) => return CommandInvocation::NotStarted(error),
         };
+        if self.interrupted().is_some() {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run command",
+                &subject,
+                "interrupted before child start",
+            ));
+        }
         if self.effective_uid() == 0 {
             return CommandInvocation::NotStarted(HostError::invalid(
                 "run command",
@@ -1754,6 +1841,7 @@ const COMMAND_OUTPUT_CHUNK: usize = 4096;
 const COMMAND_READS_PER_PUMP: usize = 16;
 const COMMAND_OUTPUT_DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
 const COMMAND_STDERR_BACKPRESSURE: Duration = Duration::from_millis(50);
+const COMMAND_TERMINATION_GRACE: Duration = Duration::from_secs(10);
 
 const DOCKER_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const DOCKER_QUERY_MAX_OUTPUT: usize = 1024 * 1024;
@@ -1835,6 +1923,17 @@ fn run_docker_query_ungated(
         .stderr(process::Stdio::piped())
         .spawn()
         .map_err(|error| io_error("start Docker query", &subject, &error))?;
+    collect_docker_query_output(&mut child, &subject, timeout)
+}
+
+/// Keep the group leader waitable until its entire group has been dealt
+/// with. A descendant may inherit a pipe after the leader exits, and
+/// reaping the leader early would free the process-group ID before KILL.
+fn collect_docker_query_output(
+    child: &mut process::Child,
+    subject: &str,
+    timeout: Duration,
+) -> Result<String, HostError> {
     let pid = match rustix::process::Pid::from_raw(child.id().cast_signed()) {
         Some(pid) => pid,
         None => {
@@ -1842,116 +1941,127 @@ fn run_docker_query_ungated(
             let _ = child.wait();
             return Err(HostError::invalid(
                 "start Docker query",
-                &subject,
+                subject,
                 "child has invalid pid",
             ));
         }
     };
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let out = thread::Builder::new()
-        .name("diskgc-docker-query-stdout".to_owned())
-        .spawn(move || read_docker_query_pipe(stdout));
-    let err = thread::Builder::new()
-        .name("diskgc-docker-query-stderr".to_owned())
-        .spawn(move || read_docker_query_pipe(stderr));
-    let (out, err) = match (out, err) {
-        (Ok(out), Ok(err)) => (out, err),
-        (out, err) => {
-            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
-            let _ = child.wait();
-            if let Ok(out) = out {
-                let _ = out.join();
-            }
-            if let Ok(err) = err {
-                let _ = err.join();
-            }
-            return Err(HostError::invalid(
-                "start Docker query",
-                &subject,
-                "cannot start bounded output readers",
-            ));
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let setup = (|| -> Result<(), HostError> {
+        for fd in [stdout.as_fd(), stderr.as_fd()] {
+            let flags = rustix::fs::fcntl_getfl(fd).map_err(|error| {
+                HostError::errno("fcntl Docker output", subject, errno_of(error))
+            })?;
+            rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(|error| {
+                HostError::errno("fcntl Docker output", subject, errno_of(error))
+            })?;
         }
-    };
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        let _ = signal_command_group(pid, rustix::process::Signal::KILL, subject);
+        let _ = child.wait();
+        return Err(error);
+    }
     let deadline = Instant::now() + timeout.min(DOCKER_QUERY_TIMEOUT);
-    let status = loop {
-        let status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => {
-                let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
-                let _ = child.wait();
-                let _ = out.join();
-                let _ = err.join();
-                return Err(io_error("wait Docker query", &subject, &error));
-            }
-        };
-        if let Some(status) = status
-            && out.is_finished()
-            && err.is_finished()
-        {
-            break status;
-        }
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let observed = loop {
         if Instant::now() >= deadline {
-            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
-            let _ = child.wait();
-            let _ = out.join();
-            let _ = err.join();
-            return Err(HostError::invalid(
+            break Err(HostError::invalid(
                 "query Docker",
-                &subject,
+                subject,
                 format!("read-only query exceeded {timeout:?}"),
             ));
         }
+        if !stdout_eof {
+            match read_docker_query_pipe(&mut stdout, &mut stdout_bytes, subject) {
+                Ok(eof) => stdout_eof = eof,
+                Err(error) => break Err(error),
+            }
+        }
+        if !stderr_eof {
+            match read_docker_query_pipe(&mut stderr, &mut stderr_bytes, subject) {
+                Ok(eof) => stderr_eof = eof,
+                Err(error) => break Err(error),
+            }
+        }
+        let exited = match rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOHANG
+                | rustix::process::WaitIdOptions::NOWAIT,
+        ) {
+            Ok(exited) => exited.is_some(),
+            Err(error) => {
+                break Err(HostError::errno(
+                    "observe Docker query exit",
+                    subject,
+                    errno_of(error),
+                ));
+            }
+        };
+        if exited && stdout_eof && stderr_eof {
+            break Ok(());
+        }
         thread::sleep(Duration::from_millis(10));
     };
-    let stdout_result = out.join();
-    let stderr_result = err.join();
-    let (stdout, out_truncated) = stdout_result
-        .map_err(|_| HostError::invalid("query Docker", &subject, "stdout reader panicked"))?
-        .map_err(|error| io_error("read Docker stdout", &subject, &error))?;
-    let (stderr, err_truncated) = stderr_result
-        .map_err(|_| HostError::invalid("query Docker", &subject, "stderr reader panicked"))?
-        .map_err(|error| io_error("read Docker stderr", &subject, &error))?;
-    if out_truncated || err_truncated {
-        return Err(HostError::invalid(
-            "query Docker",
-            &subject,
-            "output exceeded 1 MiB",
-        ));
-    }
-    let stderr = String::from_utf8_lossy(&stderr);
+    // Even after EOF, a background process may have closed its pipes and
+    // kept running. The unreaped leader pins the group ID through KILL.
+    let signaled = signal_command_group(pid, rustix::process::Signal::KILL, subject);
+    let status = child
+        .wait()
+        .map_err(|error| io_error("wait Docker query", subject, &error))?;
+    observed?;
+    signaled?;
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
     if !status.success() {
         return Err(HostError::invalid(
             "query Docker",
-            &subject,
+            subject,
             format!("exited {status}: {stderr}"),
         ));
     }
-    String::from_utf8(stdout).map_err(|error| {
+    String::from_utf8(stdout_bytes).map_err(|error| {
         HostError::invalid(
             "query Docker",
-            &subject,
+            subject,
             format!("stdout is not UTF-8: {error}"),
         )
     })
 }
 
-fn read_docker_query_pipe(mut pipe: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
-    let mut bytes = Vec::new();
-    let mut too_long = false;
+/// Pump only a bounded number of nonblocking reads before checking the
+/// deadline and the other pipe. The output cap is per pipe.
+fn read_docker_query_pipe(
+    pipe: &mut impl Read,
+    bytes: &mut Vec<u8>,
+    subject: &str,
+) -> Result<bool, HostError> {
     let mut chunk = [0u8; 4096];
-    loop {
+    for _ in 0..COMMAND_READS_PER_PUMP {
         match pipe.read(&mut chunk) {
-            Ok(0) => return Ok((bytes, too_long)),
+            Ok(0) => return Ok(true),
             Ok(n) => {
                 let remaining = DOCKER_QUERY_MAX_OUTPUT.saturating_sub(bytes.len());
-                bytes.extend_from_slice(&chunk[..n.min(remaining)]);
-                too_long |= n > remaining;
+                if n > remaining {
+                    return Err(HostError::invalid(
+                        "query Docker",
+                        subject,
+                        "output exceeded 1 MiB",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk[..n]);
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(io_error("read Docker output", subject, &error)),
         }
     }
+    Ok(false)
 }
 
 struct OutputMessage {
@@ -2057,6 +2167,13 @@ fn run_command_permitted(
     if run.deadline <= host.now() {
         return CommandInvocation::DeadlineBeforeStart;
     }
+    if host.interrupted().is_some() {
+        return CommandInvocation::NotStarted(HostError::invalid(
+            "run command",
+            &subject,
+            "interrupted before child start",
+        ));
+    }
     command
         .process_group(0)
         .stdout(process::Stdio::piped())
@@ -2080,6 +2197,13 @@ fn run_command_permitted(
             Ok(())
         });
     }
+    if host.interrupted().is_some() {
+        return CommandInvocation::NotStarted(HostError::invalid(
+            "run command",
+            &subject,
+            "interrupted before child start",
+        ));
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -2099,7 +2223,20 @@ fn run_command_permitted(
     let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_reaped);
     if result.is_err() && !leader_reaped {
         // An output or wait failure must not leave a trusted cleaner
-        // running after the caller has been told the action failed.
+        // running after the caller has been told the action failed. A signal
+        // or deadline uses the same TERM grace even if output setup failed.
+        if host.interrupted().is_some() || host.now() >= run.deadline {
+            let _ = signal_command_group(pid, rustix::process::Signal::TERM, &subject);
+            let until = host.now().checked_add(COMMAND_TERMINATION_GRACE);
+            while until.is_some_and(|until| host.now() < until) {
+                // An exited leader does not prove its descendants exited.
+                // Keep it waitable to pin the process-group ID until KILL.
+                let remaining = until
+                    .expect("loop requires an endpoint")
+                    .saturating_since(host.now());
+                host.sleep(Duration::from_millis(20).min(remaining));
+            }
+        }
         let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
         let _ = child.wait();
     }
@@ -2140,35 +2277,55 @@ fn drive_command_output(
     let mut out_line = OutputLine::default();
     let mut err_line = OutputLine::default();
     let poll = Duration::from_millis(20);
+    macro_rules! terminate {
+        ($grace:expr) => {
+            return terminate_command_group(
+                host,
+                subject,
+                pid,
+                child,
+                leader_reaped,
+                &mut stdout,
+                &mut stderr,
+                &mut out_line,
+                &mut err_line,
+                target,
+                $grace,
+            )
+        };
+    }
     loop {
+        if host.interrupted().is_some() {
+            terminate!(COMMAND_TERMINATION_GRACE);
+        }
         let forwarded = drain_command_output(&mut stdout, &mut out_line, target)
             .and_then(|()| drain_command_output(&mut stderr, &mut err_line, target));
         if let Err(error) = forwarded {
+            if host.interrupted().is_some() {
+                terminate!(COMMAND_TERMINATION_GRACE);
+            }
             if host.now() >= run.deadline {
-                return terminate_timed_out_command(
-                    host,
-                    subject,
-                    pid,
-                    child,
-                    leader_reaped,
-                    &mut stdout,
-                    &mut stderr,
-                    &mut out_line,
-                    &mut err_line,
-                    target,
-                );
+                terminate!(COMMAND_TERMINATION_GRACE);
             }
             return Err(error);
         }
-        if rustix::process::waitid(
+        let exited = match rustix::process::waitid(
             rustix::process::WaitId::Pid(pid),
             rustix::process::WaitIdOptions::EXITED
                 | rustix::process::WaitIdOptions::NOHANG
                 | rustix::process::WaitIdOptions::NOWAIT,
-        )
-        .map_err(|e| HostError::errno("observe command exit", subject, errno_of(e)))?
-        .is_some()
-        {
+        ) {
+            Ok(exited) => exited.is_some(),
+            Err(_) if host.interrupted().is_some() => terminate!(COMMAND_TERMINATION_GRACE),
+            Err(error) => {
+                return Err(HostError::errno(
+                    "observe command exit",
+                    subject,
+                    errno_of(error),
+                ));
+            }
+        };
+        if exited {
             // Leave the exited leader waitable while draining descendant
             // output. It pins the process-group ID if a descendant holds a
             // pipe open past the drain limit and must be KILLed on error.
@@ -2180,9 +2337,16 @@ fn drive_command_output(
                 target,
             ) {
                 Ok(drain) => drain,
+                Err(_) if host.interrupted().is_some() => terminate!(COMMAND_TERMINATION_GRACE),
                 Err(_) if host.now() >= run.deadline => OutputDrain::Deadline,
                 Err(error) => return Err(error),
             };
+            if host.interrupted().is_some() {
+                terminate!(COMMAND_TERMINATION_GRACE);
+            }
+            if drain == OutputDrain::Deadline || host.now() >= run.deadline {
+                terminate!(COMMAND_TERMINATION_GRACE);
+            }
             // A background cleaner may close its inherited output pipes.
             // Kill any surviving member before reaping the leader; its
             // waitable PID still reserves the process-group ID here.
@@ -2191,36 +2355,21 @@ fn drive_command_output(
                 .wait()
                 .map_err(|e| io_error("wait command", subject, &e))?;
             *leader_reaped = true;
-            return if drain == OutputDrain::Deadline {
-                Ok(CommandExit::TimedOut)
-            } else {
-                command_exit(status, subject)
-            };
+            return command_exit(status, subject);
         }
         if host.now() >= run.deadline {
-            return terminate_timed_out_command(
-                host,
-                subject,
-                pid,
-                child,
-                leader_reaped,
-                &mut stdout,
-                &mut stderr,
-                &mut out_line,
-                &mut err_line,
-                target,
-            );
+            terminate!(COMMAND_TERMINATION_GRACE);
         }
         host.sleep(poll.min(run.deadline.saturating_since(host.now())));
     }
 }
 
-/// After the tier deadline, TERM output has its own bounded forwarding
-/// window. A stalled parent stderr cannot delay KILL indefinitely. Output
-/// loss in this cleanup window does not turn a timed-out action into an
-/// unrelated forwarding error; the primary outcome is still the deadline.
+/// After a deadline or signal, TERM output has its own bounded forwarding
+/// window. A stalled parent stderr cannot delay KILL indefinitely. The
+/// deadline and signal cancellation both allow up to 10 seconds before
+/// KILL. The executor maps the result to interruption when its flag is set.
 #[allow(clippy::too_many_arguments)]
-fn terminate_timed_out_command(
+fn terminate_command_group(
     host: &LinuxHost,
     subject: &str,
     pid: rustix::process::Pid,
@@ -2231,22 +2380,26 @@ fn terminate_timed_out_command(
     out_line: &mut OutputLine,
     err_line: &mut OutputLine,
     target: OutputTarget<'_>,
+    grace_duration: Duration,
 ) -> Result<CommandExit, HostError> {
     signal_command_group(pid, rustix::process::Signal::TERM, subject)?;
     let grace = host
         .now()
-        .checked_add(Duration::from_millis(250))
+        .checked_add(grace_duration)
         .ok_or_else(|| HostError::invalid("run command", subject, "clock overflow"))?;
     let grace_target = OutputTarget {
         deadline: grace,
         ..target
     };
+    let mut draining = true;
     while host.now() < grace {
         // The leader remains waitable so its PID pins the group until KILL.
-        if drain_command_output(stdout, out_line, grace_target).is_err()
-            || drain_command_output(stderr, err_line, grace_target).is_err()
+        if draining
+            && (drain_command_output(stdout, out_line, grace_target).is_err()
+                || drain_command_output(stderr, err_line, grace_target).is_err())
         {
-            break;
+            // Forwarding failure cannot shorten the child's grace period.
+            draining = false;
         }
         host.sleep(Duration::from_millis(20).min(grace.saturating_since(host.now())));
     }
@@ -2540,6 +2693,71 @@ mod tests {
         FD_TABLE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn docker_query_collects_both_pipes_and_successful_exit() {
+        let _fd_table = fd_table_guard();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf ready; printf warning >&2")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn query stand-in");
+        let output =
+            collect_docker_query_output(&mut child, "query stand-in", Duration::from_secs(2))
+                .expect("collect output");
+        assert_eq!(output, "ready");
+    }
+
+    #[test]
+    fn docker_query_deadline_does_not_wait_for_descendant_pipe_holder() {
+        const STAGE: &str = "DISKGC_DOCKER_QUERY_TEST_STAGE";
+        const TEST: &str =
+            "host::tests::docker_query_deadline_does_not_wait_for_descendant_pipe_holder";
+        match std::env::var(STAGE).as_deref() {
+            Ok("leader") => {
+                let mut descendant =
+                    Command::new(std::env::current_exe().expect("test executable"))
+                        .args(["--exact", TEST, "--nocapture"])
+                        .env(STAGE, "descendant")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .expect("spawn pipe-holding descendant");
+                descendant.wait().expect("wait for pipe-holding descendant");
+                return;
+            }
+            Ok("descendant") => {
+                rustix::process::setsid().expect("escape query process group");
+                std::thread::sleep(Duration::from_secs(2));
+                return;
+            }
+            _ => {}
+        }
+        let _fd_table = fd_table_guard();
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", TEST, "--nocapture"])
+            .env(STAGE, "leader")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn query stand-in with descendant");
+        let started = Instant::now();
+        let result =
+            collect_docker_query_output(&mut child, "query stand-in", Duration::from_millis(100));
+        assert!(result.is_err(), "inherited output must hit the deadline");
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "reader waited for descendant after deadline: {:?}",
+            started.elapsed()
+        );
     }
 
     /// Each child using this helper is spawned while the fd-table guard is

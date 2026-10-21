@@ -940,6 +940,14 @@ pub(crate) const GATED: &[Pattern] = &[
 pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
+        function: "install_interrupt_handlers_ungated",
+        gate: Gate::Ungated(
+            "sigaction installs only this process's SIGINT/SIGTERM flag-setting handlers; no file or child operation",
+        ),
+        matches: 6, // sigaction type, sigemptyset, two calls and two signal constants
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
         function: "resolve_owner",
         gate: Gate::Ungated(
             "getpwnam_r reads NSS user records; no filesystem mutation or child process",

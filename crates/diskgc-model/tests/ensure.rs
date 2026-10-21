@@ -199,6 +199,31 @@ fn configured_stale_tier_finishes_before_pressure_and_target_stops_pressure() {
 }
 
 #[test]
+fn pressure_waits_for_every_discoverable_eligible_stale_candidate() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target && filter:idle-7d\n        roots: [/home/mark/src]\n  - name: pressure\n    tiers:\n      - name: recent\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let extra = format!(
+        "  /home/mark/src/old2/Cargo.toml: {{}}\n  /home/mark/src/old2/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {}\n",
+        profile("2G", "2026-10-05T00:00:00Z")
+    );
+    let host = host(&yaml(true, &extra));
+    let report = grouped(&host, policy, "12G", Some("19G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .map(|action| (action.tier.as_str(), action.candidate.as_path()))
+            .collect::<Vec<_>>(),
+        [
+            ("old", Path::new(OLD)),
+            ("old", Path::new("/home/mark/src/old2/target")),
+            ("recent", Path::new(NEW)),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
     let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: bad\n        select: profile:cargo-target\n        roots: [/home/mark/link]\n      - name: good\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
     let model = yaml(true, "").replacen(
@@ -218,6 +243,49 @@ fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
             .any(|error| error.tier == "bad" && error.message.contains("misconfigured")),
         "{report:#?}"
     );
+    assert!(
+        calls(&host, Op::Unlinkat)
+            .iter()
+            .all(|call| !touches(call, "/home/mark/link")),
+        "excluded tier reached the delete port: {:#?}",
+        host.trace()
+    );
+}
+
+#[test]
+fn every_tier_environment_is_preflighted_before_the_first_deletion() {
+    let policy = "version: 1\nprofiles:\n  - name: later-command\n    find: {roots: [/home/mark/empty], paths: [unused-*], type: dir}\n    action: {command: [/usr/bin/rm, -rf, \"{path}\"]}\n    examples: {match: [/home/mark/empty/unused-a]}\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target && filter:idle-7d\n        roots: [/home/mark/src/old]\n  - name: pressure\n    tiers:\n      - name: recent\n        select: profile:cargo-target\n        roots: [/home/mark/src/new]\n  - name: later\n    tiers:\n      - name: bad-root\n        select: profile:cargo-target\n        roots: [/home/mark/link]\n      - name: command\n        select: profile:later-command\n";
+    let model = yaml(true, "").replacen(
+        "tree:\n",
+        "tree:\n  /home/mark/empty: {}\n  /home/mark/link: {symlink: /home/mark/src}\n  /usr/bin/rm: {mode: \"0755\"}\n",
+        1,
+    );
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.actions[0].tier, "old");
+    assert!(report.errors.iter().any(|error| error.tier == "bad-root"));
+
+    let trace = host.trace();
+    let first_delete = trace
+        .iter()
+        .position(|call| call.op == Op::Unlinkat)
+        .expect("the stale tier deletes");
+    for (op, path) in [
+        (Op::Openat2, "/home/mark/src/old"),
+        (Op::Openat2, "/home/mark/src/new"),
+        (Op::Openat2, "/home/mark/link"),
+        (Op::Openat2, "/home/mark/empty"),
+        (Op::ExecutableFile, "/usr/bin/rm"),
+    ] {
+        let preflight = trace[..first_delete]
+            .iter()
+            .position(|call| call.op == op && touches(call, path));
+        assert!(
+            preflight.is_some(),
+            "{op:?} {path} was not preflighted before deletion: {trace:#?}"
+        );
+    }
 }
 
 #[test]
@@ -661,6 +729,54 @@ fn a_failed_delete_is_an_error_exit_3_and_the_next_target_is_tried() {
     assert_eq!(order, [Path::new(NEW)], "old deleted nothing, new went");
 }
 
+/// Every reported action has one progress line, including a candidate
+/// whose deletion stopped after its first successful unlink. Error and
+/// process-scan lines are not action lines.
+#[test]
+fn each_complete_or_partial_action_has_one_log_line_and_one_report_row() {
+    for event in [
+        "",
+        "events:\n  - {at: {op: unlinkat, nth: 2, when: before}, fail: EACCES}\n",
+    ] {
+        let host = host(&yaml(true, event));
+        let mut lines = Vec::new();
+        let report = executor::ensure(&host, &cargo("19G", None), &[1000], &mut |line| {
+            lines.push(line.to_owned());
+        });
+        let action_lines: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| {
+                line.contains(": reclaimed ")
+                    || line.contains(": deleted part-way:")
+                    || line.contains(": command finished with ")
+            })
+            .collect();
+        assert_eq!(report.actions.len(), 2, "{report:#?}; {lines:#?}");
+        assert_eq!(action_lines.len(), report.actions.len(), "{lines:#?}");
+        for (line, action) in action_lines.iter().zip(&report.actions) {
+            assert!(
+                line.contains(&format!("cargo-target {}:", action.candidate.display())),
+                "action and log disagree: {action:?}; {line}"
+            );
+        }
+        let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert_eq!(
+            json["actions"].as_array().unwrap().len(),
+            action_lines.len(),
+            "JSON and log disagree: {json}; {lines:#?}"
+        );
+        if !event.is_empty() {
+            assert!(
+                action_lines
+                    .iter()
+                    .any(|line| line.contains("deleted part-way:")),
+                "the injected failure did not exercise a partial action: {lines:#?}"
+            );
+        }
+    }
+}
+
 /// Exit 75: the host lock held by another reclaim until the deadline, a
 /// fresh sample still below `--min-free`; nothing deleted. If the other
 /// holder freed enough meanwhile, the result is 0.
@@ -712,6 +828,19 @@ fn space_freed_while_waiting_for_the_lock_is_met_without_a_reclaim() {
             .all(|c| !touches(c, OLD) && !touches(c, NEW)),
         "no target was reached"
     );
+}
+
+#[test]
+fn no_timeout_waits_past_the_default_ten_minutes_for_the_host_lock() {
+    let holder = "  /usr/bin/diskgc: {}\n  /home/mark/junk: {size: 5G}\nprocesses:\n  - pid: 4242\n    exe: /usr/bin/diskgc\n    cwd: /\n    maps: [/usr/bin/diskgc]\n    environ: [PATH=/usr/bin]\nlocks:\n  - {path: /run/diskgc/lock, holder: 4242, mode: exclusive}\nevents:\n  - {at: {elapsed: 11m}, remove: /home/mark/junk}\n  - {at: {elapsed: 11m}, exit: 4242}\n";
+    let host = common::host(&yaml(true, holder));
+    let mut req = cargo("6G", None);
+    req.timeout = None;
+    let report = ensure(&host, &req);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.exit_code(), 0);
+    assert!(host.elapsed() >= Duration::from_secs(11 * 60));
+    assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
 /// `ensure`'s `statvfs` calls in order on the default model at 12G:
@@ -1362,6 +1491,27 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     let order: Vec<&Path> = report.plan.iter().map(|p| p.candidate.as_path()).collect();
     assert_eq!(order, [Path::new(OLD), Path::new(NEW)]);
     assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn a_spent_tally_budget_does_not_truncate_the_dry_run_plan() {
+    let mut request = request(
+        "profile:cargo-target && filter:idle-7d",
+        &[SRC],
+        SRC,
+        "1G",
+        None,
+    );
+    let ordinary = dry_run(&host(&yaml(false, "")), &request);
+    request.tally_budget = Some(Duration::ZERO);
+    let spent = dry_run(&host(&yaml(false, "")), &request);
+    assert_eq!(ordinary.status, Status::DryRun);
+    assert_eq!(spent.status, Status::DryRun, "{spent:#?}");
+    assert_eq!(
+        spent.plan, ordinary.plan,
+        "a budget only limits reclaim tallying"
+    );
+    assert_eq!(spent.plan.len(), 2, "every candidate remains judged");
 }
 
 /// A root on another filesystem than PATH's is skipped in preflight:

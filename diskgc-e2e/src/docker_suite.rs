@@ -324,6 +324,86 @@ pub(crate) fn assert_native_server_identity(ctx: &Ctx) -> TestResult {
     validate_server_identity(&server, ENGINE_VERSION)
 }
 
+/// The CLI must finish a Docker read-only query at its own bound when its
+/// leader exits but a descendant keeps the inherited output pipes open.
+/// The stand-in only intercepts the context query; the daemon and every
+/// other client operation use the fixture's native Docker installation.
+pub fn docker_query_descendant_pipe_holder_hits_deadline(ctx: &Ctx) -> TestResult {
+    ensure!(
+        ctx.image.name == "docker-dind",
+        "wrong image: {}",
+        ctx.image.name
+    );
+    ctx.scratch.mkdir("docker-client", 0o755, TESTER)?;
+    let _daemon = Daemon::start(ctx)?;
+    grant_store_traversal()?;
+    let fake_dir = ctx.scratch.mkdir("docker-query-stall", 0o755, TESTER)?;
+    ctx.scratch.write_file(
+        "docker-query-stall/docker",
+        b"#!/bin/sh\nif [ \"$1\" = context ] && [ \"$2\" = show ]; then\n  sleep 30 &\n  printf 'default\\n'\n  exit 0\nfi\nexec /usr/local/bin/docker \"$@\"\n",
+        0o755,
+        TESTER,
+    )?;
+    let env = vec![
+        (
+            "PATH".to_owned(),
+            format!("{}:/usr/local/bin:/bin", fake_dir.display()),
+        ),
+        (
+            "DOCKER_HOST".to_owned(),
+            "unix:///var/run/docker.sock".to_owned(),
+        ),
+        ("DOCKER_CONFIG".to_owned(), "/tmp/docker-client".to_owned()),
+    ];
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .concurrent_writer("/var/lib/docker")
+            .concurrent_writer("/var/lib/containerd")
+            .concurrent_writer("/run/docker"),
+    )?;
+    let run = under_test::run_as_tester_with_env(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &env,
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--dry-run",
+            "--json",
+            "--no-index",
+            "--timeout",
+            "20s",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:docker-unreferenced",
+            "/var/lib/docker",
+        ],
+    )?;
+    oracle.judge(&run)?.assert_clean()?;
+    ensure!(
+        run.took < Duration::from_secs(18),
+        "Docker query waited for pipe holder after its 10-second bound: {:?}",
+        run.took
+    );
+    run.expect_code(0)?;
+    let result = report(&run)?;
+    ensure!(
+        result["status"] == "dry_run"
+            && result["actions"].as_array().is_some_and(Vec::is_empty)
+            && result["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("read-only query exceeded 10s"))
+                })),
+        "Docker query timeout was not reported without action: {result}"
+    );
+    Ok(())
+}
+
 /// A native Docker server, image, container and volume entirely inside the
 /// disposable Podman container. The diskgc binary under test is still run
 /// and judged by the deletion oracle; no Docker kind is required yet.

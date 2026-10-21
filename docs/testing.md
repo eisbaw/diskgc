@@ -553,6 +553,14 @@ filesystem, processes and mounts from the developer's system.
   `ensure_exits_1_when_every_candidate_was_processed_below_min_free`;
   selection by model tests and by the test driver's `--idle-for 1s`
   (`cargo_target_suite.rs`).
+- **Agent pre-job journey** (`agent_journey.rs`, Nix image): the shipped
+  [agent-pre-job.py](agent-pre-job.py) runs real `ensure --json` and decides
+  from its exit code and parsed JSON alone. Separate traced runs exercise
+  `met` (0), `exhausted` (1), a runtime misconfigured tier reported as
+  `error` (3), and `lock_timeout` (75) while another real reclaim holds the
+  host lock. The deletion oracle judges every run; the competing command
+  keeps its candidate, and the test checks the agent's one-line JSON
+  decision in each case.
 - **Not only Nix:** every test but the Nix-only and Docker-only ones in a container from
   a Debian image with the static binary, without Nix (Container setup:
   Images; `just e2e-debian`). A separate dind image exercises Docker Engine;

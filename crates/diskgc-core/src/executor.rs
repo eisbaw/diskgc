@@ -1,8 +1,8 @@
 //! The executor (docs/architecture.md, The reclaim walk): one selected tier
 //! or configured ordered groups, with per-tier discovery and a shared host
 //! lock. Ranking may use oldest, best-fit, or a seeded random order.
-//! Later tasks add deadlines with overruns and signals (task-54) and the
-//! index (task-31).
+//! Deadline and signal handling use the [`Host`] clock and cancellation
+//! state. Task-31's index is separate.
 //!
 //! Two entry points, kept apart by the type system:
 //!
@@ -57,14 +57,54 @@ use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, Where};
 use crate::report::{
-    ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
-    after_lock_timeout, conclude, signed_bytes,
+    ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, OverrunEntry, PlanEntry, Report,
+    SkipEntry, Status, after_lock_timeout, conclude, signed_bytes,
 };
 use crate::resolve::{
     ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
 };
 use crate::select::{self, Factor};
 use crate::units::{Size, format_bytes};
+
+fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
+    // Usage errors precede a run. Once work has started, interruption wins
+    // over the measured-space and deadline outcomes, including if a blocked
+    // host call returned with an ordinary error after the handler ran.
+    if report.status != Status::UsageError
+        && let Some(signal) = host.interrupted()
+    {
+        report.status = Status::Interrupted(signal);
+    }
+    report
+}
+
+/// Record the stage that was in progress when a cooperative deadline was
+/// crossed. Its caller decides whether a final space sample is still needed.
+fn record_deadline_overrun<H: Host>(
+    host: &H,
+    report: &mut Report,
+    deadline: Option<MonoTime>,
+    started: MonoTime,
+    operation: &str,
+    path: &Path,
+) {
+    let Some(deadline) = deadline else {
+        return;
+    };
+    let ended = host.now();
+    if started <= deadline && ended > deadline {
+        report.overruns.push(OverrunEntry {
+            operation: operation.to_owned(),
+            path: path.to_owned(),
+            over_ms: u64::try_from(ended.saturating_since(deadline).as_millis())
+                .unwrap_or(u64::MAX),
+        });
+    }
+}
+
+fn deadline_passed<H: Host>(host: &H, deadline: Option<MonoTime>) -> bool {
+    deadline.is_some_and(|end| host.now() >= end)
+}
 
 /// The name of the one group and tier `--select` makes, in reports
 /// (docs/reference.md, Commands).
@@ -617,6 +657,7 @@ pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, String> {
 struct Measured<F> {
     /// `PATH`, reached safely (held for the run: its fd is what is sampled).
     at: Resolved<F>,
+    path: PathBuf,
     dev: Dev,
     min: u64,
     target: u64,
@@ -657,20 +698,75 @@ fn measure<H: Host>(
     Ok(Measured {
         dev: at.stat.dev,
         at,
+        path: request.path.clone(),
         min,
         target,
     })
 }
 
+fn measure_until<H: Host>(
+    host: &H,
+    request: &Request,
+    report: &mut Report,
+    deadline: Option<MonoTime>,
+) -> Result<Measured<H::Fd>, String> {
+    let started = host.now();
+    let result = measure(host, request, report);
+    record_deadline_overrun(host, report, deadline, started, "measure", &request.path);
+    result
+}
+
+/// Setup can consume the whole call deadline before its first space sample.
+/// Take that sample before choosing 0/124; a failed first sample remains a
+/// usage error because there is no measured filesystem to judge.
+fn deadline_before_first_sample<H: Host>(
+    host: &H,
+    request: &Request,
+    deadline: Option<MonoTime>,
+    mut report: Report,
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let measured = match measure_until(host, request, &mut report, deadline) {
+        Ok(measured) => measured,
+        Err(_) if host.interrupted().is_some() => return report,
+        Err(error) => return usage(report, log, error),
+    };
+    report.avail_after_bytes = report.avail_before_bytes;
+    report.status = conclude(
+        Final::of(report.avail_after_bytes, measured.min),
+        true,
+        false,
+    );
+    report
+}
+
 /// The deadline `timeout` from now.
 fn deadline_of<H: Host>(host: &H, timeout: Option<Duration>) -> Option<MonoTime> {
-    timeout.and_then(|t| host.now().checked_add(t))
+    timeout.map(|t| host.now().checked_add(t).unwrap_or(MonoTime(Duration::MAX)))
 }
 
 fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
     if let Err(error) = hostlock::readiness(host) {
         log(&format!("warning: host lock is not ready: {error}"));
     }
+}
+
+fn warn_if_host_lock_unready_timed<H: Host>(
+    host: &H,
+    report: &mut Report,
+    deadline: Option<MonoTime>,
+    log: &mut dyn FnMut(&str),
+) {
+    let started = host.now();
+    warn_if_host_lock_unready(host, log);
+    record_deadline_overrun(
+        host,
+        report,
+        deadline,
+        started,
+        "host_lock_readiness",
+        &hostlock::host_lock_path(),
+    );
 }
 
 /// A foreign root cannot free space on PATH. Omit it from every source and
@@ -1026,6 +1122,16 @@ pub fn ensure<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    signal_report(host, ensure_inner(host, request, owners, log))
+}
+
+fn ensure_inner<H: Delete>(
+    host: &H,
+    request: &Request,
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let deadline = deadline_of(host, request.timeout);
     // Not a success until a path below says so.
     let report = Report::new(Status::Error, Some(&request.path));
     // Before anything else (the gate, the first sample, the host lock):
@@ -1052,7 +1158,17 @@ pub fn ensure<H: Delete>(
         }
     }
     let mut report = report;
-    if let Err(gate) = host.may_delete() {
+    let started = host.now();
+    let gate = host.may_delete();
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "sandbox_gate",
+        &request.path,
+    );
+    if let Err(gate) = gate {
         return usage(
             report,
             log,
@@ -1061,7 +1177,12 @@ pub fn ensure<H: Delete>(
             ),
         );
     }
-    let deadline = deadline_of(host, request.timeout);
+    if host.interrupted().is_some() {
+        return report;
+    }
+    if deadline_passed(host, deadline) {
+        return deadline_before_first_sample(host, request, deadline, report, log);
+    }
     let docker_argv = ["docker".to_owned()];
     let command_argv = match &request.tier.action {
         Action::Command { argv, .. } => Some(argv.as_slice()),
@@ -1071,7 +1192,20 @@ pub fn ensure<H: Delete>(
         _ => None,
     };
     let command_ready = if let Some(argv) = command_argv {
-        match command_action::preflight(host, argv) {
+        let started = host.now();
+        let preflight = command_action::preflight(host, argv);
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "preflight",
+            &request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return deadline_before_first_sample(host, request, deadline, report, log);
+        }
+        match preflight {
             Ok(Preflight::Ready(ready)) => {
                 log(&format!(
                     "{}: command executables: {}",
@@ -1086,10 +1220,21 @@ pub fn ensure<H: Delete>(
                 Some(ready)
             }
             Ok(Preflight::Missing(program)) => {
-                let measured = match measure(host, request, &mut report) {
+                let measured = match measure_until(host, request, &mut report, deadline) {
                     Ok(measured) => measured,
+                    Err(_) if host.interrupted().is_some() => return report,
                     Err(error) => return usage(report, log, error),
                 };
+                if deadline_passed(host, deadline) {
+                    return deadline_before_reclaim(
+                        host,
+                        &measured,
+                        deadline,
+                        report,
+                        log,
+                        &request.tier,
+                    );
+                }
                 log(&format!(
                     "{}: profile `{}` is missing executable {program:?}",
                     request.tier.name, request.tier.profile
@@ -1109,15 +1254,26 @@ pub fn ensure<H: Delete>(
                     false,
                 );
                 if report.status == Status::Met {
-                    warn_if_host_lock_unready(host, log);
+                    warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
                 }
                 return report;
             }
             Err(error) => {
-                let measured = match measure(host, request, &mut report) {
+                let measured = match measure_until(host, request, &mut report, deadline) {
                     Ok(measured) => measured,
+                    Err(_) if host.interrupted().is_some() => return report,
                     Err(message) => return usage(report, log, message),
                 };
+                if deadline_passed(host, deadline) {
+                    return deadline_before_reclaim(
+                        host,
+                        &measured,
+                        deadline,
+                        report,
+                        log,
+                        &request.tier,
+                    );
+                }
                 record_error(
                     &mut report,
                     log,
@@ -1135,15 +1291,19 @@ pub fn ensure<H: Delete>(
     } else {
         None
     };
-    let measured = match measure(host, request, &mut report) {
+    let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(m) => m,
+        Err(_) if host.interrupted().is_some() => return report,
         Err(e) => return usage(report, log, e),
     };
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
+    }
     let avail = report.avail_before_bytes.expect("measured");
     if avail >= measured.min {
         report.status = Status::Met;
         report.avail_after_bytes = Some(avail);
-        warn_if_host_lock_unready(host, log);
+        warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
         return report;
     }
     log(&format!(
@@ -1152,25 +1312,58 @@ pub fn ensure<H: Delete>(
         measured.at.mount.mount_point.display(),
         format_bytes(measured.min)
     ));
-    let lock = match hostlock::acquire(host, deadline) {
+    let started = host.now();
+    let acquired = hostlock::acquire(host, deadline);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "host_lock",
+        &hostlock::host_lock_path(),
+    );
+    let lock = match acquired {
         Ok(lock) => lock,
         Err(LockError::DeadlinePassed) => {
             log(&LockError::DeadlinePassed.to_string());
             // A fresh sample decides: the other holder may have freed enough.
             report.avail_after_bytes =
-                final_sample(host, &measured, &mut report, log, &request.tier);
+                final_sample(host, &measured, deadline, &mut report, log, &request.tier);
             report.status = after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
             return report;
         }
-        Err(e) => return usage(report, log, e.to_string()),
+        Err(LockError::Interrupted(signal)) => {
+            report.status = Status::Interrupted(signal);
+            return report;
+        }
+        Err(e) => {
+            if let Some(signal) = host.interrupted() {
+                report.status = Status::Interrupted(signal);
+                return report;
+            }
+            return usage(report, log, e.to_string());
+        }
     };
     log(&format!(
         "host lock {} taken after {} ms",
         hostlock::host_lock_path().display(),
         lock.waited.as_millis()
     ));
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
+    }
     // Someone else (the reclaim we waited for) may have freed it meanwhile.
-    match sample(host, &measured) {
+    let started = host.now();
+    let sampled = sample(host, &measured);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "statvfs",
+        &measured.path,
+    );
+    match sampled {
         Ok(space) if space.avail_bytes >= measured.min => {
             log(&format!(
                 "{} available now: --min-free is met, nothing to reclaim",
@@ -1186,13 +1379,29 @@ pub fn ensure<H: Delete>(
             return report;
         }
     }
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
+    }
+    let started = host.now();
     let roots = preflight_roots(host, &request.tier, measured.dev);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "preflight",
+        &request.path,
+    );
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
+    }
     report.skipped.extend(roots.skipped.iter().cloned());
     for error in roots.errors.iter().cloned() {
         record_error(&mut report, log, error);
     }
     if !report.errors.is_empty() {
-        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, &request.tier);
+        report.avail_after_bytes =
+            final_sample(host, &measured, deadline, &mut report, log, &request.tier);
         report.status = conclude(
             Final::of(report.avail_after_bytes, measured.min),
             false,
@@ -1201,12 +1410,25 @@ pub fn ensure<H: Delete>(
         return report;
     }
     let tier = roots.filtered_tier(&request.tier);
-    let protection_matches = match scan_protections(host, &request.tier.protections, deadline) {
+    let started = host.now();
+    let protections = scan_protections(host, &request.tier.protections, deadline);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "protect",
+        &request.path,
+    );
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
+    }
+    let protection_matches = match protections {
         Ok(matches) => matches,
         Err(error) => {
             record_error(&mut report, log, run_error(&request.tier, error));
             report.avail_after_bytes =
-                final_sample(host, &measured, &mut report, log, &request.tier);
+                final_sample(host, &measured, deadline, &mut report, log, &request.tier);
             return report;
         }
     };
@@ -1226,10 +1448,11 @@ pub fn ensure<H: Delete>(
     };
     run.run(owners);
     let deadline_hit = run.deadline_hit;
-    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, &request.tier);
+    report.avail_after_bytes =
+        final_sample(host, &measured, deadline, &mut report, log, &request.tier);
     report.status = conclude(
         Final::of(report.avail_after_bytes, measured.min),
-        deadline_hit,
+        deadline_hit || deadline_passed(host, deadline),
         !report.errors.is_empty(),
     );
     // Released only here, by closing, after the final sample.
@@ -1249,6 +1472,21 @@ pub fn ensure_grouped<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    signal_report(
+        host,
+        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, log),
+    )
+}
+
+fn ensure_grouped_inner<H: Delete>(
+    host: &H,
+    request: &Request,
+    tiers: &[Tier],
+    tier_timeouts: &[Duration],
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let deadline = deadline_of(host, request.timeout);
     let mut report = Report::new(Status::Error, Some(&request.path));
     if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
         return usage(report, log, "configuration has no tiers to run".to_owned());
@@ -1281,7 +1519,17 @@ pub fn ensure_grouped<H: Delete>(
             }
         }
     }
-    if let Err(gate) = host.may_delete() {
+    let started = host.now();
+    let gate = host.may_delete();
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "sandbox_gate",
+        &request.path,
+    );
+    if let Err(gate) = gate {
         return usage(
             report,
             log,
@@ -1290,34 +1538,77 @@ pub fn ensure_grouped<H: Delete>(
             ),
         );
     }
-    let deadline = deadline_of(host, request.timeout);
-    let measured = match measure(host, request, &mut report) {
+    if host.interrupted().is_some() {
+        return report;
+    }
+    if deadline_passed(host, deadline) {
+        return deadline_before_first_sample(host, request, deadline, report, log);
+    }
+    let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(measured) => measured,
+        Err(_) if host.interrupted().is_some() => return report,
         Err(error) => return usage(report, log, error),
     };
     let first = &tiers[0];
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, first);
+    }
     let avail = report.avail_before_bytes.expect("measured");
     if avail >= measured.min {
         report.status = Status::Met;
         report.avail_after_bytes = Some(avail);
-        warn_if_host_lock_unready(host, log);
+        warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
         return report;
     }
-    let lock = match hostlock::acquire(host, deadline) {
+    let started = host.now();
+    let acquired = hostlock::acquire(host, deadline);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "host_lock",
+        &hostlock::host_lock_path(),
+    );
+    let lock = match acquired {
         Ok(lock) => lock,
         Err(LockError::DeadlinePassed) => {
-            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+            report.avail_after_bytes =
+                final_sample(host, &measured, deadline, &mut report, log, first);
             report.status = after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
             return report;
         }
-        Err(error) => return usage(report, log, error.to_string()),
+        Err(LockError::Interrupted(signal)) => {
+            report.status = Status::Interrupted(signal);
+            return report;
+        }
+        Err(error) => {
+            if let Some(signal) = host.interrupted() {
+                report.status = Status::Interrupted(signal);
+                return report;
+            }
+            return usage(report, log, error.to_string());
+        }
     };
     log(&format!(
         "host lock {} taken after {} ms",
         hostlock::host_lock_path().display(),
         lock.waited.as_millis()
     ));
-    match sample(host, &measured) {
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, first);
+    }
+    let started = host.now();
+    let sampled = sample(host, &measured);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "statvfs",
+        &measured.path,
+    );
+    match sampled {
         Ok(space) if space.avail_bytes >= measured.min => {
             report.status = Status::Met;
             report.avail_after_bytes = Some(space.avail_bytes);
@@ -1329,18 +1620,36 @@ pub fn ensure_grouped<H: Delete>(
             return report;
         }
     }
-    let protection_matches = match scan_protections(host, &first.protections, deadline) {
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, first);
+    }
+    let started = host.now();
+    let protections = scan_protections(host, &first.protections, deadline);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "protect",
+        &request.path,
+    );
+    if deadline_passed(host, deadline) {
+        return deadline_before_reclaim(host, &measured, deadline, report, log, first);
+    }
+    let protection_matches = match protections {
         Ok(matches) => matches,
         Err(error) => {
             record_error(&mut report, log, run_error(first, error));
-            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+            report.avail_after_bytes =
+                final_sample(host, &measured, deadline, &mut report, log, first);
             return report;
         }
     };
     let mut prepared = Vec::with_capacity(tiers.len());
     for tier in tiers {
         if deadline.is_some_and(|end| host.now() >= end) {
-            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+            report.avail_after_bytes =
+                final_sample(host, &measured, deadline, &mut report, log, tier);
             report.status = conclude(
                 Final::of(report.avail_after_bytes, measured.min),
                 true,
@@ -1348,7 +1657,19 @@ pub fn ensure_grouped<H: Delete>(
             );
             return report;
         }
+        let started = host.now();
         let roots = preflight_roots(host, tier, measured.dev);
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "preflight",
+            &request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return deadline_before_reclaim(host, &measured, deadline, report, log, tier);
+        }
         report.skipped.extend(roots.skipped.iter().cloned());
         if !roots.errors.is_empty() {
             for error in roots.errors.iter().cloned() {
@@ -1370,7 +1691,20 @@ pub fn ensure_grouped<H: Delete>(
             _ => None,
         };
         let ready = if let Some(argv) = argv {
-            match command_action::preflight(host, argv) {
+            let started = host.now();
+            let preflight = command_action::preflight(host, argv);
+            record_deadline_overrun(
+                host,
+                &mut report,
+                deadline,
+                started,
+                "preflight",
+                &request.path,
+            );
+            if deadline_passed(host, deadline) {
+                return deadline_before_reclaim(host, &measured, deadline, report, log, tier);
+            }
+            match preflight {
                 Ok(Preflight::Ready(ready)) => {
                     log(&format!(
                         "{}: command executables: {}",
@@ -1414,7 +1748,21 @@ pub fn ensure_grouped<H: Delete>(
             tier.source,
             SourceKind::DockerBuildCache | SourceKind::DockerImages
         ) {
-            match docker_backend::inspect_backend(host, measured.dev, docker_storage(tier)) {
+            let started = host.now();
+            let inspected =
+                docker_backend::inspect_backend(host, measured.dev, docker_storage(tier));
+            record_deadline_overrun(
+                host,
+                &mut report,
+                deadline,
+                started,
+                "preflight",
+                &request.path,
+            );
+            if deadline_passed(host, deadline) {
+                return deadline_before_reclaim(host, &measured, deadline, report, log, tier);
+            }
+            match inspected {
                 Ok(Binding::Bound(bound)) => {
                     log(&format!(
                         "{}: Docker backend bound to {}",
@@ -1450,11 +1798,24 @@ pub fn ensure_grouped<H: Delete>(
     }
     let mut deadline_hit = false;
     for ((_, tier_timeout), ready) in tiers.iter().zip(tier_timeouts).zip(prepared) {
+        if host.interrupted().is_some() {
+            break;
+        }
         let Some((tier, ready, docker_bound)) = ready else {
             continue;
         };
         let tier = &tier;
-        let avail = match sample(host, &measured) {
+        let started = host.now();
+        let sampled = sample(host, &measured);
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "statvfs",
+            &measured.path,
+        );
+        let avail = match sampled {
             Ok(space) => space.avail_bytes,
             Err(error) => {
                 record_error(&mut report, log, run_error(tier, error));
@@ -1468,9 +1829,8 @@ pub fn ensure_grouped<H: Delete>(
             deadline_hit = true;
             break;
         }
-        let own_deadline = (!tier_timeout.is_zero())
-            .then(|| host.now().checked_add(*tier_timeout))
-            .flatten();
+        let own_deadline =
+            (!tier_timeout.is_zero()).then(|| deadline_of(host, Some(*tier_timeout)).unwrap());
         let tier_deadline = match (deadline, own_deadline) {
             (Some(run), Some(own)) => Some(run.min(own)),
             (run, None) => run,
@@ -1509,10 +1869,10 @@ pub fn ensure_grouped<H: Delete>(
             break;
         }
     }
-    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+    report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, first);
     report.status = conclude(
         Final::of(report.avail_after_bytes, measured.min),
-        deadline_hit,
+        deadline_hit || deadline_passed(host, deadline),
         !report.errors.is_empty(),
     );
     drop(lock);
@@ -1528,14 +1888,45 @@ pub fn dry_run<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    signal_report(host, dry_run_inner(host, request, owners, log))
+}
+
+fn dry_run_inner<H: Host>(
+    host: &H,
+    request: &Request,
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
     let deadline = deadline_of(host, request.timeout);
     let mut report = Report::new(Status::DryRun, Some(&request.path));
-    let measured = match measure(host, request, &mut report) {
+    if host.interrupted().is_some() {
+        return report;
+    }
+    let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(m) => m,
+        Err(_) if host.interrupted().is_some() => return report,
         Err(e) => return usage(report, log, e),
     };
+    if host.interrupted().is_some() {
+        return report;
+    }
     let tier = &request.tier;
+    if deadline_passed(host, deadline) {
+        return deadline_before_plan(host, &measured, deadline, report, log, tier);
+    }
+    let started = host.now();
     let roots = preflight_roots(host, tier, measured.dev);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "preflight",
+        &request.path,
+    );
+    if deadline_passed(host, deadline) {
+        return deadline_before_plan(host, &measured, deadline, report, log, tier);
+    }
     report.plan.extend(roots.skipped.iter().map(|skip| {
         let mut entry = plan_entry(tier, &skip.candidate, Some(skip.reason), None);
         entry.profile = skip.profile.clone();
@@ -1545,12 +1936,25 @@ pub fn dry_run<H: Host>(
         for error in roots.errors.iter().cloned() {
             record_error(&mut report, log, error);
         }
-        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+        report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
         return report;
     }
     let tier = roots.filtered_tier(tier);
     let tier = &tier;
-    let protection_matches = match scan_protections(host, &tier.protections, deadline) {
+    let started = host.now();
+    let protections = scan_protections(host, &tier.protections, deadline);
+    record_deadline_overrun(
+        host,
+        &mut report,
+        deadline,
+        started,
+        "protect",
+        &request.path,
+    );
+    if deadline_passed(host, deadline) {
+        return deadline_before_plan(host, &measured, deadline, report, log, tier);
+    }
+    let protection_matches = match protections {
         Ok(matches) => matches,
         Err(error) => {
             record_error(&mut report, log, run_error(tier, error));
@@ -1562,7 +1966,20 @@ pub fn dry_run<H: Host>(
         tier.source,
         SourceKind::DockerBuildCache | SourceKind::DockerImages
     ) {
-        match docker_backend::inspect_backend(host, measured.dev, docker_storage(tier)) {
+        let started = host.now();
+        let inspected = docker_backend::inspect_backend(host, measured.dev, docker_storage(tier));
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "preflight",
+            &request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return deadline_before_plan(host, &measured, deadline, report, log, tier);
+        }
+        match inspected {
             Ok(Binding::Bound(bound)) => {
                 let candidate = docker_candidate(tier, &bound);
                 log(&format!(
@@ -1596,11 +2013,24 @@ pub fn dry_run<H: Host>(
             }
             Err(error) => record_error(&mut report, log, run_error(tier, error.to_string())),
         }
-        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+        report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
         return report;
     }
     if let Action::Command { argv, .. } = &tier.action {
-        match command_action::preflight(host, argv) {
+        let started = host.now();
+        let preflight = command_action::preflight(host, argv);
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "preflight",
+            &request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return deadline_before_plan(host, &measured, deadline, report, log, tier);
+        }
+        match preflight {
             Ok(Preflight::Ready(ready)) => log(&format!(
                 "{}: command executables: {}",
                 tier.name,
@@ -1622,18 +2052,21 @@ pub fn dry_run<H: Host>(
                     Some(Reason::Missing.as_str()),
                     None,
                 ));
-                report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+                report.avail_after_bytes =
+                    final_sample(host, &measured, deadline, &mut report, log, tier);
                 return report;
             }
             Err(error) => {
                 record_error(&mut report, log, run_error(tier, error.to_string()));
-                report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+                report.avail_after_bytes =
+                    final_sample(host, &measured, deadline, &mut report, log, tier);
                 return report;
             }
         }
     }
     let rules = rules(tier, owners, log);
     let mut checker = Checker::for_plan(&rules);
+    let started = host.now();
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
             host,
@@ -1663,11 +2096,20 @@ pub fn dry_run<H: Host>(
         }
         SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
     };
+    record_deadline_overrun(host, &mut report, deadline, started, "plan", &request.path);
+    if deadline_passed(host, deadline) {
+        return deadline_before_plan(host, &measured, deadline, report, log, tier);
+    }
     let Planned {
         mut eligible,
         skipped,
         stopped,
     } = planned;
+    if host.interrupted().is_some() {
+        // A partial judgement is not a trustworthy plan. Keep the root
+        // refusals already recorded, but publish no unverified candidate.
+        return report;
+    }
     if tier.order == Order::Oldest {
         oldest_first(&mut eligible, |(last, _)| *last);
     } else {
@@ -1697,11 +2139,18 @@ pub fn dry_run<H: Host>(
         .map(|(_, e)| e)
         .chain(skipped)
         .collect();
-    for entry in &mut report.plan {
-        if entry.candidate.as_os_str().is_empty() {
+    for index in 0..report.plan.len() {
+        let candidate = report.plan[index].candidate.clone();
+        if candidate.as_os_str().is_empty() {
             continue;
         }
-        let protected = match overlaps_checked(host, &entry.candidate, &protection_matches) {
+        let started = host.now();
+        let overlap = overlaps_checked(host, &candidate, &protection_matches);
+        record_deadline_overrun(host, &mut report, deadline, started, "protect", &candidate);
+        if deadline_passed(host, deadline) {
+            return deadline_before_plan(host, &measured, deadline, report, log, tier);
+        }
+        let protected = match overlap {
             Ok(protected) => protected,
             Err(error) => {
                 record_error(&mut report, log, run_error(tier, error));
@@ -1714,8 +2163,9 @@ pub fn dry_run<H: Host>(
             log(&format!(
                 "{} {}: skip protected (overlaps a protected source match)",
                 tier.name,
-                entry.candidate.display()
+                candidate.display()
             ));
+            let entry = &mut report.plan[index];
             entry.reason = Some(Reason::Protected.as_str());
             entry.estimated_bytes = None;
         }
@@ -1732,14 +2182,43 @@ pub fn dry_run<H: Host>(
         );
     }
     // Unmeasured: unknown, not the earlier sample.
-    report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
-    report.held_by_deleted_files = held(host, &mut checker, measured.dev, &measured.at.mount, log);
+    report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
+    if !deadline_passed(host, deadline) && host.interrupted().is_none() {
+        let started = host.now();
+        report.held_by_deleted_files =
+            held(host, &mut checker, measured.dev, &measured.at.mount, log);
+        record_deadline_overrun(
+            host,
+            &mut report,
+            deadline,
+            started,
+            "in_use",
+            &request.path,
+        );
+    }
+    if deadline_passed(host, deadline) {
+        report.status = Status::Deadline;
+    }
     report
 }
 
 /// Plan every configured tier in its policy order without taking a host
 /// lock. Each plan remains tagged with its configured group and tier.
 pub fn dry_run_grouped<H: Host>(
+    host: &H,
+    request: &Request,
+    tiers: &[Tier],
+    tier_timeouts: &[Duration],
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    signal_report(
+        host,
+        dry_run_grouped_inner(host, request, tiers, tier_timeouts, owners, log),
+    )
+}
+
+fn dry_run_grouped_inner<H: Host>(
     host: &H,
     request: &Request,
     tiers: &[Tier],
@@ -1771,6 +2250,9 @@ pub fn dry_run_grouped<H: Host>(
         report.status = Status::DryRun;
     }
     for (tier, timeout) in tiers.iter().zip(tier_timeouts).skip(1) {
+        if host.interrupted().is_some() {
+            break;
+        }
         if run_deadline.is_some_and(|end| host.now() >= end) {
             report.status = Status::Deadline;
             break;
@@ -1778,6 +2260,7 @@ pub fn dry_run_grouped<H: Host>(
         for_tier.tier = tier.clone();
         for_tier.timeout = bounded_tier_timeout(host, run_deadline, *timeout);
         let part = dry_run(host, &for_tier, owners, log);
+        report.overruns.extend(part.overruns.iter().cloned());
         if matches!(part.status, Status::UsageError | Status::Error) {
             report.errors.extend(part.errors);
             report.status = part.status;
@@ -1906,6 +2389,9 @@ fn plan_cargo<H: Host>(
                 &[]
             };
             for target in targets {
+                if host.interrupted().is_some() {
+                    break;
+                }
                 let excluded =
                     match excluded_by(host, &tier.negated, &negated_matches, &target.path) {
                         Ok(excluded) => excluded,
@@ -2378,6 +2864,9 @@ fn plan_fs_union<H: Host>(
     };
     let mut checker = Checker::for_plan(rules);
     for candidate in &candidates {
+        if host.interrupted().is_some() {
+            return planned;
+        }
         let checkouts = union_checkouts(&sources, candidate);
         if let Some((index, path, skip)) = union_checkout_path(candidate, checkouts) {
             let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
@@ -2495,17 +2984,57 @@ fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules
 fn final_sample<H: Host>(
     host: &H,
     measured: &Measured<H::Fd>,
+    deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
     tier: &Tier,
 ) -> Option<u64> {
-    match sample(host, measured) {
+    let started = host.now();
+    let result = sample(host, measured);
+    record_deadline_overrun(host, report, deadline, started, "statvfs", &measured.path);
+    match result {
         Ok(space) => Some(space.avail_bytes),
         Err(e) => {
             record_error(report, log, run_error(tier, e));
             None
         }
     }
+}
+
+fn deadline_before_reclaim<H: Host>(
+    host: &H,
+    measured: &Measured<H::Fd>,
+    deadline: Option<MonoTime>,
+    mut report: Report,
+    log: &mut dyn FnMut(&str),
+    tier: &Tier,
+) -> Report {
+    report.avail_after_bytes = final_sample(host, measured, deadline, &mut report, log, tier);
+    report.status = conclude(
+        Final::of(report.avail_after_bytes, measured.min),
+        true,
+        !report.errors.is_empty(),
+    );
+    report
+}
+
+fn deadline_before_plan<H: Host>(
+    host: &H,
+    measured: &Measured<H::Fd>,
+    deadline: Option<MonoTime>,
+    mut report: Report,
+    log: &mut dyn FnMut(&str),
+    tier: &Tier,
+) -> Report {
+    report.plan.clear();
+    report.avail_after_bytes = final_sample(host, measured, deadline, &mut report, log, tier);
+    record_error(
+        &mut report,
+        log,
+        run_error(tier, "deadline passed before the plan was complete"),
+    );
+    report.status = Status::Deadline;
+    report
 }
 
 /// A fresh sample of the requested filesystem.
@@ -2710,9 +3239,29 @@ struct Reclaim<'a, 'l, H: Delete> {
 }
 
 impl<H: Delete> Reclaim<'_, '_, H> {
+    fn stop_if_interrupted(&mut self) -> bool {
+        if self.host.interrupted().is_some() {
+            self.run_stopped = true;
+            return true;
+        }
+        false
+    }
+
     /// Recheck immediately before entering a kind's reclaim protocol. A
     /// changed or unreadable protected tree stops the entire run.
     fn protected_before_reclaim(&mut self, candidate: &Path) -> bool {
+        let started = self.host.now();
+        let blocked = self.protected_before_reclaim_inner(candidate);
+        self.record_overrun("protect", candidate, started, self.host.now());
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            self.run_stopped = true;
+            return true;
+        }
+        blocked
+    }
+
+    fn protected_before_reclaim_inner(&mut self, candidate: &Path) -> bool {
         if self.tier.protections.is_empty() {
             return false;
         }
@@ -2777,11 +3326,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn walk_docker(&mut self) {
+        if self.stop_if_interrupted() {
+            return;
+        }
+        let started = self.host.now();
         let binding = if let Some(bound) = &self.docker_bound {
             Ok(Binding::Bound(bound.clone()))
         } else {
             docker_backend::inspect_backend(self.host, self.measured.dev, docker_storage(self.tier))
         };
+        self.record_overrun("preflight", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            return;
+        }
         let bound = match binding {
             Ok(Binding::Bound(bound)) => bound,
             Ok(Binding::Skipped(skip)) => {
@@ -2797,7 +3355,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.protected_before_reclaim(&candidate) {
             return;
         }
-        let before = match sample(self.host, self.measured) {
+        if self.stop_if_interrupted() {
+            return;
+        }
+        let started = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
+        let before = match sampled {
             Ok(space) => space.avail_bytes,
             Err(error) => {
                 self.run_error(error);
@@ -2814,11 +3378,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         // The daemon and its storage can change while the host lock is held;
         // compare the full binding, including Docker's server ID, just before
         // the deleting child is started.
-        match docker_backend::inspect_backend(
+        let started = self.host.now();
+        let rebound = docker_backend::inspect_backend(
             self.host,
             self.measured.dev,
             docker_storage(self.tier),
-        ) {
+        );
+        self.record_overrun("preflight", &candidate, started, self.host.now());
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            return;
+        }
+        match rebound {
             Ok(Binding::Bound(rebound)) if rebound == bound => {}
             Ok(Binding::Bound(_)) => {
                 self.skip_docker(
@@ -2840,7 +3411,17 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.protected_before_reclaim(&candidate) {
             return;
         }
-        let cwd = match resolve(self.host, Path::new("/"), Want::Directory) {
+        if self.stop_if_interrupted() {
+            return;
+        }
+        let started = self.host.now();
+        let resolved = resolve(self.host, Path::new("/"), Want::Directory);
+        self.record_overrun("resolve", Path::new("/"), started, self.host.now());
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            return;
+        }
+        let cwd = match resolved {
             Ok(cwd) => cwd,
             Err(error) => {
                 self.tier_error(format!("open Docker command cwd: {error}"));
@@ -2932,6 +3513,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Outcome {
                 started,
                 before,
+                expected_bytes: None,
                 removed_entries: 0,
                 attempted_command: attempted,
                 end,
@@ -2995,6 +3577,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn run(&mut self, owners: &[u32]) {
+        if self.stop_if_interrupted() {
+            return;
+        }
         let rules = rules(self.tier, owners, self.log);
         let mut checker = Checker::new(&rules, REUSE_LIMIT);
         // No `_` arm: a new source kind must decide here (and in `ensure`'s
@@ -3012,13 +3597,22 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             SourceKind::DockerBuildCache | SourceKind::DockerImages => self.walk_docker(),
         }
-        self.report.held_by_deleted_files = held(
-            self.host,
-            &mut checker,
-            self.measured.dev,
-            &self.measured.at.mount,
-            self.log,
-        );
+        if !self.deadline_hit && !self.run_stopped && !self.stop_if_interrupted() {
+            let started = self.host.now();
+            let held_files = held(
+                self.host,
+                &mut checker,
+                self.measured.dev,
+                &self.measured.at.mount,
+                self.log,
+            );
+            self.record_overrun("in_use", &self.measured.path, started, self.host.now());
+            self.report.held_by_deleted_files = held_files;
+            if self.past_deadline() {
+                self.deadline_hit = true;
+                self.run_stopped = true;
+            }
+        }
     }
 
     /// The end of the tally: the deadline and `--tally-budget`, whichever
@@ -3075,14 +3669,30 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn walk_cargo(&mut self, rules: &Rules<'_>, checker: &mut Checker<'_>) {
-        let found = match discover(self.host, self.tier, self.deadline, self.log) {
+        let started = self.host.now();
+        let discovered = discover(self.host, self.tier, self.deadline, self.log);
+        self.record_overrun("discover", &self.measured.path, started, self.host.now());
+        let found = match discovered {
             Ok(found) => found,
             Err(stop) => return self.stop(&stop),
         };
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
         if !self.refusals(&found.refused) {
             return;
         }
-        let negated_matches = match scan_negated(self.host, &self.tier.negated, self.deadline) {
+        let started = self.host.now();
+        let scanned = scan_negated(self.host, &self.tier.negated, self.deadline);
+        self.record_overrun("exclude", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
+        let negated_matches = match scanned {
             Ok(matches) => matches,
             Err(error) => return self.run_error(error),
         };
@@ -3103,8 +3713,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut tallied: Vec<(&Target, Tally)> = Vec::new();
         let mut untallied: Vec<&Target> = Vec::new();
         for target in &found.targets {
-            let protected = match overlaps_checked(self.host, &target.path, self.protection_matches)
-            {
+            if self.stop_if_interrupted() {
+                return;
+            }
+            let started = self.host.now();
+            let overlap = overlaps_checked(self.host, &target.path, self.protection_matches);
+            self.record_overrun("protect", &target.path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed {
+                    path: target.path.clone(),
+                });
+            }
+            let protected = match overlap {
                 Ok(protected) => protected,
                 Err(error) => return self.run_error(error),
             };
@@ -3119,12 +3739,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 );
                 continue;
             }
-            let excluded = match excluded_by(
+            let started = self.host.now();
+            let exclusion = excluded_by(
                 self.host,
                 &self.tier.negated,
                 &negated_matches,
                 &target.path,
-            ) {
+            );
+            self.record_overrun("exclude", &target.path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed {
+                    path: target.path.clone(),
+                });
+            }
+            let excluded = match exclusion {
                 Ok(excluded) => excluded,
                 Err(error) => return self.run_error(error),
             };
@@ -3147,7 +3775,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 untallied.push(target);
                 continue;
             }
-            match cargo_target::tally(self.host, target, rules, tally_until) {
+            let started = self.host.now();
+            let result = cargo_target::tally(self.host, target, rules, tally_until);
+            self.record_overrun("tally", &target.path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed {
+                    path: target.path.clone(),
+                });
+            }
+            match result {
                 Ok(Ok(tally)) => tallied.push((target, tally)),
                 Ok(Err(skip)) => self.skip(&target.path, &skip),
                 Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
@@ -3168,7 +3804,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 .chain(untallied.into_iter().map(|t| (t, None))),
             |(_, tally): &(_, Option<Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
         );
-        let mut avail = match sample(self.host, self.measured) {
+        let started = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
+        let mut avail = match sampled {
             Ok(space) => space.avail_bytes,
             Err(e) => {
                 // Without a sample, the goal cannot be observed: reclaim
@@ -3177,6 +3821,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         };
         while !queue.is_empty() {
+            if self.stop_if_interrupted() {
+                return;
+            }
             if self.goal_reached(avail) {
                 return;
             }
@@ -3188,6 +3835,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     return;
                 }
                 continue;
+            }
+            if self.stop_if_interrupted() {
+                return;
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
@@ -3240,6 +3890,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let outcome = Outcome {
                 started,
                 before: avail,
+                expected_bytes: tally.as_ref().map(|t| t.bytes),
                 removed_entries: done.removed_entries,
                 attempted_command: false,
                 end: done.end,
@@ -3268,7 +3919,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             },
             dev: self.measured.dev,
         };
+        let started = self.host.now();
         let (found, stopped) = fs_kind::discover(self.host, &self.tier.roots, find, self.deadline);
+        self.record_overrun("discover", &self.measured.path, started, self.host.now());
         (self.log)(&format!(
             "{}: `{}`: {} candidate(s) below {} ({} found again through another root or \
              pattern, {} systemd-private-* passed over)",
@@ -3289,6 +3942,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             // reclaimed from it.
             return self.stop(&stop);
         }
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
         if !self.refusals(&found.refused) {
             return;
         }
@@ -3296,7 +3954,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut tallied: Vec<(&fs_kind::Found, fs_kind::Tally)> = Vec::new();
         let mut untallied: Vec<&fs_kind::Found> = Vec::new();
         for (path, candidate) in &found.candidates {
-            let protected = match overlaps_checked(self.host, path, self.protection_matches) {
+            if self.stop_if_interrupted() {
+                return;
+            }
+            let started = self.host.now();
+            let overlap = overlaps_checked(self.host, path, self.protection_matches);
+            self.record_overrun("protect", path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
+            }
+            let protected = match overlap {
                 Ok(protected) => protected,
                 Err(error) => return self.run_error(error),
             };
@@ -3322,7 +3989,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 untallied.push(found);
                 continue;
             }
-            match fs_kind::tally(self.host, &judge, found, tally_until) {
+            let started = self.host.now();
+            let result = fs_kind::tally(self.host, &judge, found, tally_until);
+            self.record_overrun("tally", path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
+            }
+            match result {
                 Ok(Ok(tally)) => tallied.push((found, tally)),
                 Ok(Err(skip)) => self.skip(path, &skip),
                 Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
@@ -3343,11 +4016,22 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 .chain(untallied.into_iter().map(|f| (f, None))),
             |(_, tally): &(_, Option<fs_kind::Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
         );
-        let mut avail = match sample(self.host, self.measured) {
+        let started = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
+        let mut avail = match sampled {
             Ok(space) => space.avail_bytes,
             Err(e) => return self.run_error(e),
         };
         while !queue.is_empty() {
+            if self.stop_if_interrupted() {
+                return;
+            }
             if self.goal_reached(avail) {
                 return;
             }
@@ -3359,6 +4043,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     return;
                 }
                 continue;
+            }
+            if self.stop_if_interrupted() {
+                return;
             }
             if self.past_deadline() {
                 self.deadline_hit = true;
@@ -3402,6 +4089,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     Outcome {
                         started,
                         before: avail,
+                        expected_bytes: tally.as_ref().map(|t| t.bytes),
                         removed_entries: done.removed_entries,
                         attempted_command: false,
                         end: done.end,
@@ -3432,6 +4120,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     Outcome {
                         started,
                         before: avail,
+                        expected_bytes: Some(self.measured.target.saturating_sub(avail)),
                         removed_entries: 0,
                         attempted_command: done.attempted,
                         end: done.end,
@@ -3454,7 +4143,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// tried again under the one candidate lock.
     fn walk_fs_union(&mut self, base_rules: &Rules<'_>, checker: &mut Checker<'_>) {
         let sources = self.tier.fs_sources();
+        let started = self.host.now();
         let (candidates, refused, stopped) = discover_fs_union(self.host, &sources, self.deadline);
+        self.record_overrun("discover", &self.measured.path, started, self.host.now());
         (self.log)(&format!(
             "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
             self.tier.name,
@@ -3464,6 +4155,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         ));
         if let Some(stop) = stopped {
             return self.stop(&stop);
+        }
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
         }
         let mut misconfigured = false;
         for (index, skip) in &refused {
@@ -3480,7 +4176,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if misconfigured {
             return;
         }
-        let negated_matches = match scan_union_negated(self.host, &sources, self.deadline) {
+        let started = self.host.now();
+        let scanned = scan_union_negated(self.host, &sources, self.deadline);
+        self.record_overrun("exclude", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
+        let negated_matches = match scanned {
             Ok(matches) => matches,
             Err(error) => return self.run_error(error),
         };
@@ -3502,7 +4206,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut untallied: Vec<&FsUnionCandidate> = Vec::new();
         for candidate in &candidates {
             let path = &candidate.found_by[0].1.path;
-            let protected = match overlaps_checked(self.host, path, self.protection_matches) {
+            let started = self.host.now();
+            let overlap = overlaps_checked(self.host, path, self.protection_matches);
+            self.record_overrun("protect", path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
+            }
+            let protected = match overlap {
                 Ok(protected) => protected,
                 Err(error) => return self.run_error(error),
             };
@@ -3536,12 +4246,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let mut budget_exhausted = false;
             for (index, found) in &candidate.found_by {
                 let source = &sources[*index];
-                let excluded = match excluded_by(
+                let started = self.host.now();
+                let exclusion = excluded_by(
                     self.host,
                     source.negated,
                     &negated_matches[*index],
                     &found.path,
-                ) {
+                );
+                self.record_overrun("exclude", &found.path, started, self.host.now());
+                if self.past_deadline() {
+                    return self.stop(&Stop::DeadlinePassed {
+                        path: found.path.clone(),
+                    });
+                }
+                let excluded = match exclusion {
                     Ok(excluded) => excluded,
                     Err(error) => return self.run_error(error),
                 };
@@ -3563,7 +4281,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     idle: source.idle,
                     dev: self.measured.dev,
                 };
-                match fs_kind::tally(self.host, &judge, found, tally_until) {
+                let started = self.host.now();
+                let result = fs_kind::tally(self.host, &judge, found, tally_until);
+                self.record_overrun("tally", &found.path, started, self.host.now());
+                if self.past_deadline() {
+                    return self.stop(&Stop::DeadlinePassed {
+                        path: found.path.clone(),
+                    });
+                }
+                match result {
                     Ok(Ok(value)) => {
                         tally = Some(value);
                         break;
@@ -3599,11 +4325,22 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 .chain(untallied.into_iter().map(|candidate| (candidate, None))),
             |(_, tally): &(_, Option<fs_kind::Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
         );
-        let mut avail = match sample(self.host, self.measured) {
+        let started = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            return self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+        }
+        let mut avail = match sampled {
             Ok(space) => space.avail_bytes,
             Err(error) => return self.run_error(error),
         };
         while !queue.is_empty() {
+            if self.stop_if_interrupted() {
+                return;
+            }
             if self.goal_reached(avail) {
                 return;
             }
@@ -3616,6 +4353,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     return;
                 }
                 continue;
+            }
+            if self.stop_if_interrupted() {
+                return;
             }
             if self.past_deadline() {
                 self.deadline_hit = true;
@@ -3687,6 +4427,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let outcome = Outcome {
                 started,
                 before: avail,
+                expected_bytes: tally.as_ref().map(|t| t.bytes),
                 removed_entries: done.removed_entries,
                 attempted_command: false,
                 end: done.end,
@@ -3718,9 +4459,26 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         self.record_as(candidate, &profile, outcome)
     }
 
+    fn record_overrun(&mut self, operation: &str, path: &Path, started: MonoTime, ended: MonoTime) {
+        let Some(deadline) = self.deadline else {
+            return;
+        };
+        if started <= deadline && ended > deadline {
+            self.report.overruns.push(OverrunEntry {
+                operation: operation.to_owned(),
+                path: path.to_owned(),
+                over_ms: u64::try_from(ended.saturating_since(deadline).as_millis())
+                    .unwrap_or(u64::MAX),
+            });
+        }
+    }
+
     fn record_as(&mut self, candidate: &Path, profile: &str, outcome: Outcome) -> Option<u64> {
-        let took = self.host.now().saturating_since(outcome.started);
-        let after = match sample(self.host, self.measured) {
+        let action_finished = self.host.now();
+        let took = action_finished.saturating_since(outcome.started);
+        self.record_overrun("reclaim", candidate, outcome.started, action_finished);
+        let sample_started = self.host.now();
+        let mut after = match sample(self.host, self.measured) {
             Ok(space) => Some(space.avail_bytes),
             Err(e) => {
                 // Unmeasured: the change is unknown (null), never 0, and
@@ -3729,6 +4487,67 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 None
             }
         };
+        self.record_overrun(
+            "statvfs",
+            &self.measured.path,
+            sample_started,
+            self.host.now(),
+        );
+        // Filesystems may release blocks after unlink returns. Recheck for at
+        // most two seconds when this action has freed less than its tally (or
+        // the remaining target for an action without a tally). The goal is
+        // decided only by the last observed sample.
+        let acted = outcome.removed_entries > 0 || outcome.attempted_command;
+        if acted && !self.run_stopped && !self.past_deadline() && !self.stop_if_interrupted() {
+            let expected = outcome
+                .expected_bytes
+                .unwrap_or_else(|| self.measured.target.saturating_sub(outcome.before));
+            let window_end = self.host.now().checked_add(Duration::from_secs(2));
+            if let (Some(mut observed), Some(window_end)) = (after, window_end) {
+                while observed < self.measured.target
+                    && observed.saturating_sub(outcome.before) < expected
+                    && self.host.now() < window_end
+                {
+                    if self.stop_if_interrupted() || self.past_deadline() {
+                        break;
+                    }
+                    let remaining = window_end.saturating_since(self.host.now());
+                    let wait = Duration::from_millis(250).min(remaining);
+                    let wait = self.deadline.map_or(wait, |deadline| {
+                        wait.min(deadline.saturating_since(self.host.now()))
+                    });
+                    if wait.is_zero() {
+                        break;
+                    }
+                    self.host.sleep(wait);
+                    if self.stop_if_interrupted() || self.past_deadline() {
+                        break;
+                    }
+                    let retry_started = self.host.now();
+                    match sample(self.host, self.measured) {
+                        Ok(space) => {
+                            observed = space.avail_bytes;
+                            after = Some(observed);
+                        }
+                        Err(error) => {
+                            self.run_error(error);
+                            after = None;
+                            break;
+                        }
+                    }
+                    self.record_overrun(
+                        "statvfs",
+                        &self.measured.path,
+                        retry_started,
+                        self.host.now(),
+                    );
+                }
+            }
+        }
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            self.run_stopped = true;
+        }
         let delta = after
             .map(|a| i64::try_from(i128::from(a) - i128::from(outcome.before)).unwrap_or(i64::MAX));
         let complete = matches!(outcome.end, ReclaimEnd::Complete);
@@ -3793,7 +4612,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return None;
             }
         }
-        after
+        if self.run_stopped { None } else { after }
     }
 }
 
@@ -3802,6 +4621,8 @@ struct Outcome {
     started: MonoTime,
     /// The available space before it.
     before: u64,
+    /// Allocated bytes this action was expected to release, if tallied.
+    expected_bytes: Option<u64>,
     removed_entries: usize,
     attempted_command: bool,
     end: ReclaimEnd,

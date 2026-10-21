@@ -39,6 +39,7 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod agent_journey;
 pub mod autotools_suite;
 pub mod browser_suite;
 pub mod buildah_suite;
@@ -50,6 +51,7 @@ pub mod cargo_reclaim_suite;
 pub mod cargo_suite;
 pub mod cargo_target_suite;
 pub mod cargo_under_test;
+pub mod cli_contract_suite;
 pub mod controlled;
 pub mod docker_suite;
 pub mod docker_vector_suite;
@@ -79,6 +81,7 @@ pub mod project_cache_suite;
 pub mod release_check;
 pub mod runner;
 pub mod scratch;
+pub mod signal_suite;
 pub mod snapshot;
 pub mod stdout_suite;
 pub mod strace;

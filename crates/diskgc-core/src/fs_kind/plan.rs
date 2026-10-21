@@ -77,6 +77,10 @@ pub fn plan<H: Host>(
         out.unjudged = candidates.len();
         return (out, stopped);
     }
+    if host.interrupted().is_some() {
+        out.unjudged = candidates.len();
+        return (out, None);
+    }
     let judge = Judge {
         find,
         rules,
@@ -86,6 +90,10 @@ pub fn plan<H: Host>(
     let mut checker = Checker::for_plan(rules);
     let total = candidates.len();
     for (path, candidate) in candidates {
+        if host.interrupted().is_some() {
+            out.unjudged = total - out.judged.len();
+            return (out, None);
+        }
         let source_evidence = candidate
             .as_ref()
             .ok()

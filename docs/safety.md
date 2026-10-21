@@ -1571,9 +1571,12 @@ The deleting child-start port takes the already checked working-directory fd,
 an absolute executable from preflight, argument and environment arrays, and
 the tier's monotonic deadline. It changes directory with `fchdir` in the
 child, so a replacement at the path cannot redirect the working directory.
-At the deadline it sends `SIGTERM` to the process group, waits a short grace
-period, then sends `SIGKILL` to the group and reaps the leader. The host lock
-fd has close-on-exec cleared before starting the child; descendants inherit
+At the deadline it sends `SIGTERM` to the process group, waits 10 s, then
+sends `SIGKILL` to the group and reaps the leader. It keeps the leader waitable
+during that interval so the process-group ID cannot be reused. A descendant
+can close both output pipes and outlive its leader, so early pipe closure
+does not shorten the grace period. The host lock fd has close-on-exec cleared
+before starting the child; descendants inherit
 it too unless the cleaner explicitly closes it.
 On normal leader exit, the port still kills any surviving group members
 before reaping the leader, including descendants that closed both output

@@ -70,6 +70,9 @@ impl Host for Short {
     fn now(&self) -> MonoTime {
         self.0.now()
     }
+    fn interrupted(&self) -> Option<diskgc_core::report::Signal> {
+        self.0.interrupted()
+    }
     fn wall_clock(&self) -> Timestamp {
         self.0.wall_clock()
     }

@@ -174,12 +174,33 @@ fn every_status_and_reason_is_a_documented_value() {
         "plan checkouts values"
     );
     let reasons = alternatives(&doc["skipped"][0]["reason"]);
-    for reason in Reason::ALL {
-        assert!(
-            reasons.contains(reason.as_str()),
-            "skip reason {} is not documented",
-            reason.as_str()
-        );
+    // These five reasons come from kind-specific backends and predicates,
+    // rather than the eligibility walk's Reason enum.
+    let backend_reasons = [
+        "remote_backend",
+        "unsupported_store",
+        "unsupported_backend",
+        "has_not",
+        "stale",
+    ];
+    let all_reasons: BTreeSet<String> = Reason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .chain(backend_reasons)
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(all_reasons, reasons, "the full documented skip enum");
+    for reason in Reason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .chain(backend_reasons)
+    {
+        let mut r = full();
+        r.skipped[0].reason = reason;
+        r.plan[1].reason = Some(reason);
+        let got = emitted(&r);
+        assert_eq!(got["skipped"][0]["reason"], reason);
+        assert_eq!(got["plan"][1]["reason"], reason);
     }
     // Every status the report can carry shows up as that value.
     for status in Status::ALL {
@@ -187,6 +208,109 @@ fn every_status_and_reason_is_a_documented_value() {
         r.status = status;
         assert_eq!(emitted(&r)["status"], status.as_str());
     }
+}
+
+fn skip(
+    candidate: impl Into<PathBuf>,
+    tier: &str,
+    profile: &str,
+    reason: &'static str,
+) -> SkipEntry {
+    let candidate = candidate.into();
+    SkipEntry {
+        tier: tier.to_owned(),
+        profile: profile.to_owned(),
+        examples: vec![candidate.clone()],
+        candidate,
+        count: 1,
+        reason,
+    }
+}
+
+#[test]
+fn skips_aggregate_at_21_per_tier_profile_and_reason() {
+    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")));
+    r.skipped = (0..20)
+        .map(|n| skip(format!("/p/{n}"), "tier-a", "profile-a", "locked"))
+        .collect();
+    assert_eq!(emitted(&r)["skipped"].as_array().unwrap().len(), 20);
+    assert_eq!(emitted(&r)["skipped"][0]["candidate"], "/p/0");
+
+    r.skipped
+        .push(skip("/p/20", "tier-a", "profile-a", "locked"));
+    let compact = emitted(&r);
+    assert_eq!(compact["skipped"].as_array().unwrap().len(), 1);
+    assert_eq!(compact["skipped"][0]["candidate"], "");
+    assert_eq!(compact["skipped"][0]["count"], 21);
+    assert_eq!(
+        compact["skipped"][0]["examples"].as_array().unwrap().len(),
+        20
+    );
+    assert_eq!(compact["skipped"][0]["examples"][0], "/p/0");
+    assert_eq!(compact["skipped"][0]["examples"][19], "/p/19");
+
+    // Matching profiles in different tiers, and different reasons in the
+    // same tier, retain their own rows and context.
+    r.skipped.push(skip("/q", "tier-b", "profile-a", "locked"));
+    r.skipped.push(skip("/r", "tier-a", "profile-a", "in_use"));
+    let got = emitted(&r);
+    assert_eq!(got["skipped"].as_array().unwrap().len(), 3);
+    assert_eq!(got["skipped"][1]["tier"], "tier-b");
+    assert_eq!(got["skipped"][1]["candidate"], "/q");
+    assert_eq!(got["skipped"][2]["reason"], "in_use");
+}
+
+#[test]
+fn actions_keep_1000_details_then_one_counted_summary() {
+    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")));
+    r.actions = (0..1000)
+        .map(|n| ActionEntry {
+            tier: "tier".to_owned(),
+            profile: "profile".to_owned(),
+            candidate: format!("/p/{n}").into(),
+            avail_delta_bytes: Some(1),
+            duration_ms: 2,
+            count: 1,
+        })
+        .collect();
+    let at_limit = emitted(&r);
+    assert_eq!(at_limit["actions"].as_array().unwrap().len(), 1000);
+    assert_eq!(at_limit["actions"][999]["candidate"], "/p/999");
+
+    r.actions.push(ActionEntry {
+        tier: "tier".to_owned(),
+        profile: "profile".to_owned(),
+        candidate: "/p/1000".into(),
+        avail_delta_bytes: Some(-3),
+        duration_ms: 4,
+        count: 1,
+    });
+    let over_limit = emitted(&r);
+    assert_eq!(over_limit["actions"].as_array().unwrap().len(), 1001);
+    assert_eq!(over_limit["actions"][1000]["candidate"], "");
+    assert_eq!(over_limit["actions"][1000]["count"], 1);
+    assert_eq!(over_limit["actions"][1000]["avail_delta_bytes"], -3);
+    assert_eq!(over_limit["actions"][1000]["duration_ms"], 4);
+
+    r.actions.push(ActionEntry {
+        tier: "other-tier".to_owned(),
+        profile: "other-profile".to_owned(),
+        candidate: "/q".into(),
+        avail_delta_bytes: Some(5),
+        duration_ms: 6,
+        count: 1,
+    });
+    let over_limit = emitted(&r);
+    assert_eq!(over_limit["actions"].as_array().unwrap().len(), 1001);
+    assert_eq!(over_limit["actions"][1000]["count"], 2);
+    assert_eq!(over_limit["actions"][1000]["avail_delta_bytes"], 2);
+    assert_eq!(over_limit["actions"][1000]["duration_ms"], 10);
+    assert_eq!(over_limit["actions"][1000]["tier"], "");
+    assert_eq!(over_limit["actions"][1000]["profile"], "");
+
+    r.actions[1001].avail_delta_bytes = None;
+    assert!(emitted(&r)["actions"][1000]["avail_delta_bytes"].is_null());
+    assert_eq!(r.actions.len(), 1002, "details remain available internally");
 }
 
 /// On a usage error, fields that could not be determined are `null`; every

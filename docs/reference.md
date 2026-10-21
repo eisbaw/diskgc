@@ -58,6 +58,8 @@ directory whose filesystem must have the space. A complete pre-job hook
 built on this call, branching on the exit code and keeping the `--json`
 report, is [ci-pre-job.sh](ci-pre-job.sh); the CI operator's journey test
 runs it as written.
+An agent-oriented [pre-job hook](agent-pre-job.py) uses the JSON report to
+decide whether to start, defer, abort or retry after a contended host lock.
 
 For detached targets placed under `/tmp` with `CARGO_TARGET_DIR`, an
 explicit tier inside a group's `tiers` can select the same Cargo profile:
@@ -94,8 +96,9 @@ process runs, even if that Cargo works in an unrelated directory; see
   hysteresis: a fleet of CI jobs then does one larger cleanup instead of a
   small one per job. The exit code depends only on `--min-free`; missing the
   target is reported (`target_met: false`) but is not a failure.
-- `--timeout` (default `10m`, `0` = none): a **cooperative deadline** for
-  the whole call, including waiting for another reclaim. At the deadline
+- `--timeout` (default `10m`, `0` = none): a **cooperative deadline** starting
+  when the executor begins, after command-line and configuration loading,
+  including waiting for another reclaim. At the deadline
   diskgc starts no new work and terminates a running child (SIGTERM, SIGKILL
   after 10 s). diskgc checks the deadline between operations; a single
   filesystem operation that blocks (a hung network mount, a slow disk)
@@ -440,10 +443,12 @@ JSON result (field names are part of the contract):
   deleted part-way (its deletion stopped, `changed`, `in_use` or an error)
   is an action too, and also in `skipped` or `errors` with why it
   stopped.
-- `count` is 1 for a single candidate. Selections that match very many
-  candidates aggregate: one `skipped` entry per profile and reason with
-  `count` and up to 20 `examples` (`candidate` is then empty), and after
-  1,000 `actions` a single summary entry with `count`.
+- `count` is 1 for a single candidate. When more than 20 skipped candidates
+  share a tier, profile and reason, they become one `skipped` entry with
+  `count` and the first 20 paths in `examples` (`candidate` is then empty).
+  Up to 20 in a group remain individual entries. The first 1,000 `actions`
+  remain individual entries; any further actions become one summary entry
+  with their `count`.
 - `held_by_deleted_files` lists open-but-deleted files on the requested
   filesystem (visible processes only); always present, possibly empty. Their
   space returns only when the process closes them; diskgc never kills

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::host::{Access, Environ, Errno, Ids, LockMode};
+use diskgc_core::report::Signal;
 
 use crate::spec::{
     At, DirAttrs, EventSpec, FileSpec, HostModel, LockModeSpec, NodeSpec, Op, Special, When,
@@ -81,6 +82,7 @@ pub enum Trigger {
 /// What an event does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    DeliverSignal(Signal),
     Create(PathBuf),
     Mkdir(PathBuf),
     Remove(PathBuf),
@@ -775,6 +777,12 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             .map_err(|f| format!("{f:?}"))
     };
     let mut actions = Vec::new();
+    if let Some(signal) = spec.signal {
+        actions.push(Action::DeliverSignal(match signal {
+            crate::spec::ModelSignal::Int => Signal::Int,
+            crate::spec::ModelSignal::Term => Signal::Term,
+        }));
+    }
     if let Some(p) = &spec.create {
         actions.push(Action::Create(path(p)?));
     }
@@ -874,7 +882,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
-            "no action (create, mkdir, remove, rename, replace, replace_reusing_inode, chown, open, close, \
+            "no action (signal, create, mkdir, remove, rename, replace, replace_reusing_inode, chown, open, close, \
                   exit, fork, dumpable, access, advance, fail, mount)"
                 .to_owned(),
         ),

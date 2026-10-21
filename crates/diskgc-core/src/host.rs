@@ -497,6 +497,8 @@ pub enum WaitLock<F> {
     /// The deadline passed with the lock still held by someone else; the fd
     /// comes back unlocked.
     DeadlinePassed(F),
+    /// A termination signal arrived while waiting; the fd was closed.
+    Interrupted(crate::report::Signal),
 }
 
 /// A point on the host's monotonic clock that includes time spent suspended
@@ -921,6 +923,10 @@ pub trait Host {
         mode: LockMode,
         deadline: Option<MonoTime>,
     ) -> Result<WaitLock<Self::Fd>, HostError>;
+
+    /// The first SIGINT or SIGTERM delivered to this run, if any. This is
+    /// observed between work units and during the host-lock wait.
+    fn interrupted(&self) -> Option<crate::report::Signal>;
 
     /// The monotonic clock including suspend time.
     fn now(&self) -> MonoTime;

@@ -590,6 +590,9 @@ mod tests {
         fn now(&self) -> MonoTime {
             unreachable!()
         }
+        fn interrupted(&self) -> Option<crate::report::Signal> {
+            None
+        }
         fn wall_clock(&self) -> crate::host::Timestamp {
             unreachable!()
         }

@@ -403,6 +403,9 @@ pub struct FdSpec {
 #[serde(deny_unknown_fields)]
 pub struct EventSpec {
     pub at: At,
+    /// Deliver SIGINT or SIGTERM to the modelled diskgc run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<ModelSignal>,
     /// Create an empty regular file (and missing parent directories).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create: Option<PathBuf>,
@@ -467,6 +470,14 @@ pub struct EventSpec {
     /// FUSE mount appearing in a candidate while diskgc works).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<MountEventSpec>,
+}
+
+/// Signals the model can deliver to diskgc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSignal {
+    Int,
+    Term,
 }
 
 /// A mount an event makes: a fresh, empty filesystem of type `fs` on the

@@ -263,6 +263,8 @@ pub struct WalkRules {
 
 #[derive(Debug, Clone)]
 pub struct State {
+    /// First delivered signal, retained for the run.
+    pub interrupted: Option<diskgc_core::report::Signal>,
     /// In mount order.
     pub mounts: Vec<Mount>,
     pub fss: BTreeMap<Dev, Fs>,
@@ -295,6 +297,7 @@ pub struct State {
 impl State {
     pub fn new(wall_start: jiff::Timestamp, kernel: String) -> Self {
         Self {
+            interrupted: None,
             mounts: Vec::new(),
             fss: BTreeMap::new(),
             ofds: BTreeMap::new(),

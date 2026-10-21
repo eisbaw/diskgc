@@ -38,11 +38,11 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
-    cargo_reclaim_suite, cargo_suite, docker_suite, docker_vector_suite, driver_suite,
-    embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite,
-    inuse_suite, laptop_tmp_journey, meson_suite, packaging_suite, profile_vector_suite,
-    project_cache_suite, stdout_suite, temp_safety_suite,
+    agent_journey, autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
+    cargo_reclaim_suite, cargo_suite, cli_contract_suite, docker_suite, docker_vector_suite,
+    driver_suite, embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite,
+    host_suite, inuse_suite, laptop_tmp_journey, meson_suite, packaging_suite,
+    profile_vector_suite, project_cache_suite, signal_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -107,6 +107,10 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        "agent_harness_uses_json_for_all_reclaim_decisions",
+        "the shipped Python example needs the pinned Python interpreter in the Nix image",
+    ),
     (
         MESON_ANCHOR_TEST,
         "needs the pinned Meson and Ninja from the Nix store",
@@ -174,6 +178,10 @@ pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
         "needs the native Docker Engine daemon in the pinned dind image",
     ),
     (
+        "docker_query_descendant_pipe_holder_hits_deadline",
+        "needs the native Docker Engine daemon in the pinned dind image",
+    ),
+    (
         DOCKER_VECTOR_TEST,
         "replays a checked-in profile vector while native Docker Engine runs",
     ),
@@ -216,6 +224,48 @@ pub const PACKAGING_TEST: &str = "shipped_tmpfiles_and_example_work_in_container
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    Test {
+        name: "ensure_refuses_symlinked_path_without_mutation",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::ensure_refuses_symlinked_path_without_mutation,
+    },
+    Test {
+        name: "select_replaces_configured_groups",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::select_replaces_configured_groups,
+    },
+    Test {
+        name: "json_help_precedence_is_text",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::json_help_precedence_is_text,
+    },
+    Test {
+        name: "no_index_matches_current_dry_run_plan",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::no_index_matches_current_dry_run_plan,
+    },
+    Test {
+        name: "sigterm_mid_reclaim_reports_partial_action_and_stops",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: signal_suite::sigterm_mid_reclaim_reports_partial_action_and_stops,
+    },
+    Test {
+        name: "sigterm_stubborn_command_child_gets_killed_after_grace",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: signal_suite::sigterm_stubborn_command_child_gets_killed_after_grace,
+    },
+    Test {
+        name: "agent_harness_uses_json_for_all_reclaim_decisions",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: agent_journey::agent_harness_uses_json_for_all_reclaim_decisions,
+    },
     Test {
         name: PACKAGING_TEST,
         tier: Tier::Fast,
@@ -275,6 +325,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: docker_suite::native_docker_engine_dind_smoke,
+    },
+    Test {
+        name: "docker_query_descendant_pipe_holder_hits_deadline",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: docker_suite::docker_query_descendant_pipe_holder_hits_deadline,
     },
     Test {
         name: DOCKER_PACKAGING_TEST,

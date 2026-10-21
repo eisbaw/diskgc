@@ -476,6 +476,10 @@ impl<H: Host> Host for Controlled<H> {
         self.host.now()
     }
 
+    fn interrupted(&self) -> Option<diskgc_core::report::Signal> {
+        self.host.interrupted()
+    }
+
     fn wall_clock(&self) -> Timestamp {
         self.before("wall_clock");
         self.host.wall_clock()

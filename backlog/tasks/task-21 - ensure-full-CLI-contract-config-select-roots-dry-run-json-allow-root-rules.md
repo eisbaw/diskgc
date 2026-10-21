@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-21 08:22'
+updated_date: '2026-10-21 11:20'
 labels:
   - wave-2
   - cli
@@ -51,6 +51,16 @@ TASK91 is now Done: explicit {uid: N} owner mapping covers NSS-only accounts whe
 2026-10-21 CLI acceptance probes integrated: fast disposable-container tests now exercise dry-run planning while a host lock is held, zero actions, mount in the report, and single JSON usage-error objects for bare sizes/month durations, malformed --json, and post-measure threshold errors. Parser/report implementation was already present; tests were format/diff checked but not run under no-deletion restriction. AC1-3 and DoD remain unchecked until integrated E2E and independent review.
 
 2026-10-21 integrated gate: dry-run lock/oracle and JSON flag cases passed in disposable Nix containers; full just e2e passed 152/152 Nix and 6/6 native Docker tests. QA and MPED GO. AC1 remains open for a complete flag/rule matrix and Definition of Done review.
+
+2026-10-21 AC1 coverage audit: full ensure PATH symlink/mount refusal, --select replacing configured groups, dry-run with spent tally budget, operational --timeout 0, --no-index parity and --json --help precedence need explicit probes. Added ModelHost regression a_spent_tally_budget_does_not_truncate_the_dry_run_plan: compares both complete plans with no budget vs zero budget; focused nix develop -c cargo test -p diskgc-model --test ensure a_spent_tally_budget_does_not_truncate_the_dry_run_plan --locked passed 1/1. AC1 and DoD remain open pending other probes and integrated review.
+
+2026-10-21 added ModelHost no_timeout_waits_past_the_default_ten_minutes_for_the_host_lock: with Request.timeout None (the parser mapping of --timeout 0), the virtual host lock is released after 11m and ensure observes newly free space without deletion. Focused nix develop -c cargo test -p diskgc-model --test ensure no_timeout_waits_past_the_default_ten_minutes_for_the_host_lock --locked passed 1/1. Full CLI flag matrix, integrated E2E and reviews remain open.
+
+2026-10-21 PATH audit correction: a PATH on a bind mount is valid under docs/safety.md Path traversal because resolve_in chooses the deepest mount as root. The earlier note calling for generic mount refusal was too broad. The added disposable-container test covers final and intermediate symlink refusal; a separate mount race test would require a shadowed/stale mount table fixture, not rejection of a normal bind mount.
+
+2026-10-21 TASK21 AC1 focused disposable Nix container probes: ensure_refuses_symlinked_path_without_mutation (final and intermediate PATH symlinks, exit 2 usage_error, no mutation), select_replaces_configured_groups (only CLI-selected user profile deleted; configured-group candidate preserved), json_help_precedence_is_text (--json --help and malformed-size --json -h return text help/exit 0), and no_index_matches_current_dry_run_plan (one eligible candidate and equivalent plan with/without --no-index, no deletion) each passed 1/1 via nix develop -c just e2e-one. The independent deletion oracle was armed before every traced run and clean. A PATH on a bind mount is valid per docs/safety.md Path traversal; no mount-refusal claim is made. AC1 and DoD remain open pending complete flag/rule matrix, full integrated gate, and reviews.
+
+2026-10-21 final TASK21 AC1 audit after green 158/158 Nix and 7/7 Docker E2E: still lacks direct binary/container probes for no config and no --select => exit 2, environment config precedence through ensure, operational --timeout 0 and --tally-budget 0 spellings, paired --no-index reclaim parity, JSON objects on exits 124 and SIGINT 130, and --roots validity errors. Parser/model/library tests cover parts indirectly. Keep AC1 and DoD open until these direct probes run; QA/MPED final reviews found no blocker in the implemented slice.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

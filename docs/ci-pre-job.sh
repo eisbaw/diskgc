@@ -17,7 +17,7 @@
 #                       (default: DISKGC_MIN_FREE)
 #   DISKGC_SELECT       what may be reclaimed (default: Cargo targets whose
 #                       last build is a day old)
-#   DISKGC_TIMEOUT      deadline for the whole call (default 10m)
+#   DISKGC_TIMEOUT      executor deadline after setup (default 10m)
 #   DISKGC_REPORT       where the JSON report is kept, e.g. for a dashboard
 #                       (default: a new file from mktemp in ${TMPDIR:-/tmp},
 #                       never a fixed name in a shared directory, which
