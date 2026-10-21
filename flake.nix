@@ -135,6 +135,18 @@
         }
       );
 
+      # A separate feature-built binary for catalog-policy container tests.
+      # This is not the default package and retains the pre-release gate.
+      diskgcProposed01 = craneLib.buildPackage (
+        workspaceArgs
+        // {
+          pname = "diskgc-proposed-01";
+          cargoArtifacts = workspaceDeps;
+          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog";
+          doCheck = false;
+        }
+      );
+
       # diskgc-e2e is a separate Cargo project (own Cargo.lock) inside the
       # source tree; crane builds it from its directory (crane FAQ:
       # workspace-not-at-source-root).
@@ -178,6 +190,7 @@
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
         cp ${lib.getExe diskgc} $out/bin/diskgc
+        cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
         # These copies fail the build if the Nix package omits either

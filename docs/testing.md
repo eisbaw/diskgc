@@ -929,8 +929,11 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
     binaries), and Debian's own rustc package (1.85 in Debian 13) is not
     tested;
   - `/usr` is bind-mounted read-only by the harness, unlike a CI runner's;
-  - the binary under test is the development build with the pre-release
-    sandbox gate, not the release artifact (task-67);
+  - reclaim tests use the development build with the pre-release sandbox
+    gate, not the release artifact (task-67). A separate feature-built
+    `diskgc-proposed-01` binary in the read-only under-test mount runs only
+    catalog rejection checks; it retains the same sandbox gate. The release
+    artifact still needs its own container evidence under task-67;
   - one Cargo only, so the tests that need two (`NIX_ONLY_TESTS`) run on
     the Nix image only, and the cross-version parts of the others are not
     reached: race test 2's H2 rounds (a target the oldest stable built,

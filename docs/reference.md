@@ -538,9 +538,9 @@ config lives at `docs/example.yaml` in the source tree and at
 installed as an active default. Copy it to a config search path or select
 it with `--config` after setting deployment roots.
 
-The config holds `version`, optional user `profiles`, optional `protect`,
-optional `owners` (only with `--allow-root`), optional `ipc`, and the tier
-`groups`.
+The config holds `version`, optional user `profiles`, optional
+`profile_policies`, optional `protect`, optional `owners` (only with
+`--allow-root`), optional `ipc`, and the tier `groups`.
 Thresholds, intervals and timeouts are command-line arguments, so the same
 file serves `watch` on a laptop and `ensure` on a runner.
 
@@ -554,6 +554,10 @@ profiles:                          # optional: your own, or overrides
     find: {roots: [/tmp], paths: ["zephyr-*-run.*"], type: dir}
     action: delete
     examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH], no_match: [/tmp/zephyr-hal]}
+
+profile_policies:                  # optional: checkout guard only; names a built-in source
+  - profile: npm-cache
+    checkouts: allow
 
 protect:                           # never deleted by any tier (by overlap)
   - claude-code-tmp                # fixed-root profile: bare name
@@ -773,6 +777,18 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 ([safety.md](safety.md#discovery-idleness-eligibility)), so its `find` has
 only `roots`, and it takes no `examples`: `{kind: cargo-target, find: {roots:
 required}}`.
+
+Top-level `profile_policies:` changes only the checkout guard of a named
+built-in source without copying its matcher or action. Each entry requires
+`profile: NAME` and `checkouts: refuse | allow`; null, unknown names, filters,
+and duplicate names are errors. A name also defined in `profiles:` is an
+error; set `checkouts` inside that profile instead. An omitted policy leaves
+the built-in setting intact: `cargo-target` explicitly allows checkouts,
+while `npm-cache` and `uv-cache` currently default to `refuse`. The effective
+setting appears in `profiles show --json` and in every dry-run plan entry's
+`checkouts` field. Explicit `allow` emits a warning from `check` because it
+can expose uncommitted work. The setting does not alter roots, matches,
+predicates, actions, or the active release catalog.
 `/tmp` remains an explicit root, as in the tier example under Commands;
 the built-in profile has no implicit or fixed temp root.
 
@@ -1003,9 +1019,11 @@ boundary, not a 0.1 release package. It keeps `cargo-target` and the seven
 idle filters, and rejects every operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
-`profiles show`, `check` and help use the same narrowed library. No `/tmp`
-source is admitted yet: TASK65 has not established safe deletion of a live
-session with no open descriptor. The feature does not lift the pre-release
+`profiles show`, `check` and help use the same narrowed library.
+`profile_policies` for admitted `cargo-target` works, but policies for
+excluded sources, including `npm-cache` and `uv-cache`, are refused at load
+time. No `/tmp` source is admitted yet: TASK65 has not established safe
+deletion of a live session with no open descriptor. The feature does not lift the pre-release
 sandbox gate. The final 0.1 catalog and operator-authored `fs` policy remain
 release decisions under TASK67.
 
@@ -1221,6 +1239,9 @@ profile was renamed.
   of a built-in must say `override: true`; otherwise it is a load-time
   error, so nobody shadows a built-in by accident. `override: true` with
   no built-in of that name is also an error, to catch misspelled targets.
+- To change only a built-in source's checkout guard, use top-level
+  `profile_policies:` instead of replacing its definition. This preserves
+  its matching set, kind, action, and built-in origin.
 - A user profile of kind `fs` carries `examples` with at least one
   `match`, like a built-in: the examples are what `profiles test` checks.
 - `diskgc profiles test` runs every profile's `examples` against an

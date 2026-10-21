@@ -134,6 +134,138 @@ pub fn uv_cache_cleaner(ctx: &Ctx) -> TestResult {
     )
 }
 
+/// The built-in cache matchers stay intact while a narrow YAML policy
+/// changes only their checkout guard. The candidate trees live entirely in
+/// this test's disposable container; every product run is a traced dry run.
+pub fn named_checkout_policy_for_command_caches(ctx: &Ctx) -> TestResult {
+    for (profile, cache, marker) in [
+        ("npm-cache", ".npm", ".npm/_cacache/tmp/git-clone/.git"),
+        ("uv-cache", ".cache/uv", ".cache/uv/sdists-v9/.git"),
+    ] {
+        let parent = marker.rsplit_once('/').expect("marker parent").0;
+        ctx.home.mkdirs(parent, 0o700, TESTER)?;
+        ctx.home
+            .write_file(marker, b"checkout marker", 0o600, TESTER)?;
+        let candidate = ctx.home.path(cache);
+        for (policy, kept, expected_reason, expected_checkouts) in [
+            (false, false, Some("contains_checkout"), "refuse"),
+            (true, false, None, "allow"),
+            (true, true, Some("kept"), "allow"),
+        ] {
+            let config_file = format!("diskgc-{profile}-checkout-policy.yaml");
+            let config_path = format!("/home/tester/{config_file}");
+            if policy && !kept {
+                let source = format!(
+                    "version: 1\nprofile_policies:\n  - profile: {profile}\n    checkouts: allow\n"
+                );
+                ctx.home
+                    .write_file(&config_file, source.as_bytes(), 0o600, TESTER)?;
+                let oracle = Oracle::arm(Fixture::new())?;
+                let shown = ctx.run_as_tester(
+                    &ctx.diskgc(),
+                    &[
+                        "profiles",
+                        "show",
+                        profile,
+                        "--config",
+                        &config_path,
+                        "--json",
+                    ],
+                )?;
+                let verdict = oracle.judge(&shown)?;
+                shown.expect_code(0)?;
+                let output: serde_json::Value = serde_json::from_str(&shown.stdout)
+                    .map_err(|error| format!("{profile}: parse profiles show JSON: {error}"))?;
+                ensure!(
+                    output["profile"]["checkouts"] == "allow"
+                        && output["profile"]["origin"] == "built_in",
+                    "{profile}: effective built-in policy missing from profiles show: {output}"
+                );
+                verdict.assert_clean()?;
+            }
+            if kept {
+                let keep = format!("{cache}/.diskgc-keep");
+                ctx.home.write_file(&keep, b"keep", 0o600, TESTER)?;
+            }
+            let mut args = vec![
+                "--dry-run",
+                "--json",
+                "--no-index",
+                "--min-free",
+                "100%",
+                "--select",
+            ];
+            let select = format!("profile:{profile}");
+            args.push(&select);
+            args.extend(["--roots", "/home/tester"]);
+            if policy {
+                args.extend(["--config", &config_path]);
+            }
+            args.push("/home/tester");
+            let oracle = Oracle::arm(Fixture::new())?;
+            let run = ensure_run(ctx, &args)?;
+            let verdict = oracle.judge(&run)?;
+            run.expect_code(0)?;
+            let output = report(&run)?;
+            let plan = output["plan"].as_array().ok_or("missing plan")?;
+            let entry = plan
+                .iter()
+                .find(|entry| entry["candidate"] == candidate.to_string_lossy().as_ref())
+                .ok_or_else(|| format!("{profile}: candidate missing: {output}"))?;
+            ensure!(
+                entry["reason"].as_str() == expected_reason
+                    && entry["checkouts"] == expected_checkouts,
+                "{profile}: expected {expected_reason:?} with {expected_checkouts}, got {entry}"
+            );
+            verdict.assert_clean()?;
+        }
+    }
+    Ok(())
+}
+
+/// A genuinely feature-built binary is needed here: the standard developer
+/// binary has the full built-in library and cannot prove release exclusions.
+pub fn named_checkout_policy_cannot_expand_proposed_catalog(ctx: &Ctx) -> TestResult {
+    let binary = ctx.bin_dir.join("diskgc-proposed-01");
+    for excluded in ["npm-cache", "uv-cache"] {
+        let source = format!(
+            "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
+        );
+        let config_file = format!("diskgc-{excluded}-excluded-policy.yaml");
+        let config_path = format!("/home/tester/{config_file}");
+        ctx.home
+            .write_file(&config_file, source.as_bytes(), 0o600, TESTER)?;
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = ctx.run_as_tester(&binary, &["check", "--config", &config_path])?;
+        let verdict = oracle.judge(&run)?;
+        run.expect_code(2)?;
+        ensure!(
+            run.stderr.contains("excluded profile") && run.stderr.contains(excluded),
+            "{excluded}: expected catalog refusal, got {}",
+            run.stderr
+        );
+        verdict.assert_clean()?;
+    }
+    ctx.home.write_file(
+        "diskgc-admitted-policy.yaml",
+        b"version: 1\nprofile_policies:\n  - profile: cargo-target\n    checkouts: refuse\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(
+        &binary,
+        &[
+            "check",
+            "--config",
+            "/home/tester/diskgc-admitted-policy.yaml",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    verdict.assert_clean()
+}
+
 pub fn go_build_cache_cleaner(ctx: &Ctx) -> TestResult {
     cleaner_changes_its_measured_cache(
         ctx,

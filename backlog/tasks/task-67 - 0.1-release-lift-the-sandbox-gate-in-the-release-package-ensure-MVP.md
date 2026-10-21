@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-21 19:55'
+updated_date: '2026-10-21 21:19'
 labels:
   - wave-2
   - release
@@ -50,10 +50,10 @@ The v1 release (task-49) builds on this one.
 - [ ] #1 The release package is the only build with the gate flag, enforced by a test (sandbox_gate_flag_is_enabled_nowhere allows exactly one place)
 - [ ] #2 All MVP evidence is green: Cargo race tests 1-9 on every pinned toolchain; the journeys for the CI operator, the /tmp laptop owner and the agent harness; the contract freeze review (task-26); wave-1 and wave-2 hardening (task-13, task-64, and task-27's mutation-testing slice on selection and the executor)
 - [ ] #3 Release notes list the limits and the deferred scope
-- [ ] #4 A dry-run on a real machine is reviewed before the first real run
-- [ ] #5 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
-- [ ] #6 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
-- [ ] #7 The 0.1 release operator can set checkouts: allow or refuse for an admitted built-in profile in YAML without replacing its find, kind, or action. With no operator setting, the built-in default applies; profiles without an explicit exception refuse checkouts. This setting cannot admit excluded profiles, Docker or command actions, or arbitrary delete patterns. Disposable-container tests cover checkout-marker fixtures for admitted built-ins and verify excluded npm and uv profiles stay excluded.
+- [ ] #4 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
+- [ ] #5 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
+- [ ] #6 The 0.1 release operator can set checkouts: allow or refuse for an admitted built-in profile in YAML without replacing its find, kind, or action. With no operator setting, the built-in default applies; profiles without an explicit exception refuse checkouts. This setting cannot admit excluded profiles, Docker or command actions, or arbitrary delete patterns. Disposable-container tests cover checkout-marker fixtures for admitted built-ins and verify excluded npm and uv profiles stay excluded.
+- [ ] #7 Before the first real-machine run, review a dry-run of the actual gate-lifted release binary in a disposable real-kernel Docker or Podman fixture with representative 0.1 profiles. Record which deployment contracts that fixture proves and which it cannot; keep release blocked until any unproved safety-critical contract has evidence that respects the user restriction against running diskgc on the developer host.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -66,6 +66,10 @@ From task-63's review: the e2e images run the development build with the pre-rel
 Compass domain review: implementing a v1 built-in does not authorize it in 0.1. Current builtin.yaml embeds more profiles than PRD.md 0.1 scope; release catalog must be enforced in the actual release artifact, or a reviewed PRD scope change must precede gate lift.
 
 2026-10-21 read-only release audit: flake.nix still builds only gated development package; sandbox flag test requires zero enablers, and Library::builtin exposes profiles outside 0.1. Release artifact needs a separate static package with exactly one gate-lift site, pre-backend rejection of excluded built-ins/Docker/command actions from configs, tiers and --select, and a consistent list/show/help catalog. Test the actual release binary through runner --under-test in disposable Nix and Debian containers, including static/package/gate and negative scope probes. TASK66 AC3 remains open until this artifact exists. This is a plan, not implementation or release evidence. Five broad /tmp profiles in TASK65 remain unsafe; a reviewed scope decision or sound liveness protocol is required before TASK67 AC2/6 can close.
+
+2026-10-21 Compass reconciliation: AC4 now uses a reviewed disposable real-kernel fixture and keeps unresolved deployment evidence as a release blocker, honoring the 2026-10-20 no developer-host diskgc test constraint.
+
+Forward-carried from TASK-106: the e2e harness now has a feature-built proposed 0.1 catalog binary under test, but it remains sandbox-gated. Container tests using it prove policy rejection in that provisional build only. TASK-67 still must build and test the actual gate-lifted release artifact before release.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

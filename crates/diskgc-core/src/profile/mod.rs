@@ -394,6 +394,27 @@ impl Library {
         self.profiles.get(name)
     }
 
+    /// Change only a loaded source's checkout guard. Config validation keeps
+    /// this separate from profile replacement, so built-in identity and its
+    /// matcher, roots, predicates, and action remain intact.
+    pub(crate) fn set_checkouts(&mut self, name: &str, checkouts: Checkouts) -> Result<(), String> {
+        let profile = self
+            .profiles
+            .get_mut(name)
+            .ok_or_else(|| format!("unknown profile `{name}`"))?;
+        let Body::Source(source) = &mut profile.body else {
+            return Err(format!("`{name}` is a filter, not a source profile"));
+        };
+        if checkouts == Checkouts::Allow && !source.kind().enumerates() {
+            return Err(format!(
+                "`{name}` has kind {} and cannot allow checkouts: it has no file candidates",
+                source.kind()
+            ));
+        }
+        source.checkouts = checkouts;
+        Ok(())
+    }
+
     /// The `checkouts` setting of the source profile `name`, from the same
     /// library field a tier of that profile walks with (`None`: no such
     /// source profile).

@@ -21,7 +21,7 @@ use serde::de::Deserializer;
 
 use crate::engine::Checkouts;
 use crate::kind::Kind;
-use crate::profile::{Body, DurationSpec, Finds, Library, ProfileSpec, Roots};
+use crate::profile::{Body, CheckoutsSpec, DurationSpec, Finds, Library, ProfileSpec, Roots};
 use crate::select::{self, Checked};
 
 /// The largest configuration file read (bytes): far above any real policy,
@@ -118,6 +118,15 @@ pub struct Config {
     pub owners: Option<Vec<Owner>>,
     pub warnings: Vec<String>,
     pub ipc: IpcPolicy,
+    /// Narrow operator policies checked against the active release catalog.
+    pub profile_policies: Vec<CheckoutPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutPolicy {
+    pub profile: String,
+    pub checkouts: CheckoutsSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +195,8 @@ struct ConfigSpec {
     version: u64,
     #[serde(default)]
     profiles: Vec<ProfileSpec>,
+    #[serde(default)]
+    profile_policies: Vec<CheckoutPolicy>,
     #[serde(default)]
     protect: Vec<ProtectSpec>,
     #[serde(default, deserialize_with = "present")]
@@ -289,7 +300,30 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
             spec.version
         )));
     }
-    let library = Library::with_user_profiles(&spec.profiles).map_err(|e| error(e.to_string()))?;
+    let mut library =
+        Library::with_user_profiles(&spec.profiles).map_err(|e| error(e.to_string()))?;
+    let mut policy_names = BTreeSet::new();
+    for policy in &spec.profile_policies {
+        if !policy_names.insert(policy.profile.as_str()) {
+            return Err(error(format!(
+                "profile_policies: duplicate policy for `{}`",
+                policy.profile
+            )));
+        }
+        if spec
+            .profiles
+            .iter()
+            .any(|profile| profile.name == policy.profile)
+        {
+            return Err(error(format!(
+                "profile_policies: `{}` is also defined in profiles; specify checkouts in one place",
+                policy.profile
+            )));
+        }
+        library
+            .set_checkouts(&policy.profile, policy.checkouts.0)
+            .map_err(|message| error(format!("profile_policies: {message}")))?;
+    }
     if check_examples && let Some(first) = crate::profile::examples::failures(&library).first() {
         return Err(error(first.clone()));
     }
@@ -381,7 +415,18 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
             return Err(error("owners: entries must be unique".to_owned()));
         }
     }
-    let warnings = profile_warnings(&library, &groups, &protect);
+    let mut warnings = profile_warnings(&library, &groups, &protect);
+    warnings.extend(
+        spec.profile_policies
+            .iter()
+            .filter(|policy| policy.checkouts.0 == Checkouts::Allow)
+            .map(|policy| {
+            format!(
+                "profile `{}` allows VCS checkouts by profile_policies: candidates may contain uncommitted work",
+                policy.profile
+            )
+            }),
+    );
     Ok(Config {
         path: path.to_owned(),
         library,
@@ -390,6 +435,7 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         owners: spec.owners,
         warnings,
         ipc: spec.ipc.unwrap_or(IpcPolicy::BlockAny),
+        profile_policies: spec.profile_policies,
     })
 }
 
@@ -834,5 +880,85 @@ mod tests {
         assert_eq!(config.warnings.len(), 2);
         assert!(config.warnings.iter().any(|w| w.contains("only wildcards")));
         assert!(config.warnings.iter().any(|w| w.contains("VCS checkouts")));
+    }
+
+    #[test]
+    fn named_checkout_policy_changes_only_the_effective_source_setting() {
+        let baseline = parsed("version: 1\n").expect("built-ins");
+        let baseline_npm = baseline.library.get("npm-cache").unwrap().clone();
+        let baseline_cargo = baseline.library.get("cargo-target").unwrap().clone();
+        assert_eq!(
+            baseline.library.checkouts("npm-cache"),
+            Some(Checkouts::Refuse)
+        );
+        assert_eq!(
+            baseline.library.checkouts("cargo-target"),
+            Some(Checkouts::Allow)
+        );
+
+        let config = parsed("version: 1\nprofile_policies:\n  - profile: npm-cache\n    checkouts: allow\n  - profile: cargo-target\n    checkouts: refuse\n").expect("named policies load");
+        assert_eq!(
+            config.library.checkouts("npm-cache"),
+            Some(Checkouts::Allow)
+        );
+        assert_eq!(
+            config.library.checkouts("cargo-target"),
+            Some(Checkouts::Refuse)
+        );
+        let mut npm = config.library.get("npm-cache").unwrap().clone();
+        let mut cargo = config.library.get("cargo-target").unwrap().clone();
+        if let Body::Source(source) = &mut npm.body {
+            source.checkouts = Checkouts::Refuse;
+        }
+        if let Body::Source(source) = &mut cargo.body {
+            source.checkouts = Checkouts::Allow;
+        }
+        assert_eq!(
+            npm, baseline_npm,
+            "npm matcher and action must be unchanged"
+        );
+        assert_eq!(
+            cargo, baseline_cargo,
+            "Cargo matcher and action must be unchanged"
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("npm-cache") && warning.contains("uncommitted"))
+        );
+    }
+
+    #[test]
+    fn named_checkout_policy_rejects_bad_or_ambiguous_entries() {
+        for (body, message) in [
+            (
+                "  - profile: missing-cache\n    checkouts: allow\n",
+                "unknown profile",
+            ),
+            ("  - profile: idle-1d\n    checkouts: allow\n", "filter"),
+            (
+                "  - profile: docker-build-cache\n    checkouts: allow\n",
+                "no file candidates",
+            ),
+            (
+                "  - profile: npm-cache\n    checkouts: allow\n  - profile: npm-cache\n    checkouts: refuse\n",
+                "duplicate policy",
+            ),
+            ("  - profile: npm-cache\n    checkouts: ~\n", "checkouts"),
+            (
+                "  - profile: npm-cache\n    checkouts: maybe\n",
+                "checkouts",
+            ),
+            (
+                "  - profile: npm-cache\n    checkouts: allow\n    find: {roots: required}\n",
+                "unknown field",
+            ),
+        ] {
+            let error = parsed(&format!("version: 1\nprofile_policies:\n{body}")).unwrap_err();
+            assert!(error.contains(message), "{body}: {error}");
+        }
+        let error = parsed("version: 1\nprofiles:\n  - name: npm-cache\n    override: true\n    find: {roots: required, paths: [.npm], type: dir}\n    action: delete\n    examples: {match: [/home/a/.npm]}\nprofile_policies:\n  - profile: npm-cache\n    checkouts: allow\n").unwrap_err();
+        assert!(error.contains("specify checkouts in one place"), "{error}");
     }
 }

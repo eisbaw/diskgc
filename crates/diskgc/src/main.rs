@@ -456,6 +456,14 @@ fn load_config(
 /// against the same narrowed library by `Tier::select`.
 fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
     let library = config.library.clone().proposed_release_01()?;
+    for policy in &config.profile_policies {
+        if library.get(&policy.profile).is_none() {
+            return Err(format!(
+                "proposed 0.1 catalog refuses checkout policy for excluded profile `{}`",
+                policy.profile
+            ));
+        }
+    }
     for group in &config.groups {
         for tier in &group.tiers {
             select::check(tier.select.expr().clone(), &library).map_err(|e| {
@@ -1463,6 +1471,38 @@ mod tests {
             error.contains("operator-authored") && error.contains("cargo-target"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn proposed_catalog_accepts_only_checkout_policy_for_an_admitted_builtin() {
+        let source =
+            "version: 1\nprofile_policies:\n  - profile: cargo-target\n    checkouts: refuse\n";
+        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("narrow policy parses");
+        enforce_proposed_release_01_config(&mut config).expect("Cargo remains admitted");
+        assert_eq!(
+            config.library.checkouts("cargo-target"),
+            Some(diskgc_core::engine::Checkouts::Refuse)
+        );
+        assert_eq!(
+            config.library.get("cargo-target").unwrap().origin,
+            diskgc_core::profile::Origin::BuiltIn
+        );
+
+        for excluded in ["npm-cache", "uv-cache"] {
+            let source = format!(
+                "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
+            );
+            let mut config =
+                config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+                    .expect("full library accepts policy");
+            let error = enforce_proposed_release_01_config(&mut config)
+                .expect_err("excluded profile policy must not pass release gate");
+            assert!(
+                error.contains(excluded) && error.contains("excluded profile"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

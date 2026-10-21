@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-19 02:14'
-updated_date: '2026-10-21 14:28'
+updated_date: '2026-10-21 21:16'
 labels:
   - cli
   - ux
@@ -33,7 +33,7 @@ Decide at the freeze which of these belong in the contract (a field each, null w
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each listed item is decided at the contract freeze (task-26): added to reference.md Output with its type and null rule, or rejected with the reason recorded here
+- [ ] #1 Before TASK-26 begins, each listed report item has a documented proposed contract decision: add a field to docs/reference.md Output with type, null rule and a biting test, or reject it with the reason recorded here. TASK-26 reviewers accept or revise those decisions and freeze the final JSON contract.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -46,6 +46,10 @@ task-26 depends on this task: each item is decided at the freeze.
 2026-10-21 read-only contract design: propose skipped[].process_blockers: null or a nonempty array of {pid: u32, command: string|null, evidence: stable enum string}. PID and command are scan-time observations. null means no reliably attributable process, including flock contention, unsettled scan/churn, generic and grouped skips. Preserve detail as human diagnostic; never parse it for structured facts or invent PID 0. Carry typed evidence through Skip and Cargo evidence paths; cover fd/environment/unreadable, multiple Cargo blockers, null cases and grouped rows in tests. This is a proposal, not a freeze decision or verified implementation.
 
 2026-10-21 structured process blocker candidate implemented: skipped[].process_blockers is null or a nonempty array of {pid, command|null, evidence stable enum}. Typed evidence originates in the process scan and Cargo checks, not parsed detail; scan-time PID/name observations are advisory. Flock, unsettled scan, generic and grouped skips remain null. Executor-to-JSON tests assert unnamed unreadable PID command:null and two Cargo holders, plus focused evidence cases. Initial full gate passed 167/167 Nix and 7/7 Docker; after review followups, final stable-tree nix develop -c just e2e exited 0 with 167/167 Nix, 7/7 Docker, workspace fmt/clippy/tests and host interlock exit 86. Parallel QA and MPED reviews GO for incremental commit. TASK85 AC/DoD stay open until TASK26 freeze decides the field and whole JSON contract.
+
+Compass dependency review, 2026-10-21: TASK-26 depends on TASK-85, so TASK-85 must finish its proposed decisions before the freeze. The final decision remains with TASK-26; this clarifies sequencing without claiming the current proposal is frozen.
+
+This sequencing note supersedes the earlier statement that TASK-85 itself waits for the freeze: proposed decisions complete TASK-85; final accept/revise decisions complete TASK-26.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

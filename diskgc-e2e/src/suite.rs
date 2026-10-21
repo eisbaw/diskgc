@@ -454,6 +454,18 @@ pub static TESTS: &[Test] = &[
         run: cache_suite::uv_cache_cleaner,
     },
     Test {
+        name: "named_checkout_policy_for_command_caches",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::named_checkout_policy_for_command_caches,
+    },
+    Test {
+        name: "named_checkout_policy_cannot_expand_proposed_catalog",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cache_suite::named_checkout_policy_cannot_expand_proposed_catalog,
+    },
+    Test {
         name: "go_build_cache_cleaner",
         tier: Tier::Fast,
         expect: Expect::Pass,

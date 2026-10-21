@@ -162,9 +162,13 @@ Immediately before acting, diskgc walks the candidate's whole tree
     candidates hold checkouts; `checkouts: refuse` is the default, so a
     profile that does not say anything refuses (fail closed), and the
     loader rejects any other value, an empty one (`checkouts:`, `~`)
-    included. Nothing else turns the guard off: no tier, `protect` entry,
-    `!profile:` or flag. A run whose profile allows checkouts says so in
-    its log (one line per tier, before the candidates), and a dry run's
+    included. A config can use a narrow `profile_policies:` entry to set
+    `checkouts: allow | refuse` for a named built-in source without changing
+    its matcher or action. An omitted entry preserves the built-in value;
+    `cargo-target` explicitly allows checkouts. Nothing else turns the guard
+    off: no tier, `protect` entry, `!profile:` or flag. A run whose profile
+    allows checkouts says so in its log (one line per tier, before the
+    candidates), and a dry run's
     plan entries carry the setting (`checkouts` in the JSON,
     [reference.md](reference.md#output)). **The risk:** a broad user
     pattern with `checkouts: allow` (`paths: ["*"]` under a project root)
