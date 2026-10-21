@@ -23,12 +23,15 @@ use super::{
 };
 use crate::engine::{
     self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Skip, WalkStop,
-    is_cargo_lock_name, is_private_tmp, may_be_networked, networked_why, path_in_private_tmp,
+    is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
 };
 use crate::host::{
     Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
 };
-use crate::resolve::{ResolveError, Resolved, Unsafe, Want, mount_for, open_beneath, resolve_in};
+use crate::resolve::{
+    MountScreenError, ResolveError, Resolved, Unsafe, Want, open_beneath, resolve_in,
+    screen_mount_chain,
+};
 
 /// How far below a root discovery looks: a target at most this many
 /// directories down (the root itself is depth 0).
@@ -67,6 +70,7 @@ pub fn discover<H: Host>(
 ) -> Result<Discovery, Stop> {
     let mut found = Discovery::default();
     let mut seen = HashSet::new();
+    let mut seen_roots = HashSet::new();
     let mut ordered: Vec<&PathBuf> = roots.iter().collect();
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
@@ -81,6 +85,19 @@ pub fn discover<H: Host>(
                 continue;
             }
         };
+        // Retain the outermost safe route to a directory when roots alias
+        // the same inode, even if their path spellings differ.
+        let Some(identity) = resolved.stat.dev_ino() else {
+            found.refused.push(Skip::new(
+                Reason::UnsupportedFs,
+                root.to_owned(),
+                "the root inode identity was not reported; overlapping roots cannot be deduplicated",
+            ));
+            continue;
+        };
+        if !seen_roots.insert(identity) {
+            continue;
+        }
         Walk {
             host,
             root,
@@ -113,25 +130,26 @@ fn resolve_root<H: Host>(
         )));
     }
     let mounts = host.mountinfo().map_err(ResolveError::Host)?;
-    let mount = mount_for(&mounts, root).map_err(|why| ResolveError::UnsafePath {
-        path: root.to_owned(),
-        why,
-    })?;
-    if may_be_networked(&mount.fs_type) {
-        return Ok(Err(network_fs(root, &mount.fs_type)));
-    }
-    if private_mount_root(mount) {
-        return Ok(Err(private_root(
-            root,
-            "the mount root is a bind mount of systemd PrivateTmp",
-        )));
+    match screen_mount_chain(&mounts, root) {
+        Ok(()) => {}
+        Err(MountScreenError::Unsafe { why, .. }) => {
+            return Err(ResolveError::UnsafePath {
+                path: root.to_owned(),
+                why,
+            });
+        }
+        Err(MountScreenError::Networked { fs_type, .. }) => {
+            return Ok(Err(network_fs(root, &fs_type)));
+        }
+        Err(MountScreenError::PrivateTmp { .. }) => {
+            return Ok(Err(private_root(
+                root,
+                "the mount chain includes a bind mount of systemd PrivateTmp",
+            )));
+        }
     }
     resolve_in(host, &mounts, root, Want::Directory)
         .map(|resolved| Ok(LocalRoot { resolved, mounts }))
-}
-
-fn private_mount_root(mount: &MountEntry) -> bool {
-    path_in_private_tmp(&mount.fs_root)
 }
 
 fn private_root(root: &Path, why: &str) -> Skip {
@@ -902,9 +920,27 @@ mod private_tmp_tests {
             source: "tmpfs".into(),
             read_only: false,
         };
-        assert!(private_mount_root(&mount(
-            "/systemd-private-abc-cups.service-x1/tmp"
-        )));
-        assert!(!private_mount_root(&mount("/ordinary/tmp")));
+        let root = MountEntry {
+            id: 1,
+            parent_id: 0,
+            dev: Dev { major: 0, minor: 1 },
+            fs_root: "/".into(),
+            mount_point: "/".into(),
+            fs_type: "ext4".into(),
+            source: "/dev/test".into(),
+            read_only: false,
+        };
+        let bound = Path::new("/srv/bound");
+        assert!(matches!(
+            screen_mount_chain(
+                &[
+                    root.clone(),
+                    mount("/systemd-private-abc-cups.service-x1/tmp")
+                ],
+                bound
+            ),
+            Err(MountScreenError::PrivateTmp { .. })
+        ));
+        assert!(screen_mount_chain(&[root, mount("/ordinary/tmp")], bound).is_ok());
     }
 }

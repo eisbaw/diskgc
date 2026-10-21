@@ -23,7 +23,7 @@ use diskgc_core::host::{
     Locked, MapEntry, MonoTime, MountEntry, OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus,
     ProcView, Space, Stat, Timestamp, TryLock, Unlink, WaitLock,
 };
-use diskgc_core::inuse::{Checker, Options, REUSE_LIMIT};
+use diskgc_core::inuse::{Checker, REUSE_LIMIT};
 use diskgc_core::profile::{IdleFor, IdleWindow};
 use diskgc_model::spec::Op;
 use diskgc_model::{Holder, ModelFd, ModelHost};
@@ -783,13 +783,8 @@ fn an_empty_or_unknown_layout_takes_no_lock() {
 fn a_checker_for_other_users_is_an_error_of_the_run() {
     let host = host(&yaml(CLASSIC, None, ""));
     let target = found(&host);
-    let mut checker = Checker::with_options(
-        Options {
-            users: &[ME, 1001],
-            sockets: false,
-        },
-        REUSE_LIMIT,
-    );
+    let other_rules = Rules::new(&[ME, 1001]);
+    let mut checker = Checker::new(&other_rules, REUSE_LIMIT);
     let done = reclaim(
         &host,
         &target,

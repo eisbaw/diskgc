@@ -45,7 +45,7 @@
 use super::Found;
 use super::discover::check_deadline;
 use super::judge::{Judge, Tally, Walked, mountinfo, same_object};
-use crate::engine::{DeleteOptions, Identity, checkout_metadata_below};
+use crate::engine::{DeleteOptions, Identity, Skip, checkout_metadata_below};
 use crate::host::{Base, Delete, Host, MonoTime};
 use crate::inuse::{Checker, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked};
 use crate::outcome::{Judged, ReclaimEnd, Stop};
@@ -134,6 +134,27 @@ pub fn reclaim_alternatives<H: Delete>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Reclaimed {
+    reclaim_alternatives_checked(
+        host,
+        alternatives,
+        make_writable,
+        checker,
+        deadline,
+        &mut |_, _| Ok(None),
+    )
+}
+
+/// Recheck runtime policy while holding the candidate lock, first while
+/// judging and again after the fresh walk immediately before deletion. A
+/// refusal carries its exact reason; an uncertain lookup stops the whole run.
+pub fn reclaim_alternatives_checked<H: Delete>(
+    host: &H,
+    alternatives: &[Alternative<'_>],
+    make_writable: bool,
+    checker: &mut Checker<'_>,
+    deadline: Option<MonoTime>,
+    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
+) -> Reclaimed {
     let mut done = Reclaimed {
         removed_entries: 0,
         removed_bytes: 0,
@@ -147,6 +168,7 @@ pub fn reclaim_alternatives<H: Delete>(
         checker,
         deadline,
         &mut done,
+        policy,
     ) {
         done.end = end;
     }
@@ -160,6 +182,7 @@ fn protocol<H: Delete>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
     done: &mut Reclaimed,
+    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
 ) -> Result<(), ReclaimEnd> {
     let found = alternatives[0].found;
     let path = &found.path;
@@ -243,6 +266,10 @@ fn protocol<H: Delete>(
                 continue;
             }
         }
+        if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
+            first_skip.get_or_insert(skip);
+            continue;
+        }
         let walked = match judge.contents(
             host,
             reached,
@@ -269,6 +296,9 @@ fn protocol<H: Delete>(
         };
         let deletion =
             match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| {
+                if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
+                    return Err(NotDeleted::Skipped(skip));
+                }
                 if let Some(app_lock) = &judge.find.app_not_running {
                     super::app::check(host, &found.root, app_lock, deadline)
                         .map_err(NotDeleted::Stopped)?

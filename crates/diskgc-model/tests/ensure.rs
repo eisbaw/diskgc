@@ -91,6 +91,33 @@ fn cargo(min: &str, target: Option<&str>) -> Request {
     request("profile:cargo-target", &[SRC], SRC, min, target)
 }
 
+#[test]
+fn cargo_protect_uses_its_own_bound_roots_in_dry_run() {
+    let config = config::parse(
+        Path::new("/tmp/protect.yaml"),
+        b"version: 1\nprotect: [{profile: cargo-target, roots: [/home/mark/src]}]\n",
+    )
+    .unwrap();
+    let mut request = cargo("50G", None);
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    let host = host(&yaml(true, ""));
+    let report = dry_run(&host, &request);
+    assert_eq!(report.status, Status::DryRun);
+    for path in [OLD, NEW] {
+        assert_eq!(
+            report
+                .plan
+                .iter()
+                .find(|entry| entry.candidate == Path::new(path))
+                .map(|entry| entry.reason),
+            Some(Some("protected")),
+            "{path}"
+        );
+    }
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+    assert!(calls(&host, Op::MayDelete).is_empty());
+}
+
 /// Runs `ensure` (privileges first, as the binary does); the log lines
 /// are printed for a failing test.
 fn ensure(host: &ModelHost, request: &Request) -> Report {
@@ -179,7 +206,7 @@ fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
         "tree:\n  /home/mark/link: {symlink: /home/mark/src}\n",
         1,
     );
-    let host = host(&model);
+    let host = common::host(&model);
     let report = grouped(&host, policy, "12G", Some("15G"));
     assert_eq!(report.status, Status::Met, "{report:#?}");
     assert_eq!(report.actions.len(), 1, "{report:#?}");
@@ -195,7 +222,7 @@ fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
 
 #[test]
 fn all_command_preflights_finish_before_first_group_deletion() {
-    let policy = "version: 1\nprofiles:\n  - name: later-command\n    find: {roots: [/tmp], paths: [unused-*], type: dir}\n    action: {command: [/usr/bin/rm, -rf, \"{path}\"]}\n    examples: {match: [/tmp/unused-a]}\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: command\n        select: profile:later-command\n";
+    let policy = "version: 1\nprofiles:\n  - name: later-command\n    find: {roots: [/home/mark/src], paths: [unused-*], type: dir}\n    action: {command: [/usr/bin/rm, -rf, \"{path}\"]}\n    examples: {match: [/home/mark/src/unused-a]}\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: command\n        select: profile:later-command\n";
     let model = yaml(true, "").replacen("tree:\n", "tree:\n  /usr/bin/rm: {mode: \"0755\"}\n", 1);
     let host = host(&model);
     let report = grouped(&host, policy, "12G", Some("15G"));
@@ -237,6 +264,50 @@ fn later_unsafe_root_is_checked_before_earlier_tier_deletes() {
         .position(|call| call.op == Op::Unlinkat)
         .expect("earlier tier deletes");
     assert!(check < delete, "{trace:#?}");
+}
+
+#[test]
+fn later_foreign_root_is_reported_before_earlier_tier_deletes() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: foreign-later\n        select: profile:cargo-target\n        roots: [/home/mark/src/foreign]\n";
+    let model = yaml(true, "").replacen(
+        "tree:\n",
+        "  - {id: 5, at: /home/mark/src/foreign, fs: ext4, dev: \"254:9\", size: 10G, parent: 2}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].tier, "old");
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(
+        report.skipped.iter().any(|skip| {
+            skip.tier == "foreign-later"
+                && skip.candidate == Path::new("/home/mark/src/foreign")
+                && skip.reason == "other_fs"
+        }),
+        "{report:#?}"
+    );
+    let trace = host.trace();
+    let preflight = trace
+        .iter()
+        .rposition(|call| call.op == Op::Statx && touches(call, "/home/mark/src/foreign"))
+        .expect("nested foreign root statted in preflight");
+    let deletion = trace
+        .iter()
+        .position(|call| call.op == Op::Unlinkat)
+        .expect("first tier deletes");
+    assert!(preflight < deletion, "{trace:#?}");
+}
+
+#[test]
+fn a_same_device_root_remains_eligible_for_preflight() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:cargo-target\n        roots: [/home/mark/src/old]\n";
+    let host = host(&yaml(true, ""));
+    let report = grouped(&host, policy, "12G", Some("15G"));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(report.actions[0].candidate, Path::new(OLD));
 }
 
 #[test]
@@ -519,6 +590,51 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
     assert!(report.summary().expect("prints").starts_with("exhausted: "));
 }
 
+/// Btrfs subvolumes have different statx devices while sharing free space.
+/// A deleted file on a sibling mount must appear in the requested mount's
+/// report when mountinfo identifies the same backing source.
+#[test]
+fn btrfs_sibling_subvolume_deleted_file_is_reported() {
+    let scenario = yaml(
+        true,
+        "  /usr/bin/tail: {}\n  /mnt/other/gone: {size: 1G}\nprocesses:\n  - pid: 4242\n    exe: /usr/bin/tail\n    cwd: /home/mark\n    maps: [/usr/bin/tail]\n    environ: [PATH=/usr/bin]\n    fds: [{path: /mnt/other/gone, deleted: true}]\n",
+    )
+    .replace(
+        "fs: ext4, dev: \"254:2\"",
+        "fs: btrfs, dev: \"0:41\"",
+    )
+    .replace(
+        "tree:\n",
+        "  - {id: 5, at: /mnt/other, fs: btrfs, dev: \"0:43\", size: 100G, parent: 1}\ntree:\n",
+    );
+    let host = host(&scenario);
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target && filter:idle-30d",
+            &[SRC],
+            SRC,
+            "12G",
+            None,
+        ),
+    );
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(
+        calls(&host, Op::ProcMaps).len(),
+        1,
+        "process scan must read maps"
+    );
+    assert_eq!(
+        calls(&host, Op::ProcEnviron).len(),
+        1,
+        "process scan must read environ"
+    );
+    assert_eq!(report.held_by_deleted_files.len(), 1, "{report:#?}");
+    assert_eq!(report.held_by_deleted_files[0].pid, 4242);
+    assert_eq!(report.held_by_deleted_files[0].bytes, GIB);
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
 /// Exit 3: a target whose delete fails is an error of that target; the
 /// next target is still reclaimed, and the run ends below `--min-free`.
 #[test]
@@ -747,6 +863,98 @@ fn the_tally_budget_leaves_targets_untallied_in_discovery_order() {
         .map(|a| a.candidate.as_path())
         .collect();
     assert_eq!(order, [Path::new(OLD), Path::new(NEW)]);
+}
+
+/// A best-fit tier must re-pick after the first deletion's space sample.
+/// The starting 2G of free space needs 9G: no unit covers that, so it
+/// takes 8G. The remaining need is then 1G, so 4G precedes 6G.
+#[test]
+fn best_fit_cargo_recalculates_after_each_observed_sample() {
+    let model = three("")
+        .replace(
+            &profile("2G", "2026-10-14T00:00:00Z"),
+            &profile("8G", "2026-10-14T00:00:00Z"),
+        )
+        .replace(
+            &profile("2G", "2026-10-10T00:00:00Z"),
+            &profile("6G", "2026-10-10T00:00:00Z"),
+        )
+        .replace(
+            &profile("2G", "2026-10-01T00:00:00Z"),
+            &profile("4G", "2026-10-01T00:00:00Z"),
+        );
+    let policy = "version: 1\ngroups:\n  - name: pressure\n    tiers:\n      - name: fit\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        order: best-fit\n";
+    let host = host(&model);
+    let report = grouped(&host, policy, "11G", None);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    let actions: Vec<_> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            Path::new("/home/mark/src/a/target"),
+            Path::new("/home/mark/src/c/target")
+        ]
+    );
+    assert!(
+        host.stat_path(Path::new("/home/mark/src/b/target"))
+            .is_some()
+    );
+
+    let (tiers, _) = configured(policy);
+    let host = common::host(&model);
+    let mut request = cargo("11G", None);
+    request.tier = tiers[0].clone();
+    let plan = dry_run(&host, &request);
+    let paths: Vec<_> = plan.plan.iter().map(|p| p.candidate.as_path()).collect();
+    assert_eq!(
+        paths,
+        [
+            Path::new("/home/mark/src/a/target"),
+            Path::new("/home/mark/src/c/target"),
+            Path::new("/home/mark/src/b/target")
+        ]
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn best_fit_fs_chooses_smallest_covering_unit_then_recalculates() {
+    let model = r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+  - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 100G, other_used: 80G, parent: 1}
+  - {id: 3, at: /run, fs: tmpfs, dev: "0:30", size: 1G, parent: 1}
+tree:
+  /run/diskgc/lock: {uid: 0, gid: 0}
+  /home/mark/src/cache-a: {data: {size: 8G}}
+  /home/mark/src/cache-b: {data: {size: 6G}}
+  /home/mark/src/cache-c: {data: {size: 4G}}
+"#;
+    let policy = "version: 1\nprofiles:\n  - name: test-cache\n    find: {roots: [/home/mark/src], paths: [cache-*], type: dir}\n    action: delete\n    examples: {match: [/home/mark/src/cache-a]}\ngroups:\n  - name: pressure\n    tiers:\n      - name: fit\n        select: profile:test-cache\n        order: best-fit\n";
+    let host = host(model);
+    let report = grouped(&host, policy, "11G", None);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    let actions: Vec<_> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            Path::new("/home/mark/src/cache-a"),
+            Path::new("/home/mark/src/cache-c")
+        ]
+    );
+    assert!(
+        host.stat_path(Path::new("/home/mark/src/cache-b"))
+            .is_some()
+    );
 }
 
 /// Should-fix 10: something other than a regular file at the host lock's
@@ -1156,10 +1364,11 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
-/// A target on another filesystem than PATH's is `other_fs`: deleting it
-/// would free nothing there.
+/// A root on another filesystem than PATH's is skipped in preflight:
+/// deleting below it would free nothing on PATH, while same-device roots
+/// remain eligible.
 #[test]
-fn a_target_on_another_filesystem_is_other_fs() {
+fn a_foreign_root_is_skipped_while_same_device_roots_reclaim() {
     let tmp = "  /tmp/w/q/Cargo.toml: {}\n  /tmp/w/q/target:\n    CACHEDIR.TAG: {cachedir_tag: \
                true}\n    debug: {.cargo-lock: {}, deps: {q-1: {size: 100M}}}\n";
     let host = host(&yaml(true, tmp));
@@ -1167,13 +1376,22 @@ fn a_target_on_another_filesystem_is_other_fs() {
         &host,
         &request("profile:cargo-target", &[SRC, "/tmp/w"], SRC, "16G", None),
     );
-    let other: Vec<&Path> = report
-        .skipped
-        .iter()
-        .filter(|s| s.reason == "other_fs")
-        .map(|s| s.candidate.as_path())
-        .collect();
-    assert_eq!(other, [Path::new("/tmp/w/q/target")], "{report:#?}");
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|skip| skip.candidate == Path::new("/tmp/w") && skip.reason == "other_fs"),
+        "{report:#?}"
+    );
+    assert_eq!(report.actions.len(), 2, "{report:#?}");
+    assert!(
+        report
+            .actions
+            .iter()
+            .all(|action| action.candidate.starts_with(SRC)),
+        "{report:#?}"
+    );
     assert_eq!(unlinked_below(&host, "/tmp"), 0);
 }
 
@@ -1218,10 +1436,6 @@ fn selections_this_build_cannot_run_are_refused() {
     let roots = vec![SRC.to_owned()];
     for (expr, needle) in [
         (
-            "profile:cargo-target && !profile:cargo-target",
-            "`!profile:cargo-target` is not supported",
-        ),
-        (
             "(profile:cargo-target && filter:idle-1d) || profile:cargo-target",
             "a union",
         ),
@@ -1232,6 +1446,16 @@ fn selections_this_build_cannot_run_are_refused() {
     }
     let error = Tier::select("profile:cargo-target", &library, None, 1000).expect_err("no roots");
     assert!(error.contains("roots: required"), "{error}");
+    let excluded = Tier::select(
+        "profile:cargo-target && !profile:cargo-target",
+        &library,
+        Some(&roots),
+        1000,
+    )
+    .expect("a bounded negated Cargo source is supported");
+    assert_eq!(excluded.negated.len(), 1);
+    assert_eq!(excluded.negated[0].profile, "cargo-target");
+    assert_eq!(excluded.negated[0].roots, [PathBuf::from(SRC)]);
     let tier = Tier::select(
         "profile:cargo-target && filter:idle-1d && filter:idle-7d",
         &library,

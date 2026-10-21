@@ -337,6 +337,35 @@ fn a_deleted_but_open_file_is_reported_as_held_by_deleted_files() {
     assert_eq!(scan.held_by_deleted_files(root), vec![]);
 }
 
+/// Two processes can hold the same unlinked inode. Both are actionable
+/// holders, but its allocated blocks must appear only once in the report.
+#[test]
+fn a_deleted_file_shared_by_processes_is_counted_once() {
+    let host = model(&processes(&[
+        process(10, &["fds: [{path: /tmp/gone, deleted: true}]"]),
+        process(11, &["fds: [{path: /tmp/gone, deleted: true}]"]),
+    ]));
+    let (_, scan) = check_c(&host, true);
+    assert_eq!(
+        scan.held_by_deleted_files(Dev {
+            major: 0,
+            minor: 42,
+        }),
+        vec![
+            HeldByDeleted {
+                pid: Pid(10),
+                command: "tool".into(),
+                bytes: 8192,
+            },
+            HeldByDeleted {
+                pid: Pid(11),
+                command: "tool".into(),
+                bytes: 0,
+            },
+        ]
+    );
+}
+
 // ---- diskgc itself ----
 
 /// diskgc holds the candidate directory open and locked while it checks
@@ -549,13 +578,8 @@ fn a_use_found_by_an_earlier_read_still_counts() {
 #[test]
 fn the_check_refuses_options_that_disagree_with_the_walk() {
     let host = model(&processes(&[process(10, &[])]));
-    let mut checker = Checker::with_options(
-        Options {
-            users: &[],
-            sockets: false,
-        },
-        REUSE_LIMIT,
-    );
+    let other_rules = Rules::new(&[]);
+    let mut checker = Checker::new(&other_rules, REUSE_LIMIT);
     match reclaim_with(&host, &mut checker, "/tmp/c", true) {
         Err(Stop::Failed(e)) => assert!(e.detail.contains("from_rules"), "{e}"),
         other => panic!("expected a refusal, got {other:?}"),
@@ -717,13 +741,17 @@ fn only_listings_with_new_pids_count_against_the_bound() {
     assert!(in_use(result).detail.contains("still growing"));
 }
 
-/// A clear is for one walk record (mped round 3, should-fix 3): a clear
-/// made for candidate c does not delete candidate d.
+/// A clear borrows the exact candidate and record that were checked. Two
+/// hard-linked names have the same root identity, but clearing one can only
+/// delete that name through the checked capability.
 #[test]
-fn a_clear_for_one_candidate_does_not_delete_another() {
-    let host = model(&processes(&[process(10, &[])]));
+fn a_clear_for_one_candidate_deletes_only_that_candidate() {
+    let host = model(&format!(
+        "  /tmp/alias: {{link: /tmp/keep}}\n{}",
+        processes(&[process(10, &["fds: [{path: /usr/bin/tool}]"])])
+    ));
     let parent = dir(&host, "/tmp");
-    let (c, d) = (PathBuf::from("/tmp/c"), PathBuf::from("/tmp/d"));
+    let (c, d) = (PathBuf::from("/tmp/keep"), PathBuf::from("/tmp/alias"));
     let (cc, dc) = (
         Candidate::new(&parent, &c).expect("a name"),
         Candidate::new(&parent, &d).expect("a name"),
@@ -731,14 +759,24 @@ fn a_clear_for_one_candidate_does_not_delete_another() {
     let rules = rules(true);
     let c_record = walk(&host, &cc, &rules, None).expect("walk c");
     let d_record = walk(&host, &dc, &rules, None).expect("walk d");
+    assert_eq!(c_record.root().identity, d_record.root().identity);
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let mismatch = checker
+        .check(&host, &dc, &c_record)
+        .expect_err("a hard-linked alias is a different candidate name");
+    assert!(
+        mismatch.detail.contains("another candidate name"),
+        "{mismatch}"
+    );
     let clear = checker
         .check(&host, &cc, &c_record)
         .expect("check")
         .expect("c is clear");
-    let refused = inuse::delete_cleared(&host, clear, &dc, &d_record, DeleteOptions::default());
-    assert_eq!(refused.err(), Some(inuse::NotCleared::OtherCandidate));
-    assert!(exists(&host, "/tmp/d/x") && exists(&host, "/tmp/c/a"));
+    let deleted = inuse::delete_cleared(&host, clear, DeleteOptions::default())
+        .expect("the checked candidate is deleted");
+    assert_eq!(deleted.end, End::Complete);
+    assert!(exists(&host, "/tmp/alias"));
+    assert!(!exists(&host, "/tmp/keep"));
 }
 
 /// Refusals are counted on their own (Codex round 3, non-blocking): a
@@ -935,11 +973,11 @@ fn a_transiently_unsettled_scan_is_retried_before_judgement() {
     );
 }
 
-/// A fork storm that outlasts the one retry never clears a candidate. The
-/// blocking answer is shared only within 500 ms; after the storm ends the
-/// next scan can clear it.
+/// A fork storm that outlasts the one retry never clears a candidate. A
+/// later check scans immediately: an unsettled answer cannot stand for
+/// another candidate even inside the ordinary blocked reuse window.
 #[test]
-fn a_persistently_unsettled_scan_blocks_until_the_short_reuse_expires() {
+fn a_persistently_unsettled_scan_is_never_reused() {
     let n = u32::try_from(MAX_LISTINGS).expect("small");
     let forks: String = (1..=2 * n)
         .map(|k| {
@@ -971,18 +1009,11 @@ fn a_persistently_unsettled_scan_blocks_until_the_short_reuse_expires() {
         host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
         2
     );
-    assert!(
-        checker
-            .check(&host, &candidate, &record)
-            .expect("check")
-            .is_err()
-    );
     assert_eq!(
-        host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
-        2,
-        "a blocked scan is shared briefly, never rescanned per candidate"
+        host.trace().iter().filter(|c| c.op == Op::Pids).count(),
+        2 * MAX_LISTINGS,
+        "each scan stops at the 16-listing bound under continuing forks"
     );
-    host.sleep(std::time::Duration::from_millis(500));
     assert!(
         checker
             .check(&host, &candidate, &record)
@@ -991,7 +1022,8 @@ fn a_persistently_unsettled_scan_blocks_until_the_short_reuse_expires() {
     );
     assert_eq!(
         host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
-        3
+        3,
+        "the next candidate must rescan immediately"
     );
     assert!(host.unfired_events().is_empty());
 }

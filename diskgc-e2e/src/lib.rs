@@ -68,6 +68,7 @@ pub mod interlock;
 pub mod inuse_probe;
 pub mod inuse_suite;
 pub mod journey_suite;
+pub mod laptop_tmp_journey;
 pub mod meson_suite;
 pub mod oracle;
 pub mod packaging_suite;

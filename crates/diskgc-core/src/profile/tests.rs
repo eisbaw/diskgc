@@ -469,6 +469,22 @@ fn idle_filter_names_say_their_duration() {
     }
 }
 
+#[test]
+fn zero_idle_period_is_rejected_in_both_profile_origins() {
+    let yaml = "- name: instant\n  where: {idle_for: 0s}\n";
+    assert_has(&user_errors(yaml), "`idle_for` must be greater than zero");
+    let built_in_error = Library::load(
+        "- name: instant\n  category: filters\n  description: instant\n  where: {idle_for: 0s}\n",
+        &[],
+    )
+    .expect_err("zero idle filter must fail")
+    .to_string();
+    assert!(
+        built_in_error.contains("`idle_for` must be greater than zero"),
+        "{built_in_error}"
+    );
+}
+
 /// Every shipped built-in is a row of docs/reference.md's library table,
 /// in the category it says.
 #[test]
@@ -988,6 +1004,22 @@ fn roots_and_patterns_are_checked_paths() {
         (
             "- name: x\n  find: {roots: [~/src], paths: [a], type: dir}\n  action: delete\n",
             "`~` is not allowed",
+        ),
+        (
+            "- name: x\n  find: {roots: [/tmp/../var], paths: [a], type: dir}\n  action: delete\n",
+            "not normalized",
+        ),
+        (
+            "- name: x\n  find: {roots: [/tmp/./a], paths: [a], type: dir}\n  action: delete\n",
+            "not normalized",
+        ),
+        (
+            "- name: x\n  find: {roots: [/tmp//a], paths: [a], type: dir}\n  action: delete\n",
+            "not normalized",
+        ),
+        (
+            "- name: x\n  find: {roots: [/tmp, /tmp], paths: [a], type: dir}\n  action: delete\n",
+            "duplicate root",
         ),
         (
             "- name: x\n  find: {roots: [\"/tmp/{user}\"], paths: [a], type: dir}\n  action: delete\n",

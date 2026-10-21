@@ -173,6 +173,7 @@ version = "0.1.0"
 dependencies = [
  "diskgc-core",
  "diskgc-linux",
+ "getrandom",
  "serde_json",
 ]
 

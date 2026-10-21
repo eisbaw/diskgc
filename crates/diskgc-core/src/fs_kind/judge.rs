@@ -41,7 +41,7 @@ use super::source_anchor::{self, SourceEvidence};
 use super::{Find, PRIVATE_TMP_PREFIX, path_in_private_tmp};
 use crate::engine::{
     self, Candidate, KEEP_MARKER, Reason, Rules, Skip, WalkRecord, WalkStop,
-    checkout_metadata_below, may_be_networked, networked_why,
+    checkout_metadata_below, networked_why,
 };
 use crate::host::{
     Access, Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry,
@@ -49,7 +49,9 @@ use crate::host::{
 };
 use crate::outcome::{Judged, Stop};
 use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown};
-use crate::resolve::{ResolveError, Resolved, Want, mount_for, open_beneath, resolve_in};
+use crate::resolve::{
+    MountScreenError, ResolveError, Resolved, Want, open_beneath, resolve_in, screen_mount_chain,
+};
 
 /// What a candidate of one tier is judged by: the source's `find` (its own
 /// `where`), the walk's rules (owners, IPC policy, entry budget, checkout
@@ -576,35 +578,42 @@ pub(super) fn check_root(root: &Path, mounts: &[MountEntry]) -> Result<(), Resul
             "inside systemd's PrivateTmp ({PRIVATE_TMP_PREFIX}*)"
         )));
     }
-    let mount = mount_for(mounts, root).map_err(|why| {
-        Err(Skip::new(
+    match screen_mount_chain(mounts, root) {
+        Ok(()) => Ok(()),
+        Err(MountScreenError::Unsafe { at, why }) => Err(Err(Skip::new(
             Reason::UnsafePath,
             root.to_owned(),
-            format!("unsafe_path: {}: {why}", root.display()),
-        ))
-    })?;
-    if may_be_networked(&mount.fs_type) {
-        return Err(Err(Skip::new(
+            format!(
+                "unsafe_path: {}: mount at {}: {why}",
+                root.display(),
+                at.display()
+            ),
+        ))),
+        Err(MountScreenError::Networked {
+            at,
+            mount_point,
+            fs_type,
+        }) => Err(Err(Skip::new(
             Reason::UnsupportedFs,
             root.to_owned(),
             format!(
-                "on {} ({}, mount {}): never a candidate's filesystem, and not opened (a \
-                 dead server would hang it)",
-                networked_why(&mount.fs_type),
-                mount.fs_type,
-                mount.mount_point.display()
+                "ancestor {} is on {} ({fs_type}, mount {}): never opened (a dead server would hang it)",
+                at.display(),
+                networked_why(&fs_type),
+                mount_point.display()
             ),
-        )));
+        ))),
+        Err(MountScreenError::PrivateTmp {
+            at,
+            mount_point,
+            fs_root,
+        }) => Err(Ok(format!(
+            "ancestor {} is on mount {} whose root is {} in its filesystem: a bind mount of systemd's PrivateTmp ({PRIVATE_TMP_PREFIX}*)",
+            at.display(),
+            mount_point.display(),
+            fs_root.display()
+        ))),
     }
-    if path_in_private_tmp(&mount.fs_root) {
-        return Err(Ok(format!(
-            "on mount {} whose root is {} in its filesystem: a bind mount of systemd's \
-             PrivateTmp ({PRIVATE_TMP_PREFIX}*)",
-            mount.mount_point.display(),
-            mount.fs_root.display()
-        )));
-    }
-    Ok(())
 }
 
 /// A root that cannot be reached: its skip reason (`unsafe_path`,

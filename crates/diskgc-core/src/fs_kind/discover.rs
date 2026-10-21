@@ -115,6 +115,7 @@ fn discover_into<H: Host>(
         error,
     })?;
     let mut seen = HashSet::new();
+    let mut seen_roots = HashSet::new();
     let mut ordered: Vec<&PathBuf> = roots.iter().collect();
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
@@ -140,6 +141,19 @@ fn discover_into<H: Host>(
                 continue;
             }
         };
+        // The outermost spelling wins. A second name for the same directory
+        // (including a bind mount alias) must not cause another walk.
+        let Some(identity) = resolved.stat.dev_ino() else {
+            out.refused.push(Skip::new(
+                Reason::UnsupportedFs,
+                root.to_owned(),
+                "the root inode identity was not reported; overlapping roots cannot be deduplicated",
+            ));
+            continue;
+        };
+        if !seen_roots.insert(identity) {
+            continue;
+        }
         let active: Vec<usize> = (0..find.patterns.len()).collect();
         let mut walk = Walk {
             host,

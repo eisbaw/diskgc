@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 10:38'
+updated_date: '2026-10-21 08:22'
 labels:
   - wave-2
   - cli
@@ -27,8 +27,8 @@ Why: CI hooks and harnesses depend on the exact flags and exit codes. Complete e
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Every flag and rule in docs/reference.md#ensure has a test
-- [ ] #2 --dry-run deletes nothing and takes no lock (deletion oracle + lock probe)
-- [ ] #3 Bare numbers and month durations are usage errors
+- [x] #2 --dry-run deletes nothing and takes no lock (deletion oracle + lock probe)
+- [x] #3 Bare numbers and month durations are usage errors
 - [x] #4 --allow-root: owners required and resolving to non-system users; the config file and every directory above it root-owned and not writable by others; command actions refused
 - [x] #5 Under --allow-root, a selected or protected source containing {uid} is rejected before planning or deletion until per-authorized-owner expansion is defined for one and multiple owners; disposable-container tests cover both owner counts and protection
 <!-- AC:END -->
@@ -47,6 +47,10 @@ Compass domain review: Tier::select currently receives process uid 0 in root mod
 Compass/MPED follow-up: --allow-root now rejects every executable {uid} substitution point before planning; literal-only where guards reject {uid} at config load for both sources and filters. Disposable-container cases cover one/two owners, nonempty protect policy, protected literal guard, empty plan and deletion oracle. Config group/protect execution remains deferred to TASK20/TASK16.
 
 TASK91 is now Done: explicit {uid: N} owner mapping covers NSS-only accounts when the operator trusts stable numeric UID assignment. Earlier NSS dependency note is superseded.
+
+2026-10-21 CLI acceptance probes integrated: fast disposable-container tests now exercise dry-run planning while a host lock is held, zero actions, mount in the report, and single JSON usage-error objects for bare sizes/month durations, malformed --json, and post-measure threshold errors. Parser/report implementation was already present; tests were format/diff checked but not run under no-deletion restriction. AC1-3 and DoD remain unchecked until integrated E2E and independent review.
+
+2026-10-21 integrated gate: dry-run lock/oracle and JSON flag cases passed in disposable Nix containers; full just e2e passed 152/152 Nix and 6/6 native Docker tests. QA and MPED GO. AC1 remains open for a complete flag/rule matrix and Definition of Done review.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

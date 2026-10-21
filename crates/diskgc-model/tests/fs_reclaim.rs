@@ -296,18 +296,87 @@ fn filesystem_union_dedupes_identity_and_refusal_wins_in_both_orders() {
 fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
     let tree = "  /tmp/union-a: {.: {}}\n  /tmp/untrusted: {symlink: /home}\n";
     let selection = "profile:union-allow || profile:union-bad-root";
+    let mut request = tmp(selection);
+    request.tier.fs_union[0].roots.push(PathBuf::from("/home"));
     let planned_host = host(&yaml("", tree, ""));
-    let plan = executor::dry_run(&planned_host, &tmp(selection), &[1000], &mut |_| {});
+    let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
     assert_eq!(plan.errors.len(), 1, "{plan:#?}");
     assert_eq!(plan.errors[0].profile, "union-bad-root");
-    assert!(plan.plan.is_empty(), "{plan:#?}");
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert_eq!(plan.plan[0].candidate, Path::new("/home"));
+    assert_eq!(plan.plan[0].reason, Some("other_fs"));
 
     let reclaim_host = host(&yaml("", tree, ""));
-    let report = ensure(&reclaim_host, &tmp(selection));
+    let report = ensure(&reclaim_host, &request);
     assert_eq!(report.errors.len(), 1, "{report:#?}");
     assert_eq!(report.errors[0].profile, "union-bad-root");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|skip| skip.candidate == Path::new("/home") && skip.reason == "other_fs"),
+        "{report:#?}"
+    );
     assert!(report.actions.is_empty(), "{report:#?}");
     assert!(exists(&reclaim_host, "/tmp/union-a"));
+}
+
+#[test]
+fn filesystem_union_skips_foreign_second_source_and_reclaims_same_device_source() {
+    let tree = "  /tmp/union-a: {.: {}}\n  /home: {.: {}}\n  /home/union-foreign: {.: {}}\n";
+    let mut request = tmp("profile:union-allow || profile:union-bad-root");
+    request.tier.fs_union[0].roots = vec![PathBuf::from("/home")];
+
+    let plan_host = host(&yaml("", tree, ""));
+    let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
+    assert!(plan.errors.is_empty(), "{plan:#?}");
+    assert_eq!(request.tier.fs_union[0].profile, "union-bad-root");
+    assert!(
+        plan.plan.iter().any(|entry| {
+            entry.profile == "union-bad-root"
+                && entry.candidate == Path::new("/home")
+                && entry.reason == Some("other_fs")
+        }),
+        "{plan:#?}"
+    );
+    assert!(
+        plan.plan
+            .iter()
+            .any(|entry| entry.candidate == Path::new("/tmp/union-a") && entry.reason.is_none()),
+        "{plan:#?}"
+    );
+    assert_eq!(
+        plan_host
+            .trace()
+            .iter()
+            .filter(|call| call.path.as_deref() == Some(Path::new("/home/union-foreign")))
+            .count(),
+        0
+    );
+
+    let reclaim_host = host(&yaml("", tree, ""));
+    let report = ensure(&reclaim_host, &request);
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(actions(&report), ["/tmp/union-a"]);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|skip| skip.profile == "union-bad-root"
+                && skip.candidate == Path::new("/home")
+                && skip.reason == "other_fs"),
+        "{report:#?}"
+    );
+    assert!(exists(&reclaim_host, "/home/union-foreign"));
+    assert_eq!(unlinked_below(&reclaim_host, "/home"), 0);
+    assert_eq!(
+        reclaim_host
+            .trace()
+            .iter()
+            .filter(|call| call.path.as_deref() == Some(Path::new("/home/union-foreign")))
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -363,6 +432,23 @@ fn root_mode_reclaims_only_named_owners_tree() {
     let report = executor::ensure(&host, &request, &[1000], &mut |_| {});
     assert!(exists(&host, "/tmp/pytest-of-other"));
     assert!(!exists(&host, "/tmp/pytest-of-allowed"), "{report:?}");
+}
+
+/// Alias roots are resolved safely, then scanned once by directory identity.
+#[test]
+fn same_filesystem_root_identity_is_walked_once() {
+    let host = host(&yaml("", "  /tmp/x: {}\n", ""));
+    let find = Find::new(&["x".to_owned()], EntryType::File, &Where::default(), 1000);
+    let roots = [PathBuf::from("/tmp"), PathBuf::from("/tmp")];
+    let (discovered, stopped) = fs_kind::discover(&host, &roots, &find, None);
+    assert!(stopped.is_none(), "{stopped:?}");
+    assert!(discovered.refused.is_empty(), "{:#?}", discovered.refused);
+    assert_eq!(discovered.candidates.len(), 1);
+    assert!(
+        discovered.duplicates.is_empty(),
+        "{:#?}",
+        discovered.duplicates
+    );
 }
 
 /// The actual `fs` deletion protocol, on 40,000 distinct top-level `/tmp`
@@ -815,8 +901,8 @@ fn a_plain_delete_candidate_containing_private_tmp_is_kept() {
 }
 
 /// AC #5 (model): a candidate on a network filesystem is never deleted. A
-/// root on one is refused by its mountinfo line before anything there is
-/// opened or `statx`ed (`unsupported_fs`), whatever `PATH` is; a network
+/// root on one is excluded during preflight from its mountinfo line before
+/// anything there is opened or `statx`ed, whatever `PATH` is; a network
 /// mount at a candidate's name or inside one is `contains_mount`, never
 /// touched.
 #[test]
@@ -849,11 +935,17 @@ fn a_network_filesystem_is_never_reclaimed_or_touched() {
                 "100%",
             ),
         );
-        assert_ne!(report.exit_code(), 0, "{fs}: {report:#?}");
+        assert_eq!(report.status, Status::Error, "{fs}: {report:#?}");
+        assert_eq!(report.exit_code(), 3, "{fs}: {report:#?}");
         assert!(report.actions.is_empty(), "{fs}: {report:#?}");
-        assert_eq!(
-            skip_of(&report, "/mnt/net/scratch"),
-            Some("unsupported_fs"),
+        assert!(report.skipped.is_empty(), "{fs}: {report:#?}");
+        assert!(
+            report.errors.iter().any(|error| {
+                error.profile == "anything"
+                    && error.candidate == "/mnt/net/scratch"
+                    && error.message.contains(&format!("on {fs} mount /mnt/net"))
+                    && error.message.contains("the tier is excluded")
+            }),
             "{fs}: {report:#?}"
         );
         assert!(
@@ -862,6 +954,7 @@ fn a_network_filesystem_is_never_reclaimed_or_touched() {
             touching(&host, "/mnt/net/scratch")
         );
         assert!(exists(&host, "/mnt/net/scratch/old/f"), "{fs}");
+        assert_eq!(unlinked_below(&host, "/mnt/net/scratch"), 0, "{fs}");
     }
     // In /tmp: a network mount as a candidate, and one inside a candidate.
     let mounts = "  - {id: 41, at: /tmp/pytest-of-net, fs: fuse.sshfs, dev: \"0:51\", size: 1G, \
@@ -921,10 +1014,17 @@ fn every_fuse_filesystem_is_refused() {
         "fuse.fuse-overlayfs",
     ] {
         let (host, report) = reclaim_on(fs);
+        assert_eq!(report.status, Status::Error, "{fs}: {report:#?}");
+        assert_eq!(report.exit_code(), 3, "{fs}: {report:#?}");
         assert!(report.actions.is_empty(), "{fs}: {report:#?}");
-        assert_eq!(
-            skip_of(&report, "/mnt/f/scratch"),
-            Some("unsupported_fs"),
+        assert!(report.skipped.is_empty(), "{fs}: {report:#?}");
+        assert!(
+            report.errors.iter().any(|error| {
+                error.profile == "anything"
+                    && error.candidate == "/mnt/f/scratch"
+                    && error.message.contains(&format!("on {fs} mount /mnt/f"))
+                    && error.message.contains("the tier is excluded")
+            }),
             "{fs}: {report:#?}"
         );
         assert!(
@@ -933,6 +1033,7 @@ fn every_fuse_filesystem_is_refused() {
             touching(&host, "/mnt/f/scratch")
         );
         assert!(exists(&host, "/mnt/f/scratch/old/f"), "{fs}");
+        assert_eq!(unlinked_below(&host, "/mnt/f/scratch"), 0, "{fs}");
     }
 }
 

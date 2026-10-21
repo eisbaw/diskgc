@@ -236,6 +236,14 @@ fn overlapping_roots_find_each_target_once() {
     );
 }
 
+#[test]
+fn same_directory_root_is_walked_once_even_when_supplied_twice() {
+    let model = model("", "");
+    let d = found(&model, &["/tmp/w", "/tmp/w"]);
+    assert_eq!(paths(&d), ["/tmp/w/p/target"], "{d:#?}");
+    assert!(d.duplicates.is_empty(), "{d:#?}");
+}
+
 /// A root on a network filesystem is refused (`unsupported_fs`) without
 /// opening or statting it; a missing root is `missing`, a symlinked one
 /// `unsafe_path`.
@@ -299,6 +307,37 @@ fn cargo_discovery_refuses_fuse_subtypes_before_opening_the_root() {
             model.trace()
         );
     }
+}
+
+#[test]
+fn cargo_discovery_refuses_local_mount_below_nfs_before_opening_ancestor() {
+    let text = with_mount(
+        &yaml(
+            "  /net/local/p/Cargo.toml: {}\n  /net/local/p/target/CACHEDIR.TAG: {cachedir_tag: true}",
+            "",
+        ),
+        "  - {id: 40, at: /net, fs: nfs4, dev: \"0:50\", size: 1T, parent: 1}\n  - {id: 41, at: /net/local, fs: tmpfs, dev: \"0:51\", size: 1G, parent: 40}",
+    );
+    let model = host(&text);
+    let discovery = found(&model, &["/net/local"]);
+    assert!(discovery.targets.is_empty(), "{discovery:#?}");
+    assert!(
+        discovery.refused.iter().any(
+            |skip| skip.reason == Reason::UnsupportedFs && skip.path == Path::new("/net/local")
+        ),
+        "{discovery:#?}"
+    );
+    assert!(
+        model.trace().iter().all(
+            |call| !matches!(call.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                || !call
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("/net"))
+        ),
+        "{:#?}",
+        model.trace()
+    );
 }
 
 #[test]

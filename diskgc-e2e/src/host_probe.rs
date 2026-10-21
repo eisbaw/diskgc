@@ -36,7 +36,10 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-stat", paths) => stat_paths(&host, paths),
         ("host-statvfs", [path]) => statvfs(&host, path),
         ("host-lock", [how, path]) if how == "try" => lock_try(&host, path),
-        ("host-lock", [how, path, millis]) if how == "wait" => lock_wait(&host, path, millis),
+        ("host-lock", [how, path, millis]) if how == "wait" => lock_wait(&host, path, millis, None),
+        ("host-lock", [how, path, millis, busy_marker]) if how == "wait" => {
+            lock_wait(&host, path, millis, Some(busy_marker))
+        }
         ("host-lock", [how, path]) if how == "close-semantics" => close_semantics(&host, path),
         ("host-proc", [pid]) => proc_readers(&host, pid),
         ("host-proc-replaced", []) => proc_replaced_after_startup(&host),
@@ -299,11 +302,29 @@ fn lock_try(host: &LinuxHost, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn lock_wait(host: &LinuxHost, path: &str, millis: &str) -> Result<(), String> {
+fn lock_wait(
+    host: &LinuxHost,
+    path: &str,
+    millis: &str,
+    busy_marker: Option<&str>,
+) -> Result<(), String> {
     let millis: u64 = millis
         .parse()
         .map_err(|_| format!("bad millis {millis:?}"))?;
-    let fd = open_for_lock(host, path)?;
+    let mut fd = open_for_lock(host, path)?;
+    if let Some(marker) = busy_marker {
+        // The marker lets the harness release the holder only after this
+        // separate fd has observed contention. Keep the same unlocked fd.
+        fd = match host
+            .flock_try(fd, LockMode::Exclusive)
+            .map_err(|e| e.to_string())?
+        {
+            TryLock::Busy(fd) => fd,
+            TryLock::Acquired(_) => return Err("lock was free before the wait began".into()),
+        };
+        std::fs::write(marker, b"busy\n")
+            .map_err(|e| format!("write busy marker {marker}: {e}"))?;
+    }
     let started = Instant::now();
     let deadline = host.now().checked_add(Duration::from_millis(millis));
     let outcome = match host

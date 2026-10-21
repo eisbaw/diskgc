@@ -423,6 +423,11 @@ pub struct EventSpec {
     /// directory, as if renamed away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace: Option<PathBuf>,
+    /// Replace a file or directory with a fresh object deliberately assigned its
+    /// old inode number. Simulates reuse after unlink for identity tests;
+    /// the old object must have no other names or open references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_reusing_inode: Option<PathBuf>,
     /// Change the owner of the object at a path (not following it); the
     /// inode stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]

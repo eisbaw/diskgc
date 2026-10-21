@@ -3,10 +3,10 @@ id: TASK-16
 title: >-
   Selection engine: find patterns, filters, overlap negation and protect, with a
   reference implementation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 12:23'
+updated_date: '2026-10-21 08:23'
 labels:
   - wave-2
   - irreversible
@@ -70,6 +70,12 @@ Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must
 2026-10-20 integrated entry-complement checkpoint: docs/reference.md now lists filtered and accurately describes the seven shipped idle filters and supported runtime subset. Full nix develop -c just e2e passed (Nix image 139/139, native Docker 6/6); parallel QA and MPED reviews GO. TASK16 remains open for positive entry filters, unions, !profile overlap and protect; no AC/DoD checked.
 
 2026-10-20 positive fs delete-union candidate integrated for review: executor keeps the first term in its existing fields and only additional terms in union state; discovery dedupes exact inode identities, dry run judges a disjunction once per candidate, and reclaim takes one candidate lock to recheck each alternative with refuse-if-any checkout policy among matching sources. Root-mode CLI validates {uid} in every source, including later union terms. Focused ModelHost tests cover order, hardlink identity, shared checkout refusal, once-only actions and lock-time alternative changes; real-binary disposable Nix-container E2E passed 1/1 with deletion oracle clean, and host interlock refused exit 86. Fs command unions and differing delete options remain explicit usage errors; !profile and protect remain refused. Integrated full just e2e and parallel QA/MPED review pending; TASK16 AC/DoD remain open.
+
+2026-10-21 protection runtime candidate integrated: bind each protected source’s own roots, ignore its where, discover all raw matches before first deletion, skip candidates that match/contain/lie within a protected match, and rescan immediately before each reclaim. Uncertain protection discovery stops the run; root mode refuses {uid} protected roots/patterns. Three pure ModelHost dry-run regressions passed in isolated worktree; a fourth YAML fixture was corrected but not rerun. Combined workspace and E2E crate cargo check pass after merge; deletion-time E2E, full gate and independent review pending. Protection is not atomic with deletion, and !profile runtime remains open. AC/DoD remain unchecked.
+
+2026-10-21 !profile runtime candidate integrated: term-local bound fs/Cargo negated sources discover raw matches, ignore negated where, exclude component-overlapping candidates, and fail closed on incomplete scans; fs/Cargo reclaim rechecks under candidate locks and immediately before unlink. Root {uid} guard now checks negated sources. Read-only ModelHost and disposable-container dry-run regressions added, but not run under no-deletion restriction. Fresh isolated-target workspace/E2E crate cargo check passed after integration compile fixes; full E2E and independent review pending. Concurrent changes to the negated tree after the final scan remain a documented non-atomic race; TASK16 AC/DoD remain open.
+
+2026-10-21 integrated verification: fs union, !profile and protect runtime slices passed full just e2e (152/152 Nix containers, 6/6 Docker), including deletion-oracle cases, and parallel QA/MPED review. Root-mode {uid} guards and mount-chain screening passed. Runtime support for every documented filter/action combination and the full TASK16 completion review remain open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

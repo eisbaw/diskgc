@@ -83,6 +83,64 @@ profiles:
     examples: {match: [/tmp/nix-index], no_match: [/tmp/huggingface]}
 "#;
 
+const NEGATED_PROFILE_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: neg-profile-source
+    find: {roots: [/tmp], paths: [neg-profile-parent, neg-profile-free], type: dir}
+    action: delete
+    examples: {match: [/tmp/neg-profile-parent, /tmp/neg-profile-free]}
+  - name: neg-profile-child
+    find: {roots: [/tmp], paths: [neg-profile-parent/child], type: dir}
+    where: {has: deliberately-absent}
+    action: delete
+    examples: {match: [/tmp/neg-profile-parent/child]}
+"#;
+
+/// The kernel discovery and dry-run planner use raw negated matches and
+/// component-aware overlap. This deliberately makes no reclaiming call.
+pub fn fs_negated_profile_dry_run_excludes_ancestor(ctx: &Ctx) -> TestResult {
+    ctx.home.write_file(
+        "diskgc.yaml",
+        NEGATED_PROFILE_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    ctx.scratch.mkdir("neg-profile-parent", 0o700, TESTER)?;
+    ctx.scratch
+        .mkdir("neg-profile-parent/child", 0o700, TESTER)?;
+    ctx.scratch.mkdir("neg-profile-free", 0o700, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_tmp(
+        ctx,
+        &[
+            "--dry-run",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:neg-profile-source && !profile:neg-profile-child",
+        ],
+    )?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let planned = report(&run)?;
+    let entries = planned["plan"].as_array().ok_or("plan is not an array")?;
+    let reason = |path: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["candidate"].as_str() == Some(path))
+            .map(|entry| &entry["reason"])
+    };
+    ensure!(
+        reason("/tmp/neg-profile-parent") == Some(&Value::String("excluded".to_owned())),
+        "ancestor was not excluded: {planned}"
+    );
+    ensure!(
+        reason("/tmp/neg-profile-free") == Some(&Value::Null),
+        "free sibling was excluded: {planned}"
+    );
+    verdict.assert_clean()
+}
+
 const CMAKE_GUARD_TEST_PROFILE: &str = r#"version: 1
 profiles:
   - name: cmake-guard-kernel
@@ -964,7 +1022,7 @@ fn tmp_fixture(ctx: &Ctx, scale: Scale) -> TestResult {
 /// a directory or a regular file). The plain candidate next to them goes.
 pub fn fs_reclaim_never_deletes_a_socket_or_fifo(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
-    write_config(ctx, Duration::from_secs(0))?;
+    write_config(ctx, Duration::from_secs(1))?;
     s.mkdirs("rc-sock/run", 0o755, TESTER)?;
     s.socket("rc-sock/run/agent.sock", TESTER)?;
     s.write_file("rc-sock/f", b"x", 0o644, TESTER)?;
@@ -1005,7 +1063,7 @@ pub fn fs_reclaim_never_deletes_a_socket_or_fifo(ctx: &Ctx) -> TestResult {
 /// Its contents are owned by tester, so only the structural guard keeps it.
 pub fn fs_reclaim_never_enters_private_tmp_inside_a_candidate(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
-    write_config(ctx, Duration::from_secs(0))?;
+    write_config(ctx, Duration::from_secs(1))?;
     let private = "rc-private/systemd-private-abc-cups.service-x1/tmp";
     s.mkdirs(private, 0o700, TESTER)?;
     s.write_file(&format!("{private}/f"), b"keep", 0o600, TESTER)?;
@@ -1104,6 +1162,57 @@ impl Drop for DeadFuse {
     }
 }
 
+/// A protected root on a dead FUSE mount must be refused before the root
+/// is opened. Protection discovery must fail closed quickly, and no sibling
+/// candidate may be deleted after that incomplete scan.
+pub fn fs_protected_dead_fuse_root_is_refused_without_opening_it(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        b"version: 1\nprofiles:\n  - name: reclaim-test\n    find: {roots: [/tmp], paths: [rc-plain], type: dir}\n    action: delete\n    examples: {match: [/tmp/rc-plain]}\n  - name: guard\n    find: {roots: required, paths: ['*'], type: dir}\n    action: delete\n    examples: {root: /tmp, match: [/tmp/guarded]}\nprotect: [{profile: guard, roots: [/tmp/fuse-dead]}]\n",
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("fuse-dead", 0o755, ROOT)?;
+    s.mkdir("rc-plain", 0o755, TESTER)?;
+    s.write_file("rc-plain/payload", b"keep", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let fuse = DeadFuse::mount(&s.path("fuse-dead"))?;
+    let blocked = fuse.proven_dead(Duration::from_secs(2))?;
+    let run = ensure_tmp(
+        ctx,
+        &["--min-free", "100%", "--select", "profile:reclaim-test"],
+    )?;
+    drop(fuse);
+    blocked
+        .join()
+        .map_err(|_| "FUSE control thread panicked".to_owned())?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(3)?;
+    ensure!(
+        run.took < Duration::from_secs(5),
+        "protected dead FUSE root stalled for {:?}",
+        run.took
+    );
+    let output = report(&run)?;
+    ensure!(
+        output["actions"].as_array().is_some_and(Vec::is_empty),
+        "{output}"
+    );
+    ensure!(
+        output["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| error["message"]
+                .as_str()
+                .is_some_and(
+                    |message| message.contains("protect `guard`") && message.contains("fuse")
+                ))),
+        "{output}"
+    );
+    ensure!(exists(&s.path("rc-plain/payload")), "sibling was deleted");
+    verdict.assert_clean()
+}
+
 /// AC #6: a dead FUSE mount in `/tmp`, as a candidate's name and inside a
 /// candidate, is never touched, so it does not hang discovery or the
 /// judgement (mountinfo first: a mount point is never `statx`ed, opened or
@@ -1113,7 +1222,7 @@ impl Drop for DeadFuse {
 /// old directory next to them is deleted, and nothing else.
 pub fn fs_reclaim_a_dead_fuse_mount_is_never_touched(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
-    write_config(ctx, Duration::from_secs(0))?;
+    write_config(ctx, Duration::from_secs(1))?;
     s.mkdir("fuse-dead", 0o755, ROOT)?;
     s.mkdirs("holder/mnt", 0o755, TESTER)?;
     s.write_file("holder/f", b"x", 0o644, TESTER)?;

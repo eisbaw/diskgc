@@ -9,8 +9,8 @@
 //!
 //! `index` is `null`: there is no index before task-28/29, every run
 //! discovers its candidates afresh. `overruns` is always empty until
-//! the deadline work of task-54 can report one, and `seed` is `null` until
-//! `random` ranking is implemented for configured groups.
+//! the deadline work of task-54 can report one. `seed` is `null` unless a
+//! configured group uses random ranking.
 
 pub mod json;
 
@@ -250,6 +250,8 @@ pub struct ErrorEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub status: Status,
+    /// The seed used to shuffle configured random groups, if any.
+    pub seed: Option<u64>,
     /// The mount point of `path`'s filesystem; `None` before it was
     /// resolved.
     pub mount: Option<PathBuf>,
@@ -272,6 +274,7 @@ impl Report {
     pub fn new(status: Status, path: Option<&Path>) -> Self {
         Self {
             status,
+            seed: None,
             mount: None,
             path: path.map(Path::to_owned),
             min_free_bytes: None,
@@ -318,7 +321,7 @@ impl Report {
             ("status", Json::str(self.status.as_str())),
             ("mount", Json::opt(self.mount.as_deref(), path)),
             ("path", Json::opt(self.path.as_deref(), path)),
-            ("seed", Json::Null),
+            ("seed", Json::opt(self.seed, Json::U64)),
             // No index exists yet (task-28/29): every run discovers afresh.
             ("index", Json::Null),
             ("min_free_bytes", opt_u64(self.min_free_bytes)),

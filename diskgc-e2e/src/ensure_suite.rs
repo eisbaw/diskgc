@@ -67,6 +67,58 @@ pub(crate) fn ensure_run(ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
     Ok(run)
 }
 
+/// The real CLI binds protection independently of tier roots and applies
+/// raw find matches to a dry-run plan. This test only plans; it never arms
+/// the deletion oracle or invokes a reclaiming ensure.
+pub fn configured_protect_marks_overlapping_fs_candidates_in_dry_run(ctx: &Ctx) -> TestResult {
+    let scratch = &ctx.scratch;
+    scratch.mkdir("protect-parent", 0o755, TESTER)?;
+    scratch.mkdir("protect-parent/inside", 0o755, TESTER)?;
+    scratch.mkdir("protect-exact", 0o755, TESTER)?;
+    scratch.mkdir("protect-other", 0o755, TESTER)?;
+    ctx.home.write_file(
+        "diskgc-protect.yaml",
+        b"version: 1\nprofiles:\n  - name: reclaim-top\n    find: {roots: [/tmp], paths: [protect-parent, protect-exact, protect-other], type: dir}\n    action: delete\n    examples: {match: [/tmp/protect-parent, /tmp/protect-exact, /tmp/protect-other]}\n  - name: guard-inside\n    find: {roots: [/tmp], paths: [protect-parent/inside, protect-exact], type: dir}\n    where: {has: absent-marker}\n    action: delete\n    examples: {match: [/tmp/protect-parent/inside, /tmp/protect-exact]}\nprotect: [guard-inside]\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--config",
+            "/home/tester/diskgc-protect.yaml",
+            "--select",
+            "profile:reclaim-top",
+            "--min-free",
+            "100%",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let result = report(&run)?;
+    let plan = result["plan"].as_array().ok_or("plan is not an array")?;
+    for (path, reason) in [
+        (scratch.path("protect-parent"), Some("protected")),
+        (scratch.path("protect-exact"), Some("protected")),
+        (scratch.path("protect-other"), None),
+    ] {
+        let entry = plan
+            .iter()
+            .find(|entry| entry["candidate"] == path.to_string_lossy().as_ref())
+            .ok_or_else(|| format!("missing candidate {}: {result}", path.display()))?;
+        ensure!(
+            entry["reason"].as_str() == reason,
+            "{}: expected {reason:?}, got {entry}",
+            path.display()
+        );
+    }
+    judged.assert_clean()
+}
+
 /// The configured CLI path must execute both groups in policy order, with
 /// each candidate deletion checked by the independent filesystem oracle.
 pub fn configured_groups_reclaim_in_order(ctx: &Ctx) -> TestResult {
@@ -121,6 +173,87 @@ pub fn configured_groups_reclaim_in_order(ctx: &Ctx) -> TestResult {
             && actions[1]["candidate"] == pressure.to_string_lossy().as_ref(),
         "pressure tier did not run second: {result}"
     );
+    judged.assert_clean()?;
+    Ok(())
+}
+
+/// A fixed random seed orders tiers reproducibly inside one group, while
+/// the next group stays after it. The dry run makes no filesystem mutation.
+pub fn configured_random_group_reports_seed_and_order(ctx: &Ctx) -> TestResult {
+    let scratch = &ctx.scratch;
+    let mut fixture = Fixture::new();
+    for name in [
+        "random-first",
+        "random-second",
+        "random-third",
+        "random-last",
+    ] {
+        scratch.mkdir(name, 0o755, TESTER)?;
+        let path = scratch.path(name);
+        fixture = fixture.eligible(path);
+    }
+    ctx.home.write_file(
+        "diskgc-random.yaml",
+        b"version: 1\nprofiles:\n  - name: first-source\n    find: {roots: [/tmp], paths: [random-first], type: dir}\n    action: delete\n    examples: {match: [/tmp/random-first]}\n  - name: second-source\n    find: {roots: [/tmp], paths: [random-second], type: dir}\n    action: delete\n    examples: {match: [/tmp/random-second]}\n  - name: third-source\n    find: {roots: [/tmp], paths: [random-third], type: dir}\n    action: delete\n    examples: {match: [/tmp/random-third]}\n  - name: last-source\n    find: {roots: [/tmp], paths: [random-last], type: dir}\n    action: delete\n    examples: {match: [/tmp/random-last]}\ngroups:\n  - name: random\n    ranking: random\n    tiers:\n      - name: first\n        select: profile:first-source\n      - name: second\n        select: profile:second-source\n      - name: third\n        select: profile:third-source\n  - name: pressure\n    tiers:\n      - name: last\n        select: profile:last-source\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(fixture)?;
+    let run = crate::under_test::run_as_tester_with_env(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &[("DISKGC_SEED".to_owned(), "42".to_owned())],
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--dry-run",
+            "--json",
+            "--config",
+            "/home/tester/diskgc-random.yaml",
+            "--min-free",
+            "1K",
+            "/tmp",
+        ],
+    )?;
+    let invalid = crate::under_test::run_as_tester_with_env(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &[("DISKGC_SEED".to_owned(), "not-a-number".to_owned())],
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--dry-run",
+            "--json",
+            "--config",
+            "/home/tester/diskgc-random.yaml",
+            "--min-free",
+            "1K",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge_runs(&[&run, &invalid])?;
+    run.expect_code(0)?;
+    invalid.expect_code(2)?;
+    let invalid_report = report(&invalid)?;
+    ensure!(
+        invalid_report["status"] == "usage_error",
+        "{invalid_report}"
+    );
+    ensure!(
+        invalid_report["actions"] == serde_json::json!([]),
+        "{invalid_report}"
+    );
+    let result = report(&run)?;
+    ensure!(result["status"] == "dry_run", "{result}");
+    ensure!(result["seed"] == 42, "{result}");
+    let plan = result["plan"].as_array().ok_or("plan is not an array")?;
+    let order = plan
+        .iter()
+        .map(|entry| entry["tier"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>();
+    ensure!(order == ["first", "third", "second", "last"], "{result}");
     judged.assert_clean()?;
     Ok(())
 }
@@ -668,6 +801,111 @@ pub fn ensure_above_min_free_exits_0_without_the_host_lock(ctx: &Ctx) -> TestRes
     judged.assert_clean()
 }
 
+/// A dry run must return while another process owns the host lock. The
+/// fixture is confined to the container's /run/diskgc mount, and the
+/// deletion oracle permits no changes to the scratch tree.
+pub fn ensure_dry_run_plans_while_the_host_lock_is_held(ctx: &Ctx) -> TestResult {
+    work_dir(ctx)?;
+    let holder = Holder::root(ctx, &["flock-hold", HOST_LOCK])?;
+    ensure!(held_by_someone()?, "fixture did not take the host lock");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "8s",
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            "/tmp/w",
+            "/tmp/w",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let result = report(&run)?;
+    ensure!(
+        result["status"] == "dry_run"
+            && result["mount"] == "/tmp"
+            && result["path"] == "/tmp/w"
+            && result["actions"].as_array().is_some_and(Vec::is_empty),
+        "dry run under a held lock: {result}"
+    );
+    ensure!(
+        run.took < Duration::from_secs(8),
+        "dry run waited for the host lock for {:?}",
+        run.took
+    );
+    ensure!(held_by_someone()?, "dry run released the fixture's lock");
+    holder.finish()?;
+    judged.assert_clean()
+}
+
+/// CLI failures must be one JSON report, with no operation. A syntax error
+/// has no resolved mount; a threshold error after measuring PATH has /tmp.
+pub fn ensure_flag_errors_are_single_json_reports(ctx: &Ctx) -> TestResult {
+    work_dir(ctx)?;
+    let cases: &[(&[&str], &str, bool)] = &[
+        (&["--min-free", "50"], "bare number", false),
+        (
+            &["--min-free", "1G", "--target-free", "50"],
+            "bare number",
+            false,
+        ),
+        (&["--min-free", "1G", "--timeout", "1M"], "no months", false),
+        (
+            &["--min-free", "1G", "--tally-budget", "1mo"],
+            "no months",
+            false,
+        ),
+        (
+            &["--min-free", "1G", "--json=yes"],
+            "--json takes no value",
+            false,
+        ),
+        (&["--min-free", "101%"], "--min-free", true),
+        (
+            &["--min-free", "100%", "--target-free", "1K"],
+            "below --min-free",
+            true,
+        ),
+    ];
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut runs = Vec::new();
+    for (flags, expected, measured) in cases {
+        let mut args = vec!["--dry-run", "--json", "--select", "profile:cargo-target"];
+        args.extend_from_slice(flags);
+        args.extend(["--roots", "/tmp/w", "/tmp/w"]);
+        let run = ensure_run(ctx, &args)?;
+        runs.push((args, *expected, *measured, run));
+    }
+    let judged = oracle.judge_runs(&runs.iter().map(|(_, _, _, run)| run).collect::<Vec<_>>())?;
+    for (args, expected, measured, run) in &runs {
+        run.expect_code(2)?;
+        let result = report(&run)?;
+        let message = result["errors"][0]["message"]
+            .as_str()
+            .ok_or("usage error has no message")?;
+        ensure!(
+            result["status"] == "usage_error"
+                && message.contains(expected)
+                && result["mount"]
+                    == if *measured {
+                        Value::from("/tmp")
+                    } else {
+                        Value::Null
+                    }
+                && result["actions"].as_array().is_some_and(Vec::is_empty),
+            "{args:?}: {result}"
+        );
+    }
+    judged.assert_clean()
+}
+
 /// AC #2 and exit 2: below `--min-free` without `/run/diskgc/lock`, exit 2
 /// printing the two tmpfiles lines (docs/safety.md, Host lock); nothing is
 /// deleted.
@@ -1084,10 +1322,6 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
             "/run/diskgc/literal-guard.yaml",
             "is literal and does not expand it",
         ),
-        (
-            "/run/diskgc/protected-source.yaml",
-            "ensure cannot enforce it in this build yet",
-        ),
     ] {
         let run = ctx.run_as_root(
             &ctx.diskgc(),
@@ -1115,6 +1349,25 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
         );
         runs.push(run);
     }
+    let protected = ctx.run_as_root(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--allow-root",
+            "--json",
+            "--min-free",
+            "100%",
+            "--config",
+            "/run/diskgc/protected-source.yaml",
+            "--select",
+            "profile:root-rejected-fixture",
+            "--roots",
+            "/tmp/root-rejected",
+            "/tmp/root-rejected",
+        ],
+    )?;
+    let protected_index = runs.len();
+    runs.push(protected);
     let docker = ctx.run_as_root(
         &ctx.diskgc(),
         &[
@@ -1143,6 +1396,21 @@ pub fn root_mode_refuses_untrusted_policy_and_system_owner(ctx: &Ctx) -> TestRes
     );
     runs.push(docker);
     let judged = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;
+    let protected = &runs[protected_index];
+    protected.expect_code(1)?;
+    let protected_report = report(protected)?;
+    ensure!(
+        protected_report["status"] == "exhausted"
+            && protected_report["actions"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+            && protected_report["skipped"]
+                .as_array()
+                .is_some_and(|skipped| {
+                    skipped.iter().any(|item| item["reason"] == "protected")
+                }),
+        "protected source was not enforced: {protected_report}"
+    );
     ensure!(
         s.path("root-rejected/reclaim/payload").exists(),
         "a rejected policy deleted payload"

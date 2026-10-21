@@ -10,7 +10,7 @@ use super::Found;
 use super::discover::check_deadline;
 use super::judge::{Judge, Walked, mountinfo, same_object};
 use crate::command_action::{self, Ready};
-use crate::engine::Identity;
+use crate::engine::{Identity, Skip};
 use crate::host::{
     Base, Cause, CommandExit, CommandInvocation, Delete, FileType, HostError, MonoTime,
 };
@@ -24,6 +24,18 @@ use crate::profile::Cwd;
 pub struct CommandResult {
     pub attempted: bool,
     pub end: ReclaimEnd,
+}
+
+/// The preflighted command and its invocation context for one candidate.
+pub struct CommandSpec<'a> {
+    pub ready: &'a Ready,
+    pub argv: &'a [String],
+    pub cwd: Option<Cwd>,
+    pub need_bytes: u64,
+    pub mount: &'a Path,
+    pub profile: &'a str,
+    pub output_prefix: String,
+    pub deadline: Option<MonoTime>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -41,6 +53,36 @@ pub fn run_command<H: Delete>(
     output_prefix: String,
     deadline: Option<MonoTime>,
 ) -> CommandResult {
+    run_command_checked(
+        host,
+        judge,
+        found,
+        checker,
+        CommandSpec {
+            ready,
+            argv,
+            cwd,
+            need_bytes,
+            mount,
+            profile,
+            output_prefix,
+            deadline,
+        },
+        &mut |_| Ok(None),
+    )
+}
+
+/// Run the command after rechecking runtime policy under the candidate lock.
+/// The policy is checked after the fresh walk and again immediately before
+/// invoking the command; uncertainty stops the run.
+pub fn run_command_checked<H: Delete>(
+    host: &H,
+    judge: &Judge<'_>,
+    found: &Found,
+    checker: &mut Checker<'_>,
+    command: CommandSpec<'_>,
+    policy: &mut impl FnMut(&Path) -> Result<Option<Skip>, Stop>,
+) -> CommandResult {
     let mut result = CommandResult {
         attempted: false,
         end: ReclaimEnd::Complete,
@@ -49,38 +91,35 @@ pub fn run_command<H: Delete>(
         host,
         judge,
         found,
-        ready,
-        argv,
-        cwd,
         checker,
-        need_bytes,
-        mount,
-        profile,
-        output_prefix,
-        deadline,
+        command,
         &mut result.attempted,
+        policy,
     ) {
         result.end = end;
     }
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn protocol<H: Delete>(
     host: &H,
     judge: &Judge<'_>,
     found: &Found,
-    ready: &Ready,
-    argv: &[String],
-    cwd: Option<Cwd>,
     checker: &mut Checker<'_>,
-    need_bytes: u64,
-    mount: &Path,
-    profile: &str,
-    output_prefix: String,
-    deadline: Option<MonoTime>,
+    command: CommandSpec<'_>,
     attempted: &mut bool,
+    policy: &mut impl FnMut(&Path) -> Result<Option<Skip>, Stop>,
 ) -> Result<(), ReclaimEnd> {
+    let CommandSpec {
+        ready,
+        argv,
+        cwd,
+        need_bytes,
+        mount,
+        profile,
+        output_prefix,
+        deadline,
+    } = command;
     let path = &found.path;
     let stopped = |error| {
         ReclaimEnd::Stopped(Stop::Failed {
@@ -114,6 +153,9 @@ fn protocol<H: Delete>(
         deadline,
     )??;
     locked_is_walked(host, &candidate, &lock, &record).map_err(stopped)??;
+    if let Some(skip) = policy(path).map_err(ReclaimEnd::Stopped)? {
+        return Err(skip.into());
+    }
     let use_candidate = match cwd {
         Some(Cwd::Candidate) => true,
         Some(Cwd::Parent) => false,
@@ -159,6 +201,23 @@ fn protocol<H: Delete>(
         check_deadline(host, deadline, path)?;
         if let Some(app_lock) = &judge.find.app_not_running {
             super::app::check(host, &found.root, app_lock, deadline)??;
+        }
+        if let Some(skip) = policy(path).map_err(ReclaimEnd::Stopped)? {
+            return Err(skip.into());
+        }
+        check_deadline(host, deadline, path)?;
+        // The policy may scan other trees and take longer than the in-use
+        // verdict remains fresh. Recheck its lifetime at the point of use.
+        if host.now() >= clear.fresh_until() {
+            if attempt == 0 {
+                checker.forget();
+                continue;
+            }
+            return Err(stopped(HostError::invalid(
+                "command in-use check",
+                path.display(),
+                "two clear verdicts expired before the command could start",
+            )));
         }
         let exit = match host.run_command(cwd_fd, &run) {
             CommandInvocation::Started(result) => {

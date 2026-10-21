@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::fs::{AtFlags, CWD, StatxFlags};
 
@@ -371,15 +371,39 @@ pub fn host_flock_release_only_by_close(ctx: &Ctx) -> TestResult {
     .map_err(|e| format!("harness flock {LOCK}: {e}"))?;
     let busy = ctx.probe_as_tester(&["host-lock", "try", LOCK])?;
     let timed_out = ctx.probe_as_tester(&["host-lock", "wait", LOCK, "300"])?;
-    // Released while the probe waits: it must get the lock.
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        drop(holder);
+    // The probe writes this marker only after its own fd observed Busy.
+    // Waiting for the marker prevents a slow strace startup from turning
+    // this into an uncontended acquire after the holder has gone away.
+    let busy_marker = ctx.scratch.path("host-lock-wait-busy");
+    let release = std::thread::spawn({
+        let busy_marker = busy_marker.clone();
+        move || -> TestResult {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !busy_marker.exists() {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "wait probe did not report a Busy lock at {}",
+                        busy_marker.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            drop(holder);
+            Ok(())
+        }
     });
-    let acquired = ctx.probe_as_tester(&["host-lock", "wait", LOCK, "5000"])?;
+    let acquired =
+        ctx.probe_as_tester(&["host-lock", "wait", LOCK, "5000", to_str(&busy_marker)?])?;
     release
         .join()
-        .map_err(|_| "the releasing thread panicked".to_owned())?;
+        .map_err(|_| "the releasing thread panicked".to_owned())??;
+    ensure!(
+        std::fs::read(&busy_marker)
+            .map_err(|e| format!("read busy marker {}: {e}", busy_marker.display()))?
+            == b"busy\n",
+        "the wait probe did not report Busy"
+    );
     let verdict = oracle.judge_runs(&[&semantics, &busy, &timed_out, &acquired])?;
 
     busy.expect_code(0)?;
@@ -404,10 +428,10 @@ pub fn host_flock_release_only_by_close(ctx: &Ctx) -> TestResult {
         "deadline 300 ms, gave up after {waited} ms"
     );
     let waited = after_ms(&acquired, "Acquired")?;
-    info!("lock released after ~300 ms was acquired after {waited} ms");
+    info!("lock released after a Busy probe and ~300 ms was acquired after {waited} ms");
     ensure!(
-        waited < 5000,
-        "acquired only after {waited} ms (deadline 5000)"
+        (250..5000).contains(&waited),
+        "acquired after {waited} ms; release was scheduled 300 ms after Busy"
     );
     verdict.assert_clean()
 }

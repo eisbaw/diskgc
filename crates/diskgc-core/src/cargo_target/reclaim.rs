@@ -94,6 +94,14 @@ pub struct Reclaimed {
     pub end: ReclaimEnd,
 }
 
+/// Checks that remain fixed while one Cargo target is reclaimed.
+pub struct ReclaimPolicy<'r, 'a> {
+    pub judged_last_build: Option<Timestamp>,
+    pub rules: &'r Rules<'a>,
+    pub idle: IdleWindow,
+    pub deadline: Option<MonoTime>,
+}
+
 /// Runs the reclaim protocol (see the module docs) on `target`, found by
 /// [`super::discover`], for the walk `rules` (their owners and IPC policy;
 /// `max_entries` is the budget for the whole target) and the term's idle
@@ -112,16 +120,40 @@ pub fn reclaim<H: Delete>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Reclaimed {
+    reclaim_checked(
+        host,
+        target,
+        ReclaimPolicy {
+            judged_last_build,
+            rules,
+            idle,
+            deadline,
+        },
+        checker,
+        &mut |_| Ok(None),
+    )
+}
+
+/// Recheck protected and negated profile overlap while Cargo's candidate
+/// locks are held, and immediately before each part is deleted.
+pub fn reclaim_checked<H: Delete>(
+    host: &H,
+    target: &Target,
+    policy: ReclaimPolicy<'_, '_>,
+    checker: &mut Checker<'_>,
+    guard: &mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
+) -> Reclaimed {
     let mut run = Run {
         host,
         target,
         checker,
-        deadline,
+        deadline: policy.deadline,
         removed_entries: 0,
         removed_bytes: 0,
         locked_at: None,
+        guard,
     };
-    let end = match run.protocol(judged_last_build, rules, idle) {
+    let end = match run.protocol(policy.judged_last_build, policy.rules, policy.idle) {
         Ok(()) => ReclaimEnd::Complete,
         Err(end) => end,
     };
@@ -147,6 +179,7 @@ struct Run<'r, 'c, H: Delete> {
     removed_bytes: u64,
     /// When the first lock was taken.
     locked_at: Option<MonoTime>,
+    guard: &'r mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
 }
 
 /// A judgement as the end of the protocol.
@@ -211,6 +244,10 @@ impl<H: Delete> Run<'_, '_, H> {
             dirs.push(dir);
         }
 
+        if let Some(skip) = (self.guard)(path).map_err(ReclaimEnd::Stopped)? {
+            return Err(ReclaimEnd::Skipped(skip));
+        }
+
         // Step 2: recheck under the locks.
         let inspected = step(inspect(
             host,
@@ -269,6 +306,9 @@ impl<H: Delete> Run<'_, '_, H> {
             .map_err(|error| failed(path, error))?;
         judge_in_use(scan, &walks, target, &inspected, reached.project)
             .map_err(ReclaimEnd::Skipped)?;
+        if let Some(skip) = (self.guard)(path).map_err(ReclaimEnd::Stopped)? {
+            return Err(ReclaimEnd::Skipped(skip));
+        }
 
         // Step 3: delete, fingerprints first.
         for part in plan(&mut walks) {
@@ -309,6 +349,9 @@ impl<H: Delete> Run<'_, '_, H> {
         };
         // The Cargo process heuristics, on the same scan as the check.
         let mut heuristics = |scan: &crate::inuse::Scan| {
+            if let Some(skip) = (self.guard)(&target.path).map_err(NotDeleted::Stopped)? {
+                return Err(NotDeleted::Skipped(skip));
+            }
             let evidence =
                 cargo_evidence(scan, &target.path, target.identity.id, inspected, project);
             if evidence.is_empty() {

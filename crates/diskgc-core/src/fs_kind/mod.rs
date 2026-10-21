@@ -40,12 +40,14 @@ mod source_anchor;
 #[cfg(test)]
 mod tests;
 
-pub use command::{CommandResult, run_command};
+pub use command::{CommandResult, CommandSpec, run_command, run_command_checked};
 pub use discover::{Discovery, Found, discover};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
 pub use plan::{Planned, judge_one, plan};
-pub use reclaim::{Alternative, Reclaimed, reclaim, reclaim_alternatives, tally};
+pub use reclaim::{
+    Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked, tally,
+};
 pub use source_anchor::SourceEvidence;
 
 use crate::profile::{EntryType, Finds, Source, Where};

@@ -120,10 +120,11 @@
 //!   could start a thread and exit in between.
 //! - **Kernels.** `EPOLLHUP` for a pid without a task came with fs/pidfs.c
 //!   in Linux 6.9. On 5.8 to 6.8 (kernel/fork.c `pidfd_poll`,
-//!   `thread_group_exited`) a released process gives `POLLIN` alone; its
-//!   `status` then cannot be read (`ENOENT`), and it ends as `Failed`, never
-//!   as a false `Gone`. The `status` read and its order are the same on
-//!   those kernels.
+//!   `thread_group_exited`) a released process gives `POLLIN` alone.
+//!   LinuxHost checks `pidfd_send_signal(pidfd, 0)` then: `ESRCH` confirms
+//!   release; success or `EPERM` leaves it inconclusive. A blocked syscall
+//!   fails closed. Subsequent polls wait at most 2 ms before the next
+//!   round so a task in the act of exiting has a chance to be released.
 //!
 //! A read of one task's entry must also come from one task and one memory
 //! map in full; [`crate::host`] makes sure of that with the helpers in
@@ -134,8 +135,13 @@
 //! `mremap` is found by the other pass); the fd table from one `getdents`
 //! call.
 //!
-//! Assumptions and limits: no tid is reused within one round; the window in
-//! which an exec'ing thread's old tid shows the old leader as `Z` is
+//! Each task entry is bracketed by two `stat` reads. A changed `starttime`
+//! (field 22) discards that round, so a tid reused during a read cannot make
+//! an old answer look like the new task's answer when the two starts fall in
+//! different clock ticks. The remaining limit is reuse within one tick:
+//! procfs `starttime` has only clock-tick resolution, and `de_thread` copies
+//! it when swapping the leader's tid. The window in which an exec'ing
+//! thread's old tid shows the old leader as `Z` is
 //! normally sub-microsecond (it lies inside `de_thread`'s locked section),
 //! and while it lasts the process is not settled, never gone. A thread
 //! started after a round's count is not read (also when it then execs), the
@@ -145,10 +151,12 @@
 //! true. Every read under `/proc/<pid>` goes by number too, while the pidfd
 //! pins the process itself, not its number: when the process is released
 //! and another one gets its number before a later read, the readers may
-//! read the newcomer in its place or miss it (it may be using files and be
-//! reported as not using them, until the next scan lists it under its own
-//! number). A zombie whose `status` is hidden (`hidepid`) is `Failed`, not
-//! `Gone`.
+//! read the newcomer in its place or miss it. In particular, a scan that
+//! already marked the number settled need not read its new occupant, even
+//! if that occupant appears in a later listing. The scan's one-second
+//! freshness limit bounds the time this answer can be used, but not the
+//! rate of pid reuse within it. A zombie whose `status` is hidden
+//! (`hidepid`) is `Failed`, not `Gone`.
 //!
 //! The decisions are made here without I/O ([`collect`] takes the reads as
 //! closures; [`has_exited`], [`shortfall`], [`task_status`] and
@@ -170,6 +178,10 @@ pub(crate) struct TaskStat {
     pub exiting: bool,
     /// `PF_KTHREAD`: a kernel thread, which has no memory map or `exe`.
     pub kernel_thread: bool,
+    /// Field 22 of `/proc/<pid>/task/<tid>/stat`, in clock ticks since boot.
+    /// It detects a tid handed to another task between two reads, except
+    /// when both tasks started in the same clock tick.
+    pub start_ticks: u64,
 }
 
 /// `PF_EXITING` and `PF_KTHREAD` in the flags field of `stat`.
@@ -193,7 +205,7 @@ pub(crate) fn parse_task_stat(text: &[u8]) -> Result<TaskStat, String> {
         .map_err(|_| format!("non-UTF-8 task stat: {}", shown()))?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     // After the name: state(3) ppid(4) pgrp(5) session(6) tty_nr(7)
-    // tpgid(8) flags(9).
+    // tpgid(8) flags(9) ... starttime(22).
     let state = fields
         .first()
         .and_then(|s| {
@@ -205,10 +217,15 @@ pub(crate) fn parse_task_stat(text: &[u8]) -> Result<TaskStat, String> {
         .get(6)
         .and_then(|f| f.parse().ok())
         .ok_or_else(|| format!("no flags in task stat: {}", shown()))?;
+    let start_ticks = fields
+        .get(19)
+        .and_then(|f| f.parse().ok())
+        .ok_or_else(|| format!("no starttime in task stat: {}", shown()))?;
     Ok(TaskStat {
         state,
         exiting: flags & PF_EXITING != 0,
         kernel_thread: flags & PF_KTHREAD != 0,
+        start_ticks,
     })
 }
 
@@ -380,6 +397,9 @@ enum Seen {
     Missing,
     /// The leader's own entry vanished: a lookup can race a non-leader exec.
     LeaderVanished,
+    /// The number was handed to another task during this read. The read
+    /// cannot prove anything about the task now occupying the number.
+    Reused,
 }
 
 impl Seen {
@@ -388,8 +408,9 @@ impl Seen {
     }
 }
 
-/// Reads task `tid` and judges it by its `stat` read right after, so a task
-/// that died during the read is seen.
+/// Brackets task `tid`'s entry read with `stat`. A changed start tick (or a
+/// vanished entry that then reappears) makes the whole round untrustworthy;
+/// the task's status after the read catches one that exited during it.
 ///
 /// The value worth keeping: for [`Want::EveryTask`] every successful read,
 /// also from a task that exits meanwhile or an untrusted one (reporting too
@@ -405,9 +426,19 @@ fn observe<T>(
     >,
     want: Want,
 ) -> Result<(Option<T>, Seen), ProcError> {
+    let before = (tasks.stat)(tid);
     let result = (tasks.read)(tid);
-    let status = task_status(&(tasks.stat)(tid)).map_err(ProcError::from_host)?;
+    let after = (tasks.stat)(tid);
+    let status = task_status(&after).map_err(ProcError::from_host)?;
+    let reused = match (&before, &after) {
+        (Ok(before), Ok(after)) => before.start_ticks != after.start_ticks,
+        (Err(error), Ok(_)) if is_vanished(error) => true,
+        (Err(error), Err(_)) if is_vanished(error) => false,
+        (Err(error), _) => return Err(ProcError::from_host(error.clone())),
+        _ => false,
+    };
     let seen = match &result {
+        _ if reused => Seen::Reused,
         _ if tid == pid && status == Status::Vanished => Seen::LeaderVanished,
         Ok(value) if status == Status::Live && (tasks.is_empty)(value) => Seen::Empty,
         Err(e) if status == Status::Live && is_vanished(e) => Seen::Missing,
@@ -477,6 +508,7 @@ impl Shortfall {
                 ),
                 Seen::Missing => format!("task {tid} is live but its {what} said ENOENT"),
                 Seen::LeaderVanished => format!("the leader's entry (task {tid}) vanished"),
+                Seen::Reused => format!("task {tid} changed identity during its {what} read"),
                 Seen::Trusted(_) => format!("task {tid} gave no trustworthy read"),
             },
             Self::NothingLive => "no task of a complete listing was live".to_owned(),
@@ -570,8 +602,15 @@ pub(crate) fn collect<T>(
         }
         match shortfall(&listing, &round.seen) {
             None => return Ok(round.results),
-            Some(Shortfall::NothingLive) if exited()? => return Err(ProcError::Gone),
-            Some(lack) => lacked = lack.describe(tasks.what),
+            Some(lack) => {
+                lacked = lack.describe(tasks.what);
+                // The Linux poll closure waits at most 2 ms after the
+                // initial check. This gives an exiting task time to be
+                // released before another round repeats the same reads.
+                if exited()? {
+                    return Err(ProcError::Gone);
+                }
+            }
         }
     }
     Err(ProcError::Failed(HostError::invalid(
@@ -584,10 +623,11 @@ pub(crate) fn collect<T>(
 /// The owner of a live task's `fd` directory (see `ProcStatus::fd_dir_owner`
 /// in diskgc-core): the first of `tids` whose `stat` shows it live (not
 /// ended, not exiting, not a kernel thread) both before and after `owner`
-/// reads its directory's owner. `PF_EXITING` is set before a task releases
-/// its memory map and is never cleared, so a task live after the read had
-/// its memory map during it, and the owner reflects the process's
-/// dumpability. A task that ends or vanishes on the way is passed over;
+/// reads its directory's owner, with the same `starttime`. `PF_EXITING` is
+/// set before a task releases its memory map and is never cleared, so a
+/// task live after the read had its memory map during it. Its owner reflects
+/// the process's dumpability. A task that ends or vanishes on the way is
+/// passed over;
 /// `None` when no task qualifies (the caller then cannot tell dumpability).
 /// An exited leader (`pthread_exit`) has no memory map and shows root on
 /// some kernels while live threads are dumpable: it is never the answer.
@@ -597,15 +637,20 @@ pub(crate) fn owner_through_live_task(
     mut owner: impl FnMut(u32) -> Result<Option<u32>, HostError>,
 ) -> Result<Option<u32>, HostError> {
     for &tid in tids {
-        if task_status(&stat(tid))? != Status::Live {
+        let before = stat(tid);
+        if task_status(&before)? != Status::Live {
             continue;
         }
+        let before = before.expect("only a successful stat can classify a task as live");
         let found = match owner(tid) {
             Ok(found) => found,
             Err(e) if is_vanished(&e) => continue,
             Err(e) => return Err(e),
         };
-        if task_status(&stat(tid))? == Status::Live {
+        let after = stat(tid);
+        if task_status(&after)? == Status::Live
+            && after.is_ok_and(|last| before.start_ticks == last.start_ticks)
+        {
             return Ok(found);
         }
     }
@@ -626,6 +671,7 @@ mod tests {
             state,
             exiting,
             kernel_thread,
+            start_ticks: 1,
         })
     }
 
@@ -765,11 +811,14 @@ mod tests {
 
     #[test]
     fn task_stat_is_parsed_from_the_last_parenthesis() {
-        let s = parse_task_stat(b"42 (a b) c)) S 1 42 42 0 -1 4194560 0 0 0").unwrap();
+        let s = parse_task_stat(b"42 (a b) c)) S 1 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 0 0 0 0 17")
+            .unwrap();
         assert_eq!((s.state, s.exiting, s.kernel_thread), ('S', false, false));
-        let k = parse_task_stat(b"2 (kthreadd) S 0 0 0 0 -1 2129984 0 0").unwrap();
+        assert_eq!(s.start_ticks, 17);
+        let k = parse_task_stat(b"2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 0 0 0 0 8")
+            .unwrap();
         assert!(k.kernel_thread, "2129984 has PF_KTHREAD");
-        let x = parse_task_stat(b"7 (w) R 1 7 7 0 -1 4194372 0 0").unwrap();
+        let x = parse_task_stat(b"7 (w) R 1 7 7 0 -1 4194372 0 0 0 0 0 0 0 0 0 0 0 0 9").unwrap();
         assert!(x.exiting && x.state == 'R', "4194372 has PF_EXITING");
         for bad in [
             &b"42 (x S 1"[..],
@@ -824,6 +873,58 @@ mod tests {
             Listing::new(vec![11, 10, 10], 2, &[10, 11, 12]).complete(),
             "duplicates and late tasks"
         );
+    }
+
+    #[test]
+    fn a_tid_reused_during_a_read_forces_a_new_round() {
+        let stat_reads = Cell::new(0);
+        let data_reads = Cell::new(0);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| {
+                let n = data_reads.get();
+                data_reads.set(n + 1);
+                Ok(if n == 0 { "old task" } else { "new task" })
+            },
+            |_| {
+                let n = stat_reads.get();
+                stat_reads.set(n + 1);
+                let mut stat = live().expect("live stat");
+                stat.start_ticks = if n == 0 { 1 } else { 2 };
+                Ok(stat)
+            },
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec!["new task"]));
+        assert_eq!(data_reads.get(), 2, "the first read was discarded");
+    }
+
+    #[test]
+    fn first_live_read_does_not_accept_a_reappeared_tid() {
+        let stat_reads = Cell::new(0);
+        let data_reads = Cell::new(0);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| {
+                let n = data_reads.get();
+                data_reads.set(n + 1);
+                Ok(if n == 0 { "old map" } else { "new map" })
+            },
+            |_| {
+                let n = stat_reads.get();
+                stat_reads.set(n + 1);
+                if n == 0 {
+                    Err(errno(Errno::ENOENT))
+                } else {
+                    live()
+                }
+            },
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["new map"]));
+        assert_eq!(data_reads.get(), 2);
     }
 
     #[test]
@@ -973,6 +1074,35 @@ mod tests {
             Want::EveryTask,
         );
         assert_eq!(got, Err(ProcError::Gone));
+    }
+
+    /// Every incomplete round asks the pidfd before reading another
+    /// listing, including a changed task count with a live task.
+    #[test]
+    fn incomplete_round_polls_before_the_next_listing() {
+        let polls = Cell::new(0);
+        let pidfd = Pidfd {
+            poll: || {
+                let next = polls.get() + 1;
+                polls.set(next);
+                Ok(if next == 1 {
+                    PidfdPoll::Running
+                } else {
+                    PidfdPoll::Hangup
+                })
+            },
+            status: no_status,
+        };
+        let got = scan_exited(
+            10,
+            rounds(vec![counted(&[10], 2)]),
+            pidfd,
+            |_| Ok("fd"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert_eq!(got, Err(ProcError::Gone));
+        assert_eq!(polls.get(), 2);
     }
 
     /// Round 9 (Codex, mped): `pidfd_poll` can say readable while the process
@@ -1474,5 +1604,25 @@ mod tests {
         assert_eq!(got, Ok(Some(1000)));
         // Any other error is passed on.
         assert!(owner_through_live_task(&[10], |_| live(), |_| Err(errno(Errno::EIO))).is_err());
+    }
+
+    #[test]
+    fn fd_owner_skips_a_tid_reused_while_its_directory_is_read() {
+        let first_tid_stats = Cell::new(0);
+        let got = owner_through_live_task(
+            &[10, 11],
+            |tid| {
+                let mut result = live().expect("live task");
+                if tid == 10 {
+                    let read = first_tid_stats.get();
+                    first_tid_stats.set(read + 1);
+                    result.start_ticks = if read == 0 { 1 } else { 2 };
+                }
+                Ok(result)
+            },
+            |tid| Ok(Some(if tid == 10 { 0 } else { 1000 })),
+        );
+        assert_eq!(got, Ok(Some(1000)));
+        assert_eq!(first_tid_stats.get(), 2);
     }
 }

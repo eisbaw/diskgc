@@ -5,7 +5,7 @@
 //! errors: a required profile left without roots, and roots given where no
 //! profile takes them (they would silently do nothing).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::load::absolute_path;
@@ -102,9 +102,7 @@ impl Library {
             if supplied.is_empty() {
                 return Err(RootsError::Empty);
             }
-            for root in supplied {
-                absolute_path(root).map_err(RootsError::Path)?;
-            }
+            validate_root_list(supplied).map_err(RootsError::Path)?;
         }
         let mut bound = BTreeMap::new();
         let mut required = Vec::new();
@@ -137,6 +135,33 @@ impl Library {
             _ => Ok(bound),
         }
     }
+}
+
+/// Validate the spelling of a root before it reaches the path resolver.
+/// Refusing aliases here keeps policy meaning independent of lexical cleanup;
+/// inode aliases are handled later, after safe host resolution.
+pub(super) fn validate_root_list(roots: &[String]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        absolute_path(root)?;
+        if root != "/"
+            && root
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(format!(
+                "`{root}` is not normalized: roots cannot contain empty, `.` or `..` components"
+            ));
+        }
+        if root.contains('\0') {
+            return Err(format!("`{root}` contains a NUL byte"));
+        }
+        if !seen.insert(root) {
+            return Err(format!("duplicate root `{root}`"));
+        }
+    }
+    Ok(())
 }
 
 /// In first-seen order, each once.

@@ -965,6 +965,64 @@ impl State {
         self.create_in(dir, name, kind)
     }
 
+    /// Simulates a file or directory being unlinked and a new object of the
+    /// same type receiving the freed inode number. This is narrower than `replace_path`:
+    /// reuse is possible only after every other name and reference is gone.
+    pub fn replace_path_reusing_inode(&mut self, path: &Path) -> Result<(), Fault> {
+        let (dir, name) = self.parent_of(path)?;
+        let old = self.child(dir, name)?;
+        let new_kind = match self.inode(old).kind {
+            Kind::File { .. } => Kind::File {
+                cachedir_tag: false,
+                content: Vec::new(),
+            },
+            Kind::Dir(_) => Kind::Dir(BTreeMap::new()),
+            _ => {
+                return Err(Fault::Model(format!(
+                    "replace_reusing_inode needs a file or directory: {}",
+                    path.display()
+                )));
+            }
+        };
+        if self.holds_mount(old) {
+            return Err(Errno::EBUSY.into());
+        }
+        let aliases = self
+            .fs(old.mnt)
+            .inodes
+            .values()
+            .filter_map(Inode::entries)
+            .flat_map(|entries| entries.values())
+            .filter(|&&ino| ino == old.ino)
+            .count();
+        let held = self.ofds.values().any(|ofd| ofd.loc == old)
+            || self.procs.values().any(|proc| {
+                proc.exe.as_ref().is_some_and(|r| r.loc == old)
+                    || proc.cwd.loc == old
+                    || proc.root.loc == old
+                    || proc.maps.iter().any(|r| r.loc == old)
+            });
+        if aliases != 1 || held {
+            return Err(Fault::Model(format!(
+                "replace_reusing_inode needs one name and no held references: {}",
+                path.display()
+            )));
+        }
+        let now = self.wall_now();
+        if now == self.inode(old).btime {
+            return Err(Fault::Model(format!(
+                "replace_reusing_inode needs a later model clock for a distinct birth time: {}",
+                path.display()
+            )));
+        }
+        self.unlink_entry(dir, name)?;
+        self.fs_mut(old.mnt)
+            .inodes
+            .insert(old.ino, Inode::new(new_kind, now));
+        self.link(dir, name, old.ino)?;
+        Ok(())
+    }
+
     /// `unlinkat(dir, name, what)` as the kernel does it.
     pub fn unlinkat(&mut self, dir: Loc, name: &OsStr, remove_dir: bool) -> Result<Loc, Errno> {
         let entries = self.inode(dir).entries().ok_or(Errno::ENOTDIR)?;

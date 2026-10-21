@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 diskgc-core.workspace = true
 diskgc-linux.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 # Test-only: reads the binary's --json output back.

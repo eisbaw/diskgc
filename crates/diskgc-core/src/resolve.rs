@@ -24,6 +24,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::engine::{may_be_networked, path_in_private_tmp};
 use crate::host::{
     Access, Base, Errno, FileType, Host, HostError, MountEntry, OpenHow, ResolveFlags, Stat,
 };
@@ -176,6 +177,83 @@ pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountE
             at_point.iter().map(|m| m.id).collect(),
         )),
     }
+}
+
+/// A reason to refuse a root before opening it or any ancestor. A local
+/// bind mount at the final path does not make an unsafe parent traversable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountScreenError {
+    Unsafe {
+        at: PathBuf,
+        why: Unsafe,
+    },
+    Networked {
+        at: PathBuf,
+        mount_point: PathBuf,
+        fs_type: String,
+    },
+    PrivateTmp {
+        at: PathBuf,
+        mount_point: PathBuf,
+        fs_root: PathBuf,
+    },
+}
+
+impl fmt::Display for MountScreenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsafe { at, why } => write!(f, "mount at {} is unsafe: {why}", at.display()),
+            Self::Networked {
+                at,
+                mount_point,
+                fs_type,
+            } => write!(
+                f,
+                "ancestor {} is on {} mount {} and may block on I/O",
+                at.display(),
+                fs_type,
+                mount_point.display()
+            ),
+            Self::PrivateTmp {
+                at,
+                mount_point,
+                fs_root,
+            } => write!(
+                f,
+                "ancestor {} is on mount {} bound from systemd PrivateTmp root {}",
+                at.display(),
+                mount_point.display(),
+                fs_root.display()
+            ),
+        }
+    }
+}
+
+/// Screen the effective mount at every path prefix from the root down to
+/// `path`, using mountinfo only. The caller may then safely try to resolve
+/// the root; a local bind mount below NFS/FUSE or PrivateTmp still fails.
+pub fn screen_mount_chain(mounts: &[MountEntry], path: &Path) -> Result<(), MountScreenError> {
+    for at in path.ancestors() {
+        let mount = mount_for(mounts, at).map_err(|why| MountScreenError::Unsafe {
+            at: at.to_owned(),
+            why,
+        })?;
+        if may_be_networked(&mount.fs_type) {
+            return Err(MountScreenError::Networked {
+                at: at.to_owned(),
+                mount_point: mount.mount_point.clone(),
+                fs_type: mount.fs_type.clone(),
+            });
+        }
+        if path_in_private_tmp(&mount.fs_root) {
+            return Err(MountScreenError::PrivateTmp {
+                at: at.to_owned(),
+                mount_point: mount.mount_point.clone(),
+                fs_root: mount.fs_root.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `openat2` arguments for opening a mount point (step 2).
@@ -772,6 +850,36 @@ mod tests {
         assert_eq!(
             mount_for(&siblings, Path::new("/tmp/s")),
             Err(Unsafe::AmbiguousMounts(vec![2, 3]))
+        );
+    }
+
+    #[test]
+    fn full_mount_chain_refuses_unsafe_ancestors_but_allows_local_same_device_bind() {
+        let base = mount(1, 0, "/");
+        let mut network = mount(2, 1, "/net");
+        network.fs_type = "nfs4".into();
+        let local_below_network = mount(3, 2, "/net/local");
+        let unsafe_chain = [base.clone(), network, local_below_network];
+        assert!(matches!(
+            screen_mount_chain(&unsafe_chain, Path::new("/net/local/build")),
+            Err(MountScreenError::Networked { at, .. }) if at == Path::new("/net")
+        ));
+
+        let mut private = mount(4, 1, "/bound");
+        private.fs_root = "/systemd-private-abc-cups.service-x1/tmp".into();
+        let local_below_private = mount(5, 4, "/bound/local");
+        assert!(matches!(
+            screen_mount_chain(&[base.clone(), private, local_below_private], Path::new("/bound/local/build")),
+            Err(MountScreenError::PrivateTmp { at, .. }) if at == Path::new("/bound")
+        ));
+
+        // The bind mount has a different mount id, but the same device.
+        // Its local ancestry is safe and must remain usable.
+        let same_device_bind = mount(6, 1, "/safe/bind");
+        assert_eq!(same_device_bind.dev, base.dev);
+        assert_eq!(
+            screen_mount_chain(&[base, same_device_bind], Path::new("/safe/bind/build")),
+            Ok(())
         );
     }
 }

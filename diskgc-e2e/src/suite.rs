@@ -41,8 +41,8 @@ use crate::{
     autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
     cargo_reclaim_suite, cargo_suite, docker_suite, docker_vector_suite, driver_suite,
     embedded_suite, engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite,
-    inuse_suite, meson_suite, packaging_suite, profile_vector_suite, project_cache_suite,
-    stdout_suite, temp_safety_suite,
+    inuse_suite, laptop_tmp_journey, meson_suite, packaging_suite, profile_vector_suite,
+    project_cache_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -199,6 +199,7 @@ pub const DOCKER_VECTOR_TEST: &str = "checked_in_python_profile_vector_replays_u
 /// host has it): only these mount a FUSE filesystem.
 pub static FUSE_TESTS: &[&str] = &[
     "fs_reclaim_a_dead_fuse_mount_is_never_touched",
+    "fs_protected_dead_fuse_root_is_refused_without_opening_it",
     "inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount",
 ];
 
@@ -238,6 +239,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: temp_safety_suite::nested_claude_shell_cache_reclaims_only_its_exact_entry,
+    },
+    Test {
+        name: "laptop_tmp_groups_protect_live_work_and_reclaim_independent_cruft",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: laptop_tmp_journey::laptop_tmp_groups_protect_live_work_and_reclaim_independent_cruft,
     },
     Test {
         name: "checked_in_python_profile_vector_replays_in_container",
@@ -394,6 +401,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: fs_reclaim_suite::fs_reclaim_exact_exclusion_keeps_valuable_cache,
+    },
+    Test {
+        name: "fs_negated_profile_dry_run_excludes_ancestor",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_negated_profile_dry_run_excludes_ancestor,
     },
     Test {
         name: "fs_reclaim_cmake_guard_keeps_a_dangling_source_symlink",
@@ -756,6 +769,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_a_dead_fuse_mount_is_never_touched,
     },
     Test {
+        name: "fs_protected_dead_fuse_root_is_refused_without_opening_it",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_protected_dead_fuse_root_is_refused_without_opening_it,
+    },
+    Test {
         name: "inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount",
         tier: Tier::Fast,
         expect: Expect::Pass,
@@ -768,10 +787,34 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::configured_groups_reclaim_in_order,
     },
     Test {
+        name: "configured_random_group_reports_seed_and_order",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::configured_random_group_reports_seed_and_order,
+    },
+    Test {
+        name: "configured_protect_marks_overlapping_fs_candidates_in_dry_run",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::configured_protect_marks_overlapping_fs_candidates_in_dry_run,
+    },
+    Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: ensure_suite::ensure_above_min_free_exits_0_without_the_host_lock,
+    },
+    Test {
+        name: "ensure_dry_run_plans_while_the_host_lock_is_held",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_dry_run_plans_while_the_host_lock_is_held,
+    },
+    Test {
+        name: "ensure_flag_errors_are_single_json_reports",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_flag_errors_are_single_json_reports,
     },
     Test {
         name: "ensure_claude_and_pytest_tmp_profiles_keep_open_units",

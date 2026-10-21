@@ -33,7 +33,7 @@ use crate::resolve::{ResolveError, Want, open_beneath};
 use super::frames::{OpenFailed, OpenFailure, Stack};
 use super::{Candidate, Identity, WalkRecord, deadline_passed};
 
-/// How [`delete`] runs.
+/// How [`delete_unchecked`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DeleteOptions {
     /// Add owner write permission to directories that lack it (the
@@ -43,7 +43,7 @@ pub struct DeleteOptions {
     pub deadline: Option<MonoTime>,
 }
 
-/// What [`delete`] did.
+/// What [`delete_unchecked`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deletion {
     /// Entries unlinked, the candidate included if it was.
@@ -74,9 +74,10 @@ pub enum End {
     GateRefused { path: PathBuf, error: HostError },
 }
 
-/// Deletes the entries of `record`, which the eligibility walk of
-/// `candidate` produced (see the module docs).
-pub fn delete<H: Delete>(
+/// Deletes the entries of `record` without proving the in-use check ran.
+/// Production protocols must use [`crate::inuse::clear_and_delete`]; this
+/// entry point exists for isolated deletion-engine and host tests.
+pub fn delete_unchecked<H: Delete>(
     host: &H,
     candidate: &Candidate<'_, H::Fd>,
     record: &WalkRecord,

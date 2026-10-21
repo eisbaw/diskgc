@@ -1,10 +1,10 @@
 ---
 id: TASK-64
 title: 'Host primitives: real-machine hardening blocking the 0.1 release'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-20 12:45'
+updated_date: '2026-10-21 08:22'
 labels:
   - wave-1
   - hardening
@@ -70,13 +70,13 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 - [ ] #1 A (blocking or hanging opens and stats: D3, D5, #26): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #2 B (path resolution: D4, D6): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #5 E (delete only what was checked: #32, task-6 round 3 (3), #27): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #5 E (delete only what was checked: #32, task-6 round 3 (3), #27): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #6 F (process identity: pid reuse within and after a scan, tid reuse): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #7 G (in-use scan soundness and liveness: unsettled scan reuse, Linux 5.8-6.8 hang-up, bounded pidfd poll, 16-listing bound under load, #38): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #8 H (host lock tests: #37, H10, D7): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #9 I (roots and config validation: #39, #41): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #10 J (side effects and reporting: #19 O_NOATIME, held_by_deleted_files on btrfs): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #9 I (roots and config validation: #39, #41): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #10 J (side effects and reporting: #19 O_NOATIME, held_by_deleted_files on btrfs): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #11 K (gate flag test scans nested .cargo/config files): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 <!-- AC:END -->
 
@@ -107,6 +107,20 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-20 integrated group C gate: nix develop -c just e2e passed Nix image 140/140 and native Docker 6/6; parallel QA and MPED reviews GO. AC3 checked with the exact ancestor-namespace construction limit documented in docs/safety.md. TASK64 remains open for D-J and remaining group A caveat; no developer-host diskgc run.
 
 2026-10-20 group D candidate: Delete::fchmod port now accepts only a held directory fd and deadline, reads current mode on the fd, checks the deadline immediately before fchmod, and requests only owner write addition. The caller no longer supplies arbitrary mode bits. ModelHost trace pins Now immediately before Fchmod; focused ModelHost checks 23/23 and engine 40/40 passed. Disposable Nix-container E2E passed rename-out 1/1, file bind-mount after statx 1/1, and concurrent chmod before fchmod 1/1; host interlock refused exit 86 each time. Linux kernel may clear setgid and chmod between fstat/fchmod is still a non-atomic race; docs/safety.md records this. Integrated full E2E and independent QA/MPED review pending before AC4 check.
+
+2026-10-20 integrated group D gate: commit fdbbcff passed nix develop -c just e2e (Nix image 145/145, native Docker 6/6), including rename-out, bind-over-file and concurrent chmod probes. Parallel QA and MPED final reviews GO. Fchmod is limited to held directory fd plus deadline, and ModelHost no-op trace and ENOTDIR deadline precedence have regressions. AC4 checked; remaining groups and documented non-atomic fstat/fchmod caveat still block TASK64 completion.
+
+2026-10-21 group E candidate: Clear is a single-use borrowed capability holding the exact Candidate and WalkRecord. WalkRecord records candidate path and mount at walk; Checker::check refuses another hard-linked name or mount before scanning, while delete_cleared consumes the checked pair. The engine-only bypass is named delete_unchecked and Checker::with_options is crate-private. ModelHost can replace a regular file with a fresh birth time at the same inode number when no aliases or references remain; model tests pin both the birth-time catch and the documented missing-birth-time limit. A chown at candidate reopen stops before unlinks. Focused Nix suites cargo_reclaim 19/19, engine 42/42, inuse 39/39, fs_dry_run 48/48 and core/model/e2e Clippy passed. Full integrated E2E and independent QA/MPED review remain pending before checking AC5.
+
+2026-10-21 group H candidate integrated: LinuxHost lock test uses post-exec child lock contention with guarded bounded child lifetime; E2E release-during-wait probe requires Busy before release and measures wait. Rare original #37 root cause unconfirmed. Format and diff checks passed; stress, full E2E and independent review pending. AC8 remains unchecked.
+
+2026-10-21 group I candidate integrated: reject non-normalized or duplicate fixed roots and idle_for:0s at load/bind, dedupe safely resolved root identities during fs/Cargo discovery, add focused regressions and docs. Nested roots still traverse separately with candidate identity dedupe. Format and diff checks passed; full E2E and independent review pending. AC9 remains unchecked.
+
+2026-10-21 group J candidate integrated: LinuxHost read_dir uses O_NOATIME with EPERM fallback; deleted-file accounting counts a shared inode once while retaining all holders, and maps mounted btrfs subvolumes sharing mountinfo source to the requested filesystem. Narrow host/model regressions and btrfs visibility limits documented. Nix fmt, diff check, and cargo check --workspace --tests passed in isolated worktree; tests, integrated E2E and independent review pending. AC10 remains unchecked.
+
+2026-10-21 group G candidate integrated: Checker rescans for every candidate after an unsettled scan; Linux reader uses pidfd signal 0 to recognize released processes on kernels where poll lacks hang-up and polls briefly before another incomplete round. Model/Linux regressions added for 16-listing bound, rescan, release and poll. Nix cargo check --tests, fmt and diff checks passed in isolated tree. Full E2E, old-kernel and loaded-CI measurements, and independent review pending; persistent fork storm still conservatively reports in_use. AC7 remains unchecked.
+
+2026-10-21 integrated gate: E/I/J changes passed full just e2e (152/152 Nix-container, 6/6 native Docker), workspace tests including 40k candidates, and parallel QA/MPED review. Mixed-root preflight now skips foreign devices; protection and source root discovery screen full mount ancestry before opening, with ModelHost and dead-FUSE container regressions. AC5, AC9 and AC10 checked; A, F, G, H and final release review remain open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -11,7 +11,7 @@
 //!    allocated size. Whether a VCS checkout inside refuses the candidate
 //!    is the source profile's setting, in [`Rules::checkouts`] (refused
 //!    unless the profile says `checkouts: allow`).
-//! 2. [`delete`]: deletes exactly the entries of the record, depth first.
+//! 2. [`delete_unchecked`]: deletes exactly the entries of the record, depth first.
 //!    Every directory is reopened relative to its parent by its recorded
 //!    name and matched against its recorded identity; every `unlinkat` comes
 //!    right after a `statx` of the same name whose identity matches the
@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 use crate::host::{DevIno, FileType, Host, MonoTime, Stat, Timestamp};
 use crate::resolve::Resolved;
 
-pub use delete::{DeleteOptions, Deletion, End, delete};
+pub use delete::{DeleteOptions, Deletion, End, delete_unchecked};
 pub(crate) use walk::host_failure;
 pub use walk::{
     CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, PRIVATE_TMP_PREFIX,
@@ -256,11 +256,15 @@ pub struct IpcEntry {
     pub rel: PathBuf,
 }
 
-/// The objects the eligibility walk checked: what [`delete`] may remove,
+/// The objects the eligibility walk checked: what [`delete_unchecked`] may remove,
 /// and what the in-use check must look for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkRecord {
     root: Entry,
+    /// The name and mount under which `walk` checked the candidate. This
+    /// distinguishes hard-linked names with the same inode identity.
+    origin: PathBuf,
+    mount_id: u64,
     /// Every directory's entries, sorted by name; `listings[0]` is the
     /// candidate's when it is a directory.
     listings: Vec<Vec<Entry>>,
@@ -270,6 +274,13 @@ pub struct WalkRecord {
 }
 
 impl WalkRecord {
+    /// Whether this record was walked for this candidate name on this
+    /// mount. The deleting check also borrows this exact record, so a later
+    /// re-walk cannot be substituted after it returns a `Clear`.
+    pub(crate) fn belongs_to<F>(&self, candidate: &Candidate<'_, F>) -> bool {
+        self.origin == candidate.path && self.mount_id == candidate.mount_id
+    }
+
     /// The candidate itself.
     pub fn root(&self) -> &Entry {
         &self.root
@@ -426,6 +437,8 @@ impl WalkRecord {
         self.bytes = self.bytes.saturating_sub(bytes);
         Some(WalkRecord {
             root,
+            origin: self.origin.join(rel),
+            mount_id: self.mount_id,
             listings,
             entries,
             bytes,
@@ -492,6 +505,8 @@ pub enum Reason {
     TooIdle,
     /// A selection entry filter did not match (or its complement matched).
     Filtered,
+    /// A candidate overlaps a raw match of a negated source profile.
+    Excluded,
     /// Its last use lies in the future, so its age says nothing
     /// (docs/reference.md, Predicates).
     FutureTime,
@@ -505,12 +520,14 @@ pub enum Reason {
     LinkedCurrent,
     /// Listed as installed in Cursor's extension registry, or the registry cannot be trusted.
     InstalledExtension,
+    /// The candidate overlaps a configured protected source match.
+    Protected,
 }
 
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 24] = [
+    pub const ALL: [Reason; 26] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -530,11 +547,13 @@ impl Reason {
         Reason::NotIdle,
         Reason::TooIdle,
         Reason::Filtered,
+        Reason::Excluded,
         Reason::FutureTime,
         Reason::OtherFs,
         Reason::NewestVersion,
         Reason::LinkedCurrent,
         Reason::InstalledExtension,
+        Reason::Protected,
     ];
 
     /// The skip reason's name in reports.
@@ -559,11 +578,13 @@ impl Reason {
             Self::NotIdle => "not_idle",
             Self::TooIdle => "too_idle",
             Self::Filtered => "filtered",
+            Self::Excluded => "excluded",
             Self::FutureTime => "future_time",
             Self::OtherFs => "other_fs",
             Self::NewestVersion => "newest_version",
             Self::LinkedCurrent => "linked_current",
             Self::InstalledExtension => "installed_extension",
+            Self::Protected => "protected",
         }
     }
 }
@@ -796,8 +817,8 @@ mod tests {
 
     /// Every part of the identity counts: an object with the same inode
     /// number but another owner, type or birth time (removed and recreated,
-    /// the number reused) is not the recorded one. ModelHost never reuses
-    /// inode numbers, so the birth time is pinned here.
+    /// the number reused) is not the recorded one. ModelHost also exercises
+    /// inode number reuse at both deletion check sites.
     #[test]
     fn identity_is_device_inode_owner_type_and_birth_time() {
         let recorded = Identity::of(&stat()).expect("answered");

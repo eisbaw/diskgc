@@ -337,6 +337,8 @@ pub fn walk<H: Host>(
     }
     Ok(WalkRecord {
         root,
+        origin: candidate.path().to_path_buf(),
+        mount_id: candidate.mount_id(),
         listings: walker.listings,
         entries: walker.entries,
         bytes: walker.bytes,

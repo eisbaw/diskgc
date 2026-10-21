@@ -1,7 +1,7 @@
 //! The `diskgc` binary: CLI and output, wiring `diskgc-core` to `LinuxHost`
 //! (docs/reference.md is the contract).
 //!
-//! So far: `ensure` with `--select` or configured ordered groups, `--dry-run`
+//! So far: `ensure` with `--select` or configured groups, `--dry-run`
 //! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
 //! `profiles list`, `show NAME` and `test`, `check`, plus `--version`
 //! and `--help`, whose Profiles section is rendered from the built-in
@@ -30,9 +30,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::config::{
-    self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Order, Owner, Ranking,
-};
+use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Owner, Ranking};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Errno;
 use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
@@ -78,8 +76,8 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
 
-This build runs `ensure --select` or configured groups with ordered tiers
-and oldest order. Random ranking and best-fit order are rejected. `watch`
+This build runs `ensure --select` or configured groups with ordered or random
+tier ranking and oldest or best-fit candidate order. `watch`
 and `survey` arrive with later tasks. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 The full contract is docs/reference.md in diskgc's source tree.
@@ -522,29 +520,69 @@ fn tier(
     Ok(selected)
 }
 
+/// Parse the operator's reproducible seed without accepting signs or spaces.
+fn parse_configured_seed(value: &OsStr) -> Result<u64, String> {
+    let value = value
+        .to_str()
+        .ok_or("DISKGC_SEED must be an unsigned decimal integer")?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("DISKGC_SEED must be an unsigned decimal integer".to_owned());
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| "DISKGC_SEED is larger than u64".to_owned())
+}
+
+/// Draw one seed for all random groups so the report reproduces their order.
+fn configured_seed(config: &Config) -> Result<Option<u64>, String> {
+    if !config
+        .groups
+        .iter()
+        .any(|group| group.ranking == Ranking::Random)
+    {
+        return Ok(None);
+    }
+    if let Some(value) = std::env::var_os("DISKGC_SEED") {
+        return parse_configured_seed(&value).map(Some);
+    }
+    let mut bytes = [0; 8];
+    getrandom::fill(&mut bytes).map_err(|error| format!("could not draw random seed: {error}"))?;
+    Ok(Some(u64::from_le_bytes(bytes)))
+}
+
+/// A stable, small PRNG for Fisher-Yates tier shuffles. The seed is printed
+/// so a run can be reproduced without relying on a library RNG version.
+fn next_shuffle_word(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut word = *state;
+    word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    word ^ (word >> 31)
+}
+
 /// Compile every configured tier before any action. Unsupported execution
 /// options are errors rather than silently changing policy order.
 fn configured_tiers(
     config: &Config,
     uid: u32,
     allow_root: bool,
+    seed: Option<u64>,
 ) -> Result<(Vec<Tier>, Vec<Duration>), String> {
     let mut tiers = Vec::new();
     let mut timeouts = Vec::new();
+    let mut state = seed.unwrap_or_default();
     for group in &config.groups {
-        if group.ranking != Ranking::Ordered {
-            return Err(format!(
-                "group `{}`: ranking: random is not implemented for ensure yet (task-20)",
-                group.name
-            ));
-        }
-        for setting in &group.tiers {
-            if setting.order != Order::Oldest {
-                return Err(format!(
-                    "group `{}` tier `{}`: order: best-fit is not implemented for ensure yet (task-20)",
-                    group.name, setting.name
-                ));
+        let mut settings = group.tiers.iter().collect::<Vec<_>>();
+        if group.ranking == Ranking::Random {
+            if seed.is_none() {
+                return Err(format!("group `{}` needs a random seed", group.name));
             }
+            for end in (1..settings.len()).rev() {
+                let pick = (next_shuffle_word(&mut state) % (end as u64 + 1)) as usize;
+                settings.swap(end, pick);
+            }
+        }
+        for setting in settings {
             let tier = Tier::configured(&group.name, setting, &config.library, uid)?;
             if allow_root {
                 let supplied: Vec<String> = setting.roots.values().flatten().cloned().collect();
@@ -571,18 +609,22 @@ fn reject_root_uid_selected(
     library: &Library,
     supplied_roots: &[String],
 ) -> Result<(), String> {
-    let profiles: Vec<&str> = if selected.fs_union.is_empty() {
-        vec![&selected.profile]
-    } else {
-        std::iter::once(selected.profile.as_str())
-            .chain(
-                selected
-                    .fs_union
+    let profiles: Vec<&str> = std::iter::once(selected.profile.as_str())
+        .chain(
+            selected
+                .negated
+                .iter()
+                .map(|source| source.profile.as_str()),
+        )
+        .chain(selected.fs_union.iter().flat_map(|source| {
+            std::iter::once(source.profile.as_str()).chain(
+                source
+                    .negated
                     .iter()
-                    .map(|source| source.profile.as_str()),
+                    .map(|negated| negated.profile.as_str()),
             )
-            .collect()
-    };
+        }))
+        .collect();
     for profile in profiles {
         let Some(Body::Source(source)) = library.get(profile).map(|p| &p.body) else {
             return Err(format!(
@@ -667,9 +709,6 @@ fn ensure(args: &EnsureArgs) -> Report {
         if let Err(why) = config.validate_mode(args.allow_root) {
             return fail(why);
         }
-        if !config.protect.is_empty() {
-            return fail("protect: is statically valid, but ensure cannot enforce it in this build yet (task-16)".to_owned());
-        }
         if config.ipc == IpcPolicy::LiveOnly {
             return fail("ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)".to_owned());
         }
@@ -686,16 +725,32 @@ fn ensure(args: &EnsureArgs) -> Report {
     } else {
         vec![uid]
     };
-    let configured = if args.select.is_none() {
+    let protections = match config.as_ref() {
+        Some(config) => match executor::bind_protections(config, uid, args.allow_root) {
+            Ok(protections) => protections,
+            Err(why) => return fail(why),
+        },
+        None => Vec::new(),
+    };
+    let mut configured = if args.select.is_none() {
         let config = config.as_ref().expect("unselected ensure requires config");
-        match configured_tiers(config, uid, args.allow_root) {
-            Ok(tiers) => Some(tiers),
+        let seed = match configured_seed(config) {
+            Ok(seed) => seed,
+            Err(why) => return fail(why),
+        };
+        match configured_tiers(config, uid, args.allow_root, seed) {
+            Ok((tiers, timeouts)) => Some((tiers, timeouts, seed)),
             Err(why) => return fail(why),
         }
     } else {
         None
     };
-    let tier = if let Some((tiers, _)) = &configured {
+    if let Some((tiers, _, _)) = &mut configured {
+        for tier in tiers {
+            tier.protections = protections.clone();
+        }
+    }
+    let mut tier = if let Some((tiers, _, _)) = &configured {
         tiers[0].clone()
     } else {
         let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
@@ -707,6 +762,7 @@ fn ensure(args: &EnsureArgs) -> Report {
         }
         tier
     };
+    tier.protections = protections;
     let request = Request {
         path: args.path.clone(),
         min_free: args.min_free,
@@ -716,7 +772,7 @@ fn ensure(args: &EnsureArgs) -> Report {
         tier,
     };
     let mut progress = |line: &str| log(line);
-    if let Some((tiers, timeouts)) = &configured {
+    let mut report = if let Some((tiers, timeouts, _)) = &configured {
         if args.dry_run {
             executor::dry_run_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
         } else {
@@ -727,7 +783,9 @@ fn ensure(args: &EnsureArgs) -> Report {
         executor::dry_run(&host, &request, &owners, &mut progress)
     } else {
         executor::ensure(&host, &request, &owners, &mut progress)
-    }
+    };
+    report.seed = configured.as_ref().and_then(|(_, _, seed)| *seed);
+    report
 }
 
 /// The built-in profiles alone; an error is a bug in the shipped YAML
@@ -1186,20 +1244,81 @@ mod tests {
     }
 
     #[test]
-    fn configured_execution_rejects_unsupported_policy_order() {
-        let source = "version: 1\ngroups:\n  - name: stale\n    ranking: random\n    tiers:\n      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n";
+    fn root_mode_checks_uid_placeholder_in_negated_source() {
+        let specs = diskgc_core::profile::parse_profiles(concat!(
+            "- name: plain-source\n",
+            "  find: {roots: [/tmp], paths: [plain-*], type: dir}\n",
+            "  action: delete\n",
+            "  examples: {match: [/tmp/plain-x]}\n",
+            "- name: uid-exclusion\n",
+            "  find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
+            "  action: delete\n",
+            "  examples: {match: [/tmp/uid-1000]}\n",
+        ))
+        .expect("fixture profiles");
+        let library = Library::with_user_profiles(&specs).expect("fixture library");
+        let selected = Tier::select(
+            "profile:plain-source && !profile:uid-exclusion",
+            &library,
+            None,
+            0,
+        )
+        .expect("negated filesystem source");
+        let error = reject_root_uid_selected(&selected, &library, &[])
+            .expect_err("negated source's uid placeholder must be refused");
+        assert!(
+            error.contains("selected profile `uid-exclusion`"),
+            "{error}"
+        );
+        assert!(error.contains("find.paths"), "{error}");
+    }
+
+    #[test]
+    fn configured_random_ranking_is_reproducible_and_preserves_group_order() {
+        let source = "version: 1\ngroups:\n  - name: stale\n    ranking: random\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/tmp]\n      - name: second\n        select: profile:cargo-target\n        roots: [/tmp]\n      - name: third\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: pressure\n    tiers:\n      - name: last\n        select: profile:cargo-target\n        roots: [/tmp]\n";
         let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
             .expect("valid static policy");
-        let error =
-            configured_tiers(&config, 1000, false).expect_err("random ranking is unsupported");
-        assert!(error.contains("ranking: random"), "{error}");
-        let source = source
-            .replace("ranking: random", "ranking: ordered\n")
-            .replace("roots: [/tmp]", "roots: [/tmp]\n        order: best-fit");
+        let (first, first_timeouts) = configured_tiers(&config, 1000, false, Some(42)).unwrap();
+        let (again, again_timeouts) = configured_tiers(&config, 1000, false, Some(42)).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(first_timeouts, again_timeouts);
+        assert_eq!(
+            first
+                .iter()
+                .map(|tier| tier.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "third", "second", "last"]
+        );
+        assert_eq!(first.last().expect("pressure tier").name, "last");
+        assert!(first.iter().take(3).all(|tier| tier.group == "stale"));
+        let error = configured_tiers(&config, 1000, false, None).expect_err("seed required");
+        assert!(error.contains("needs a random seed"), "{error}");
+    }
+
+    #[test]
+    fn configured_seed_rejects_invalid_operator_input() {
+        assert_eq!(parse_configured_seed(OsStr::new("0")).unwrap(), 0);
+        assert_eq!(
+            parse_configured_seed(OsStr::new("18446744073709551615")).unwrap(),
+            u64::MAX
+        );
+        for invalid in ["", "-1", "+1", " 1", "1 ", "0x2a", "1.5"] {
+            assert!(
+                parse_configured_seed(OsStr::new(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(parse_configured_seed(OsStr::new("18446744073709551616")).is_err());
+    }
+
+    #[test]
+    fn configured_execution_accepts_best_fit() {
+        let source = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n        order: best-fit\n";
         let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
             .expect("valid static policy");
-        let error = configured_tiers(&config, 1000, false).expect_err("best-fit is unsupported");
-        assert!(error.contains("order: best-fit"), "{error}");
+        let (tiers, _) =
+            configured_tiers(&config, 1000, false, None).expect("best-fit is supported");
+        assert_eq!(tiers[0].order, diskgc_core::config::Order::BestFit);
     }
 
     #[test]
@@ -1218,8 +1337,8 @@ mod tests {
         );
         let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
             .expect("valid static policy");
-        let error =
-            configured_tiers(&config, 0, true).expect_err("later uid placeholder must be refused");
+        let error = configured_tiers(&config, 0, true, None)
+            .expect_err("later uid placeholder must be refused");
         assert!(
             error.contains("uid-in-later-group") && error.contains("find.paths"),
             "{error}"

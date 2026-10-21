@@ -14,9 +14,9 @@ use std::time::Duration;
 use common::{dir, host};
 use diskgc_core::engine::{
     Candidate, Checkouts, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind, Reason, Rules, Skip,
-    WalkRecord, WalkStop, delete, walk,
+    WalkRecord, WalkStop, delete_unchecked, walk,
 };
-use diskgc_core::host::{Errno, FileType, MonoTime};
+use diskgc_core::host::{Errno, FileType, Host, MonoTime};
 use diskgc_core::resolve::Resolved;
 use diskgc_model::host::UPTIME_AT_START;
 use diskgc_model::spec::Op;
@@ -90,7 +90,7 @@ fn skipped(host: &ModelHost, target: &Target, rules: &Rules<'_>) -> Skip {
 }
 
 fn deleted(host: &ModelHost, target: &Target, record: &WalkRecord) -> Deletion {
-    delete(host, &target.candidate(), record, DeleteOptions::default())
+    delete_unchecked(host, &target.candidate(), record, DeleteOptions::default())
 }
 
 /// The paths successfully unlinked, in order.
@@ -170,7 +170,7 @@ fn every_unlink_comes_right_after_the_statx_of_its_entry_and_the_deadline_checks
         deadline: Some(far),
         ..DeleteOptions::default()
     };
-    let done = delete(&host, &target.candidate(), &record, options);
+    let done = delete_unchecked(&host, &target.candidate(), &record, options);
     assert_eq!(done.end, End::Complete);
     let trace = host.trace();
     let mut unlinks = 0;
@@ -797,7 +797,7 @@ fn make_writable_adds_owner_write_to_read_only_directories_after_the_checks() {
         make_writable: true,
         deadline: Some(MonoTime(UPTIME_AT_START + Duration::from_secs(3600))),
     };
-    let done = delete(&host, &target.candidate(), &record, options);
+    let done = delete_unchecked(&host, &target.candidate(), &record, options);
     assert_eq!(done.end, End::Complete);
     let trace = host.trace();
     let chmods: Vec<(String, String)> = trace
@@ -862,7 +862,7 @@ fn the_deadline_stops_the_walk_and_the_delete_before_the_next_step() {
         deadline: Some(deadline),
         ..DeleteOptions::default()
     };
-    let done = delete(&host, &target.candidate(), &record, options);
+    let done = delete_unchecked(&host, &target.candidate(), &record, options);
     assert_eq!(
         done.end,
         End::DeadlinePassed {
@@ -928,6 +928,106 @@ fn an_entry_chowned_between_walk_and_unlink_is_changed() {
     );
     assert_eq!(unlinked(&host), ["/tmp/c/a"]);
     assert!(exists(&host, "/tmp/c/b"));
+}
+
+/// A chown of the candidate after the walk is caught when its directory is
+/// reopened, before any child can be unlinked.
+#[test]
+fn a_candidate_chowned_before_delete_reopen_is_changed_without_unlinks() {
+    let host = model(&format!(
+        "events:\n  - {{at: {{op: openat2, path: /tmp/c, nth: 2, when: before}}, chown: {{path: /tmp/c, uid: {OTHER}}}}}\n"
+    ));
+    let target = Target::new(&host, "/tmp/c");
+    let record = walked(&host, &target, &rules());
+    let done = deleted(&host, &target, &record);
+    assert!(host.unfired_events().is_empty());
+    assert!(
+        matches!(&done.end, End::Changed { path, .. } if path == Path::new("/tmp/c")),
+        "{done:?}"
+    );
+    assert!(unlinked(&host).is_empty());
+    assert!(exists(&host, "/tmp/c/a"));
+}
+
+/// Simulate inode reuse after unlink: dev, inode, owner and type all remain
+/// equal. Birth time must stop deletion when reported; a filesystem that
+/// omits it has the documented residual risk.
+#[test]
+fn reused_inode_is_stopped_by_birth_time_when_reported() {
+    for missing in [false, true] {
+        let missing_field = if missing {
+            ", statx_missing: [btime]"
+        } else {
+            ""
+        };
+        let host = host(&format!(
+            r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}}
+  - {{id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, parent: 1{missing_field}}}
+tree:
+  /tmp/c: {{b: {{}}}}
+events:
+  - {{at: {{op: openat2, path: /tmp/c, nth: 2, when: before}}, replace_reusing_inode: /tmp/c/b}}
+"#
+        ));
+        let target = Target::new(&host, "/tmp/c");
+        let record = walked(&host, &target, &rules());
+        let before = record.entry_at(Path::new("b")).expect("b").identity;
+        host.sleep(Duration::from_secs(1));
+        let done = deleted(&host, &target, &record);
+        assert!(host.unfired_events().is_empty());
+        let after = host
+            .stat_path(Path::new("/tmp/c/b"))
+            .map(|stat| diskgc_core::engine::Identity::of(&stat).expect("identity"));
+        if missing {
+            assert_eq!(done.end, End::Complete, "{done:?}");
+            assert!(
+                after.is_none(),
+                "reuse is indistinguishable without birth time"
+            );
+        } else {
+            assert!(
+                matches!(&done.end, End::Changed { path, .. } if path == Path::new("/tmp/c/b")),
+                "{done:?}"
+            );
+            let after = after.expect("replacement kept");
+            assert_eq!(before.id, after.id, "inode number was reused");
+            assert_eq!(before.uid, after.uid);
+            assert_eq!(before.file_type, after.file_type);
+            assert_ne!(before.btime, after.btime);
+            assert!(unlinked(&host).is_empty());
+        }
+    }
+}
+
+/// The same birth-time check applies when reopening a recorded directory,
+/// before making it writable or unlinking anything below it.
+#[test]
+fn reused_directory_inode_is_stopped_at_reopen() {
+    let host = model(
+        "events:\n  - {at: {op: openat2, path: /tmp/c, nth: 2, when: before}, replace_reusing_inode: /tmp/c}\n",
+    );
+    let target = Target::new(&host, "/tmp/c");
+    let record = walked(&host, &target, &rules());
+    let before = record.root().identity;
+    host.sleep(Duration::from_secs(1));
+    let done = deleted(&host, &target, &record);
+    assert!(host.unfired_events().is_empty());
+    let after = diskgc_core::engine::Identity::of(
+        &host
+            .stat_path(Path::new("/tmp/c"))
+            .expect("replacement kept"),
+    )
+    .expect("identity");
+    assert_eq!(before.id, after.id, "directory inode number was reused");
+    assert_ne!(before.btime, after.btime);
+    assert!(
+        matches!(&done.end, End::Changed { path, .. } if path == Path::new("/tmp/c")),
+        "{done:?}"
+    );
+    assert!(unlinked(&host).is_empty());
 }
 
 /// An entry gone, mounted on, or of another type when the unlink runs
@@ -1029,7 +1129,7 @@ fn an_expired_delete_touches_nothing() {
         make_writable: true,
         deadline: Some(MonoTime(UPTIME_AT_START)),
     };
-    let done = delete(&host, &target.candidate(), &record, options);
+    let done = delete_unchecked(&host, &target.candidate(), &record, options);
     assert_eq!(
         done.end,
         End::DeadlinePassed {
@@ -1064,7 +1164,7 @@ fn reopening_a_long_chain_stops_at_the_deadline() {
         deadline: Some(deadline),
         ..DeleteOptions::default()
     };
-    let done = delete(&host, &target.candidate(), &record, options);
+    let done = delete_unchecked(&host, &target.candidate(), &record, options);
     assert!(host.unfired_events().is_empty());
     assert!(matches!(done.end, End::DeadlinePassed { .. }), "{done:?}");
     let trace = host.trace();
@@ -1135,7 +1235,7 @@ fn a_split_off_part_and_the_rest_are_deleted_on_their_own() {
     let mut rest = walked(&host, &target, &rules());
     let part = rest.split_off(Path::new("sub/deeper")).expect("recorded");
     let sub = Target::new(&host, "/tmp/c/sub/deeper");
-    let done = delete(&host, &sub.candidate(), &part, DeleteOptions::default());
+    let done = delete_unchecked(&host, &sub.candidate(), &part, DeleteOptions::default());
     assert_eq!((done.end, done.removed_entries), (End::Complete, 2));
     assert_eq!(
         unlinked(&host),

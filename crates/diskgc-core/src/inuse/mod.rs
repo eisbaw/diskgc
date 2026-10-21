@@ -28,13 +28,13 @@
 pub(crate) mod environ;
 pub mod scan;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::engine::{
-    self, Candidate, DeleteOptions, Deletion, Identity, IpcKind, Reason, Rules, Skip, WalkRecord,
+    self, Candidate, DeleteOptions, Deletion, IpcKind, Reason, Rules, Skip, WalkRecord,
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
@@ -354,9 +354,27 @@ impl Scan {
     /// filesystem `dev`, per process (docs/reference.md,
     /// `held_by_deleted_files`).
     pub fn held_by_deleted_files(&self, dev: Dev) -> Vec<HeldByDeleted> {
+        self.held_by_deleted_files_on(&[dev])
+    }
+
+    /// As [`Self::held_by_deleted_files`], accepting the devices of all
+    /// visible mounts sharing a space pool (btrfs subvolumes have distinct
+    /// `statx` devices). The caller establishes that relationship.
+    pub fn held_by_deleted_files_on(&self, devices: &[Dev]) -> Vec<HeldByDeleted> {
         let mut per_pid: BTreeMap<Pid, u64> = BTreeMap::new();
-        for held in self.held_deleted.iter().filter(|h| h.id.dev == dev) {
-            *per_pid.entry(held.pid).or_default() += held.bytes;
+        let mut counted = HashSet::new();
+        let devices: HashSet<Dev> = devices.iter().copied().collect();
+        for held in self
+            .held_deleted
+            .iter()
+            .filter(|h| devices.contains(&h.id.dev))
+        {
+            // Keep every holder visible, but attribute shared bytes to one
+            // process only. Scan collection visits pids in ascending order.
+            let bytes = per_pid.entry(held.pid).or_default();
+            if counted.insert(held.id) {
+                *bytes = bytes.saturating_add(held.bytes);
+            }
         }
         per_pid
             .into_iter()
@@ -479,57 +497,51 @@ fn below(path: &Path, rel: &Path) -> PathBuf {
 }
 
 /// A candidate cleared by the in-use check: only [`Checker::check`] makes
-/// one, for one walk record (it keeps the identity of the record's root:
-/// device, inode, owner, type, birth time where reported), and
-/// [`delete_cleared`] deletes only that record's candidate and only while
-/// the clear is fresh (docs/safety.md, Freshness). Neither `Copy` nor
-/// `Clone`: one check, one deletion.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Clear {
+/// one, borrowing the exact candidate and walk record it checked.
+/// [`delete_cleared`] can only consume this checked pair while the clear is
+/// fresh (docs/safety.md, Freshness). Neither `Copy` nor `Clone`: one check,
+/// one deletion. The borrow also prevents splitting the record meanwhile.
+#[derive(Debug)]
+pub struct Clear<'checked, 'parent, F> {
     fresh_until: MonoTime,
-    root: Identity,
+    candidate: &'checked Candidate<'parent, F>,
+    record: &'checked WalkRecord,
 }
 
 /// Why [`delete_cleared`] deleted nothing.
-#[derive(Debug, PartialEq, Eq)]
-pub enum NotCleared {
+#[derive(Debug)]
+pub enum NotCleared<'checked, 'parent, F> {
     /// The clear is no longer fresh: check again.
-    Expired(Clear),
-    /// The clear was made for another object (another candidate's root
-    /// identity): a bug of the caller. Only the root's identity is
-    /// compared, so walking the same object again between the check and
-    /// the delete, or a hard-linked file candidate, is not caught here;
-    /// delete with the record that was checked.
-    OtherCandidate,
+    Expired(Clear<'checked, 'parent, F>),
 }
 
-impl Clear {
+impl<F> Clear<'_, '_, F> {
     /// The last moment at which the deletion it allows may start.
     pub fn fresh_until(&self) -> MonoTime {
         self.fresh_until
     }
 }
 
-/// Deletes what the walk of `candidate` recorded, as [`engine::delete`]
-/// does, but only on a [`Clear`] made for that record and still fresh now
+/// Deletes the candidate and record borrowed by `clear`, as
+/// [`engine::delete_unchecked`] does, but only while the check is fresh now
 /// (the last port call before the delete reads the clock); an expired one
 /// comes back ([`NotCleared::Expired`]) for the caller to check again. The only deletion entry
 /// point for checked candidates (through [`clear_and_delete`]: the `fs`
 /// kind's protocol and the Cargo kind's).
-pub fn delete_cleared<H: Delete>(
+pub fn delete_cleared<'checked, 'parent, H: Delete>(
     host: &H,
-    clear: Clear,
-    candidate: &Candidate<'_, H::Fd>,
-    record: &WalkRecord,
+    clear: Clear<'checked, 'parent, H::Fd>,
     options: DeleteOptions,
-) -> Result<Deletion, NotCleared> {
-    if clear.root != record.root().identity {
-        return Err(NotCleared::OtherCandidate);
-    }
+) -> Result<Deletion, NotCleared<'checked, 'parent, H::Fd>> {
     if host.now() >= clear.fresh_until {
         return Err(NotCleared::Expired(clear));
     }
-    Ok(engine::delete(host, candidate, record, options))
+    Ok(engine::delete_unchecked(
+        host,
+        clear.candidate,
+        clear.record,
+        options,
+    ))
 }
 
 /// Keeps the latest [`Scan`] and decides when a new one is needed.
@@ -551,7 +563,7 @@ impl<'a> Checker<'a> {
 
     /// A checker with explicit options (for scans without a walk, and for
     /// tests of the guard in [`Checker::serves`]).
-    pub fn with_options(options: Options<'a>, reuse_limit: Duration) -> Self {
+    pub(crate) fn with_options(options: Options<'a>, reuse_limit: Duration) -> Self {
         Self {
             options,
             reuse_limit: reuse_limit.min(FRESHNESS),
@@ -594,12 +606,19 @@ impl<'a> Checker<'a> {
     /// one is not fresh either, nothing can be cleared: an error of the
     /// run, not a skip. The caller starts the deletion right away and
     /// never after [`Clear::fresh_until`].
-    pub fn check<H: Host, F>(
+    pub fn check<'checked, 'parent, H: Host>(
         &mut self,
         host: &H,
-        candidate: &Candidate<'_, F>,
-        record: &WalkRecord,
-    ) -> Result<Result<Clear, Skip>, HostError> {
+        candidate: &'checked Candidate<'parent, H::Fd>,
+        record: &'checked WalkRecord,
+    ) -> Result<Result<Clear<'checked, 'parent, H::Fd>, Skip>, HostError> {
+        if !record.belongs_to(candidate) {
+            return Err(HostError::invalid(
+                "in-use check",
+                candidate.path().display(),
+                "the walk record was made for another candidate name or mount",
+            ));
+        }
         let now = host.now();
         let reusable = self.reusable_at(now);
         if !reusable {
@@ -612,7 +631,8 @@ impl<'a> Checker<'a> {
             }
             if scan.is_fresh_at(host.now()) {
                 return Ok(Ok(Clear {
-                    root: record.root().identity,
+                    candidate,
+                    record,
                     fresh_until: scan.fresh_until(),
                 }));
             }
@@ -659,6 +679,11 @@ impl<'a> Checker<'a> {
 
     fn reusable_at(&self, now: MonoTime) -> bool {
         self.latest.as_ref().is_some_and(|scan| {
+            // An unsettled listing did not inspect every process. Retry for
+            // each candidate, including read-only plans with a long limit.
+            if scan.unsettled.is_some() {
+                return false;
+            }
             let blocked = scan.blocks_all();
             let limit = if blocked {
                 BLOCKED_REUSE_LIMIT.min(self.reuse_limit)
@@ -795,7 +820,7 @@ pub fn clear_and_delete<H: Delete>(
             .map_err(NotDeleted::Failed)?
             .map_err(NotDeleted::Skipped)?;
         also(checker.latest().expect("the check made or kept one"))?;
-        match delete_cleared(host, clear, candidate, record, options) {
+        match delete_cleared(host, clear, options) {
             Ok(done) => return Ok(done),
             Err(NotCleared::Expired(_)) if attempt == 0 => checker.forget(),
             Err(e) => return Err(failed(format!("the clear could not be used: {e:?}"))),

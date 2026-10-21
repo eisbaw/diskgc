@@ -537,6 +537,7 @@ impl Inner {
             Action::Remove(path) => state.remove_path(path),
             Action::Rename { from, to } => state.rename_path(from, to),
             Action::Replace(path) => state.replace_path(path).map(drop),
+            Action::ReplaceReusingInode(path) => state.replace_path_reusing_inode(path),
             Action::Chown { path, uid } => state.chown_path(path, *uid),
             Action::Open { pid, path } => state.proc_open(*pid, path, None).map(drop),
             Action::Close { pid, path } => state.proc_close(*pid, path),

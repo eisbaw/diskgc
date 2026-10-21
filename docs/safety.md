@@ -177,8 +177,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
     one of them allows checkouts: `refuse` wins. Filesystem delete unions
     apply this rule during planning and reclaim; other union forms remain
     unsupported. Each tier judges its own candidates by its source
-    settings. `protect` entries and `!profile:` terms remain unsupported
-    in execution.
+    settings. Protected matches are enumerated before reclaim and rechecked
+    under the candidate lock and immediately before deletion. Changes in a
+    separately writable protected tree can still race between that scan and
+    deletion; this is not an atomic cross-tree exclusion.
   - **Kept too (the accepted cost):** whatever holds a clone is never
     deleted by a profile that refuses checkouts (the default), and that
     can be much of what a profile finds. Seen on the development machine:
@@ -224,8 +226,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
   network namespace are not seen, so a socket file used only from another
   network namespace looks stale and is deleted. Only the default is reachable until
   the configuration schema defines the setting.
-- **Not protected or excluded** by overlap with a `protect` entry or a
-  negated profile ([reference.md](reference.md#protect)).
+- **Not excluded** by overlap with a negated profile
+  ([reference.md](reference.md#protect)). Negated profiles are enumerated
+  before the first deletion and checked again under candidate locks;
+  incomplete enumeration excludes the tier.
 
 - **Fail closed on anything unreadable**, never treating it as empty or as
   nothing to check. A listing that fails part-way is that error, never a
@@ -365,8 +369,9 @@ found gone and listed again was reused (or is a zombie not yet reaped): it
 is read again as a new process, once per scan. After 16
 listings that each brought new pids the scan is unsettled. The checker
 waits 20 ms and makes one complete new scan before judging a candidate.
-If that scan is unsettled too, the candidate is `in_use`; the blocked scan
-is reused for less than half a second from its completion before another retry. Listings made
+If that scan is unsettled too, the candidate is `in_use`; the next candidate
+starts a new scan immediately. Other blocking scans can be reused for less
+than half a second from completion. Listings made
 only for re-reads do not count (they
 are bounded by the re-reads each process gets) (a process it did not read could have inherited
 anything); a machine that keeps starting processes faster than the scan
@@ -467,9 +472,13 @@ exited never runs again, also while a tracer reaps it). The old leader of an
 exec shows `Z` only while the exec'ing thread is still counted (2 or more).
 The poll only decides whether that read is made: the read alone shows that
 no task of the process is live, given a `/proc` of diskgc's own pid
-namespace and that the number still names the process. On Linux 5.8 to 6.8 polling never reports a
-hang-up; a process released during a scan then cannot be confirmed and is
-unreadable, never gone. No `/proc` listing and no `ENOENT` decides it: a
+namespace and that the number still names the process. On Linux 5.8 to 6.8
+polling never reports a hang-up. When it reports readable, diskgc checks
+the held pidfd with `pidfd_send_signal(..., 0)`: `ESRCH` confirms release;
+success or `EPERM` does not. Signal 0 delivers no signal. A seccomp filter
+that returns `EPERM` also leaves this check inconclusive; an unreadable
+process then remains blocking. Other syscall errors fail the read. No `/proc`
+listing and no `ENOENT` decides it: a
 lookup can race an exec, `hidepid` can hide a live process (a hidden zombie
 is unreadable, not gone), and an exec can briefly show the old leader as a
 zombie. A process that cannot be read for any of these reasons is
@@ -516,6 +525,14 @@ which the process is treated as unreadable. Only the answering round's
 reads are used; within it, results of tasks that exit meanwhile are kept. A
 task that is exiting (`PF_EXITING`) shows empty or missing entries while it
 releases them: it is never the source of the memory map or environment.
+A task read is bracketed by two reads of `/proc/<pid>/task/<tid>/stat`; a
+different start time discards that round. Start time is in clock ticks, so a
+tid reused within one tick can still evade the comparison. With a small
+`pid_max` (for example 32768) and heavy churn, that is a real limit, not a
+guarantee of unique task identity.
+The fd-directory owner used to classify an unreadable process is accepted
+only when the task is live and has the same start time before and after
+that owner read; reuse within one clock tick remains a limit there too.
 A tid can also change hands: when a non-leader thread execs, it takes over
 the leader's tid once the old leader is a zombie, with the old leader's
 start time, so `stat` cannot tell the two apart; the exec'ing thread's old
@@ -553,11 +570,14 @@ once; none of them makes diskgc take a live process for gone):
    right after the first directory read of the exec'ing thread's fd table,
    a table larger than one read, and that entry's own lookups bound to the
    leader's tid), take a prefix of that table for the whole;
-4. the pidfd pins a process, not its number, and every read under
-   `/proc/<pid>` goes by number: when a listed process is released and
-   another one gets its number before a later read of the scan, the
-   newcomer may be missed (reported as not using files it uses) until the
-   next scan lists it;
+4. the pidfd pins a process during each reader, not its number across the
+   scan. The scan indexes PID numbers, and every read under `/proc/<pid>`
+   goes by number: when a listed process is released and another one gets
+   its number before a later read or after its last read without a `Gone`
+   observation, the newcomer may be missed (reported as not using files it
+   uses) until the next scan lists it. The one-second scan freshness bound
+   and 500 ms deleting-checker reuse bound limit exposure time, but do not
+   give a churn-rate guarantee;
 5. the check and the deletion are not atomic: a process that starts using
    a candidate after its in-use check (including a thread that acquires
    files after a round's count) is not seen. The check is kept fresh (see
@@ -816,6 +836,12 @@ descends into is matched by (device, inode) against the walk's record, and
 the candidate itself is held open while it is deleted, so if a checked
 directory is renamed elsewhere mid-delete, diskgc keeps deleting that same
 object (the cruft it checked), never whatever now sits at the old path.
+The in-use check returns a single-use `Clear` that borrows the exact
+candidate and `WalkRecord` it checked. The deleting protocol consumes that
+pair while the scan is fresh; it cannot substitute a second walk or another
+hard-linked name with the same inode. The lower-level
+`engine::delete_unchecked` entry point is explicitly for isolated engine
+and host tests; production protocols use `inuse::clear_and_delete`.
 Two windows remain and are accepted: an entry replaced between the `statx` and the
 `unlinkat` of its name (Linux has no unlink-by-inode), and a file opened or
 created inside the candidate after its check in step 4. A third limit is separate from
@@ -873,7 +899,13 @@ Each with the number of events outside diskgc it needs:
   until the process closes it. Every report lists such files on the
   requested filesystem (`held_by_deleted_files`): the open fds of visible
   processes on regular files with link count 0, per process, each file's
-  allocated bytes counted once. A deleted file that is only mapped (its fd
+  allocated bytes counted once across all processes. Every holder is listed;
+  when several processes hold one file, its bytes are attributed to the
+  lowest pid and the other holders show 0 bytes. On btrfs, mounted
+  subvolumes with the same mountinfo source are treated as one space pool.
+  An unmounted sibling subvolume, a subvolume visible only in another mount
+  namespace, or an alias of the same device with a different source string
+  may be omitted from the report. A deleted file that is only mapped (its fd
   closed) is not listed. diskgc never kills processes.
 - **tmpfs:** if `/tmp` is a tmpfs, profiles under it only help a request for
   that tmpfs (filesystem matching), which is correct: it frees memory, not
@@ -1627,7 +1659,8 @@ these features backported, and an unparseable release is refused too.
 ## Validation
 
 - **Static** (`check`, and every startup): YAML syntax, schema, unknown
-  keys, `version`, unique tier names, profile names, absolute paths, no
+  keys, `version`, unique tier names, profile names, absolute paths, normalized
+  and unique roots, nonzero `idle_for`, no
   `~`, size and duration syntax, the selection grammar (qualifiers, one
   source per term, no unparenthesised mixing, `!` only narrows), one kind
   and one action per expression, predicates supported by the kind, roots

@@ -1,10 +1,10 @@
 ---
 id: TASK-22
 title: 'Journey: laptop owner''s /tmp under pressure with config groups and protect'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-16 22:50'
+updated_date: '2026-10-21 08:22'
 labels:
   - wave-2
   - journey
@@ -23,10 +23,18 @@ Why: exercise profiles, tiers and protection as a user. In a container whose /tm
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Protected and in-use entries survive; the deletion oracle agrees with the dry-run plan for independent candidates
+- [x] #1 Protected and in-use entries survive; the deletion oracle agrees with the dry-run plan for independent candidates
 - [ ] #2 Findings are filed as tasks
-- [ ] #3 The fixtures use user profiles (the built-in library ships in wave 4)
+- [x] #3 The fixtures use user profiles (the built-in library ships in wave 4)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-21 laptop /tmp journey test candidate integrated: disposable-container fixture uses user profiles, nested pytest, nix-shell rc/TMPDIR, Claude temp, socket, stale/pressure groups and protect; compares dry-run, real-run actions and deletion oracle. New test compiles in fresh isolated-target E2E crate and fmt/diff checks pass; it has not run under no-deletion instruction, so assumptions about protected dry-run reason, exhausted goal and tier order remain unverified. Exported TMPDIR after exec with no open fd remains undetectable; fixture keeps descriptor and initial TMPDIR. AC/DoD remain open.
+
+2026-10-21 verification: the laptop /tmp journey passed in the full disposable Nix-container E2E suite (152/152). Dry-run and real-run eligibility agreed, protected and in-use data survived, and the deletion oracle was clean. QA and MPED reviewed the staged patch; AC2 remains open until journey findings are reconciled in the tracker.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

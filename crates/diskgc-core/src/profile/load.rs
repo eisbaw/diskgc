@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use super::roots::validate_root_list;
 use super::spec::{
     ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, ProfileSpec, RootsSpec, WhereSpec,
     parse_profiles,
@@ -573,19 +574,20 @@ fn roots(spec: &RootsSpec, problems: &mut Vec<String>) -> Option<Roots> {
             );
             None
         }
-        RootsSpec::Fixed(list) => {
-            let before = problems.len();
-            for root in list {
-                if let Err(problem) = absolute_path(root) {
-                    problems.push(format!("root {problem}"));
-                }
+        RootsSpec::Fixed(list) => match validate_root_list(list) {
+            Ok(()) => Some(Roots::Fixed(list.clone())),
+            Err(problem) => {
+                problems.push(format!("root {problem}"));
+                None
             }
-            (problems.len() == before).then(|| Roots::Fixed(list.clone()))
-        }
+        },
     }
 }
 
 fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
+    if spec.idle_for.is_some_and(|duration| duration.0.is_zero()) {
+        problems.push("`idle_for` must be greater than zero".to_owned());
+    }
     for (predicate, name) in [
         ("has", &spec.has),
         ("has_dir", &spec.has_dir),

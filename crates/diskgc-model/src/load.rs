@@ -89,6 +89,7 @@ pub enum Action {
         to: PathBuf,
     },
     Replace(PathBuf),
+    ReplaceReusingInode(PathBuf),
     Chown {
         path: PathBuf,
         uid: u32,
@@ -792,6 +793,9 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
     if let Some(p) = &spec.replace {
         actions.push(Action::Replace(path(p)?));
     }
+    if let Some(p) = &spec.replace_reusing_inode {
+        actions.push(Action::ReplaceReusingInode(path(p)?));
+    }
     if let Some(c) = &spec.chown {
         actions.push(Action::Chown {
             path: path(&c.path)?,
@@ -870,7 +874,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
-            "no action (create, mkdir, remove, rename, replace, chown, open, close, \
+            "no action (create, mkdir, remove, rename, replace, replace_reusing_inode, chown, open, close, \
                   exit, fork, dumpable, access, advance, fail, mount)"
                 .to_owned(),
         ),

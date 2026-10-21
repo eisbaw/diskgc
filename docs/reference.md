@@ -41,15 +41,17 @@ diskgc ensure --min-free 50G \
   "$CI_BUILDS_DIR"
 ```
 
-The current configured `ensure` implementation runs groups and tiers in
-their written order and discovers each tier before leaving it. It refuses
-`ranking: random` and `order: best-fit` with exit 2 until their ordering
-and seed reporting are implemented. Before the first deletion, it checks
+The current configured `ensure` implementation runs groups in their written
+order, shuffles tiers inside `ranking: random` groups using the report's
+seed, and discovers each tier before leaving it. Within a tier, `best-fit`
+re-picks after each observed space sample. Its dry-run plan uses estimates
+from the initial sample and cannot predict the exact reclaim order. Before
+the first deletion, it checks
 all configured roots, command executables and Docker bindings under the
 host lock. A tier with an unsafe root or failed environment check is
-excluded and reported while the other tiers remain eligible. `protect:`
-and `ipc: live-only` remain refused by `ensure` until their runtime checks
-are implemented.
+excluded and reported while the other tiers remain eligible. Protected and
+negated source matches are rechecked during reclaim. `ipc: live-only` remains
+refused by `ensure` until its runtime check is implemented.
 
 The `--roots` value is where the profile looks; the final `PATH` is the
 directory whose filesystem must have the space. A complete pre-job hook
@@ -445,7 +447,10 @@ JSON result (field names are part of the contract):
 - `held_by_deleted_files` lists open-but-deleted files on the requested
   filesystem (visible processes only); always present, possibly empty. Their
   space returns only when the process closes them; diskgc never kills
-  processes. It comes from the run's last process scan (one is made at the
+  processes. A file held by several processes contributes its allocated bytes
+  once, to the lowest listed pid; the other holders appear with zero bytes.
+  On btrfs, mounted subvolumes with the same mountinfo source are included.
+  It comes from the run's last process scan (one is made at the
   end if the run made none); a run that reclaimed nothing because the goal
   was met, or that ended before the reclaim (a usage error, a lock
   timeout), scans nothing and leaves it empty.
@@ -581,6 +586,12 @@ Rules:
   `app_not_running` path is refused before planning: uid 0 cannot stand for
   one or more `owners:` entries. Supplied `--roots` using `{uid}` are refused
   for the same reason.
+  Root lists (`find.roots`, tier `roots`, `protect` roots, and `--roots`)
+  also reject `.` and `..` components, repeated slashes, trailing slashes,
+  and duplicate entries. `/` itself is valid. After safe resolution,
+  filesystem and Cargo discovery walk one root for each reported directory
+  identity, choosing the outermost listed route first. A root whose inode
+  identity is unavailable is skipped as `unsupported_fs`.
 - **Literal guards:** `where.has`, `has_dir`, `has_not`, `lacks_entry`, and
   `protect_links`, `protect_link_dirs`, `protect_parent_link`,
   `protect_cursor_extensions` compare names or paths literally. They reject
@@ -600,11 +611,12 @@ of positive filesystem sources with exactly the same `delete` action and
 options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source that found it refuses checkouts. It rechecks each
-term under the candidate lock. Command and other-kind unions, negated
-profiles, and positive entry filters are deferred. Filesystem terms can use
+term under the candidate lock. Command and other-kind unions and positive
+entry filters are deferred. Filesystem and Cargo sources can use negated
+profiles. Filesystem terms can use
 `!filter:` with a single `has` or `has_not` predicate. It refuses
-a nonempty `protect` and `ipc: live-only` until their run-time checks are
-implemented (tasks 16 and 21). Root mode
+a nonempty `ipc: live-only` until its run-time check is implemented (tasks 16
+and 21). Root mode
 requires a protected config with `owners:`, resolves those owners before
 planning, and refuses generic command, Docker prune and `{uid}` sources.
 It never ignores a safety setting.
@@ -621,7 +633,7 @@ It never ignores a safety setting.
 
 ### `protect`
 
-Profiles whose matches no tier ever deletes, by **overlap**: a candidate
+Profiles whose matches exclude overlapping candidates by **overlap**: a candidate
 that is a protected match, lies inside one, or contains one is skipped
 (`protected`). Entries are bare names for fixed-root profiles, or
 `{profile: NAME, roots: [...]}` for `roots: required` profiles; a bare
@@ -630,7 +642,14 @@ which tier happens to supply roots. Only kinds `fs` and `cargo-target` can be
 protected (Docker images and Nix paths are protected by Docker's and Nix's
 own means: running containers, GC roots). Like `!profile:`, a protected
 profile covers everything its `find` finds and ignores its `where`. The
-example config protects `claude-code-tmp`.
+example config protects `claude-code-tmp`. Filesystem and Cargo reclaim
+re-enumerate matches under candidate locks and just before deletion; Docker
+rechecks protection before invoking prune. An incomplete scan stops the
+run. Concurrent changes in an independently writable protected tree cannot
+be made atomic with deletion of another tree; do not rely on this rule as a
+security boundary against another local writer. For a user-defined `command`
+action, the command must itself limit its effects to the selected candidate;
+diskgc cannot constrain arbitrary actions taken by that program.
 
 ### Protection marker
 
@@ -732,10 +751,11 @@ the built-in profile has no implicit or fixed temp root.
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
 | `protect_cursor_extensions` | a literal path relative to the bound root to Cursor's `extensions.json`, beside extension candidates. Every `relativeLocation` listed as installed is kept, even if older than the newest N. The JSON array and each entry's `location.path` must agree with that one directory name. A missing, unreadable, malformed, oversized (over 1 MiB) or changing manifest retains all candidates. | `fs` |
 
-In YAML, `where: {idle_for: 3d}` (a duration), `where: {has: CACHEDIR.TAG}`
+In YAML, `where: {idle_for: 3d}` (a nonzero duration), `where: {has: CACHEDIR.TAG}`
 (one file name), or `where: {app_not_running: .config/chromium/SingletonLock}`.
 A present null or blank `app_not_running` is a load-time error; omitting the
-key is allowed. Each predicate appears at most once per profile, and all of
+key is allowed. `idle_for: 0s` is a load-time error: it would accept every
+candidate with a known, nonfuture age. Each predicate appears at most once per profile, and all of
 a profile's predicates must hold. A predicate on a kind
 that does not support it is a load-time error. Two `idle_for` in one term
 (its `filter:`s) and the source's `min_idle_for` combine to the longest;

@@ -817,6 +817,10 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: diskgc-core = { path = \"crates/diskgc-core\" }",
             "diskgc-linux.workspace = true",
             "workspace: diskgc-linux = { path = \"crates/diskgc-linux\" }",
+            // The CLI calls getrandom::fill only to seed candidate ordering.
+            // On Linux its OS entropy read does not write or delete files.
+            "getrandom.workspace = true",
+            "workspace: getrandom = \"0.4\"",
         ],
     ),
     // Reviewed for task-8 (YAML profile schema) and task-73 (Cursor's
@@ -941,6 +945,14 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
             "getpwnam_r reads NSS user records; no filesystem mutation or child process",
         ),
         matches: 3,
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "pidfd_released",
+        gate: Gate::Ungated(
+            "pidfd_send_signal with literal signal 0 and flags 0 only checks the held process",
+        ),
+        matches: 4, // syscall plus libc at the call, constant, and null siginfo type
     },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
@@ -1074,6 +1086,39 @@ mod tests {
         for (allowed, hits) in GATED_ALLOWED.iter().zip(hits) {
             assert_eq!(hits, allowed.matches, "{allowed:?}");
         }
+    }
+
+    /// This is the sole ungated raw syscall. Keep its exact arguments
+    /// reviewable: signal zero and a null siginfo cannot deliver a signal,
+    /// and zero flags leave no alternate behavior to the kernel.
+    #[test]
+    fn pidfd_liveness_probe_cannot_send_a_signal() {
+        let scanned = production_sources();
+        let file = scanned
+            .iter()
+            .find(|s| s.path == Path::new("crates/diskgc-linux/src/host.rs"))
+            .expect("Linux host scanned");
+        let spans: Vec<_> = file
+            .fns
+            .iter()
+            .filter(|f| f.name == "pidfd_released")
+            .collect();
+        let [span] = spans[..] else {
+            panic!("expected one pidfd_released function, got {}", spans.len());
+        };
+        let body: String = file.source.code[span.body..=span.end]
+            .iter()
+            .copied()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let safe_call = "libc::syscall(libc::SYS_pidfd_send_signal,pidfd.as_raw_fd(),0,\
+                         std::ptr::null::<libc::siginfo_t>(),0,)";
+        assert!(
+            body.contains(safe_call),
+            "pidfd liveness probe changed; review signal, siginfo, and flags"
+        );
+        assert_eq!(body.matches("libc::syscall(").count(), 1);
+        assert_eq!(body.matches("libc::SYS_pidfd_send_signal").count(), 1);
     }
 
     /// Every production crate's code is under `src/`, where the walk reads

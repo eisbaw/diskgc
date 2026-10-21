@@ -28,6 +28,7 @@ fn documented() -> Value {
 /// (two plan entries: one eligible, one skipped).
 fn full() -> Report {
     let mut r = Report::new(Status::Met, Some(&PathBuf::from("/home/mark/src/app")));
+    r.seed = Some(42);
     r.mount = Some("/".into());
     r.min_free_bytes = Some(50);
     r.target_free_bytes = Some(80);

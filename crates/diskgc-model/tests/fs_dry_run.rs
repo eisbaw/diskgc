@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{dir, host};
-use diskgc_core::engine::{Candidate, Checkouts, DeleteOptions, End, Rules, delete, walk};
+use diskgc_core::config;
+use diskgc_core::engine::{
+    Candidate, Checkouts, DeleteOptions, End, Rules, delete_unchecked, walk,
+};
 use diskgc_core::executor::{self, Request, SourceKind, Tier};
 use diskgc_core::inuse::MAX_LISTINGS;
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
@@ -102,6 +105,15 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: [link-b], type: file}
   action: delete
   examples: {match: [/tmp/link-b]}
+- name: negated-descendant
+  find: {roots: [/tmp], paths: [neg-parent/child], type: dir}
+  where: {has: deliberately-absent}
+  action: delete
+  examples: {match: [/tmp/neg-parent/child]}
+- name: negated-private-tmp
+  find: {roots: [/tmp], paths: ["systemd-private-*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/systemd-private-unit]}
 "#;
 
 fn library() -> Library {
@@ -988,7 +1000,7 @@ fn shipped_go_mod_cache_makes_read_only_modules_writable_for_deletion() {
     let target = Path::new("/home/mark/go/pkg/mod");
     let candidate = Candidate::new(&parent, target).expect("candidate");
     let record = walk(&host, &candidate, &Rules::new(&[1000]), None).expect("eligible");
-    let outcome = delete(
+    let outcome = delete_unchecked(
         &host,
         &candidate,
         &record,
@@ -1079,6 +1091,51 @@ fn reason_of(report: &Report, candidate: &str) -> Option<Option<&'static str>> {
         .map(|p| p.reason)
 }
 
+#[test]
+fn negated_profile_excludes_ancestor_even_when_its_own_where_fails() {
+    let host = host(&yaml(
+        "  /tmp/neg-parent: {.: {}, child: {.: {}, payload: {size: 1K}}}\n  /tmp/neg-free: {.: {}, payload: {size: 1K}}\n",
+    ));
+    let report = dry_run(
+        &host,
+        &request(
+            "profile:tmp-entry && !profile:negated-descendant",
+            &[],
+            "/tmp",
+        ),
+    );
+    assert_eq!(
+        reason_of(&report, "/tmp/neg-parent"),
+        Some(Some("excluded"))
+    );
+    assert_eq!(reason_of(&report, "/tmp/neg-free"), Some(None));
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn negated_profile_incomplete_private_tmp_scan_excludes_the_tier() {
+    let host = host(&yaml(
+        "  /tmp/systemd-private-unit: {.: {}, payload: {size: 1K}}\n  /tmp/neg-free: {.: {}, payload: {size: 1K}}\n",
+    ));
+    let report = dry_run(
+        &host,
+        &request(
+            "profile:tmp-entry && !profile:negated-private-tmp",
+            &[],
+            "/tmp",
+        ),
+    );
+    assert!(report.plan.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("PrivateTmp")),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
 fn nothing_locked_or_deleted(host: &ModelHost) {
     for op in [
         Op::Flock,
@@ -1088,6 +1145,188 @@ fn nothing_locked_or_deleted(host: &ModelHost) {
         Op::InheritLock,
     ] {
         assert!(host.trace().iter().all(|c| c.op != op), "{op} in a dry run");
+    }
+}
+
+#[test]
+fn config_protect_overlaps_both_directions_and_ignores_its_where() {
+    let policy = r#"version: 1
+profiles:
+  - name: all-top
+    find: {roots: [/tmp], paths: ['*'], type: dir}
+    action: delete
+    examples: {match: [/tmp/guarded]}
+  - name: child
+    find: {roots: [/tmp], paths: [guarded/child], type: dir}
+    action: delete
+    examples: {match: [/tmp/guarded/child]}
+  - name: guard
+    find: {roots: [/tmp], paths: [guarded, parent/inside], type: dir}
+    where: {has: absent-marker}
+    action: delete
+    examples: {match: [/tmp/guarded, /tmp/parent/inside]}
+protect: [guard]
+"#;
+    let config = config::parse(Path::new("/tmp/config.yaml"), policy.as_bytes()).unwrap();
+    let protections = executor::bind_protections(&config, 1000, false).unwrap();
+    let model = yaml(
+        "  /tmp/guarded: {child: {payload: {size: 1K}}}\n  /tmp/parent: {inside: {payload: {size: 1K}}}\n  /tmp/other: {payload: {size: 1K}}\n",
+    );
+    let host = host(&model);
+    let mut top = Request {
+        path: PathBuf::from("/tmp"),
+        min_free: parse_size("1G").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:all-top", &config.library, None, 1000).unwrap(),
+    };
+    top.tier.protections = protections.clone();
+    let report = dry_run(&host, &top);
+    assert_eq!(reason_of(&report, "/tmp/guarded"), Some(Some("protected")));
+    assert_eq!(reason_of(&report, "/tmp/parent"), Some(Some("protected")));
+    assert_ne!(reason_of(&report, "/tmp/other"), Some(Some("protected")));
+
+    top.tier = Tier::select("profile:child", &config.library, None, 1000).unwrap();
+    top.tier.protections = protections;
+    let child_report = dry_run(&host, &top);
+    assert_eq!(
+        reason_of(&child_report, "/tmp/guarded/child"),
+        Some(Some("protected"))
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn protect_scan_fails_closed_on_an_unsafe_bound_root() {
+    let policy = r#"version: 1
+profiles:
+  - name: guard
+    find: {roots: required, paths: ['*'], type: dir}
+    action: delete
+    examples: {root: /tmp/protected, match: [/tmp/protected/inside]}
+protect: [{profile: guard, roots: [/tmp/guard-link]}]
+"#;
+    let config = config::parse(Path::new("/tmp/config.yaml"), policy.as_bytes()).unwrap();
+    let model = yaml(
+        "  /tmp/guard-link: {symlink: /tmp/protected}\n  /tmp/protected: {inside: {}}\n  /tmp/other: {payload: {size: 1K}}\n",
+    );
+    let host = host(&model);
+    let mut request = request("profile:tmp-entry", &[], "/tmp");
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    let report = dry_run(&host, &request);
+    assert_eq!(report.status, Status::Error);
+    assert!(report.plan.is_empty());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("guard-link"))
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn a_local_mount_below_nfs_is_refused_before_any_root_or_ancestor_open() {
+    let model = yaml("  /net/local/old: {payload: {size: 1K}}\n  /tmp/other: {payload: {size: 1K}}\n")
+        .replacen(
+            "tree:\n",
+            "  - {id: 50, at: /net, fs: nfs4, dev: \"0:50\", size: 1T, parent: 1}\n  - {id: 51, at: /net/local, fs: tmpfs, dev: \"0:51\", size: 1G, parent: 50}\ntree:\n",
+            1,
+        );
+    let root = Path::new("/net/local");
+
+    let host = common::host(&model);
+    let source = request("profile:anything", &["/net/local"], "/tmp");
+    let report = dry_run(&host, &source);
+    assert!(report.plan.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("nfs4") && error.message.contains("/net")),
+        "{report:#?}"
+    );
+    assert!(
+        host.trace().iter().all(
+            |call| !matches!(call.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                || !call
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("/net"))
+        ),
+        "{:#?}",
+        host.trace()
+    );
+
+    let host = common::host(&model);
+    let SourceKind::Fs(find) = &source.tier.source else {
+        panic!("filesystem source")
+    };
+    let (found, stopped) = diskgc_core::fs_kind::discover(&host, &source.tier.roots, find, None);
+    assert!(stopped.is_none(), "{stopped:?}");
+    assert!(found.candidates.is_empty());
+    assert!(
+        found
+            .refused
+            .iter()
+            .any(|skip| skip.path == root
+                && skip.reason == diskgc_core::engine::Reason::UnsupportedFs),
+        "{found:#?}"
+    );
+    assert!(
+        host.trace().iter().all(
+            |call| !matches!(call.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                || !call
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("/net"))
+        ),
+        "{:#?}",
+        host.trace()
+    );
+
+    let policy = "version: 1\nprofiles:\n  - name: guard\n    find: {roots: required, paths: ['*'], type: dir}\n    action: delete\n    examples: {root: /tmp/protected, match: [/tmp/protected/inside]}\nprotect: [{profile: guard, roots: [/net/local]}]\n";
+    let config = config::parse(Path::new("/tmp/config.yaml"), policy.as_bytes()).unwrap();
+    let host = common::host(&model);
+    let mut selected = request("profile:tmp-entry", &[], "/tmp");
+    selected.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    let report = dry_run(&host, &selected);
+    assert!(report.plan.is_empty(), "{report:#?}");
+    assert!(
+        report.errors.iter().any(
+            |error| error.message.contains("protect `guard`") && error.message.contains("nfs4")
+        ),
+        "{report:#?}"
+    );
+    assert!(
+        host.trace().iter().all(
+            |call| !matches!(call.op, Op::Openat2 | Op::Statx | Op::ReadDir)
+                || !call
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("/net"))
+        ),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+#[test]
+fn root_mode_refuses_uid_placeholder_in_protect_roots_and_patterns() {
+    for (roots, pattern) in [
+        ("['/tmp/owner-{uid}']", "['*']"),
+        ("[/tmp/owners]", "['owner-{uid}']"),
+    ] {
+        let policy = format!(
+            "version: 1\nprofiles:\n  - name: guard\n    find: {{roots: required, paths: {pattern}, type: dir}}\n    action: delete\n    examples: {{root: /tmp/owners, match: [/tmp/owners/owner-1000]}}\nprotect: [{{profile: guard, roots: {roots}}}]\n"
+        );
+        let config = config::parse(Path::new("/tmp/config.yaml"), policy.as_bytes()).unwrap();
+        assert!(
+            executor::bind_protections(&config, 0, true)
+                .unwrap_err()
+                .contains("--allow-root refuses `{uid}`")
+        );
     }
 }
 
@@ -1240,7 +1479,8 @@ processes:
 
 /// `type: any` takes directories and regular files, never a symlink, a
 /// socket or a FIFO; `systemd-private-*` is never a candidate (and never
-/// entered); a candidate on another filesystem than PATH's is `other_fs`.
+/// entered); a root on another filesystem than PATH's is refused before its
+/// candidates are enumerated.
 #[test]
 fn tmp_entry_takes_files_and_dirs_but_never_private_tmp_or_specials() {
     let host = host(&yaml(
@@ -1268,10 +1508,18 @@ fn tmp_entry_takes_files_and_dirs_but_never_private_tmp_or_specials() {
             .is_some_and(|p| p.starts_with("/tmp/systemd-private-abc-cups.service-x1"))),
         "PrivateTmp is never touched"
     );
-    // The same candidates for a request on /home: on another filesystem.
+    // A /tmp root for a /home request cannot free space on /home, so it is
+    // reported as skipped before /tmp candidates are inspected.
     let host = common::host(&yaml("  /tmp/f: {}\n  /home/mark/x: {}\n"));
     let report = dry_run(&host, &request("profile:tmp-entry", &[], "/home/mark"));
-    assert_eq!(plan(&report), [("/tmp/f".to_owned(), Some("other_fs"))]);
+    assert_eq!(plan(&report), [("/tmp".to_owned(), Some("other_fs"))]);
+    assert!(report.errors.is_empty(), "{:#?}", report.errors);
+    assert!(
+        host.trace()
+            .iter()
+            .all(|call| call.path.as_deref() != Some(Path::new("/tmp/f"))),
+        "foreign-root candidate was inspected"
+    );
 }
 
 /// `roots: required` with `--roots`: the depths are spelled out (three
@@ -2140,9 +2388,12 @@ fn jest_cache_finds_only_default_temp_directories_in_the_model() {
          /tmp/nix-shell.Ab1/jest_app_hash: {{.: {at}, payload: {{size: 1M}}}}\n  \
          /tmp/subdir/jest_decoy: {{.: {at}, data: {at}}}\n  \
          /tmp/jest_file: {at}\n  \
-         /tmp/jest: {{.: {at}}}\n"
+         /tmp/jest: {{.: {at}}}\n  \
+         /var/tmp/jest_foreign: {{.: {at}, payload: {{size: 1M}}}}\n"
     )));
     let report = dry_run(&host, &request("profile:jest-cache", &[], "/tmp"));
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(reason_of(&report, "/var/tmp"), Some(Some("other_fs")));
     let mut actual: Vec<String> = plan(&report)
         .into_iter()
         .filter(|(_, reason)| reason.is_none())
@@ -2150,6 +2401,12 @@ fn jest_cache_finds_only_default_temp_directories_in_the_model() {
         .collect();
     actual.sort();
     assert_eq!(actual, ["/tmp/jest_rs", "/tmp/nix-shell.Ab1/jest_app_hash"]);
+    assert!(
+        host.trace()
+            .iter()
+            .all(|call| call.path.as_deref() != Some(Path::new("/var/tmp/jest_foreign"))),
+        "foreign-root child was inspected"
+    );
     nothing_locked_or_deleted(&host);
 }
 

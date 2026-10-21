@@ -719,16 +719,52 @@ fn pidfd_poll_answer(pid: Pid, revents: PollFlags) -> Result<PidfdPoll, ProcErro
     }
 }
 
-/// Polls `pidfd` once, without waiting.
-fn poll_pidfd(pid: Pid, pidfd: &OwnedFd) -> Result<PidfdPoll, ProcError> {
-    let mut fds = [rustix::event::PollFd::new(pidfd, PollFlags::IN)];
-    let now = rustix::event::Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
+/// A zero signal only checks the process pinned by the pidfd. On kernels
+/// before 6.9, poll cannot distinguish a released process from a zombie.
+fn pidfd_released(pid: Pid, pidfd: &OwnedFd) -> Result<bool, ProcError> {
+    // SAFETY: signal 0 sends nothing; the fd is held open and the remaining
+    // syscall arguments are the documented null siginfo and zero flags.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            0,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
     };
-    rustix::event::poll(&mut fds, Some(&now))
+    if result == 0 {
+        return Ok(false);
+    }
+    let error = rustix::io::Errno::from_io_error(&std::io::Error::last_os_error())
+        .expect("a failed syscall sets errno");
+    match error {
+        rustix::io::Errno::SRCH => Ok(true),
+        // A live process belonging to another user may deny the check.
+        rustix::io::Errno::PERM => Ok(false),
+        _ => Err(ProcError::Failed(HostError::errno(
+            "pidfd_send_signal",
+            pid,
+            errno_of(error),
+        ))),
+    }
+}
+
+/// Polls `pidfd`, waiting at most `timeout` for an exiting process.
+fn poll_pidfd(pid: Pid, pidfd: &OwnedFd, timeout: Duration) -> Result<PidfdPoll, ProcError> {
+    let mut fds = [rustix::event::PollFd::new(pidfd, PollFlags::IN)];
+    let wait = rustix::event::Timespec {
+        tv_sec: timeout.as_secs().cast_signed(),
+        tv_nsec: timeout.subsec_nanos().into(),
+    };
+    rustix::event::poll(&mut fds, Some(&wait))
         .map_err(|e| ProcError::Failed(HostError::errno("poll", pid, errno_of(e))))?;
-    pidfd_poll_answer(pid, fds[0].revents())
+    let answer = pidfd_poll_answer(pid, fds[0].revents())?;
+    if answer == PidfdPoll::Readable && pidfd_released(pid, pidfd)? {
+        Ok(PidfdPoll::Hangup)
+    } else {
+        Ok(answer)
+    }
 }
 
 /// How the readers reach process `pid`: its task listings, its pidfd and
@@ -742,6 +778,7 @@ fn process<'a>(
     impl FnMut() -> Polled + 'a,
     impl FnMut() -> StatusRead + 'a,
 > {
+    let mut polls = 0;
     Process {
         pid: pid.0,
         list: move || {
@@ -750,7 +787,24 @@ fn process<'a>(
                 || Ok(group_status(proc, pid)?.map(|status| status.threads)),
             )
         },
-        poll: move || poll_pidfd(pid, pidfd),
+        poll: move || {
+            let timeout = if polls == 0 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(2)
+            };
+            polls += 1;
+            let answer = poll_pidfd(pid, pidfd, timeout)?;
+            if timeout > Duration::ZERO && answer == PidfdPoll::Readable {
+                // A zombie makes poll return immediately. Give a task in
+                // the middle of release the same bounded pause before
+                // checking the held pidfd once more.
+                thread::sleep(timeout);
+                poll_pidfd(pid, pidfd, Duration::ZERO)
+            } else {
+                Ok(answer)
+            }
+        },
         status: move || group_status(proc, pid),
     }
 }
@@ -1370,7 +1424,7 @@ impl Host for LinuxHost {
 
     /// `status`, `uid_map` and the `fd` directory of a live task are read by
     /// number while the pidfd pins the process; a lookup that vanished
-    /// (`ENOENT`) is `Gone` only when the pidfd then reports a hang-up,
+    /// (`ENOENT`) is `Gone` only when the pidfd then confirms release,
     /// otherwise `Failed`. The live task is chosen by
     /// [`crate::tasks::owner_through_live_task`].
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
@@ -1411,10 +1465,12 @@ impl Host for LinuxHost {
         };
         match read() {
             Ok(status) => Ok(status),
-            Err(ProcError::Failed(e)) if is_vanished(&e) => match poll_pidfd(pid, &pidfd)? {
-                PidfdPoll::Hangup => Err(ProcError::Gone),
-                PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::Failed(e)),
-            },
+            Err(ProcError::Failed(e)) if is_vanished(&e) => {
+                match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                    PidfdPoll::Hangup => Err(ProcError::Gone),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::Failed(e)),
+                }
+            }
             Err(e) => Err(e),
         }
     }
@@ -1635,18 +1691,30 @@ impl Delete for LinuxHost {
     }
 }
 
-/// `dir` itself, opened anew `O_RDONLY | O_DIRECTORY`: `.` below `dir`
+/// `dir` itself, opened anew `O_RDONLY | O_DIRECTORY | O_NOATIME`: `.` below `dir`
 /// names `dir`, so nothing is resolved and no symlink or mount can be met,
 /// and `dir` may be an `O_PATH` fd. A fresh open also gives a listing its own
-/// position (the fd's would be shared with any dup of it).
+/// position (the fd's would be shared with any dup of it). If the caller
+/// does not own the directory, Linux rejects `O_NOATIME` with `EPERM`; retry
+/// without it so a readable directory remains listable.
 fn reopen_readable(dir: &LinuxFd, subject: &str) -> Result<OwnedFd, HostError> {
-    rustix::fs::openat(
-        dir,
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
+    let base = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    open_with_noatime(base, |flags| {
+        rustix::fs::openat(dir, ".", flags, Mode::empty())
+    })
     .map_err(|e| HostError::errno("open", format!("{subject}/."), errno_of(e)))
+}
+
+/// Retry only the documented ownership/capability refusal. Other open
+/// errors must reach the caller unchanged, especially a vanished directory.
+fn open_with_noatime<T>(
+    base: OFlags,
+    mut open: impl FnMut(OFlags) -> rustix::io::Result<T>,
+) -> rustix::io::Result<T> {
+    match open(base | OFlags::NOATIME) {
+        Err(rustix::io::Errno::PERM) => open(base),
+        result => result,
+    }
 }
 
 /// The pre-release sandbox gate for deleting operation `op` on `subject`
@@ -2451,7 +2519,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
-    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
     use std::time::Instant;
 
     /// Serialises the tests that copy this process's fd table (spawning a
@@ -2472,6 +2540,52 @@ mod tests {
         FD_TABLE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Each child using this helper is spawned while the fd-table guard is
+    /// held. A failure to reach its expected exit cannot strand a child (or a copy
+    /// of another test's flock fd) across the remaining parallel tests.
+    struct GuardedChild {
+        child: Child,
+        reaped: bool,
+    }
+
+    impl GuardedChild {
+        fn spawn(command: &mut Command, _fd_table: &std::sync::MutexGuard<'_, ()>) -> Self {
+            Self {
+                child: command.spawn().expect("spawn test child"),
+                reaped: false,
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = self.child.try_wait()? {
+                    self.reaped = true;
+                    return Ok(status);
+                }
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("test child {} did not exit in 10 seconds", self.child.id()),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl Drop for GuardedChild {
+        fn drop(&mut self) {
+            if !self.reaped {
+                if let Ok(Some(_)) = self.child.try_wait() {
+                    return;
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
     }
 
     /// A fresh directory under the system temp dir, removed on drop.
@@ -2575,8 +2689,8 @@ mod tests {
     /// ends all the time (a task list that does not settle is, correctly,
     /// `Failed`). It runs this test binary's [`holder_process`].
     struct Holder {
-        child: Child,
-        stdout: BufReader<ChildStdout>,
+        child: GuardedChild,
+        _stdout: BufReader<ChildStdout>,
     }
 
     impl Holder {
@@ -2592,7 +2706,8 @@ mod tests {
             let mut child = {
                 // Spawning copies this process's fd table until the exec.
                 let _fd_table = fd_table_guard();
-                Command::new(std::env::current_exe().expect("own executable"))
+                let mut command = Command::new(std::env::current_exe().expect("own executable"));
+                command
                     .args(HOLDER_ARGS)
                     .env(HOLDER_MODE, mode)
                     .env(HOLDER_FILE, file)
@@ -2602,30 +2717,40 @@ mod tests {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     // Inherited, so a holder that panics says why.
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .expect("spawn holder")
+                    .stderr(Stdio::inherit());
+                GuardedChild::spawn(&mut command, &_fd_table)
             };
-            let mut stdout = BufReader::new(child.stdout.take().expect("holder stdout"));
+            let mut stdout = BufReader::new(child.child.stdout.take().expect("holder stdout"));
             let mut line = String::new();
             while line.trim() != "ready" {
+                if stdout.buffer().is_empty() {
+                    let mut poll = [rustix::event::PollFd::new(stdout.get_ref(), PollFlags::IN)];
+                    let timeout = rustix::event::Timespec {
+                        tv_sec: 10,
+                        tv_nsec: 0,
+                    };
+                    let ready =
+                        rustix::event::poll(&mut poll, Some(&timeout)).expect("poll holder stdout");
+                    assert!(ready > 0, "the holder did not become ready in 10 seconds");
+                }
                 line.clear();
                 let n = stdout.read_line(&mut line).expect("read holder");
                 assert!(n > 0, "the holder ended before it was ready");
             }
-            Self { child, stdout }
+            Self {
+                child,
+                _stdout: stdout,
+            }
         }
 
         fn pid(&self) -> Pid {
-            Pid(self.child.id())
+            Pid(self.child.child.id())
         }
     }
 
     impl Drop for Holder {
         fn drop(&mut self) {
-            drop(self.child.stdin.take());
-            let mut rest = String::new();
-            let _ = self.stdout.read_to_string(&mut rest);
+            drop(self.child.child.stdin.take());
             let _ = self.child.wait();
         }
     }
@@ -2638,10 +2763,15 @@ mod tests {
         let Ok(mode) = std::env::var(HOLDER_MODE) else {
             return;
         };
+        let lock_held_file = mode == "flock";
         let hold = move || {
             let file = PathBuf::from(std::env::var_os(HOLDER_FILE).expect("holder file"));
             let dir = PathBuf::from(std::env::var_os(HOLDER_DIR).expect("holder dir"));
             let held = std::fs::File::open(&file).expect("open held file");
+            if lock_held_file {
+                rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                    .expect("holder flock");
+            }
             std::env::set_current_dir(&dir).expect("chdir");
             let mut out = std::io::stdout();
             out.write_all(b"ready\n").expect("write");
@@ -2651,7 +2781,7 @@ mod tests {
             drop(held);
         };
         match mode.as_str() {
-            "plain" => hold(),
+            "plain" | "flock" => hold(),
             "nondumpable" => {
                 rustix::process::set_dumpable_behavior(
                     rustix::process::DumpableBehavior::NotDumpable,
@@ -2949,6 +3079,30 @@ mod tests {
         let root = resolve(&host, Path::new("/"), Want::Directory).expect("resolve /");
         let space = host.statvfs(&root.fd).expect("statvfs");
         assert!(space.avail_bytes <= space.size_bytes, "{space:?}");
+    }
+
+    #[test]
+    fn read_dir_open_retries_only_noatime_permission_refusal() {
+        let base = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let mut calls = Vec::new();
+        let value = open_with_noatime(base, |flags| {
+            calls.push(flags);
+            if flags.contains(OFlags::NOATIME) {
+                Err(rustix::io::Errno::PERM)
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(value, Ok(7));
+        assert_eq!(calls, [base | OFlags::NOATIME, base]);
+
+        calls.clear();
+        let error: rustix::io::Result<()> = open_with_noatime(base, |flags| {
+            calls.push(flags);
+            Err(rustix::io::Errno::NOENT)
+        });
+        assert_eq!(error, Err(rustix::io::Errno::NOENT));
+        assert_eq!(calls, [base | OFlags::NOATIME]);
     }
 
     /// `read_dir` lists every name of a directory, from an `O_PATH` fd (as
@@ -3332,12 +3486,10 @@ mod tests {
 
         let gone = {
             let _fd_table = fd_table_guard();
-            let mut child = Command::new("/proc/self/exe")
-                .arg("--help")
-                .stdout(Stdio::null())
-                .spawn()
-                .expect("spawn");
-            let pid = Pid(child.id());
+            let mut command = Command::new("/proc/self/exe");
+            command.arg("--help").stdout(Stdio::null());
+            let mut child = GuardedChild::spawn(&mut command, &_fd_table);
+            let pid = Pid(child.child.id());
             child.wait().expect("wait");
             pid
         };
@@ -3453,13 +3605,13 @@ mod tests {
     fn a_process_that_is_gone_is_gone() {
         let _fd_table = fd_table_guard();
         let host = LinuxHost::new().expect("host setup");
-        let mut child = std::process::Command::new("/proc/self/exe")
+        let mut command = Command::new("/proc/self/exe");
+        command
             .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn");
-        let pid = Pid(child.id());
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = GuardedChild::spawn(&mut command, &_fd_table);
+        let pid = Pid(child.child.id());
         child.wait().expect("wait");
         assert_eq!(host.proc_maps(pid), Err(ProcError::Gone));
         assert_eq!(host.proc_fds(pid), Err(ProcError::Gone));
@@ -3470,20 +3622,20 @@ mod tests {
     /// A zombie child, not yet reaped: `pidfd_poll` says readable and its
     /// `status` shows it alone in its group, so it is Gone. (Pins the
     /// `POLLIN` branch: answering "running" there makes this `Failed`.) Once
-    /// reaped, a pidfd opened before says `POLLHUP` (Linux 6.9 and later).
+    /// reaped, a held pidfd says released on every supported kernel.
     #[test]
     fn an_unreaped_zombie_is_gone() {
         let host = LinuxHost::new().expect("host setup");
         let mut child = {
             let _fd_table = fd_table_guard();
-            Command::new("/proc/self/exe")
+            let mut command = Command::new("/proc/self/exe");
+            command
                 .arg("--help")
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn")
+                .stderr(Stdio::null());
+            GuardedChild::spawn(&mut command, &_fd_table)
         };
-        let pid = Pid(child.id());
+        let pid = Pid(child.child.id());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let status = group_status(host.root(), pid).expect("status of an unreaped child");
@@ -3494,21 +3646,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let pidfd = open_pidfd(pid).expect("a zombie has a pidfd");
-        assert_eq!(poll_pidfd(pid, &pidfd), Ok(PidfdPoll::Readable));
+        assert_eq!(
+            poll_pidfd(pid, &pidfd, Duration::ZERO),
+            Ok(PidfdPoll::Readable)
+        );
         assert_eq!(host.proc_fds(pid), Err(ProcError::Gone));
         assert_eq!(host.proc_links(pid, ProcLink::Cwd), Err(ProcError::Gone));
         assert_eq!(host.proc_maps(pid), Err(ProcError::Gone));
         assert_eq!(host.proc_environ(pid), Err(ProcError::Gone));
         child.wait().expect("reap");
-        let release = host.kernel_release().expect("release");
-        let version = diskgc_core::kernel::parse_release(&release).expect("version");
-        let hangup_since = diskgc_core::kernel::KernelVersion { major: 6, minor: 9 };
-        let after_reaping = poll_pidfd(pid, &pidfd);
-        if version >= hangup_since {
-            assert_eq!(after_reaping, Ok(PidfdPoll::Hangup), "{release}");
-        } else {
-            assert_eq!(after_reaping, Ok(PidfdPoll::Readable), "{release}");
-        }
+        assert_eq!(pidfd_released(pid, &pidfd), Ok(true));
+        assert_eq!(
+            poll_pidfd(pid, &pidfd, Duration::ZERO),
+            Ok(PidfdPoll::Hangup)
+        );
     }
 
     /// Round 9 regression on the real kernel: a process whose threads exec
@@ -3745,7 +3896,10 @@ mod tests {
             let task = format!("4242/task/{tid}");
             write(
                 &format!("{task}/stat"),
-                &format!("{tid} (x) S 1 1 1 0 -1 4194560 0"),
+                &format!(
+                    "{tid} (x) S 1 1 1 0 -1 4194560 {} 12345\n",
+                    ["0"; 12].join(" ")
+                ),
             );
             write(
                 &format!("{task}/maps"),
@@ -3781,7 +3935,11 @@ mod tests {
         let proc = host.root();
         assert_eq!(host.pids(), Ok(vec![Pid(4242)]));
         let pid = Pid(4242);
-        assert_eq!(task_ids(proc, pid), Ok(Some(vec![4242, 4243])));
+        let mut tids = task_ids(proc, pid)
+            .expect("task ids")
+            .expect("live process");
+        tids.sort_unstable();
+        assert_eq!(tids, vec![4242, 4243]);
         assert_eq!(
             group_status(proc, pid),
             Ok(Some(StatusFields {
@@ -3791,6 +3949,7 @@ mod tests {
         );
         let stat = read_task_stat(proc, pid, 4243).expect("stat");
         assert_eq!(stat.state, 'S');
+        assert_eq!(stat.start_ticks, 12345);
         let fds = task_fds(proc, pid, 4242).expect("fds");
         let status_ino = std::fs::metadata(dir.0.join("4242/status"))
             .expect("stat")
@@ -3932,7 +4091,7 @@ mod tests {
     #[test]
     fn the_engine_walks_here_but_its_delete_is_refused_by_the_gate() {
         use diskgc_core::engine::{
-            Candidate, DeleteOptions, End, Reason, Rules, WalkStop, delete, walk,
+            Candidate, DeleteOptions, End, Reason, Rules, WalkStop, delete_unchecked, walk,
         };
         sandbox::check().expect_err("this test must run outside a diskgc test container");
         let host = LinuxHost::new().expect("host setup");
@@ -3959,7 +4118,7 @@ mod tests {
         let candidate = Candidate::new(&parent, &path).expect("a name");
         let record = walk(&host, &candidate, &rules, None).expect("eligible");
         assert_eq!(record.entries(), 5);
-        let done = delete(&host, &candidate, &record, DeleteOptions::default());
+        let done = delete_unchecked(&host, &candidate, &record, DeleteOptions::default());
         match &done.end {
             End::GateRefused { path, error } => {
                 assert_eq!(error.cause, Cause::SandboxGate, "{error}");
@@ -4022,14 +4181,13 @@ mod tests {
 
     #[test]
     fn a_lock_conflicts_until_its_fd_is_closed() {
-        let _fd_table = fd_table_guard();
         let host = LinuxHost::new().expect("host setup");
         let dir = TempDir::new("flock");
-        let first = match host.flock_try(open_dir(&host, &dir.0), LockMode::Exclusive) {
-            Ok(TryLock::Acquired(locked)) => locked,
-            other => panic!("first lock: {other:?}"),
-        };
-        assert_eq!(first.mode(), LockMode::Exclusive);
+        // The holder takes its lock only after exec, in its own fd table.
+        // A parallel test's fork cannot inherit this fd and keep it alive
+        // after the holder exits. This removes one possible cause of the
+        // rare failure recorded in task-64 #37; its cause was not observed.
+        let holder = Holder::spawn("flock", &dir.0, &dir.0);
         let second = match host.flock_try(open_dir(&host, &dir.0), LockMode::Shared) {
             Ok(TryLock::Busy(fd)) => fd,
             other => panic!("second lock should be busy: {other:?}"),
@@ -4041,7 +4199,7 @@ mod tests {
             other => panic!("wait should time out: {other:?}"),
         };
         assert!(host.now().saturating_since(started) >= Duration::from_millis(50));
-        drop(first);
+        drop(holder);
         assert!(
             matches!(
                 host.flock_wait(second, LockMode::Exclusive, deadline),

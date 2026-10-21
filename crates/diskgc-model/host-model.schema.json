@@ -522,6 +522,13 @@
             "string",
             "null"
           ]
+        },
+        "replace_reusing_inode": {
+          "description": "Replace a file or directory with a fresh object deliberately assigned its\nold inode number. Simulates reuse after unlink for identity tests;\nthe old object must have no other names or open references.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

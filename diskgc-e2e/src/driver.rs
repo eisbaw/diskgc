@@ -453,7 +453,10 @@ fn delete<H: Delete>(
             return Ok(());
         }
     };
-    deleted(engine::delete(host, &candidate, &record, options), out);
+    deleted(
+        engine::delete_unchecked(host, &candidate, &record, options),
+        out,
+    );
     Ok(())
 }
 

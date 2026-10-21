@@ -1,6 +1,6 @@
 //! The executor (docs/architecture.md, The reclaim walk): one selected tier
 //! or configured ordered groups, with per-tier discovery and a shared host
-//! lock. Random ranking and best-fit order are still rejected by the CLI.
+//! lock. Ranking may use oldest, best-fit, or a seeded random order.
 //! Later tasks add deadlines with overruns and signals (task-54) and the
 //! index (task-31).
 //!
@@ -24,7 +24,7 @@
 //!   `fs` candidate ([`fs_kind::plan`]: the reclaim's discovery and
 //!   judgement), whatever the available space, and lists them in the order
 //!   [`ensure`] would take them (`oldest`: least recently built or changed
-//!   first), eligible first.
+//!   first; `best-fit`: estimated adaptive order), eligible first.
 //!
 //! Both start with [`privileges`] and checked tiers built by the caller.
 //!
@@ -36,29 +36,33 @@
 //! `Stopped(Failed)` errors of the run, which stop it;
 //! `Stopped(DeadlinePassed)` the deadline path.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
-use crate::config;
+use crate::config::{self, Order};
 use crate::docker_backend::{self, Binding, Bound, Storage};
-use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
+use crate::engine::{
+    Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below, may_be_networked,
+};
 use crate::fs_kind::{self, EntryFilter, Find};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno, Host, HostError,
-    MonoTime, Space, Timestamp,
+    MonoTime, MountEntry, Space, Timestamp,
 };
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
-use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library};
+use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, Where};
 use crate::report::{
     ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, PlanEntry, Report, SkipEntry, Status,
     after_lock_timeout, conclude, signed_bytes,
 };
-use crate::resolve::{ResolveError, Resolved, Want, resolve};
+use crate::resolve::{
+    ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
+};
 use crate::select::{self, Factor};
 use crate::units::{Size, format_bytes};
 
@@ -73,6 +77,8 @@ pub const SELECT_TIER: &str = "--select";
 pub struct Tier {
     pub group: String,
     pub name: String,
+    /// Candidate order within this tier. An explicit `--select` uses oldest.
+    pub order: Order,
     /// The expression, normalised (as `check` prints it).
     pub select: String,
     /// The source profile.
@@ -95,6 +101,72 @@ pub struct Tier {
     /// held in the tier's ordinary fields, so there is one source of truth.
     /// Empty for a single-source tier.
     pub fs_union: Vec<FsUnionSource>,
+    /// Bound protected source matches, shared by every tier of a policy.
+    pub protections: Vec<ProtectedSource>,
+    /// Raw source matches excluded from this term by overlap.
+    pub negated: Vec<NegatedSource>,
+}
+
+/// A protected source's raw find, with its own `where` deliberately omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedSource {
+    pub profile: String,
+    pub roots: Vec<PathBuf>,
+    pub kind: ProtectedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectedKind {
+    Fs(Box<Find>),
+    CargoTarget,
+}
+
+/// Bind all protection roots before planning or reclaim. Root mode must not
+/// silently expand a protected `{uid}` to uid 0.
+pub fn bind_protections(
+    config: &config::Config,
+    uid: u32,
+    allow_root: bool,
+) -> Result<Vec<ProtectedSource>, String> {
+    config.protect.iter().map(|entry| {
+        let Body::Source(source) = &config.library.get(&entry.profile)
+            .ok_or_else(|| format!("protect: unknown profile `{}`", entry.profile))?.body else {
+            return Err(format!("protect: `{}` is not a source", entry.profile));
+        };
+        if allow_root {
+            let uses_uid = entry.roots.iter().any(|root| root.contains("{uid}"))
+                || matches!(&source.finds, Finds::Paths { patterns, exclude, .. }
+                    if patterns.iter().chain(exclude).any(|path| path.contains("{uid}")));
+            if uses_uid {
+                return Err(format!("--allow-root refuses `{{uid}}` in protected profile `{}`: it would expand to root (uid 0), not to an owners: entry", entry.profile));
+            }
+        }
+        let kind = match &source.finds {
+            Finds::Paths { patterns, exclude, entry_type } => ProtectedKind::Fs(Box::new(
+                Find::with_excludes(patterns, exclude, *entry_type, &Where::default(), uid),
+            )),
+            Finds::CargoTargets => ProtectedKind::CargoTarget,
+            _ => return Err(format!("protect: `{}` has an unsupported kind", entry.profile)),
+        };
+        Ok(ProtectedSource {
+            profile: entry.profile.clone(),
+            roots: entry.roots.iter().map(|root| PathBuf::from(root.replace("{uid}", &uid.to_string()))).collect(),
+            kind,
+        })
+    }).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegatedSource {
+    pub profile: String,
+    pub source: NegatedKind,
+    pub roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NegatedKind {
+    Fs(Box<Find>),
+    CargoTarget,
 }
 
 /// One source contribution to a filesystem union. The same inode may be
@@ -106,6 +178,7 @@ pub struct FsUnionSource {
     pub roots: Vec<PathBuf>,
     pub idle: IdleWindow,
     pub checkouts: Checkouts,
+    pub negated: Vec<NegatedSource>,
 }
 
 /// A borrowed view of either the tier's first source or an additional
@@ -117,6 +190,7 @@ struct FsUnionSourceRef<'a> {
     roots: &'a [PathBuf],
     idle: IdleWindow,
     checkouts: Checkouts,
+    negated: &'a [NegatedSource],
 }
 
 impl Tier {
@@ -138,6 +212,7 @@ impl Tier {
                 before: self.idle_before,
             },
             checkouts: self.checkouts,
+            negated: &self.negated,
         }];
         sources.extend(self.fs_union.iter().map(|source| FsUnionSourceRef {
             profile: &source.profile,
@@ -145,6 +220,7 @@ impl Tier {
             roots: &source.roots,
             idle: source.idle,
             checkouts: source.checkouts,
+            negated: &source.negated,
         }));
         sources
     }
@@ -195,6 +271,7 @@ impl Tier {
             .map_err(|e| format!("group `{group}` tier `{}`: {e}", tier.name))?;
         selected.group = group.to_owned();
         selected.name = tier.name.clone();
+        selected.order = tier.order;
         Ok(selected)
     }
 
@@ -219,6 +296,13 @@ impl Tier {
             )?);
         }
         let mut first = terms.remove(0);
+        if !matches!(
+            first.action,
+            Action::Delete { .. } | Action::CargoLockProtocol
+        ) && (!first.negated.is_empty() || terms.iter().any(|term| !term.negated.is_empty()))
+        {
+            return Err(not_yet("!profile: with this source action", "task-16"));
+        }
         if !terms.is_empty() {
             if !matches!(first.source, SourceKind::Fs(_))
                 || !matches!(first.action, Action::Delete { .. })
@@ -247,6 +331,7 @@ impl Tier {
                         before: tier.idle_before,
                     },
                     checkouts: tier.checkouts,
+                    negated: tier.negated.clone(),
                 });
             }
             first.fs_union = extra;
@@ -263,13 +348,6 @@ impl Tier {
         uid: u32,
         not_yet: &impl Fn(&str, &str) -> String,
     ) -> Result<Tier, String> {
-        if let Some(factor) = term
-            .factors
-            .iter()
-            .find(|f| matches!(f, Factor::NotProfile(_)))
-        {
-            return Err(not_yet(&format!("`{factor}`"), "task-16"));
-        }
         let Some(Body::Source(source)) = library.get(&term.source).map(|p| &p.body) else {
             return Err(format!(
                 "--select `{expr}`: no source profile `{}`",
@@ -286,16 +364,52 @@ impl Tier {
             Finds::DockerImages => SourceKind::DockerImages,
         };
         let mut idle_before: Option<IdleFor> = None;
+        let mut negated = Vec::new();
         for factor in &term.factors {
-            let (name, negated) = match factor {
+            let (name, is_negated) = match factor {
                 Factor::Filter(name) => (name, false),
                 Factor::NotFilter(name) => (name, true),
-                Factor::NotProfile(_) => continue,
+                Factor::NotProfile(name) => {
+                    let Some(Body::Source(other)) = library.get(name).map(|p| &p.body) else {
+                        return Err(format!(
+                            "--select `{expr}`: no negated source profile `{name}`"
+                        ));
+                    };
+                    let source = match &other.finds {
+                        Finds::Paths {
+                            patterns,
+                            exclude,
+                            entry_type,
+                        } => NegatedKind::Fs(Box::new(Find::with_excludes(
+                            patterns,
+                            exclude,
+                            *entry_type,
+                            &crate::profile::Where::default(),
+                            uid,
+                        ))),
+                        Finds::CargoTargets => NegatedKind::CargoTarget,
+                        _ => return Err(not_yet(&format!("`!profile:{name}`"), "task-16")),
+                    };
+                    let roots = bound
+                        .get(name)
+                        .ok_or_else(|| {
+                            format!("--select `{expr}`: no bound roots for `!profile:{name}`")
+                        })?
+                        .iter()
+                        .map(|root| PathBuf::from(root.replace("{uid}", &uid.to_string())))
+                        .collect();
+                    negated.push(NegatedSource {
+                        profile: name.clone(),
+                        source,
+                        roots,
+                    });
+                    continue;
+                }
             };
             let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
                 return Err(format!("--select `{expr}`: no filter profile `{name}`"));
             };
-            if negated {
+            if is_negated {
                 if where_.predicates() == [crate::kind::PredicateName::IdleFor] {
                     let bound = where_.idle_for.expect("idle predicate present");
                     idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
@@ -352,6 +466,7 @@ impl Tier {
         Ok(Tier {
             group: SELECT_TIER.to_owned(),
             name: SELECT_TIER.to_owned(),
+            order: Order::Oldest,
             select: term.to_string(),
             profile: term.source.clone(),
             source: kind,
@@ -361,6 +476,8 @@ impl Tier {
             checkouts: source.checkouts,
             action: source.action.clone(),
             fs_union: Vec::new(),
+            protections: Vec::new(),
+            negated,
         })
     }
 }
@@ -400,6 +517,63 @@ fn oldest_first<T>(items: &mut [T], last_build: impl Fn(&T) -> Option<Timestamp>
         let last = last_build(item);
         (last.is_none(), last)
     });
+}
+
+/// A tier's remaining units. `oldest` consumes a deque in linear time;
+/// `best-fit` indexes each known estimate for logarithmic re-picks after
+/// every observed space sample. Unknown estimates retain discovery order
+/// after all known estimates. The key ranks singles before equal-size
+/// buckets by deletion count, then preserves discovery order.
+struct CandidateQueue<T> {
+    order: Order,
+    oldest: VecDeque<T>,
+    sized: BTreeMap<(u64, usize, usize), T>,
+    unknown: VecDeque<T>,
+}
+
+impl<T> CandidateQueue<T> {
+    fn new(
+        order: Order,
+        items: impl IntoIterator<Item = T>,
+        estimate: impl Fn(&T) -> Option<(u64, usize)>,
+    ) -> Self {
+        let mut queue = Self {
+            order,
+            oldest: VecDeque::new(),
+            sized: BTreeMap::new(),
+            unknown: VecDeque::new(),
+        };
+        for (index, item) in items.into_iter().enumerate() {
+            if order == Order::Oldest {
+                queue.oldest.push_back(item);
+            } else if let Some((bytes, deletions)) = estimate(&item) {
+                queue.sized.insert((bytes, deletions, index), item);
+            } else {
+                queue.unknown.push_back(item);
+            }
+        }
+        queue
+    }
+
+    fn is_empty(&self) -> bool {
+        self.oldest.is_empty() && self.sized.is_empty() && self.unknown.is_empty()
+    }
+
+    fn pop(&mut self, need: u64) -> Option<T> {
+        if self.order == Order::Oldest {
+            return self.oldest.pop_front();
+        }
+        let covering = self.sized.range((need, 0, 0)..).next().map(|(key, _)| *key);
+        let key = covering.or_else(|| {
+            let largest_size = self.sized.last_key_value()?.0.0;
+            self.sized
+                .range((largest_size, 0, 0)..)
+                .next()
+                .map(|(key, _)| *key)
+        });
+        key.and_then(|key| self.sized.remove(&key))
+            .or_else(|| self.unknown.pop_front())
+    }
 }
 
 /// Appends `entry` to the report's errors and logs it: no error reaches
@@ -499,26 +673,343 @@ fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
     }
 }
 
-/// Check every configured root without enumerating candidates. A missing
-/// root remains an empty source; an unsafe or unreadable root excludes its
-/// tier before any other tier is allowed to delete.
-fn preflight_roots<H: Host>(host: &H, tier: &Tier) -> Result<(), String> {
-    let roots = tier
-        .roots
-        .iter()
-        .chain(tier.fs_union.iter().flat_map(|source| &source.roots));
-    for root in roots {
-        match resolve(host, root, Want::Directory) {
+/// A foreign root cannot free space on PATH. Omit it from every source and
+/// negated source before discovery, including union terms. Fatal root errors
+/// still exclude the whole tier because discovery may be incomplete.
+struct RootPreflight {
+    errors: Vec<ErrorEntry>,
+    skipped: Vec<SkipEntry>,
+}
+
+impl RootPreflight {
+    fn filtered_tier(&self, tier: &Tier) -> Tier {
+        let foreign: HashSet<&Path> = self.skipped.iter().map(|s| s.candidate.as_path()).collect();
+        let mut filtered = tier.clone();
+        filtered
+            .roots
+            .retain(|root| !foreign.contains(root.as_path()));
+        for source in &mut filtered.negated {
+            source
+                .roots
+                .retain(|root| !foreign.contains(root.as_path()));
+        }
+        for source in &mut filtered.fs_union {
+            source
+                .roots
+                .retain(|root| !foreign.contains(root.as_path()));
+            for negated in &mut source.negated {
+                negated
+                    .roots
+                    .retain(|root| !foreign.contains(root.as_path()));
+            }
+        }
+        filtered
+    }
+}
+
+/// Check every source root against PATH's device before enumerating candidates.
+/// A missing root remains an empty source. A foreign root is reported and
+/// skipped while same-device roots proceed. An unsafe or unreadable root
+/// excludes its tier; all roots are checked before another tier may delete.
+/// Compare devices, not mount ids: a bind mount of the requested filesystem
+/// can free space on PATH.
+fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPreflight {
+    let mut roots = Vec::new();
+    roots.extend(tier.roots.iter().map(|root| (tier.profile.as_str(), root)));
+    for source in &tier.negated {
+        roots.extend(
+            source
+                .roots
+                .iter()
+                .map(|root| (source.profile.as_str(), root)),
+        );
+    }
+    for source in &tier.fs_union {
+        roots.extend(
+            source
+                .roots
+                .iter()
+                .map(|root| (source.profile.as_str(), root)),
+        );
+        for negated in &source.negated {
+            roots.extend(
+                negated
+                    .roots
+                    .iter()
+                    .map(|root| (negated.profile.as_str(), root)),
+            );
+        }
+    }
+    if roots.is_empty() {
+        return RootPreflight {
+            errors: Vec::new(),
+            skipped: Vec::new(),
+        };
+    }
+    // The root itself may be inside systemd's PrivateTmp. Reject it from
+    // its path components before resolve_in can open or stat any ancestor.
+    let mut errors = Vec::new();
+    let mut skipped = Vec::new();
+    roots.retain(|(profile, root)| {
+        if !fs_kind::path_in_private_tmp(root) {
+            return true;
+        }
+        errors.push(ErrorEntry {
+            tier: tier.name.clone(),
+            profile: (*profile).to_owned(),
+            candidate: root.display().to_string(),
+            message: format!(
+                "root {}: inside systemd PrivateTmp (systemd-private-*); misconfigured root; the tier is excluded",
+                root.display()
+            ),
+        });
+        false
+    });
+    if roots.is_empty() {
+        return RootPreflight { errors, skipped };
+    }
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            errors.push(run_error(
+                tier,
+                format!("cannot read mountinfo for root preflight: {error}; the tier is excluded"),
+            ));
+            return RootPreflight { errors, skipped };
+        }
+    };
+    for (profile, root) in roots {
+        let mut error = |message: String| {
+            errors.push(ErrorEntry {
+                tier: tier.name.clone(),
+                profile: profile.to_owned(),
+                candidate: root.display().to_string(),
+                message,
+            })
+        };
+        // A local bind mount can sit below an unsafe ancestor. Screen the
+        // full mount chain before resolve_in opens any of it.
+        if let Err(why) = screen_mount_chain(&mounts, root) {
+            error(format!(
+                "root {}: {why}; the tier is excluded",
+                root.display()
+            ));
+            continue;
+        }
+        match resolve_in(host, &mounts, root, Want::Directory) {
+            Ok(resolved) if resolved.stat.dev != requested_dev => skipped.push(SkipEntry {
+                tier: tier.name.clone(),
+                profile: profile.to_owned(),
+                candidate: root.clone(),
+                count: 1,
+                examples: Vec::new(),
+                reason: Reason::OtherFs.as_str(),
+            }),
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
-            Err(error) => {
-                return Err(format!(
-                    "root {}: {error} (misconfigured, or the environment changed); the tier is excluded",
+            Err(ResolveError::UnsafePath { why, .. }) => error(format!(
+                "root {}: unsafe_path (misconfigured, or the mounts changed): {why}; the tier is excluded",
+                root.display()
+            )),
+            Err(resolve_error) => {
+                error(format!(
+                    "root {}: {resolve_error} (misconfigured, or the environment changed); the tier is excluded",
                     root.display()
                 ));
             }
         }
     }
+    RootPreflight { errors, skipped }
+}
+
+/// Discover the complete raw match set. An unreadable or unsafe branch can
+/// hide a protected descendant, so it excludes the run instead of yielding
+/// a partial allow decision. A missing root is an empty match set.
+fn scan_protections<H: Host>(
+    host: &H,
+    protections: &[ProtectedSource],
+    deadline: Option<MonoTime>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut matches = Vec::new();
+    for protection in protections {
+        let mut refused = Vec::new();
+        match &protection.kind {
+            ProtectedKind::Fs(find) => {
+                let (found, stopped) = fs_kind::discover(host, &protection.roots, find, deadline);
+                if let Some(stop) = stopped {
+                    return Err(format!(
+                        "protect `{}` discovery stopped: {stop}",
+                        protection.profile
+                    ));
+                }
+                refused.extend(found.refused);
+                for (path, candidate) in found.candidates {
+                    match candidate {
+                        Ok(_) => matches.push(path),
+                        Err(skip) => refused.push(skip),
+                    }
+                }
+            }
+            ProtectedKind::CargoTarget => {
+                let found =
+                    cargo_target::discover(host, &protection.roots, deadline).map_err(|stop| {
+                        format!("protect `{}` discovery stopped: {stop}", protection.profile)
+                    })?;
+                refused.extend(found.refused);
+                matches.extend(found.targets.into_iter().map(|target| target.path));
+            }
+        }
+        for skip in refused {
+            if skip.reason == Reason::Missing && protection.roots.contains(&skip.path) {
+                continue;
+            }
+            return Err(format!(
+                "protect `{}` cannot prove matches at {}: {}",
+                protection.profile,
+                skip.path.display(),
+                skip
+            ));
+        }
+    }
+    Ok(matches)
+}
+
+/// Compare names and object identity. A same-device bind mount can expose a
+/// protected subtree under a different name, so lexical prefixes alone are
+/// insufficient. Each equal ancestor object supplies a pair of relative
+/// paths; those paths overlap exactly when the underlying subtrees overlap.
+fn overlaps_checked<H: Host>(
+    host: &H,
+    candidate: &Path,
+    matches: &[PathBuf],
+) -> Result<bool, String> {
+    overlaps_checked_until(host, candidate, matches, None)
+}
+
+fn overlaps_checked_until<H: Host>(
+    host: &H,
+    candidate: &Path,
+    matches: &[PathBuf],
+    deadline: Option<MonoTime>,
+) -> Result<bool, String> {
+    if matches.is_empty() {
+        return Ok(false);
+    }
+    if matches.iter().any(|path| select::overlaps(candidate, path)) {
+        return Ok(true);
+    }
+    // Preflight every ancestor before opening even the deepest path: a
+    // local bind mount can sit below a network or FUSE mount point.
+    let mounts = host
+        .mountinfo()
+        .map_err(|error| format!("cannot read mountinfo to prove overlap: {error}"))?;
+    let check_time = || {
+        if deadline.is_some_and(|end| host.now() >= end) {
+            Err(format!(
+                "overlap check timed out at {}",
+                candidate.display()
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    screen_overlap_mounts(&mounts, candidate, matches, check_time)?;
+    overlaps_with(candidate, matches, |path| {
+        check_time()?;
+        let at = resolve_in(host, &mounts, path, Want::Any)
+            .map_err(|error| format!("cannot prove overlap at {}: {error}", path.display()))?;
+        at.stat.dev_ino().ok_or_else(|| {
+            format!(
+                "cannot prove overlap at {}: statx omitted inode",
+                path.display()
+            )
+        })
+    })
+}
+
+fn screen_overlap_mounts(
+    mounts: &[MountEntry],
+    candidate: &Path,
+    matches: &[PathBuf],
+    mut check_time: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    for path in std::iter::once(candidate).chain(matches.iter().map(PathBuf::as_path)) {
+        for ancestor in path.ancestors() {
+            check_time()?;
+            let mount = mount_for(mounts, ancestor).map_err(|error| {
+                format!("cannot prove overlap at {}: {error}", ancestor.display())
+            })?;
+            if may_be_networked(&mount.fs_type) {
+                return Err(format!(
+                    "cannot prove overlap at {}: filesystem type {} may block on I/O",
+                    ancestor.display(),
+                    mount.fs_type
+                ));
+            }
+            if fs_kind::path_in_private_tmp(&mount.fs_root) {
+                return Err(format!(
+                    "cannot prove overlap at {}: mount {} is bound from systemd PrivateTmp root {}",
+                    ancestor.display(),
+                    mount.mount_point.display(),
+                    mount.fs_root.display()
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+fn overlaps_with(
+    candidate: &Path,
+    matches: &[PathBuf],
+    mut identity: impl FnMut(&Path) -> Result<DevIno, String>,
+) -> Result<bool, String> {
+    if matches.is_empty() {
+        return Ok(false);
+    }
+    if matches.iter().any(|path| select::overlaps(candidate, path)) {
+        return Ok(true);
+    }
+    let mut cache = HashMap::<PathBuf, DevIno>::new();
+    let mut cached_identity = |path: &Path| {
+        if let Some(id) = cache.get(path) {
+            return Ok(*id);
+        }
+        let id = identity(path)?;
+        cache.insert(path.to_owned(), id);
+        Ok(id)
+    };
+    let candidate_ancestors = ancestor_identities(candidate, &mut cached_identity)?;
+    let mut by_identity = HashMap::<DevIno, Vec<&PathBuf>>::new();
+    for (prefix, id) in &candidate_ancestors {
+        by_identity.entry(*id).or_default().push(prefix);
+    }
+    for protected in matches {
+        for (protected_prefix, protected_id) in
+            ancestor_identities(protected, &mut cached_identity)?
+        {
+            if let Some(candidate_prefixes) = by_identity.get(&protected_id) {
+                for candidate_prefix in candidate_prefixes {
+                    let candidate_suffix =
+                        candidate.strip_prefix(candidate_prefix).expect("ancestor");
+                    let protected_suffix =
+                        protected.strip_prefix(&protected_prefix).expect("ancestor");
+                    if select::overlaps(candidate_suffix, protected_suffix) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn ancestor_identities(
+    path: &Path,
+    identity: &mut impl FnMut(&Path) -> Result<DevIno, String>,
+) -> Result<Vec<(PathBuf, DevIno)>, String> {
+    path.ancestors()
+        .map(|ancestor| Ok((ancestor.to_owned(), identity(ancestor)?)))
+        .collect()
 }
 
 /// Brings `PATH`'s filesystem to the goal (see the module docs). Progress
@@ -695,14 +1186,39 @@ pub fn ensure<H: Delete>(
             return report;
         }
     }
+    let roots = preflight_roots(host, &request.tier, measured.dev);
+    report.skipped.extend(roots.skipped.iter().cloned());
+    for error in roots.errors.iter().cloned() {
+        record_error(&mut report, log, error);
+    }
+    if !report.errors.is_empty() {
+        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, &request.tier);
+        report.status = conclude(
+            Final::of(report.avail_after_bytes, measured.min),
+            false,
+            true,
+        );
+        return report;
+    }
+    let tier = roots.filtered_tier(&request.tier);
+    let protection_matches = match scan_protections(host, &request.tier.protections, deadline) {
+        Ok(matches) => matches,
+        Err(error) => {
+            record_error(&mut report, log, run_error(&request.tier, error));
+            report.avail_after_bytes =
+                final_sample(host, &measured, &mut report, log, &request.tier);
+            return report;
+        }
+    };
     let mut run = Reclaim {
         host,
-        tier: &request.tier,
+        tier: &tier,
         measured: &measured,
         deadline,
         tally_budget: request.tally_budget,
         command_ready,
         docker_bound: None,
+        protection_matches: &protection_matches,
         report: &mut report,
         log,
         deadline_hit: false,
@@ -736,6 +1252,16 @@ pub fn ensure_grouped<H: Delete>(
     let mut report = Report::new(Status::Error, Some(&request.path));
     if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
         return usage(report, log, "configuration has no tiers to run".to_owned());
+    }
+    if tiers
+        .iter()
+        .any(|tier| tier.protections != tiers[0].protections)
+    {
+        return usage(
+            report,
+            log,
+            "configured tiers have different protection policies".to_owned(),
+        );
     }
     for tier in tiers {
         match (&tier.source, &tier.action) {
@@ -803,6 +1329,14 @@ pub fn ensure_grouped<H: Delete>(
             return report;
         }
     }
+    let protection_matches = match scan_protections(host, &first.protections, deadline) {
+        Ok(matches) => matches,
+        Err(error) => {
+            record_error(&mut report, log, run_error(first, error));
+            report.avail_after_bytes = final_sample(host, &measured, &mut report, log, first);
+            return report;
+        }
+    };
     let mut prepared = Vec::with_capacity(tiers.len());
     for tier in tiers {
         if deadline.is_some_and(|end| host.now() >= end) {
@@ -814,11 +1348,17 @@ pub fn ensure_grouped<H: Delete>(
             );
             return report;
         }
-        if let Err(error) = preflight_roots(host, tier) {
-            record_error(&mut report, log, run_error(tier, error));
+        let roots = preflight_roots(host, tier, measured.dev);
+        report.skipped.extend(roots.skipped.iter().cloned());
+        if !roots.errors.is_empty() {
+            for error in roots.errors.iter().cloned() {
+                record_error(&mut report, log, error);
+            }
             prepared.push(None);
             continue;
         }
+        let filtered_tier = roots.filtered_tier(tier);
+        let tier = &filtered_tier;
         // Environmental checks of every tier finish under the host lock
         // before any tier may delete. The action rechecks volatile binding.
         let docker_argv = ["docker".to_owned()];
@@ -906,13 +1446,14 @@ pub fn ensure_grouped<H: Delete>(
                 }
             }
         }
-        prepared.push(Some((ready, docker_bound)));
+        prepared.push(Some((filtered_tier, ready, docker_bound)));
     }
     let mut deadline_hit = false;
-    for ((tier, tier_timeout), ready) in tiers.iter().zip(tier_timeouts).zip(prepared) {
-        let Some((ready, docker_bound)) = ready else {
+    for ((_, tier_timeout), ready) in tiers.iter().zip(tier_timeouts).zip(prepared) {
+        let Some((tier, ready, docker_bound)) = ready else {
             continue;
         };
+        let tier = &tier;
         let avail = match sample(host, &measured) {
             Ok(space) => space.avail_bytes,
             Err(error) => {
@@ -943,6 +1484,7 @@ pub fn ensure_grouped<H: Delete>(
             tally_budget: request.tally_budget,
             command_ready: ready,
             docker_bound,
+            protection_matches: &protection_matches,
             report: &mut report,
             log,
             deadline_hit: false,
@@ -993,6 +1535,29 @@ pub fn dry_run<H: Host>(
         Err(e) => return usage(report, log, e),
     };
     let tier = &request.tier;
+    let roots = preflight_roots(host, tier, measured.dev);
+    report.plan.extend(roots.skipped.iter().map(|skip| {
+        let mut entry = plan_entry(tier, &skip.candidate, Some(skip.reason), None);
+        entry.profile = skip.profile.clone();
+        entry
+    }));
+    if !roots.errors.is_empty() {
+        for error in roots.errors.iter().cloned() {
+            record_error(&mut report, log, error);
+        }
+        report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
+        return report;
+    }
+    let tier = roots.filtered_tier(tier);
+    let tier = &tier;
+    let protection_matches = match scan_protections(host, &tier.protections, deadline) {
+        Ok(matches) => matches,
+        Err(error) => {
+            record_error(&mut report, log, run_error(tier, error));
+            report.status = Status::Error;
+            return report;
+        }
+    };
     if matches!(
         tier.source,
         SourceKind::DockerBuildCache | SourceKind::DockerImages
@@ -1005,7 +1570,20 @@ pub fn dry_run<H: Host>(
                     tier.name,
                     candidate.display()
                 ));
-                report.plan.push(plan_entry(tier, &candidate, None, None));
+                let protected = match overlaps_checked(host, &candidate, &protection_matches) {
+                    Ok(protected) => protected,
+                    Err(error) => {
+                        record_error(&mut report, log, run_error(tier, error));
+                        report.status = Status::Error;
+                        return report;
+                    }
+                };
+                report.plan.push(plan_entry(
+                    tier,
+                    &candidate,
+                    protected.then_some(Reason::Protected.as_str()),
+                    None,
+                ));
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
@@ -1068,7 +1646,7 @@ pub fn dry_run<H: Host>(
             log,
         ),
         SourceKind::Fs(find) => {
-            if tier.fs_union.is_empty() {
+            if tier.fs_union.is_empty() && tier.negated.is_empty() {
                 plan_fs(
                     host,
                     tier,
@@ -1090,12 +1668,59 @@ pub fn dry_run<H: Host>(
         skipped,
         stopped,
     } = planned;
-    oldest_first(&mut eligible, |(last, _)| *last);
+    if tier.order == Order::Oldest {
+        oldest_first(&mut eligible, |(last, _)| *last);
+    } else {
+        // A dry run cannot observe what reclamation actually frees. Order
+        // the complete plan with estimated bytes and the initial sample.
+        log(&format!(
+            "{}: best-fit dry-run order uses estimates; actual reclaim order may differ",
+            tier.name
+        ));
+        let mut remaining = measured
+            .target
+            .saturating_sub(report.avail_before_bytes.expect("measured"));
+        let mut ordered = Vec::with_capacity(eligible.len());
+        let mut queue =
+            CandidateQueue::new(Order::BestFit, eligible, |(_, entry): &(_, PlanEntry)| {
+                entry.estimated_bytes.map(|bytes| (bytes, 1))
+            });
+        while let Some(item) = queue.pop(remaining) {
+            remaining = remaining.saturating_sub(item.1.estimated_bytes.unwrap_or(0));
+            ordered.push(item);
+        }
+        eligible = ordered;
+    }
+    let root_skips = std::mem::take(&mut report.plan);
     report.plan = eligible
         .into_iter()
         .map(|(_, e)| e)
         .chain(skipped)
         .collect();
+    for entry in &mut report.plan {
+        if entry.candidate.as_os_str().is_empty() {
+            continue;
+        }
+        let protected = match overlaps_checked(host, &entry.candidate, &protection_matches) {
+            Ok(protected) => protected,
+            Err(error) => {
+                record_error(&mut report, log, run_error(tier, error));
+                report.status = Status::Error;
+                report.plan.extend(root_skips);
+                return report;
+            }
+        };
+        if protected {
+            log(&format!(
+                "{} {}: skip protected (overlaps a protected source match)",
+                tier.name,
+                entry.candidate.display()
+            ));
+            entry.reason = Some(Reason::Protected.as_str());
+            entry.estimated_bytes = None;
+        }
+    }
+    report.plan.extend(root_skips);
     if let Some(stop) = stopped {
         if matches!(stop, Stop::DeadlinePassed { .. }) {
             report.status = Status::Deadline;
@@ -1108,7 +1733,7 @@ pub fn dry_run<H: Host>(
     }
     // Unmeasured: unknown, not the earlier sample.
     report.avail_after_bytes = final_sample(host, &measured, &mut report, log, tier);
-    report.held_by_deleted_files = held(host, &mut checker, measured.dev, log);
+    report.held_by_deleted_files = held(host, &mut checker, measured.dev, &measured.at.mount, log);
     report
 }
 
@@ -1134,7 +1759,7 @@ pub fn dry_run_grouped<H: Host>(
     for_tier.tier = first.clone();
     for_tier.timeout = bounded_tier_timeout(host, run_deadline, tier_timeouts[0]);
     let mut report = dry_run(host, &for_tier, owners, log);
-    if report.status == Status::UsageError {
+    if matches!(report.status, Status::UsageError | Status::Error) {
         return report;
     }
     if report.status == Status::Deadline {
@@ -1153,9 +1778,9 @@ pub fn dry_run_grouped<H: Host>(
         for_tier.tier = tier.clone();
         for_tier.timeout = bounded_tier_timeout(host, run_deadline, *timeout);
         let part = dry_run(host, &for_tier, owners, log);
-        if part.status == Status::UsageError {
+        if matches!(part.status, Status::UsageError | Status::Error) {
             report.errors.extend(part.errors);
-            report.status = Status::UsageError;
+            report.status = part.status;
             report.avail_after_bytes = part.avail_after_bytes;
             return report;
         }
@@ -1264,12 +1889,44 @@ fn plan_cargo<H: Host>(
             for skip in &misconfigured {
                 record_error(report, log, run_error(tier, excluded(skip)));
             }
+            let negated_matches = match scan_negated(host, &tier.negated, deadline) {
+                Ok(matches) => matches,
+                Err(error) => {
+                    record_error(report, log, run_error(tier, error));
+                    return Planned {
+                        eligible,
+                        skipped,
+                        stopped,
+                    };
+                }
+            };
             let targets = if misconfigured.is_empty() {
                 found.targets.as_slice()
             } else {
                 &[]
             };
             for target in targets {
+                let excluded =
+                    match excluded_by(host, &tier.negated, &negated_matches, &target.path) {
+                        Ok(excluded) => excluded,
+                        Err(error) => {
+                            record_error(report, log, run_error(tier, error));
+                            return Planned {
+                                eligible,
+                                skipped,
+                                stopped,
+                            };
+                        }
+                    };
+                if let Some(profile) = excluded {
+                    skipped.push(entry(&target.path, Some(Reason::Excluded.as_str()), None));
+                    log(&format!(
+                        "{}: {} overlaps !profile:{profile}",
+                        tier.name,
+                        target.path.display()
+                    ));
+                    continue;
+                }
                 if let Some(skip) = other_fs(target, dev) {
                     log_skip(log, tier, &skip);
                     skipped.push(entry(&target.path, Some(skip.reason.as_str()), None));
@@ -1501,6 +2158,147 @@ fn discover_fs_union<H: Host>(
     (candidates, refused, None)
 }
 
+/// Enumerate a negated source's raw matches. Its own `where` was removed
+/// during binding; any incomplete scan is an error, never an empty set.
+fn scan_negated<H: Host>(
+    host: &H,
+    sources: &[NegatedSource],
+    deadline: Option<MonoTime>,
+) -> Result<Vec<Vec<PathBuf>>, String> {
+    let mut all = Vec::with_capacity(sources.len());
+    for source in sources {
+        let mut paths = Vec::new();
+        match &source.source {
+            NegatedKind::Fs(find) => {
+                let (discovery, stopped) = fs_kind::discover(host, &source.roots, find, deadline);
+                if let Some(stop) = stopped {
+                    return Err(format!(
+                        "!profile:{} discovery stopped: {stop}",
+                        source.profile
+                    ));
+                }
+                if discovery.private_tmp != 0 {
+                    return Err(format!(
+                        "!profile:{} discovery skipped {} matching PrivateTmp path(s)",
+                        source.profile, discovery.private_tmp
+                    ));
+                }
+                for skip in discovery.refused {
+                    if skip.reason != Reason::Missing || !source.roots.contains(&skip.path) {
+                        return Err(format!(
+                            "!profile:{} discovery uncertain: {}",
+                            source.profile, skip.detail
+                        ));
+                    }
+                }
+                for (path, found) in discovery.candidates {
+                    match found {
+                        Ok(_) => paths.push(path),
+                        Err(skip) => {
+                            return Err(format!(
+                                "!profile:{} discovery uncertain: {}",
+                                source.profile, skip.detail
+                            ));
+                        }
+                    }
+                }
+            }
+            NegatedKind::CargoTarget => {
+                let discovery =
+                    cargo_target::discover(host, &source.roots, deadline).map_err(|stop| {
+                        format!("!profile:{} discovery stopped: {stop}", source.profile)
+                    })?;
+                for skip in discovery.refused {
+                    if skip.reason != Reason::Missing || !source.roots.contains(&skip.path) {
+                        return Err(format!(
+                            "!profile:{} discovery uncertain: {}",
+                            source.profile, skip.detail
+                        ));
+                    }
+                }
+                paths.extend(discovery.targets.into_iter().map(|target| target.path));
+            }
+        }
+        all.push(paths);
+    }
+    Ok(all)
+}
+
+fn excluded_by<H: Host>(
+    host: &H,
+    sources: &[NegatedSource],
+    matches: &[Vec<PathBuf>],
+    candidate: &Path,
+) -> Result<Option<String>, String> {
+    excluded_by_until(host, sources, matches, candidate, None)
+}
+
+fn excluded_by_until<H: Host>(
+    host: &H,
+    sources: &[NegatedSource],
+    matches: &[Vec<PathBuf>],
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Result<Option<String>, String> {
+    for (source, paths) in sources.iter().zip(matches) {
+        if overlaps_checked_until(host, candidate, paths, deadline)? {
+            return Ok(Some(source.profile.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Called by each kind while it still holds its candidate lock and before
+/// its final action. Protection is global; negation belongs to the selected
+/// source term. Uncertain discovery or identity stops the run.
+fn policy_skip<H: Host>(
+    host: &H,
+    protections: &[ProtectedSource],
+    negated: &[NegatedSource],
+    deadline: Option<MonoTime>,
+    path: &Path,
+) -> Result<Option<Skip>, Stop> {
+    let failed = |what: &'static str, detail: String| Stop::Failed {
+        path: path.to_owned(),
+        error: HostError::invalid(what, path.display(), detail),
+    };
+    let protected = scan_protections(host, protections, deadline)
+        .map_err(|error| failed("protect recheck", error))?;
+    if overlaps_checked_until(host, path, &protected, deadline)
+        .map_err(|error| failed("protect overlap", error))?
+    {
+        return Ok(Some(Skip::new(
+            Reason::Protected,
+            path.to_owned(),
+            "overlaps a protected match at final action check".to_owned(),
+        )));
+    }
+    let negated_matches =
+        scan_negated(host, negated, deadline).map_err(|error| failed("!profile recheck", error))?;
+    Ok(
+        excluded_by_until(host, negated, &negated_matches, path, deadline)
+            .map_err(|error| failed("!profile overlap", error))?
+            .map(|profile| {
+                Skip::new(
+                    Reason::Excluded,
+                    path.to_owned(),
+                    format!("overlaps !profile:{profile} at final action check"),
+                )
+            }),
+    )
+}
+
+fn scan_union_negated<H: Host>(
+    host: &H,
+    sources: &[FsUnionSourceRef<'_>],
+    deadline: Option<MonoTime>,
+) -> Result<Vec<Vec<Vec<PathBuf>>>, String> {
+    sources
+        .iter()
+        .map(|source| scan_negated(host, source.negated, deadline))
+        .collect()
+}
+
 fn union_checkouts(sources: &[FsUnionSourceRef<'_>], candidate: &FsUnionCandidate) -> Checkouts {
     if candidate
         .found_by
@@ -1571,6 +2369,13 @@ fn plan_fs_union<H: Host>(
     if !misconfigured.is_empty() {
         return planned;
     }
+    let negated_matches = match scan_union_negated(host, &sources, deadline) {
+        Ok(matches) => matches,
+        Err(error) => {
+            record_error(report, log, run_error(tier, error));
+            return planned;
+        }
+    };
     let mut checker = Checker::for_plan(rules);
     for candidate in &candidates {
         let checkouts = union_checkouts(&sources, candidate);
@@ -1589,6 +2394,26 @@ fn plan_fs_union<H: Host>(
         let mut selected = None;
         for (index, found) in &candidate.found_by {
             let source = &sources[*index];
+            let excluded =
+                match excluded_by(host, source.negated, &negated_matches[*index], &found.path) {
+                    Ok(excluded) => excluded,
+                    Err(error) => {
+                        record_error(report, log, run_error(tier, error));
+                        return planned;
+                    }
+                };
+            if let Some(profile) = excluded {
+                first_skip.get_or_insert((
+                    *index,
+                    found.path.as_path(),
+                    Skip::new(
+                        Reason::Excluded,
+                        found.path.clone(),
+                        format!("overlaps !profile:{profile}"),
+                    ),
+                ));
+                continue;
+            }
             let judge = fs_kind::Judge {
                 find: source.find,
                 rules: &rules,
@@ -1828,6 +2653,7 @@ fn held<H: Host>(
     host: &H,
     checker: &mut Checker<'_>,
     dev: Dev,
+    mount: &MountEntry,
     log: &mut dyn FnMut(&str),
 ) -> Vec<HeldEntry> {
     if checker.latest().is_none()
@@ -1844,7 +2670,20 @@ fn held<H: Host>(
     for note in scan.notes() {
         log(&format!("process scan: {note}"));
     }
-    scan.held_by_deleted_files(dev)
+    let mut devices = vec![dev];
+    if mount.fs_type == "btrfs" {
+        match host.mountinfo() {
+            Ok(mounts) => {
+                devices.extend(mounts.into_iter().filter_map(|other| {
+                    (other.fs_type == "btrfs" && other.source == mount.source).then_some(other.dev)
+                }));
+            }
+            Err(e) => log(&format!(
+                "held_by_deleted_files: cannot identify other btrfs subvolumes: {e}"
+            )),
+        }
+    }
+    scan.held_by_deleted_files_on(&devices)
         .into_iter()
         .map(|h| HeldEntry {
             pid: h.pid.0,
@@ -1863,6 +2702,7 @@ struct Reclaim<'a, 'l, H: Delete> {
     tally_budget: Option<Duration>,
     command_ready: Option<Ready>,
     docker_bound: Option<Bound>,
+    protection_matches: &'a [PathBuf],
     report: &'a mut Report,
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
@@ -1870,6 +2710,57 @@ struct Reclaim<'a, 'l, H: Delete> {
 }
 
 impl<H: Delete> Reclaim<'_, '_, H> {
+    /// Recheck immediately before entering a kind's reclaim protocol. A
+    /// changed or unreadable protected tree stops the entire run.
+    fn protected_before_reclaim(&mut self, candidate: &Path) -> bool {
+        if self.tier.protections.is_empty() {
+            return false;
+        }
+        match overlaps_checked_until(self.host, candidate, self.protection_matches, self.deadline) {
+            Ok(true) => {
+                self.skip(
+                    candidate,
+                    &Skip::new(
+                        Reason::Protected,
+                        candidate.to_owned(),
+                        "overlaps a protected match found before reclaim".to_owned(),
+                    ),
+                );
+                return true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.run_error(error);
+                return true;
+            }
+        }
+        match scan_protections(self.host, &self.tier.protections, self.deadline) {
+            Ok(matches) => {
+                match overlaps_checked_until(self.host, candidate, &matches, self.deadline) {
+                    Ok(true) => {
+                        self.skip(
+                            candidate,
+                            &Skip::new(
+                                Reason::Protected,
+                                candidate.to_owned(),
+                                "overlaps a protected match at deletion recheck".to_owned(),
+                            ),
+                        );
+                        true
+                    }
+                    Ok(false) => false,
+                    Err(error) => {
+                        self.run_error(error);
+                        true
+                    }
+                }
+            }
+            Err(error) => {
+                self.run_error(error);
+                true
+            }
+        }
+    }
     fn skip_docker(&mut self, candidate: &Path, reason: &'static str, detail: &str) {
         (self.log)(&format!(
             "{}: skip Docker backend: {reason}: {detail}",
@@ -1903,6 +2794,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         };
         let candidate = docker_candidate(self.tier, &bound);
+        if self.protected_before_reclaim(&candidate) {
+            return;
+        }
         let before = match sample(self.host, self.measured) {
             Ok(space) => space.avail_bytes,
             Err(error) => {
@@ -1942,6 +2836,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.tier_error(format!("recheck Docker backend: {error}"));
                 return;
             }
+        }
+        if self.protected_before_reclaim(&candidate) {
+            return;
         }
         let cwd = match resolve(self.host, Path::new("/"), Want::Directory) {
             Ok(cwd) => cwd,
@@ -2107,7 +3004,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         match &self.tier.source {
             SourceKind::CargoTarget => self.walk_cargo(&rules, &mut checker),
             SourceKind::Fs(find) => {
-                if self.tier.fs_union.is_empty() {
+                if self.tier.fs_union.is_empty() && self.tier.negated.is_empty() {
                     self.walk_fs(find, &rules, &mut checker);
                 } else {
                     self.walk_fs_union(&rules, &mut checker);
@@ -2115,8 +3012,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             SourceKind::DockerBuildCache | SourceKind::DockerImages => self.walk_docker(),
         }
-        self.report.held_by_deleted_files =
-            held(self.host, &mut checker, self.measured.dev, self.log);
+        self.report.held_by_deleted_files = held(
+            self.host,
+            &mut checker,
+            self.measured.dev,
+            &self.measured.at.mount,
+            self.log,
+        );
     }
 
     /// The end of the tally: the deadline and `--tally-budget`, whichever
@@ -2180,6 +3082,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if !self.refusals(&found.refused) {
             return;
         }
+        let negated_matches = match scan_negated(self.host, &self.tier.negated, self.deadline) {
+            Ok(matches) => matches,
+            Err(error) => return self.run_error(error),
+        };
+        if !self.tier.negated.is_empty() {
+            (self.log)(&format!(
+                "{}: {} negated profile(s), {} raw match(es) scanned before reclaim",
+                self.tier.name,
+                self.tier.negated.len(),
+                negated_matches.iter().map(Vec::len).sum::<usize>()
+            ));
+        }
         let tally_until = self.tally_until();
         // Two groups, in this order (docs/reference.md, `--tally-budget`):
         // the tallied targets, oldest first, then those the budget left
@@ -2189,6 +3103,42 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut tallied: Vec<(&Target, Tally)> = Vec::new();
         let mut untallied: Vec<&Target> = Vec::new();
         for target in &found.targets {
+            let protected = match overlaps_checked(self.host, &target.path, self.protection_matches)
+            {
+                Ok(protected) => protected,
+                Err(error) => return self.run_error(error),
+            };
+            if protected {
+                self.skip(
+                    &target.path,
+                    &Skip::new(
+                        Reason::Protected,
+                        target.path.clone(),
+                        "overlaps a protected match".to_owned(),
+                    ),
+                );
+                continue;
+            }
+            let excluded = match excluded_by(
+                self.host,
+                &self.tier.negated,
+                &negated_matches,
+                &target.path,
+            ) {
+                Ok(excluded) => excluded,
+                Err(error) => return self.run_error(error),
+            };
+            if let Some(profile) = excluded {
+                self.skip(
+                    &target.path,
+                    &Skip::new(
+                        Reason::Excluded,
+                        target.path.clone(),
+                        format!("overlaps !profile:{profile}"),
+                    ),
+                );
+                continue;
+            }
             if let Some(skip) = other_fs(target, self.measured.dev) {
                 self.skip(&target.path, &skip);
                 continue;
@@ -2207,11 +3157,17 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Err(stop) => return self.stop(&stop),
             }
         }
-        oldest_first(&mut tallied, |(_, tally)| tally.last_build);
-        let queue = tallied
-            .into_iter()
-            .map(|(target, tally)| (target, Some(tally)))
-            .chain(untallied.into_iter().map(|t| (t, None)));
+        if self.tier.order == Order::Oldest {
+            oldest_first(&mut tallied, |(_, tally)| tally.last_build);
+        }
+        let mut queue = CandidateQueue::new(
+            self.tier.order,
+            tallied
+                .into_iter()
+                .map(|(target, tally)| (target, Some(tally)))
+                .chain(untallied.into_iter().map(|t| (t, None))),
+            |(_, tally): &(_, Option<Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
+        );
         let mut avail = match sample(self.host, self.measured) {
             Ok(space) => space.avail_bytes,
             Err(e) => {
@@ -2220,9 +3176,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return self.run_error(e);
             }
         };
-        for (target, tally) in queue {
+        while !queue.is_empty() {
             if self.goal_reached(avail) {
                 return;
+            }
+            let (target, tally) = queue
+                .pop(self.measured.target.saturating_sub(avail))
+                .expect("nonempty candidate queue");
+            if self.protected_before_reclaim(&target.path) {
+                if self.run_stopped {
+                    return;
+                }
+                continue;
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
@@ -2245,17 +3210,28 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             // judged_last_build None: an accepted tally only orders; the
             // protocol's own recheck under the locks and the idle
             // requirement decide.
-            let done = cargo_target::reclaim(
+            let done = cargo_target::reclaim_checked(
                 self.host,
                 target,
-                None,
-                rules,
-                IdleWindow {
-                    at_least: self.tier.idle_for,
-                    before: self.tier.idle_before,
+                cargo_target::ReclaimPolicy {
+                    judged_last_build: None,
+                    rules,
+                    idle: IdleWindow {
+                        at_least: self.tier.idle_for,
+                        before: self.tier.idle_before,
+                    },
+                    deadline: self.deadline,
                 },
                 checker,
-                self.deadline,
+                &mut |path| {
+                    policy_skip(
+                        self.host,
+                        &self.tier.protections,
+                        &self.tier.negated,
+                        self.deadline,
+                        path,
+                    )
+                },
             );
             let held = format!(
                 ", Cargo locks held {} ms",
@@ -2320,6 +3296,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut tallied: Vec<(&fs_kind::Found, fs_kind::Tally)> = Vec::new();
         let mut untallied: Vec<&fs_kind::Found> = Vec::new();
         for (path, candidate) in &found.candidates {
+            let protected = match overlaps_checked(self.host, path, self.protection_matches) {
+                Ok(protected) => protected,
+                Err(error) => return self.run_error(error),
+            };
+            if protected {
+                self.skip(
+                    path,
+                    &Skip::new(
+                        Reason::Protected,
+                        path.clone(),
+                        "overlaps a protected match".to_owned(),
+                    ),
+                );
+                continue;
+            }
             let found = match candidate {
                 Ok(found) => found,
                 Err(skip) => {
@@ -2341,18 +3332,33 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Err(stop) => return self.stop(&stop),
             }
         }
-        oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
-        let queue = tallied
-            .into_iter()
-            .map(|(found, tally)| (found, Some(tally)))
-            .chain(untallied.into_iter().map(|f| (f, None)));
+        if self.tier.order == Order::Oldest {
+            oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
+        }
+        let mut queue = CandidateQueue::new(
+            self.tier.order,
+            tallied
+                .into_iter()
+                .map(|(found, tally)| (found, Some(tally)))
+                .chain(untallied.into_iter().map(|f| (f, None))),
+            |(_, tally): &(_, Option<fs_kind::Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
+        );
         let mut avail = match sample(self.host, self.measured) {
             Ok(space) => space.avail_bytes,
             Err(e) => return self.run_error(e),
         };
-        for (found, tally) in queue {
+        while !queue.is_empty() {
             if self.goal_reached(avail) {
                 return;
+            }
+            let (found, tally) = queue
+                .pop(self.measured.target.saturating_sub(avail))
+                .expect("nonempty candidate queue");
+            if self.protected_before_reclaim(&found.path) {
+                if self.run_stopped {
+                    return;
+                }
+                continue;
             }
             if self.past_deadline() {
                 self.deadline_hit = true;
@@ -2383,13 +3389,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let started = self.host.now();
             let outcome = match action {
                 Action::Delete { make_writable } => {
-                    let done = fs_kind::reclaim(
+                    let done = fs_kind::reclaim_alternatives_checked(
                         self.host,
-                        &judge,
-                        found,
+                        &[fs_kind::Alternative { judge, found }],
                         *make_writable,
                         checker,
                         self.deadline,
+                        &mut |_, path| {
+                            policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
+                        },
                     );
                     Outcome {
                         started,
@@ -2402,19 +3410,24 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 }
                 Action::Command { argv, cwd } => {
                     let ready = self.command_ready.as_ref().expect("command preflighted");
-                    let done = fs_kind::run_command(
+                    let done = fs_kind::run_command_checked(
                         self.host,
                         &judge,
                         found,
-                        ready,
-                        argv,
-                        *cwd,
                         checker,
-                        self.measured.target.saturating_sub(avail),
-                        &self.measured.at.mount.mount_point,
-                        &self.tier.profile,
-                        format!("{}/{}", self.tier.name, self.tier.profile),
-                        self.deadline,
+                        fs_kind::CommandSpec {
+                            ready,
+                            argv,
+                            cwd: *cwd,
+                            need_bytes: self.measured.target.saturating_sub(avail),
+                            mount: &self.measured.at.mount.mount_point,
+                            profile: &self.tier.profile,
+                            output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+                            deadline: self.deadline,
+                        },
+                        &mut |path| {
+                            policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
+                        },
                     );
                     Outcome {
                         started,
@@ -2467,10 +3480,43 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if misconfigured {
             return;
         }
+        let negated_matches = match scan_union_negated(self.host, &sources, self.deadline) {
+            Ok(matches) => matches,
+            Err(error) => return self.run_error(error),
+        };
+        let negated_count: usize = sources.iter().map(|source| source.negated.len()).sum();
+        if negated_count != 0 {
+            (self.log)(&format!(
+                "{}: {} negated profile(s), {} raw match(es) scanned before reclaim",
+                self.tier.name,
+                negated_count,
+                negated_matches
+                    .iter()
+                    .flatten()
+                    .map(Vec::len)
+                    .sum::<usize>()
+            ));
+        }
         let tally_until = self.tally_until();
         let mut tallied: Vec<(&FsUnionCandidate, fs_kind::Tally)> = Vec::new();
         let mut untallied: Vec<&FsUnionCandidate> = Vec::new();
         for candidate in &candidates {
+            let path = &candidate.found_by[0].1.path;
+            let protected = match overlaps_checked(self.host, path, self.protection_matches) {
+                Ok(protected) => protected,
+                Err(error) => return self.run_error(error),
+            };
+            if protected {
+                self.skip(
+                    path,
+                    &Skip::new(
+                        Reason::Protected,
+                        path.clone(),
+                        "overlaps a protected match".to_owned(),
+                    ),
+                );
+                continue;
+            }
             if !untallied.is_empty() {
                 untallied.push(candidate);
                 continue;
@@ -2490,6 +3536,27 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let mut budget_exhausted = false;
             for (index, found) in &candidate.found_by {
                 let source = &sources[*index];
+                let excluded = match excluded_by(
+                    self.host,
+                    source.negated,
+                    &negated_matches[*index],
+                    &found.path,
+                ) {
+                    Ok(excluded) => excluded,
+                    Err(error) => return self.run_error(error),
+                };
+                if let Some(profile) = excluded {
+                    first_skip.get_or_insert((
+                        *index,
+                        found.path.as_path(),
+                        Skip::new(
+                            Reason::Excluded,
+                            found.path.clone(),
+                            format!("overlaps !profile:{profile}"),
+                        ),
+                    ));
+                    continue;
+                }
                 let judge = fs_kind::Judge {
                     find: source.find,
                     rules: &rules,
@@ -2521,20 +3588,35 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.skip_as(path, sources[index].profile, &skip);
             }
         }
-        oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
-        let queue = tallied
-            .into_iter()
-            .map(|(candidate, tally)| (candidate, Some(tally)))
-            .chain(untallied.into_iter().map(|candidate| (candidate, None)));
+        if self.tier.order == Order::Oldest {
+            oldest_first(&mut tallied, |(_, tally)| tally.newest_change);
+        }
+        let mut queue = CandidateQueue::new(
+            self.tier.order,
+            tallied
+                .into_iter()
+                .map(|(candidate, tally)| (candidate, Some(tally)))
+                .chain(untallied.into_iter().map(|candidate| (candidate, None))),
+            |(_, tally): &(_, Option<fs_kind::Tally>)| tally.as_ref().map(|t| (t.bytes, 1)),
+        );
         let mut avail = match sample(self.host, self.measured) {
             Ok(space) => space.avail_bytes,
             Err(error) => return self.run_error(error),
         };
-        for (candidate, tally) in queue {
+        while !queue.is_empty() {
             if self.goal_reached(avail) {
                 return;
             }
+            let (candidate, tally) = queue
+                .pop(self.measured.target.saturating_sub(avail))
+                .expect("nonempty candidate queue");
             let path = &candidate.found_by[0].1.path;
+            if self.protected_before_reclaim(path) {
+                if self.run_stopped {
+                    return;
+                }
+                continue;
+            }
             if self.past_deadline() {
                 self.deadline_hit = true;
                 (self.log)(&format!(
@@ -2577,12 +3659,22 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let Action::Delete { make_writable } = self.tier.action else {
                 unreachable!("filesystem unions admit only delete")
             };
-            let done = fs_kind::reclaim_alternatives(
+            let done = fs_kind::reclaim_alternatives_checked(
                 self.host,
                 &alternatives,
                 make_writable,
                 checker,
                 self.deadline,
+                &mut |selected, path| {
+                    let source = &sources[candidate.found_by[selected].0];
+                    policy_skip(
+                        self.host,
+                        &self.tier.protections,
+                        source.negated,
+                        self.deadline,
+                        path,
+                    )
+                },
             );
             let profile = done
                 .selected
@@ -2715,4 +3807,115 @@ struct Outcome {
     end: ReclaimEnd,
     /// Appended to the action's log line.
     note: String,
+}
+
+#[cfg(test)]
+mod best_fit_tests {
+    use super::{
+        CandidateQueue, Dev, DevIno, MountEntry, Order, overlaps_with, screen_overlap_mounts,
+    };
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn covering_fallback_and_bucket_ties() {
+        let estimates = [Some((8, 2)), Some((4, 1)), Some((8, 1)), None];
+        let mut queue = CandidateQueue::new(Order::BestFit, estimates, |unit| *unit);
+        assert_eq!(queue.pop(3), Some(Some((4, 1))));
+        assert_eq!(queue.pop(6), Some(Some((8, 1))));
+        assert_eq!(queue.pop(9), Some(Some((8, 2))));
+        assert_eq!(queue.pop(1), Some(None));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn oldest_and_unknown_estimates_keep_their_input_order() {
+        let units = [(0, None), (1, Some((4, 1))), (2, None), (3, Some((4, 1)))];
+        let mut oldest = CandidateQueue::new(Order::Oldest, units, |(_, estimate)| *estimate);
+        let oldest_ids: Vec<_> = (0..4).map(|_| oldest.pop(100).unwrap().0).collect();
+        assert_eq!(oldest_ids, [0, 1, 2, 3]);
+
+        let mut best_fit = CandidateQueue::new(Order::BestFit, units, |(_, estimate)| *estimate);
+        let fit_ids: Vec<_> = (0..4).map(|_| best_fit.pop(100).unwrap().0).collect();
+        assert_eq!(fit_ids, [1, 3, 0, 2]);
+    }
+
+    #[test]
+    fn overlap_follows_same_device_bind_aliases() {
+        let id = |path: &Path| -> Result<DevIno, String> {
+            let ino = match path.to_str().unwrap() {
+                "/" => 1,
+                "/work" | "/alias" => 10,
+                "/work/build" | "/alias/build" => 11,
+                "/work/build/cache" | "/alias/build/cache" => 12,
+                "/work/other" | "/alias/other" => 13,
+                other => return Err(format!("unexpected path {other}")),
+            };
+            Ok(DevIno {
+                dev: Dev { major: 8, minor: 1 },
+                ino,
+            })
+        };
+        assert!(
+            overlaps_with(
+                Path::new("/work/build"),
+                &[PathBuf::from("/alias/build/cache")],
+                id
+            )
+            .unwrap()
+        );
+        assert!(
+            !overlaps_with(
+                Path::new("/work/other"),
+                &[PathBuf::from("/alias/build/cache")],
+                id
+            )
+            .unwrap()
+        );
+        assert!(
+            overlaps_with(
+                Path::new("/work/build"),
+                &[PathBuf::from("/alias/build")],
+                id
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn overlap_identity_uncertainty_fails_closed() {
+        let error = overlaps_with(
+            Path::new("/work/build"),
+            &[PathBuf::from("/alias/build")],
+            |_| Err("cannot stat".to_owned()),
+        );
+        assert_eq!(error.unwrap_err(), "cannot stat");
+    }
+
+    #[test]
+    fn overlap_screens_network_ancestor_before_local_bind_root() {
+        let mount = |id, point: &str, fs_type: &str| MountEntry {
+            id,
+            parent_id: 1,
+            dev: Dev { major: 8, minor: 1 },
+            fs_root: PathBuf::from("/"),
+            mount_point: PathBuf::from(point),
+            fs_type: fs_type.to_owned(),
+            source: "fixture".to_owned(),
+            read_only: false,
+        };
+        let mounts = [
+            mount(1, "/", "ext4"),
+            mount(2, "/remote", "nfs"),
+            mount(3, "/remote/alias", "ext4"),
+        ];
+        let error = screen_overlap_mounts(
+            &mounts,
+            Path::new("/remote/alias/build"),
+            &[PathBuf::from("/protected/build")],
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("/remote"));
+        assert!(error.contains("nfs"));
+    }
 }

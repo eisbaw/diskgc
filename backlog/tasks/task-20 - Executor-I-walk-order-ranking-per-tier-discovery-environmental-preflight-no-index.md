@@ -3,10 +3,10 @@ id: TASK-20
 title: >-
   Executor I: walk order, ranking, per-tier discovery, environmental preflight
   (no index)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-20 12:49'
+updated_date: '2026-10-21 08:23'
 labels:
   - wave-2
   - irreversible
@@ -61,6 +61,14 @@ From task-80: executor::Tier carries the source profile's checkouts setting (one
 Compass root-mode finding (TASK21 AC5): {uid} currently expands from process UID 0 under --allow-root. Before config-group execution is enabled for root, define how each tier/source expands per authorized owner (one or many) and deduplicates overlapping candidates; reject ambiguous cases before the first action.
 
 2026-10-20 incremental configured-ensure slice: ordered groups/oldest tiers now compile and execute under one host lock, with preflight of all roots, command executables, and Docker bindings before first deletion; per-tier discovery and timeout; ModelHost trace tests and disposable container oracle E2E. Remaining TASK20 work: random ranking with report seed, best-fit ordering, and full acceptance/DoD gate. Root preflight resolves path safety but does not yet reject or report roots on a device other than requested PATH before the walk; kind discovery/tally still enforces same-filesystem matching before action, so this is a preflight/performance/reporting gap, not permission to delete elsewhere. Config protect and ipc live-only continue to fail closed until TASK16/TASK21 runtime enforcement.
+
+2026-10-20 integrated configured-tier slice: commit fdbbcff passed nix develop -c just e2e (Nix image 145/145, native Docker 6/6) and parallel QA/MPED reviews GO. Ordered groups and oldest tiers now execute under one host lock with all-tier preflight, per-tier discovery and deadline handling; tier-local dry-run timeout no longer stops later tiers. TASK20 remains open for random seed/report, best-fit, and remaining acceptance criteria.
+
+2026-10-21 adaptive best-fit candidate integrated: Cargo, fs and fs-union queues re-pick smallest tallied unit covering the remaining target, otherwise largest, after each observed space sample. Unknown estimates follow measured units; equal sizes prefer fewer deletions and stable discovery order. Dry-run reports only an estimate-based approximation. Pure selector test, Nix workspace all-targets check, fmt and diff checks passed in isolated tree; model/E2E tests, integrated gate and independent review pending. Bucket ranking is structurally supported but unverified until bucket units exist. TASK20 AC/DoD remain open.
+
+2026-10-21 device-root preflight candidate integrated: before first deletion, check each configured source root including fs-union terms against requested PATH device using safe mountinfo-aware resolution; same-device bind aliases are allowed and foreign, unsafe or networked roots exclude the tier with source-attributed errors. A foreign root containing a nested mount of the requested device must be configured as that nested root explicitly. Initial focused ModelHost checks passed but final edits and combined tests are unverified under no-deletion and build-cache isolation constraints; AC/DoD remain open.
+
+2026-10-21 integrated verification: best-fit, seeded random order, grouped preflight, and mixed-device root skip paths passed full just e2e (152/152 Nix containers, 6/6 Docker) and parallel QA/MPED review. Unsafe roots still exclude the tier; foreign roots are skipped before discovery so a same-device sibling root can run. Acceptance/DoD trace review remains open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -52,7 +52,7 @@ pub use eligible::{
     Eligible, ProfileWalk, Tally, eligibility, judge_layout, last_build, tally, walk_profiles,
 };
 pub use evidence::cargo_evidence;
-pub use reclaim::{LOCK_ORDER, Reclaimed, reclaim};
+pub use reclaim::{LOCK_ORDER, ReclaimPolicy, Reclaimed, reclaim, reclaim_checked};
 
 /// Shared with the `fs` kind ([`crate::outcome`]); named here too, where
 /// the Cargo kind's callers have always found them.
