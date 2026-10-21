@@ -14,6 +14,10 @@ diskgc-core.workspace = true
 diskgc-linux.workspace = true
 getrandom.workspace = true
 
+[features]
+# Catalog preparation only. This never lifts diskgc-linux's sandbox gate.
+proposed-release-01-catalog = []
+
 [dev-dependencies]
 # Test-only: reads the binary's --json output back.
 serde_json.workspace = true

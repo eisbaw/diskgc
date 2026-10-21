@@ -821,6 +821,10 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             // On Linux its OS entropy read does not write or delete files.
             "getrandom.workspace = true",
             "workspace: getrandom = \"0.4\"",
+            // This narrows the CLI catalog only. It does not enable the
+            // separate Linux sandbox-gate release feature.
+            "[features]",
+            "proposed-release-01-catalog = []",
         ],
     ),
     // Reviewed for task-8 (YAML profile schema) and task-73 (Cursor's

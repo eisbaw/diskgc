@@ -338,6 +338,53 @@ impl Library {
         Self::load(BUILTIN_YAML, user)
     }
 
+    /// A conservative proposed 0.1 catalog. TASK65 has not signed off a
+    /// deletion-safe `/tmp` source, so this currently admits Cargo and the
+    /// inert idle filters only. A release package must opt into this policy
+    /// explicitly; the development library still exposes the full catalog.
+    ///
+    /// Reject all operator-authored profiles, including overrides of an
+    /// allowed name. A name-only allowlist would otherwise admit a command
+    /// action or an arbitrary filesystem delete under `cargo-target`.
+    pub fn proposed_release_01(mut self) -> Result<Self, String> {
+        if let Some(profile) = self.profiles.values().find(|p| p.origin != Origin::BuiltIn) {
+            return Err(format!(
+                "proposed 0.1 catalog refuses operator-authored profile `{}` (including overrides)",
+                profile.name
+            ));
+        }
+        const ALLOWED: &[&str] = &[
+            "cargo-target",
+            "idle-1h",
+            "idle-1d",
+            "idle-2d",
+            "idle-3d",
+            "idle-7d",
+            "idle-10d",
+            "idle-30d",
+        ];
+        for name in ALLOWED {
+            let profile = self.profiles.get(*name).ok_or_else(|| {
+                format!("proposed 0.1 catalog is missing required built-in `{name}`")
+            })?;
+            let expected = if *name == "cargo-target" {
+                matches!(&profile.body, Body::Source(source)
+                    if source.kind() == crate::kind::Kind::CargoTarget
+                        && source.action == Action::CargoLockProtocol)
+            } else {
+                matches!(&profile.body, Body::Filter(_))
+            };
+            if !expected {
+                return Err(format!(
+                    "proposed 0.1 catalog built-in `{name}` has an unexpected kind or action"
+                ));
+            }
+        }
+        self.profiles
+            .retain(|name, _| ALLOWED.contains(&name.as_str()));
+        Ok(self)
+    }
+
     /// [`Self::with_user_profiles`] over other built-in YAML (tests).
     pub(crate) fn load(builtin_yaml: &str, user: &[ProfileSpec]) -> Result<Self, LoadErrors> {
         load::library(builtin_yaml, user).map(|profiles| Self { profiles })

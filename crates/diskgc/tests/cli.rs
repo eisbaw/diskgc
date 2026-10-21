@@ -16,7 +16,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 use diskgc_core::config;
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 use diskgc_core::profile::Library;
 use serde_json::Value;
 
@@ -187,6 +189,7 @@ fn a_missing_given_config_is_exit_2() {
     );
 }
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
     let tmp = TempDir::new("check-valid");
@@ -207,6 +210,7 @@ fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
     );
 }
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {
     let tmp = TempDir::new("check-warning");
@@ -329,6 +333,7 @@ fn inventory(root: &Path) -> Vec<(PathBuf, u64)> {
 /// same inode, afterwards. The same for a kind `fs` reclaim (task-18): a
 /// user profile of the config, `roots: required`, given the same temp
 /// directory, which holds an old plain directory it finds.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate() {
     let tmp = TempDir::new("gate");
@@ -555,6 +560,7 @@ fn json_anywhere_gives_one_object() {
 }
 
 /// The built-in profiles, as the binary's library has them.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 fn builtin() -> Library {
     Library::builtin().expect("the built-in profiles load")
 }
@@ -564,6 +570,7 @@ fn builtin() -> Library {
 /// here; a machine with `/etc/diskgc/config.yaml` installed (which the
 /// search reaches, whatever `$XDG_CONFIG_HOME` says) is compared with
 /// that file instead.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 fn expected_library(config: &Value) -> Library {
     match config.as_str() {
         None => builtin(),
@@ -576,6 +583,7 @@ fn expected_library(config: &Value) -> Library {
     }
 }
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 fn names(library: &Library) -> BTreeSet<String> {
     library.profiles().map(|p| p.name.clone()).collect()
 }
@@ -592,6 +600,7 @@ fn listed(list: &Value) -> BTreeSet<String> {
 }
 
 /// A config file holding user profiles, in a fresh temp dir.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 const USER_PROFILES: &str = "\
 version: 1
 profiles:
@@ -607,6 +616,7 @@ profiles:
     examples: {match: [/home/u/go-build]}
 ";
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 fn user_config(tmp: &TempDir) -> (PathBuf, Library) {
     let path = tmp.0.join("config.yaml");
     std::fs::write(&path, USER_PROFILES).expect("write");
@@ -620,6 +630,7 @@ fn user_config(tmp: &TempDir) -> (PathBuf, Library) {
 /// every built-in profile. The test iterates the library, so a new
 /// built-in is checked without editing the help text or this test; a
 /// help text that names profiles by hand fails as soon as one is added.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn help_names_every_built_in_profile() {
     let out = diskgc(&["--help"]);
@@ -650,9 +661,64 @@ fn help_names_every_built_in_profile() {
     }
 }
 
+/// Exercise the built binary with the proposed catalog feature, including
+/// the command paths that do not construct a Tier.
+#[cfg(feature = "proposed-release-01-catalog")]
+#[test]
+fn proposed_catalog_is_consistent_across_cli_surfaces() {
+    let help = diskgc(&["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let help = text(&help.stdout);
+    assert!(help.contains("cargo-target"));
+    assert!(!help.contains("docker-build-cache"));
+
+    let list = diskgc(&["profiles", "list", "--json"]);
+    assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
+    let names = listed(&json(&list));
+    assert_eq!(names.len(), 8, "{names:?}");
+    assert!(names.contains("cargo-target"));
+    assert!(!names.contains("docker-build-cache"));
+
+    let show = diskgc(&["profiles", "show", "docker-build-cache", "--json"]);
+    assert_eq!(show.status.code(), Some(2));
+    assert!(error_of(&show).contains("docker-build-cache"));
+
+    let tmp = TempDir::new("proposed-catalog");
+    let config = tmp.0.join("config.yaml");
+    std::fs::write(
+        &config,
+        "version: 1\ngroups:\n  - name: safe\n    tiers:\n      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: excluded\n    tiers:\n      - name: docker\n        select: profile:docker-build-cache\n",
+    )
+    .expect("write config");
+    let check = diskgc(&["check", "--config", config.to_str().expect("UTF-8")]);
+    assert_eq!(check.status.code(), Some(2));
+    assert!(text(&check.stderr).contains("docker-build-cache"));
+
+    let ensure = diskgc(&[
+        "ensure",
+        "--min-free",
+        "1G",
+        "--dry-run",
+        "--json",
+        "--select",
+        "profile:docker-build-cache",
+        "--roots",
+        "/nonexistent-diskgc-test",
+        "/nonexistent-diskgc-test",
+    ]);
+    assert_eq!(ensure.status.code(), Some(2));
+    assert!(
+        json(&ensure)["errors"][0]["message"]
+            .as_str()
+            .expect("message")
+            .contains("docker-build-cache")
+    );
+}
+
 /// task-92 AC #2 and #3: `profiles list --json` is one object listing the
 /// library's profiles, each once: the built-ins without a config file (no
 /// error), plus the config's user profiles with one.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn profiles_list_json_lists_the_library() {
     let out = diskgc(&["profiles", "list", "--json"]);
@@ -679,6 +745,7 @@ fn profiles_list_json_lists_the_library() {
 
 /// The human listing: one header and one row per profile, each row
 /// starting with its name.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn profiles_list_is_one_table_row_per_profile() {
     let tmp = TempDir::new("table");
@@ -722,6 +789,7 @@ fn profiles_list_is_one_table_row_per_profile() {
 /// `checkouts: allow`, roots required, the kind's fixed action, the tool
 /// versions; it takes no examples (`null`). A user fs profile's examples
 /// are shown, `match` and `no_match`.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn profiles_show_json_is_the_full_definition() {
     let out = diskgc(&["profiles", "show", "cargo-target", "--json"]);
@@ -868,6 +936,7 @@ fn profiles_usage_errors_are_exit_2() {
     }
 }
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn profiles_test_exits_one_on_failing_examples_in_human_and_json_modes() {
     let tmp = TempDir::new("profile-test");
@@ -893,6 +962,7 @@ fn profiles_test_exits_one_on_failing_examples_in_human_and_json_modes() {
     assert_eq!(data["failures"].as_array().unwrap().len(), 2);
 }
 
+#[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn profiles_test_passes_and_an_override_is_visible() {
     let tmp = TempDir::new("profile-override");

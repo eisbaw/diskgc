@@ -998,6 +998,17 @@ A built-in profile must satisfy the profile-specific
 Every row below is a v1 *target*; until verified it is
 listed as planned, not shipped.
 
+The optional `proposed-release-01-catalog` build feature is a preparation
+boundary, not a 0.1 release package. It keeps `cargo-target` and the seven
+idle filters, and rejects every operator-authored profile, including
+overrides. It also refuses configured tiers and `--select` expressions that
+refer to excluded built-ins, even during a dry run. `profiles list`,
+`profiles show`, `check` and help use the same narrowed library. No `/tmp`
+source is admitted yet: TASK65 has not established safe deletion of a live
+session with no open descriptor. The feature does not lift the pre-release
+sandbox gate. The final 0.1 catalog and operator-authored `fs` policy remain
+release decisions under TASK67.
+
 | Category | Profile | Finds | Action |
 |---|---|---|---|
 | test | `pytest-tmp` | planned: pytest's test directories `pytest-of-*/pytest-*/*`; a live pytest session can have no open descriptor in its test directory, and `tmp_path_retention_policy=none` omits the numbered session `.lock` | no safe action yet |

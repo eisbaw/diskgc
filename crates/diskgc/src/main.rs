@@ -36,6 +36,7 @@ use diskgc_core::host::Errno;
 use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{Report, Status};
+use diskgc_core::select;
 use diskgc_core::units::{Size, parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{read_config_file, read_root_config_file, resolve_owner};
@@ -430,12 +431,15 @@ fn load_config(
     for path in lookup.paths() {
         match read(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
-                let config = if for_profile_test {
+                let mut config = if for_profile_test {
                     config::parse_for_profile_test(path, &bytes)
                 } else {
                     config::parse(path, &bytes)
                 }
                 .map_err(|e| e.to_string())?;
+                if cfg!(feature = "proposed-release-01-catalog") {
+                    enforce_proposed_release_01_config(&mut config)?;
+                }
                 return Ok((lookup, Some(config)));
             }
             Err(e) if matches!(lookup, Lookup::Search(_)) && is_absent(&e) => continue,
@@ -443,6 +447,35 @@ fn load_config(
         }
     }
     Ok((lookup, None))
+}
+
+/// Recheck every configured tier against the narrowed catalog. Config
+/// parsing checked these expressions against the full embedded library;
+/// simply replacing that library would leave a previously checked Docker
+/// or command selection in a later tier. `--select` is checked separately
+/// against the same narrowed library by `Tier::select`.
+fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
+    let library = config.library.clone().proposed_release_01()?;
+    for group in &config.groups {
+        for tier in &group.tiers {
+            select::check(tier.select.expr().clone(), &library).map_err(|e| {
+                format!(
+                    "proposed 0.1 catalog refuses group `{}` tier `{}`: {e}",
+                    group.name, tier.name
+                )
+            })?;
+        }
+    }
+    for protected in &config.protect {
+        if library.get(&protected.profile).is_none() {
+            return Err(format!(
+                "proposed 0.1 catalog refuses protect profile `{}`",
+                protected.profile
+            ));
+        }
+    }
+    config.library = library;
+    Ok(())
 }
 
 /// `ensure`'s configuration: `None` when none is found and `--select`
@@ -794,7 +827,13 @@ fn ensure(args: &EnsureArgs) -> Report {
 /// The built-in profiles alone; an error is a bug in the shipped YAML
 /// (the tests load it).
 fn builtin_library() -> Result<Library, String> {
-    Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
+    let library = Library::builtin()
+        .map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))?;
+    if cfg!(feature = "proposed-release-01-catalog") {
+        library.proposed_release_01()
+    } else {
+        Ok(library)
+    }
 }
 
 /// `profiles list | show NAME | test`: the text or JSON for stdout, or why not
@@ -1322,6 +1361,140 @@ mod tests {
         let (tiers, _) =
             configured_tiers(&config, 1000, false, None).expect("best-fit is supported");
         assert_eq!(tiers[0].order, diskgc_core::config::Order::BestFit);
+    }
+
+    #[test]
+    fn proposed_catalog_keeps_only_cargo_and_idle_filters_on_every_listing_surface() {
+        let library = Library::builtin()
+            .expect("built-ins")
+            .proposed_release_01()
+            .expect("proposed catalog");
+        let names: Vec<_> = library
+            .profiles()
+            .map(|profile| profile.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "cargo-target",
+                "idle-10d",
+                "idle-1d",
+                "idle-1h",
+                "idle-2d",
+                "idle-30d",
+                "idle-3d",
+                "idle-7d"
+            ]
+        );
+        for surface in [
+            describe::list_text(&library),
+            describe::help_section(&library),
+        ] {
+            assert!(surface.contains("cargo-target"));
+            assert!(!surface.contains("docker-build-cache"));
+            assert!(!surface.contains("pip-cache"));
+            assert!(!surface.contains("pytest-cache"));
+        }
+        assert!(library.get("docker-build-cache").is_none());
+        assert!(library.get("pip-cache").is_none());
+        assert!(library.get("pytest-cache").is_none());
+    }
+
+    #[test]
+    fn proposed_catalog_refuses_excluded_select_before_a_tier_can_reach_a_backend() {
+        let all = Library::builtin().expect("built-ins");
+        let library = all.clone().proposed_release_01().expect("proposed catalog");
+        let roots = ["/tmp".to_owned()];
+        for profile in all
+            .profiles()
+            .filter(|profile| profile.role() == "source" && library.get(&profile.name).is_none())
+        {
+            let name = profile.name.as_str();
+            let error = Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000)
+                .expect_err(name);
+            assert!(error.contains(name), "{error}");
+        }
+        Tier::select(
+            "profile:cargo-target && filter:idle-3d",
+            &library,
+            Some(&roots),
+            1000,
+        )
+        .expect("Cargo remains selectable");
+    }
+
+    #[test]
+    fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
+        for excluded in ["docker-build-cache", "pip-cache", "pytest-cache"] {
+            let roots = if excluded == "docker-build-cache" {
+                ""
+            } else {
+                "        roots: [/tmp]\n"
+            };
+            let source = format!(
+                "version: 1\ngroups:\n  - name: first\n    tiers:\n      - name: safe\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: later\n    tiers:\n      - name: excluded\n        select: profile:{excluded}\n{roots}"
+            );
+            let mut config =
+                config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+                    .expect("valid full catalog policy");
+            let error = enforce_proposed_release_01_config(&mut config)
+                .expect_err("later tier must fail before execution");
+            assert!(
+                error.contains("later") && error.contains(excluded),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
+        let source = concat!(
+            "version: 1\nprofiles:\n",
+            "  - name: cargo-target\n    override: true\n",
+            "    kind: cargo-target\n    find: {roots: required}\n",
+            "groups:\n  - name: first\n    tiers:\n",
+            "      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n",
+        );
+        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("valid full catalog override");
+        let error = enforce_proposed_release_01_config(&mut config)
+            .expect_err("operator override must not impersonate approved Cargo");
+        assert!(
+            error.contains("operator-authored") && error.contains("cargo-target"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn proposed_catalog_refuses_user_command_action_before_selection() {
+        let source = concat!(
+            "version: 1\nprofiles:\n",
+            "  - name: custom-cleaner\n",
+            "    find: {roots: required, paths: [.cache/tool], type: dir}\n",
+            "    action: {command: [tool, clean, '{path}']}\n",
+            "    examples: {match: [/tmp/.cache/tool]}\n",
+            "groups:\n  - name: first\n    tiers:\n",
+            "      - name: cleaner\n        select: profile:custom-cleaner\n        roots: [/tmp]\n",
+        );
+        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
+            .expect("valid full catalog command policy");
+        let error = enforce_proposed_release_01_config(&mut config)
+            .expect_err("user command action must be refused before any backend");
+        assert!(
+            error.contains("operator-authored") && error.contains("custom-cleaner"),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "proposed-release-01-catalog")]
+    #[test]
+    fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
+        let library = builtin_library().expect("binary catalog");
+        assert_eq!(library.profiles().count(), 8);
+        assert!(library.get("docker-build-cache").is_none());
+        let error = Tier::select("profile:docker-build-cache", &library, None, 1000)
+            .expect_err("excluded source");
+        assert!(error.contains("docker-build-cache"), "{error}");
     }
 
     #[test]
