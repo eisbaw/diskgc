@@ -21,7 +21,7 @@
 //! (`sandbox::permit`) before anything else; see `impl Delete for
 //! LinuxHost`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -691,23 +691,102 @@ fn group_status(proc: ProcRoot<'_>, pid: Pid) -> Result<Option<StatusFields>, Pr
         .map_err(|e| ProcError::Failed(HostError::invalid("parse", ProcRoot::shown(&path), e)))
 }
 
-/// One [`Listing`]: the tasks (`list`), the thread count read right after
-/// them (`count`), and the tasks listed again right after the count. `None`
-/// as soon as one of them vanished.
-fn task_listing(
+/// One [`Listing`]: list numeric tids, pin their task directories, read the
+/// count, then list again and confirm that each pinned task still owns its
+/// numeric tid. A vanished pin makes the round incomplete. `None` means a
+/// lookup vanished before the count could be established.
+fn task_listing<P>(
     mut list: impl FnMut() -> Result<Option<Vec<u32>>, ProcError>,
     count: impl FnOnce() -> Result<Option<usize>, ProcError>,
+    mut pin: impl FnMut(u32) -> Result<Option<P>, ProcError>,
+    mut same: impl FnMut(u32, &P) -> Result<bool, ProcError>,
 ) -> Result<Option<Listing>, ProcError> {
     let Some(tids) = list()? else {
         return Ok(None);
     };
+    let mut pinned = Vec::with_capacity(tids.len());
+    for &tid in &tids {
+        let Some(identity) = pin(tid)? else {
+            return Ok(None);
+        };
+        pinned.push((tid, identity));
+    }
     let Some(threads) = count()? else {
         return Ok(None);
     };
     let Some(again) = list()? else {
         return Ok(None);
     };
-    Ok(Some(Listing::new(tids, threads, &again)))
+    let mut listing = Listing::new(tids, threads, &again);
+    for (tid, identity) in pinned {
+        if !same(tid, &identity)? {
+            listing.invalidate_identity();
+        }
+    }
+    Ok(Some(listing))
+}
+
+/// The numeric listing can look unchanged when a tid exits and its number
+/// is recycled between the two `getdents` calls. Pin every first-list task
+/// before reading `Threads:` and compare its procfs inode with a fresh open
+/// after the second list. A mismatch invalidates the round. Procfs assigns
+/// each instantiated task directory a fresh inode (`get_next_ino` in
+/// fs/proc/base.c) and keeps its `struct pid` in that inode.
+fn anchored_task_listing(proc: ProcRoot<'_>, pid: Pid) -> Result<Option<Listing>, ProcError> {
+    anchored_task_listing_with_count(proc, pid, || {
+        Ok(group_status(proc, pid)?.map(|status| status.threads))
+    })
+}
+
+/// `count` sits between pinning the first list and reading the second.
+/// Supplying it separately lets the fake-procfs test replace a task at that
+/// precise point while production reads the kernel's `Threads:` field.
+fn anchored_task_listing_with_count(
+    proc: ProcRoot<'_>,
+    pid: Pid,
+    count: impl FnOnce() -> Result<Option<usize>, ProcError>,
+) -> Result<Option<Listing>, ProcError> {
+    task_listing(
+        || task_ids(proc, pid),
+        count,
+        |tid| {
+            let path = format!("{pid}/task/{tid}");
+            match proc.open(&path, OFlags::PATH | OFlags::DIRECTORY) {
+                Ok(fd) => Ok(Some(fd)),
+                Err(e) if is_vanished(&e) => Ok(None),
+                Err(e) => Err(ProcError::from_host(e)),
+            }
+        },
+        |tid, old| {
+            let path = format!("{pid}/task/{tid}");
+            let fresh = match proc.open(&path, OFlags::PATH | OFlags::DIRECTORY) {
+                Ok(fd) => fd,
+                Err(e) if is_vanished(&e) => return Ok(false),
+                Err(e) => return Err(ProcError::from_host(e)),
+            };
+            // `fstat` on an old directory inode can still succeed after its
+            // task was released. Require a *current task* through the pin
+            // as well, so even an inode-number wrap cannot validate reuse.
+            match rustix::fs::openat(old, "stat", OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::NOENT | rustix::io::Errno::SRCH) => {
+                    return Ok(false);
+                }
+                Err(e) => {
+                    return Err(ProcError::from_host(HostError::errno(
+                        "open",
+                        task_path(pid, tid, "stat"),
+                        errno_of(e),
+                    )));
+                }
+            }
+            let old_stat = rustix::fs::fstat(old)
+                .map_err(|e| ProcError::from_host(HostError::errno("fstat", &path, errno_of(e))))?;
+            let fresh_stat = rustix::fs::fstat(&fresh)
+                .map_err(|e| ProcError::from_host(HostError::errno("fstat", &path, errno_of(e))))?;
+            Ok((old_stat.st_dev, old_stat.st_ino) == (fresh_stat.st_dev, fresh_stat.st_ino))
+        },
+    )
 }
 
 /// The process ids in a fresh listing of `/proc` (thread-group ids), sorted.
@@ -831,12 +910,7 @@ fn process<'a>(
     let mut polls = 0;
     Process {
         pid: pid.0,
-        list: move || {
-            task_listing(
-                || task_ids(proc, pid),
-                || Ok(group_status(proc, pid)?.map(|status| status.threads)),
-            )
-        },
+        list: move || anchored_task_listing(proc, pid),
         poll: move || {
             let timeout = if polls == 0 {
                 Duration::ZERO
@@ -859,10 +933,42 @@ fn process<'a>(
     }
 }
 
-fn read_task_stat(proc: ProcRoot<'_>, pid: Pid, tid: u32) -> Result<TaskStat, HostError> {
-    let path = task_path(pid, tid, "stat");
-    let text = proc.read(&path)?;
-    parse_task_stat(&text).map_err(|e| HostError::invalid("parse", ProcRoot::shown(&path), e))
+/// Holds the procfs inode for each task whose `stat` is read. A procfs task
+/// inode holds its `struct pid`, so a later read through the directory fd
+/// cannot silently follow a reused numeric tid to another `struct pid`.
+/// Keep the handle through all rounds: a vanished incarnation must make the
+/// read untrustworthy, even when the replacement has the same start tick.
+struct TaskStats<'a> {
+    proc: ProcRoot<'a>,
+    pid: Pid,
+    pins: BTreeMap<u32, OwnedFd>,
+}
+
+impl<'a> TaskStats<'a> {
+    fn new(proc: ProcRoot<'a>, pid: Pid) -> Self {
+        Self {
+            proc,
+            pid,
+            pins: BTreeMap::new(),
+        }
+    }
+
+    fn read(&mut self, tid: u32) -> Result<TaskStat, HostError> {
+        let dir = format!("{}/task/{tid}", self.pid);
+        if !self.pins.contains_key(&tid) {
+            let pin = self.proc.open(&dir, OFlags::PATH | OFlags::DIRECTORY)?;
+            self.pins.insert(tid, pin);
+        }
+        let path = task_path(self.pid, tid, "stat");
+        let pin = self.pins.get(&tid).expect("task directory was just pinned");
+        let fd = rustix::fs::openat(pin, "stat", OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| HostError::errno("open", ProcRoot::shown(&path), errno_of(e)))?;
+        let mut text = Vec::new();
+        std::fs::File::from(fd)
+            .read_to_end(&mut text)
+            .map_err(|e| io_error("read", ProcRoot::shown(&path), &e))?;
+        parse_task_stat(&text).map_err(|e| HostError::invalid("parse", ProcRoot::shown(&path), e))
+    }
 }
 
 /// Bounds of the one-call reads: the first buffer, and the largest one
@@ -1027,6 +1133,7 @@ fn read_through_live_task(
     read: impl Fn(&str) -> Result<Vec<u8>, HostError>,
 ) -> Result<(String, Vec<u8>), ProcError> {
     let pidfd = open_pidfd(pid)?;
+    let mut stats = TaskStats::new(proc, pid);
     let mut got = collect(
         process(proc, pid, &pidfd),
         Tasks {
@@ -1036,7 +1143,7 @@ fn read_through_live_task(
                 read(&path).map(|bytes| (path, bytes))
             },
             is_empty: |(_, bytes): &(String, Vec<u8>)| bytes.is_empty(),
-            stat: |tid| read_task_stat(proc, pid, tid),
+            stat: |tid| stats.read(tid),
         },
         Want::FirstLiveTask,
     )?;
@@ -1370,13 +1477,14 @@ impl Host for LinuxHost {
     fn proc_fds(&self, pid: Pid) -> Result<Vec<ProcFd>, ProcError> {
         let proc = self.root();
         let pidfd = open_pidfd(pid)?;
+        let mut stats = TaskStats::new(proc, pid);
         let per_task = collect(
             process(proc, pid, &pidfd),
             Tasks {
                 what: "fd table",
                 read: |tid| task_fds(proc, pid, tid),
                 is_empty: |fds: &Vec<ProcFd>| fds.is_empty(),
-                stat: |tid| read_task_stat(proc, pid, tid),
+                stat: |tid| stats.read(tid),
             },
             Want::EveryTask,
         )?;
@@ -1394,6 +1502,7 @@ impl Host for LinuxHost {
     fn proc_links(&self, pid: Pid, which: ProcLink) -> Result<Vec<LinkTarget>, ProcError> {
         let proc = self.root();
         let pidfd = open_pidfd(pid)?;
+        let mut stats = TaskStats::new(proc, pid);
         let per_task = collect(
             process(proc, pid, &pidfd),
             Tasks {
@@ -1401,7 +1510,7 @@ impl Host for LinuxHost {
                 read: |tid| proc.link_target(&task_path(pid, tid, which.name())),
                 // A link always names something; nothing is ENOENT.
                 is_empty: |_: &LinkTarget| false,
-                stat: |tid| read_task_stat(proc, pid, tid),
+                stat: |tid| stats.read(tid),
             },
             Want::EveryTask,
         )?;
@@ -1521,12 +1630,15 @@ impl Host for LinuxHost {
             };
             let fd_dir_owner = match task_ids(proc, pid)? {
                 None => None,
-                Some(tids) => owner_through_live_task(
-                    &tids,
-                    |tid| read_task_stat(proc, pid, tid),
-                    |tid| proc.owner(&task_path(pid, tid, "fd")),
-                )
-                .map_err(ProcError::from_host)?,
+                Some(tids) => {
+                    let mut stats = TaskStats::new(proc, pid);
+                    owner_through_live_task(
+                        &tids,
+                        |tid| stats.read(tid),
+                        |tid| proc.owner(&task_path(pid, tid, "fd")),
+                    )
+                    .map_err(ProcError::from_host)?
+                }
             };
             Ok(ProcStatus {
                 name: ids.name,
@@ -3982,16 +4094,70 @@ mod tests {
                 calls.borrow_mut().push("count");
                 Ok(Some(2))
             },
+            |_| Ok(Some(())),
+            |_, _| Ok(true),
         );
         assert_eq!(got, Ok(Some(Listing::new(vec![10, 11], 2, &[10]))));
         assert_ne!(got, Ok(Some(Listing::new(vec![10, 11], 2, &[10, 11]))));
         assert_eq!(*calls.borrow(), ["list", "count", "list"]);
         // A step that vanished: no listing, and no step after it.
-        let got = task_listing(|| Ok(Some(vec![10])), || Ok(None));
+        let got = task_listing(
+            || Ok(Some(vec![10])),
+            || Ok(None),
+            |_| Ok(Some(())),
+            |_, _| Ok(true),
+        );
         assert_eq!(got, Ok(None));
         let mut listings = vec![Some(vec![10]), None].into_iter();
-        let got = task_listing(|| Ok(listings.next().flatten()), || Ok(Some(1)));
+        let got = task_listing(
+            || Ok(listings.next().flatten()),
+            || Ok(Some(1)),
+            |_| Ok(Some(())),
+            |_, _| Ok(true),
+        );
         assert_eq!(got, Ok(None));
+    }
+
+    /// Two listings can have identical numbers while a different task was
+    /// present at the count. Identity confirmation must reject that round.
+    #[test]
+    fn task_listing_rejects_a_same_number_different_task_aba() {
+        let mut listings = vec![vec![10, 11], vec![10, 11]].into_iter();
+        let got = task_listing(
+            || Ok(listings.next()),
+            || Ok(Some(2)),
+            |tid| Ok(Some(tid)),
+            |tid, pinned| Ok(tid == 10 && *pinned == 10),
+        )
+        .expect("listing read")
+        .expect("listing exists");
+        assert_ne!(got, Listing::new(vec![10, 11], 2, &[10, 11]));
+    }
+
+    /// The production procfs pin/compare closures reject a reused numeric
+    /// tid even when both directory listings and the thread count agree.
+    /// The fake tree makes the replacement exactly at the count boundary.
+    #[test]
+    fn anchored_task_listing_rejects_reused_numeric_tid() {
+        let dir = TempDir::new("fake-listing-reuse");
+        fake_proc(&dir.0, &std::process::id().to_string());
+        let root = open_proc_root(&dir.0);
+        let proc = ProcRoot(root.as_fd());
+        let pid = Pid(4242);
+        let task_dir = dir.0.join("4242/task");
+        let listing = anchored_task_listing_with_count(proc, pid, || {
+            std::fs::rename(task_dir.join("4243"), dir.0.join("old-task"))
+                .expect("move old task after its directory was pinned");
+            std::fs::create_dir(task_dir.join("4243")).expect("reuse numeric tid");
+            Ok(Some(2))
+        })
+        .expect("listing read")
+        .expect("listing exists");
+        assert_ne!(
+            listing,
+            Listing::new(vec![4242, 4243], 2, &[4242, 4243]),
+            "identical numeric listings must not validate a different task inode"
+        );
     }
 
     fn errno(e: Errno) -> HostError {
@@ -4174,7 +4340,7 @@ mod tests {
                 threads: 2
             }))
         );
-        let stat = read_task_stat(proc, pid, 4243).expect("stat");
+        let stat = TaskStats::new(proc, pid).read(4243).expect("stat");
         assert_eq!(stat.state, 'S');
         assert_eq!(stat.start_ticks, 12345);
         let fds = task_fds(proc, pid, 4242).expect("fds");
@@ -4198,6 +4364,86 @@ mod tests {
         assert!(
             refused.to_string().contains("another pid namespace"),
             "{refused}"
+        );
+    }
+
+    /// The old and new tasks deliberately have the same clock-tick start
+    /// time. A directory fd must keep the first incarnation's inode even
+    /// after its numeric name is reused; when that inode goes away its
+    /// `stat` must fail instead of switching to the replacement.
+    #[test]
+    fn task_stat_pin_does_not_follow_a_reused_tid_within_one_tick() {
+        let dir = TempDir::new("fake-task-reuse");
+        fake_proc(&dir.0, &std::process::id().to_string());
+        let root = open_proc_root(&dir.0);
+        let proc = ProcRoot(root.as_fd());
+        let pid = Pid(4242);
+        let mut stats = TaskStats::new(proc, pid);
+        assert_eq!(stats.read(4243).expect("old stat").start_ticks, 12345);
+
+        let task_dir = dir.0.join("4242/task");
+        std::fs::rename(task_dir.join("4243"), task_dir.join("old-task"))
+            .expect("move old incarnation");
+        std::fs::create_dir(task_dir.join("4243")).expect("reuse numeric tid");
+        std::fs::write(
+            task_dir.join("4243/stat"),
+            format!(
+                "4243 (new) R 1 1 1 0 -1 4194560 {} 12345\n",
+                ["0"; 12].join(" ")
+            ),
+        )
+        .expect("new stat in same tick");
+        assert_eq!(
+            TaskStats::new(proc, pid)
+                .read(4243)
+                .expect("new stat")
+                .state,
+            'R'
+        );
+        assert_eq!(stats.read(4243).expect("pinned old stat").state, 'S');
+
+        std::fs::rename(task_dir.join("old-task/stat"), task_dir.join("old-stat"))
+            .expect("simulate old task release");
+        assert!(
+            stats.read(4243).is_err_and(|e| is_vanished(&e)),
+            "pinned stat must disappear with its incarnation"
+        );
+    }
+
+    /// Procfs must stop resolving `stat` through an already open task
+    /// directory when that particular thread has exited. This is the kernel
+    /// fact the same-tick reuse check relies on, exercised without needing
+    /// to force a numeric tid recycle on the host.
+    #[test]
+    fn held_task_directory_stat_disappears_after_thread_exit() {
+        let host = LinuxHost::new().expect("host setup");
+        let pid = Pid(std::process::id());
+        let (tid_sender, tid_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // SAFETY: gettid takes no pointer arguments and changes no state.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            tid_sender
+                .send(u32::try_from(tid).expect("positive tid"))
+                .expect("send tid");
+            release_receiver.recv().expect("release worker");
+        });
+        let tid = tid_receiver.recv().expect("worker tid");
+        let mut stats = TaskStats::new(host.root(), pid);
+        let _ = stats.read(tid).expect("live worker stat");
+        release_sender.send(()).expect("release worker");
+        worker.join().expect("join worker");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let after = loop {
+            let after = stats.read(tid);
+            if after.as_ref().is_err_and(is_vanished) || Instant::now() >= deadline {
+                break after;
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            after.as_ref().is_err_and(is_vanished),
+            "a held task directory must not remain readable after thread exit: {after:?}"
         );
     }
 

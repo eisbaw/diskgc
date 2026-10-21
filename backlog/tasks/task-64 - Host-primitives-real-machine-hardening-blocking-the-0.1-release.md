@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-21 12:40'
+updated_date: '2026-10-21 13:17'
 labels:
   - wave-1
   - hardening
@@ -72,7 +72,7 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 - [x] #3 C (/proc integrity: PROC_SUPER_MAGIC check, /proc-replaced real-kernel test): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #4 D (deletion engine permissions and deadlines: #25, task-5 round 1 (2) and (3)): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #5 E (delete only what was checked: #32, task-6 round 3 (3), #27): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
-- [ ] #6 F (process identity: pid reuse within and after a scan, tid reuse): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
+- [x] #6 F (process identity: pid reuse within and after a scan, tid reuse): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #7 G (in-use scan soundness and liveness: unsettled scan reuse, Linux 5.8-6.8 hang-up, bounded pidfd poll, 16-listing bound under load, #38): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [ ] #8 H (host lock tests: #37, H10, D7): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #9 I (roots and config validation: #39, #41): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
@@ -127,6 +127,10 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-21 group H stress evidence: built diskgc-linux unit-test binary with `nix develop -c cargo test -p diskgc-linux --lib --locked --no-run`, then ran `host::tests::a_lock_conflicts_until_its_fd_is_closed --exact --test-threads=1` 600 times at xargs -P4 inside a disposable rootless Podman Debian container, with a 15s per-iteration and 180s outer bound. Result: 600/600 runs, 0 failures, 8.9s wall time. No diskgc deletion or host cleanup. `nix develop -c just e2e-one host_flock_release_only_by_close` passed 1/1 in a disposable Nix container (2.32s); release probe recorded Busy before release, 300ms deadline at 300ms, release-during-wait acquisition at 350ms, and clean deletion oracle. The historical 1/600 failure did not reproduce; exact original cause remains unconfirmed. AC8 stays unchecked pending integrated review/decision on that uncertainty.
 
 2026-10-21 PID identity integration: Host now pins each process incarnation for the scan lifetime (Linux held pidfd, ModelHost monotonic generation). Scan detects release/replacement even when numeric PID listing is unchanged, relists after a listed process vanishes before identity open, retains observed uses, and treats pin/check errors or persistent churn as unsettled/in_use. ModelHost regressions include unchanged-number reuse, vanished-before-pin inherited child, and injected pin/check failures. Full just e2e passed 167/167 Nix and 7/7 native Docker. TID reuse within one clock tick remains explicitly documented in docs/safety.md and uncorrected; AC6 remains open pending release safety decision. H historical 1/600 root cause remains unconfirmed despite 600/600 stress.
+
+2026-10-21 Group F availability limit after MPED review: the anchored task listing temporarily holds one procfs directory fd per listed thread, and TaskStats retains one fd per encountered tid until that process read ends. If a highly threaded process reaches RLIMIT_NOFILE, an open can return EMFILE; ProcError classifies it Failed, so the in-use scan fails closed and reclaim may be delayed. No threshold or old-kernel behavior was measured for this limit. docs/safety.md records it. A direct fake-procfs numeric-TID inode-mismatch test was added; the full gate for these followup edits is pending.
+
+2026-10-21 group F TID integration: each listed TID is pinned by a held procfs task directory through count/listing validation, and task stat/owner reads use the held directory across read brackets. Fresh numeric lookup plus held inode identity catches listing ABA; vanished or unreadable task identity fails closed. Fake same-tick TID replacement and numeric-listing ABA tests bite; real-kernel held-task release probe passed 100/100 in disposable Podman. Stable-tree full nix develop -c just e2e exit 0: Nix container 167/167, native Docker 7/7, Linux unit 138 passed/1 ignored, fmt/clippy passed; QA and MPED reviews GO for this slice. Older-kernel behavior and forced real-kernel same-tick recycle remain untested; RLIMIT_NOFILE can make highly threaded scans conservatively fail. Group G old-kernel/load and H historical lock failure remain open, so TASK64 stays In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

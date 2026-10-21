@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-19 02:14'
-updated_date: '2026-10-21 12:40'
+updated_date: '2026-10-21 12:46'
 labels:
   - cli
   - ux
@@ -42,6 +42,8 @@ Decide at the freeze which of these belong in the contract (a field each, null w
 task-26 depends on this task: each item is decided at the freeze.
 
 2026-10-21 provisional contract implementation: JSON emits started_at (UTC RFC 3339 string or null before executor/unrepresentable wall clock), duration_ms (u64 or null), version (always string), skipped.detail (advisory string or null), skipped.estimated_bytes (complete prior tally or null), and actions.idle_age_seconds (prior tally change/build age sampled before action, or null). docs/reference and focused report/model/CLI tests cover types, null rules, grouping, and a clock advance during reclaim. Full just e2e passed 167/167 Nix and 7/7 native Docker. Structured process blocker remains undecided: generic in_use may lack a unique process and flock cannot identify its holder; do not parse detail text into PID. AC/DoD remain open until TASK26 freeze and explicit decision.
+
+2026-10-21 read-only contract design: propose skipped[].process_blockers: null or a nonempty array of {pid: u32, command: string|null, evidence: stable enum string}. PID and command are scan-time observations. null means no reliably attributable process, including flock contention, unsettled scan/churn, generic and grouped skips. Preserve detail as human diagnostic; never parse it for structured facts or invent PID 0. Carry typed evidence through Skip and Cargo evidence paths; cover fd/environment/unreadable, multiple Cargo blockers, null cases and grouped rows in tests. This is a proposal, not a freeze decision or verified implementation.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

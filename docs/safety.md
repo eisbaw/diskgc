@@ -519,24 +519,38 @@ snapshot: a listing stops early when a task it holds is released, even one
 it never showed, and a listing resumed part-way can skip entries. So each
 round lists the tasks, reads the kernel's thread count (`Threads:` in
 `/proc/<pid>/status`, which changes together with the thread list), and
-lists them again; the listing is complete when every task of the first
-listing is in the second one and their number equals the count (not zero),
-and then it holds every thread alive at the count (assuming no tid is
-reused within the round). A round is the answer when its listing is
-complete, every task in it gave a trustworthy read, and one task is live;
-otherwise another round follows, for a bounded number of rounds, after
+lists them again. The listing is complete only when the first listing's
+numeric tids all appear in the second listing, their number equals the
+nonzero count, and each task directory pinned before the count still has a
+task and has the same procfs inode as a fresh lookup of that numeric tid
+after the second listing. It then holds every thread alive at the count.
+A tid reused between the listings invalidates the round even if both
+lists contain the same number. A round is the answer when its listing is
+complete, every task in it gave a trustworthy read, and one task is live.
+Otherwise another round follows, for a bounded number of rounds, after
 which the process is treated as unreadable. Only the answering round's
 reads are used; within it, results of tasks that exit meanwhile are kept. A
 task that is exiting (`PF_EXITING`) shows empty or missing entries while it
 releases them: it is never the source of the memory map or environment.
-A task read is bracketed by two reads of `/proc/<pid>/task/<tid>/stat`; a
-different start time discards that round. Start time is in clock ticks, so a
-tid reused within one tick can still evade the comparison. With a small
-`pid_max` (for example 32768) and heavy churn, that is a real limit, not a
-guarantee of unique task identity.
+A task read is bracketed by two `stat` reads through the same held task
+directory. The directory inode holds the kernel `struct pid`, so a recycled
+numeric tid cannot redirect the second read to another task. A different
+start time or a vanished held task discards that round. The start time's
+clock-tick resolution is no longer the sole identity check.
+A task directory pinned in an unsuccessful round stays pinned for that
+process read. If its tid is recycled during a later round, that read may
+reach the 16-round bound and treat the process as unreadable; this can
+delay reclaim under heavy thread churn.
+The listing temporarily holds one directory fd per listed thread; the
+task reads also retain one fd per encountered tid until that process read
+ends. A highly threaded process can therefore reach `RLIMIT_NOFILE` and
+be treated as unreadable, delaying reclaim. This is an availability limit,
+not a measured threshold: other open fds and the thread count determine
+when it occurs.
 The fd-directory owner used to classify an unreadable process is accepted
-only when the task is live and has the same start time before and after
-that owner read; reuse within one clock tick remains a limit there too.
+only when the task is live and the same held task directory returns the
+same start time before and after that owner read. A vanished held task is
+passed over, even if its numeric tid was reused within one clock tick.
 A tid can also change hands: when a non-leader thread execs, it takes over
 the leader's tid once the old leader is a zombie, with the old leader's
 start time, so `stat` cannot tell the two apart; the exec'ing thread's old

@@ -23,10 +23,13 @@
 //!   (`copy_process` in kernel/fork.c; `__exit_signal`/`__unhash_process`
 //!   in kernel/exit.c, under `tasklist_lock` and `siglock`). So a round lists
 //!   the tasks, reads the count, and lists them again. The listing is
-//!   complete when every task of the first listing is in the second one and
-//!   their number equals the count: each of them was attached before and
-//!   after the count, hence counted, so they are exactly the tasks alive at
-//!   the count ([`Listing::complete`]). `Threads: 0` proves nothing
+//!   complete when every task of the first listing is in the second one,
+//!   their number equals the count, and the host confirms each numeric tid
+//!   still reaches its held procfs task inode after the count. Without that
+//!   last check, a tid recycled between the two listings would counterfeit
+//!   continuity. Each confirmed task was attached before and after the
+//!   count, hence counted, so they are exactly the tasks alive at the count
+//!   ([`Listing::complete`]). `Threads: 0` proves nothing
 //!   (`task_sig` in fs/proc/array.c prints 0 when the task the `status` read
 //!   reached has no signal handlers any more).
 //! - **A task that is exiting** (`PF_EXITING`) still shows state `R` or `D`
@@ -135,12 +138,13 @@
 //! `mremap` is found by the other pass); the fd table from one `getdents`
 //! call.
 //!
-//! Each task entry is bracketed by two `stat` reads. A changed `starttime`
-//! (field 22) discards that round, so a tid reused during a read cannot make
-//! an old answer look like the new task's answer when the two starts fall in
-//! different clock ticks. The remaining limit is reuse within one tick:
-//! procfs `starttime` has only clock-tick resolution, and `de_thread` copies
-//! it when swapping the leader's tid. The window in which an exec'ing
+//! Each task entry is bracketed by two `stat` reads through the same held
+//! procfs task directory. The directory inode holds the kernel `struct pid`;
+//! a recycled numeric tid cannot redirect the second `stat` to a new task,
+//! even if both tasks started in one clock tick. A changed `starttime`
+//! (field 22) or a vanished held task discards the round. `de_thread` swaps
+//! tasks under the *same* pid structure and copies the start time; the
+//! leader re-read below covers that separate case. The window in which an exec'ing
 //! thread's old tid shows the old leader as `Z` is
 //! normally sub-microsecond (it lies inside `de_thread`'s locked section),
 //! and while it lasts the process is not settled, never gone. A thread
@@ -179,8 +183,7 @@ pub(crate) struct TaskStat {
     /// `PF_KTHREAD`: a kernel thread, which has no memory map or `exe`.
     pub kernel_thread: bool,
     /// Field 22 of `/proc/<pid>/task/<tid>/stat`, in clock ticks since boot.
-    /// It detects a tid handed to another task between two reads, except
-    /// when both tasks started in the same clock tick.
+    /// This is an additional check beside the held task-directory identity.
     pub start_ticks: u64,
 }
 
@@ -294,7 +297,8 @@ pub(crate) struct Listing {
     /// repeat an entry).
     tids: Vec<u32>,
     threads: usize,
-    /// Every task of the first listing is in the second one.
+    /// Every numeric tid of the first listing is in the second one, and
+    /// the host confirmed its held task inode still owns that tid.
     confirmed: bool,
 }
 
@@ -312,11 +316,18 @@ impl Listing {
         }
     }
 
+    /// A host saw a different procfs inode under a numeric tid before and
+    /// after the count. The numeric listing alone cannot prove which tasks
+    /// were counted, even if it contains the same numbers both times.
+    pub(crate) fn invalidate_identity(&mut self) {
+        self.confirmed = false;
+    }
+
     /// The listing is exactly the set of tasks alive at the count: every
-    /// task of the first listing is in the second one, so each was attached
-    /// before and after the count, hence counted, and their number equals
-    /// the count. The count changes together with the thread list (see the
-    /// module docs). `Threads: 0` proves nothing (`task_sig` prints 0 when
+    /// task of the first listing still owns its numeric tid after the count,
+    /// hence was counted, and their number equals the count. The count
+    /// changes together with the thread list (see the module docs).
+    /// `Threads: 0` proves nothing (`task_sig` prints 0 when
     /// the task the `status` read reached has no signal handlers any more).
     fn complete(&self) -> bool {
         self.confirmed && self.threads > 0 && self.tids.len() == self.threads
@@ -408,8 +419,9 @@ impl Seen {
     }
 }
 
-/// Brackets task `tid`'s entry read with `stat`. A changed start tick (or a
-/// vanished entry that then reappears) makes the whole round untrustworthy;
+/// Brackets task `tid`'s entry read with `stat` from the same pinned task
+/// directory. A changed start tick or a missing first `stat` makes the
+/// whole round untrustworthy;
 /// the task's status after the read catches one that exited during it.
 ///
 /// The value worth keeping: for [`Want::EveryTask`] every successful read,
@@ -432,8 +444,11 @@ fn observe<T>(
     let status = task_status(&after).map_err(ProcError::from_host)?;
     let reused = match (&before, &after) {
         (Ok(before), Ok(after)) => before.start_ticks != after.start_ticks,
-        (Err(error), Ok(_)) if is_vanished(error) => true,
-        (Err(error), Err(_)) if is_vanished(error) => false,
+        // The directory may be pinned to a previous incarnation from an
+        // earlier round. A numeric tid in this round's listing can already
+        // name a replacement even when both reads through the old handle
+        // say ENOENT. It must never count as a trusted vanished task.
+        (Err(error), _) if is_vanished(error) => true,
         (Err(error), _) => return Err(ProcError::from_host(error.clone())),
         _ => false,
     };
@@ -900,6 +915,28 @@ mod tests {
         assert_eq!(data_reads.get(), 2, "the first read was discarded");
     }
 
+    /// A pin from an earlier round can still name the old task after the
+    /// numeric tid has been recycled. Both pinned stats then say ENOENT;
+    /// treating that pair as a harmless vanished task would accept a
+    /// complete numeric listing without reading the new task.
+    #[test]
+    fn a_reused_tid_missing_from_its_pinned_handle_is_not_trusted() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok("read by number"),
+            |tid| {
+                if tid == 11 {
+                    Err(errno(Errno::ENOENT))
+                } else {
+                    live()
+                }
+            },
+            Want::EveryTask,
+        );
+        assert!(failed_saying(&got, "task 11 changed identity"), "{got:?}");
+    }
+
     #[test]
     fn first_live_read_does_not_accept_a_reappeared_tid() {
         let stat_reads = Cell::new(0);
@@ -1272,12 +1309,19 @@ mod tests {
     #[test]
     fn a_thread_seen_ended_makes_the_leader_be_read_again_in_the_round() {
         let swapped = Cell::new(false);
+        let leader_reads = Cell::new(0);
         let got = scan(
             10,
             rounds(vec![complete(&[10, 11, 20])]),
             |tid| match (tid, swapped.get()) {
-                (10, false) => Ok("old leader's data"),
-                (10, true) => Ok("survivor's private table"),
+                (10, false) => {
+                    leader_reads.set(leader_reads.get() + 1);
+                    Ok("old leader's data")
+                }
+                (10, true) => {
+                    leader_reads.set(leader_reads.get() + 1);
+                    Ok("survivor's private table")
+                }
                 (20, _) => Err(errno(Errno::ENOENT)),
                 _ => Ok(""),
             },
@@ -1292,9 +1336,12 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            got.as_ref()
-                .is_ok_and(|v| v.contains(&"survivor's private table")),
-            "{got:?}"
+            failed_saying(&got, "task 20 changed identity"),
+            "an already vanished pinned task cannot establish the round: {got:?}"
+        );
+        assert!(
+            leader_reads.get() >= 2,
+            "the leader must still be read again after seeing another task end"
         );
     }
 
