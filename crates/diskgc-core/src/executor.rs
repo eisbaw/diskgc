@@ -926,6 +926,7 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 examples: Vec::new(),
                 reason: Reason::OtherFs.as_str(),
                 detail: None,
+                process_blockers: None,
                 estimated_bytes: None,
             }),
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
@@ -1274,6 +1275,7 @@ fn ensure_inner<H: Delete>(
                     examples: Vec::new(),
                     reason: Reason::Missing.as_str(),
                     detail: None,
+                    process_blockers: None,
                     estimated_bytes: None,
                 });
                 report.avail_after_bytes = Some(report.avail_before_bytes.expect("measured"));
@@ -1759,6 +1761,7 @@ fn ensure_grouped_inner<H: Delete>(
                         examples: Vec::new(),
                         reason: Reason::Missing.as_str(),
                         detail: None,
+                        process_blockers: None,
                         estimated_bytes: None,
                     });
                     prepared.push(None);
@@ -1814,6 +1817,7 @@ fn ensure_grouped_inner<H: Delete>(
                         examples: Vec::new(),
                         reason: skip.reason,
                         detail: Some(skip.detail.clone()),
+                        process_blockers: None,
                         estimated_bytes: None,
                     });
                     prepared.push(None);
@@ -3354,6 +3358,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             examples: Vec::new(),
             reason,
             detail: Some(detail.to_owned()),
+            process_blockers: None,
             estimated_bytes: None,
         });
     }
@@ -3588,6 +3593,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             examples: Vec::new(),
             reason: skip.reason.as_str(),
             detail: Some(skip.detail.clone()),
+            process_blockers: skip.process_blockers.clone(),
             estimated_bytes,
         });
     }
@@ -3698,6 +3704,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 examples: Vec::new(),
                 reason: skip.reason.as_str(),
                 detail: Some(skip.detail.clone()),
+                process_blockers: skip.process_blockers.clone(),
                 estimated_bytes: None,
             });
         }

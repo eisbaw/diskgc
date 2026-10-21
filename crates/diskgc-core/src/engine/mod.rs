@@ -601,6 +601,70 @@ pub struct Skip {
     pub reason: Reason,
     pub path: PathBuf,
     pub detail: String,
+    /// Scan-time process evidence, when this refusal names a known process.
+    pub process_blockers: Option<Vec<ProcessBlocker>>,
+}
+
+/// A process observed by the in-use scan. The evidence value is a stable
+/// report enum; the human detail remains separate and may change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessBlocker {
+    pub pid: u32,
+    pub command: Option<String>,
+    pub evidence: ProcessEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessEvidence {
+    Fd,
+    Cwd,
+    Root,
+    Exe,
+    Map,
+    InodeMap,
+    Environment,
+    Unreadable,
+    TargetCwd,
+    TargetExe,
+    ProjectCargo,
+    DetachedCargo,
+    CargoManifestDir,
+}
+
+impl ProcessEvidence {
+    pub const ALL: [Self; 13] = [
+        Self::Fd,
+        Self::Cwd,
+        Self::Root,
+        Self::Exe,
+        Self::Map,
+        Self::InodeMap,
+        Self::Environment,
+        Self::Unreadable,
+        Self::TargetCwd,
+        Self::TargetExe,
+        Self::ProjectCargo,
+        Self::DetachedCargo,
+        Self::CargoManifestDir,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fd => "fd",
+            Self::Cwd => "cwd",
+            Self::Root => "root",
+            Self::Exe => "exe",
+            Self::Map => "map",
+            Self::InodeMap => "inode_map",
+            Self::Environment => "environment",
+            Self::Unreadable => "unreadable",
+            Self::TargetCwd => "target_cwd",
+            Self::TargetExe => "target_exe",
+            Self::ProjectCargo => "project_cargo",
+            Self::DetachedCargo => "detached_cargo",
+            Self::CargoManifestDir => "cargo_manifest_dir",
+        }
+    }
 }
 
 impl Skip {
@@ -609,7 +673,15 @@ impl Skip {
             reason,
             path,
             detail: detail.into(),
+            process_blockers: None,
         }
+    }
+
+    pub(crate) fn with_process_blockers(mut self, blockers: Vec<ProcessBlocker>) -> Self {
+        if !blockers.is_empty() {
+            self.process_blockers = Some(blockers);
+        }
+        self
     }
 }
 

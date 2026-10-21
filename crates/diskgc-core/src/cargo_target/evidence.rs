@@ -9,7 +9,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::{CARGO_MANIFEST, Inspected, Project};
+use crate::engine::{ProcessBlocker, ProcessEvidence};
 use crate::host::DevIno;
+use crate::host::Pid;
 use crate::inuse::environ::inside;
 use crate::inuse::{How, Scan};
 
@@ -19,11 +21,31 @@ use crate::inuse::{How, Scan};
 /// 1.99.1 and the 2026-10-16 nightly.
 pub const CARGO_MANIFEST_DIR: &str = "CARGO_MANIFEST_DIR";
 
+/// One Cargo-specific heuristic, keeping structured attribution next to
+/// its diagnostic text so the report never needs to parse a message.
+pub(crate) struct CargoEvidence {
+    pub detail: String,
+    pub blocker: ProcessBlocker,
+}
+
+impl CargoEvidence {
+    fn new(scan: &Scan, pid: Pid, evidence: ProcessEvidence, detail: String) -> Self {
+        Self {
+            detail,
+            blocker: ProcessBlocker {
+                pid: pid.0,
+                command: scan.command_option(pid),
+                evidence,
+            },
+        }
+    }
+}
+
 /// Every piece of evidence in `scan` that the target at `target` (its
 /// directory's identity `target_id`, what [`super::inspect`] found in it
 /// `inspected`, its project directory's identity `project` where known) is
-/// in use, beyond what the walked entries' own records show, one message
-/// each, naming the process. Empty: none. The rules, in this order:
+/// in use, beyond what the walked entries' own records show, one typed
+/// item with diagnostic text each. Empty: none. The rules, in this order:
 ///
 /// 1. a process uses (fd, cwd, root, exe, mapping) the target directory, a
 ///    directory directly in it, a profile directory or a lock file,
@@ -51,13 +73,13 @@ pub const CARGO_MANIFEST_DIR: &str = "CARGO_MANIFEST_DIR";
 ///
 /// Path text is the process's view, so a process of another mount
 /// namespace is matched by rule 1 and the exact half of rule 3 only.
-pub fn cargo_evidence(
+pub(crate) fn cargo_evidence(
     scan: &Scan,
     target: &Path,
     target_id: DevIno,
     inspected: &Inspected,
     project: Project,
-) -> Vec<String> {
+) -> Vec<CargoEvidence> {
     let mut found = Vec::new();
     let who = |pid| format!("pid {pid} ({})", scan.command(pid));
     let objects = std::iter::once((PathBuf::new(), target_id)).chain(inspected.objects());
@@ -68,28 +90,44 @@ pub fn cargo_evidence(
             target.join(rel)
         };
         for u in scan.uses(id) {
-            found.push(format!(
-                "{} has {} {} ({id})",
-                who(u.pid),
-                at.display(),
-                u.how
+            found.push(CargoEvidence::new(
+                scan,
+                u.pid,
+                match u.how {
+                    How::Fd(_) => ProcessEvidence::Fd,
+                    How::Cwd => ProcessEvidence::Cwd,
+                    How::Root => ProcessEvidence::Root,
+                    How::Exe => ProcessEvidence::Exe,
+                    How::Map => ProcessEvidence::Map,
+                },
+                format!("{} has {} {} ({id})", who(u.pid), at.display(), u.how),
             ));
         }
     }
     let project_dir = target.parent();
     for (pid, seen) in scan.readable() {
         for cwd in seen.cwds.iter().filter(|c| inside(c, target)) {
-            found.push(format!(
-                "{} works inside the target (cwd {})",
-                who(pid),
-                cwd.display()
+            found.push(CargoEvidence::new(
+                scan,
+                pid,
+                ProcessEvidence::TargetCwd,
+                format!(
+                    "{} works inside the target (cwd {})",
+                    who(pid),
+                    cwd.display()
+                ),
             ));
         }
         for exe in seen.exes.iter().filter(|e| inside(undeleted(e), target)) {
-            found.push(format!(
-                "{} runs an executable inside the target ({})",
-                who(pid),
-                exe.display()
+            found.push(CargoEvidence::new(
+                scan,
+                pid,
+                ProcessEvidence::TargetExe,
+                format!(
+                    "{} runs an executable inside the target ({})",
+                    who(pid),
+                    exe.display()
+                ),
             ));
         }
         if !is_cargo(&seen.command) {
@@ -102,35 +140,55 @@ pub fn cargo_evidence(
                 .any(|u| u.pid == pid && u.how == How::Cwd)
         });
         if by_text.is_some() || by_identity {
-            found.push(format!(
-                "{} is a Cargo process working in the project directory {} (cwd {})",
-                who(pid),
-                project_dir.map_or("?".into(), |p| p.display().to_string()),
-                by_text.map_or("matched by identity".into(), |c| c.display().to_string())
+            found.push(CargoEvidence::new(
+                scan,
+                pid,
+                ProcessEvidence::ProjectCargo,
+                format!(
+                    "{} is a Cargo process working in the project directory {} (cwd {})",
+                    who(pid),
+                    project_dir.map_or("?".into(), |p| p.display().to_string()),
+                    by_text.map_or("matched by identity".into(), |c| c.display().to_string())
+                ),
             ));
         } else if project.detached {
-            found.push(format!(
-                "{} is a Cargo process, and the target is detached (its parent holds no \
+            found.push(CargoEvidence::new(
+                scan,
+                pid,
+                ProcessEvidence::DetachedCargo,
+                format!(
+                    "{} is a Cargo process, and the target is detached (its parent holds no \
                  {CARGO_MANIFEST}: a --target-dir, a target-dir in .cargo/config.toml or a nested \
                  target), so any Cargo may be using it",
-                who(pid)
+                    who(pid)
+                ),
             ));
         }
     }
     for e in scan.environ_paths() {
         if inside(&e.path, target) {
-            found.push(format!(
-                "{} names a path inside the target in its initial environment ({}={})",
-                who(e.pid),
-                e.var.to_string_lossy(),
-                e.path.display()
+            found.push(CargoEvidence::new(
+                scan,
+                e.pid,
+                ProcessEvidence::Environment,
+                format!(
+                    "{} names a path inside the target in its initial environment ({}={})",
+                    who(e.pid),
+                    e.var.to_string_lossy(),
+                    e.path.display()
+                ),
             ));
         } else if e.var == CARGO_MANIFEST_DIR && project_dir.is_some_and(|p| inside(&e.path, p)) {
-            found.push(format!(
-                "{} was started by Cargo for a package of the project directory \
+            found.push(CargoEvidence::new(
+                scan,
+                e.pid,
+                ProcessEvidence::CargoManifestDir,
+                format!(
+                    "{} was started by Cargo for a package of the project directory \
                  ({CARGO_MANIFEST_DIR}={})",
-                who(e.pid),
-                e.path.display()
+                    who(e.pid),
+                    e.path.display()
+                ),
             ));
         }
     }

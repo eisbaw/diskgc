@@ -892,6 +892,40 @@ fn cargo_target_dir_in_the_initial_environment_is_in_use() {
     }
 }
 
+#[test]
+fn cargo_skip_keeps_multiple_typed_process_blockers() {
+    let model = with_processes(
+        "",
+        &[
+            process(
+                42,
+                "/bin/sh",
+                "/",
+                &["CARGO_TARGET_DIR=/tmp/w/p/target"],
+                "/bin/sh",
+            ),
+            process(
+                43,
+                "/bin/sh",
+                "/",
+                &["TMPDIR=/tmp/w/p/target/debug"],
+                "/bin/sh",
+            ),
+        ],
+    );
+    let skip = assert_skip(only_target(&model), Reason::InUse, "initial environment");
+    let blockers = skip.process_blockers.expect("attributed blockers");
+    assert_eq!(
+        blockers.iter().map(|b| b.pid).collect::<Vec<_>>(),
+        vec![42, 43]
+    );
+    assert!(
+        blockers
+            .iter()
+            .all(|b| b.evidence.as_str() == "environment")
+    );
+}
+
 /// Rule 5: `CARGO_MANIFEST_DIR` in the project directory or below it (the
 /// runner `cargo run` execs in its own process, a test binary's runner);
 /// one outside the project does not count.

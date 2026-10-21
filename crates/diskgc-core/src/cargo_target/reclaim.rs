@@ -357,11 +357,18 @@ impl<H: Delete> Run<'_, '_, H> {
             if evidence.is_empty() {
                 Ok(())
             } else {
-                Err(NotDeleted::Skipped(Skip::new(
-                    Reason::InUse,
-                    target.path.clone(),
-                    evidence.join("; "),
-                )))
+                Err(NotDeleted::Skipped(
+                    Skip::new(
+                        Reason::InUse,
+                        target.path.clone(),
+                        evidence
+                            .iter()
+                            .map(|e| e.detail.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )
+                    .with_process_blockers(evidence.into_iter().map(|e| e.blocker).collect()),
+                ))
             }
         };
         let done = match clear_and_delete(

@@ -20,7 +20,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::engine::Checkouts;
+use crate::engine::{Checkouts, ProcessBlocker};
 use crate::units::format_bytes;
 use json::Json;
 
@@ -222,8 +222,19 @@ pub struct SkipEntry {
     pub reason: &'static str,
     /// Human diagnostic from the refusal, when one was available.
     pub detail: Option<String>,
+    /// Attributed scan-time process evidence, or `None` when attribution is
+    /// unavailable or this is an aggregated row.
+    pub process_blockers: Option<Vec<ProcessBlocker>>,
     /// A complete tally made before this refusal, when available.
     pub estimated_bytes: Option<u64>,
+}
+
+fn process_blocker_json(blocker: &ProcessBlocker) -> Json {
+    Json::Obj(vec![
+        ("pid", Json::U64(u64::from(blocker.pid))),
+        ("command", Json::opt(blocker.command.as_deref(), Json::str)),
+        ("evidence", Json::str(blocker.evidence.as_str())),
+    ])
 }
 
 /// A process holding deleted files on the requested filesystem
@@ -349,6 +360,7 @@ impl Report {
                         examples: examples.clone(),
                         reason: skip.reason,
                         detail: None,
+                        process_blockers: None,
                         estimated_bytes: None,
                     });
                 }
@@ -497,6 +509,14 @@ impl Report {
                                 ),
                                 ("reason", Json::str(s.reason)),
                                 ("detail", Json::opt(s.detail.as_deref(), Json::str)),
+                                (
+                                    "process_blockers",
+                                    Json::opt(s.process_blockers.as_ref(), |blockers| {
+                                        Json::Arr(
+                                            blockers.iter().map(process_blocker_json).collect(),
+                                        )
+                                    }),
+                                ),
                                 ("estimated_bytes", opt_u64(s.estimated_bytes)),
                             ])
                         })

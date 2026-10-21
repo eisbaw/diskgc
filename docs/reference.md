@@ -402,7 +402,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension", "detail": null, "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
@@ -465,6 +465,16 @@ JSON result (field names are part of the contract):
 - `skipped[].detail` is an advisory human diagnostic from the refusal, or
   `null` when no diagnostic was captured. Grouped rows always use `null`;
   programs should branch on `reason`, not parse this text.
+- `skipped[].process_blockers` is `null` when the refusal cannot be
+  attributed to an observed process, including flock contention, an
+  unsettled process scan and grouped rows. Otherwise it is a nonempty array
+  of `{pid: u32, command: string|null, evidence: string}`. `pid` and
+  `command` are scan-time observations; an unreadable process can have a
+  known PID but no command. Evidence is one of `fd`, `cwd`, `root`, `exe`,
+  `map`, `inode_map`, `environment`, `unreadable`, `target_cwd`, `target_exe`,
+  `project_cargo`, `detached_cargo`, `cargo_manifest_dir`. Cargo targets can
+  have several blockers. The field reports visible evidence, not an
+  exhaustive set of processes using a candidate.
 - `skipped[].estimated_bytes` is the candidate's allocated-byte estimate
   only when a complete tally succeeded before a later refusal. Early skips,
   untallied paths and grouped rows use `null`. It is a point-in-time size,

@@ -636,30 +636,37 @@ pub(super) fn judge_in_use<F>(
 ) -> Result<(), Skip> {
     let path = &target.path;
     if let Some(why) = scan.blocked() {
-        return Err(Skip::new(Reason::InUse, path.clone(), why));
+        return Err(Skip::new(Reason::InUse, path.clone(), why)
+            .with_process_blockers(scan.blocking_unreadable().into_iter().collect()));
     }
     let mut evidence = Vec::new();
+    let mut blockers = Vec::new();
     for walk in walks {
         for (candidate, record) in walk.candidates() {
             match scan.check(&candidate, record) {
                 Ok(()) => {}
                 Err(skip) if skip.reason == Reason::InUse => {
                     evidence.push(format!("{}: {}", skip.path.display(), skip.detail));
+                    blockers.extend(skip.process_blockers.unwrap_or_default());
                 }
                 Err(skip) => return Err(skip),
             }
         }
     }
-    evidence.extend(cargo_evidence(
-        scan,
-        path,
-        target.identity.id,
-        inspected,
-        project,
-    ));
+    for item in cargo_evidence(scan, path, target.identity.id, inspected, project) {
+        evidence.push(item.detail);
+        blockers.push(item.blocker);
+    }
     if evidence.is_empty() {
         Ok(())
     } else {
-        Err(Skip::new(Reason::InUse, path.clone(), evidence.join("; ")))
+        let mut distinct = Vec::new();
+        for blocker in blockers {
+            if !distinct.contains(&blocker) {
+                distinct.push(blocker);
+            }
+        }
+        Err(Skip::new(Reason::InUse, path.clone(), evidence.join("; "))
+            .with_process_blockers(distinct))
     }
 }

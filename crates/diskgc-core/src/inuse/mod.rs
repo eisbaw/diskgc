@@ -306,11 +306,35 @@ impl Scan {
 
     /// The command of `pid` for messages (`?` when unknown).
     pub fn command(&self, pid: Pid) -> String {
+        self.command_option(pid).unwrap_or_else(|| "?".into())
+    }
+
+    /// A command observed at scan time, without inventing a name for an
+    /// unreadable process.
+    pub fn command_option(&self, pid: Pid) -> Option<String> {
         self.seen
             .get(&pid)
             .map(|s| &s.command)
             .filter(|c| !c.is_empty())
-            .map_or("?".into(), |c| c.to_string_lossy().into_owned())
+            .map(|c| c.to_string_lossy().into_owned())
+    }
+
+    /// The one unreadable process that blocks every candidate, if a scan
+    /// settled. An unsettled scan has no complete attribution.
+    pub fn blocking_unreadable(&self) -> Option<crate::engine::ProcessBlocker> {
+        if self.unsettled.is_some() {
+            return None;
+        }
+        let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
+        Some(crate::engine::ProcessBlocker {
+            pid: u.pid.0,
+            command: u
+                .name
+                .as_ref()
+                .filter(|n| !n.is_empty())
+                .map(|n| n.to_string_lossy().into_owned()),
+            evidence: crate::engine::ProcessEvidence::Unreadable,
+        })
     }
 
     /// Every process read in full, in pid order, with what it showed of
@@ -405,9 +429,18 @@ impl Scan {
     ///    query failed): `contains_ipc`.
     pub fn check<F>(&self, candidate: &Candidate<'_, F>, record: &WalkRecord) -> Result<(), Skip> {
         let path = candidate.path();
-        let in_use = |at: PathBuf, detail: String| Err(Skip::new(Reason::InUse, at, detail));
+        use crate::engine::{ProcessBlocker, ProcessEvidence};
+        let blocker = |pid: Pid, evidence| ProcessBlocker {
+            pid: pid.0,
+            command: self.command_option(pid),
+            evidence,
+        };
+        let in_use = |at: PathBuf, detail: String, process: Option<ProcessBlocker>| {
+            Err(Skip::new(Reason::InUse, at, detail)
+                .with_process_blockers(process.into_iter().collect()))
+        };
         if let Some(why) = self.blocked() {
-            return in_use(path.to_owned(), why);
+            return in_use(path.to_owned(), why, self.blocking_unreadable());
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
         for id in record.objects() {
@@ -421,6 +454,16 @@ impl Scan {
                         self.command(u.pid),
                         u.how
                     ),
+                    Some(blocker(
+                        u.pid,
+                        match u.how {
+                            How::Fd(_) => ProcessEvidence::Fd,
+                            How::Cwd => ProcessEvidence::Cwd,
+                            How::Root => ProcessEvidence::Root,
+                            How::Exe => ProcessEvidence::Exe,
+                            How::Map => ProcessEvidence::Map,
+                        },
+                    )),
                 );
             }
             if by_inode && let Some(pid) = self.maps_by_inode.get(&id.ino).and_then(|p| p.first()) {
@@ -433,6 +476,7 @@ impl Scan {
                         id.ino,
                         candidate.fs_type()
                     ),
+                    Some(blocker(*pid, ProcessEvidence::InodeMap)),
                 );
             }
         }
@@ -450,6 +494,7 @@ impl Scan {
                     e.var.to_string_lossy(),
                     e.path.display()
                 ),
+                Some(blocker(e.pid, ProcessEvidence::Environment)),
             );
         }
         for ipc in record.ipc_entries() {

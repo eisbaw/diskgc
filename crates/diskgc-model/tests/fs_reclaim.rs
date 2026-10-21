@@ -1373,6 +1373,23 @@ fn a_blocking_scan_is_replaced_at_the_short_limit() {
     assert_eq!(actions(&report), ["/tmp/pytest-of-a"], "{report:#?}");
 }
 
+#[test]
+fn an_unreadable_process_without_a_name_has_null_command_on_the_wire() {
+    let tree = format!("  /tmp/pytest-of-a: {}\n", old_dir("10K"));
+    let host = host(&yaml(
+        "",
+        &tree,
+        "  - {pid: 9, exe: /usr/bin/tool, name: '', proc: failed}\n",
+    ));
+    let report = ensure(&host, &tmp("profile:pytest-of-dir"));
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some("in_use"));
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("report JSON");
+    assert_eq!(
+        wire["skipped"][0]["process_blockers"],
+        serde_json::json!([{"pid": 9, "command": null, "evidence": "unreadable"}])
+    );
+}
+
 /// A blocking scan that runs past the deadline is a stopped run, even when
 /// this is the final candidate and there is no next loop iteration to check.
 #[test]
@@ -1935,6 +1952,50 @@ fn each_kind_reaches_only_its_own_protocol() {
     assert_eq!(
         unlinked_below(&host, "/home/mark/src/proj/.pytest_cache"),
         0
+    );
+}
+
+#[test]
+fn cargo_report_json_keeps_multiple_attributed_processes() {
+    let at = OLD;
+    let tree = format!(
+        "  /home/mark/src/proj/Cargo.toml: {{}}\n  /home/mark/src/proj/target:\n    \
+         CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {{.: {{mtime: {at}}}, \
+         .cargo-lock: {{mtime: {at}}}, .fingerprint: {{.: {{mtime: {at}}}, p-1: \
+         {{.: {{mtime: {at}}}}}}}, deps: {{.: {{mtime: {at}}}, p-1: {{size: 5G, mtime: \
+         {at}}}}}}}\n"
+    );
+    let rest = "  - {pid: 42, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], \
+                fds: [{path: /usr/bin/tool}], environ: \
+                [CARGO_TARGET_DIR=/home/mark/src/proj/target]}\n  - {pid: 43, \
+                exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], \
+                fds: [{path: /usr/bin/tool}], \
+                environ: [TMPDIR=/home/mark/src/proj/target/debug]}\n";
+    let host = host(&yaml("", &tree, rest));
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target",
+            &["/home/mark/src"],
+            "/home/mark",
+            "100%",
+        ),
+    );
+    assert_eq!(
+        skip_of(&report, "/home/mark/src/proj/target"),
+        Some("in_use"),
+        "{report:#?}"
+    );
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("report JSON");
+    let blockers = wire["skipped"][0]["process_blockers"]
+        .as_array()
+        .expect("attributed process array");
+    assert_eq!(
+        blockers,
+        &vec![
+            serde_json::json!({"pid": 42, "command": "tool", "evidence": "environment"}),
+            serde_json::json!({"pid": 43, "command": "tool", "evidence": "environment"}),
+        ]
     );
 }
 

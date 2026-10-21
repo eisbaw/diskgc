@@ -63,8 +63,13 @@ fn full() -> Report {
         candidate: "/u".into(),
         count: 1,
         examples: vec!["/u".into()],
-        reason: "locked",
-        detail: Some("another process holds the lock".into()),
+        reason: "in_use",
+        detail: Some("pid 42 uses it".into()),
+        process_blockers: Some(vec![crate::engine::ProcessBlocker {
+            pid: 42,
+            command: None,
+            evidence: crate::engine::ProcessEvidence::Fd,
+        }]),
         estimated_bytes: Some(4096),
     }];
     r.held_by_deleted_files = vec![HeldEntry {
@@ -195,6 +200,12 @@ fn every_status_and_reason_is_a_documented_value() {
         .map(str::to_owned)
         .collect();
     assert_eq!(all_reasons, reasons, "the full documented skip enum");
+    let evidence_values = alternatives(&doc["skipped"][0]["process_blockers"][0]["evidence"]);
+    let expected_evidence: BTreeSet<String> = crate::engine::ProcessEvidence::ALL
+        .iter()
+        .map(|e| e.as_str().to_owned())
+        .collect();
+    assert_eq!(evidence_values, expected_evidence);
     for reason in Reason::ALL
         .iter()
         .map(|reason| reason.as_str())
@@ -230,6 +241,7 @@ fn skip(
         count: 1,
         reason,
         detail: None,
+        process_blockers: None,
         estimated_bytes: None,
     }
 }
@@ -252,6 +264,7 @@ fn skips_aggregate_at_21_per_tier_profile_and_reason() {
     assert_eq!(compact["skipped"][0]["candidate"], "");
     assert_eq!(compact["skipped"][0]["count"], 21);
     assert!(compact["skipped"][0]["detail"].is_null());
+    assert!(compact["skipped"][0]["process_blockers"].is_null());
     assert!(compact["skipped"][0]["estimated_bytes"].is_null());
     assert_eq!(
         compact["skipped"][0]["examples"].as_array().unwrap().len(),

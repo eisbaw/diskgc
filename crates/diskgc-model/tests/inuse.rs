@@ -185,6 +185,25 @@ fn a_process_using_an_object_of_the_candidate_makes_it_in_use() {
             skip.detail.starts_with("pid 10 (") && skip.detail.contains(how),
             "{with:?}: {skip}"
         );
+        let blocker = &skip.process_blockers.as_ref().expect("attributed")[0];
+        assert_eq!(blocker.pid, 10);
+        assert!(
+            blocker
+                .command
+                .as_deref()
+                .is_some_and(|name| !name.is_empty())
+        );
+        assert_eq!(
+            blocker.evidence.as_str(),
+            match how {
+                "open as fd 3" => "fd",
+                "as its working directory" => "cwd",
+                "as its root directory" => "root",
+                "as its executable" => "exe",
+                "mapped" => "map",
+                _ => unreachable!(),
+            }
+        );
         // The deletion step refuses it and unlinks nothing.
         let skip = skip_of(reclaim(&host, "/tmp/c", true));
         assert_eq!(skip.reason, Reason::InUse, "{skip}");
@@ -269,6 +288,11 @@ fn the_initial_environment_names_a_path_inside_the_candidate() {
                 assert!(
                     skip.detail.contains("initial environment") && skip.detail.contains(shown),
                     "{env}: {skip}"
+                );
+                let blocker = &skip.process_blockers.as_ref().expect("attributed")[0];
+                assert_eq!(
+                    (blocker.pid, blocker.evidence.as_str()),
+                    (10, "environment")
                 );
             }
             None => assert_eq!(result, Ok(()), "{env}"),
@@ -437,6 +461,8 @@ fn unreadable_processes_block_unless_their_status_explains_them() {
                 skip.detail.starts_with("pid 10 (tool) cannot be inspected"),
                 "{with:?}: {skip}"
             );
+            let blocker = &skip.process_blockers.as_ref().expect("attributed")[0];
+            assert_eq!((blocker.pid, blocker.evidence.as_str()), (10, "unreadable"));
         } else {
             assert_eq!(result, Ok(()), "{with:?}: {notes}");
         }
@@ -1020,6 +1046,10 @@ fn a_process_list_that_keeps_growing_leaves_the_scan_unsettled() {
     ));
     let skip = in_use(check_c(&host, true).0);
     assert!(skip.detail.contains("still growing"), "{skip}");
+    assert!(
+        skip.process_blockers.is_none(),
+        "unsettled scans cannot attribute a holder"
+    );
     let host = model(&format!(
         "{}events:\n{}",
         processes(&[process(10, &[])]),
@@ -1255,6 +1285,10 @@ fn a_directory_flocked_by_another_process_is_locked() {
             (skip.reason, skip.path.as_path()),
             (Reason::Locked, Path::new("/tmp/c")),
             "{mode}: {skip}"
+        );
+        assert!(
+            skip.process_blockers.is_none(),
+            "flock does not identify its holder"
         );
         assert!(
             !host
