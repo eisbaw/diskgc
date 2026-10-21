@@ -14,7 +14,7 @@ use diskgc_core::resolve::{ResolveError, Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
-use diskgc_model::spec::{FileSpec, NodeSpec};
+use diskgc_model::spec::{Bytes, DirSpec, FileSpec, NodeSpec};
 use serde_json::Value;
 
 use crate::ensure;
@@ -30,6 +30,19 @@ const BUN_VECTOR: &str =
 const MYPY_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/mypy-cache-match.yaml");
 const DANGLING_LINK: &str = "/home/tester/project/dangling-link";
+
+// The fresh kernel tmpfs gives every new inode a current ctime. These
+// checked-in vectors need an eligible candidate whose *newest mtime or
+// ctime* is days old. Setting mtime cannot reproduce the old ctime; a real
+// LinuxHost must therefore skip that candidate as not_idle.
+#[cfg(test)]
+const HISTORICAL_CTIME_VECTORS: &[&str] = &[
+    "autotools-source-anchor.yaml",
+    "cmake-source-anchor.yaml",
+    "meson-source-anchor.yaml",
+    "west-build-anchored.yaml",
+    "xdg-cache-entry-v2-match.yaml",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Outcome {
@@ -57,8 +70,134 @@ pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRe
     replay_vector(ctx, MYPY_VECTOR, false)
 }
 
+macro_rules! replay_fixture {
+    ($function:ident, $file:literal) => {
+        pub fn $function(ctx: &Ctx) -> TestResult {
+            replay_vector(
+                ctx,
+                include_str!(concat!(
+                    "../../crates/diskgc-model/tests/models/profiles/",
+                    $file
+                )),
+                false,
+            )
+        }
+    };
+}
+
+replay_fixture!(cargo_target_vector, "cargo-target-locked.yaml");
+replay_fixture!(chromium_tmp_vector, "chromium-tmp-match.yaml");
+replay_fixture!(claude_code_tmp_vector, "claude-code-tmp-match.yaml");
+replay_fixture!(
+    claude_code_versions_vector,
+    "claude-code-versions-versions.yaml"
+);
+replay_fixture!(codex_releases_vector, "codex-releases-versions.yaml");
+replay_fixture!(
+    cursor_agent_versions_vector,
+    "cursor-agent-versions-versions.yaml"
+);
+replay_fixture!(cursor_extensions_vector, "cursor-extensions-versions.yaml");
+replay_fixture!(go_mod_cache_vector, "go-mod-cache-match.yaml");
+replay_fixture!(nix_user_cache_vector, "nix-user-cache-match.yaml");
+replay_fixture!(node_compile_cache_vector, "node-compile-cache-match.yaml");
+replay_fixture!(
+    node_compile_cache_nested_vector,
+    "node-compile-cache-nested-claude.yaml"
+);
+replay_fixture!(playwright_tmp_vector, "playwright-tmp-match.yaml");
+replay_fixture!(pytest_cache_vector, "pytest-cache-match.yaml");
+replay_fixture!(renode_tmp_vector, "renode-tmp-match.yaml");
+replay_fixture!(zephyr_tmp_vector, "zephyr-tmp-match.yaml");
+
+/// One container runs 100 distinct, deterministic model trees. Every case
+/// gets a disjoint bound root, so earlier cases cannot become candidates for
+/// later ones. The checked-in Python expectation supplies an independent
+/// base; generated branches add eligible, checkout-protected, and decoy
+/// paths with their own independent expectations.
+pub fn generated_python_models_match_linux(ctx: &Ctx) -> TestResult {
+    for index in 0..100 {
+        let vector = generated_python_vector(index)?;
+        replay_model(ctx, vector, false)
+            .map_err(|error| format!("generated Python model {index}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn generated_python_vector(index: u32) -> Result<ProfileVector, String> {
+    let root = format!("/home/tester/differential-{index:03}");
+    let yaml = PYTHON_VECTOR.replace("/home/tester/project", &root);
+    let mut vector = ProfileVector::parse(&yaml)?;
+    let base_cache = PathBuf::from(format!("{root}/app/__pycache__"));
+    let Some(NodeSpec::Dir(cache)) = vector.host.tree.get_mut(&base_cache) else {
+        return Err("generated Python vector is missing its base cache".into());
+    };
+    cache.entries.insert(
+        format!("generated-{index}.pyc"),
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(1024 + u64::from(index) * 97)),
+            ..FileSpec::default()
+        }),
+    );
+
+    let extra = PathBuf::from(format!("{root}/variation/__pycache__"));
+    match index % 4 {
+        0 => {} // The varied base cache alone is eligible.
+        1 => {
+            let mut cache = DirSpec::default();
+            cache.entries.insert(
+                "extra.pyc".into(),
+                NodeSpec::File(FileSpec {
+                    size: Some(Bytes(512 + u64::from(index) * 31)),
+                    ..FileSpec::default()
+                }),
+            );
+            vector.host.tree.insert(extra.clone(), NodeSpec::Dir(cache));
+            vector.expect.plan.push(PlanVerdict {
+                candidate: extra.clone(),
+                reason: None,
+                source: None,
+            });
+            vector.expect.actions.push(extra.clone());
+            vector.expect.removed.push(extra);
+        }
+        2 => {
+            let mut git = DirSpec::default();
+            git.entries
+                .insert("HEAD".into(), NodeSpec::File(FileSpec::default()));
+            let mut cache = DirSpec::default();
+            cache.entries.insert(".git".into(), NodeSpec::Dir(git));
+            vector.host.tree.insert(extra.clone(), NodeSpec::Dir(cache));
+            vector.expect.plan.push(PlanVerdict {
+                candidate: extra.clone(),
+                reason: Some("contains_checkout".into()),
+                source: None,
+            });
+            vector.expect.skipped.push(SkipVerdict {
+                candidate: extra.clone(),
+                reason: "contains_checkout".into(),
+            });
+            vector.expect.preserved.push(extra.join(".git/HEAD"));
+        }
+        3 => {
+            let decoy = PathBuf::from(format!("{root}/variation/__pycache__-backup"));
+            let mut cache = DirSpec::default();
+            cache
+                .entries
+                .insert("keep".into(), NodeSpec::File(FileSpec::default()));
+            vector.host.tree.insert(decoy.clone(), NodeSpec::Dir(cache));
+            vector.expect.preserved.push(decoy.join("keep"));
+        }
+        _ => unreachable!(),
+    }
+    Ok(vector)
+}
+
 fn replay_vector(ctx: &Ctx, yaml: &str, with_dangling_link: bool) -> TestResult {
-    let mut vector = ProfileVector::parse(yaml)?;
+    replay_model(ctx, ProfileVector::parse(yaml)?, with_dangling_link)
+}
+
+fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) -> TestResult {
     // The checked-in model's `/home` ext4 is not a rootless-container mount.
     // Place the same tree on the harness's `/home/tester` tmpfs. This changes
     // no candidate pathname or selection expectation.
@@ -92,24 +231,21 @@ fn replay_vector(ctx: &Ctx, yaml: &str, with_dangling_link: bool) -> TestResult 
     let oracle = Oracle::arm(fixture)?;
     let select = format!("profile:{}", vector.profile_name());
     let path = vector.root_path().to_str().ok_or("non-UTF-8 vector path")?;
-    let root = vector.roots.first().ok_or("vector needs a bound root")?;
-    ensure!(
-        vector.roots.len() == 1,
-        "vector needs exactly one bound root"
-    );
-    let args = [
+    let mut args = vec![
         "--json",
         "--no-index",
         "--min-free",
         vector.min_free.as_str(),
         "--select",
         &select,
-        "--roots",
-        root,
-        path,
     ];
+    if !vector.roots.is_empty() {
+        args.push("--roots");
+        args.extend(vector.roots.iter().map(String::as_str));
+    }
+    args.push(path);
     let mut dry_args = vec!["--dry-run"];
-    dry_args.extend(args);
+    dry_args.extend(&args);
     let dry = ensure_run(ctx, &dry_args)?;
     let reclaim = ensure_run(ctx, &args)?;
     oracle.judge_runs(&[&dry, &reclaim])?.assert_clean()?;
@@ -145,11 +281,15 @@ fn adapt_home_mount(vector: &mut ProfileVector) {
 }
 
 fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
-    let library = Library::builtin().map_err(|e| e.to_string())?;
+    let library = if vector.user_profiles.is_empty() {
+        Library::builtin().map_err(|e| e.to_string())?
+    } else {
+        Library::with_user_profiles(&vector.user_profiles).map_err(|e| e.to_string())?
+    };
     let tier = Tier::select(
         &format!("profile:{}", vector.profile),
         &library,
-        Some(&vector.roots),
+        (!vector.roots.is_empty()).then_some(vector.roots.as_slice()),
         vector.host.own_uid.unwrap_or(1000),
     )?;
     let request = Request {
@@ -406,7 +546,24 @@ mod tests {
     }
 
     #[test]
-    fn every_checked_in_profile_vector_has_an_explicit_materialization_classification() {
+    fn generated_models_have_independent_expectations() {
+        let library = Library::builtin().expect("built-in library");
+        let mut roots = std::collections::BTreeSet::new();
+        for index in 0..100 {
+            let vector = generated_python_vector(index).expect("generated model");
+            assert!(
+                roots.insert(vector.path.clone()),
+                "generated roots must differ"
+            );
+            assert_eq!(vector.expect.actions.len(), 1 + usize::from(index % 4 == 1));
+            vector
+                .check(&library)
+                .expect("independent generated expectation");
+        }
+    }
+
+    #[test]
+    fn every_checked_in_profile_vector_has_an_explicit_replay_classification() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../crates/diskgc-model/tests/models/profiles");
         let mut files: Vec<_> = fs::read_dir(&directory)
@@ -420,7 +577,9 @@ mod tests {
             30,
             "new profile fixture needs materialization triage"
         );
-        let mut accepted = 0;
+        let mut replayable = 0;
+        let mut historical_ctime = 0;
+        let mut unsupported_tree = 0;
         for path in files {
             let yaml = fs::read_to_string(&path).expect("read profile fixture");
             let mut vector = ProfileVector::parse(&yaml).expect("parse profile fixture");
@@ -428,10 +587,20 @@ mod tests {
             let name = path.file_name().expect("fixture name").to_string_lossy();
             match model_materialize::validate(&vector.host) {
                 Ok(()) => {
-                    accepted += 1;
-                    eprintln!("materializable {name}");
+                    if HISTORICAL_CTIME_VECTORS.contains(&name.as_ref()) {
+                        historical_ctime += 1;
+                        eprintln!("model-only {name}: historical ctime cannot be created on tmpfs");
+                    } else {
+                        replayable += 1;
+                        eprintln!("replayable {name}");
+                    }
                 }
                 Err(reason) => {
+                    assert!(
+                        !HISTORICAL_CTIME_VECTORS.contains(&name.as_ref()),
+                        "{name}: ctime classification overlaps unsupported tree: {reason}"
+                    );
+                    unsupported_tree += 1;
                     assert!(
                         reason.contains("model-only")
                             || reason.contains("outside the container scratch mounts"),
@@ -441,9 +610,18 @@ mod tests {
                 }
             }
         }
-        assert!(
-            accepted >= 3,
-            "at least the three kernel replay fixtures must materialize"
+        assert_eq!(historical_ctime, HISTORICAL_CTIME_VECTORS.len());
+        assert_eq!(unsupported_tree, 7);
+        assert_eq!(replayable, 18);
+        assert_eq!(
+            crate::suite::TESTS
+                .iter()
+                .filter(|test| test
+                    .name
+                    .ends_with("_vector_matches_linux_outcomes_and_deletion_diff"))
+                .count(),
+            replayable,
+            "every replayable vector needs a registered container test"
         );
     }
 }
