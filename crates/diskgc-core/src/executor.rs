@@ -503,8 +503,8 @@ impl Tier {
                 idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
                 continue;
             }
-            // A positive filter is a conjunction: its entry checks and
-            // idle requirement are judged by the same candidate path.
+            // A positive filter is a conjunction: its entry checks, idle
+            // requirement and version guards judge the same candidate.
             // A negated mixed filter complements the entire conjunction,
             // using the walk's newest-change measure under the lock.
             let entry_count =
@@ -517,7 +517,10 @@ impl Tier {
                         | crate::kind::PredicateName::IdleFor
                 )
             });
-            if matches!(kind, SourceKind::Fs(_)) && entry_count > 0 && entry_and_idle_only {
+            if matches!(kind, SourceKind::Fs(_))
+                && entry_count > 0
+                && (!is_negated || entry_and_idle_only)
+            {
                 let SourceKind::Fs(find) = &mut kind else {
                     unreachable!()
                 };
@@ -539,6 +542,13 @@ impl Tier {
                             negated: is_negated,
                         });
                     }
+                }
+                // Entry checks narrow this term after discovery; version
+                // guards are independent retention checks. A filter can
+                // specify both, so neither may disappear when compiling it.
+                if !is_negated {
+                    find.apply_version_filter(where_)
+                        .map_err(|error| format!("--select `{expr}`: filter:{name}: {error}"))?;
                 }
                 continue;
             }

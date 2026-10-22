@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 05:35'
+updated_date: '2026-10-22 05:59'
 labels:
   - wave-2
   - irreversible
@@ -108,6 +108,8 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 command-union final-policy fallback increment (pending parent full gate/review): a final !profile/protect refusal before command start now retries source selection under the same candidate lock. Each retry rereads mount/place, source predicates and idle, term policy, full walk and checkout veto across every term; the fallback gets its own argv path, DISKGC_PROFILE, cwd and report source. A source can lose final policy once, bounding retries to the union width; command starts at most once. ModelHost regressions cover both source orders, one-lock/one-command attribution, and a checkout appearing at the final boundary vetoing the fallback. Focused command-union tests 9/9 and core/model Clippy passed. TASK-16 still lacks full randomized reference properties and other unsupported runtime combinations; AC/DoD remain open.
 
 2026-10-22 MPED final-boundary attribution fix (pending parent full gate/review): if fallback finds no selectable command source, the report now preserves the final refusal reason and the source selected immediately before that refusal. A prior filtered source no longer masks excluded, and report attribution no longer falls back to the union first source. ModelHost regression with filtered first term and late !profile exclusion of the second passes; command-union focused suite 10/10, core/model Clippy, format check, diff check pass. AC/DoD unchanged.
+
+2026-10-22 positive mixed entry+retention increment (pending parent full gate/review): valid fs filters with has/has_not plus idle_for and version guards (keep_newest/link protection) now compile all predicates into one term; previously has plus keep_newest was refused as an unsupported filter despite the schema allowing it. ModelHost dry run proves tagged old v1 eligible, untagged v2 filtered and newest tagged v3 retained; reclaim removes only v1, and removing its tag at flock prevents deletion. Full focused fs_dry_run 58/58 and fs_reclaim 76/76 passed; core/model Clippy and diff check pass. TASK-16 AC/DoD stay open: negated entry+version conjunctions, broader Cargo unions and full integrated random profile/tree property remain unsupported/unproved. Parent exact just e2e and parallel QA/MPED remain before commit.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

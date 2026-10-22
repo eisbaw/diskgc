@@ -45,6 +45,12 @@ const PROFILES: &str = r#"
   where: {has_not: CACHEDIR.TAG}
 - name: tagged-idle-unkept
   where: {has: CACHEDIR.TAG, has_not: .keep, idle_for: 2d}
+- name: tagged-keep-one
+  where: {has: CACHEDIR.TAG, idle_for: 2d, keep_newest: 1}
+- name: versioned
+  find: {roots: [/tmp], paths: [versions/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/versions/v1]}
 - name: anything
   find: {roots: required, paths: ["*"], type: any}
   action: delete
@@ -1603,6 +1609,45 @@ fn version_reclaim_keeps_linked_and_newest_files() {
         host.trace_count(Op::ReadLink) >= 2,
         "link checked during tally and reclaim"
     );
+}
+
+#[test]
+fn entry_and_version_filter_conjoin_under_reclaim_lock() {
+    let tree = r#"  /tmp/versions/v1: {.: {mtime: 2026-10-01T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-01T00:00:00Z}}
+  /tmp/versions/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1K, mtime: 2026-10-02T00:00:00Z}}
+  /tmp/versions/v3: {.: {mtime: 2026-10-03T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-03T00:00:00Z}}
+"#;
+    let baseline = host(&yaml("", tree, ""));
+    let report = ensure(
+        &baseline,
+        &tmp("profile:versioned && filter:tagged-keep-one"),
+    );
+    assert_eq!(actions(&report), ["/tmp/versions/v1"]);
+    assert!(!exists(&baseline, "/tmp/versions/v1"));
+    assert!(exists(&baseline, "/tmp/versions/v2"));
+    assert!(exists(&baseline, "/tmp/versions/v3"));
+    assert_eq!(unlinked_below(&baseline, "/tmp/versions/v2"), 0);
+    assert_eq!(unlinked_below(&baseline, "/tmp/versions/v3"), 0);
+
+    let changed = host(&yaml(
+        "",
+        tree,
+        "events:\n  - {at: {op: flock, path: /tmp/versions/v1, when: after}, remove: /tmp/versions/v1/CACHEDIR.TAG}\n",
+    ));
+    let report = ensure(
+        &changed,
+        &tmp("profile:versioned && filter:tagged-keep-one"),
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(
+        report.skipped.iter().any(|skip| {
+            skip.candidate == Path::new("/tmp/versions/v1") && skip.reason == "filtered"
+        }),
+        "{report:#?}"
+    );
+    assert!(exists(&changed, "/tmp/versions/v1"));
+    assert_eq!(unlinked_below(&changed, "/tmp/versions/v1"), 0);
+    assert!(changed.unfired_events().is_empty());
 }
 
 fn actions(report: &Report) -> Vec<String> {

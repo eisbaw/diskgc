@@ -99,6 +99,8 @@ const PROFILES: &str = r#"
   examples: {match: [/home/mark/versions/v1]}
 - name: keep-two
   where: {keep_newest: 2}
+- name: tagged-keep-one
+  where: {has: CACHEDIR.TAG, idle_for: 2d, keep_newest: 1}
 - name: union-file-a
   find: {roots: [/tmp], paths: [link-a], type: file}
   action: delete
@@ -680,6 +682,28 @@ fn keep_newest_filter_really_narrows_a_source_term() {
     );
     assert_eq!(
         reason_of(&filtered, "/home/mark/versions/v3"),
+        Some(Some("newest_version"))
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn entry_and_version_filter_conjoin_in_dry_run() {
+    let host = host(&yaml(
+        r#"  /home/mark/versions/v1: {.: {mtime: 2026-10-01T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-01T00:00:00Z}}
+  /home/mark/versions/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1K, mtime: 2026-10-02T00:00:00Z}}
+  /home/mark/versions/v3: {.: {mtime: 2026-10-03T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-03T00:00:00Z}}
+"#,
+    ));
+    let selection = "profile:generic-versions && filter:tagged-keep-one";
+    let report = dry_run(&host, &request(selection, &["/home/mark"], "/home/mark"));
+    assert_eq!(reason_of(&report, "/home/mark/versions/v1"), Some(None));
+    assert_eq!(
+        reason_of(&report, "/home/mark/versions/v2"),
+        Some(Some("filtered"))
+    );
+    assert_eq!(
+        reason_of(&report, "/home/mark/versions/v3"),
         Some(Some("newest_version"))
     );
     nothing_locked_or_deleted(&host);

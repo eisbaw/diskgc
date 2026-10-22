@@ -668,9 +668,10 @@ lock-time reclaim checks then apply once per target. Other Cargo unions are
 deferred.
 Filesystem and Cargo sources can use negated profiles. Filesystem terms can
 use either polarity of a filter with a single `has` or `has_not` predicate.
-Positive filesystem filters may also combine `has`, `has_not`, and `idle_for`
-in one profile: all predicates must pass. The entry checks and idle measure
-are repeated under the candidate lock. A negated filesystem filter may
+Positive filesystem filters may combine `has`, `has_not`, `idle_for`,
+`keep_newest` and link protection predicates in one profile: all predicates
+must pass. The entry checks, idle measure and retention guards are repeated
+under the candidate lock. A negated filesystem filter may
 combine these predicates too: it admits a candidate when the complete
 conjunction is known false, and excludes it as `filtered` when all predicates
 match. Unknown entry type or age admits neither polarity, even if another
