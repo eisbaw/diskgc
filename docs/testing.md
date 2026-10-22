@@ -497,9 +497,18 @@ four originals need staged kernel creation times in an isolated clock domain,
 such as a disposable QEMU guest whose wall clock changes between creating
 the old and fresh cohorts. A host container cannot safely set the wall clock:
 `CLOCK_REALTIME` is not time namespaced, and the sandbox offset changes only
-diskgc's read of time, not the kernel's ctime. No VM replay is implemented in
-this suite yet. Containers-image also needs its
-`/var/tmp` and process shape materialized.
+diskgc's read of time, not the kernel's ctime. A disposable KVM/QEMU probe
+booted the current kernel with a static BusyBox initramfs, mounted guest
+tmpfs, set the guest clock to 2021-01-01, created an inode, then moved the
+guest clock forward and created another. The first inode's ctime stayed at
+1609459200 while the second received 1792655850; QEMU exited zero and the
+host clock advanced only one second across the run. Thus an isolated kernel
+can represent both age cohorts. This was a read-only feasibility probe for
+diskgc: no VM differential replay or deletion was run. The remaining replay
+needs a guest Podman container, staged fixture creation across guest clock
+changes, and the existing independent expectation and deletion oracle inside
+that container. Containers-image also needs its `/var/tmp` and process shape
+materialized.
 
 ## 5. End-to-end tests in containers
 

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-22 07:52'
+updated_date: '2026-10-22 08:00'
 labels:
   - wave-2
   - testing
@@ -66,6 +66,8 @@ Correction to immediately preceding TASK-25 note: four originals, not all six, m
 2026-10-22 TASK-25 historical-ctime increment: West and XDG checked-in originals now each have a Fast disposable Podman ModelHost/LinuxHost differential replay. The original independent ProfileVector expectation is checked first; projection moves its one explicit old timestamp cohort to kernel-now and shifts model clock/mtimes together, using TASK-89's sandbox-only clock offset for real ctime age. Both focused Podman cases PASS with strace deletion oracle clean and host canary refusal exit 86; the four remaining historical originals still refuse preflight before fixture writes (focused Podman PASS). A unit regression confirms rebased expectations/preflight for West/XDG and explicitly rejects Autotools/CMake/Meson/containers-image as mixed-age fresh not_idle vectors; exact registry unit and e2e Clippy all targets warnings-denied PASS. QEMU and /dev/kvm exist, but this repo has no disposable VM harness. The four mixed-age originals need a guest root with CAP_SYS_TIME, staged inode creation across guest wall-clock changes, then full parity/oracle replay; a host container's CLOCK_REALTIME is not namespaced and TASK-89's offset does not change kernel ctime. Containers-image additionally needs /var/tmp and process materialization. AC #1/#2 and DoD stay open; no full gate or commit in this slice.
 
 2026-10-22 parent final gate for West/XDG projected replay: exact nix develop -c just e2e exited 0 on the frozen tree; Nix E2E units 99/99, Podman 216/216 including both new replays, Docker 7/7, workspace fmt/Clippy/tests passed (one intentional ignored Linux helper). Read-only MPED review GO; four mixed-age originals remain model-only, so AC/DoD remain unchecked.
+
+2026-10-22 mixed-age kernel feasibility: booted disposable QEMU/KVM with current kernel and a static BusyBox initramfs, mounted guest tmpfs, created /scratch/old after setting guest clock to 1609459200, advanced guest clock to 1792655850, then created /scratch/fresh. Guest stat output: old ctime 1609459200 both before and after shift; fresh ctime 1792655850. QEMU exit 0; host clock 1792655900 before, 1792655901 after. This proves two genuine kernel ctime cohorts can coexist without changing host time. No deleting diskgc ran in guest: current E2E runner requires Podman native overlay and a large Nix-built image, while this proof guest had only BusyBox. TASK-25.1 captures the reproducible Podman-inside-guest harness, staged statx assertions, four unchanged originals, and Oracle parity. AC #1/#2 and DoD stay open; none of the four original mixed-age replays is claimed passing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
