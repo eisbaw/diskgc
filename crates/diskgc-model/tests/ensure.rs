@@ -1614,7 +1614,7 @@ fn selections_this_build_cannot_run_are_refused() {
     let roots = vec![SRC.to_owned()];
     for (expr, needle) in [
         (
-            "(profile:cargo-target && filter:idle-1d) || profile:cargo-target",
+            "(profile:cargo-target && !filter:idle-1d) || profile:cargo-target",
             "a union",
         ),
         ("profile:nope", "no profile or filter is named `nope`"),
@@ -1647,6 +1647,118 @@ fn selections_this_build_cannot_run_are_refused() {
         Some(Duration::from_secs(7 * 86_400))
     );
     assert_eq!(tier.name, "--select");
+}
+
+#[test]
+fn same_cargo_source_positive_idle_union_uses_weakest_bound_once() {
+    let first =
+        "(profile:cargo-target && filter:idle-7d) || (profile:cargo-target && filter:idle-2d)";
+    let reverse =
+        "(profile:cargo-target && filter:idle-2d) || (profile:cargo-target && filter:idle-7d)";
+    for expr in [first, reverse] {
+        let request = request(expr, &[SRC], SRC, "12G", Some("15G"));
+        assert_eq!(
+            request.tier.idle_for.unwrap().0,
+            Duration::from_secs(2 * 86_400)
+        );
+        assert_eq!(request.tier.select, expr);
+        let planning = host(&yaml(false, ""));
+        let plan = dry_run(&planning, &request);
+        assert_eq!(plan.status, Status::DryRun, "{plan:#?}");
+        assert_eq!(plan.plan.len(), 2, "{plan:#?}");
+        assert_eq!(plan.plan[0].candidate, Path::new(OLD));
+        assert_eq!(plan.plan[0].reason, None);
+        assert_eq!(plan.plan[1].candidate, Path::new(NEW));
+        assert_eq!(plan.plan[1].reason, Some("not_idle"));
+        assert!(calls(&planning, Op::Unlinkat).is_empty());
+
+        let reclaiming = host(&yaml(true, ""));
+        let report = ensure(&reclaiming, &request);
+        assert_eq!(report.status, Status::Met, "{report:#?}");
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].candidate, Path::new(OLD));
+        assert!(!calls(&reclaiming, Op::Unlinkat).is_empty());
+        assert!(calls(&reclaiming, Op::Unlinkat).iter().all(|call| {
+            call.path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(OLD))
+        }));
+    }
+
+    let unfiltered = request(
+        "(profile:cargo-target && filter:idle-7d) || profile:cargo-target",
+        &[SRC],
+        SRC,
+        "1G",
+        None,
+    );
+    assert_eq!(unfiltered.tier.idle_for, None);
+    let plan = dry_run(&host(&yaml(false, "")), &unfiltered);
+    assert_eq!(plan.plan.len(), 2, "{plan:#?}");
+    assert!(
+        plan.plan.iter().all(|entry| entry.reason.is_none()),
+        "{plan:#?}"
+    );
+
+    let (configured_tiers, _) = configured(
+        "version: 1\ngroups:\n  - name: pressure\n    tiers:\n      - name: cargo-union\n        select: (profile:cargo-target && filter:idle-7d) || (profile:cargo-target && filter:idle-2d)\n        roots: [/home/mark/src]\n",
+    );
+    assert_eq!(configured_tiers.len(), 1);
+    assert_eq!(
+        configured_tiers[0].idle_for.unwrap().0,
+        Duration::from_secs(2 * 86_400)
+    );
+}
+
+#[test]
+fn unfiltered_cargo_union_member_keeps_its_source_minimum_age() {
+    let specs = parse_profiles(
+        "- {name: floored-targets, kind: cargo-target, find: {roots: required}, min_idle_for: 3d}\n- {name: other-targets, kind: cargo-target, find: {roots: required}}",
+    )
+    .unwrap();
+    let library = Library::with_user_profiles(&specs).unwrap();
+    let roots = [SRC.to_owned()];
+    for expr in [
+        "(profile:floored-targets && filter:idle-7d) || profile:floored-targets",
+        "profile:floored-targets || (profile:floored-targets && filter:idle-7d)",
+    ] {
+        let tier = Tier::select(expr, &library, Some(&roots), 1000).unwrap();
+        assert_eq!(tier.idle_for.unwrap().0, Duration::from_secs(3 * 86_400));
+        let request = Request {
+            tier,
+            ..cargo("12G", Some("15G"))
+        };
+        let planning = host(&yaml(false, ""));
+        let plan = dry_run(&planning, &request);
+        assert_eq!(plan.status, Status::DryRun, "{plan:#?}");
+        assert_eq!(plan.plan.len(), 2, "{plan:#?}");
+        assert_eq!(plan.plan[0].candidate, Path::new(OLD));
+        assert_eq!(plan.plan[0].reason, None);
+        assert_eq!(plan.plan[1].candidate, Path::new(NEW));
+        assert_eq!(plan.plan[1].reason, Some("not_idle"));
+        assert!(calls(&planning, Op::Unlinkat).is_empty());
+
+        let reclaiming = host(&yaml(true, ""));
+        let report = ensure(&reclaiming, &request);
+        assert_eq!(report.status, Status::Met, "{report:#?}");
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].candidate, Path::new(OLD));
+        assert!(!calls(&reclaiming, Op::Unlinkat).is_empty());
+        assert!(calls(&reclaiming, Op::Unlinkat).iter().all(|call| {
+            call.path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(OLD))
+        }));
+    }
+
+    let error = Tier::select(
+        "profile:floored-targets || profile:other-targets",
+        &library,
+        Some(&roots),
+        1000,
+    )
+    .expect_err("different Cargo sources need distinct tiers");
+    assert!(error.contains("a union of this kind or action"), "{error}");
 }
 
 #[test]

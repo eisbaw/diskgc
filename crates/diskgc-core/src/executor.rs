@@ -137,7 +137,8 @@ pub const SELECT_TIER: &str = "--select";
 
 /// One selected tier. Its ordinary fields hold the first source term;
 /// [`Tier::fs_union`] holds any additional positive filesystem delete
-/// terms. Built by [`Tier::select`] only.
+/// terms. A same-profile Cargo union of positive idle filters is reduced
+/// to its shortest bound. Built by [`Tier::select`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier {
     pub group: String,
@@ -152,7 +153,8 @@ pub struct Tier {
     pub source: SourceKind,
     /// Where it looks: the bound roots, `{uid}` replaced.
     pub roots: Vec<PathBuf>,
-    /// The term's idle requirement (the longest of its `filter:`s).
+    /// The term's idle requirement: the longest positive `filter:` bound
+    /// and the source's mandatory `min_idle_for` floor, if present.
     pub idle_for: Option<IdleFor>,
     /// Every negated idle filter requires a last use strictly newer than
     /// this shortest bound. Checked again in the kind's reclaim protocol.
@@ -351,7 +353,8 @@ impl Tier {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
-                 kind fs), optionally with supported filters, or a positive fs delete union"
+                 kind fs), optionally with supported filters, a positive fs delete union, or a \
+                 same-source Cargo union with only positive idle filters"
             )
         };
         let mut terms = Vec::new();
@@ -369,6 +372,27 @@ impl Tier {
             return Err(not_yet("!profile: with this source action", "task-16"));
         }
         if !terms.is_empty() {
+            // For one Cargo source, positive idle filters are lower age
+            // bounds on the same candidates. Their union is the weakest
+            // bound, including the source's mandatory minimum when one
+            // member has no tier filter. Keep the
+            // existing Cargo discovery and lock-time protocol as the one
+            // authority for the reduced selection.
+            if matches!(first.source, SourceKind::CargoTarget)
+                && checked.expr().terms.iter().all(|term| {
+                    term.source == first.profile
+                        && term
+                            .factors
+                            .iter()
+                            .all(|factor| matches!(factor, select::Factor::Filter(_)))
+                })
+            {
+                first.idle_for = terms
+                    .iter()
+                    .fold(first.idle_for, |bound, term| bound.min(term.idle_for));
+                first.select = checked.expr().to_string();
+                return Ok(first);
+            }
             if !matches!(first.source, SourceKind::Fs(_))
                 || !matches!(first.action, Action::Delete { .. })
             {

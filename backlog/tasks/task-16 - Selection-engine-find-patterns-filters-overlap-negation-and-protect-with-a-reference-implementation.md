@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 04:21'
+updated_date: '2026-10-22 04:37'
 labels:
   - wave-2
   - irreversible
@@ -96,6 +96,8 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 negated mixed filesystem filter increment (pending parent full gate/review): !filter with has, has_not and optional idle_for now complements the complete conjunction. A typed grouped filter is evaluated after the filesystem walk supplies newest-change evidence, in dry-run, single-source ordering tally, union prequeue tally, and locked reclaim. Unknown entry type or age admits neither polarity; known full match skips filtered, unknown age reports unsupported_fs or future_time. Focused ModelHost regressions cover each failed predicate, both union orders and checkout veto before queue, three lock-time changes, and unknown/future age. Disposable Podman real-binary deletion-oracle case passed 1/1 before helper refactor; Clippy passed. TASK-16 AC/DoD remain open for the full random-profile reference property and remaining runtime combinations. Parent must run exact just e2e plus parallel QA/MPED before commit.
 
 2026-10-22 final MPED file-candidate follow-up (pending parent exact gate/review): both shared filesystem filter paths now use a child-lookup fd only when the discovered candidate identity is Directory. A regular-file candidate has known absence of child entries even if a caller supplies a held fd. ModelHost dry-run and reclaim regression covers positive has_not, !has, and negated mixed filter on a file: all three select and delete exactly that file; 1/1 focused test passed. The current directory-only lock protocol normally supplies no locked fd for a file, so this regression protects the intended semantics while the explicit identity guard closes the reviewed edge case. Focused negated-mixed tests 5/5, both fmt checks and diff check passed. AC/DoD unchanged; parent full e2e and parallel QA/MPED still required.
+
+2026-10-22 bounded runtime increment: same-profile cargo-target unions containing only positive idle filters reduce to the shortest idle requirement; an unfiltered member removes only filter-imposed age bounds, preserving a source min_idle_for floor when configured. The existing Cargo discovery, plan and lock-time reclaim protocol handles the reduced selection once per target, preserving report expression and deletion order. Different Cargo sources, complemented idle filters, negation in unions, fs command unions and other kinds remain explicit usage errors. ModelHost plan/reclaim test passed for both term orders and an unfiltered member; focused disposable Podman real-binary Cargo test passed 1/1 with deletion oracle, checking filtered and unfiltered unions. Parent full just e2e and parallel QA/MPED review remain before commit; TASK-16 AC/DoD unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

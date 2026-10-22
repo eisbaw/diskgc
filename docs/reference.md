@@ -655,7 +655,12 @@ options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source term that admits it after its filters refuses
 checkouts. It rechecks each
-term under the candidate lock. Command and other-kind unions are deferred.
+term under the candidate lock. A union of the same `cargo-target` source
+with only positive idle filters is reduced to its shortest idle requirement;
+an unfiltered member removes only the filters' added bound, preserving the
+source's mandatory `min_idle_for` when set. The usual Cargo plan and
+lock-time reclaim checks then apply once per target. Command unions and
+other Cargo unions are deferred.
 Filesystem and Cargo sources can use negated profiles. Filesystem terms can
 use either polarity of a filter with a single `has` or `has_not` predicate.
 Positive filesystem filters may also combine `has`, `has_not`, and `idle_for`
@@ -922,6 +927,11 @@ fixture-only parser catalog; that deletion profile is not shipped:
   `nix-store`) or `profile:NAME`, optionally followed by `&&` filters whose
   predicates are all `idle_for` (`docker-build-cache`), as the whole expression (one term, never in a
   union): they have no per-candidate enumeration.
+- **Cargo unions** may combine terms of the same `cargo-target` source with
+  positive `idle_for` filters. The union accepts a target at the shortest
+  required age; an unfiltered member still enforces the source's
+  `min_idle_for`, if set. Unions of
+  different Cargo sources remain unsupported by the runtime.
 - Filters are evaluated from the index where it already knows the answer,
   and always re-evaluated at deletion time. A candidate that fails an idle
   filter is skipped as `not_idle`; one that matches a negated idle filter is

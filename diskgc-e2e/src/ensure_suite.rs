@@ -2171,9 +2171,10 @@ pub fn ensure_reclaims_the_oldest_real_target_and_stops_at_min_free(
     build(ctx, toolchain, Path::new("/tmp/w/old"))
 }
 
-/// Exit 1, twice: (a) every target too recent for `filter:idle-1d` is
-/// skipped `not_idle` and nothing is deleted; (b) without a filter,
-/// everything is reclaimed and the goal (100% free) still not met. Both:
+/// Exit 1, twice: (a) a same-source Cargo union takes its shortest positive
+/// idle bound, and every recent target is skipped `not_idle`; (b) an
+/// unfiltered member admits both targets once, and the goal (100% free)
+/// still is not met. Both:
 /// every eligible candidate processed without errors, still below
 /// `--min-free`.
 pub fn ensure_exits_1_when_every_candidate_was_processed_below_min_free(
@@ -2197,7 +2198,9 @@ pub fn ensure_exits_1_when_every_candidate_was_processed_below_min_free(
         )
     };
     let oracle = Oracle::arm(Fixture::new())?;
-    let recent = run("profile:cargo-target && filter:idle-1d")?;
+    let recent = run(
+        "(profile:cargo-target && filter:idle-7d) || (profile:cargo-target && filter:idle-1d)",
+    )?;
     let judged = oracle.judge(&recent)?;
     recent.expect_code(1)?;
     let r = report(&recent)?;
@@ -2214,7 +2217,7 @@ pub fn ensure_exits_1_when_every_candidate_was_processed_below_min_free(
         fixture = fixture.eligible(path);
     }
     let oracle = Oracle::arm(fixture)?;
-    let all = run("profile:cargo-target")?;
+    let all = run("(profile:cargo-target && filter:idle-7d) || profile:cargo-target")?;
     let judged = oracle.judge(&all)?;
     all.expect_code(1)?;
     let r = report(&all)?;
