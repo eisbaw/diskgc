@@ -376,6 +376,30 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::mypy_vector_matches_linux_outcomes_and_deletion_diff,
     },
     Test {
+        name: "brave_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::brave_browser_vector,
+    },
+    Test {
+        name: "chrome_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::chrome_browser_vector,
+    },
+    Test {
+        name: "chromium_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::chromium_browser_vector,
+    },
+    Test {
+        name: "edge_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::edge_browser_vector,
+    },
+    Test {
         name: "python_in_use_vector_matches_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,

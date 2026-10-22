@@ -450,8 +450,12 @@ since those use the same matching.
 a test container (directories, `fallocate`d files, owners via subuid ranges,
 bind and stacked mounts, symlinks, helper processes holding locks or
 files), and the same scenarios run on `ModelHost` and on `LinuxHost`;
-traces and outcomes must match. Model fields that cannot be built for real
-in a rootless container (clock, kernel capabilities, exact `statvfs`
+the dry-run plan, reclaim exit, actions, skips, and deletion diff must match.
+The independent deletion oracle judges every traced Linux run, including
+dry-run. Host call traces are excluded from this comparison because the
+`Host` trait is tentative; the oracle's syscall trace remains safety evidence.
+Model fields that cannot be built for real in a rootless container (clock,
+kernel capabilities, exact `statvfs`
 numbers, filesystem types other than tmpfs, NFS, scripted Docker/Nix,
 delayed freeing) are marked *model-only*; tests that use them say so.
 

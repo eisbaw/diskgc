@@ -36,6 +36,22 @@ const MYPY_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/mypy-cache-match.yaml");
 const PYTHON_IN_USE_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
+const BRAVE_BROWSER_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/brave-browser-cache-lock.yaml");
+const CHROME_BROWSER_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/chrome-browser-cache-lock.yaml");
+const CHROMIUM_BROWSER_VECTOR: &str = include_str!(
+    "../../crates/diskgc-model/tests/models/profiles/chromium-browser-cache-lock.yaml"
+);
+const EDGE_BROWSER_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/edge-browser-cache-lock.yaml");
+#[cfg(test)]
+const BROWSER_VECTORS: &[&str] = &[
+    BRAVE_BROWSER_VECTOR,
+    CHROME_BROWSER_VECTOR,
+    CHROMIUM_BROWSER_VECTOR,
+    EDGE_BROWSER_VECTOR,
+];
 pub(crate) const CARGO_TARGET_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/cargo-target-locked.yaml");
 pub(crate) const CARGO_LOCK_PATH: &str = "/home/tester/project/good/target/debug/.cargo-lock";
@@ -79,6 +95,141 @@ pub fn bun_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRes
 /// Exercise a cache marker and explicit old mtimes on both hosts.
 pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
     replay_vector(ctx, MYPY_VECTOR, false)
+}
+
+macro_rules! browser_replay {
+    ($name:ident, $yaml:ident) => {
+        pub fn $name(ctx: &Ctx) -> TestResult {
+            let original = ProfileVector::parse($yaml)?;
+            let library = Library::builtin().map_err(|error| error.to_string())?;
+            original.check(&library)?;
+            replay_model(ctx, project_browser_vector(original)?, false)
+        }
+    };
+}
+
+browser_replay!(brave_browser_vector, BRAVE_BROWSER_VECTOR);
+browser_replay!(chrome_browser_vector, CHROME_BROWSER_VECTOR);
+browser_replay!(chromium_browser_vector, CHROMIUM_BROWSER_VECTOR);
+browser_replay!(edge_browser_vector, EDGE_BROWSER_VECTOR);
+
+/// Project only the two source homes in a checked-in Chromium-family
+/// fixture onto the container's scratch home. The profile, relative lock
+/// rule, and independent expected reasons remain the checked-in data.
+fn project_browser_vector(mut vector: ProfileVector) -> Result<ProfileVector, String> {
+    const ORIGINAL: &str = "/home";
+    const SCRATCH: &str = "/home/tester";
+    if !matches!(
+        vector.profile.as_str(),
+        "brave-browser-cache"
+            | "chrome-browser-cache"
+            | "chromium-browser-cache"
+            | "edge-browser-cache"
+    ) || vector.path != Path::new(ORIGINAL)
+        || vector.roots != ["/home/clear", "/home/locked"]
+        || !vector.host.processes.is_empty()
+        || !vector.host.locks.is_empty()
+        || !vector.host.events.is_empty()
+        || !vector.user_profiles.is_empty()
+    {
+        return Err("browser projection requires the checked-in two-home fixture shape".into());
+    }
+    if vector.host.mounts.len() != 2
+        || !vector
+            .host
+            .mounts
+            .iter()
+            .any(|mount| mount.at == Path::new("/"))
+        || !vector
+            .host
+            .mounts
+            .iter()
+            .any(|mount| mount.at == Path::new(ORIGINAL))
+    {
+        return Err("browser projection requires only the / and /home model mounts".into());
+    }
+    fn check_embedded_paths(path: &Path, node: &NodeSpec) -> Result<(), String> {
+        match node {
+            NodeSpec::Dir(dir) => {
+                for (name, child) in &dir.entries {
+                    check_embedded_paths(&path.join(name), child)?;
+                }
+            }
+            NodeSpec::File(file)
+                if file
+                    .symlink
+                    .as_ref()
+                    .is_some_and(|target| target.is_absolute())
+                    || file.link.is_some() =>
+            {
+                return Err(format!(
+                    "browser projection cannot preserve an embedded absolute symlink or hard link at {}",
+                    path.display()
+                ));
+            }
+            NodeSpec::File(_) => {}
+        }
+        Ok(())
+    }
+    for (path, node) in &vector.host.tree {
+        check_embedded_paths(path, node)?;
+    }
+    fn source_path(path: &Path) -> Result<PathBuf, String> {
+        let in_source_home = ["/home/clear", "/home/locked"]
+            .iter()
+            .any(|root| path.starts_with(root));
+        if !in_source_home {
+            return Err(format!(
+                "browser projection expected a path under /home/clear or /home/locked: {}",
+                path.display()
+            ));
+        }
+        Ok(Path::new(SCRATCH).join(
+            path.strip_prefix(ORIGINAL)
+                .expect("validated source home is under /home"),
+        ))
+    }
+    vector.path = SCRATCH.into();
+    vector.roots = vector
+        .roots
+        .iter()
+        .map(|root| {
+            source_path(Path::new(root)).and_then(|path| {
+                path.into_os_string()
+                    .into_string()
+                    .map_err(|_| "projected browser root is not UTF-8".to_owned())
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    vector.host.tree = std::mem::take(&mut vector.host.tree)
+        .into_iter()
+        .map(|(path, node)| {
+            if path == Path::new("/run/diskgc/lock") {
+                Ok((path, node))
+            } else {
+                Ok((source_path(&path)?, node))
+            }
+        })
+        .collect::<Result<_, String>>()?;
+    for plan in &mut vector.expect.plan {
+        plan.candidate = source_path(&plan.candidate)?;
+        if let Some(source) = &mut plan.source {
+            *source = source_path(source)?;
+        }
+    }
+    for path in &mut vector.expect.actions {
+        *path = source_path(path)?;
+    }
+    for path in &mut vector.expect.removed {
+        *path = source_path(path)?;
+    }
+    for skip in &mut vector.expect.skipped {
+        skip.candidate = source_path(&skip.candidate)?;
+    }
+    for path in &mut vector.expect.preserved {
+        *path = source_path(path)?;
+    }
+    Ok(vector)
 }
 
 /// The checked-in in-use vector names a nominal Python executable. The
@@ -520,9 +671,9 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
         "--select",
         &select,
     ];
-    if !vector.roots.is_empty() {
+    for root in &vector.roots {
         args.push("--roots");
-        args.extend(vector.roots.iter().map(String::as_str));
+        args.push(root);
     }
     args.push(path);
     let mut dry_args = vec!["--dry-run"];
@@ -930,6 +1081,47 @@ mod tests {
     }
 
     #[test]
+    fn projected_browser_vectors_keep_independent_expectations() {
+        let library = Library::builtin().expect("built-in library");
+        for yaml in BROWSER_VECTORS {
+            let original = ProfileVector::parse(yaml).expect("checked-in browser vector");
+            original.check(&library).expect("original expectation");
+            let mut projected = project_browser_vector(original).expect("known browser shape");
+            adapt_home_mount(&mut projected);
+            model_materialize::validate(&projected.host).expect("projected scratch tree");
+            projected.check(&library).expect("projected expectation");
+            let removed = projected.expect.removed[0].clone();
+            projected.host.tree.remove(&removed);
+            assert!(
+                projected.check(&library).is_err(),
+                "missing eligible cache must break the independent expectation"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_projection_rejects_paths_outside_the_two_homes() {
+        let mut vector = ProfileVector::parse(BRAVE_BROWSER_VECTOR).expect("browser vector");
+        vector.host.tree.insert(
+            "/home/other/unsafe".into(),
+            NodeSpec::File(FileSpec::default()),
+        );
+        let error = project_browser_vector(vector).expect_err("unexpected home must fail");
+        assert!(error.contains("/home/other/unsafe"), "{error}");
+
+        let mut vector = ProfileVector::parse(BRAVE_BROWSER_VECTOR).expect("browser vector");
+        vector.host.tree.insert(
+            "/home/clear/absolute-link".into(),
+            NodeSpec::File(FileSpec {
+                symlink: Some("/home/locked/private".into()),
+                ..FileSpec::default()
+            }),
+        );
+        let error = project_browser_vector(vector).expect_err("absolute link must fail");
+        assert!(error.contains("absolute-link"), "{error}");
+    }
+
+    #[test]
     fn every_checked_in_profile_vector_has_an_explicit_replay_classification() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../crates/diskgc-model/tests/models/profiles");
@@ -987,8 +1179,8 @@ mod tests {
                     .name
                     .ends_with("_vector_matches_linux_outcomes_and_deletion_diff"))
                 .count(),
-            replayable,
-            "every replayable vector needs a registered container test"
+            replayable + BROWSER_VECTORS.len(),
+            "every direct replay and projected browser vector needs a registered container test"
         );
     }
 }
