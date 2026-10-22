@@ -458,6 +458,22 @@ Model fields that cannot be built for real in a rootless container (clock,
 kernel capabilities, exact `statvfs`
 numbers, filesystem types other than tmpfs, NFS, scripted Docker/Nix,
 delayed freeing) are marked *model-only*; tests that use them say so.
+The checked-in profile-vector inventory in
+`diskgc-e2e/src/differential_suite.rs` classifies each original YAML by
+filename and reason: 18 direct replays, four browser-home projections, two
+process projections, and six model-only originals. Every direct or projected
+entry names its registered container case. The projections keep the
+original expectations and check them before the transformed replay. The six
+model-only originals require `idle_for` on historical ctime; a fresh tmpfs
+inode has current ctime even after its mtime is set, so vector replay
+preflight refuses them before writing a fixture or CLI config. The
+containers-image original also refers to `/var/tmp` and a process outside
+this scratch replay. The materializer itself cannot infer outcome dependence
+from a host model alone. The vector replay gate checks the selected profile's
+time predicate before materialization, then proves that nominal clock, mount
+size, device and ID did not change the observed plan, action, skip, exit, or
+deletion diff for each accepted replay. Adding a checked-in vector requires
+a new classification and parity evidence.
 
 ## 5. End-to-end tests in containers
 

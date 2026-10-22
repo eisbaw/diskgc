@@ -70,18 +70,304 @@ pub(crate) const CARGO_LOCK_PATH: &str = "/home/tester/project/good/target/debug
 const CARGO_TARGET_PATH: &str = "/home/tester/project/good/target";
 const DANGLING_LINK: &str = "/home/tester/project/dangling-link";
 
-// The fresh kernel tmpfs gives every new inode a current ctime. These
-// checked-in vectors need an eligible candidate whose *newest mtime or
-// ctime* is days old. Setting mtime cannot reproduce the old ctime; a real
-// LinuxHost must therefore skip that candidate as not_idle.
-#[cfg(test)]
-const HISTORICAL_CTIME_VECTORS: &[&str] = &[
-    "autotools-source-anchor.yaml",
-    "cmake-source-anchor.yaml",
-    "meson-source-anchor.yaml",
-    "west-build-anchored.yaml",
-    "xdg-cache-entry-v2-match.yaml",
+// This inventory is the contract for every original checked-in profile
+// vector. A projection has a separate replay and never changes its original
+// YAML or expectation. A model-only entry names the first irreproducible
+// property; it must fail preflight before the fixture is written.
+#[derive(Clone, Copy)]
+enum FixtureReplay {
+    Direct {
+        test: &'static str,
+        run: fn(&Ctx) -> TestResult,
+    },
+    Projected {
+        reason: &'static str,
+        test: &'static str,
+        run: fn(&Ctx) -> TestResult,
+    },
+    ModelOnly {
+        reason: &'static str,
+        yaml: &'static str,
+    },
+}
+
+struct FixtureClassification {
+    file: &'static str,
+    replay: FixtureReplay,
+}
+
+macro_rules! direct {
+    ($file:literal, $test:literal, $run:path) => {
+        FixtureClassification {
+            file: $file,
+            replay: FixtureReplay::Direct {
+                test: $test,
+                run: $run,
+            },
+        }
+    };
+}
+
+macro_rules! projected {
+    ($file:literal, $reason:literal, $test:literal, $run:path) => {
+        FixtureClassification {
+            file: $file,
+            replay: FixtureReplay::Projected {
+                reason: $reason,
+                test: $test,
+                run: $run,
+            },
+        }
+    };
+}
+
+macro_rules! model_only {
+    ($file:literal, $reason:literal) => {
+        FixtureClassification {
+            file: $file,
+            replay: FixtureReplay::ModelOnly {
+                reason: $reason,
+                yaml: include_str!(concat!(
+                    "../../crates/diskgc-model/tests/models/profiles/",
+                    $file
+                )),
+            },
+        }
+    };
+}
+
+const PROFILE_FIXTURES: &[FixtureClassification] = &[
+    model_only!(
+        "autotools-source-anchor.yaml",
+        "historical ctime required by idle_for"
+    ),
+    projected!(
+        "brave-browser-cache-lock.yaml",
+        "source homes /home/clear and /home/locked are outside scratch",
+        "brave_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        brave_browser_vector
+    ),
+    direct!(
+        "bun-cache-match.yaml",
+        "bun_vector_matches_linux_outcomes_and_deletion_diff",
+        bun_vector_matches_linux_outcomes_and_deletion_diff
+    ),
+    direct!(
+        "cargo-target-locked.yaml",
+        "cargo_target_vector_matches_linux_outcomes_and_deletion_diff",
+        cargo_target_vector
+    ),
+    projected!(
+        "chrome-browser-cache-lock.yaml",
+        "source homes /home/clear and /home/locked are outside scratch",
+        "chrome_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        chrome_browser_vector
+    ),
+    projected!(
+        "chromium-browser-cache-lock.yaml",
+        "source homes /home/clear and /home/locked are outside scratch",
+        "chromium_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        chromium_browser_vector
+    ),
+    direct!(
+        "chromium-tmp-match.yaml",
+        "chromium_tmp_vector_matches_linux_outcomes_and_deletion_diff",
+        chromium_tmp_vector
+    ),
+    direct!(
+        "claude-code-tmp-match.yaml",
+        "claude_code_tmp_vector_matches_linux_outcomes_and_deletion_diff",
+        claude_code_tmp_vector
+    ),
+    direct!(
+        "claude-code-versions-versions.yaml",
+        "claude_code_versions_vector_matches_linux_outcomes_and_deletion_diff",
+        claude_code_versions_vector
+    ),
+    model_only!(
+        "cmake-source-anchor.yaml",
+        "historical ctime required by idle_for"
+    ),
+    direct!(
+        "codex-releases-versions.yaml",
+        "codex_releases_vector_matches_linux_outcomes_and_deletion_diff",
+        codex_releases_vector
+    ),
+    model_only!(
+        "containers-image-age.yaml",
+        "historical ctime required by idle_for; /var/tmp and process evidence are outside this scratch replay"
+    ),
+    direct!(
+        "cursor-agent-versions-versions.yaml",
+        "cursor_agent_versions_vector_matches_linux_outcomes_and_deletion_diff",
+        cursor_agent_versions_vector
+    ),
+    direct!(
+        "cursor-extensions-versions.yaml",
+        "cursor_extensions_vector_matches_linux_outcomes_and_deletion_diff",
+        cursor_extensions_vector
+    ),
+    projected!(
+        "edge-browser-cache-lock.yaml",
+        "source homes /home/clear and /home/locked are outside scratch",
+        "edge_browser_vector_matches_linux_outcomes_and_deletion_diff",
+        edge_browser_vector
+    ),
+    direct!(
+        "go-mod-cache-match.yaml",
+        "go_mod_cache_vector_matches_linux_outcomes_and_deletion_diff",
+        go_mod_cache_vector
+    ),
+    model_only!(
+        "meson-source-anchor.yaml",
+        "historical ctime required by idle_for"
+    ),
+    direct!(
+        "mypy-cache-match.yaml",
+        "mypy_vector_matches_linux_outcomes_and_deletion_diff",
+        mypy_vector_matches_linux_outcomes_and_deletion_diff
+    ),
+    direct!(
+        "nix-user-cache-match.yaml",
+        "nix_user_cache_vector_matches_linux_outcomes_and_deletion_diff",
+        nix_user_cache_vector
+    ),
+    direct!(
+        "node-compile-cache-match.yaml",
+        "node_compile_cache_vector_matches_linux_outcomes_and_deletion_diff",
+        node_compile_cache_vector
+    ),
+    direct!(
+        "node-compile-cache-nested-claude.yaml",
+        "node_compile_cache_nested_vector_matches_linux_outcomes_and_deletion_diff",
+        node_compile_cache_nested_vector
+    ),
+    direct!(
+        "playwright-tmp-match.yaml",
+        "playwright_tmp_vector_matches_linux_outcomes_and_deletion_diff",
+        playwright_tmp_vector
+    ),
+    direct!(
+        "pytest-cache-match.yaml",
+        "pytest_cache_vector_matches_linux_outcomes_and_deletion_diff",
+        pytest_cache_vector
+    ),
+    projected!(
+        "pytest-tmp-unsafe-live-no-fd.yaml",
+        "the original executable and maps are /usr/bin/python outside scratch",
+        "pytest_unsafe_unrelated_fd_matches_linux",
+        pytest_unsafe_unrelated_fd_matches_linux
+    ),
+    direct!(
+        "python-pycache-checkout.yaml",
+        "python_vector_matches_linux_outcomes_and_deletion_diff",
+        python_vector_matches_linux_outcomes_and_deletion_diff
+    ),
+    projected!(
+        "python-pycache-in-use.yaml",
+        "the original executable and maps are /usr/bin/python outside scratch",
+        "python_in_use_vector_matches_linux",
+        python_in_use_vector_matches_linux
+    ),
+    direct!(
+        "renode-tmp-match.yaml",
+        "renode_tmp_vector_matches_linux_outcomes_and_deletion_diff",
+        renode_tmp_vector
+    ),
+    model_only!(
+        "west-build-anchored.yaml",
+        "historical ctime required by idle_for"
+    ),
+    model_only!(
+        "xdg-cache-entry-v2-match.yaml",
+        "historical ctime required by idle_for"
+    ),
+    direct!(
+        "zephyr-tmp-match.yaml",
+        "zephyr_tmp_vector_matches_linux_outcomes_and_deletion_diff",
+        zephyr_tmp_vector
+    ),
 ];
+
+fn verify_registered_replays() -> Result<(), String> {
+    for classification in PROFILE_FIXTURES {
+        let (test_name, run) = match classification.replay {
+            FixtureReplay::Direct { test, run } => (test, run),
+            FixtureReplay::Projected { reason, test, run } => {
+                if reason.is_empty() {
+                    return Err(format!(
+                        "{}: projection needs a reason",
+                        classification.file
+                    ));
+                }
+                (test, run)
+            }
+            FixtureReplay::ModelOnly { reason, .. } => {
+                if !reason.contains("historical ctime") {
+                    return Err(format!(
+                        "{}: model-only reason is incomplete",
+                        classification.file
+                    ));
+                }
+                continue;
+            }
+        };
+        let registered = crate::suite::TESTS
+            .iter()
+            .find(|entry| entry.name == test_name)
+            .ok_or_else(|| format!("{}: missing replay {test_name}", classification.file))?;
+        if registered.tier != crate::suite::Tier::Fast || !std::ptr::fn_addr_eq(registered.run, run)
+        {
+            return Err(format!(
+                "{}: replay {test_name} is not registered with its Fast runner",
+                classification.file
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// All six original age-dependent vectors must refuse before any scratch
+/// fixture or CLI config write. A fresh tmpfs inode's ctime is always now.
+pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> TestResult {
+    verify_registered_replays()?;
+    fn top_level_entries(root: &str) -> Result<Vec<PathBuf>, String> {
+        let mut entries = fs::read_dir(root)
+            .map_err(|error| format!("read {root}: {error}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| format!("read {root} entry: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+        Ok(entries)
+    }
+    let home_before = top_level_entries("/home/tester")?;
+    let tmp_before = top_level_entries("/tmp")?;
+    for classification in PROFILE_FIXTURES {
+        let FixtureReplay::ModelOnly { yaml, .. } = classification.replay else {
+            continue;
+        };
+        let name = classification.file;
+        let vector = ProfileVector::parse(yaml)?;
+        let error = replay_model(ctx, vector, false)
+            .expect_err("historical ctime original unexpectedly replayed");
+        ensure!(
+            error.contains("idle_for") && error.contains("ctime") && error.contains("model-only"),
+            "{name}: {error}"
+        );
+        ensure!(
+            top_level_entries("/home/tester")? == home_before,
+            "{name}: preflight wrote /home/tester"
+        );
+        ensure!(
+            top_level_entries("/tmp")? == tmp_before,
+            "{name}: preflight wrote /tmp"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Outcome {
@@ -784,6 +1070,10 @@ fn replay_model_with_profile(
     profile_yaml: Option<&str>,
     unrelated_to: Option<&Path>,
 ) -> TestResult {
+    // Preflight the semantic contract before even writing the CLI config.
+    // The model's old clock and ctime cannot be installed on a fresh tmpfs.
+    adapt_home_mount(&mut vector);
+    preflight_vector(&vector)?;
     let config_path = match profile_yaml {
         Some(profile_yaml) => {
             ensure!(
@@ -812,10 +1102,6 @@ fn replay_model_with_profile(
             None
         }
     };
-    // The checked-in model's `/home` ext4 is not a rootless-container mount.
-    // Place the same tree on the harness's `/home/tester` tmpfs. This changes
-    // no candidate pathname or selection expectation.
-    adapt_home_mount(&mut vector);
     if with_dangling_link {
         vector.host.tree.insert(
             DANGLING_LINK.into(),
@@ -900,6 +1186,28 @@ fn replay_model_with_profile(
     );
     materialized.finish()?;
     Ok(())
+}
+
+fn preflight_vector(vector: &ProfileVector) -> Result<(), String> {
+    let library = if vector.user_profiles.is_empty() {
+        Library::builtin().map_err(|error| error.to_string())?
+    } else {
+        Library::with_user_profiles(&vector.user_profiles)
+            .map_err(|error| format!("vector user profiles: {error}"))?
+    };
+    let tier = Tier::select(
+        &format!("profile:{}", vector.profile_name()),
+        &library,
+        (!vector.roots.is_empty()).then_some(vector.roots.as_slice()),
+        vector.host.own_uid.unwrap_or(1000),
+    )?;
+    if tier.idle_for.is_some() || tier.idle_before.is_some() {
+        return Err(format!(
+            "materialize(model): profile {} idle_for is model-only: fresh tmpfs ctime cannot reproduce the model clock and historical inode changes",
+            vector.profile_name()
+        ));
+    }
+    model_materialize::validate(&vector.host)
 }
 
 fn adapt_home_mount(vector: &mut ProfileVector) {
@@ -1395,6 +1703,8 @@ mod tests {
 
     #[test]
     fn every_checked_in_profile_vector_has_an_explicit_replay_classification() {
+        use std::collections::BTreeSet;
+
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../crates/diskgc-model/tests/models/profiles");
         let mut files: Vec<_> = fs::read_dir(&directory)
@@ -1403,56 +1713,73 @@ mod tests {
             .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
             .collect();
         files.sort();
+        let listed: BTreeSet<_> = PROFILE_FIXTURES.iter().map(|entry| entry.file).collect();
         assert_eq!(
-            files.len(),
-            30,
-            "new profile fixture needs materialization triage"
+            listed.len(),
+            PROFILE_FIXTURES.len(),
+            "duplicate fixture classification"
         );
-        let mut replayable = 0;
-        let mut historical_ctime = 0;
-        let mut unsupported_tree = 0;
+        let on_disk: BTreeSet<_> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            listed, on_disk,
+            "every checked-in vector needs its own classification"
+        );
         for path in files {
             let yaml = fs::read_to_string(&path).expect("read profile fixture");
             let mut vector = ProfileVector::parse(&yaml).expect("parse profile fixture");
             adapt_home_mount(&mut vector);
             let name = path.file_name().expect("fixture name").to_string_lossy();
-            match model_materialize::validate(&vector.host) {
-                Ok(()) => {
-                    if HISTORICAL_CTIME_VECTORS.contains(&name.as_ref()) {
-                        historical_ctime += 1;
-                        eprintln!("model-only {name}: historical ctime cannot be created on tmpfs");
-                    } else {
-                        replayable += 1;
-                        eprintln!("replayable {name}");
-                    }
+            let classification = PROFILE_FIXTURES
+                .iter()
+                .find(|entry| entry.file == name)
+                .expect("listed fixture classification");
+            match classification.replay {
+                FixtureReplay::Direct { test, run } => {
+                    preflight_vector(&vector).unwrap_or_else(|error| {
+                        panic!("{name}: direct replay fails preflight: {error}")
+                    });
+                    let registered = crate::suite::TESTS
+                        .iter()
+                        .find(|entry| entry.name == test)
+                        .unwrap_or_else(|| panic!("{name}: missing container replay {test}"));
+                    assert_eq!(registered.tier, crate::suite::Tier::Fast, "{name}");
+                    assert!(
+                        std::ptr::fn_addr_eq(registered.run, run),
+                        "{name}: wrong replay runner"
+                    );
                 }
-                Err(reason) => {
+                FixtureReplay::Projected { reason, test, run } => {
+                    assert!(!reason.is_empty(), "{name}: projection reason is empty");
+                    let error = preflight_vector(&vector)
+                        .expect_err("original projected vector must refuse direct materialization");
                     assert!(
-                        !HISTORICAL_CTIME_VECTORS.contains(&name.as_ref()),
-                        "{name}: ctime classification overlaps unsupported tree: {reason}"
+                        error.contains("model-only")
+                            || error.contains("outside the container scratch mounts"),
+                        "{name}: {error}"
                     );
-                    unsupported_tree += 1;
+                    let registered = crate::suite::TESTS
+                        .iter()
+                        .find(|entry| entry.name == test)
+                        .unwrap_or_else(|| panic!("{name}: missing projected replay {test}"));
+                    assert_eq!(registered.tier, crate::suite::Tier::Fast, "{name}");
                     assert!(
-                        reason.contains("model-only")
-                            || reason.contains("outside the container scratch mounts"),
-                        "{name}: unclassified materialization failure: {reason}"
+                        std::ptr::fn_addr_eq(registered.run, run),
+                        "{name}: wrong projection runner"
                     );
-                    eprintln!("model-only {name}: {reason}");
+                }
+                FixtureReplay::ModelOnly { reason, .. } => {
+                    assert!(reason.contains("historical ctime"), "{name}: {reason}");
+                    let error = preflight_vector(&vector)
+                        .expect_err("historical ctime must be rejected before writes");
+                    assert!(
+                        error.contains("ctime") && error.contains("model-only"),
+                        "{name}: {error}"
+                    );
                 }
             }
         }
-        assert_eq!(historical_ctime, HISTORICAL_CTIME_VECTORS.len());
-        assert_eq!(unsupported_tree, 7);
-        assert_eq!(replayable, 18);
-        assert_eq!(
-            crate::suite::TESTS
-                .iter()
-                .filter(|test| test
-                    .name
-                    .ends_with("_vector_matches_linux_outcomes_and_deletion_diff"))
-                .count(),
-            replayable + BROWSER_VECTORS.len(),
-            "every direct replay and projected browser vector needs a registered container test"
-        );
     }
 }

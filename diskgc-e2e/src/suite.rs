@@ -478,6 +478,12 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::generated_python_models_match_linux,
     },
     Test {
+        name: "historical_ctime_originals_refuse_before_fixture_writes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::historical_ctime_originals_refuse_before_fixture_writes,
+    },
+    Test {
         name: "cargo_target_vector_matches_linux_outcomes_and_deletion_diff",
         tier: Tier::Fast,
         expect: Expect::Pass,
