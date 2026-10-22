@@ -1253,7 +1253,11 @@ guarantee would need Cargo itself to hold a lock until the run ends.
 
 The step that deletes (`cargo_target::reclaim` in the core).
 
-1. **Lock.** Reach the target again from its root, as found (Discovery);
+1. **Lock.** A completed tally's measured last build is checked against
+   the tier's idle window first: one it refuses (`not_idle`, `too_idle`,
+   or an unknown-age reason) is skipped without attempting a Cargo lock.
+   Untallied targets continue to the locked check. Reach the target again
+   from its root, as found (Discovery);
    refuse before locking a target whose layout or lock set is not one
    diskgc reclaims (`unsupported_layout`, `empty`: an unknown lock name
    would not be taken), and, first, when the profile refuses checkouts, a
@@ -1287,7 +1291,8 @@ The step that deletes (`cargo_target::reclaim` in the core).
    Walk every entry of the locked profile directories (the eligibility
    walk, one entry budget for the target). Measure the last build: newer
    than the one the caller chose the target by (its eligibility check, a
-   plan), or no longer known: `changed`; then the idle requirement. Then
+   plan), or no longer known: `changed`; then apply the idle requirement
+   again even if the tally's earlier measurement passed. Then
    the in-use check of the whole target against a scan made now, under
    the locks (a scan from before could miss a process started meanwhile):
    every entry's record and the Cargo process checks (In use). Any hit:

@@ -113,7 +113,12 @@ process runs, even if that Cargo works in an unrelated directory; see
   candidate the tally refuses (e.g. kept, another user's, too many entries) is
   skipped with that reason for the run and never locked; a refusal that
   stops being true later (a `.diskgc-keep` removed after the tally) is a
-  missed reclaim until the next run, never an unsafe delete. The dry run
+  missed reclaim until the next run, never an unsafe delete. When a tallied
+  Cargo target's measured last build fails the tier's idle filter, it is
+  skipped (`not_idle`, `too_idle`, or an unknown-age reason) before any of
+  its Cargo locks are attempted. A target left untallied is judged under
+  its locks; one that passes the tally's age check is judged there again
+  before deletion. The dry run
   judges every candidate fully and is not bounded by it. The result's
   `tally_cut_short` is true when the budget leaves at least one discovered
   candidate untallied during reclaim.

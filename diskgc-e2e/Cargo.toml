@@ -4,6 +4,8 @@
 # interlock, layer 1). The flake builds it, lints it and runs its unit tests
 # (pure functions only); its binaries reach a container only as the
 # read-only under-test mount of the e2e image.
+[workspace]
+
 [package]
 name = "diskgc-e2e"
 version = "0.0.0"

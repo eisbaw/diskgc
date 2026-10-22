@@ -3,10 +3,10 @@ id: TASK-87
 title: >-
   Cargo targets already known not to be idle are still locked, and reported
   locked instead of not_idle
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 02:52'
-updated_date: '2026-10-19 03:21'
+updated_date: '2026-10-22 22:17'
 labels:
   - cli
   - safety
@@ -30,12 +30,20 @@ The locks are only tried, never waited for, so this costs no deadlock; but a Car
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A target whose measured last build fails the tier's idle filter is skipped not_idle without taking any of its locks (container test: /proc/locks or a held lock shows no attempt)
-- [ ] #2 reference.md (--tally-budget) and safety.md (Reclaim protocol, step 2) say so; the step-2 recheck under the locks is unchanged
-- [ ] #3 The CI operator journey's default-selection case expects not_idle (not locked) for the paused build's target
+- [x] #1 A target whose measured last build fails the tier's idle filter is skipped not_idle without taking any of its locks (container test: /proc/locks or a held lock shows no attempt)
+- [x] #2 reference.md (--tally-budget) and safety.md (Reclaim protocol, step 2) say so; the step-2 recheck under the locks is unchanged
+- [x] #3 The CI operator journey's default-selection case expects not_idle (not locked) for the paused build's target
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-23 implementation in isolated repo-local worktree tmp/worktrees/task87-idle-precheck: prechecks tallied Cargo build age before target locks and preserves locked recheck for accepted/untallied targets. Focused nix develop cargo test -p diskgc-linux --lib --locked passed 141/141 (one helper ignored); focused ModelHost no-lock test passed 1/1; disposable Podman journey journey_ci_operator_frees_space_with_ensure@1.99.1 passed 1/1, with paused Cargo holding all target locks before not_idle and later lock-time recheck still producing locked. Parallel QA and MPED reviews GO for the diff. Exact nix develop -c just e2e is still running; no commit and no host deletion.
+
+Final gate 2026-10-23: exact nix develop -c just e2e exited 0 after code was stable: format, Python, Clippy, workspace/doctests, Nix fast 219/219 in 73.7s, Docker fast 7/7, and five VM checks. QA and MPED parallel reviews GO; git diff --check clean. AC1 proven by ModelHost zero target-flock trace plus paused-build /proc/locks container journey; AC2 docs updated; AC3 journey now expects not_idle and retains later locked recheck. No host deletion.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
