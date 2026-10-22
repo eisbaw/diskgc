@@ -938,6 +938,156 @@ pub fn fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout(ctx: &Ctx) 
     verdict.assert_clean()
 }
 
+/// A real command union uses one checked child per inode, carries the
+/// selected source into its environment, and honors term-local exclusion,
+/// protection, and the stricter admitted checkout policy.
+pub fn fs_command_union_invokes_once_with_selected_source(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "command-union-cleaner",
+        b"#!/bin/sh\nset -eu\ntest \"$DISKGC_PATH\" = \"$1\"\nprintf '%s:%s\\n' \"$DISKGC_PROFILE\" \"$DISKGC_PATH\" >> /home/tester/command-union.trace\n/bin/rm -rf -- \"$DISKGC_PATH\"\n",
+        0o755,
+        TESTER,
+    )?;
+    let config = r#"version: 1
+profiles:
+  - name: command-union-allow
+    find: {roots: [/tmp], paths: ["command-union-a*", "command-union-shared*", "command-union-protected"], type: dir}
+    checkouts: allow
+    action: {command: [/home/tester/command-union-cleaner, "{path}"]}
+    examples: {match: [/tmp/command-union-a]}
+  - name: command-union-refuse
+    find: {roots: [/tmp], paths: ["command-union-b*", "command-union-shared*", "command-union-protected"], type: dir}
+    action: {command: [/home/tester/command-union-cleaner, "{path}"]}
+    examples: {match: [/tmp/command-union-b]}
+  - name: command-union-exclude
+    find: {roots: [/tmp], paths: [command-union-shared-clear], type: dir}
+    action: delete
+    examples: {match: [/tmp/command-union-shared-clear]}
+  - name: command-union-protect
+    find: {roots: [/tmp], paths: [command-union-protected], type: dir}
+    action: delete
+    examples: {match: [/tmp/command-union-protected]}
+protect: [command-union-protect]
+"#;
+    ctx.home
+        .write_file("diskgc.yaml", config.as_bytes(), 0o644, TESTER)?;
+    let only_allow = s.mkdir("command-union-a", 0o700, TESTER)?;
+    s.mkdirs("command-union-a/.git", 0o700, TESTER)?;
+    s.write_file("command-union-a/.git/HEAD", b"ref: x\n", 0o600, TESTER)?;
+    let only_refuse = s.mkdir("command-union-b", 0o700, TESTER)?;
+    s.write_file("command-union-b/payload", b"delete", 0o600, TESTER)?;
+    let shared = s.mkdir("command-union-shared-clear", 0o700, TESTER)?;
+    s.write_file(
+        "command-union-shared-clear/payload",
+        b"delete",
+        0o600,
+        TESTER,
+    )?;
+    let checkout = s.mkdir("command-union-shared-checkout", 0o700, TESTER)?;
+    s.mkdirs("command-union-shared-checkout/.git", 0o700, TESTER)?;
+    s.write_file(
+        "command-union-shared-checkout/.git/HEAD",
+        b"ref: y\n",
+        0o600,
+        TESTER,
+    )?;
+    let protected = s.mkdir("command-union-protected", 0o700, TESTER)?;
+    s.write_file("command-union-protected/payload", b"keep", 0o600, TESTER)?;
+    let expr = "(profile:command-union-allow && !profile:command-union-exclude) || profile:command-union-refuse";
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(only_allow.clone())
+            .eligible(only_refuse.clone())
+            .eligible(shared.clone()),
+    )?;
+    let plan = ensure_tmp(ctx, &["--dry-run", "--min-free", "100%", "--select", expr])?;
+    let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", expr])?;
+    let judged = oracle.judge_runs(&[&plan, &run])?;
+    plan.expect_code(0)?;
+    run.expect_code(1)?;
+    let planned = report(&plan)?;
+    let entries = planned["plan"].as_array().ok_or("plan is not an array")?;
+    ensure!(
+        entries.len() == 5,
+        "command union planned unexpected candidates: {planned}"
+    );
+    for (candidate, reason) in [
+        (&only_allow, None),
+        (&only_refuse, None),
+        (&shared, None),
+        (&checkout, Some("contains_checkout")),
+        (&protected, Some("protected")),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["candidate"] == candidate.to_string_lossy().as_ref())
+            .ok_or_else(|| format!("plan omitted {}: {planned}", candidate.display()))?;
+        ensure!(
+            entry["reason"].as_str() == reason,
+            "{}: expected {reason:?}: {planned}",
+            candidate.display()
+        );
+    }
+    ensure!(
+        entries
+            .iter()
+            .filter(|entry| entry["candidate"] == shared.to_string_lossy().as_ref())
+            .count()
+            == 1,
+        "command union planned shared inode more than once: {planned}"
+    );
+    let actual = report(&run)?;
+    let (skipped, mut actions) = outcome(&actual);
+    actions.sort();
+    let mut expected = [only_allow.clone(), only_refuse.clone(), shared.clone()]
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    ensure!(
+        actions == expected,
+        "command union actions {actions:?}, expected {expected:?}: {actual}"
+    );
+    ensure!(
+        skipped
+            .get(checkout.to_str().ok_or("checkout path")?)
+            .map(String::as_str)
+            == Some("contains_checkout"),
+        "checkout not refused: {actual}"
+    );
+    ensure!(
+        skipped
+            .get(protected.to_str().ok_or("protected path")?)
+            .map(String::as_str)
+            == Some("protected"),
+        "protection not enforced: {actual}"
+    );
+    let trace = std::fs::read_to_string("/home/tester/command-union.trace")
+        .map_err(|error| format!("read command trace: {error}"))?;
+    let mut invocations = trace.lines().collect::<Vec<_>>();
+    invocations.sort();
+    let mut expected_invocations = vec![
+        format!("command-union-allow:{}", only_allow.display()),
+        format!("command-union-refuse:{}", only_refuse.display()),
+        format!("command-union-refuse:{}", shared.display()),
+    ];
+    expected_invocations.sort();
+    ensure!(
+        invocations
+            == expected_invocations
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        "command invocations {invocations:?}, expected {expected_invocations:?}"
+    );
+    ensure!(
+        checkout.join(".git/HEAD").exists() && protected.join("payload").exists(),
+        "retained candidate changed"
+    );
+    judged.assert_clean()
+}
+
 /// The user profiles of these tests (docs/reference.md, Profiles), and a
 /// filter `idle-test` whose `idle_for` the test chooses (`{IDLE}`): what a
 /// fixture made before the run is old enough for, and what it makes right

@@ -650,17 +650,18 @@ In this development build, `check` validates these fields, including all
 configured groups. `ensure` runs configured groups in written order when
 `--select` is absent. `ensure --select` accepts one positive source term with
 supported idle and version filters, including negated idle filters, and unions
-of positive filesystem sources with exactly the same `delete` action and
-options. A filesystem union discovers each source separately, deduplicates
+of positive filesystem sources with exactly the same `delete` or `command`
+action and options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source term that admits it after its filters refuses
-checkouts. It rechecks each
-term under the candidate lock. A union of the same `cargo-target` source
+checkouts. It rechecks each term under one candidate lock. A command union
+invokes its shared argv at most once per inode, with `DISKGC_PROFILE` and the
+output prefix of the source selected by that locked recheck. A union of the same `cargo-target` source
 with only positive idle filters is reduced to its shortest idle requirement;
 an unfiltered member removes only the filters' added bound, preserving the
 source's mandatory `min_idle_for` when set. The usual Cargo plan and
-lock-time reclaim checks then apply once per target. Command unions and
-other Cargo unions are deferred.
+lock-time reclaim checks then apply once per target. Other Cargo unions are
+deferred.
 Filesystem and Cargo sources can use negated profiles. Filesystem terms can
 use either polarity of a filter with a single `has` or `has_not` predicate.
 Positive filesystem filters may also combine `has`, `has_not`, and `idle_for`
@@ -1009,8 +1010,10 @@ so it is never the candidate. The tier's remaining `timeout`
 bounds it (Tier fields). Two sources have the same action only if the
 action and every option are equal; the "one action" error shows a command
 action as its quoted argv and `cwd`. Environment passed:
-`DISKGC_PATH`, `DISKGC_NEED_BYTES`, `DISKGC_MOUNT`, `DISKGC_PROFILE`. Most
-cleaners pick their cache from their own config or environment, not from
+`DISKGC_PATH`, `DISKGC_NEED_BYTES`, `DISKGC_MOUNT`, `DISKGC_PROFILE`.
+For a command union, `DISKGC_PROFILE` is the source selected after the
+candidate's locked recheck; the command runs once even if several sources
+admit the same inode. Most cleaners pick their cache from their own config or environment, not from
 the working directory, so the command must name the location explicitly
 (`pip --cache-dir {path} cache purge`, `env GOCACHE={path} go clean
 -cache`). A non-zero exit is an error in the report (exit 3 if the goal is

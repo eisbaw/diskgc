@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 04:37'
+updated_date: '2026-10-22 05:13'
 labels:
   - wave-2
   - irreversible
@@ -98,6 +98,12 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 final MPED file-candidate follow-up (pending parent exact gate/review): both shared filesystem filter paths now use a child-lookup fd only when the discovered candidate identity is Directory. A regular-file candidate has known absence of child entries even if a caller supplies a held fd. ModelHost dry-run and reclaim regression covers positive has_not, !has, and negated mixed filter on a file: all three select and delete exactly that file; 1/1 focused test passed. The current directory-only lock protocol normally supplies no locked fd for a file, so this regression protects the intended semantics while the explicit identity guard closes the reviewed edge case. Focused negated-mixed tests 5/5, both fmt checks and diff check passed. AC/DoD unchanged; parent full e2e and parallel QA/MPED still required.
 
 2026-10-22 bounded runtime increment: same-profile cargo-target unions containing only positive idle filters reduce to the shortest idle requirement; an unfiltered member removes only filter-imposed age bounds, preserving a source min_idle_for floor when configured. The existing Cargo discovery, plan and lock-time reclaim protocol handles the reduced selection once per target, preserving report expression and deletion order. Different Cargo sources, complemented idle filters, negation in unions, fs command unions and other kinds remain explicit usage errors. ModelHost plan/reclaim test passed for both term orders and an unfiltered member; focused disposable Podman real-binary Cargo test passed 1/1 with deletion oracle, checking filtered and unfiltered unions. Parent full just e2e and parallel QA/MPED review remain before commit; TASK-16 AC/DoD unchanged.
+
+2026-10-22 bounded command-union increment (pending parent exact gate/review): fs command unions with identical argv/cwd now reuse inode-deduplicated discovery, plan and prequeue admission, then judge every source under one candidate lock before invoking the command once. The selected source supplies DISKGC_PROFILE, path substitution, stderr label and action attribution; admitted refusing sources veto checkouts. Term-local !profile and tier protect apply before and under lock. ModelHost regressions cover both source orders, once-only calls, lock-time checkout appearance, negated-source fallback and hardlink alias path attribution. Disposable Podman real-binary command deletion-oracle case passed 1/1 before and after source-context refactor. Full exact just e2e and parallel QA/MPED review remain for parent. TASK-16 AC/DoD remain open for full randomized reference properties and other runtime combinations.
+
+2026-10-22 command-union review follow-up (pending parent exact gate/review): ModelHost now changes the first term has-tag predicate at the candidate flock; the command falls back to the other source exactly once with its profile, argv path, stderr prefix and report attribution. A separate event creates a !profile child match at the final process-scan boundary; the last policy recheck reports excluded and starts no command. Focused command-union suite passed 7/7. AC/DoD unchanged.
+
+2026-10-22 MPED command-union review limitation: after the one-lock alternative judgement selects a command source, the final policy recheck can discover a new !profile or protect match for that selected source. The command then conservatively skips the candidate even if a different source term would still admit it. No command starts, so this is a safe under-selection, but it does not implement complete union fallback under a concurrent final-boundary policy change. Finishing TASK-16 requires deciding and testing final-boundary reselection with fresh policy, source predicates, checkout veto and in-use freshness, or explicitly documenting fail-closed concurrent semantics before closing the random-reference contract. Stable-state plan and tally agreement and the existing late-exclusion safety test do not prove this fallback. AC/DoD remain open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

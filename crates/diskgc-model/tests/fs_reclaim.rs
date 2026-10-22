@@ -140,6 +140,39 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp/untrusted], paths: [item], type: dir}
   action: delete
   examples: {match: [/tmp/untrusted/item]}
+- name: command-union-allow
+  find: {roots: [/tmp], paths: ["command-a*", "command-shared*"], type: dir}
+  checkouts: allow
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/command-a]}
+- name: command-union-refuse
+  find: {roots: [/tmp], paths: ["command-b*", "command-shared*"], type: dir}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/command-b]}
+- name: command-union-tagged
+  find: {roots: [/tmp], paths: ["command-shared*"], type: dir}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/command-shared-clear]}
+- name: command-union-exclude
+  find: {roots: [/tmp], paths: ["command-shared*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/command-shared-clear]}
+- name: command-union-exclude-child
+  find: {roots: [/tmp], paths: [command-shared-clear/late-guard], type: file}
+  action: delete
+  examples: {match: [/tmp/command-shared-clear/late-guard]}
+- name: command-alias-first
+  find: {roots: [/tmp], paths: [command-alias-a], type: file}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/command-alias-a]}
+- name: command-alias-second
+  find: {roots: [/tmp], paths: [command-alias-b], type: file}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/command-alias-b]}
+- name: command-alias-exclude
+  find: {roots: [/tmp], paths: [command-alias-a], type: file}
+  action: delete
+  examples: {match: [/tmp/command-alias-a]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -199,16 +232,254 @@ fn tmp(select: &str) -> Request {
 }
 
 #[test]
-fn command_action_union_is_explicitly_refused() {
-    let selection = "profile:cleaner || profile:cleaner";
-    let error = Tier::select(selection, &library(), None, 1000)
-        .expect_err("command action union has no lock-time disjunction protocol");
-    assert!(error.contains("a union of this kind or action"), "{error}");
-    assert!(error.contains("task-16"), "{error}");
+fn command_action_union_requires_exact_action_options() {
+    let selection = "profile:command-union-allow || profile:command-union-refuse";
+    assert!(Tier::select(selection, &library(), None, 1000).is_ok());
+    let different = "profile:command-union-allow || profile:env-cleaner";
+    let error = Tier::select(different, &library(), None, 1000)
+        .expect_err("different commands cannot share a union action");
+    assert!(error.contains("share one action"), "{error}");
     let mixed_delete = "profile:plain-tmp || profile:writable-tmp";
     assert!(
         Tier::select(mixed_delete, &library(), None, 1000).is_err(),
         "different delete options must never share one union action"
+    );
+}
+
+#[test]
+fn command_union_plans_and_invokes_once_per_inode_with_source_profile() {
+    let tree = format!(
+        "  /tmp/command-a: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{size: 1K, mtime: {OLD}}}}}}}\n  /tmp/command-b: {}\n  /tmp/command-shared-clear: {}\n  /tmp/command-shared-checkout: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{size: 1K, mtime: {OLD}}}}}}}\n",
+        old_dir("1M"),
+        old_dir("1M"),
+    );
+    for selection in [
+        "profile:command-union-allow || profile:command-union-refuse",
+        "profile:command-union-refuse || profile:command-union-allow",
+    ] {
+        let request = tmp(selection);
+        let planned_host = host(&yaml("", &tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert_eq!(
+            plan.plan
+                .iter()
+                .filter(|entry| entry.candidate == Path::new("/tmp/command-shared-clear"))
+                .count(),
+            1,
+            "{plan:#?}"
+        );
+        assert!(
+            plan.plan.iter().any(|entry| entry.candidate
+                == Path::new("/tmp/command-shared-checkout")
+                && entry.reason == Some("contains_checkout")),
+            "{plan:#?}"
+        );
+        let run_host = host(&yaml("", &tree, ""));
+        let report = ensure(&run_host, &request);
+        assert_eq!(
+            calls(&run_host, Op::RunCommand).len(),
+            3,
+            "{selection}: {report:#?}"
+        );
+        assert_eq!(
+            run_host.trace_count(Op::Flock),
+            4,
+            "one host lock and one candidate lock per prequeue admission: {report:#?}"
+        );
+        assert_eq!(
+            skip_of(&report, "/tmp/command-shared-checkout"),
+            Some("contains_checkout")
+        );
+        for call in calls(&run_host, Op::RunCommand) {
+            let run = call.command.as_ref().expect("command trace");
+            let profile = run
+                .environment
+                .iter()
+                .find(|(key, _)| key == "DISKGC_PROFILE")
+                .map(|(_, value)| value.to_string_lossy().into_owned())
+                .expect("source profile environment");
+            let path = call
+                .path
+                .as_ref()
+                .expect("candidate path")
+                .to_string_lossy();
+            let expected = match path.rsplit('/').next() {
+                Some("command-a") => "command-union-allow",
+                Some("command-b") => "command-union-refuse",
+                Some("command-shared-clear")
+                    if selection.starts_with("profile:command-union-allow") =>
+                {
+                    "command-union-allow"
+                }
+                Some("command-shared-clear") => "command-union-refuse",
+                other => panic!("unexpected command candidate {other:?}: {report:#?}"),
+            };
+            assert_eq!(profile, expected, "{path}: {report:#?}");
+        }
+        assert!(calls(&run_host, Op::Unlinkat).is_empty());
+    }
+}
+
+#[test]
+fn command_union_negation_selects_the_other_source() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    let selection = "(profile:command-union-allow && !profile:command-union-exclude) || profile:command-union-refuse";
+    let request = tmp(selection);
+    let planned_host = host(&yaml("", &tree, ""));
+    let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert_eq!(plan.plan[0].profile, "command-union-refuse");
+    let run_host = host(&yaml("", &tree, ""));
+    let report = ensure(&run_host, &request);
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].profile, "command-union-refuse");
+    let commands = calls(&run_host, Op::RunCommand);
+    assert_eq!(commands.len(), 1);
+    let environment = &commands[0]
+        .command
+        .as_ref()
+        .expect("command trace")
+        .environment;
+    assert!(
+        environment
+            .iter()
+            .any(|(key, value)| key == "DISKGC_PROFILE" && value == "command-union-refuse"),
+        "{environment:?}"
+    );
+}
+
+#[test]
+fn command_union_rechecks_all_checkout_policies_under_one_lock() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    let event = "events:\n  - {at: {op: flock, path: /tmp/command-shared-clear, when: after}, create: /tmp/command-shared-clear/.git}\n";
+    for selection in [
+        "profile:command-union-allow || profile:command-union-refuse",
+        "profile:command-union-refuse || profile:command-union-allow",
+    ] {
+        let run_host = host(&yaml("", &tree, event));
+        let report = ensure(&run_host, &tmp(selection));
+        assert!(report.actions.is_empty(), "{selection}: {report:#?}");
+        assert_eq!(
+            skip_of(&report, "/tmp/command-shared-clear"),
+            Some("contains_checkout")
+        );
+        assert!(calls(&run_host, Op::RunCommand).is_empty());
+        assert_eq!(
+            run_host.trace_count(Op::Flock),
+            2,
+            "host and candidate lock once"
+        );
+        assert!(run_host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn command_union_checkout_veto_follows_newly_admitted_filter_term() {
+    let tree = format!(
+        "  /tmp/command-shared-checkout: {{.: {{mtime: {OLD}}}, .git: {{HEAD: {{size: 1K, mtime: {OLD}}}}}}}\n"
+    );
+    let selection =
+        "profile:command-union-allow || (profile:command-union-tagged && filter:has-tag)";
+    let plan_host = host(&yaml("", &tree, ""));
+    let plan = executor::dry_run(&plan_host, &tmp(selection), &[1000], &mut |_| {});
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert!(plan.plan[0].reason.is_none(), "{plan:#?}");
+    assert_eq!(plan.plan[0].checkouts, Checkouts::Allow);
+    let event = "events:\n  - {at: {op: flock, path: /tmp/command-shared-checkout, when: after}, create: /tmp/command-shared-checkout/CACHEDIR.TAG}\n";
+    let run_host = host(&yaml("", &tree, event));
+    let report = ensure(&run_host, &tmp(selection));
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/command-shared-checkout"),
+        Some("contains_checkout")
+    );
+    assert!(calls(&run_host, Op::RunCommand).is_empty());
+    assert!(run_host.unfired_events().is_empty());
+}
+
+#[test]
+fn command_union_falls_back_when_first_filter_fails_after_lock() {
+    let tree = format!(
+        "  /tmp/command-shared-clear: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"
+    );
+    let selection =
+        "(profile:command-union-allow && filter:has-tag) || profile:command-union-refuse";
+    let plan_host = host(&yaml("", &tree, ""));
+    let plan = executor::dry_run(&plan_host, &tmp(selection), &[1000], &mut |_| {});
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert_eq!(plan.plan[0].profile, "command-union-allow");
+    let event = "events:\n  - {at: {op: flock, path: /tmp/command-shared-clear, when: after}, remove: /tmp/command-shared-clear/CACHEDIR.TAG}\n";
+    let run_host = host(&yaml("", &tree, event));
+    let report = ensure(&run_host, &tmp(selection));
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(report.actions[0].profile, "command-union-refuse");
+    assert_eq!(
+        report.actions[0].candidate,
+        Path::new("/tmp/command-shared-clear")
+    );
+    let commands = calls(&run_host, Op::RunCommand);
+    assert_eq!(commands.len(), 1, "{report:#?}");
+    let run = commands[0].command.as_ref().expect("command trace");
+    assert_eq!(run.arguments[1], "/tmp/command-shared-clear");
+    assert!(run.output_prefix.ends_with("/command-union-refuse"));
+    assert!(
+        run.environment
+            .iter()
+            .any(|(key, value)| key == "DISKGC_PROFILE" && value == "command-union-refuse")
+    );
+    assert_eq!(
+        run_host.trace_count(Op::Flock),
+        2,
+        "host and candidate lock once"
+    );
+    assert!(run_host.unfired_events().is_empty());
+}
+
+#[test]
+fn command_union_rechecks_new_negated_match_just_before_invocation() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    let selection = "(profile:command-union-allow && !profile:command-union-exclude-child) || (profile:command-union-refuse && !profile:command-union-exclude-child)";
+    let plan_host = host(&yaml("", &tree, ""));
+    let plan = executor::dry_run(&plan_host, &tmp(selection), &[1000], &mut |_| {});
+    assert_eq!(plan.plan.len(), 1, "{plan:#?}");
+    assert!(plan.plan[0].reason.is_none(), "{plan:#?}");
+    // The second process scan is the final freshness check. Creating a raw
+    // negated match there exercises the command boundary, after the locked
+    // candidate judgement has already admitted both terms.
+    let event = "events:\n  - {at: {op: pids, nth: 2, when: after}, create: /tmp/command-shared-clear/late-guard}\n";
+    let run_host = host(&yaml("", &tree, event));
+    let report = ensure(&run_host, &tmp(selection));
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/command-shared-clear"),
+        Some("excluded")
+    );
+    assert!(calls(&run_host, Op::RunCommand).is_empty());
+    assert!(run_host.unfired_events().is_empty());
+}
+
+#[test]
+fn command_union_uses_selected_hardlink_alias_in_argv_and_report() {
+    let tree = "  /tmp/command-alias-a: {size: 1M}\n  /tmp/command-alias-b: {link: /tmp/command-alias-a}\n";
+    let selection = "(profile:command-alias-first && !profile:command-alias-exclude) || profile:command-alias-second";
+    let run_host = host(&yaml("", tree, ""));
+    let report = ensure(&run_host, &tmp(selection));
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    assert_eq!(
+        report.actions[0].candidate,
+        Path::new("/tmp/command-alias-b")
+    );
+    assert_eq!(report.actions[0].profile, "command-alias-second");
+    let commands = calls(&run_host, Op::RunCommand);
+    assert_eq!(commands.len(), 1);
+    let run = commands[0].command.as_ref().expect("command trace");
+    assert_eq!(run.arguments[1], "/tmp/command-alias-b");
+    assert_eq!(commands[0].path.as_deref(), Some(Path::new("/tmp")));
+    assert!(run.output_prefix.ends_with("/command-alias-second"));
+    assert!(
+        run.environment
+            .iter()
+            .any(|(key, value)| key == "DISKGC_PROFILE" && value == "command-alias-second")
     );
 }
 

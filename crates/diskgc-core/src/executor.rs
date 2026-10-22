@@ -136,7 +136,7 @@ fn deadline_passed<H: Host>(host: &H, deadline: Option<MonoTime>) -> bool {
 pub const SELECT_TIER: &str = "--select";
 
 /// One selected tier. Its ordinary fields hold the first source term;
-/// [`Tier::fs_union`] holds any additional positive filesystem delete
+/// [`Tier::fs_union`] holds any additional positive filesystem
 /// terms. A same-profile Cargo union of positive idle filters is reduced
 /// to its shortest bound. Built by [`Tier::select`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,7 +353,7 @@ impl Tier {
             format!(
                 "--select `{expr}`: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
-                 kind fs), optionally with supported filters, a positive fs delete union, or a \
+                 kind fs), optionally with supported filters, a positive fs union with one action, or a \
                  same-source Cargo union with only positive idle filters"
             )
         };
@@ -366,7 +366,7 @@ impl Tier {
         let mut first = terms.remove(0);
         if !matches!(
             first.action,
-            Action::Delete { .. } | Action::CargoLockProtocol
+            Action::Delete { .. } | Action::Command { .. } | Action::CargoLockProtocol
         ) && (!first.negated.is_empty() || terms.iter().any(|term| !term.negated.is_empty()))
         {
             return Err(not_yet("!profile: with this source action", "task-16"));
@@ -394,7 +394,7 @@ impl Tier {
                 return Ok(first);
             }
             if !matches!(first.source, SourceKind::Fs(_))
-                || !matches!(first.action, Action::Delete { .. })
+                || !matches!(first.action, Action::Delete { .. } | Action::Command { .. })
             {
                 return Err(not_yet(
                     "a union of this kind or action",
@@ -403,7 +403,7 @@ impl Tier {
             }
             if terms.iter().any(|term| term.action != first.action) {
                 return Err(format!(
-                    "--select `{expr}`: filesystem union sources must have exactly the same delete action and options"
+                    "--select `{expr}`: filesystem union sources must have exactly the same action and options"
                 ));
             }
             let mut extra = Vec::with_capacity(terms.len());
@@ -4254,8 +4254,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             cwd: *cwd,
                             need_bytes: self.measured.target.saturating_sub(avail),
                             mount: &self.measured.at.mount.mount_point,
-                            profile: &self.tier.profile,
-                            output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+                            sources: vec![fs_kind::CommandSource {
+                                profile: &self.tier.profile,
+                                output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+                            }],
                             deadline: self.deadline,
                         },
                         &mut |path| {
@@ -4569,43 +4571,86 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.host.wall_clock(),
                 tally.as_ref().and_then(|t| t.newest_change),
             );
-            let Action::Delete { make_writable } = self.tier.action else {
-                unreachable!("filesystem unions admit only delete")
-            };
-            let done = fs_kind::reclaim_alternatives_checked(
-                self.host,
-                &alternatives,
-                make_writable,
-                checker,
-                self.deadline,
-                &mut |selected, path| {
-                    let source = &sources[candidate.found_by[selected].0];
-                    policy_skip(
+            let (selected, removed_entries, attempted_command, end) = match &self.tier.action {
+                Action::Delete { make_writable } => {
+                    let done = fs_kind::reclaim_alternatives_checked(
                         self.host,
-                        &self.tier.protections,
-                        source.negated,
+                        &alternatives,
+                        *make_writable,
+                        checker,
                         self.deadline,
-                        path,
-                    )
-                },
-            );
-            let profile = done
-                .selected
+                        &mut |selected, path| {
+                            let source = &sources[candidate.found_by[selected].0];
+                            policy_skip(
+                                self.host,
+                                &self.tier.protections,
+                                source.negated,
+                                self.deadline,
+                                path,
+                            )
+                        },
+                    );
+                    (done.selected, done.removed_entries, false, done.end)
+                }
+                Action::Command { argv, cwd } => {
+                    let command_sources: Vec<_> = candidate
+                        .found_by
+                        .iter()
+                        .map(|(index, _)| {
+                            let profile = sources[*index].profile;
+                            fs_kind::CommandSource {
+                                profile,
+                                output_prefix: format!("{}/{}", self.tier.name, profile),
+                            }
+                        })
+                        .collect();
+                    let done = fs_kind::run_command_alternatives_checked(
+                        self.host,
+                        &alternatives,
+                        checker,
+                        fs_kind::CommandSpec {
+                            ready: self.command_ready.as_ref().expect("command preflighted"),
+                            argv,
+                            cwd: *cwd,
+                            need_bytes: self.measured.target.saturating_sub(avail),
+                            mount: &self.measured.at.mount.mount_point,
+                            sources: command_sources,
+                            deadline: self.deadline,
+                        },
+                        &mut |selected, path| {
+                            let source = &sources[candidate.found_by[selected].0];
+                            policy_skip(
+                                self.host,
+                                &self.tier.protections,
+                                source.negated,
+                                self.deadline,
+                                path,
+                            )
+                        },
+                    );
+                    (done.selected, 0, done.attempted, done.end)
+                }
+                _ => unreachable!("filesystem unions admit delete or command"),
+            };
+            let profile = selected
                 .map(|selected| sources[candidate.found_by[selected].0].profile.to_owned())
                 .unwrap_or_else(|| sources[candidate.found_by[0].0].profile.to_owned());
-            let reported_path = done
-                .selected
+            let reported_path = selected
                 .map(|selected| &candidate.found_by[selected].1.path)
                 .unwrap_or(path);
             let outcome = Outcome {
                 started,
                 before: avail,
-                expected_bytes: tally.as_ref().map(|t| t.bytes),
+                expected_bytes: if attempted_command {
+                    Some(self.measured.target.saturating_sub(avail))
+                } else {
+                    tally.as_ref().map(|t| t.bytes)
+                },
                 tallied_bytes: tally.as_ref().map(|t| t.bytes),
                 idle_age_seconds,
-                removed_entries: done.removed_entries,
-                attempted_command: false,
-                end: done.end,
+                removed_entries,
+                attempted_command,
+                end,
                 note: String::new(),
             };
             match self.record_as(reported_path, &profile, outcome) {

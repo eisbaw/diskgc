@@ -183,11 +183,11 @@ Immediately before acting, diskgc walks the candidate's whole tree
     **Overlap:** where one candidate is found by several source profiles
     of one tier (a union, `a || b`), it may hold a checkout only if every
     source term that admits it after its filters allows checkouts: `refuse`
-    wins among admitted terms. Filesystem delete unions
+    wins among admitted terms. Filesystem delete and command unions
     inspect every admitted refusing source's candidate view, including
     different names for one hard-linked inode, during planning, tally, and
-    reclaim. Other union forms remain
-    unsupported. Each tier judges its own candidates by its source
+    reclaim. A supported same-source Cargo union reduces to one idle
+    bound; other union forms remain unsupported. Each tier judges its own candidates by its source
     settings. Protected matches are enumerated before reclaim and rechecked
     under the candidate lock and immediately before deletion. Changes in a
     separately writable protected tree can still race between that scan and

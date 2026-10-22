@@ -820,6 +820,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout,
     },
     Test {
+        name: "fs_command_union_invokes_once_with_selected_source",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_command_union_invokes_once_with_selected_source,
+    },
+    Test {
         name: "nix_evaluation_keeps_its_user_eval_cache_in_use",
         tier: Tier::Fast,
         expect: Expect::Pass,

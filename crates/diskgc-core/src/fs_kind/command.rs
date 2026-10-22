@@ -9,8 +9,9 @@ use std::time::Duration;
 use super::Found;
 use super::discover::check_deadline;
 use super::judge::{Judge, Walked, mountinfo, same_object};
+use super::reclaim::Alternative;
 use crate::command_action::{self, Ready};
-use crate::engine::{Identity, Skip};
+use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{
     Base, Cause, CommandExit, CommandInvocation, Delete, FileType, HostError, MonoTime,
 };
@@ -24,17 +25,25 @@ use crate::profile::Cwd;
 pub struct CommandResult {
     pub attempted: bool,
     pub end: ReclaimEnd,
+    /// Source whose fresh locked judgement selected the candidate.
+    pub selected: Option<usize>,
+}
+
+/// One source's identity for a shared command invocation.
+pub struct CommandSource<'a> {
+    pub profile: &'a str,
+    pub output_prefix: String,
 }
 
 /// The preflighted command and its invocation context for one candidate.
+/// `sources` follows the alternatives in discovery order.
 pub struct CommandSpec<'a> {
     pub ready: &'a Ready,
     pub argv: &'a [String],
     pub cwd: Option<Cwd>,
     pub need_bytes: u64,
     pub mount: &'a Path,
-    pub profile: &'a str,
-    pub output_prefix: String,
+    pub sources: Vec<CommandSource<'a>>,
     pub deadline: Option<MonoTime>,
 }
 
@@ -64,8 +73,10 @@ pub fn run_command<H: Delete>(
             cwd,
             need_bytes,
             mount,
-            profile,
-            output_prefix,
+            sources: vec![CommandSource {
+                profile,
+                output_prefix,
+            }],
             deadline,
         },
         &mut |_| Ok(None),
@@ -83,19 +94,36 @@ pub fn run_command_checked<H: Delete>(
     command: CommandSpec<'_>,
     policy: &mut impl FnMut(&Path) -> Result<Option<Skip>, Stop>,
 ) -> CommandResult {
+    run_command_alternatives_checked(
+        host,
+        &[Alternative {
+            judge: *judge,
+            found,
+            checkouts: judge.rules.checkouts,
+        }],
+        checker,
+        command,
+        &mut |_, path| policy(path),
+    )
+}
+
+/// Judge every source of one inode while holding one candidate lock, then
+/// invoke the common command once with the selected source's identity.
+/// `command.sources` corresponds to `alternatives` in discovery order.
+pub fn run_command_alternatives_checked<H: Delete>(
+    host: &H,
+    alternatives: &[Alternative<'_>],
+    checker: &mut Checker<'_>,
+    command: CommandSpec<'_>,
+    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
+) -> CommandResult {
+    assert!(!alternatives.is_empty() && alternatives.len() == command.sources.len());
     let mut result = CommandResult {
         attempted: false,
         end: ReclaimEnd::Complete,
+        selected: None,
     };
-    if let Err(end) = protocol(
-        host,
-        judge,
-        found,
-        checker,
-        command,
-        &mut result.attempted,
-        policy,
-    ) {
+    if let Err(end) = protocol(host, alternatives, checker, command, &mut result, policy) {
         result.end = end;
     }
     result
@@ -103,12 +131,11 @@ pub fn run_command_checked<H: Delete>(
 
 fn protocol<H: Delete>(
     host: &H,
-    judge: &Judge<'_>,
-    found: &Found,
+    alternatives: &[Alternative<'_>],
     checker: &mut Checker<'_>,
     command: CommandSpec<'_>,
-    attempted: &mut bool,
-    policy: &mut impl FnMut(&Path) -> Result<Option<Skip>, Stop>,
+    result: &mut CommandResult,
+    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
 ) -> Result<(), ReclaimEnd> {
     let CommandSpec {
         ready,
@@ -116,10 +143,10 @@ fn protocol<H: Delete>(
         cwd,
         need_bytes,
         mount,
-        profile,
-        output_prefix,
+        sources,
         deadline,
     } = command;
+    let found = alternatives[0].found;
     let path = &found.path;
     let stopped = |error| {
         ReclaimEnd::Stopped(Stop::Failed {
@@ -127,35 +154,109 @@ fn protocol<H: Delete>(
             error,
         })
     };
-    checker.serves(judge.rules).map_err(stopped)?;
+    checker
+        .serves(alternatives[0].judge.rules)
+        .map_err(stopped)?;
     check_deadline(host, deadline, path)?;
     let mounts = mountinfo(host)?;
-    let reached = judge.approach(host, found, &mounts, deadline)??;
-    let candidate = reached.candidate(found)?;
+    let mut first_skip = None;
+    let mut reached = None;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        match alternative
+            .judge
+            .approach(host, alternative.found, &mounts, deadline)?
+        {
+            Ok(candidate) => {
+                reached = Some((index, alternative.found, candidate));
+                break;
+            }
+            Err(skip) => {
+                first_skip.get_or_insert(skip);
+            }
+        }
+    }
+    let (locked_index, lock_found, reached) =
+        reached.ok_or_else(|| first_skip.expect("nonempty alternatives"))?;
+    let candidate = reached.candidate(lock_found)?;
     let lock = lock_candidate(host, &candidate).map_err(stopped)??;
     if let Some(locked) = lock.locked() {
         let stat = host
             .statx(Base::Dir(locked.fd()), Path::new(""))
             .map_err(stopped)?;
-        same_object(found, Identity::of(&stat), "locked")?;
+        same_object(lock_found, Identity::of(&stat), "locked")?;
     }
     let mounts = mountinfo(host)?;
-    judge.again(host, found, &reached, &mounts, deadline)??;
-    let Walked { record, .. } = judge.contents(
-        host,
-        &reached,
-        super::judge::CandidateView {
-            candidate: &candidate,
-            locked_fd: lock.locked().map(|held| held.fd()),
-        },
-        found,
-        true,
-        deadline,
-    )??;
-    locked_is_walked(host, &candidate, &lock, &record).map_err(stopped)??;
-    if let Some(skip) = policy(path).map_err(ReclaimEnd::Stopped)? {
+    first_skip = None;
+    let mut original_reached = Some(reached);
+    let mut selected = None;
+    let mut checkout_refusal = None;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        let found = alternative.found;
+        let judge = &alternative.judge;
+        let reached = if index == locked_index {
+            original_reached.take().expect("locked reach is used once")
+        } else {
+            match judge.approach(host, found, &mounts, deadline)? {
+                Ok(reached) => reached,
+                Err(skip) => {
+                    first_skip.get_or_insert(skip);
+                    continue;
+                }
+            }
+        };
+        let candidate = reached.candidate(found)?;
+        if let Err(skip) = judge.again(host, found, &reached, &mounts, deadline)? {
+            first_skip.get_or_insert(skip);
+            continue;
+        }
+        if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
+            first_skip.get_or_insert(skip);
+            continue;
+        }
+        let walked = match judge.contents(
+            host,
+            &reached,
+            super::judge::CandidateView {
+                candidate: &candidate,
+                locked_fd: lock.locked().map(|held| held.fd()),
+            },
+            found,
+            true,
+            deadline,
+        )? {
+            Ok(walked) => walked,
+            Err(skip) => {
+                first_skip.get_or_insert(skip);
+                continue;
+            }
+        };
+        locked_is_walked(host, &candidate, &lock, &walked.record).map_err(stopped)??;
+        if alternative.checkouts == Checkouts::Refuse {
+            let refusal = checkout_metadata_below(Checkouts::Refuse, &found.root, &found.path)
+                .or_else(|| {
+                    walked.record.contains_checkout().then(|| Skip::new(
+                    Reason::ContainsCheckout, found.path.clone(),
+                    "an admitted source refuses a version-control checkout in this candidate",
+                ))
+                });
+            if let Some(skip) = refusal {
+                checkout_refusal.get_or_insert((index, skip));
+            }
+        }
+        if selected.is_none() {
+            selected = Some((index, found, reached, walked));
+        }
+    }
+    if let Some((index, skip)) = checkout_refusal {
+        result.selected = Some(index);
         return Err(skip.into());
     }
+    let (index, found, reached, walked) =
+        selected.ok_or_else(|| first_skip.expect("every union alternative has a verdict"))?;
+    result.selected = Some(index);
+    let candidate = reached.candidate(found)?;
+    let judge = &alternatives[index].judge;
+    let Walked { record, .. } = walked;
     let use_candidate = match cwd {
         Some(Cwd::Candidate) => true,
         Some(Cwd::Parent) => false,
@@ -172,11 +273,11 @@ fn protocol<H: Delete>(
         ready,
         argv,
         command_action::Context {
-            candidate: path,
+            candidate: &found.path,
             need_bytes,
             mount,
-            profile,
-            label: output_prefix,
+            profile: sources[index].profile,
+            label: sources[index].output_prefix.clone(),
             deadline: deadline.unwrap_or(MonoTime(Duration::MAX)),
         },
     );
@@ -202,7 +303,7 @@ fn protocol<H: Delete>(
         if let Some(app_lock) = &judge.find.app_not_running {
             super::app::check(host, &found.root, app_lock, deadline)??;
         }
-        if let Some(skip) = policy(path).map_err(ReclaimEnd::Stopped)? {
+        if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
             return Err(skip.into());
         }
         check_deadline(host, deadline, path)?;
@@ -220,9 +321,9 @@ fn protocol<H: Delete>(
             )));
         }
         let exit = match host.run_command(cwd_fd, &run) {
-            CommandInvocation::Started(result) => {
-                *attempted = true;
-                result
+            CommandInvocation::Started(exit_result) => {
+                result.attempted = true;
+                exit_result
             }
             CommandInvocation::DeadlineBeforeStart => {
                 return Err(ReclaimEnd::Stopped(Stop::DeadlinePassed {

@@ -40,7 +40,10 @@ mod source_anchor;
 #[cfg(test)]
 mod tests;
 
-pub use command::{CommandResult, CommandSpec, run_command, run_command_checked};
+pub use command::{
+    CommandResult, CommandSource, CommandSpec, run_command, run_command_alternatives_checked,
+    run_command_checked,
+};
 pub use discover::{Discovery, Found, discover};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
