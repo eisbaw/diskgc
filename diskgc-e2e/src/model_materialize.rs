@@ -23,6 +23,7 @@ const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 /// oracle finish. Dropping this guard closes their stdin and waits for them.
 pub struct Materialized {
     holders: Vec<(Holder, PathBuf)>,
+    mounted: Vec<PathBuf>,
 }
 
 impl Materialized {
@@ -56,11 +57,33 @@ impl Materialized {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<(), String> {
-        for (holder, _) in self.holders {
+    pub fn finish(mut self) -> Result<(), String> {
+        for (holder, _) in self.holders.drain(..) {
             holder.finish()?;
         }
+        while let Some(path) = self.mounted.last() {
+            rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty())
+                .map_err(|error| format!("unmount fixture {}: {error}", path.display()))?;
+            self.mounted.pop();
+        }
         Ok(())
+    }
+}
+
+impl Drop for Materialized {
+    fn drop(&mut self) {
+        // Helpers may hold files on an inner mount. Close them first, even
+        // when an earlier check returned an error.
+        self.holders.clear();
+        while let Some(path) = self.mounted.pop() {
+            if let Err(error) = rustix::mount::unmount(&path, rustix::mount::UnmountFlags::empty())
+            {
+                eprintln!(
+                    "error: unmount fixture {} during cleanup: {error}",
+                    path.display()
+                );
+            }
+        }
     }
 }
 
@@ -114,8 +137,16 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
     if model.mounts.is_empty() {
         return unsupported("mounts", "a root mount is required");
     }
+    let mut inner_at: Option<&Path> = None;
+    let mut previous_inner_id = None;
     for (index, mount) in model.mounts.iter().enumerate() {
         let field = format!("mounts[{index}]");
+        if model.mounts[..index]
+            .iter()
+            .any(|prior| prior.dev == mount.dev)
+        {
+            return unsupported(&field, "bind mounts sharing a device are not modelled");
+        }
         if !mount.statx_missing.is_empty() {
             return unsupported(
                 &format!("{field}.statx_missing"),
@@ -135,22 +166,56 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             );
         }
         if mount.at == Path::new("/") {
-            if matches!(mount.fs.as_str(), "nfs" | "btrfs") {
+            if !matches!(mount.fs.as_str(), "ext4" | "overlay") {
                 return unsupported(
                     &format!("{field}.fs"),
-                    "the container root is not this filesystem type",
+                    "the container root is an overlay; only a nominal ext4/overlay root is supported",
                 );
             }
             continue; // The container's root filesystem is provisioned by the image.
         }
-        if mount.fs != "tmpfs"
-            || !matches!(
-                mount.at.to_str(),
-                Some("/tmp" | "/home/tester" | "/run/diskgc")
-            )
-        {
-            return unsupported(&field, "only the harness's tmpfs mounts are supported");
+        if mount.fs != "tmpfs" {
+            return unsupported(&field, "only scratch tmpfs mounts are supported");
         }
+        if matches!(
+            mount.at.to_str(),
+            Some("/tmp" | "/home/tester" | "/run/diskgc")
+        ) {
+            if model.mounts[..index]
+                .iter()
+                .any(|prior| prior.at == mount.at)
+            {
+                return unsupported(&field, "stacking over a harness root is unsupported");
+            }
+            continue; // The harness provisions its base scratch mounts.
+        }
+        let (root, _) = destination(&mount.at)?;
+        let base = model.mounts[..index]
+            .iter()
+            .find(|candidate| candidate.at == Path::new(root));
+        let Some(base) = base else {
+            return unsupported(
+                &field,
+                "the containing scratch root is absent from the model",
+            );
+        };
+        match inner_at {
+            None => {
+                if mount.parent != Some(base.id) {
+                    return unsupported(&field, "inner tmpfs must descend from its scratch root");
+                }
+                inner_at = Some(&mount.at);
+            }
+            Some(at) => {
+                if mount.at != at || mount.parent != previous_inner_id {
+                    return unsupported(
+                        &field,
+                        "only one inner mount point with an optional stack is supported",
+                    );
+                }
+            }
+        }
+        previous_inner_id = Some(mount.id);
     }
     for (path, node) in &model.tree {
         if path == Path::new("/run/diskgc/lock") {
@@ -166,6 +231,43 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
         }
         let _ = destination(path)?;
         validate_node(path, node)?;
+        if let Some(at) = inner_at {
+            validate_mount_tree_boundary(path, node, at)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_mount_tree_boundary(
+    path: &Path,
+    node: &NodeSpec,
+    mount_at: &Path,
+) -> Result<(), String> {
+    if path == mount_at {
+        return Err(format!(
+            "materialize(model): {} is model-only: explicit mount-root attributes are unsupported",
+            path.display()
+        ));
+    }
+    if let NodeSpec::Dir(dir) = node {
+        for (name, child) in &dir.entries {
+            let child_path = path.join(name);
+            if path.starts_with(mount_at) != child_path.starts_with(mount_at) {
+                return Err(format!(
+                    "materialize(model): {} crosses an inner mount inside a directory node; use a separate tree key",
+                    child_path.display()
+                ));
+            }
+            validate_mount_tree_boundary(&child_path, child, mount_at)?;
+        }
+    } else if let NodeSpec::File(file) = node
+        && file.symlink.is_some()
+        && mount_at.starts_with(path)
+    {
+        return Err(format!(
+            "materialize(model): {} is model-only: a symlink cannot be an inner mount ancestor",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -333,8 +435,25 @@ fn destination(path: &Path) -> Result<(&'static str, &Path), String> {
 /// differential callers must compare outcomes that do not depend on them.
 pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String> {
     validate(model)?;
+    let inner_at = model
+        .mounts
+        .iter()
+        .find(|mount| {
+            mount.at != Path::new("/")
+                && !matches!(
+                    mount.at.to_str(),
+                    Some("/tmp" | "/home/tester" | "/run/diskgc")
+                )
+        })
+        .map(|mount| mount.at.as_path());
+    let mut materialized = Materialized {
+        holders: Vec::new(),
+        mounted: Vec::new(),
+    };
+    // Populate the parent scratch mounts before covering the mount point.
     for (path, node) in &model.tree {
-        if path == Path::new("/run/diskgc/lock") {
+        if path == Path::new("/run/diskgc/lock") || inner_at.is_some_and(|at| path.starts_with(at))
+        {
             continue;
         }
         let (root, relative) = destination(path)?;
@@ -345,21 +464,70 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
         };
         create_node(scratch, relative, node)?;
     }
+    let mut inner_scratch = None;
+    if let Some(at) = inner_at {
+        let (root, relative) = destination(at)?;
+        let parent_scratch = if root == "/tmp" {
+            &ctx.scratch
+        } else {
+            &ctx.home
+        };
+        parent_scratch.mkdirs(
+            relative
+                .to_str()
+                .ok_or("materialize(model): non-UTF-8 mount point")?,
+            0o755,
+            TESTER,
+        )?;
+        for mount in model.mounts.iter().filter(|mount| mount.at == at) {
+            let scratch = Scratch::mount(
+                at.to_str()
+                    .ok_or("materialize(model): non-UTF-8 mount point")?,
+                "0755",
+                TESTER,
+            )
+            .map_err(|error| format!("materialize(model): mount id {}: {error}", mount.id))?;
+            materialized.mounted.push(at.to_owned());
+            inner_scratch = Some(scratch);
+        }
+        let scratch = inner_scratch
+            .as_ref()
+            .ok_or("materialize(model): inner mount was not created")?;
+        for (path, node) in &model.tree {
+            if path.starts_with(at) {
+                let relative = path
+                    .strip_prefix(at)
+                    .map_err(|error| format!("inner tree path {}: {error}", path.display()))?;
+                create_node(scratch, relative, node)?;
+            }
+        }
+    }
     // Creating children changes parent mtimes. Apply explicit times only
     // after the complete tree exists, with descendants before their parents.
     for (path, node) in &model.tree {
         if path == Path::new("/run/diskgc/lock") {
             continue;
         }
-        let (root, relative) = destination(path)?;
-        let scratch = if root == "/tmp" {
-            &ctx.scratch
+        let (scratch, relative) = if let Some(at) = inner_at.filter(|at| path.starts_with(at)) {
+            (
+                inner_scratch
+                    .as_ref()
+                    .ok_or("materialize(model): inner mount missing for mtime")?,
+                path.strip_prefix(at).map_err(|error| error.to_string())?,
+            )
         } else {
-            &ctx.home
+            let (root, relative) = destination(path)?;
+            (
+                if root == "/tmp" {
+                    &ctx.scratch
+                } else {
+                    &ctx.home
+                },
+                relative,
+            )
         };
         apply_mtimes(scratch, relative, node)?;
     }
-    let mut holders = Vec::new();
     for process in &model.processes {
         let path = &process.fds[0].path;
         let path_text = path
@@ -377,9 +545,8 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
                 process.pid
             )
         })?;
-        holders.push((holder, path.clone()));
+        materialized.holders.push((holder, path.clone()));
     }
-    let materialized = Materialized { holders };
     materialized.assert_holding()?;
     Ok(materialized)
 }

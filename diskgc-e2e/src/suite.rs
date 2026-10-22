@@ -382,6 +382,18 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::python_in_use_vector_matches_linux,
     },
     Test {
+        name: "python_nested_mount_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::python_nested_mount_matches_linux,
+    },
+    Test {
+        name: "python_stacked_mount_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::python_stacked_mount_matches_linux,
+    },
+    Test {
         name: "generated_python_models_match_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,

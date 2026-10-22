@@ -8,13 +8,13 @@ use std::time::Duration;
 use std::{fs, io};
 
 use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::host::{Base, Errno, Host};
+use diskgc_core::host::{Base, Dev, Errno, Host};
 use diskgc_core::profile::Library;
 use diskgc_core::resolve::{ResolveError, Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
-use diskgc_model::spec::{Bytes, DirSpec, FileSpec, NodeSpec};
+use diskgc_model::spec::{Bytes, DevSpec, DirSpec, FileSpec, MountSpec, NodeSpec};
 use serde_json::Value;
 
 use crate::ensure;
@@ -78,6 +78,69 @@ pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRe
 /// The unchanged expected in-use verdict still comes from the vector.
 pub fn python_in_use_vector_matches_linux(ctx: &Ctx) -> TestResult {
     replay_model(ctx, python_in_use_probe_vector()?, false)
+}
+
+/// A Python cache containing a mounted filesystem must remain untouched.
+/// The stacked variant has two distinct tmpfs mounts at the same point;
+/// only the topmost mount's file is visible to both hosts.
+pub fn python_nested_mount_matches_linux(ctx: &Ctx) -> TestResult {
+    replay_model(ctx, python_mounted_cache_vector(false)?, false)
+}
+
+pub fn python_stacked_mount_matches_linux(ctx: &Ctx) -> TestResult {
+    replay_model(ctx, python_mounted_cache_vector(true)?, false)
+}
+
+fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
+    let mut vector = ProfileVector::parse(PYTHON_VECTOR)?;
+    let cache = PathBuf::from("/home/tester/project/app/__pycache__");
+    let at = cache.join("mounted");
+    let mut mount = MountSpec {
+        id: 3,
+        at: at.clone(),
+        fs: "tmpfs".into(),
+        dev: DevSpec(Dev {
+            major: 0,
+            minor: 77,
+        }),
+        size: Bytes(1 << 20),
+        other_used: Bytes(0),
+        parent: Some(2),
+        read_only: false,
+        statx_missing: Vec::new(),
+    };
+    vector.host.mounts.push(mount.clone());
+    if stacked {
+        mount.id = 4;
+        mount.dev = DevSpec(Dev {
+            major: 0,
+            minor: 78,
+        });
+        mount.parent = Some(3);
+        vector.host.mounts.push(mount);
+    }
+    vector.host.tree.insert(
+        at.join("visible"),
+        NodeSpec::File(FileSpec {
+            content: Some("topmost mount".into()),
+            ..FileSpec::default()
+        }),
+    );
+    let plan = vector
+        .expect
+        .plan
+        .iter_mut()
+        .find(|entry| entry.candidate == cache)
+        .ok_or("Python cache candidate missing from expectation")?;
+    plan.reason = Some("contains_mount".into());
+    vector.expect.actions.clear();
+    vector.expect.removed.clear();
+    vector.expect.skipped.push(SkipVerdict {
+        candidate: cache,
+        reason: "contains_mount".into(),
+    });
+    vector.expect.preserved.push(at.join("visible"));
+    Ok(vector)
 }
 
 fn python_in_use_probe_vector() -> Result<ProfileVector, String> {
@@ -595,6 +658,45 @@ mod tests {
         vector
             .check(&Library::builtin().expect("built-in library"))
             .expect("the checked-in in-use expectation");
+    }
+
+    #[test]
+    fn nested_and_stacked_mounts_have_independent_refusal_expectations() {
+        let library = Library::builtin().expect("built-in library");
+        for stacked in [false, true] {
+            let mut vector = python_mounted_cache_vector(stacked).expect("mounted vector");
+            vector.check(&library).expect("mount refusal expectation");
+            adapt_home_mount(&mut vector);
+            model_materialize::validate(&vector.host).expect("supported tmpfs mount layout");
+            let last = vector.host.mounts.len() - 1;
+            vector.host.mounts[last].dev = vector.host.mounts[last - 1].dev;
+            assert!(
+                model_materialize::validate(&vector.host)
+                    .expect_err("bind representation must fail")
+                    .contains("bind mounts sharing a device are not modelled"),
+            );
+            vector.host.mounts[last].dev = DevSpec(Dev {
+                major: 0,
+                minor: 99,
+            });
+            vector.host.mounts[last].fs = "ext4".into();
+            assert!(
+                model_materialize::validate(&vector.host)
+                    .expect_err("non-tmpfs inner mount must fail")
+                    .contains("only scratch tmpfs mounts are supported"),
+            );
+            vector.host.mounts[last].fs = "tmpfs".into();
+            let mount_at = vector.host.mounts[last].at.clone();
+            vector
+                .host
+                .tree
+                .insert(mount_at, NodeSpec::Dir(DirSpec::default()));
+            assert!(
+                model_materialize::validate(&vector.host)
+                    .expect_err("explicit mounted root must fail")
+                    .contains("explicit mount-root attributes are unsupported"),
+            );
+        }
     }
 
     #[test]
