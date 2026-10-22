@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-22 09:02'
+updated_date: '2026-10-22 09:55'
 labels:
   - wave-2
   - testing
@@ -70,6 +70,10 @@ Correction to immediately preceding TASK-25 note: four originals, not all six, m
 2026-10-22 mixed-age kernel feasibility: booted disposable QEMU/KVM with current kernel and a static BusyBox initramfs, mounted guest tmpfs, created /scratch/old after setting guest clock to 1609459200, advanced guest clock to 1792655850, then created /scratch/fresh. Guest stat output: old ctime 1609459200 both before and after shift; fresh ctime 1792655850. QEMU exit 0; host clock 1792655900 before, 1792655901 after. This proves two genuine kernel ctime cohorts can coexist without changing host time. No deleting diskgc ran in guest: current E2E runner requires Podman native overlay and a large Nix-built image, while this proof guest had only BusyBox. TASK-25.1 captures the reproducible Podman-inside-guest harness, staged statx assertions, four unchanged originals, and Oracle parity. AC #1/#2 and DoD stay open; none of the four original mixed-age replays is claimed passing.
 
 2026-10-22 TASK-25.1 mixed-age guest replay: all four formerly unproved originals (Autotools, CMake, Meson, containers-image) now have registered Tier::Vm differential tests against unchanged YAML and independent expectations. Nix QEMU/Podman native-overlay check exited 0; each staged genuine old/fresh kernel statx ctimes, compared ModelHost/LinuxHost dry and reclaim, and passed the strace deletion oracle. The containers-image replay uses /var/tmp scratch and an image-baked static /usr/bin/buildah-named process probe for in-use evidence. Ordinary container preflight still refuses mixed-age replays before fixture writes. TASK-25.1 AC #1-#3 checked; AC #4 awaits exact just e2e gate. Parent TASK-25 AC and DoD remain unchecked until full gate and review.
+
+2026-10-22 non-profile/materializer preflight bite: classified the two checked-in host-model YAMLs outside profiles/ without changing originals. docker-bundled.yaml refuses scripted Docker responses; sketch/locked-cargo-target.yaml refuses its event, and an isolated second probe refuses exact other_used accounting. Added 26 table-driven representatives of rejected model-only field families (kernel/identity, sandbox/commands, events, locks/processes, mount capabilities/types, unsupported nodes/paths). A disposable Podman case calls materialize for every case and requires contextual refusal before /home/tester, /tmp, or /var/tmp changes; host canary refused exit 86 and focused case PASS 1/1. Pure table/classification unit tests PASS, E2E crate Clippy -D warnings PASS, diff check PASS. Model clock and nominal mount size/device/ID remain accepted only for outcome-independent vector replays, and eight original profile vectors still require projections. AC #1/#2 and DoD remain unchecked; parent exact just e2e and read-only review pending.
+
+2026-10-22 MPED P2 preflight-evidence follow-up: prior top-level name snapshots could miss nested writes or overwrites of existing files. Replaced them in the disposable-container bite with recursive snapshots of /tmp, /var/tmp, and /home/tester: mount ID is checked at every entry; metadata identity/ownership/mode/size/mtime/ctime, symlink target, and regular-file bytes are compared after every refusal. A same-inode overwrite of a nested file with equal-length different bytes makes the snapshot change, then is restored before the refusal baseline. Focused Podman case PASS 1/1 with host canary exit 86; pure model-only tests 3/3 and E2E Clippy -D warnings PASS. TASK-25 AC/DoD remain unchecked pending full gate and review.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

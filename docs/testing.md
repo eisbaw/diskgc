@@ -488,6 +488,20 @@ size, device and ID did not change the observed plan, action, skip, exit, or
 deletion diff for each accepted replay. Adding a checked-in vector requires
 a new classification and parity evidence.
 
+The two other checked-in host-model YAMLs are classified separately:
+`sketch/locked-cargo-target.yaml` uses a call-time event and exact external
+space accounting, while `docker-bundled.yaml` supplies scripted Docker
+responses. Both fail materializer preflight with a named model-only field.
+A disposable-container bite table mutates each supported refusal family
+(kernel and identity, sandbox and command responses, events, process and
+lock shapes, mount capabilities and types, and nonrepresentable nodes and
+paths), invokes `materialize`, and compares recursive metadata and regular
+file bytes under `/tmp`, `/var/tmp`, and `/home/tester` before and after each
+refusal. A nested same-inode overwrite bite proves the comparison detects
+changed contents in an existing directory. The model's mandatory clock and
+nominal mount size, device, and ID are still accepted for outcome-independent
+replays; the selected profile's time predicate is checked by vector preflight.
+
 The generated differential cases run 100 disjoint Python bytecode models and
 100 disjoint Mypy cache models per container run. The Mypy cases vary payload
 sizes, a second tagged cache, a matching path without `CACHEDIR.TAG`, and a

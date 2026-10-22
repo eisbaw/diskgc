@@ -3,8 +3,8 @@
 //! fixture objects that actually disappeared, but excludes incidental inode
 //! numbers, mount ids, timings, and Host call text.
 
-use std::collections::BTreeSet;
-use std::os::unix::fs::OpenOptionsExt;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
@@ -17,8 +17,8 @@ use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
 use diskgc_model::spec::{
-    Bytes, DevSpec, DirSpec, FileSpec, LockModeSpec, LockSpec, Mode, MountSpec, NodeSpec,
-    ProcessSpec, WallTime,
+    Bytes, DevSpec, DirSpec, FileSpec, GateSpec, HostModel, LockModeSpec, LockSpec, Mode,
+    MountSpec, NodeSpec, ProcAccess, ProcessSpec, Special, StatxField, WallTime,
 };
 use diskgc_model::state::Fault;
 use serde_json::Value;
@@ -71,6 +71,23 @@ const MESON_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/meson-source-anchor.yaml");
 const CONTAINERS_IMAGE_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/containers-image-age.yaml");
+// The sketch has several nonrepresentable fields. Isolate its mount accounting
+// in a second probe so both event and exact-space refusals are demonstrated.
+const NON_PROFILE_MODELS: &[(&str, &str, &str, Option<&str>)] = &[
+    (
+        "docker-bundled.yaml",
+        include_str!("../../crates/diskgc-model/tests/models/docker-bundled.yaml"),
+        "command/docker is model-only",
+        None,
+    ),
+    (
+        "sketch/locked-cargo-target.yaml",
+        include_str!("../../crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml"),
+        "events is model-only",
+        Some("other_used is model-only"),
+    ),
+];
+type NonProfileModelCase = (&'static str, HostModel, &'static str, Option<&'static str>);
 #[cfg(test)]
 const BROWSER_VECTORS: &[&str] = &[
     BRAVE_BROWSER_VECTOR,
@@ -355,25 +372,37 @@ fn verify_registered_replays() -> Result<(), String> {
     Ok(())
 }
 
-/// The four mixed-age originals must refuse before any scratch
+/// Rejected original models and field families must fail before any scratch
 /// fixture or CLI config write. A fresh tmpfs inode's ctime is always now.
 pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> TestResult {
     verify_registered_replays()?;
-    fn top_level_entries(root: &str) -> Result<Vec<PathBuf>, String> {
-        let mut entries = fs::read_dir(root)
-            .map_err(|error| format!("read {root}: {error}"))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|error| format!("read {root} entry: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort();
-        Ok(entries)
-    }
-    let home_before = top_level_entries("/home/tester")?;
-    let tmp_before = top_level_entries("/tmp")?;
-    let var_tmp_before = top_level_entries("/var/tmp")?;
+    let bite_dir = "preflight-snapshot-bite/nested";
+    ctx.home.mkdirs(bite_dir, 0o700, TESTER)?;
+    let bite = ctx.home.write_file(
+        "preflight-snapshot-bite/nested/payload",
+        b"first",
+        0o600,
+        TESTER,
+    )?;
+    let prior = preflight_scratch_snapshot(ctx)?;
+    fs::write(&bite, b"other")
+        .map_err(|error| format!("overwrite nested snapshot bite {}: {error}", bite.display()))?;
+    let changed = preflight_scratch_snapshot(ctx)?;
+    let before_entry = prior
+        .get(&bite)
+        .ok_or("snapshot omitted nested bite file")?;
+    let after_entry = changed.get(&bite).ok_or("snapshot lost nested bite file")?;
+    ensure!(
+        before_entry.ino == after_entry.ino && before_entry.content != after_entry.content,
+        "nested same-inode overwrite did not change snapshotted content"
+    );
+    ensure!(
+        prior != changed,
+        "nested overwrite did not change scratch snapshot"
+    );
+    fs::write(&bite, b"first")
+        .map_err(|error| format!("restore nested snapshot bite {}: {error}", bite.display()))?;
+    let before = preflight_scratch_snapshot(ctx)?;
     for classification in PROFILE_FIXTURES {
         let FixtureReplay::Vm { yaml, .. } = classification.replay else {
             continue;
@@ -386,20 +415,333 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
             error.contains("idle_for") && error.contains("ctime") && error.contains("model-only"),
             "{name}: {error}"
         );
-        ensure!(
-            top_level_entries("/home/tester")? == home_before,
-            "{name}: preflight wrote /home/tester"
-        );
-        ensure!(
-            top_level_entries("/tmp")? == tmp_before,
-            "{name}: preflight wrote /tmp"
-        );
-        ensure!(
-            top_level_entries("/var/tmp")? == var_tmp_before,
-            "{name}: preflight wrote /var/tmp"
-        );
+        assert_preflight_scratch_unchanged(ctx, &before, name)?;
+    }
+    for (name, model, expected, second_expected) in non_profile_models()? {
+        let error = model_materialize::materialize(ctx, &model)
+            .err()
+            .ok_or_else(|| format!("{name}: model-only fixture unexpectedly materialized"))?;
+        ensure!(error.contains(expected), "{name}: {error}");
+        assert_preflight_scratch_unchanged(ctx, &before, name)?;
+        if let Some(second_expected) = second_expected {
+            let isolated_accounting = isolate_sketch_mount_accounting(&model);
+            let error = model_materialize::materialize(ctx, &isolated_accounting)
+                .err()
+                .ok_or_else(|| {
+                    format!("{name}: second model-only field unexpectedly materialized")
+                })?;
+            ensure!(error.contains(second_expected), "{name}: {error}");
+            assert_preflight_scratch_unchanged(ctx, &before, name)?;
+        }
+    }
+    for (name, model, expected) in model_only_field_cases()? {
+        let error = model_materialize::materialize(ctx, &model)
+            .err()
+            .ok_or_else(|| format!("{name}: model-only field unexpectedly materialized"))?;
+        ensure!(error.contains(expected), "{name}: {error}");
+        assert_preflight_scratch_unchanged(ctx, &before, name)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreflightScratchEntry {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+    content: Option<Vec<u8>>,
+    symlink: Option<PathBuf>,
+}
+
+type PreflightScratchSnapshot = BTreeMap<PathBuf, PreflightScratchEntry>;
+
+fn preflight_scratch_snapshot(ctx: &Ctx) -> Result<PreflightScratchSnapshot, String> {
+    fn visit(path: &Path, mount_id: u64, entries: &mut PreflightScratchSnapshot) -> TestResult {
+        let actual_mount = crate::scratch::mount_id(path, false)?;
+        ensure!(
+            actual_mount == mount_id,
+            "preflight scratch snapshot reached another mount at {}",
+            path.display()
+        );
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("lstat preflight scratch {}: {error}", path.display()))?;
+        let kind = metadata.file_type();
+        let content = kind
+            .is_file()
+            .then(|| {
+                fs::read(path)
+                    .map_err(|error| format!("read preflight scratch {}: {error}", path.display()))
+            })
+            .transpose()?;
+        let symlink = kind
+            .is_symlink()
+            .then(|| {
+                fs::read_link(path)
+                    .map_err(|error| format!("read preflight symlink {}: {error}", path.display()))
+            })
+            .transpose()?;
+        let previous = entries.insert(
+            path.to_owned(),
+            PreflightScratchEntry {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                nlink: metadata.nlink(),
+                len: metadata.len(),
+                mtime: (metadata.mtime(), metadata.mtime_nsec()),
+                ctime: (metadata.ctime(), metadata.ctime_nsec()),
+                content,
+                symlink,
+            },
+        );
+        ensure!(
+            previous.is_none(),
+            "duplicate preflight scratch path {}",
+            path.display()
+        );
+        if kind.is_dir() {
+            for child in fs::read_dir(path)
+                .map_err(|error| format!("list preflight scratch {}: {error}", path.display()))?
+            {
+                let child =
+                    child.map_err(|error| format!("read preflight scratch entry: {error}"))?;
+                visit(&child.path(), mount_id, entries)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut entries = BTreeMap::new();
+    for scratch in [&ctx.scratch, &ctx.var_tmp, &ctx.home] {
+        visit(scratch.root(), scratch.mnt_id(), &mut entries)?;
+    }
+    Ok(entries)
+}
+
+fn assert_preflight_scratch_unchanged(
+    ctx: &Ctx,
+    before: &PreflightScratchSnapshot,
+    case: &str,
+) -> TestResult {
+    let after = preflight_scratch_snapshot(ctx)?;
+    let changed = before
+        .keys()
+        .chain(after.keys())
+        .find(|path| before.get(*path) != after.get(*path));
+    ensure!(
+        changed.is_none(),
+        "{case}: preflight changed scratch entry {}",
+        changed.map_or_else(|| "?".to_owned(), |path| path.display().to_string())
+    );
+    Ok(())
+}
+
+fn non_profile_models() -> Result<Vec<NonProfileModelCase>, String> {
+    NON_PROFILE_MODELS
+        .iter()
+        .map(|(name, yaml, expected, second_expected)| {
+            let model =
+                diskgc_model::load::parse_yaml(yaml).map_err(|error| format!("{name}: {error}"))?;
+            Ok((*name, model, *expected, *second_expected))
+        })
+        .collect()
+}
+
+fn isolate_sketch_mount_accounting(model: &HostModel) -> HostModel {
+    // Leave the original YAML unchanged. Remove its event and process/lock
+    // evidence from this independent probe to reach the exact-space check.
+    let mut isolated = model.clone();
+    isolated.events.clear();
+    isolated.processes.clear();
+    isolated.locks.clear();
+    isolated
+}
+
+/// One representative per field family that `materialize` declares
+/// model-only. The container bite invokes materialize, not just validate,
+/// and compares the scratch roots before and after each refusal.
+fn model_only_field_cases() -> Result<Vec<(&'static str, HostModel, &'static str)>, String> {
+    type Mutation = fn(&mut HostModel);
+    let cases: &[(&str, &str, Mutation)] = &[
+        ("kernel", "kernel is model-only", |m| {
+            m.kernel = Some("2.6.0".into())
+        }),
+        ("hostname", "hostname is model-only", |m| {
+            m.hostname = Some("other".into())
+        }),
+        (
+            "own-pid",
+            "own_pid/own_uid_map/own_uid is model-only",
+            |m| m.own_pid = Some(1),
+        ),
+        (
+            "own-uid-map",
+            "own_pid/own_uid_map/own_uid is model-only",
+            |m| m.own_uid_map = Some("0 0 1".into()),
+        ),
+        (
+            "own-uid",
+            "own_pid/own_uid_map/own_uid is model-only",
+            |m| m.own_uid = Some(0),
+        ),
+        ("sandbox-gate", "sandbox_gate is model-only", |m| {
+            m.sandbox_gate = GateSpec::Closed
+        }),
+        ("command-exit", "command/docker is model-only", |m| {
+            m.command_exit = 1
+        }),
+        ("command-error", "command/docker is model-only", |m| {
+            m.command_error_after_start = true
+        }),
+        ("docker", "command/docker is model-only", |m| {
+            m.docker.host = Some("unix:///tmp/docker.sock".into())
+        }),
+        ("events", "events is model-only", |m| {
+            m.events.push(Default::default())
+        }),
+        ("lock-holder", "locks[0].holder is model-only", |m| {
+            m.locks.push(LockSpec {
+                path: "/home/tester/project/unused".into(),
+                holder: 42,
+                mode: LockModeSpec::Exclusive,
+            })
+        }),
+        ("process-proc", "processes[0].proc is model-only", |m| {
+            m.processes.push(ProcessSpec {
+                proc: ProcAccess::Denied,
+                ..minimal_process()
+            })
+        }),
+        (
+            "process-executable",
+            "processes[0].exe/maps/environ is model-only",
+            |m| {
+                m.processes.push(ProcessSpec {
+                    exe: Some("/usr/bin/python".into()),
+                    ..minimal_process()
+                })
+            },
+        ),
+        (
+            "process-credentials",
+            "processes[0].root/name/ids/dumpability/uid_map/privileged is model-only",
+            |m| {
+                m.processes.push(ProcessSpec {
+                    root: Some("/home/tester/project".into()),
+                    ..minimal_process()
+                })
+            },
+        ),
+        ("process-fds", "processes[0].fds is model-only", |m| {
+            m.processes.push(minimal_process())
+        }),
+        ("statx-mask", "statx_missing is model-only", |m| {
+            m.mounts[0].statx_missing.push(StatxField::MntId)
+        }),
+        ("other-used", "other_used is model-only", |m| {
+            m.mounts[0].other_used = Bytes(4096)
+        }),
+        ("read-only-mount", "read_only is model-only", |m| {
+            m.mounts[0].read_only = true
+        }),
+        (
+            "network-filesystem",
+            "is model-only: only scratch tmpfs mounts",
+            |m| m.mounts[1].fs = "nfs".into(),
+        ),
+        (
+            "outside-scratch",
+            "outside the container scratch mounts",
+            |m| {
+                m.tree.insert(
+                    "/home/other/unsupported".into(),
+                    NodeSpec::File(FileSpec::default()),
+                );
+            },
+        ),
+        ("hard-link", ".link is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/hard-link".into(),
+                NodeSpec::File(FileSpec {
+                    link: Some("/home/tester/project/original".into()),
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+        ("bound-socket", ".bound is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/bound-socket".into(),
+                NodeSpec::File(FileSpec {
+                    special: Some(Special::Socket),
+                    bound: true,
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+        ("char-device", "char_device is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/char-device".into(),
+                NodeSpec::File(FileSpec {
+                    special: Some(Special::CharDevice),
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+        ("symlink-mtime", ".mtime on a symlink is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/symlink-mtime".into(),
+                NodeSpec::File(FileSpec {
+                    symlink: Some("target".into()),
+                    mtime: Some(m.clock),
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+        ("symlink-mode", ".mode on a symlink is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/symlink-mode".into(),
+                NodeSpec::File(FileSpec {
+                    symlink: Some("target".into()),
+                    mode: Some(Mode(0o777)),
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+        ("socket-mode", ".mode on a socket is model-only", |m| {
+            m.tree.insert(
+                "/home/tester/socket-mode".into(),
+                NodeSpec::File(FileSpec {
+                    special: Some(Special::Socket),
+                    mode: Some(Mode(0o600)),
+                    ..FileSpec::default()
+                }),
+            );
+        }),
+    ];
+    let mut base = ProfileVector::parse(PYTHON_VECTOR)?.host;
+    base.mounts[1].at = "/home/tester".into();
+    base.mounts[1].fs = "tmpfs".into();
+    model_materialize::validate(&base)?;
+    Ok(cases
+        .iter()
+        .map(|(name, expected, mutate)| {
+            let mut model = base.clone();
+            mutate(&mut model);
+            (*name, model, *expected)
+        })
+        .collect())
+}
+
+fn minimal_process() -> ProcessSpec {
+    serde_json::from_value(serde_json::json!({"pid": 42})).expect("minimal process shape")
 }
 
 /// Replay the unchanged CMake mixed-age vector in the disposable QEMU guest.
@@ -2465,6 +2807,61 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_non_profile_host_model_has_a_model_only_classification() {
+        fn yaml_below(root: &Path, base: &Path, found: &mut BTreeSet<PathBuf>) {
+            for entry in fs::read_dir(root).expect("model fixture directory") {
+                let path = entry.expect("model fixture entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "profiles") {
+                        yaml_below(&path, base, found);
+                    }
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "yaml")
+                {
+                    found.insert(path.strip_prefix(base).expect("relative model path").into());
+                }
+            }
+        }
+        let base =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/diskgc-model/tests/models");
+        let mut on_disk = BTreeSet::new();
+        yaml_below(&base, &base, &mut on_disk);
+        let classified: BTreeSet<_> = NON_PROFILE_MODELS
+            .iter()
+            .map(|(name, _, _, _)| PathBuf::from(name))
+            .collect();
+        assert_eq!(
+            classified.len(),
+            NON_PROFILE_MODELS.len(),
+            "duplicate classification"
+        );
+        assert_eq!(on_disk, classified, "unclassified non-profile host model");
+        for (name, model, expected, second_expected) in
+            non_profile_models().expect("parse original YAMLs")
+        {
+            let error = model_materialize::validate(&model)
+                .expect_err("model-only original unexpectedly passed preflight");
+            assert!(error.contains(expected), "{name}: {error}");
+            if let Some(second_expected) = second_expected {
+                let isolated_accounting = isolate_sketch_mount_accounting(&model);
+                let error = model_materialize::validate(&isolated_accounting)
+                    .expect_err("second model-only field unexpectedly passed preflight");
+                assert!(error.contains(second_expected), "{name}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn model_only_field_table_bites_on_each_preflight_family() {
+        for (name, model, expected) in model_only_field_cases().expect("field case table") {
+            let error = model_materialize::validate(&model)
+                .expect_err("model-only field unexpectedly passed preflight");
+            assert!(error.contains(expected), "{name}: {error}");
         }
     }
 
