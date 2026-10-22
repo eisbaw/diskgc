@@ -656,7 +656,11 @@ matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source term that admits it after its filters refuses
 checkouts. It rechecks each term under one candidate lock. A command union
 invokes its shared argv at most once per inode, with `DISKGC_PROFILE` and the
-output prefix of the source selected by that locked recheck. A union of the same `cargo-target` source
+output prefix of the source selected by that locked recheck. If the final
+policy scan excludes that source before the command starts, the union judges
+every term again under the same lock, including its filters and checkout
+setting, then tries another admitted source. Each source can lose this final
+check once; the command is never run twice. A union of the same `cargo-target` source
 with only positive idle filters is reduced to its shortest idle requirement;
 an unfiltered member removes only the filters' added bound, preserving the
 source's mandatory `min_idle_for` when set. The usual Cargo plan and

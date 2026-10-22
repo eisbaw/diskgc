@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 05:13'
+updated_date: '2026-10-22 05:35'
 labels:
   - wave-2
   - irreversible
@@ -104,6 +104,10 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 command-union review follow-up (pending parent exact gate/review): ModelHost now changes the first term has-tag predicate at the candidate flock; the command falls back to the other source exactly once with its profile, argv path, stderr prefix and report attribution. A separate event creates a !profile child match at the final process-scan boundary; the last policy recheck reports excluded and starts no command. Focused command-union suite passed 7/7. AC/DoD unchanged.
 
 2026-10-22 MPED command-union review limitation: after the one-lock alternative judgement selects a command source, the final policy recheck can discover a new !profile or protect match for that selected source. The command then conservatively skips the candidate even if a different source term would still admit it. No command starts, so this is a safe under-selection, but it does not implement complete union fallback under a concurrent final-boundary policy change. Finishing TASK-16 requires deciding and testing final-boundary reselection with fresh policy, source predicates, checkout veto and in-use freshness, or explicitly documenting fail-closed concurrent semantics before closing the random-reference contract. Stable-state plan and tally agreement and the existing late-exclusion safety test do not prove this fallback. AC/DoD remain open.
+
+2026-10-22 command-union final-policy fallback increment (pending parent full gate/review): a final !profile/protect refusal before command start now retries source selection under the same candidate lock. Each retry rereads mount/place, source predicates and idle, term policy, full walk and checkout veto across every term; the fallback gets its own argv path, DISKGC_PROFILE, cwd and report source. A source can lose final policy once, bounding retries to the union width; command starts at most once. ModelHost regressions cover both source orders, one-lock/one-command attribution, and a checkout appearing at the final boundary vetoing the fallback. Focused command-union tests 9/9 and core/model Clippy passed. TASK-16 still lacks full randomized reference properties and other unsupported runtime combinations; AC/DoD remain open.
+
+2026-10-22 MPED final-boundary attribution fix (pending parent full gate/review): if fallback finds no selectable command source, the report now preserves the final refusal reason and the source selected immediately before that refusal. A prior filtered source no longer masks excluded, and report attribution no longer falls back to the union first source. ModelHost regression with filtered first term and late !profile exclusion of the second passes; command-union focused suite 10/10, core/model Clippy, format check, diff check pass. AC/DoD unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -459,6 +459,80 @@ fn command_union_rechecks_new_negated_match_just_before_invocation() {
 }
 
 #[test]
+fn command_union_reports_final_refusal_after_an_earlier_filtered_term() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    let selection = "(profile:command-union-allow && filter:has-tag) || (profile:command-union-refuse && !profile:command-union-exclude-child)";
+    let event = "events:\n  - {at: {op: pids, nth: 2, when: after}, create: /tmp/command-shared-clear/late-guard}\n";
+    let run_host = host(&yaml("", &tree, event));
+    let report = ensure(&run_host, &tmp(selection));
+    assert!(report.actions.is_empty(), "{report:#?}");
+    let skipped = report
+        .skipped
+        .iter()
+        .find(|entry| entry.candidate == Path::new("/tmp/command-shared-clear"))
+        .expect("candidate refusal");
+    assert_eq!(skipped.reason, "excluded", "{report:#?}");
+    assert_eq!(skipped.profile, "command-union-refuse", "{report:#?}");
+    assert!(calls(&run_host, Op::RunCommand).is_empty());
+    assert_eq!(run_host.trace_count(Op::Flock), 2, "one candidate lock");
+    assert!(run_host.unfired_events().is_empty());
+}
+
+#[test]
+fn command_union_reselects_after_final_policy_change_in_both_orders() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    for (first, second) in [
+        ("command-union-allow", "command-union-refuse"),
+        ("command-union-refuse", "command-union-allow"),
+    ] {
+        let selection = format!(
+            "(profile:{first} && !profile:command-union-exclude-child) || profile:{second}"
+        );
+        let event = "events:\n  - {at: {op: pids, nth: 2, when: after}, create: /tmp/command-shared-clear/late-guard}\n";
+        let run_host = host(&yaml("", &tree, event));
+        let report = ensure(&run_host, &tmp(&selection));
+        assert_eq!(report.actions.len(), 1, "{selection}: {report:#?}");
+        assert_eq!(
+            report.actions[0].profile, second,
+            "{selection}: {report:#?}"
+        );
+        assert_eq!(
+            report.actions[0].candidate,
+            Path::new("/tmp/command-shared-clear")
+        );
+        let commands = calls(&run_host, Op::RunCommand);
+        assert_eq!(commands.len(), 1, "{selection}: {report:#?}");
+        let run = commands[0].command.as_ref().expect("command trace");
+        assert_eq!(run.arguments[1], "/tmp/command-shared-clear");
+        assert!(run.output_prefix.ends_with(&format!("/{second}")));
+        assert!(
+            run.environment
+                .iter()
+                .any(|(key, value)| key == "DISKGC_PROFILE" && value == second)
+        );
+        assert_eq!(run_host.trace_count(Op::Flock), 2, "one candidate lock");
+        assert!(run_host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn command_union_late_fallback_rejudges_new_checkout_veto() {
+    let tree = format!("  /tmp/command-shared-clear: {}\n", old_dir("1M"));
+    let selection = "(profile:command-union-allow && !profile:command-union-exclude-child) || profile:command-union-refuse";
+    let event = "events:\n  - {at: {op: pids, nth: 2, when: after}, create: /tmp/command-shared-clear/late-guard}\n  - {at: {op: pids, nth: 2, when: after}, mkdir: /tmp/command-shared-clear/.git}\n";
+    let run_host = host(&yaml("", &tree, event));
+    let report = ensure(&run_host, &tmp(selection));
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/command-shared-clear"),
+        Some("contains_checkout")
+    );
+    assert!(calls(&run_host, Op::RunCommand).is_empty());
+    assert_eq!(run_host.trace_count(Op::Flock), 2, "one candidate lock");
+    assert!(run_host.unfired_events().is_empty());
+}
+
+#[test]
 fn command_union_uses_selected_hardlink_alias_in_argv_and_report() {
     let tree = "  /tmp/command-alias-a: {size: 1M}\n  /tmp/command-alias-b: {link: /tmp/command-alias-a}\n";
     let selection = "(profile:command-alias-first && !profile:command-alias-exclude) || profile:command-alias-second";
