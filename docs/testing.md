@@ -447,8 +447,9 @@ since those use the same matching.
 
 ## 4. Differential contract tests
 
-`materialize(model)` builds a host model for real on a scratch tmpfs inside
-a test container (directories, `fallocate`d files, owners via subuid ranges,
+The differential fixture materializer builds the representable host shape on
+a scratch tmpfs inside a test container (directories, `fallocate`d files,
+owners via subuid ranges,
 bind and stacked mounts, symlinks, helper processes holding locks or
 files), and the same scenarios run on `ModelHost` and on `LinuxHost`;
 the dry-run plan, reclaim exit, actions, skips, and deletion diff must match.
@@ -464,7 +465,9 @@ The checked-in profile-vector inventory in
 filename and reason: 18 direct replays, four browser-home projections, two
 process projections, two single-age clock projections, and four mixed-age
 originals requiring the QEMU guest. Every direct or projected
-entry names its registered container case. The projections keep the
+entry names its registered container case. Here “direct” means no
+fixture-specific transformation; every outcome replay still uses the common
+typed projection of nominal clock and mount geometry. The projections keep the
 original expectations and check them before the transformed replay. West and
 XDG use one historical timestamp cohort: the replay shifts the model clock
 and explicit mtimes together, then uses the sandbox-only clock offset to make
@@ -481,12 +484,25 @@ container, ModelHost and LinuxHost run dry and reclaim, and the existing
 strace deletion oracle judges the Linux runs. The containers-image replay
 has its own `/var/tmp` tmpfs and an image-baked static process probe named
 `/usr/bin/buildah` which holds the modelled spool file open; this tests the
-in-use guard, not Buildah's own program logic. The materializer itself cannot infer outcome dependence
-from a host model alone. The vector replay gate checks the selected profile's
-time predicate before materialization, then proves that nominal clock, mount
-size, device and ID did not change the observed plan, action, skip, exit, or
-deletion diff for each accepted replay. Adding a checked-in vector requires
-a new classification and parity evidence.
+in-use guard, not Buildah's own program logic. A literal `materialize(model)`
+preflight checks the container's root/scratch mount ID, parent, filesystem
+type, device, and statvfs size before writing a fixture. Inner mount IDs are
+refused because the kernel assigns them only when mounted. An exact model
+clock cannot be held constant while constructing a fixture, so literal
+materialization always refuses that field after the mount checks. The refusal
+precedes every fixture write. The materializer cannot infer outcome dependence
+from a host model alone.
+Differential vector replay therefore uses a checked `OutcomeStagePlan` to
+declare every fixture stage before any fixture tree write. Its constructor
+asserts the independent vector expectation. The staged tree nodes must
+partition the checked tree exactly once, and the final stage must carry the
+complete checked process and lock cohort. The plan issues `OutcomeProjection`
+values for the physical filesystem/process shape. Replay checks the selected
+profile's time predicate, then compares the model and Linux plan, action,
+skip, exit, and deletion diff. The clock and mount geometry are intentionally
+projected away in this outcome-only
+path; literal replay is not claimed. Adding a checked-in vector requires a
+new classification and parity evidence.
 
 The two other checked-in host-model YAMLs are classified separately:
 `sketch/locked-cargo-target.yaml` uses a call-time event and exact external
@@ -498,9 +514,10 @@ lock shapes, mount capabilities and types, and nonrepresentable nodes and
 paths), invokes `materialize`, and compares recursive metadata and regular
 file bytes under `/tmp`, `/var/tmp`, and `/home/tester` before and after each
 refusal. A nested same-inode overwrite bite proves the comparison detects
-changed contents in an existing directory. The model's mandatory clock and
-nominal mount size, device, and ID are still accepted for outcome-independent
-replays; the selected profile's time predicate is checked by vector preflight.
+changed contents in an existing directory. Additional live preflight bites
+alter the clock, mount ID, parent, filesystem type, device, or size one at a
+time from live kernel facts and require a contextual refusal without any
+scratch change.
 
 The generated differential cases run 100 disjoint Python bytecode models and
 100 disjoint Mypy cache models per container run. The Mypy cases vary payload

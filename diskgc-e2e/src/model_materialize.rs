@@ -8,7 +8,10 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+use rustix::fs::{AtFlags, CWD, StatxFlags};
+
 use diskgc_model::host::CACHEDIR_TAG_CONTENT;
+use diskgc_model::profile_vector::ProfileVector;
 use diskgc_model::spec::{
     Bytes, FileSpec, GateSpec, HostModel, LockModeSpec, Mode, NodeSpec, ProcAccess, ProcessSpec,
     Special, WallTime,
@@ -16,12 +19,107 @@ use diskgc_model::spec::{
 
 use crate::holder::Holder;
 use crate::scratch::{self, Scratch};
+use crate::snapshot;
 use crate::suite::Ctx;
 use crate::{Owner, TESTER};
 
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 pub(crate) const SCRATCH_PROBE_EXE: &str = "/home/tester/differential-process-probe";
 const IMAGE_BUILD_PROBE_EXE: &str = "/usr/bin/buildah";
+
+/// A checked outcome replay projects away the model's nominal clock and
+/// mount geometry. Only a complete, independently checked stage plan can
+/// issue one of these values. Callers still compare Linux and model outcomes.
+pub struct OutcomeProjection<'a> {
+    model: &'a HostModel,
+}
+
+/// All staged fixture writes are declared before the first write. Exactly
+/// one stage owns each modelled tree node; the last owns processes and locks.
+pub struct OutcomeStagePlan<'a> {
+    _checked_vector: &'a ProfileVector,
+    stages: Vec<&'a HostModel>,
+    next_index: usize,
+}
+
+impl<'a> OutcomeStagePlan<'a> {
+    pub fn checked(vector: &'a ProfileVector, stages: Vec<&'a HostModel>) -> Result<Self, String> {
+        let library = diskgc_core::profile::Library::builtin()
+            .map_err(|error| format!("outcome projection library: {error}"))?;
+        vector.check(&library)?;
+        validate_stage_partition(&vector.host, &stages)?;
+        Ok(Self {
+            _checked_vector: vector,
+            stages,
+            next_index: 0,
+        })
+    }
+
+    pub fn next_stage(&mut self) -> Result<OutcomeProjection<'a>, String> {
+        let index = self.next_index;
+        let model = self
+            .stages
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("outcome projection stage {index} is absent"))?;
+        self.next_index += 1;
+        Ok(OutcomeProjection { model })
+    }
+}
+
+fn validate_stage_partition(expected: &HostModel, stages: &[&HostModel]) -> Result<(), String> {
+    if stages.is_empty() {
+        return Err("outcome projection has no materialization stages".into());
+    }
+    let mut seen = BTreeSet::new();
+    for (index, stage) in stages.iter().enumerate() {
+        let mut nonstage_fields = (**stage).clone();
+        nonstage_fields.tree = expected.tree.clone();
+        nonstage_fields.processes = expected.processes.clone();
+        nonstage_fields.locks = expected.locks.clone();
+        if nonstage_fields != *expected {
+            return Err(format!(
+                "outcome projection stage {index} changes fields beyond the checked tree/process cohort"
+            ));
+        }
+        for (path, node) in &stage.tree {
+            if expected.tree.get(path) != Some(node) {
+                return Err(format!(
+                    "outcome projection stage {index} contains node {} absent from the checked vector",
+                    path.display()
+                ));
+            }
+            if !seen.insert(path.clone()) {
+                return Err(format!(
+                    "outcome projection duplicates node {} across stages",
+                    path.display()
+                ));
+            }
+        }
+        let final_stage = index + 1 == stages.len();
+        if final_stage {
+            if stage.processes != expected.processes {
+                return Err(
+                    "outcome projection final stage omits or changes checked processes".into(),
+                );
+            }
+            if stage.locks != expected.locks {
+                return Err("outcome projection final stage omits or changes checked locks".into());
+            }
+        } else if !stage.processes.is_empty() || !stage.locks.is_empty() {
+            return Err(format!(
+                "outcome projection stage {index} starts checked processes or locks before the final stage"
+            ));
+        }
+    }
+    if let Some(missing) = expected.tree.keys().find(|path| !seen.contains(*path)) {
+        return Err(format!(
+            "outcome projection omits checked node {} from all stages",
+            missing.display()
+        ));
+    }
+    Ok(())
+}
 
 fn mapped_path(line: &str) -> Option<&Path> {
     line.split_whitespace().nth(5).map(Path::new)
@@ -394,7 +492,10 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             continue; // The container's root filesystem is provisioned by the image.
         }
         if mount.fs != "tmpfs" {
-            return unsupported(&field, "only scratch tmpfs mounts are supported");
+            return unsupported(
+                &format!("{field}.fs"),
+                "only scratch tmpfs mounts are supported",
+            );
         }
         if matches!(
             mount.at.to_str(),
@@ -723,12 +824,117 @@ fn scratch_for<'a>(ctx: &'a Ctx, root: &str) -> &'a Scratch {
     }
 }
 
-/// Preflight-validate, then create the model tree on fresh scratch mounts.
-/// Call only inside the interlocked e2e container. The required model clock
-/// and nominal mount size/device/id are deliberately not materialized;
-/// differential callers must compare outcomes that do not depend on them.
+/// A literal host model includes an exact clock instant, which this harness
+/// cannot hold constant while building the fixture. Refuse it before writes.
 pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String> {
     validate(model)?;
+    validate_literal_nominal(model)?;
+    materialize_validated(ctx, model)
+}
+
+/// Materialize only the filesystem/process shape of a checked outcome vector.
+/// The caller must independently check its expectation and compare the model
+/// and Linux outcomes; model clock and mount geometry remain projected away.
+pub fn materialize_outcome_projection(
+    ctx: &Ctx,
+    projection: OutcomeProjection<'_>,
+) -> Result<Materialized, String> {
+    validate(projection.model)?;
+    materialize_validated(ctx, projection.model)
+}
+
+fn validate_literal_nominal(model: &HostModel) -> Result<(), String> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("read mountinfo before materialize: {error}"))?;
+    let real_mounts = snapshot::parse_mountinfo(&mountinfo)?;
+    for (index, mount) in model.mounts.iter().enumerate() {
+        let field = format!("mounts[{index}]");
+        if !matches!(
+            mount.at.to_str(),
+            Some("/" | "/tmp" | "/var/tmp" | "/home/tester" | "/run/diskgc")
+        ) {
+            return Err(format!(
+                "materialize(model): {field}.id is model-only: the kernel assigns an inner mount ID only when that mount is created"
+            ));
+        }
+        let stat = rustix::fs::statx(
+            CWD,
+            &mount.at,
+            AtFlags::SYMLINK_NOFOLLOW,
+            StatxFlags::BASIC_STATS | StatxFlags::MNT_ID,
+        )
+        .map_err(|error| format!("statx {} before materialize: {error}", mount.at.display()))?;
+        if stat.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
+            return Err(format!(
+                "materialize(model): {field}.id is model-only: kernel did not report a mount ID"
+            ));
+        }
+        if mount.id != stat.stx_mnt_id {
+            return Err(format!(
+                "materialize(model): {field}.id is model-only: model {}, kernel {}",
+                mount.id, stat.stx_mnt_id
+            ));
+        }
+        let real_mount = real_mounts
+            .iter()
+            .find(|real| real.mount_id == stat.stx_mnt_id)
+            .ok_or_else(|| {
+                format!(
+                    "materialize(model): {field}.id is model-only: kernel mount {} is absent from mountinfo",
+                    stat.stx_mnt_id
+                )
+            })?;
+        if real_mount.mount_point != mount.at {
+            return Err(format!(
+                "materialize(model): {field}.at is model-only: kernel mount {} is at {}, not {}",
+                mount.id,
+                real_mount.mount_point.display(),
+                mount.at.display()
+            ));
+        }
+        if mount.fs != real_mount.fs_type {
+            return Err(format!(
+                "materialize(model): {field}.fs is model-only: model {}, kernel {}",
+                mount.fs, real_mount.fs_type
+            ));
+        }
+        if mount.at == Path::new("/") && mount.parent.is_some() {
+            return Err(format!(
+                "materialize(model): {field}.parent is model-only: the container root has no visible parent"
+            ));
+        }
+        if mount.at != Path::new("/") && mount.parent != Some(real_mount.parent_id) {
+            return Err(format!(
+                "materialize(model): {field}.parent is model-only: model {:?}, kernel {}",
+                mount.parent, real_mount.parent_id
+            ));
+        }
+        if mount.dev.0.major != stat.stx_dev_major || mount.dev.0.minor != stat.stx_dev_minor {
+            return Err(format!(
+                "materialize(model): {field}.dev is model-only: model {}, kernel {}:{}",
+                mount.dev, stat.stx_dev_major, stat.stx_dev_minor
+            ));
+        }
+        let vfs = rustix::fs::statvfs(&mount.at).map_err(|error| {
+            format!("statvfs {} before materialize: {error}", mount.at.display())
+        })?;
+        let real_size = vfs.f_blocks.checked_mul(vfs.f_frsize).ok_or_else(|| {
+            format!("materialize(model): {field}.size is model-only: statvfs size overflow")
+        })?;
+        if mount.size.0 != real_size {
+            return Err(format!(
+                "materialize(model): {field}.size is model-only: model {}, kernel {real_size}",
+                mount.size.0
+            ));
+        }
+    }
+    Err(format!(
+        "materialize(model): clock is model-only: the exact model instant {} cannot be held constant while writing a fixture",
+        model.clock
+    ))
+}
+
+fn materialize_validated(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String> {
     let probe_bytes = if model
         .processes
         .iter()
@@ -1061,6 +1267,98 @@ mod tests {
     );
     const IN_USE_VECTOR: &str =
         include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
+
+    #[test]
+    fn outcome_projection_requires_independent_expectation_and_complete_stage_plan() {
+        let mut vector = ProfileVector::parse(VECTOR).expect("checked-in vector");
+        let model = vector.host.clone();
+        let mut plan =
+            OutcomeStagePlan::checked(&vector, vec![&model]).expect("independent expectation");
+        plan.next_stage().expect("first stage");
+        assert!(
+            plan.next_stage().is_err(),
+            "one stage cannot be issued twice"
+        );
+
+        vector.expect.reclaim_exit += 1;
+        let error = OutcomeStagePlan::checked(&vector, vec![&model])
+            .err()
+            .expect("wrong independent expectation must fail");
+        assert!(error.contains("exit"), "{error}");
+        vector.expect.reclaim_exit -= 1;
+
+        let mut changed = model.clone();
+        changed.mounts[0].fs = "changed".into();
+        let error = validate_stage_partition(&vector.host, &[&changed])
+            .err()
+            .expect("changed mount geometry must fail");
+        assert!(error.contains("beyond the checked"), "{error}");
+
+        let mut added = model;
+        added.tree.insert(
+            "/home/tester/unexpected".into(),
+            NodeSpec::File(FileSpec::default()),
+        );
+        let error = validate_stage_partition(&vector.host, &[&added])
+            .err()
+            .expect("unlisted stage node must fail");
+        assert!(error.contains("absent from the checked vector"), "{error}");
+
+        let mut paths = vector.host.tree.keys();
+        let first = paths.next().expect("first model tree node").clone();
+        let missing = paths.next().expect("second model tree node").clone();
+        let mut old_stage = vector.host.clone();
+        old_stage.tree.retain(|path, _| path == &first);
+        old_stage.processes.clear();
+        old_stage.locks.clear();
+        let mut fresh_stage = vector.host.clone();
+        fresh_stage.tree.remove(&first);
+        fresh_stage.tree.remove(&missing);
+        let error = validate_stage_partition(&vector.host, &[&old_stage, &fresh_stage])
+            .err()
+            .expect("node omitted from both historical stages must fail");
+        assert!(error.contains("omits checked node"), "{error}");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+
+        let mut old = vector.host.clone();
+        old.processes.clear();
+        old.locks.clear();
+        let error = validate_stage_partition(&vector.host, &[&old, &vector.host])
+            .err()
+            .expect("duplicate stage tree must fail");
+        assert!(error.contains("duplicates node"), "{error}");
+
+        let process_vector = ProfileVector::parse(IN_USE_VECTOR).expect("in-use vector");
+        assert!(
+            !process_vector.host.processes.is_empty(),
+            "process bite must be live"
+        );
+        let mut no_process = process_vector.host.clone();
+        no_process.processes.clear();
+        let error = validate_stage_partition(&process_vector.host, &[&no_process])
+            .err()
+            .expect("missing final process cohort must fail");
+        assert!(
+            error.contains("final stage omits or changes checked processes"),
+            "{error}"
+        );
+
+        let mut with_lock = process_vector.host.clone();
+        let holder = with_lock.processes[0].pid;
+        with_lock.locks.push(LockSpec {
+            path: "/home/tester/held".into(),
+            holder,
+            mode: LockModeSpec::Exclusive,
+        });
+        let no_lock = process_vector.host.clone();
+        let error = validate_stage_partition(&with_lock, &[&no_lock])
+            .err()
+            .expect("missing final lock cohort must fail");
+        assert!(
+            error.contains("final stage omits or changes checked locks"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn lock_preflight_rejects_unsupported_shapes() {

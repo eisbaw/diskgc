@@ -441,7 +441,80 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
         ensure!(error.contains(expected), "{name}: {error}");
         assert_preflight_scratch_unchanged(ctx, &before, name)?;
     }
+    for (name, model, expected) in nominal_field_cases()? {
+        let error = model_materialize::materialize(ctx, &model)
+            .err()
+            .ok_or_else(|| format!("{name}: nominal model field unexpectedly materialized"))?;
+        ensure!(error.contains(expected), "{name}: {error}");
+        assert_preflight_scratch_unchanged(ctx, &before, name)?;
+    }
     Ok(())
+}
+
+fn nominal_field_cases() -> Result<Vec<(&'static str, HostModel, &'static str)>, String> {
+    let mut vector = ProfileVector::parse(PYTHON_VECTOR)?;
+    adapt_home_mount(&mut vector);
+    let mut literal = vector.host;
+    literal.clock = WallTime(jiff::Timestamp::now());
+    for mount in &mut literal.mounts {
+        if mount.at == Path::new("/") {
+            mount.fs = "overlay".into();
+        }
+        let stat = rustix::fs::statx(
+            rustix::fs::CWD,
+            &mount.at,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            rustix::fs::StatxFlags::BASIC_STATS | rustix::fs::StatxFlags::MNT_ID,
+        )
+        .map_err(|error| format!("statx {} for nominal bite: {error}", mount.at.display()))?;
+        mount.id = stat.stx_mnt_id;
+        mount.dev = DevSpec(Dev {
+            major: stat.stx_dev_major,
+            minor: stat.stx_dev_minor,
+        });
+        let vfs = rustix::fs::statvfs(&mount.at)
+            .map_err(|error| format!("statvfs {} for nominal bite: {error}", mount.at.display()))?;
+        mount.size = Bytes(vfs.f_blocks * vfs.f_frsize);
+    }
+    if literal.mounts.len() != 2 {
+        return Err("nominal bite expects root and one home scratch mount".into());
+    }
+    literal.mounts[1].parent = Some(literal.mounts[0].id);
+    let mut clock = literal.clone();
+    clock.clock = "2000-01-01T00:00:00Z".parse()?;
+    let mut id = literal.clone();
+    id.mounts[0].id = id.mounts[0].id.saturating_add(10_000);
+    let mut dev = literal.clone();
+    dev.mounts[0].dev.0.minor = dev.mounts[0].dev.0.minor.saturating_add(10_000);
+    let mut size = literal.clone();
+    size.mounts[0].size.0 = size.mounts[0].size.0.saturating_add(1);
+    let mut root_fs = literal.clone();
+    root_fs.mounts[0].fs = "ext4".into();
+    let mut scratch_fs = literal.clone();
+    scratch_fs.mounts[1].fs = "ext4".into();
+    let mut parent = literal;
+    parent.mounts[1].parent = Some(parent.mounts[0].id.saturating_add(10_000));
+    Ok(vec![
+        ("nominal clock", clock, "clock is model-only"),
+        ("nominal mount id", id, "mounts[0].id is model-only"),
+        ("nominal mount device", dev, "mounts[0].dev is model-only"),
+        ("nominal mount size", size, "mounts[0].size is model-only"),
+        (
+            "nominal root filesystem",
+            root_fs,
+            "mounts[0].fs is model-only",
+        ),
+        (
+            "nominal scratch filesystem",
+            scratch_fs,
+            "mounts[1].fs is model-only",
+        ),
+        (
+            "nominal mount parent",
+            parent,
+            "mounts[1].parent is model-only",
+        ),
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -773,10 +846,7 @@ pub fn vm_containers_image_original_matches_linux_outcomes_and_deletion_diff(
 fn replay_historical_vector(
     ctx: &Ctx,
     source: &str,
-    materialize: fn(
-        &Ctx,
-        &diskgc_model::spec::HostModel,
-    ) -> Result<model_materialize::Materialized, String>,
+    materialize: fn(&Ctx, &ProfileVector) -> Result<model_materialize::Materialized, String>,
 ) -> TestResult {
     let vector = ProfileVector::parse(source)?;
     vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
@@ -865,11 +935,11 @@ fn set_guest_clock(nanos: i128) -> TestResult {
 /// stages use the ordinary scratch materializer and its mount checks.
 fn materialize_historical_cmake(
     ctx: &Ctx,
-    model: &diskgc_model::spec::HostModel,
+    vector: &ProfileVector,
 ) -> Result<model_materialize::Materialized, String> {
     materialize_historical_source(
         ctx,
-        model,
+        vector,
         &[CMAKE_OLD, CMAKE_CHECKOUT_OLD],
         CMAKE_FRESH,
         "cmake-build-anchored",
@@ -878,11 +948,11 @@ fn materialize_historical_cmake(
 
 fn materialize_historical_autotools(
     ctx: &Ctx,
-    model: &diskgc_model::spec::HostModel,
+    vector: &ProfileVector,
 ) -> Result<model_materialize::Materialized, String> {
     materialize_historical_source(
         ctx,
-        model,
+        vector,
         &[
             "/home/tester/project/app/output",
             "/home/tester/project/missing/output",
@@ -896,11 +966,11 @@ fn materialize_historical_autotools(
 
 fn materialize_historical_meson(
     ctx: &Ctx,
-    model: &diskgc_model::spec::HostModel,
+    vector: &ProfileVector,
 ) -> Result<model_materialize::Materialized, String> {
     materialize_historical_source(
         ctx,
-        model,
+        vector,
         &[
             "/home/tester/project/app/odd-output",
             "/home/tester/project/checkout/output",
@@ -912,8 +982,9 @@ fn materialize_historical_meson(
 
 fn materialize_historical_containers_image(
     ctx: &Ctx,
-    model: &diskgc_model::spec::HostModel,
+    vector: &ProfileVector,
 ) -> Result<model_materialize::Materialized, String> {
+    let model = &vector.host;
     let old_paths = [
         PathBuf::from("/var/tmp/container_images_storage-old"),
         PathBuf::from("/var/tmp/container_images_storage-held"),
@@ -938,10 +1009,13 @@ fn materialize_historical_containers_image(
     old_model.locks.clear();
     let mut fresh_model = model.clone();
     fresh_model.tree.retain(|path, _| !old_paths.contains(path));
+    let mut stages =
+        model_materialize::OutcomeStagePlan::checked(vector, vec![&old_model, &fresh_model])?;
     set_guest_clock(old.0.as_nanosecond())?;
-    model_materialize::materialize(ctx, &old_model)?.finish()?;
+    model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?.finish()?;
     set_guest_clock(model.clock.0.as_nanosecond())?;
-    let materialized = model_materialize::materialize(ctx, &fresh_model)?;
+    let materialized =
+        model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?;
     assert_kernel_ctimes(
         model,
         old,
@@ -955,11 +1029,12 @@ fn materialize_historical_containers_image(
 
 fn materialize_historical_source(
     ctx: &Ctx,
-    model: &diskgc_model::spec::HostModel,
+    vector: &ProfileVector,
     old_paths: &[&str],
     fresh_path: &str,
     profile: &str,
 ) -> Result<model_materialize::Materialized, String> {
+    let model = &vector.host;
     model_materialize::validate(model)?;
     let old = match model.tree.get(Path::new(old_paths[0])) {
         Some(NodeSpec::Dir(dir)) => dir.attrs.mtime.ok_or("old source candidate has no mtime")?,
@@ -985,10 +1060,13 @@ fn materialize_historical_source(
     old_model.locks.clear();
     let mut fresh_model = model.clone();
     fresh_model.tree.retain(|path, _| !old_paths.contains(path));
+    let mut stages =
+        model_materialize::OutcomeStagePlan::checked(vector, vec![&old_model, &fresh_model])?;
     set_guest_clock(old.0.as_nanosecond())?;
-    model_materialize::materialize(ctx, &old_model)?.finish()?;
+    model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?.finish()?;
     set_guest_clock(model.clock.0.as_nanosecond())?;
-    let materialized = model_materialize::materialize(ctx, &fresh_model)?;
+    let materialized =
+        model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?;
     assert_kernel_ctimes(
         model,
         old,
@@ -1143,7 +1221,7 @@ pub fn pytest_unsafe_unrelated_fd_matches_linux(ctx: &Ctx) -> TestResult {
         Some(PYTEST_UNSAFE_PROFILE),
         Some(Path::new(PYTEST_ACTIVE)),
         false,
-        model_materialize::materialize,
+        projected_materialize,
     )
 }
 
@@ -1403,7 +1481,7 @@ pub fn cargo_target_shared_lock_matches_linux(ctx: &Ctx) -> TestResult {
 pub fn materialized_lock_releases_on_finish(ctx: &Ctx) -> TestResult {
     let mut vector = cargo_target_held_lock_vector()?;
     adapt_home_mount(&mut vector);
-    let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    let materialized = projected_materialize(ctx, &vector)?;
     materialized.assert_holding()?;
     materialized.finish()?;
     let path = Path::new(CARGO_LOCK_PATH);
@@ -1530,7 +1608,7 @@ pub fn bind_root_alias_mutations_match_linux(ctx: &Ctx) -> TestResult {
     adapt_home_mount(&mut vector);
     let (mut state, _) =
         diskgc_model::load::load(&vector.host).map_err(|error| error.to_string())?;
-    let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    let materialized = projected_materialize(ctx, &vector)?;
     let source = Path::new("/home/tester/visible");
     let alias_root = Path::new("/home/tester/project/app/__pycache__/mounted");
     let alias = alias_root.join("visible");
@@ -1876,7 +1954,7 @@ fn replay_model(ctx: &Ctx, vector: ProfileVector, with_dangling_link: bool) -> T
         None,
         None,
         false,
-        model_materialize::materialize,
+        projected_materialize,
     )
 }
 
@@ -1889,15 +1967,7 @@ fn replay_single_cohort_vector(ctx: &Ctx, yaml: &str) -> TestResult {
     vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
     let offset_seconds = rebase_single_cohort(&mut vector)?;
     let _clock_offset = DifferentialClockOffset::install(offset_seconds)?;
-    replay_model_with_profile(
-        ctx,
-        vector,
-        false,
-        None,
-        None,
-        true,
-        model_materialize::materialize,
-    )
+    replay_model_with_profile(ctx, vector, false, None, None, true, projected_materialize)
 }
 
 struct DifferentialClockOffset;
@@ -2033,10 +2103,7 @@ fn replay_model_with_profile(
     profile_yaml: Option<&str>,
     unrelated_to: Option<&Path>,
     sandbox_clock_offset: bool,
-    materialize: fn(
-        &Ctx,
-        &diskgc_model::spec::HostModel,
-    ) -> Result<model_materialize::Materialized, String>,
+    materialize: fn(&Ctx, &ProfileVector) -> Result<model_materialize::Materialized, String>,
 ) -> TestResult {
     // Preflight the semantic contract before even writing the CLI config.
     // The model's old clock and ctime cannot be installed on a fresh tmpfs.
@@ -2086,7 +2153,7 @@ fn replay_model_with_profile(
     // shared no-op regression must fail here, before comparing the hosts.
     vector.check(&Library::builtin().map_err(|e| e.to_string())?)?;
     let model = model_outcome(&vector)?;
-    let materialized = materialize(ctx, &vector.host)?;
+    let materialized = materialize(ctx, &vector)?;
     if let Some(candidate) = unrelated_to {
         materialized.assert_no_reference_to(candidate)?;
     }
@@ -2157,6 +2224,14 @@ fn replay_model_with_profile(
     );
     materialized.finish()?;
     Ok(())
+}
+
+fn projected_materialize(
+    ctx: &Ctx,
+    vector: &ProfileVector,
+) -> Result<model_materialize::Materialized, String> {
+    let mut stages = model_materialize::OutcomeStagePlan::checked(vector, vec![&vector.host])?;
+    model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)
 }
 
 fn preflight_vector(vector: &ProfileVector, sandbox_clock_offset: bool) -> Result<(), String> {
