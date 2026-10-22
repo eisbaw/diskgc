@@ -3,10 +3,10 @@ id: TASK-15
 title: >-
   Config file: lookup, YAML schema v1, groups/tiers/protect/owners, static
   validation and check
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 01:51'
+updated_date: '2026-10-22 02:20'
 labels:
   - wave-2
   - config
@@ -26,13 +26,13 @@ Why: the YAML schema is frozen once users deploy it. Implement config lookup (ex
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A typo in --config or DISKGC_CONFIG exits 2 and never falls back
-- [ ] #2 check runs in a Nix build sandbox with no access to the target machine (test)
-- [ ] #3 Every rule in the static validation list has a failing-config test
-- [ ] #4 check prints each tier's expression normalised with the profiles it resolves to
-- [ ] #5 check warns about a user profile whose last path segment is only wildcards outside /tmp and /var/tmp
-- [ ] #6 An invalid config exits 2 and deletes nothing, and check reports the same error
-- [ ] #7 check works outside a container (the sandbox gate only guards deletion)
+- [x] #1 A typo in --config or DISKGC_CONFIG exits 2 and never falls back
+- [x] #2 check runs in a Nix build sandbox with no access to the target machine (test)
+- [x] #3 Each static configuration rule in docs/safety.md#validation has a failing config-load test; each static invocation rule has a failing invocation test proving exit 2 before deletion
+- [x] #4 check prints each tier's expression normalised with the profiles it resolves to
+- [x] #5 check warns about a user profile whose last path segment is only wildcards outside /tmp and /var/tmp
+- [x] #6 An invalid config exits 2 and deletes nothing, and check reports the same error
+- [x] #7 check works outside a container (the sandbox gate only guards deletion)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -69,9 +69,19 @@ From task-80 QA r3: reference.md says an example config ships as docs/example.ya
 Final checkpoint gate: parallel QA and MPED re-reviews GO after override-warning and protection-root fixes; both regressions pass. Task remains open for runtime ACs.
 
 2026-10-22: Added real-binary disposable-container regression invalid_config_never_falls_back_or_reclaims: --config typo overrides a valid DISKGC_CONFIG and search config; DISKGC_CONFIG typo overrides a valid search config; both check and ensure exit 2 without deletion; malformed existing config gives the same check/ensure error. Focused nix develop -c just e2e-one invalid_config_never_falls_back_or_reclaims passed 1/1. AC3 static-rule coverage audit and integrated gate/review still pending; do not mark complete yet.
+
+2026-10-22 AC3 audit: docs/safety.md now distinguishes static configuration from static invocation. Config-load failures: YAML/schema/unknown/version, unique tier/profile names, paths/roots/~, zero idle, config duration, select grammar (qualifier/source/mixing/negation), kind/action/predicate, fixed-vs-required roots, protect, override, examples are exercised through config::tests::every_config_specific_static_rule_has_a_refusal and embedded_profiles_and_selection_rules_are_checked_by_config_load; profile/tests.rs and select/tests.rs add specific diagnostics. CLI-only: size and command-line duration syntax in main.rs::tests::bare_numbers_months_and_malformed_arguments_are_usage_errors; command actions under --allow-root in config::tests::mode_checks_refuse_owners_mismatch_and_root_commands. Literal AC3 wording asking for a failing-config test for those invocation-only cases is impossible: check takes neither a space goal nor --allow-root. Focused 13 config tests and CLI syntax test pass. Full e2e/review pending.
+
+2026-10-22 MPED audit follow-up: revised AC3 via backlog CLI to separate config-load failures from invocation failures. docs/safety.md now includes owners list shape at config load, owners/--allow-root compatibility and explicit --select/root binding at invocation. Existing disposable-container E2E tests cover bad size/duration (ensure_flag_errors_are_single_json_reports), explicit roots (select_roots_requirements_are_usage_errors), missing owners under --allow-root (ensure_as_root_without_allow_root_exits_2), and command action under root (root_mode_refuses_untrusted_policy_and_system_owner); Oracle judges those runs. AC3 remains unchecked: no real-binary non-root ensure with owners present demonstrates exit 2 and no deletion; only config::tests::mode_checks_refuse_owners_mismatch_and_root_commands exercises that direction. Add that test before checking AC3.
+
+2026-10-22 AC3 remaining direction covered: invalid_config_never_falls_back_or_reclaims now first proves check accepts valid owners: [tester] config, then runs ordinary non-root ensure without --allow-root against an eligible candidate; real binary exits 2 with owners compatibility error, reports zero actions, candidate survives, and the container deletion oracle is clean. Focused nix develop -c just e2e-one invalid_config_never_falls_back_or_reclaims passed 1/1. AC3 remains unchecked pending full integrated gate and independent review.
+
+2026-10-22 final AC3 selection proof: the disposable-container invalid_config_never_falls_back_or_reclaims test now invokes real non-dry-run ensure with valid config and malformed explicit --select (profile:cli-config-cache &&). It exits 2 with invalid selection, reports zero actions, preserves eligible candidate, and deletion oracle is clean. Focused nix develop -c just e2e-one invalid_config_never_falls_back_or_reclaims passed 1/1. AC3 remains unchecked until integrated e2e and final review.
+
+2026-10-22 completion gate: exact nix develop -c just e2e exited 0 on final tree (96 e2e unit, 206 Podman, 7 Docker; format, Clippy, workspace and Nix checks passed). Parallel qa-test-runner and mped-architect reviews GO. Config-load and invocation rule audit completed; missing-config, malformed-config, non-root owners, and malformed explicit --select run through real binary in disposable container with exit 2, zero actions and clean deletion oracle. ACs #1-#7 and task DoD satisfied. Runtime group execution/protect remains owned by TASK-16/20/21 and wave-1 hardening by TASK-13.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

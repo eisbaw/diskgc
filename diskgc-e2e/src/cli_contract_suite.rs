@@ -171,6 +171,83 @@ pub fn invalid_config_never_falls_back_or_reclaims(ctx: &Ctx) -> TestResult {
             && candidate.exists(),
         "ensure did not preserve check's error before reclaim: {result}"
     );
+
+    // An owners list is valid config syntax, so check accepts it. Ordinary
+    // ensure must reject that root-mode policy before acting on the candidate.
+    let owners = "/home/tester/owners-config.yaml";
+    ctx.home.write_file(
+        "owners-config.yaml",
+        format!("{fallback}owners: [tester]\n").as_bytes(),
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let checked = under_test::run_as_tester(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &["check", "--config", owners],
+    )?;
+    oracle.judge(&checked)?.assert_clean()?;
+    checked.expect_code(0)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = under_test::run_as_tester(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            owners,
+            "--min-free",
+            "100%",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(2)?;
+    let result = report(&run)?;
+    ensure!(
+        result["errors"][0]["message"] == "owners: is allowed only with --allow-root"
+            && result["actions"].as_array().is_some_and(Vec::is_empty)
+            && candidate.exists(),
+        "ordinary ensure did not reject the root-mode policy before reclaim: {result}"
+    );
+
+    // The file's selected tier is valid; an explicit malformed selection
+    // must still fail static invocation validation before reclaim.
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = under_test::run_as_tester(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            "/home/tester/.config/diskgc/config.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:cli-config-cache &&",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(2)?;
+    let result = report(&run)?;
+    ensure!(
+        result["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid selection"))
+            && result["actions"].as_array().is_some_and(Vec::is_empty)
+            && candidate.exists(),
+        "malformed --select reached reclaim: {result}"
+    );
     Ok(())
 }
 

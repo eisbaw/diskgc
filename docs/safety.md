@@ -1687,16 +1687,23 @@ these features backported, and an unparseable release is refused too.
 
 ## Validation
 
-- **Static** (`check`, and every startup): YAML syntax, schema, unknown
-  keys, `version`, unique tier names, profile names, absolute paths, normalized
-  and unique roots, nonzero `idle_for`, no
-  `~`, size and duration syntax, the selection grammar (qualifiers, one
-  source per term, no unparenthesised mixing, `!` only narrows), one kind
-  and one action per expression, predicates supported by the kind, roots
-  fixed vs required, `protect` entries, `override:` on shadowed built-ins,
-  command actions refused under `--allow-root`, profile `examples`. Needs
-  nothing from the machine, so it runs in a build sandbox and when
-  cross-building. Failure: exit 2, nothing deleted.
+- **Static configuration** (`check` and `ensure`): YAML syntax, schema,
+  unknown keys, `version`, unique tier and profile names, absolute paths,
+  normalized and unique roots, nonzero `idle_for`, no `~`, duration syntax
+  in the config, the selection grammar
+  (qualifiers, one source per term, no unparenthesised mixing, `!` only
+  narrows), one kind and one action per expression, predicates supported by
+  the kind, roots fixed vs required, `protect` entries, `override:` on
+  shadowed built-ins, `owners:` list shape, and profile `examples`. `check`
+  needs nothing from the deployment machine, so it runs in a build sandbox
+  and when cross-building.
+- **Static invocation** (`ensure`, before planning or deletion): size and
+  command-line duration syntax; the same selection grammar and root binding
+  for an explicit `--select` and its `--roots`; compatibility of `owners:`
+  with `--allow-root`; and command actions refused under `--allow-root`.
+  `check` has no space goal, `--select`, or `--allow-root` option, so it
+  cannot validate those invocation-specific rules. Failure in either static
+  phase: exit 2, nothing deleted.
 - **Environmental** (at the start of every reclaim, for *all* tiers, before
   the first deletion): roots and paths exist, contain no symlinks, resolve
   to a device and mount; `owners:` names resolve to non-system users;
