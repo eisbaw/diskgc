@@ -7,6 +7,9 @@
 //!   holds them until its stdin closes. Holding `<profile>/.cargo-lock`
 //!   makes a Cargo build block there; a Cargo that takes
 //!   `.cargo-build-lock` first blocks holding it.
+//! - `flock-hold-existing [--shared] FILE...`: the same lock, but refuses
+//!   missing files. Model materialization uses it so an absent fixture
+//!   cannot be silently created by the helper.
 //! - `cargo-runner BINARY ARGS...`: a Cargo `runner` (set through
 //!   [`RUNNER_ENV`]): Cargo starts it after compiling, with the binary and
 //!   its arguments; it waits at the gate named by [`RUNNER_GATE_ENV`] (the
@@ -33,7 +36,12 @@ use crate::cargo_under_test::{RUNNER_GATE_ENV, wait_at_gate};
 use crate::exit;
 
 /// The probe names this module handles.
-pub const PROBES: &[&str] = &["flock-hold", "cargo-runner", "rusage"];
+pub const PROBES: &[&str] = &[
+    "flock-hold",
+    "flock-hold-existing",
+    "cargo-runner",
+    "rusage",
+];
 
 /// The variable Cargo reads the host target's runner from (an alternative
 /// to `target.<triple>.runner` in `.cargo/config.toml`): program and
@@ -47,10 +55,16 @@ pub const RUSAGE_PREFIX: &str = "diskgc-e2e-rusage:";
 pub fn main(cmd: &str, args: &[String]) -> i32 {
     let result = match (cmd, args) {
         ("flock-hold", [flag, files @ ..]) if flag == "--shared" && !files.is_empty() => {
-            flock_hold(files, FlockOperation::NonBlockingLockShared)
+            flock_hold(files, FlockOperation::NonBlockingLockShared, true)
         }
         ("flock-hold", files) if !files.is_empty() => {
-            flock_hold(files, FlockOperation::NonBlockingLockExclusive)
+            flock_hold(files, FlockOperation::NonBlockingLockExclusive, true)
+        }
+        ("flock-hold-existing", [flag, files @ ..]) if flag == "--shared" && !files.is_empty() => {
+            flock_hold(files, FlockOperation::NonBlockingLockShared, false)
+        }
+        ("flock-hold-existing", files) if !files.is_empty() => {
+            flock_hold(files, FlockOperation::NonBlockingLockExclusive, false)
         }
         ("cargo-runner", [binary, rest @ ..]) => cargo_runner(Path::new(binary), rest),
         ("rusage", [sep, program, rest @ ..]) if sep == "--" => return rusage(program, rest),
@@ -68,15 +82,15 @@ pub fn main(cmd: &str, args: &[String]) -> i32 {
     }
 }
 
-/// `flock-hold`: locks every file (created if missing, never its parent
-/// directory) without waiting, says `ready`, holds until stdin closes.
-fn flock_hold(files: &[String], op: FlockOperation) -> Result<(), String> {
+/// Locks every file without waiting, says `ready`, holds until stdin closes.
+/// `create` is only for the original Cargo race fixture probe.
+fn flock_hold(files: &[String], op: FlockOperation, create: bool) -> Result<(), String> {
     let mut held = Vec::new();
     for file in files.iter().map(PathBuf::from) {
         let f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .open(&file)
             .map_err(|e| format!("open {}: {e}", file.display()))?;

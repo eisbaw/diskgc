@@ -14,16 +14,19 @@ use diskgc_core::resolve::{ResolveError, Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
-use diskgc_model::spec::{Bytes, DevSpec, DirSpec, FileSpec, MountSpec, NodeSpec};
+use diskgc_model::spec::{
+    Bytes, DevSpec, DirSpec, FileSpec, LockModeSpec, LockSpec, MountSpec, NodeSpec, ProcessSpec,
+};
 use diskgc_model::state::Fault;
 use serde_json::Value;
 
-use crate::ensure;
 use crate::ensure_suite::{ensure_run, report};
+use crate::holder::Holder;
 use crate::model_materialize;
 use crate::oracle::{Fixture, Oracle};
 use crate::scratch::Scratch;
 use crate::suite::{Ctx, TestResult};
+use crate::{TESTER, ensure};
 
 const PYTHON_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-checkout.yaml");
@@ -33,6 +36,10 @@ const MYPY_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/mypy-cache-match.yaml");
 const PYTHON_IN_USE_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
+pub(crate) const CARGO_TARGET_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/cargo-target-locked.yaml");
+pub(crate) const CARGO_LOCK_PATH: &str = "/home/tester/project/good/target/debug/.cargo-lock";
+const CARGO_TARGET_PATH: &str = "/home/tester/project/good/target";
 const DANGLING_LINK: &str = "/home/tester/project/dangling-link";
 
 // The fresh kernel tmpfs gives every new inode a current ctime. These
@@ -80,6 +87,126 @@ pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRe
 /// The unchanged expected in-use verdict still comes from the vector.
 pub fn python_in_use_vector_matches_linux(ctx: &Ctx) -> TestResult {
     replay_model(ctx, python_in_use_probe_vector()?, false)
+}
+
+/// A live exclusive Cargo lock must leave the target and its payload intact.
+pub fn cargo_target_held_lock_matches_linux(ctx: &Ctx) -> TestResult {
+    replay_model(ctx, cargo_target_held_lock_vector()?, false)
+}
+
+pub fn cargo_target_shared_lock_matches_linux(ctx: &Ctx) -> TestResult {
+    let mut vector = cargo_target_held_lock_vector()?;
+    vector.host.locks[0].mode = LockModeSpec::Shared;
+    replay_model(ctx, vector, false)
+}
+
+/// The materialized helper must release its kernel lock when its guard ends.
+pub fn materialized_lock_releases_on_finish(ctx: &Ctx) -> TestResult {
+    let mut vector = cargo_target_held_lock_vector()?;
+    adapt_home_mount(&mut vector);
+    let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    materialized.assert_holding()?;
+    materialized.finish()?;
+    let path = Path::new(CARGO_LOCK_PATH);
+    let file = fs::File::open(path)
+        .map_err(|error| format!("open released lock {}: {error}", path.display()))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+        |error| {
+            format!(
+                "lock {} remained held after helper exit: {error}",
+                path.display()
+            )
+        },
+    )?;
+    Ok(())
+}
+
+/// A missing modelled lock file must not be created by the fixture helper.
+pub fn missing_lock_probe_does_not_create_a_file(ctx: &Ctx) -> TestResult {
+    let path = ctx.scratch.path("missing-model-lock");
+    ensure!(
+        fs::symlink_metadata(&path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+        "missing-lock probe path already exists: {}",
+        path.display()
+    );
+    let args = [
+        "flock-hold-existing",
+        path.to_str().ok_or("non-UTF-8 lock path")?,
+    ];
+    let result = Holder::tester(ctx, &args, &[]);
+    ensure!(
+        result.is_err(),
+        "no-create lock helper accepted a missing file"
+    );
+    ensure!(
+        fs::symlink_metadata(&path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+        "no-create lock helper created {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// A shared lock allows another shared holder; an exclusive lock does not.
+/// Check that a wrong declared mode fails the verifier in both directions.
+pub fn lock_mode_verifier_rejects_mismatch(ctx: &Ctx) -> TestResult {
+    let path = ctx
+        .scratch
+        .write_file("lock-mode-probe", b"", 0o600, TESTER)?;
+    let path_text = path.to_str().ok_or("non-UTF-8 lock path")?;
+    for (args, actual, incorrect) in [
+        (
+            vec!["flock-hold-existing", "--shared", path_text],
+            LockModeSpec::Shared,
+            LockModeSpec::Exclusive,
+        ),
+        (
+            vec!["flock-hold-existing", path_text],
+            LockModeSpec::Exclusive,
+            LockModeSpec::Shared,
+        ),
+    ] {
+        let holder = Holder::tester(ctx, &args, &[])?;
+        model_materialize::verify_lock_mode(&path, actual)?;
+        let error = model_materialize::verify_lock_mode(&path, incorrect)
+            .expect_err("wrong declared lock mode must fail verification");
+        ensure!(
+            error.contains("disagrees"),
+            "unexpected mode error: {error}"
+        );
+        holder.finish()?;
+    }
+    Ok(())
+}
+
+fn cargo_target_held_lock_vector() -> Result<ProfileVector, String> {
+    let mut vector = ProfileVector::parse(CARGO_TARGET_VECTOR)?;
+    let path = PathBuf::from(CARGO_LOCK_PATH);
+    let process: ProcessSpec = serde_json::from_value(serde_json::json!({"pid": 42}))
+        .map_err(|error| format!("lock holder model: {error}"))?;
+    vector.host.processes.push(process);
+    vector.host.locks.push(LockSpec {
+        path: path.clone(),
+        holder: 42,
+        mode: LockModeSpec::Exclusive,
+    });
+    let plan = vector
+        .expect
+        .plan
+        .iter_mut()
+        .find(|plan| plan.candidate == Path::new(CARGO_TARGET_PATH))
+        .ok_or("Cargo target plan missing")?;
+    plan.reason = Some("in_use".into());
+    vector.expect.actions.clear();
+    vector.expect.removed.clear();
+    vector.expect.skipped.push(SkipVerdict {
+        candidate: CARGO_TARGET_PATH.into(),
+        reason: "locked".into(),
+    });
+    vector.expect.preserved.extend([
+        "/home/tester/project/good/target/debug/.fingerprint/good-hash/bin-good".into(),
+        "/home/tester/project/good/target/debug/deps/good".into(),
+    ]);
+    Ok(vector)
 }
 
 /// A Python cache containing a mounted filesystem must remain untouched.
@@ -727,6 +854,19 @@ mod tests {
         vector
             .check(&Library::builtin().expect("built-in library"))
             .expect("the checked-in in-use expectation");
+    }
+
+    #[test]
+    fn held_cargo_lock_has_an_independent_refusal_expectation() {
+        for mode in [LockModeSpec::Exclusive, LockModeSpec::Shared] {
+            let mut vector = cargo_target_held_lock_vector().expect("held lock vector");
+            vector.host.locks[0].mode = mode;
+            adapt_home_mount(&mut vector);
+            vector
+                .check(&Library::builtin().expect("built-in library"))
+                .expect("checked independent locked verdict");
+            model_materialize::validate(&vector.host).expect("supported lock holder");
+        }
     }
 
     #[test]

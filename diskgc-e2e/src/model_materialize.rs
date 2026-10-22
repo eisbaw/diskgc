@@ -9,7 +9,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use diskgc_model::host::CACHEDIR_TAG_CONTENT;
 use diskgc_model::spec::{
-    FileSpec, GateSpec, HostModel, NodeSpec, ProcAccess, ProcessSpec, Special, WallTime,
+    FileSpec, GateSpec, HostModel, LockModeSpec, NodeSpec, ProcAccess, ProcessSpec, Special,
+    WallTime,
 };
 
 use crate::holder::Holder;
@@ -22,8 +23,55 @@ const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 /// Fixture helpers stay alive until both LinuxHost runs and the deletion
 /// oracle finish. Dropping this guard closes their stdin and waits for them.
 pub struct Materialized {
-    holders: Vec<(Holder, PathBuf)>,
+    holders: Vec<HeldProcess>,
     mounted: Vec<PathBuf>,
+}
+
+struct HeldProcess {
+    holder: Holder,
+    path: PathBuf,
+    lock_mode: Option<LockModeSpec>,
+}
+
+/// A second open file description must see the kernel conflict appropriate
+/// to the declared mode. A shared holder admits another shared lock; an
+/// exclusive holder admits neither kind.
+fn lock_conflicts(path: &Path, op: rustix::fs::FlockOperation) -> Result<bool, String> {
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "open held lock {} for verification: {error}",
+            path.display()
+        )
+    })?;
+    match rustix::fs::flock(&file, op) {
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Ok(()) => Ok(false),
+        Err(error) => Err(format!(
+            "verify lock {} with {op:?}: {error}",
+            path.display()
+        )),
+    }
+}
+
+pub(crate) fn verify_lock_mode(path: &Path, mode: LockModeSpec) -> Result<(), String> {
+    use rustix::fs::FlockOperation::{NonBlockingLockExclusive, NonBlockingLockShared};
+    if !lock_conflicts(path, NonBlockingLockExclusive)? {
+        return Err(format!("{} has no conflicting kernel lock", path.display()));
+    }
+    let shared_conflicts = lock_conflicts(path, NonBlockingLockShared)?;
+    if shared_conflicts != (mode == LockModeSpec::Exclusive) {
+        return Err(format!(
+            "{} kernel lock mode disagrees with model {:?}: shared probe {}",
+            path.display(),
+            mode,
+            if shared_conflicts {
+                "conflicted"
+            } else {
+                "succeeded"
+            }
+        ));
+    }
+    Ok(())
 }
 
 impl Materialized {
@@ -31,8 +79,8 @@ impl Materialized {
     /// that exits between planning and reclaim would make an in-use test
     /// vacuous; this check makes that failure explicit.
     pub fn assert_holding(&self) -> Result<(), String> {
-        for (holder, path) in &self.holders {
-            let fd_dir = format!("/proc/{}/fd", holder.pid());
+        for held in &self.holders {
+            let fd_dir = format!("/proc/{}/fd", held.holder.pid());
             let entries =
                 fs::read_dir(&fd_dir).map_err(|error| format!("list helper {fd_dir}: {error}"))?;
             let mut found = false;
@@ -41,7 +89,7 @@ impl Materialized {
                 let target = fs::read_link(entry.path()).map_err(|error| {
                     format!("read helper fd {}: {error}", entry.path().display())
                 })?;
-                if target == *path {
+                if target == held.path {
                     found = true;
                     break;
                 }
@@ -49,17 +97,21 @@ impl Materialized {
             if !found {
                 return Err(format!(
                     "helper pid {} no longer holds {} open",
-                    holder.pid(),
-                    path.display()
+                    held.holder.pid(),
+                    held.path.display()
                 ));
+            }
+            if let Some(mode) = held.lock_mode {
+                verify_lock_mode(&held.path, mode)
+                    .map_err(|error| format!("helper pid {}: {error}", held.holder.pid()))?;
             }
         }
         Ok(())
     }
 
     pub fn finish(mut self) -> Result<(), String> {
-        for (holder, _) in self.holders.drain(..) {
-            holder.finish()?;
+        for held in self.holders.drain(..) {
+            held.holder.finish()?;
         }
         while let Some(path) = self.mounted.last() {
             rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty())
@@ -128,11 +180,26 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             "virtual call-time races cannot be replayed as a fixture",
         );
     }
-    if !model.locks.is_empty() {
-        return unsupported("locks", "flock replay is not implemented");
+    if model.locks.len() > 1 {
+        return unsupported("locks", "only one process-owned lock is supported");
+    }
+    if let Some(lock) = model.locks.first()
+        && !model
+            .processes
+            .iter()
+            .any(|process| process.pid == lock.holder)
+    {
+        return unsupported("locks[0].holder", "the holder must be a modelled process");
     }
     for (index, process) in model.processes.iter().enumerate() {
-        validate_process(index, process)?;
+        let lock = model.locks.iter().find(|lock| lock.holder == process.pid);
+        validate_process(index, process, lock.is_some())?;
+    }
+    if let Some(lock) = model.locks.first() {
+        destination(&lock.path).map_err(|_| {
+            "materialize(model): locks[0].path is model-only: only scratch files can be locked"
+                .to_owned()
+        })?;
     }
     if model.mounts.is_empty() {
         return unsupported("mounts", "a root mount is required");
@@ -265,6 +332,23 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             validate_mount_tree_boundary(path, node, at)?;
         }
     }
+    if let Some(lock) = model.locks.first() {
+        let (state, _) = diskgc_model::load::load(model)
+            .map_err(|error| format!("materialize(model): locks[0] does not load: {error}"))?;
+        let loc = state.lookup(&lock.path).map_err(|error| {
+            format!("materialize(model): locks[0].path is not reachable: {error:?}")
+        })?;
+        let inode = state.inode(loc);
+        if !matches!(&inode.kind, diskgc_model::state::Kind::File { .. })
+            || inode.uid != TESTER.uid
+            || inode.perm & 0o600 != 0o600
+        {
+            return unsupported(
+                "locks[0].path",
+                "the helper needs an existing tester-owned readable and writable regular file",
+            );
+        }
+    }
     Ok(())
 }
 
@@ -302,7 +386,7 @@ fn validate_mount_tree_boundary(
     Ok(())
 }
 
-fn validate_process(index: usize, process: &ProcessSpec) -> Result<(), String> {
+fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result<(), String> {
     let field = format!("processes[{index}]");
     let unsupported = |name: &str, reason: &str| {
         Err(format!(
@@ -332,14 +416,25 @@ fn validate_process(index: usize, process: &ProcessSpec) -> Result<(), String> {
             "the tester helper has fixed process credentials and namespace",
         );
     }
-    if process.fds.len() != 1 || process.fds[0].deleted || process.fds[0].fd.is_some() {
+    if (!locked && process.fds.len() != 1)
+        || (locked && !process.fds.is_empty())
+        || process.fds.iter().any(|fd| fd.deleted || fd.fd.is_some())
+    {
         return unsupported(
             "fds",
-            "the helper holds exactly one named, existing file at a kernel-selected fd",
+            "the helper holds exactly one named file, either from fds or one lock, at a kernel-selected fd",
         );
     }
-    destination(&process.fds[0].path)?;
+    if let Some(fd) = process.fds.first() {
+        destination(&fd.path)?;
+    }
     if let Some(cwd) = &process.cwd {
+        if locked {
+            return unsupported(
+                "cwd",
+                "the flock helper runs at / and cannot reproduce a custom cwd",
+            );
+        }
         destination(cwd)?;
     }
     Ok(())
@@ -591,7 +686,12 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
         apply_mtimes(scratch, relative, node)?;
     }
     for process in &model.processes {
-        let path = &process.fds[0].path;
+        let lock = model.locks.iter().find(|lock| lock.holder == process.pid);
+        let path = if let Some(lock) = lock {
+            &lock.path
+        } else {
+            &process.fds[0].path
+        };
         let path_text = path
             .to_str()
             .ok_or("materialize(model): non-UTF-8 process fd path")?;
@@ -601,13 +701,22 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             .unwrap_or(Path::new("/"))
             .to_str()
             .ok_or("materialize(model): non-UTF-8 process cwd")?;
-        let holder = Holder::tester(ctx, &["hold", path_text, cwd_text], &[]).map_err(|error| {
+        let args: Vec<&str> = match lock.map(|lock| lock.mode) {
+            Some(LockModeSpec::Shared) => vec!["flock-hold-existing", "--shared", path_text],
+            Some(LockModeSpec::Exclusive) => vec!["flock-hold-existing", path_text],
+            None => vec!["hold", path_text, cwd_text],
+        };
+        let holder = Holder::tester(ctx, &args, &[]).map_err(|error| {
             format!(
                 "materialize(model): helper for pid {}: {error}",
                 process.pid
             )
         })?;
-        materialized.holders.push((holder, path.clone()));
+        materialized.holders.push(HeldProcess {
+            holder,
+            path: path.clone(),
+            lock_mode: lock.map(|lock| lock.mode),
+        });
     }
     materialized.assert_holding()?;
     Ok(materialized)
@@ -730,7 +839,7 @@ fn create_file(scratch: &Scratch, rel: &str, file: &FileSpec) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use diskgc_model::profile_vector::ProfileVector;
-    use diskgc_model::spec::{ProcAccess, StatxField};
+    use diskgc_model::spec::{LockModeSpec, LockSpec, ProcAccess, ProcessSpec, StatxField};
 
     use super::*;
 
@@ -739,6 +848,67 @@ mod tests {
     );
     const IN_USE_VECTOR: &str =
         include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
+
+    #[test]
+    fn lock_preflight_rejects_unsupported_shapes() {
+        let mut vector = ProfileVector::parse(crate::differential_suite::CARGO_TARGET_VECTOR)
+            .expect("Cargo target vector");
+        vector.host.mounts[1].at = "/home/tester".into();
+        vector.host.mounts[1].fs = "tmpfs".into();
+        let process: ProcessSpec =
+            serde_json::from_value(serde_json::json!({"pid": 42})).expect("minimal process");
+        vector.host.processes.push(process);
+        let lock = LockSpec {
+            path: crate::differential_suite::CARGO_LOCK_PATH.into(),
+            holder: 42,
+            mode: LockModeSpec::Exclusive,
+        };
+        vector.host.locks.push(lock.clone());
+        validate(&vector.host).expect("one existing tester-owned lock file");
+
+        vector.host.locks.push(lock.clone());
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("only one process-owned lock")
+        );
+        vector.host.locks.pop();
+        vector.host.processes[0].cwd = Some("/home/tester/project".into());
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("cwd is model-only")
+        );
+        vector.host.processes[0].cwd = None;
+        vector.host.processes[0].fds.push(
+            serde_json::from_value(
+                serde_json::json!({"path": "/home/tester/project/good/Cargo.toml"}),
+            )
+            .expect("fd"),
+        );
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("fds is model-only")
+        );
+        vector.host.processes[0].fds.clear();
+        vector.host.locks[0].path = "/run/diskgc/lock".into();
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("only scratch files can be locked")
+        );
+        vector.host.locks[0].path = "/home/tester/project/good/target/debug".into();
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("readable and writable regular file")
+        );
+        vector.host.locks[0].path = lock.path;
+        vector.host.locks[0].holder = 99;
+        let error = validate(&vector.host).unwrap_err();
+        assert!(error.contains("holder is model-only"), "{error}");
+    }
 
     #[test]
     fn rejects_model_only_fields_before_materialization() {

@@ -382,6 +382,36 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::python_in_use_vector_matches_linux,
     },
     Test {
+        name: "cargo_target_held_lock_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::cargo_target_held_lock_matches_linux,
+    },
+    Test {
+        name: "cargo_target_shared_lock_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::cargo_target_shared_lock_matches_linux,
+    },
+    Test {
+        name: "materialized_lock_releases_on_finish",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::materialized_lock_releases_on_finish,
+    },
+    Test {
+        name: "missing_lock_probe_does_not_create_a_file",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::missing_lock_probe_does_not_create_a_file,
+    },
+    Test {
+        name: "lock_mode_verifier_rejects_mismatch",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::lock_mode_verifier_rejects_mismatch,
+    },
+    Test {
         name: "python_nested_mount_matches_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,
