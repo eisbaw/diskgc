@@ -1,3 +1,5 @@
 target/
 result*
 .gcroots/
+/tmp/
+__pycache__/

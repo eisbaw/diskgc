@@ -108,7 +108,7 @@ pub fn parse_args(args: &[String]) -> Result<(Config, Selection), String> {
         image_stream: PathBuf::from(required(take("image-stream"), "image-stream")?),
         image_ref: required(take("image-ref"), "image-ref")?,
         under_test: PathBuf::from(required(take("under-test"), "under-test")?),
-        log_dir: PathBuf::from(take("log-dir").unwrap_or_else(|| "target/e2e-logs".to_owned())),
+        log_dir: PathBuf::from(take("log-dir").unwrap_or_else(|| "tmp/e2e-logs".to_owned())),
         runtime,
     };
     let selection = match words.as_slice() {
@@ -790,7 +790,7 @@ mod tests {
         ]));
         let (config, selection) = parse_args(&a).unwrap();
         assert_eq!(config.image_ref, "localhost/x:abc");
-        assert_eq!(config.log_dir, PathBuf::from("target/e2e-logs"));
+        assert_eq!(config.log_dir, PathBuf::from("tmp/e2e-logs"));
         assert_eq!(
             selection,
             Selection::Suite {

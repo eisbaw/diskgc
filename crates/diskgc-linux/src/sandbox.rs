@@ -302,7 +302,11 @@ mod tests {
                         }
                     }
                 }
-                if !file_type.is_dir() || name == ".git" || name == "target" {
+                if !file_type.is_dir()
+                    || name == ".git"
+                    || name == "target"
+                    || (dir.as_os_str().is_empty() && name == "tmp")
+                {
                     continue; // No symlink recursion or generated output.
                 }
                 pending.push(child);
@@ -461,6 +465,22 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("crates/another/.cargo/config:2:")),
             "nested alias location must be reported: {found:?}"
+        );
+    }
+
+    #[test]
+    fn generated_root_tmp_is_excluded_from_cargo_config_scan() {
+        let root = TempRoot::new("generated-tmp-scan");
+        std::fs::create_dir_all(root.0.join("tmp/system/.cargo"))
+            .expect("create generated scratch directory");
+        root.write("tmp/system/.cargo/config.toml", b"[build]\n");
+        std::fs::create_dir_all(root.0.join("crates/example/.cargo"))
+            .expect("create tracked config directory");
+        root.write("crates/example/.cargo/config.toml", b"[build]\n");
+
+        assert_eq!(
+            cargo_configs_under(&root.0),
+            vec![PathBuf::from("crates/example/.cargo/config.toml")]
         );
     }
 

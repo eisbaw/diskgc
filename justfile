@@ -6,9 +6,13 @@
 #     nix develop -c just <recipe>      # one-off
 #     nix develop                       # then: just <recipe>
 #
-# Recipes only call Nix, Cargo and Podman (docs/architecture.md,
+# Recipes call Nix, Cargo, Podman and the scratch tally's Python helper (docs/architecture.md,
 # Implementation). The dev shell builds for the host (gnu) target; the flake's
 # package and checks build for static musl.
+
+# Inspect project scratch, legacy /tmp/diskgc* and free space before a task.
+scratch-tally:
+    python3 tools/scratch_tally.py
 
 # List the recipes.
 default:
@@ -22,6 +26,7 @@ default:
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path diskgc-e2e/Cargo.toml --check
+    python3 -m unittest discover -s tools -p 'test_*.py'
     cargo clippy --workspace --all-targets --locked -- --deny warnings
     cargo test --workspace --locked
 
@@ -80,20 +85,20 @@ e2e-one NAME:
 
 # One container test by NAME on the Debian image, kept on failure.
 e2e-debian-one NAME:
-    just _runner e2e-runner-debian --log-dir target/e2e-logs-debian one {{NAME}}
+    just _runner e2e-runner-debian --log-dir tmp/e2e-logs-debian one {{NAME}}
 
 # One native Docker Engine test in the disposable dind image.
 e2e-docker-one NAME:
-    just _runner e2e-runner-docker --log-dir target/e2e-logs-docker one {{NAME}}
+    just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker one {{NAME}}
 
 # The Debian image's run, shared by e2e-debian and e2e-full; its own log
 # directory, since test names repeat across images.
 _e2e-debian:
-    just _runner e2e-runner-debian --log-dir target/e2e-logs-debian run --suite full --budget-secs 900
+    just _runner e2e-runner-debian --log-dir tmp/e2e-logs-debian run --suite full --budget-secs 900
 
 # Run the selected native Docker Engine suite with its own logs and deadline.
 _e2e-docker SUITE BUDGET:
-    just _runner e2e-runner-docker --log-dir target/e2e-logs-docker run --suite {{SUITE}} --budget-secs {{BUDGET}}
+    just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker run --suite {{SUITE}} --budget-secs {{BUDGET}}
 
 # Builds runner package NAME to an out-link under .gcroots/ (gitignored, at
 # the repo root so `cargo clean` keeps it) and runs it with ARGS. The

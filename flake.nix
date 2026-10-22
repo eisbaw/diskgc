@@ -786,7 +786,19 @@
       # the inputs of every check. Run recipes as `nix develop -c just <recipe>`.
       devShells.${system}.default = craneLib.devShell {
         checks = self.checks.${system};
-        packages = [ pkgs.just ];
+        packages = [ pkgs.just pkgs.python3 pkgs.coreutils ];
+        shellHook = ''
+          diskgc_worktree_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+          if [ -z "$diskgc_worktree_root" ] || [ ! -f "$diskgc_worktree_root/justfile" ]; then
+            echo "diskgc dev shell must start inside a diskgc worktree" >&2
+            return 1
+          fi
+          mkdir -p "$diskgc_worktree_root/tmp/system"
+          export CARGO_TARGET_DIR="$diskgc_worktree_root/tmp/target"
+          export TMPDIR="$diskgc_worktree_root/tmp/system"
+          export PYTHONPYCACHEPREFIX="$diskgc_worktree_root/tmp/pycache"
+          unset diskgc_worktree_root
+        '';
       };
     };
 }

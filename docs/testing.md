@@ -1142,8 +1142,50 @@ and offset code until TASK-67 changes release packaging.
 
 ## Commands
 
+### Development scratch
+
+Run `nix develop -c just scratch-tally` before starting each backlog
+implementation task. It resolves the main checkout through Git's common
+directory even when invoked from a nested task worktree. The tally uses
+`du -x` without following
+symlinks, skips entries on another filesystem, and reports every child of
+the ignored `./tmp/`, the aggregate legacy `/tmp/diskgc*`, the old root
+`target/`, and available space. It records one sample in the bounded
+`tmp/scratch-tallies.jsonl` to show change since the previous tally. The
+history retains at most 1,024 records and reads at most its last 1 MiB;
+a corrupt final record is skipped with a warning. It warns
+when tracked scratch grows by at least 2 GiB or available space falls below
+10% of the filesystem or 20 GiB. A warning calls for inspection; it does
+not remove anything or block a task.
+
+Create new agent worktrees under the main checkout's
+`./tmp/worktrees/<task-name>/`. The dev shell resolves the worktree root
+even when entered from a subdirectory, sends Cargo output to its
+`./tmp/target/`, and sets `TMPDIR` to its `./tmp/system/` for host-side
+test fixtures. The E2E runner and recipes write logs under
+`./tmp/e2e-logs*`; Python bytecode goes under `./tmp/pycache/`.
+Nix store objects, container-private `/tmp`, rootless
+container storage and the small `.gcroots/` symlinks have their own required
+locations. The product's host `/tmp` profiles are unaffected.
+
+On 2026-10-22, the legacy `/tmp/diskgc*` inventory contained 503 entries:
+88 registered Git worktrees, 96 other directories and 319 files. Sixty of
+the registered worktrees had tracked or untracked changes; 28 were clean.
+The legacy entries occupied 133.79 GiB, and the old root `target/` occupied
+7.89 GiB. A process cwd/fd/map snapshot found no references to those paths,
+but 313 process fd tables were unreadable. This does not prove the paths are
+inactive. Before moving any legacy worktree, inspect its
+Git status and live process references, and retain its branch and build
+artifacts. Do not delete host data without explicit user authorization.
+Run `nix develop -c python3 tools/scratch_inventory.py --json` for a fresh
+path-level report: each entry's size, registered branch or detached HEAD,
+dirty count, nested `target/` bytes and observed process cwd/fd/map references.
+Unreadable process tables are counted; an empty observed-PID list is only a
+snapshot, not proof that a path is safe to move.
+
 | `just` recipe | What | When |
 |---|---|---|
+| `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus fast Nix-image tests, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites and the four-vector QEMU guest check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
