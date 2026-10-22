@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-17 23:54'
+updated_date: '2026-10-22 19:30'
 labels:
   - wave-1
   - hardening
@@ -37,6 +37,8 @@ Forward-carried from task-59 review (hardening): (1) The 10 s wall-time check in
 From the task-4 review (mped), harness items: H1 mount the Cargo toolchain closures from the host store (closureInfo) instead of baking them into the 2.84 GB base image; pair with item (3), tag pruning. H2 Ctx::setup always bind-mounts /nix/store read-only and the test listing requires the toolchain manifest (/opt/cargo-under-test/toolchains); both break the planned Debian (non-Nix) variant and the own-store Nix-daemon container, so each needs a per-image opt-out. H3 log the CPU count next to the traced-build ratio in cargo_traced_build_within_bound. H4 one builder for the as-tester + env_clear + TESTER_ENV command, now built in four places (cargo_under_test: Cargo::spawn, run_as_tester_untraced; cargo_suite: full_trace; holder: Holder::start). H5 a no-create flag for probe flock-hold (it creates a missing lock file today). H6 bisect the stables 1.91-1.98 for distinct lock behaviours and pin one toolchain per behaviour.
 
 H2 (per-image opt-out of the /nix/store bind mount and the toolchain manifest) moved to task-63, the Debian / static-binary e2e variant, for the 0.1 ensure MVP (2026-10-18).
+
+2026-10-22 gate reliability evidence from TASK-16 extension: exact just e2e fast Nix suite ran 219 cases at 14-way concurrency with one global 300s deadline; 218 passed and cargo_race_6_killed_at_seeded_positions_the_next_build_succeeds@1.99.1 was stopped by that global deadline after completing 106/119 successful seeded kill/recovery cycles, with about 60s of suite time remaining when it started. The suite ended at 301.7s; a west source-anchor case took 146.86s. The same Cargo race case passed alone in 42.23s (one-test suite 46.5s). Forty-two unrelated arch-explorer busy-loop shells were consuming host CPU throughout; no diskgc process or host files were touched. This is a capacity/load diagnosis, not a per-test 60s cap or proven product defect. When hardening harness deadlines and CPU reporting, test and explain suite-budget behavior under external contention; require a later exact gate pass on a suitable host before calling the TASK-16 change verified.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-20 09:40'
+updated_date: '2026-10-22 19:51'
 labels:
   - wave-2
   - profiles
@@ -70,6 +70,8 @@ Active-session limit retained: a live pytest process may hold no descriptor in a
 Final integrated nix develop -c just e2e passed 93/93 on 2026-10-20; QA and MPED reviews GO for the opt-in built-ins. TASK-65 remains To Do: nix-shell-rc and nix-shell-tmpdir are unshipped pending dormant-session protection, and a live pytest session without an open descriptor can still make a bare pytest-tmp selection unsafe. The warm-cache full host dry run establishes plan completion here, not safe deletion of such a live session or cold-cache latency.
 
 2026-10-20 disposable pytest 9.1.1 counterexample (Nixpkgs-pinned package in rootless Podman): with tmp_path_retention_policy=none, a live test created /tmp/pytest-of-root/pytest-0/test_active0 and no numbered-session .lock. During the sleep, /proc/<pytest-pid>/fd had no descriptor under the test directory. The same case is now a checked-in ModelHost negative YAML vector: an old live test dir is selected and deleted by the unsafe user-configured path rule; vector suite passed 4/4. The new Nix-image E2E starts real pytest as tester, asserts no lock/no candidate fd, and proves the unsafe user probe marks it eligible in dry run; oracle clean, focused E2E passed 1/1. Retired pytest-tmp from builtin.yaml and adjusted catalog/docs; no real-host diskgc run. A parent-lock predicate misses supported retention_policy=none, while age and initial-environ checks cannot establish a live no-fd test dir is unused. pytest-tmp remains planned pending a reliable session-liveness protocol. nix-shell-rc, nix-shell-tmpdir, mktemp-dir and tmp-entry remain unshipped due previously proved dormant-session visibility gaps; AC4 is satisfied by the unshipped branch. TASK65 remains To Do because AC1/AC2 and DoD are not met for all target profiles.
+
+2026-10-22 Compass domain review: only containers-image-tmp is currently shipped from this proposed six-profile set, with fixed /var/tmp prefixes and a 3d source floor. Existing golden/model/Buildah-held-spool evidence does not test the exact release artifact or a dormant spool. pytest-tmp, nix-shell-rc, nix-shell-tmpdir, mktemp-dir and tmp-entry remain unshipped because checked-in no-fd/no-lock, post-exec TMPDIR and PID-namespace counterexamples defeat name, age, open-fd and host-PID heuristics as general liveness proof. The task has a scope conflict: AC1/2 say each proposed profile ships and is verified, while AC4 expressly permits two shell profiles not to ship. Do not check AC1/2 or close TASK-65 by treating an unsafe profile as safe. Resolve the signed-off 0.1 catalog scope with TASK-67 and prove that catalog using the actual release binary; any broad deferred profile needs a real liveness contract and disposable-container counterexample tests. No host deletion.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
