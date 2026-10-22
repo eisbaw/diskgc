@@ -207,14 +207,46 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             return Err(LoadError::new(at, "mount ids are unique and not 0"));
         }
         let dev = spec.dev.0;
-        if state.fss.contains_key(&dev) {
-            return Err(LoadError::new(
-                at,
-                format!("device {dev} is mounted twice; bind mounts are not modelled yet"),
-            ));
+        match (state.fss.get(&dev), spec.bind_of) {
+            (None, None) => {}
+            (None, Some(source)) => {
+                return Err(LoadError::new(
+                    &at,
+                    format!("bind_of {source} has no filesystem on device {dev}"),
+                ));
+            }
+            (Some(_), None) => {
+                return Err(LoadError::new(
+                    &at,
+                    format!("device {dev} is mounted twice without bind_of"),
+                ));
+            }
+            (Some(fs), Some(source)) => {
+                let source_mount = state
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.id == source)
+                    .ok_or_else(|| {
+                        LoadError::new(&at, format!("bind_of {source} is not an earlier mount"))
+                    })?;
+                if source_mount.dev != dev {
+                    return Err(LoadError::new(
+                        &at,
+                        format!("bind_of {source} uses a different device"),
+                    ));
+                }
+                if fs.fs_type != spec.fs
+                    || fs.size != spec.size.0
+                    || fs.other_used != spec.other_used.0
+                    || fs.missing != spec.statx_missing.iter().copied().collect()
+                {
+                    return Err(LoadError::new(
+                        &at,
+                        format!("bind_of {source} has incompatible filesystem metadata"),
+                    ));
+                }
+            }
         }
-        let mut fs = Fs::new(dev, spec.fs.clone(), spec.size.0, spec.other_used.0, now);
-        fs.missing = spec.statx_missing.iter().copied().collect();
         let on = match spec.parent {
             None if spec.at == Path::new("/") && state.mounts.is_empty() => None,
             None => {
@@ -243,7 +275,11 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 Some(mount_point(state, parent, rel).map_err(|m| LoadError::new(&at, m))?)
             }
         };
-        state.fss.insert(dev, fs);
+        if spec.bind_of.is_none() {
+            let mut fs = Fs::new(dev, spec.fs.clone(), spec.size.0, spec.other_used.0, now);
+            fs.missing = spec.statx_missing.iter().copied().collect();
+            state.fss.insert(dev, fs);
+        }
         state.mounts.push(Mount {
             id: spec.id,
             parent: spec.parent,

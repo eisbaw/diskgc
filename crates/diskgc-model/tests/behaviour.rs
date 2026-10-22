@@ -19,6 +19,82 @@ use diskgc_model::harness::{Outcome, run};
 use diskgc_model::host::UPTIME_AT_START;
 use diskgc_model::load::parse_yaml;
 use diskgc_model::spec::Op;
+use diskgc_model::state::Fault;
+
+fn root_bind_yaml() -> String {
+    tmp_yaml("").replace(
+        "tree:\n",
+        "  - {id: 31, at: /tmp/a/sub/bind, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 30, bind_of: 30}\ntree:\n",
+    )
+}
+
+#[test]
+fn root_bind_shares_inodes_but_keeps_a_mount_boundary() {
+    let host = host(&root_bind_yaml());
+    let source = host.stat_path(Path::new("/tmp/a/f")).expect("source");
+    let alias = host
+        .stat_path(Path::new("/tmp/a/sub/bind/a/f"))
+        .expect("alias");
+    assert_eq!(source.dev_ino(), alias.dev_ino());
+    assert_ne!(source.mnt_id, alias.mnt_id);
+    assert_eq!(
+        host.mountinfo().unwrap().last().unwrap().fs_root,
+        Path::new("/")
+    );
+    let outer = dir(&host, "/tmp/a/sub");
+    let error = open_beneath(
+        &host,
+        &outer.fd,
+        outer.mount.id,
+        Path::new("bind"),
+        Access::Path,
+        Want::Directory,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ResolveError::UnsafePath {
+                why: Unsafe::CrossesMount,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn cross_bind_rename_is_exdev_and_alias_reference_prevents_inode_reuse() {
+    let model = diskgc_model::load::parse_yaml(&root_bind_yaml()).expect("model");
+    let (mut state, _) = diskgc_model::load::load(&model).expect("state");
+    assert_eq!(
+        state.rename_path(Path::new("/tmp/a/f"), Path::new("/tmp/a/sub/bind/new")),
+        Err(Fault::Errno(Errno::EXDEV))
+    );
+    assert_eq!(
+        state.rename_path(Path::new("/tmp/a/sub/bind/a/f"), Path::new("/tmp/a/new")),
+        Err(Fault::Errno(Errno::EXDEV))
+    );
+    assert_eq!(
+        state.rename_path(Path::new("/tmp/a/sub/bind"), Path::new("/tmp/a/sub/moved")),
+        Err(Fault::Errno(Errno::EBUSY))
+    );
+    let sub = state
+        .lookup(Path::new("/tmp/a/sub"))
+        .expect("parent of bind");
+    assert_eq!(
+        state.unlinkat(sub, OsStr::new("bind"), true),
+        Err(Errno::EBUSY)
+    );
+    let alias = state
+        .lookup(Path::new("/tmp/a/sub/bind/a/f"))
+        .expect("alias");
+    state.open_ofd(alias, "/tmp/a/sub/bind/a/f".into(), Access::Read);
+    state.elapsed = Duration::from_secs(1);
+    assert!(
+        matches!(state.replace_path_reusing_inode(Path::new("/tmp/a/f")), Err(Fault::Model(message)) if message.contains("no held references"))
+    );
+}
 
 // ---- Path resolution ----
 

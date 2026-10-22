@@ -431,6 +431,12 @@ impl State {
     /// Mounts a fresh filesystem on the existing directory `spec.at` (an
     /// event): the new mount's parent is the mount that directory is on.
     pub fn mount_on(&mut self, spec: &crate::spec::MountEventSpec) -> Result<(), Fault> {
+        if self.fss.contains_key(&spec.dev.0) || self.mounts.iter().any(|m| m.id == spec.id) {
+            return Err(Fault::Model(format!(
+                "mount: id {} or device {} already exists",
+                spec.id, spec.dev.0
+            )));
+        }
         let on = self.lookup(&spec.at)?;
         if self.inode(on).entries().is_none() {
             return Err(Fault::Model(format!(
@@ -898,7 +904,7 @@ impl State {
         }
         let (from_dir, from_name) = self.parent_of(from)?;
         let (to_dir, to_name) = self.parent_of(to)?;
-        if self.mount(from_dir.mnt).dev != self.mount(to_dir.mnt).dev {
+        if from_dir.mnt != to_dir.mnt {
             return Err(Errno::EXDEV.into());
         }
         let moving = *self
@@ -906,6 +912,15 @@ impl State {
             .entries()
             .and_then(|e| e.get(from_name))
             .ok_or(Errno::ENOENT)?;
+        if self
+            .mounted_on(Loc {
+                mnt: from_dir.mnt,
+                ino: moving,
+            })
+            .is_some()
+        {
+            return Err(Errno::EBUSY.into());
+        }
         let moving_is_dir = self
             .inode(Loc {
                 mnt: from_dir.mnt,
@@ -920,6 +935,15 @@ impl State {
             .get(to_name)
             .copied();
         if let Some(old) = existing {
+            if self
+                .mounted_on(Loc {
+                    mnt: to_dir.mnt,
+                    ino: old,
+                })
+                .is_some()
+            {
+                return Err(Errno::EBUSY.into());
+            }
             let old_inode = self.inode(Loc {
                 mnt: to_dir.mnt,
                 ino: old,
@@ -1005,12 +1029,18 @@ impl State {
             .flat_map(|entries| entries.values())
             .filter(|&&ino| ino == old.ino)
             .count();
-        let held = self.ofds.values().any(|ofd| ofd.loc == old)
+        let old_id = self.dev_ino(old);
+        let held = self
+            .ofds
+            .values()
+            .any(|ofd| self.dev_ino(ofd.loc) == old_id)
             || self.procs.values().any(|proc| {
-                proc.exe.as_ref().is_some_and(|r| r.loc == old)
-                    || proc.cwd.loc == old
-                    || proc.root.loc == old
-                    || proc.maps.iter().any(|r| r.loc == old)
+                proc.exe
+                    .as_ref()
+                    .is_some_and(|r| self.dev_ino(r.loc) == old_id)
+                    || self.dev_ino(proc.cwd.loc) == old_id
+                    || self.dev_ino(proc.root.loc) == old_id
+                    || proc.maps.iter().any(|r| self.dev_ino(r.loc) == old_id)
             });
         if aliases != 1 || held {
             return Err(Fault::Model(format!(

@@ -394,6 +394,18 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::python_stacked_mount_matches_linux,
     },
     Test {
+        name: "python_bind_root_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::python_bind_root_matches_linux,
+    },
+    Test {
+        name: "bind_root_alias_mutations_match_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::bind_root_alias_mutations_match_linux,
+    },
+    Test {
         name: "generated_python_models_match_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,

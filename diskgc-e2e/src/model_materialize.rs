@@ -141,11 +141,33 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
     let mut previous_inner_id = None;
     for (index, mount) in model.mounts.iter().enumerate() {
         let field = format!("mounts[{index}]");
-        if model.mounts[..index]
-            .iter()
-            .any(|prior| prior.dev == mount.dev)
+        let source = mount.bind_of.and_then(|source| {
+            model.mounts[..index]
+                .iter()
+                .find(|prior| prior.id == source)
+        });
+        if let Some(source) = source {
+            if !matches!(source.at.to_str(), Some("/tmp" | "/home/tester"))
+                || source.dev != mount.dev
+                || source.fs != mount.fs
+                || source.size != mount.size
+                || source.other_used != mount.other_used
+                || source.statx_missing != mount.statx_missing
+            {
+                return unsupported(
+                    &field,
+                    "only matching scratch filesystem-root binds are supported",
+                );
+            }
+        } else if mount.bind_of.is_some()
+            || model.mounts[..index]
+                .iter()
+                .any(|prior| prior.dev == mount.dev)
         {
-            return unsupported(&field, "bind mounts sharing a device are not modelled");
+            return unsupported(
+                &field,
+                "repeated devices require bind_of an earlier scratch root",
+            );
         }
         if !mount.statx_missing.is_empty() {
             return unsupported(
@@ -181,6 +203,9 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             mount.at.to_str(),
             Some("/tmp" | "/home/tester" | "/run/diskgc")
         ) {
+            if mount.bind_of.is_some() {
+                return unsupported(&field, "binding over a harness scratch root is unsupported");
+            }
             if model.mounts[..index]
                 .iter()
                 .any(|prior| prior.at == mount.at)
@@ -190,6 +215,11 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             continue; // The harness provisions its base scratch mounts.
         }
         let (root, _) = destination(&mount.at)?;
+        if let Some(source) = source
+            && source.at != Path::new(root)
+        {
+            return unsupported(&field, "bind source and target must share one scratch root");
+        }
         let base = model.mounts[..index]
             .iter()
             .find(|candidate| candidate.at == Path::new(root));
@@ -480,14 +510,46 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             TESTER,
         )?;
         for mount in model.mounts.iter().filter(|mount| mount.at == at) {
-            let scratch = Scratch::mount(
-                at.to_str()
-                    .ok_or("materialize(model): non-UTF-8 mount point")?,
-                "0755",
-                TESTER,
-            )
-            .map_err(|error| format!("materialize(model): mount id {}: {error}", mount.id))?;
-            materialized.mounted.push(at.to_owned());
+            let scratch = if let Some(source) = mount.bind_of {
+                let source_mount = model
+                    .mounts
+                    .iter()
+                    .find(|prior| prior.id == source)
+                    .ok_or_else(|| format!("materialize(model): bind_of {source} missing"))?;
+                let source_scratch = if source_mount.at == Path::new("/tmp") {
+                    &ctx.scratch
+                } else {
+                    &ctx.home
+                };
+                if source_scratch.root() != Path::new(root) {
+                    return Err(format!(
+                        "materialize(model): bind source {} and target {} must share a scratch root",
+                        source_mount.at.display(),
+                        at.display()
+                    ));
+                }
+                source_scratch.bind_mount_root(
+                    relative
+                        .to_str()
+                        .ok_or("materialize(model): non-UTF-8 bind target")?,
+                )?;
+                materialized.mounted.push(at.to_owned());
+                Scratch::attach(
+                    at.to_str()
+                        .ok_or("materialize(model): non-UTF-8 bind target")?,
+                )?
+            } else {
+                Scratch::mount(
+                    at.to_str()
+                        .ok_or("materialize(model): non-UTF-8 mount point")?,
+                    "0755",
+                    TESTER,
+                )
+                .map_err(|error| format!("materialize(model): mount id {}: {error}", mount.id))?
+            };
+            if mount.bind_of.is_none() {
+                materialized.mounted.push(at.to_owned());
+            }
             inner_scratch = Some(scratch);
         }
         let scratch = inner_scratch

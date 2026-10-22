@@ -15,12 +15,14 @@ use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
 use diskgc_model::spec::{Bytes, DevSpec, DirSpec, FileSpec, MountSpec, NodeSpec};
+use diskgc_model::state::Fault;
 use serde_json::Value;
 
 use crate::ensure;
 use crate::ensure_suite::{ensure_run, report};
 use crate::model_materialize;
 use crate::oracle::{Fixture, Oracle};
+use crate::scratch::Scratch;
 use crate::suite::{Ctx, TestResult};
 
 const PYTHON_VECTOR: &str =
@@ -91,6 +93,72 @@ pub fn python_stacked_mount_matches_linux(ctx: &Ctx) -> TestResult {
     replay_model(ctx, python_mounted_cache_vector(true)?, false)
 }
 
+pub fn python_bind_root_matches_linux(ctx: &Ctx) -> TestResult {
+    replay_model(ctx, python_bind_root_vector()?, false)
+}
+
+/// Compare the kernel's cross-mount rename refusal and the inode shared by
+/// an unlink through the bind alias with the model's path operations.
+pub fn bind_root_alias_mutations_match_linux(ctx: &Ctx) -> TestResult {
+    let mut vector = python_bind_root_vector()?;
+    adapt_home_mount(&mut vector);
+    let (mut state, _) =
+        diskgc_model::load::load(&vector.host).map_err(|error| error.to_string())?;
+    let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    let source = Path::new("/home/tester/visible");
+    let alias_root = Path::new("/home/tester/project/app/__pycache__/mounted");
+    let alias = alias_root.join("visible");
+    ensure!(
+        state.rename_path(source, &alias) == Err(Fault::Errno(Errno::EXDEV)),
+        "model allowed a cross-mount rename"
+    );
+    let kernel_error =
+        fs::rename(source, &alias).expect_err("kernel must refuse a rename across bind mount IDs");
+    ensure!(
+        kernel_error.kind() == io::ErrorKind::CrossesDevices,
+        "kernel cross-bind rename: {kernel_error}"
+    );
+    let alias_dir = state
+        .lookup(alias_root)
+        .map_err(|error| format!("model alias: {error:?}"))?;
+    state
+        .unlinkat(alias_dir, std::ffi::OsStr::new("visible"), false)
+        .map_err(|error| format!("model alias unlink: {error:?}"))?;
+    let bound = Scratch::attach(alias_root.to_str().ok_or("non-UTF-8 bind root")?)?;
+    bound.remove_file("visible")?;
+    ensure!(
+        state.lookup(source) == Err(Fault::Errno(Errno::ENOENT)),
+        "model retained the source name after alias unlink"
+    );
+    ensure!(
+        fs::symlink_metadata(source).is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+        "kernel retained the source name after alias unlink"
+    );
+    materialized.finish()?;
+    Ok(())
+}
+
+fn python_bind_root_vector() -> Result<ProfileVector, String> {
+    let mut vector = python_mounted_cache_vector(false)?;
+    let source = vector.host.mounts[1].clone();
+    let mount = vector.host.mounts.last_mut().ok_or("missing bind mount")?;
+    mount.bind_of = Some(2);
+    mount.dev = source.dev;
+    mount.fs = "tmpfs".into(); // replay_model adapts /home to this scratch filesystem
+    mount.size = source.size;
+    let at = mount.at.clone();
+    vector.host.tree.remove(&at.join("visible"));
+    vector.host.tree.insert(
+        "/home/tester/visible".into(),
+        NodeSpec::File(FileSpec {
+            content: Some("shared filesystem root".into()),
+            ..FileSpec::default()
+        }),
+    );
+    vector.expect.preserved.push("/home/tester/visible".into());
+    Ok(vector)
+}
+
 fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
     let mut vector = ProfileVector::parse(PYTHON_VECTOR)?;
     let cache = PathBuf::from("/home/tester/project/app/__pycache__");
@@ -103,6 +171,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
             major: 0,
             minor: 77,
         }),
+        bind_of: None,
         size: Bytes(1 << 20),
         other_used: Bytes(0),
         parent: Some(2),
@@ -673,7 +742,7 @@ mod tests {
             assert!(
                 model_materialize::validate(&vector.host)
                     .expect_err("bind representation must fail")
-                    .contains("bind mounts sharing a device are not modelled"),
+                    .contains("repeated devices require bind_of"),
             );
             vector.host.mounts[last].dev = DevSpec(Dev {
                 major: 0,
@@ -697,6 +766,27 @@ mod tests {
                     .contains("explicit mount-root attributes are unsupported"),
             );
         }
+    }
+
+    #[test]
+    fn bind_root_has_independent_refusal_and_shared_inode() {
+        let mut vector = python_bind_root_vector().expect("bind vector");
+        adapt_home_mount(&mut vector);
+        vector
+            .check(&Library::builtin().expect("built-in library"))
+            .expect("bind refusal expectation");
+        model_materialize::validate(&vector.host).expect("supported root bind");
+        let host = ModelHost::new(&vector.host).expect("valid bind model");
+        let source = host
+            .stat_path(Path::new("/home/tester/visible"))
+            .expect("source stat");
+        let alias = host
+            .stat_path(Path::new(
+                "/home/tester/project/app/__pycache__/mounted/visible",
+            ))
+            .expect("bind stat");
+        assert_eq!(source.dev_ino(), alias.dev_ino());
+        assert_ne!(source.mnt_id, alias.mnt_id);
     }
 
     #[test]

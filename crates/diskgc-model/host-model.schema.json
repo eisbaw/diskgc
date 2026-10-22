@@ -813,8 +813,17 @@
           "description": "Mount point.",
           "type": "string"
         },
+        "bind_of": {
+          "description": "Bind the filesystem root of an earlier mount. The device and filesystem\nmetadata must match that mount; subdirectory binds are unsupported.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "dev": {
-          "description": "Device number `major:minor`. One filesystem per device: bind mounts\nare not modelled yet.",
+          "description": "Device number `major:minor`. Reuse requires `bind_of`.",
           "$ref": "#/$defs/Dev"
         },
         "fs": {

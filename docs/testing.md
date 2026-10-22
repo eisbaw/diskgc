@@ -279,7 +279,9 @@ How the format reads (the schema documents every key):
   to 1000, times to `clock`.
 - **Mounts** in mount order, each with a `parent` (a stacked mount's parent
   is the mount it covers); `statx_missing` lists fields the filesystem does
-  not answer. One device per mount: bind mounts are not modelled yet.
+  not answer. A repeated device requires `bind_of: <earlier mount id>` and
+  exposes that filesystem's root through a distinct mount ID. Filesystem
+  metadata must match; subdirectory binds are not represented.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
   `/proc` read errors; a pid that exits is `Gone`. What `status` shows,

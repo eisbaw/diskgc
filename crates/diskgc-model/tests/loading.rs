@@ -149,7 +149,36 @@ fn contradictions_are_load_errors() {
     );
     assert_error(
         &tmp_yaml("").replace("dev: \"0:42\"", "dev: \"254:1\""),
-        &["bind mounts are not modelled yet"],
+        &["mounted twice without bind_of"],
+    );
+}
+
+#[test]
+fn root_bind_requires_an_earlier_matching_filesystem() {
+    let bind = |extra: &str| {
+        tmp_yaml("").replace(
+        "tree:\n",
+        &format!("  - {{id: 31, at: /tmp/a/sub/bind, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 30, bind_of: 30{extra}}}\ntree:\n"),
+    )
+    };
+    ModelHost::from_yaml(&bind("")).expect("matching root bind loads");
+    assert_error(
+        &bind("").replace("bind_of: 30", "bind_of: 99"),
+        &["bind_of 99", "not an earlier mount"],
+    );
+    assert_error(
+        &bind("").replace(
+            "size: 1G, parent: 30, bind_of",
+            "size: 2G, parent: 30, bind_of",
+        ),
+        &["incompatible filesystem metadata"],
+    );
+    assert_error(
+        &bind("").replace(
+            "dev: \"0:42\", size: 1G, parent: 30, bind_of",
+            "dev: \"0:43\", size: 1G, parent: 30, bind_of",
+        ),
+        &["no filesystem on device"],
     );
 }
 

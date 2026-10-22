@@ -158,9 +158,12 @@ pub struct MountSpec {
     pub at: PathBuf,
     /// Filesystem type, e.g. `ext4`, `tmpfs`, `nfs`, `btrfs`.
     pub fs: String,
-    /// Device number `major:minor`. One filesystem per device: bind mounts
-    /// are not modelled yet.
+    /// Device number `major:minor`. Reuse requires `bind_of`.
     pub dev: DevSpec,
+    /// Bind the filesystem root of an earlier mount. The device and filesystem
+    /// metadata must match that mount; subdirectory binds are unsupported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_of: Option<u64>,
     /// Filesystem size.
     pub size: Bytes,
     /// Space used by things outside the model; available space is `size -

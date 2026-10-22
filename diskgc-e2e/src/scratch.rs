@@ -20,7 +20,7 @@
 use std::ffi::CString;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags};
@@ -293,6 +293,61 @@ impl Scratch {
                 target.display()
             )
         })
+    }
+
+    /// Bind this verified scratch mount root onto an existing directory on
+    /// the same scratch mount. The destination becomes a distinct mount ID.
+    pub fn bind_mount_root(&self, target_rel: &str) -> Result<(), String> {
+        let target = self.for_existing("bind_mount_root", target_rel);
+        if mount_id(&self.root, false)? != self.mnt_id || !is_mount_root(&self.root)? {
+            return Err(format!(
+                "bind mount source {} is no longer the scratch mount root",
+                self.root.display()
+            ));
+        }
+        let target_meta = std::fs::symlink_metadata(&target)
+            .map_err(|error| format!("lstat bind target {}: {error}", target.display()))?;
+        if !target_meta.file_type().is_dir() {
+            return Err(format!(
+                "bind mount target {} is not a directory",
+                target.display()
+            ));
+        }
+        let old_id = mount_id(&target, false)?;
+        rustix::mount::mount_bind(&self.root, &target).map_err(|error| {
+            format!(
+                "bind mount {} on {}: {error}",
+                self.root.display(),
+                target.display()
+            )
+        })?;
+        let verified = (|| {
+            let new_id = mount_id(&target, false)?;
+            if new_id == old_id || new_id == self.mnt_id || !is_mount_root(&target)? {
+                return Err(format!(
+                    "bind mount {} did not get a distinct mount root",
+                    target.display()
+                ));
+            }
+            let source = std::fs::metadata(&self.root)
+                .map_err(|error| format!("stat bind source {}: {error}", self.root.display()))?;
+            let alias = std::fs::metadata(&target)
+                .map_err(|error| format!("stat bind target {}: {error}", target.display()))?;
+            if (source.dev(), source.ino()) != (alias.dev(), alias.ino()) {
+                return Err(format!(
+                    "bind mount {} does not share its source root inode",
+                    target.display()
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = verified {
+            rustix::mount::unmount(&target, rustix::mount::UnmountFlags::empty()).map_err(
+                |cleanup| format!("{error}; unmount {} failed: {cleanup}", target.display()),
+            )?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Like [`Scratch::bind_mount`], then makes the new mount read-only
