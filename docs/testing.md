@@ -522,6 +522,16 @@ filesystem, processes and mounts from the developer's system.
   12,000 entries in the fast tier and 100,000 in the full tier, judged by
   the oracle; stale sockets and FIFOs; and a FUSE mount whose server
   never answers (below).
+- **Fork churn during the in-use scan:**
+  `host_inuse_scan_settles_after_fork_churn` runs the real Linux scanner in
+  a disposable container with 0, 1, 4 and 8 bounded child-spawning workers.
+  It timestamps each child's spawn and wait with `CLOCK_BOOTTIME` and
+  requires one entire spawn-and-wait interval inside a measured scan's
+  recorded interval. An unsettled scan or checker result must block
+  clearing. It reports process-list rounds, duration, whether the 16-listing bound
+  was hit, and whether the checker retried. After reaping every worker,
+  it requires the unused candidate to clear. This exercises the
+  current host kernel; it does not emulate Linux 5.8–6.8 pidfd behavior.
 - **Root-mode owner resolution:** the static binary runs under container
   root with a protected config that names a numeric UID absent from
   `/etc/passwd`; an oracle-checked reclaim proves the UID owns every removed

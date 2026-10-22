@@ -43,11 +43,210 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-lock", [how, path]) if how == "close-semantics" => close_semantics(&host, path),
         ("host-proc", [pid]) => proc_readers(&host, pid),
         ("host-proc-replaced", []) => proc_replaced_after_startup(&host),
+        ("host-inuse-fork-churn", [candidate]) => inuse_fork_churn(&host, candidate),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
         ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
         _ => Err(format!("bad host probe arguments: {cmd} {args:?}")),
     }
+}
+
+/// Measure the real process scanner while short-lived children appear, then
+/// prove that a scan after all children are reaped can clear an unused tree.
+/// This runs only in the disposable E2E container. Each worker stops
+/// launching children after 500 ms or 64 launches; the E2E runner bounds
+/// the whole test if a child itself cannot exit promptly.
+fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use diskgc_core::engine::{Candidate, Rules, walk};
+    use diskgc_core::host::MonoTime;
+    use diskgc_core::inuse::{Checker, Options, scan};
+    use diskgc_core::resolve::{Want, resolve};
+
+    /// The same CLOCK_BOOTTIME representation as LinuxHost::now, so these
+    /// events can be compared with Scan::started and Scan::took.
+    fn boot_time() -> MonoTime {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+        MonoTime(Duration::new(
+            u64::try_from(t.tv_sec).expect("CLOCK_BOOTTIME seconds are non-negative"),
+            u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
+        ))
+    }
+
+    struct ChildEvent {
+        before_spawn: MonoTime,
+        after_spawn: MonoTime,
+        after_wait: MonoTime,
+    }
+
+    let path = Path::new(candidate);
+    let parent_path = path.parent().ok_or("candidate has no parent")?;
+    let parent = resolve(host, parent_path, Want::Directory).map_err(|e| e.to_string())?;
+    let candidate = Candidate::new(&parent, path).ok_or("candidate is not beneath its parent")?;
+    let uid = rustix::process::geteuid().as_raw();
+    let users = [uid];
+    let rules = Rules::new(&users);
+    let record = walk(host, &candidate, &rules, None)
+        .map_err(|e| format!("walk unused candidate: {e:?}"))?;
+    let options = Options::from_rules(&rules);
+    let mut overlapped_scan = false;
+
+    for workers in [0, 1, 4, 8] {
+        let stop = Arc::new(AtomicBool::new(false));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::<ChildEvent>::new()));
+        let mut threads = Vec::new();
+        for _ in 0..workers {
+            let stop = Arc::clone(&stop);
+            let launched = Arc::clone(&launched);
+            let completed = Arc::clone(&completed);
+            let events = Arc::clone(&events);
+            threads.push(std::thread::spawn(move || -> Result<(), String> {
+                let until = Instant::now() + Duration::from_millis(500);
+                for _ in 0..64 {
+                    if stop.load(Ordering::Relaxed) || Instant::now() >= until {
+                        break;
+                    }
+                    let before_spawn = boot_time();
+                    let mut child = std::process::Command::new("/bin/true")
+                        .spawn()
+                        .map_err(|e| format!("spawn /bin/true: {e}"))?;
+                    let after_spawn = boot_time();
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    let status = child
+                        .wait()
+                        .map_err(|e| format!("wait for /bin/true: {e}"))?;
+                    let after_wait = boot_time();
+                    if !status.success() {
+                        return Err(format!("/bin/true exited with {status}"));
+                    }
+                    events
+                        .lock()
+                        .map_err(|_| "fork event lock poisoned".to_owned())?
+                        .push(ChildEvent {
+                            before_spawn,
+                            after_spawn,
+                            after_wait,
+                        });
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            }));
+        }
+        if workers > 0 {
+            let ready_by = Instant::now() + Duration::from_secs(5);
+            while launched.load(Ordering::SeqCst) < workers && Instant::now() < ready_by {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let before_scan = (
+            launched.load(Ordering::SeqCst),
+            completed.load(Ordering::SeqCst),
+        );
+        let measured = scan(host, &options);
+        let after_scan = (
+            launched.load(Ordering::SeqCst),
+            completed.load(Ordering::SeqCst),
+        );
+        let mut checker = Checker::new(&rules, Duration::ZERO);
+        let before_check = (
+            launched.load(Ordering::SeqCst),
+            completed.load(Ordering::SeqCst),
+        );
+        let checked = checker.check(host, &candidate, &record);
+        let after_check = (
+            launched.load(Ordering::SeqCst),
+            completed.load(Ordering::SeqCst),
+        );
+        stop.store(true, Ordering::Relaxed);
+        let mut worker_error = None;
+        for thread in threads {
+            let outcome = thread
+                .join()
+                .map_err(|_| "fork worker panicked".to_owned())?;
+            if let Err(error) = outcome {
+                worker_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = worker_error {
+            return Err(error);
+        }
+        if workers > 0 && launched.load(Ordering::SeqCst) < workers {
+            return Err(format!(
+                "only {} child launches occurred with {workers} workers",
+                launched.load(Ordering::SeqCst)
+            ));
+        }
+        let measured = measured.map_err(|e| format!("scan with {workers} workers: {e}"))?;
+        let scan_end = measured
+            .started()
+            .checked_add(measured.took())
+            .expect("scan end fits in CLOCK_BOOTTIME");
+        let events_within_scan = events
+            .lock()
+            .map_err(|_| "fork event lock poisoned".to_owned())?
+            .iter()
+            .filter(|event| {
+                measured.started() <= event.before_spawn
+                    && event.before_spawn <= event.after_spawn
+                    && event.after_spawn <= event.after_wait
+                    && event.after_wait <= scan_end
+            })
+            .count();
+        let checker_blocked = checked
+            .map_err(|e| format!("checker with {workers} workers: {e}"))?
+            .is_err();
+        let notes = checker.latest().expect("checker made a scan").notes();
+        let retried = notes.iter().any(|note| note.contains("retried after"));
+        let checker_unsettled = notes
+            .iter()
+            .any(|note| note.starts_with("process scan unsettled:"));
+        let blocked = measured.check(&candidate, &record).is_err();
+        let unsettled = measured
+            .notes()
+            .iter()
+            .any(|note| note.starts_with("process scan unsettled:"));
+        if unsettled && !blocked {
+            return Err(format!(
+                "{workers}-worker scan was unsettled but cleared the candidate"
+            ));
+        }
+        if checker_unsettled && !checker_blocked {
+            return Err(format!(
+                "{workers}-worker checker ended unsettled but cleared the candidate"
+            ));
+        }
+        let launched_during_scan = after_scan.0.saturating_sub(before_scan.0);
+        let completed_during_scan = after_scan.1.saturating_sub(before_scan.1);
+        let launched_during_check = after_check.0.saturating_sub(before_check.0);
+        let completed_during_check = after_check.1.saturating_sub(before_check.1);
+        overlapped_scan |= workers > 0 && events_within_scan > 0;
+        println!(
+            "workers={workers} launched={} completed={} events_within_scan={events_within_scan} launched_during_scan={launched_during_scan} completed_during_scan={completed_during_scan} launched_during_check={launched_during_check} completed_during_check={completed_during_check} listings={} took_ms={} unsettled={unsettled} blocked={blocked} checker_retried={retried} checker_unsettled={checker_unsettled} checker_blocked={checker_blocked}",
+            launched.load(Ordering::SeqCst),
+            completed.load(Ordering::SeqCst),
+            measured.listings(),
+            measured.took().as_millis()
+        );
+    }
+    if !overlapped_scan {
+        return Err(
+            "no entire child spawn-and-wait interval fell within a measured in-use scan".to_owned(),
+        );
+    }
+
+    let settled = scan(host, &options).map_err(|e| format!("post-storm scan: {e}"))?;
+    let result = settled.check(&candidate, &record);
+    println!(
+        "post_storm listings={} took_ms={} clear={}",
+        settled.listings(),
+        settled.took().as_millis(),
+        result.is_ok()
+    );
+    result.map_err(|e| format!("unused candidate remained blocked after fork storm: {e:?}"))
 }
 
 /// In a disposable container subprocess, replace the pathname after the

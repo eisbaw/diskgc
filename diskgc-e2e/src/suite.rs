@@ -910,6 +910,12 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_flock_release_only_by_close,
     },
     Test {
+        name: "host_inuse_scan_settles_after_fork_churn",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: host_suite::host_inuse_scan_settles_after_fork_churn,
+    },
+    Test {
         name: "host_proc_readers",
         tier: Tier::Fast,
         expect: Expect::Pass,

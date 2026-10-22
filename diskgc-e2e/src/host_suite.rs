@@ -436,6 +436,39 @@ pub fn host_flock_release_only_by_close(ctx: &Ctx) -> TestResult {
     verdict.assert_clean()
 }
 
+/// TASK-64 G: measure a real in-use scan with 0, 1, 4 and 8 bounded fork
+/// workers in a disposable container. The exact counts and times are
+/// diagnostic; after all workers are reaped, an unused candidate must clear.
+pub fn host_inuse_scan_settles_after_fork_churn(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("fork-churn-free", 0o755, TESTER)?;
+    s.write_file("fork-churn-free/file", b"unused", 0o644, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.probe_as_tester(&["host-inuse-fork-churn", "/tmp/fork-churn-free"])?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let lines: Vec<_> = run.stdout.lines().collect();
+    ensure!(
+        lines.len() == 5,
+        "expected four measurements and post-storm result:\n{}",
+        run.stdout
+    );
+    for (line, workers) in lines[..4].iter().zip([0, 1, 4, 8]) {
+        ensure!(
+            line.starts_with(&format!("workers={workers} ")),
+            "missing {workers}-worker measurement: {line:?}"
+        );
+        info!("fork churn: {line}");
+    }
+    ensure!(
+        lines[4].starts_with("post_storm ") && lines[4].ends_with(" clear=true"),
+        "post-storm unused candidate did not clear: {:?}",
+        lines[4]
+    );
+    info!("fork churn: {}", lines[4]);
+    verdict.assert_clean()
+}
+
 /// The `/proc` readers on a process using scratch objects: an open file
 /// (fd), a working directory, its executable (exe and a mapping) and its
 /// initial environment, matched by (device, inode) against the harness's
