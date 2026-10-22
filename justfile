@@ -123,6 +123,7 @@ gcroots-drop:
 soak:
     DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test properties --locked
     DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test selection_reference --locked
+    DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test selection_general_reference --locked
 
 # cargo-fuzz targets, in a nightly dev shell.
 fuzz:

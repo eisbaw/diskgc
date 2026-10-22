@@ -428,7 +428,7 @@ it under `crates/diskgc-model/tests/regressions/`, where it is replayed.
 Regression files pin the host-model schema and are migrated when it
 changes.
 
-The 0.1 property suite runs five safety properties and seven integrated
+The 0.1 property suite runs five safety properties and eight integrated
 filesystem selection properties with 32 cases each in `just check` and 1,024
 cases each in `just soak`, plus saved regression replay. It covers independent
 checks of
@@ -457,10 +457,15 @@ while config-bound protection narrows the plan and reclaim. The first
 generator injects an already-bound protection; the joint evidence generator
 and owner case exercise the config binder. Saved regressions replay a
 rejected outer `where` match and the whole Claude container exclusion with
-user YAML profiles. These finite generators cover seven fixed path shapes,
-three delete-source profiles, two known marker names, and two ages. They do
-not cover arbitrary predicates, every unknown-evidence shape, all profile
-kinds and actions, or concurrent races. The index-authority
+user YAML profiles. A further generated family independently interprets
+single-segment `*` and explicit-depth patterns over variable names in two
+roots, with file, directory and any entry types, `find.exclude` patterns,
+source marker admission, term filters, unions and raw `!profile:` overlap.
+Its saved boundary case combines file selection, an excluded leaf and a
+negated source directory in the other root. The finite families cover three
+delete-source profiles, known marker names and two ages. They do not cover
+every predicate, every unknown-evidence shape, all profile kinds and actions,
+or concurrent races. The index-authority
 property and indexed/best-fit dry-run cases follow the index implementation.
 A failing generated case prints
 its shrunk host model as YAML for a regression fixture.
