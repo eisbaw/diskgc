@@ -47,6 +47,10 @@ const PROFILES: &str = r#"
   where: {has: CACHEDIR.TAG, has_not: .keep, idle_for: 2d}
 - name: tagged-keep-one
   where: {has: CACHEDIR.TAG, idle_for: 2d, keep_newest: 1}
+- name: has-and-keep-one
+  where: {has: CACHEDIR.TAG, keep_newest: 1}
+- name: keep-one
+  where: {keep_newest: 1}
 - name: versioned
   find: {roots: [/tmp], paths: [versions/*], type: dir}
   action: delete
@@ -179,6 +183,78 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: [command-alias-a], type: file}
   action: delete
   examples: {match: [/tmp/command-alias-a]}
+- name: union-version-open
+  find: {roots: [/tmp], paths: [union-version/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-version/v1]}
+- name: union-version-guard
+  find: {roots: [/tmp], paths: [union-version/*], type: dir}
+  where: {keep_newest: 1}
+  action: delete
+  examples: {match: [/tmp/union-version/v1]}
+- name: union-version-filter-guard
+  find: {roots: [/tmp], paths: [union-version/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-version/v1]}
+- name: union-raw-open
+  find: {roots: [/tmp], paths: [union-raw/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-raw/v1]}
+- name: union-raw-guard
+  find: {roots: [/tmp], paths: [union-raw/*], type: dir}
+  where: {has: CACHEDIR.TAG, keep_newest: 1}
+  action: delete
+  examples: {match: [/tmp/union-raw/v1]}
+- name: union-raw-filter-guard
+  find: {roots: [/tmp], paths: [union-raw/*], type: dir}
+  where: {has: CACHEDIR.TAG}
+  action: delete
+  examples: {match: [/tmp/union-raw/v1]}
+- name: union-link-open
+  find: {roots: [/tmp], paths: [union-link/releases/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-link/releases/v1]}
+- name: union-link-guard
+  find: {roots: [/tmp], paths: [union-link/releases/*], type: dir}
+  where: {protect_parent_link: current}
+  action: delete
+  examples: {match: [/tmp/union-link/releases/v1]}
+- name: union-launcher-open
+  find: {roots: [/tmp], paths: [union-launcher/releases/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-launcher/releases/v1]}
+- name: union-launcher-guard
+  find: {roots: [/tmp], paths: [union-launcher/releases/*], type: dir}
+  where: {protect_links: [union-launcher/current]}
+  action: delete
+  examples: {match: [/tmp/union-launcher/releases/v1]}
+- name: union-link-dir-open
+  find: {roots: [/tmp], paths: [union-link-dir/releases/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-link-dir/releases/v1]}
+- name: union-link-dir-guard
+  find: {roots: [/tmp], paths: [union-link-dir/releases/*], type: dir}
+  where: {protect_link_dirs: [union-link-dir/bin]}
+  action: delete
+  examples: {match: [/tmp/union-link-dir/releases/v1]}
+- name: union-extension-open
+  find: {roots: [/tmp], paths: [union-extension/*], type: dir}
+  action: delete
+  examples: {match: [/tmp/union-extension/a.ext-1.0.0]}
+- name: union-extension-guard
+  find: {roots: [/tmp], paths: [union-extension/*], type: dir}
+  where: {protect_cursor_extensions: union-extension/extensions.json}
+  action: delete
+  examples: {match: [/tmp/union-extension/a.ext-1.0.0]}
+- name: union-command-link-open
+  find: {roots: [/tmp], paths: [union-command-link/releases/*], type: dir}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/union-command-link/releases/v1]}
+- name: union-command-link-guard
+  find: {roots: [/tmp], paths: [union-command-link/releases/*], type: dir}
+  where: {protect_parent_link: current}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/union-command-link/releases/v1]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -250,6 +326,329 @@ fn command_action_union_requires_exact_action_options() {
         Tier::select(mixed_delete, &library(), None, 1000).is_err(),
         "different delete options must never share one union action"
     );
+}
+
+#[test]
+fn union_retention_guards_veto_even_when_their_term_fails_evidence_in_both_orders() {
+    let cases = [
+        (
+            "version",
+            "  /tmp/union-version/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-version/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n",
+            "/tmp/union-version/v1",
+            "/tmp/union-version/v2",
+            "newest_version",
+        ),
+        (
+            "link",
+            "  /tmp/union-link/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-link/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n  /tmp/union-link/current: {symlink: releases/v1}\n",
+            "/tmp/union-link/releases/v2",
+            "/tmp/union-link/releases/v1",
+            "linked_current",
+        ),
+        (
+            "extension",
+            "  /tmp/union-extension/a.ext-1.0.0: {payload: {size: 1M}}\n  /tmp/union-extension/a.ext-2.0.0: {payload: {size: 1M}}\n  /tmp/union-extension/extensions.json: {content: '[{\"relativeLocation\":\"a.ext-1.0.0\",\"location\":{\"path\":\"/tmp/union-extension/a.ext-1.0.0\"}}]'}\n",
+            "/tmp/union-extension/a.ext-2.0.0",
+            "/tmp/union-extension/a.ext-1.0.0",
+            "installed_extension",
+        ),
+        (
+            "launcher",
+            "  /tmp/union-launcher/releases/v1: {payload: {size: 1M}}\n  /tmp/union-launcher/releases/v2: {payload: {size: 1M}}\n  /tmp/union-launcher/current: {symlink: releases/v1}\n",
+            "/tmp/union-launcher/releases/v2",
+            "/tmp/union-launcher/releases/v1",
+            "linked_current",
+        ),
+        (
+            "link-dir",
+            "  /tmp/union-link-dir/releases/v1: {payload: {size: 1M}}\n  /tmp/union-link-dir/releases/v2: {payload: {size: 1M}}\n  /tmp/union-link-dir/bin/launcher: {symlink: ../releases/v1}\n",
+            "/tmp/union-link-dir/releases/v2",
+            "/tmp/union-link-dir/releases/v1",
+            "linked_current",
+        ),
+    ];
+    for (kind, tree, eligible, retained, reason) in cases {
+        for (first, second) in [
+            (
+                format!("profile:union-{kind}-open"),
+                format!("(profile:union-{kind}-guard && filter:has-tag)"),
+            ),
+            (
+                format!("(profile:union-{kind}-guard && filter:has-tag)"),
+                format!("profile:union-{kind}-open"),
+            ),
+        ] {
+            let selection = format!("{first} || {second}");
+            let request = tmp(&selection);
+            let plan_host = host(&yaml("", tree, ""));
+            let plan = dry_run(&plan_host, &request);
+            let retained_plan = plan
+                .plan
+                .iter()
+                .find(|entry| entry.candidate == Path::new(retained))
+                .expect("retained plan entry");
+            assert_eq!(retained_plan.reason, Some(reason), "{selection}: {plan:#?}");
+            assert_eq!(
+                retained_plan.profile,
+                format!("union-{kind}-guard"),
+                "{selection}: {plan:#?}"
+            );
+            assert!(
+                plan.plan
+                    .iter()
+                    .any(|entry| entry.candidate == Path::new(eligible) && entry.reason.is_none()),
+                "{selection}: {plan:#?}"
+            );
+            let run_host = host(&yaml("", tree, ""));
+            let report = ensure(&run_host, &request);
+            assert_eq!(
+                skip_of(&report, retained),
+                Some(reason),
+                "{selection}: {report:#?}"
+            );
+            assert!(
+                report
+                    .skipped
+                    .iter()
+                    .any(|entry| entry.candidate == Path::new(retained)
+                        && entry.profile == format!("union-{kind}-guard")),
+                "{selection}: {report:#?}"
+            );
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|entry| entry.candidate == Path::new(eligible)
+                        && entry.profile == format!("union-{kind}-open")),
+                "{selection}: {report:#?}"
+            );
+            assert!(
+                exists(&run_host, retained),
+                "{selection}: retained version removed"
+            );
+            assert_eq!(
+                unlinked_below(&run_host, retained),
+                0,
+                "{selection}: {report:#?}"
+            );
+            assert!(
+                !exists(&run_host, eligible),
+                "{selection}: eligible version remains: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn positive_filter_retention_guard_vetoes_other_admitted_union_term() {
+    let tree = "  /tmp/union-version/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-version/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n";
+    let guarded = "(profile:union-version-filter-guard && filter:has-and-keep-one)";
+    let open = "profile:union-version-open";
+    for selection in [
+        format!("{open} || {guarded}"),
+        format!("{guarded} || {open}"),
+    ] {
+        let request = tmp(&selection);
+        let plan_host = host(&yaml("", tree, ""));
+        let plan = dry_run(&plan_host, &request);
+        assert!(
+            plan.plan.iter().any(
+                |entry| entry.candidate == Path::new("/tmp/union-version/v2")
+                    && entry.reason == Some("newest_version")
+            ),
+            "{selection}: {plan:#?}"
+        );
+        let run_host = host(&yaml("", tree, ""));
+        let report = ensure(&run_host, &request);
+        assert_eq!(
+            skip_of(&report, "/tmp/union-version/v2"),
+            Some("newest_version"),
+            "{selection}: {report:#?}"
+        );
+        assert!(
+            report.skipped.iter().any(|entry| entry.candidate
+                == Path::new("/tmp/union-version/v2")
+                && entry.profile == "union-version-filter-guard"),
+            "{selection}: {report:#?}"
+        );
+        assert_eq!(unlinked_below(&run_host, "/tmp/union-version/v2"), 0);
+        assert!(exists(&run_host, "/tmp/union-version/v2"));
+        assert!(!exists(&run_host, "/tmp/union-version/v1"));
+    }
+}
+
+#[test]
+fn source_where_failure_does_not_hide_raw_retention_guard() {
+    let tree = "  /tmp/union-raw/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-raw/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n";
+    let unknown = "events:\n  - {at: {op: statx, path: /tmp/union-raw/v2/CACHEDIR.TAG, when: before}, fail: EACCES}\n";
+    for (guarded, profile) in [
+        ("profile:union-raw-guard", "union-raw-guard"),
+        (
+            "(profile:union-raw-filter-guard && filter:keep-one)",
+            "union-raw-filter-guard",
+        ),
+    ] {
+        for evidence in ["absent", "unknown"] {
+            for selection in [
+                format!("profile:union-raw-open || {guarded}"),
+                format!("{guarded} || profile:union-raw-open"),
+            ] {
+                let request = tmp(&selection);
+                let events = if evidence == "unknown" { unknown } else { "" };
+                let plan = dry_run(&host(&yaml("", tree, events)), &request);
+                assert!(
+                    plan.plan
+                        .iter()
+                        .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
+                            && entry.reason == Some("newest_version")
+                            && entry.profile == profile),
+                    "{evidence}, {selection}: {plan:#?}"
+                );
+                let run_host = host(&yaml("", tree, events));
+                let report = ensure(&run_host, &request);
+                assert!(
+                    report
+                        .skipped
+                        .iter()
+                        .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
+                            && entry.reason == "newest_version"
+                            && entry.profile == profile),
+                    "{evidence}, {selection}: {report:#?}"
+                );
+                assert!(exists(&run_host, "/tmp/union-raw/v2"));
+                assert_eq!(unlinked_below(&run_host, "/tmp/union-raw/v2"), 0);
+                assert!(!exists(&run_host, "/tmp/union-raw/v1"));
+            }
+        }
+    }
+}
+
+#[test]
+fn union_guards_still_veto_with_zero_tally_budget() {
+    let tree = "  /tmp/union-version/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-version/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n";
+    for selection in [
+        "profile:union-version-open || (profile:union-version-filter-guard && filter:has-and-keep-one)",
+        "(profile:union-version-filter-guard && filter:has-and-keep-one) || profile:union-version-open",
+    ] {
+        let mut request = tmp(selection);
+        request.tally_budget = Some(Duration::ZERO);
+        let run_host = host(&yaml("", tree, ""));
+        let report = ensure(&run_host, &request);
+        let guarded = Path::new("/tmp/union-version/v2");
+        assert_eq!(
+            skip_of(&report, guarded.to_str().unwrap()),
+            Some("newest_version"),
+            "{selection}: {report:#?}"
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|entry| entry.candidate == guarded
+                    && entry.profile == "union-version-filter-guard"),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&run_host, guarded.to_str().unwrap()));
+        assert_eq!(unlinked_below(&run_host, guarded.to_str().unwrap()), 0);
+        assert!(
+            report
+                .actions
+                .iter()
+                .all(|entry| entry.candidate != guarded),
+            "an untallied guarded candidate must never be an action: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn union_retention_guard_rechecks_unclassifiable_link_after_candidate_lock() {
+    let tree = "  /tmp/union-link/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-link/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n  /tmp/union-link/current: {symlink: releases/v1}\n";
+    let candidate = "/tmp/union-link/releases/v2";
+    let event = "events:\n  - {at: {op: flock, path: /tmp/union-link/releases/v2, when: after}, remove: /tmp/union-link/current}\n";
+    for selection in [
+        "profile:union-link-open || (profile:union-link-guard && filter:has-tag)",
+        "(profile:union-link-guard && filter:has-tag) || profile:union-link-open",
+    ] {
+        let run_host = host(&yaml("", tree, event));
+        let report = ensure(&run_host, &tmp(selection));
+        assert_eq!(
+            skip_of(&report, candidate),
+            Some("linked_current"),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&run_host, candidate));
+        assert_eq!(unlinked_below(&run_host, candidate), 0);
+        assert!(run_host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn union_keep_newest_guard_rechecks_rank_after_candidate_lock() {
+    let tree = "  /tmp/union-version/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-version/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n";
+    let candidate = "/tmp/union-version/v1";
+    let event = "events:\n  - {at: {op: flock, path: /tmp/union-version/v1, when: after}, remove: /tmp/union-version/v2}\n";
+    for selection in [
+        "profile:union-version-open || (profile:union-version-filter-guard && filter:has-and-keep-one)",
+        "(profile:union-version-filter-guard && filter:has-and-keep-one) || profile:union-version-open",
+    ] {
+        let run_host = host(&yaml("", tree, event));
+        let report = ensure(&run_host, &tmp(selection));
+        assert_eq!(
+            skip_of(&report, candidate),
+            Some("newest_version"),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&run_host, candidate));
+        assert_eq!(unlinked_below(&run_host, candidate), 0);
+        assert!(run_host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn command_union_rechecks_every_retention_guard_at_final_boundary() {
+    let tree = "  /tmp/union-command-link/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-command-link/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n  /tmp/union-command-link/current: {symlink: releases/v1}\n";
+    let candidate = "/tmp/union-command-link/releases/v2";
+    let current = Path::new("/tmp/union-command-link/current");
+    let event = "events:\n  - {at: {op: pids, nth: 2, when: after}, remove: /tmp/union-command-link/current}\n";
+    for selection in [
+        "profile:union-command-link-open || (profile:union-command-link-guard && filter:has-tag)",
+        "(profile:union-command-link-guard && filter:has-tag) || profile:union-command-link-open",
+    ] {
+        let run_host = host(&yaml("", tree, event));
+        let report = ensure(&run_host, &tmp(selection));
+        assert_eq!(
+            skip_of(&report, candidate),
+            Some("linked_current"),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&run_host, candidate));
+        assert!(
+            calls(&run_host, Op::RunCommand).is_empty(),
+            "{selection}: {report:#?}"
+        );
+        assert!(run_host.unfired_events().is_empty());
+        let trace = run_host.trace();
+        let second_scan = trace
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.op == Op::Pids)
+            .nth(1)
+            .map(|(index, _)| index)
+            .expect("second process scan");
+        assert!(
+            trace[..second_scan]
+                .iter()
+                .any(|call| call.op == Op::Flock
+                    && call.path.as_deref() == Some(Path::new(candidate))),
+            "event must follow candidate lock"
+        );
+        assert!(
+            trace[second_scan + 1..]
+                .iter()
+                .any(|call| call.op == Op::Statx && call.path.as_deref() == Some(current)),
+            "link guard must run after final policy scan"
+        );
+    }
 }
 
 #[test]
@@ -1163,6 +1562,7 @@ fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
             },
             found: cache_found,
             checkouts: Checkouts::Allow,
+            admitted: true,
         };
         let marker = fs_kind::Alternative {
             judge: Judge {
@@ -1173,6 +1573,7 @@ fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
             },
             found: marker_found,
             checkouts: Checkouts::Refuse,
+            admitted: true,
         };
         let alternatives = if marker_first {
             [marker, cache]
@@ -1236,11 +1637,13 @@ fn no_admitted_union_term_reports_filtered_even_inside_checkout_metadata() {
             judge,
             found,
             checkouts: Checkouts::Refuse,
+            admitted: true,
         },
         fs_kind::Alternative {
             judge,
             found,
             checkouts: Checkouts::Refuse,
+            admitted: true,
         },
     ];
     let mut checker = Checker::new(&rules, REUSE_LIMIT);

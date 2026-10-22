@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::Found;
 use super::discover::check_deadline;
 use super::judge::{Judge, Reached, Walked, mountinfo, same_object};
-use super::reclaim::Alternative;
+use super::reclaim::{Alternative, runtime_retention_guard_veto};
 use crate::command_action::{self, Ready};
 use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{
@@ -109,6 +109,7 @@ pub fn run_command_checked<H: Delete>(
             judge: *judge,
             found,
             checkouts: judge.rules.checkouts,
+            admitted: true,
         }],
         checker,
         command,
@@ -126,7 +127,8 @@ pub fn run_command_alternatives_checked<H: Delete>(
     command: CommandSpec<'_>,
     policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
 ) -> CommandResult {
-    assert!(!alternatives.is_empty() && alternatives.len() == command.sources.len());
+    assert!(alternatives.first().is_some_and(|source| source.admitted));
+    assert_eq!(alternatives.len(), command.sources.len());
     let mut result = CommandResult {
         attempted: false,
         end: ReclaimEnd::Complete,
@@ -167,10 +169,19 @@ fn protocol<H: Delete>(
         .serves(alternatives[0].judge.rules)
         .map_err(stopped)?;
     check_deadline(host, deadline, path)?;
+    if let Some((index, skip)) =
+        runtime_retention_guard_veto(host, alternatives, deadline).map_err(ReclaimEnd::Stopped)?
+    {
+        result.selected = Some(index);
+        return Err(skip.into());
+    }
     let mounts = mountinfo(host)?;
     let mut first_skip = None;
     let mut reached = None;
     for (index, alternative) in alternatives.iter().enumerate() {
+        if !alternative.admitted {
+            continue;
+        }
         match alternative
             .judge
             .approach(host, alternative.found, &mounts, deadline)?
@@ -277,6 +288,13 @@ fn protocol<H: Delete>(
                 retry_alternative = true;
                 break;
             }
+            if let Some((guard_index, skip)) =
+                runtime_retention_guard_veto(host, alternatives, deadline)
+                    .map_err(ReclaimEnd::Stopped)?
+            {
+                result.selected = Some(guard_index);
+                return Err(skip.into());
+            }
             check_deadline(host, deadline, path)?;
             // The policy may scan other trees and take longer than the in-use
             // verdict remains fresh. Recheck its lifetime at the point of use.
@@ -354,11 +372,19 @@ fn judge_locked_alternatives<'a, H: Delete>(
     refused_at_boundary: &[bool],
     boundary_skip: Option<&(usize, Skip)>,
 ) -> Result<LockedVerdict<'a, H::Fd>, ReclaimEnd> {
+    if let Some((index, skip)) =
+        runtime_retention_guard_veto(host, alternatives, deadline).map_err(ReclaimEnd::Stopped)?
+    {
+        return Ok(Err((Some(index), skip)));
+    }
     let mounts = mountinfo(host)?;
     let mut first_skip = None;
     let mut selected = None;
     let mut checkout_refusal = None;
     for (index, alternative) in alternatives.iter().enumerate() {
+        if !alternative.admitted {
+            continue;
+        }
         let found = alternative.found;
         let judge = &alternative.judge;
         let reached = match judge.approach(host, found, &mounts, deadline)? {

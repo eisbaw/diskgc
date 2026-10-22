@@ -76,6 +76,50 @@ pub struct Alternative<'a> {
     /// The source's checkout policy. Union judges walk with checkout
     /// admission enabled until their own filters have been judged.
     pub checkouts: Checkouts,
+    /// Whether this source passed source-owned discovery evidence and may
+    /// select an action. Raw guard contributors set this to false.
+    pub admitted: bool,
+}
+
+/// A positive retention rule on any discovering source vetoes the shared
+/// inode. No term-local admission decision is used here. An uncertain guard
+/// path or version state is a refusal, and a host failure stops the run.
+pub fn retention_guard_veto<H: Host>(
+    host: &H,
+    alternatives: &[Alternative<'_>],
+    deadline: Option<MonoTime>,
+) -> Result<Option<(usize, Skip)>, Stop> {
+    if !alternatives
+        .iter()
+        .any(|alternative| alternative.judge.find.has_retention_guard())
+    {
+        return Ok(None);
+    }
+    let mounts = mountinfo(host)?;
+    for (index, alternative) in alternatives.iter().enumerate() {
+        if let Err(skip) =
+            alternative
+                .judge
+                .retention_guard(host, alternative.found, &mounts, deadline)?
+        {
+            return Ok(Some((index, skip)));
+        }
+    }
+    Ok(None)
+}
+
+/// The extra candidate-wide pass belongs to unions. A single-source
+/// protocol retains its established term-local evidence-before-version
+/// ordering inside `Judge::contents`.
+pub(super) fn runtime_retention_guard_veto<H: Host>(
+    host: &H,
+    alternatives: &[Alternative<'_>],
+    deadline: Option<MonoTime>,
+) -> Result<Option<(usize, Skip)>, Stop> {
+    if alternatives.len() < 2 {
+        return Ok(None);
+    }
+    retention_guard_veto(host, alternatives, deadline)
 }
 
 /// The tally of `found` for the tier's order (see the module docs): no
@@ -144,6 +188,7 @@ pub fn reclaim<H: Delete>(
             judge: *judge,
             found,
             checkouts: judge.rules.checkouts,
+            admitted: true,
         }],
         make_writable,
         checker,
@@ -183,6 +228,7 @@ pub fn reclaim_alternatives_checked<H: Delete>(
     deadline: Option<MonoTime>,
     policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
 ) -> Reclaimed {
+    assert!(alternatives.first().is_some_and(|source| source.admitted));
     let mut done = Reclaimed {
         removed_entries: 0,
         removed_bytes: 0,
@@ -226,12 +272,21 @@ fn protocol<H: Delete>(
     // A deadline wins over candidate-local skips, as in the single-source
     // protocol.
     check_deadline(host, deadline, path)?;
+    if let Some((index, skip)) =
+        runtime_retention_guard_veto(host, alternatives, deadline).map_err(ReclaimEnd::Stopped)?
+    {
+        done.selected = Some(index);
+        return Err(skip.into());
+    }
     // Steps 1 and 2: keep markers are checked before the lock. A union's
     // checkout policy depends on predicates rechecked under that lock.
     let mounts = mountinfo(host)?;
     let mut first_skip = None;
     let mut reached = None;
     for (index, alternative) in alternatives.iter().enumerate() {
+        if !alternative.admitted {
+            continue;
+        }
         match alternative
             .judge
             .approach(host, alternative.found, &mounts, deadline)?
@@ -259,12 +314,21 @@ fn protocol<H: Delete>(
     // Step 4: each source term is judged afresh while the same inode is
     // locked. A term whose predicate changed can lose membership without
     // preventing another term from selecting the candidate.
+    if let Some((index, skip)) =
+        runtime_retention_guard_veto(host, alternatives, deadline).map_err(ReclaimEnd::Stopped)?
+    {
+        done.selected = Some(index);
+        return Err(skip.into());
+    }
     let mounts = mountinfo(host)?;
     first_skip = None;
     let mut original_reached = Some(reached);
     let mut selected: Option<(usize, &Found, Reached<H::Fd>, Walked)> = None;
     let mut checkout_refusal = None;
     for (index, alternative) in alternatives.iter().enumerate() {
+        if !alternative.admitted {
+            continue;
+        }
         let found = alternative.found;
         let judge = &alternative.judge;
         let reached = if index == locked_index {
@@ -350,10 +414,16 @@ fn protocol<H: Delete>(
         if let Some(app_lock) = &judge.find.app_not_running {
             super::app::check(host, &found.root, app_lock, deadline)
                 .map_err(NotDeleted::Stopped)?
-                .map_err(NotDeleted::Skipped)
-        } else {
-            Ok(())
+                .map_err(NotDeleted::Skipped)?;
         }
+        if let Some((guard_index, skip)) =
+            runtime_retention_guard_veto(host, alternatives, deadline)
+                .map_err(NotDeleted::Stopped)?
+        {
+            done.selected = Some(guard_index);
+            return Err(NotDeleted::Skipped(skip));
+        }
+        Ok(())
     }) {
         Ok(deletion) => deletion,
         Err(NotDeleted::Skipped(skip)) => {

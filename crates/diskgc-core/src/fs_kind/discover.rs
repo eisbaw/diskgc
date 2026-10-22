@@ -72,6 +72,9 @@ pub struct Discovery {
     /// discovery already (a mount point or a mount inside, never looked
     /// into; an identity the kernel does not report).
     pub candidates: Vec<(PathBuf, Result<Found, Skip>)>,
+    /// Structural matches of a guarding union source, recorded before
+    /// source-owned evidence or anchors decide action admission.
+    pub guard_candidates: Vec<Found>,
     /// Roots and directories on the way that could not be read or must not
     /// be (a missing root, a root on a network filesystem or reached through
     /// a symlink, an unreadable directory, a candidate whose own `where`
@@ -99,7 +102,29 @@ pub fn discover<H: Host>(
     deadline: Option<MonoTime>,
 ) -> (Discovery, Option<Stop>) {
     let mut out = Discovery::default();
-    let stopped = discover_into(host, roots, find, deadline, &mut out).err();
+    let stopped = discover_into(host, roots, find, deadline, false, &mut out).err();
+    (out, stopped)
+}
+
+/// Discover admitted candidates and structural matches of any union term
+/// with positive retention guards. The latter includes guards from term
+/// filters even when source-owned evidence rejects action admission.
+pub fn discover_union<H: Host>(
+    host: &H,
+    roots: &[PathBuf],
+    find: &Find,
+    deadline: Option<MonoTime>,
+) -> (Discovery, Option<Stop>) {
+    let mut out = Discovery::default();
+    let stopped = discover_into(
+        host,
+        roots,
+        find,
+        deadline,
+        find.has_retention_guard(),
+        &mut out,
+    )
+    .err();
     (out, stopped)
 }
 
@@ -108,6 +133,7 @@ fn discover_into<H: Host>(
     roots: &[PathBuf],
     find: &Find,
     deadline: Option<MonoTime>,
+    record_structural: bool,
     out: &mut Discovery,
 ) -> Result<(), Stop> {
     let mounts = host.mountinfo().map_err(|error| Stop::Failed {
@@ -161,6 +187,7 @@ fn discover_into<H: Host>(
             find,
             mounts: &mounts,
             deadline,
+            record_structural,
             out,
             seen: &mut seen,
         };
@@ -210,6 +237,7 @@ struct Walk<'a, H: Host> {
     find: &'a Find,
     mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
+    record_structural: bool,
     out: &'a mut Discovery,
     seen: &'a mut HashSet<DevIno>,
 }
@@ -416,6 +444,14 @@ impl<H: Host> Walk<'_, H> {
         if let Some(skip) = mounted_at_or_inside(self.mounts, at) {
             self.out.candidates.push((at.to_owned(), Err(skip)));
             return Ok(true);
+        }
+        if self.record_structural {
+            self.out.guard_candidates.push(Found {
+                root: self.root.to_owned(),
+                path: at.to_owned(),
+                identity,
+                source_evidence: None,
+            });
         }
         match source_where(
             self.host,

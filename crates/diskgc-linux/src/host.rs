@@ -3945,7 +3945,13 @@ mod tests {
             .check(&used_candidate, &record)
             .expect_err("a held file makes its candidate in use");
         assert_eq!(skip.reason, Reason::InUse, "{skip}");
-        if scan.unreadable().iter().all(|u| u.excuse.is_some()) {
+        if let Some(why) = scan.blocked() {
+            // Host process churn can exhaust the bounded listing. That
+            // correctly blocks every candidate, but has no holder-specific
+            // attribution even when every unreadable process was excused.
+            assert_eq!(skip.path, used, "{skip}");
+            assert_eq!(skip.detail, why, "{skip}");
+        } else {
             assert!(
                 skip.detail.starts_with(&format!("pid {} ", holder.pid())),
                 "{skip}"

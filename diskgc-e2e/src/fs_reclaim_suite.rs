@@ -113,6 +113,28 @@ profiles:
     examples: {match: [/tmp/mixed-case/.git/cache-file]}
 "#;
 
+const FS_UNION_RETENTION_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: union-retention-delete-open
+    find: {roots: [/tmp], paths: [union-retention-delete/releases/*], type: dir}
+    action: delete
+    examples: {match: [/tmp/union-retention-delete/releases/v1]}
+  - name: union-retention-delete-guard
+    find: {roots: [/tmp], paths: [union-retention-delete/releases/*], type: dir}
+    where: {has: CACHEDIR.TAG, protect_parent_link: current}
+    action: delete
+    examples: {match: [/tmp/union-retention-delete/releases/v1]}
+  - name: union-retention-command-open
+    find: {roots: [/tmp], paths: [union-retention-command/releases/*], type: dir}
+    action: {command: [/home/tester/union-retention-cleaner, "{path}"]}
+    examples: {match: [/tmp/union-retention-command/releases/v1]}
+  - name: union-retention-command-guard
+    find: {roots: [/tmp], paths: [union-retention-command/releases/*], type: dir}
+    where: {has: CACHEDIR.TAG, protect_parent_link: current}
+    action: {command: [/home/tester/union-retention-cleaner, "{path}"]}
+    examples: {match: [/tmp/union-retention-command/releases/v1]}
+"#;
+
 const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
 profiles:
   - name: cache-exclusion-test
@@ -936,6 +958,89 @@ pub fn fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout(ctx: &Ctx) 
         "shared checkout was deleted"
     );
     verdict.assert_clean()
+}
+
+/// Both delete and command unions protect an installed release even when
+/// source-owned `where.has` rejects that source for action admission.
+pub fn fs_union_retention_guards_veto_shared_candidates(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        FS_UNION_RETENTION_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    ctx.home.write_file(
+        "union-retention-cleaner",
+        b"#!/bin/sh\nset -eu\n/bin/rm -rf -- \"$DISKGC_PATH\"\n",
+        0o755,
+        TESTER,
+    )?;
+    for action in ["delete", "command"] {
+        let root = format!("union-retention-{action}");
+        let retained = s.mkdirs(&format!("{root}/releases/v1"), 0o700, TESTER)?;
+        s.write_file(
+            &format!("{root}/releases/v1/payload"),
+            b"installed",
+            0o600,
+            TESTER,
+        )?;
+        s.symlink(&format!("{root}/current"), Path::new("releases/v1"))?;
+        for guarded_first in [false, true] {
+            let eligible = s.mkdir(&format!("{root}/releases/v2"), 0o700, TESTER)?;
+            s.write_file(
+                &format!("{root}/releases/v2/payload"),
+                b"obsolete",
+                0o600,
+                TESTER,
+            )?;
+            let open = format!("profile:union-retention-{action}-open");
+            let guarded = format!("profile:union-retention-{action}-guard");
+            let selection = if guarded_first {
+                format!("{guarded} || {open}")
+            } else {
+                format!("{open} || {guarded}")
+            };
+            let oracle = Oracle::arm(Fixture::new().eligible(eligible.clone()))?;
+            let plan = ensure_tmp(
+                ctx,
+                &["--dry-run", "--min-free", "100%", "--select", &selection],
+            )?;
+            let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", &selection])?;
+            let verdict = oracle.judge_runs(&[&plan, &run])?;
+            plan.expect_code(0)?;
+            run.expect_code(1)?;
+            let planned = report(&plan)?;
+            ensure!(
+                planned["plan"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().any(|entry| {
+                        entry["candidate"] == retained.display().to_string()
+                            && entry["reason"] == "linked_current"
+                    })),
+                "{action}, guarded first {guarded_first}: {planned}"
+            );
+            let (skipped, actions) = outcome(&report(&run)?);
+            ensure!(
+                skipped
+                    .get(retained.to_str().ok_or("retained path")?)
+                    .map(String::as_str)
+                    == Some("linked_current"),
+                "{action}, guarded first {guarded_first}: {skipped:?}"
+            );
+            ensure!(
+                actions == [eligible.display().to_string()],
+                "{action}, guarded first {guarded_first}: {actions:?}"
+            );
+            ensure!(
+                retained.join("payload").exists(),
+                "installed version removed"
+            );
+            ensure!(!eligible.exists(), "obsolete version remains");
+            verdict.assert_clean()?;
+        }
+    }
+    Ok(())
 }
 
 /// A real command union uses one checked child per inode, carries the

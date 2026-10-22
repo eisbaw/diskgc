@@ -89,6 +89,14 @@ impl Facts for TreeFacts {
         Ok(self.source[Self::source_index(profile)][self.index(candidate)])
     }
 
+    fn source_discovered(&self, profile: &str, candidate: &Path) -> Result<bool, Self::Error> {
+        self.source_matches(profile, candidate)
+    }
+
+    fn retention_guard_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(FilterVerdict::Matches)
+    }
+
     fn filter_verdict(&self, filter: &str, candidate: &Path) -> Result<FilterVerdict, Self::Error> {
         Ok(self.filters[Self::filter_index(filter)][self.index(candidate)])
     }
@@ -294,6 +302,98 @@ proptest! {
     }
 }
 
+struct GuardCatalog;
+
+impl Catalog for GuardCatalog {
+    type Action = &'static str;
+
+    fn lookup(&self, name: &str) -> Option<Entry<'_, Self::Action>> {
+        static DELETE: &str = "delete";
+        match name {
+            "a" | "b" => Some(Entry::Source {
+                kind: Kind::Fs,
+                action: &DELETE,
+            }),
+            "f" => Some(Entry::Filter {
+                predicates: vec![PredicateName::KeepNewest],
+            }),
+            "g" => Some(Entry::Filter {
+                predicates: vec![PredicateName::Has],
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Source `b` was discovered but its evidence no longer admits it. Source
+/// `a` admits the inode; the guard from `b` or its positive filter must be
+/// checked before the union can use `a`.
+struct GuardFacts {
+    discovered_b: bool,
+    source_guard: bool,
+    guard: FilterVerdict,
+}
+
+impl Facts for GuardFacts {
+    type Error = std::convert::Infallible;
+
+    fn source_matches(&self, profile: &str, _: &Path) -> Result<bool, Self::Error> {
+        Ok(profile == "a")
+    }
+
+    fn source_discovered(&self, profile: &str, _: &Path) -> Result<bool, Self::Error> {
+        Ok(profile == "a" || self.discovered_b)
+    }
+
+    fn retention_guard_verdict(&self, name: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(
+            if (self.source_guard && name == "b") || (!self.source_guard && name == "f") {
+                self.guard
+            } else {
+                FilterVerdict::Matches
+            },
+        )
+    }
+
+    fn filter_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(FilterVerdict::DoesNotMatch)
+    }
+
+    fn profile_overlaps(&self, _: &str, _: &Path) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    fn protection_overlaps(&self, _: &Protection, _: &Path) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+}
+
+proptest! {
+    #[test]
+    fn guard_veto_is_order_independent_even_when_guarded_term_fails_evidence(
+        discovered_b in any::<bool>(),
+        source_guard in any::<bool>(),
+        verdict in 0u8..3,
+    ) {
+        let guard = match verdict {
+            0 => FilterVerdict::Matches,
+            1 => FilterVerdict::DoesNotMatch,
+            _ => FilterVerdict::Unknown,
+        };
+        let facts = GuardFacts { discovered_b, source_guard, guard };
+        let guarded = "(profile:b && filter:f && filter:g)";
+        let path = Path::new("/tmp/shared");
+        let expected = !discovered_b || guard == FilterVerdict::Matches;
+        for expression in [
+            format!("profile:a || {guarded}"),
+            format!("{guarded} || profile:a"),
+        ] {
+            let checked = compile(&expression, &GuardCatalog).unwrap();
+            prop_assert_eq!(eligible(&checked, path, &[], &facts).unwrap(), expected);
+        }
+    }
+}
+
 #[test]
 fn unknown_filter_passes_neither_polarity() {
     let mut facts = arb_sample();
@@ -353,6 +453,14 @@ impl Facts for PatternFacts {
 
     fn source_matches(&self, _: &str, candidate: &Path) -> Result<bool, Self::Error> {
         Ok(self.source.iter().any(|p| p == candidate))
+    }
+
+    fn source_discovered(&self, profile: &str, candidate: &Path) -> Result<bool, Self::Error> {
+        self.source_matches(profile, candidate)
+    }
+
+    fn retention_guard_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(FilterVerdict::Matches)
     }
 
     fn filter_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
@@ -429,6 +537,14 @@ impl Facts for DistinctRootFacts {
         Ok(true)
     }
 
+    fn source_discovered(&self, _: &str, _: &Path) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    fn retention_guard_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(FilterVerdict::Matches)
+    }
+
     fn filter_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
         unreachable!("no filters in this selection")
     }
@@ -481,6 +597,14 @@ impl Facts for FailedProtection {
 
     fn source_matches(&self, _: &str, _: &Path) -> Result<bool, Self::Error> {
         Ok(true)
+    }
+
+    fn source_discovered(&self, _: &str, _: &Path) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    fn retention_guard_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {
+        Ok(FilterVerdict::Matches)
     }
 
     fn filter_verdict(&self, _: &str, _: &Path) -> Result<FilterVerdict, Self::Error> {

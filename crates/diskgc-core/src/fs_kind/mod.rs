@@ -44,13 +44,13 @@ pub use command::{
     CommandResult, CommandSource, CommandSpec, run_command, run_command_alternatives_checked,
     run_command_checked,
 };
-pub use discover::{Discovery, Found, discover};
+pub use discover::{Discovery, Found, discover, discover_union};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
 pub use plan::{Planned, judge_one, plan};
 pub use reclaim::{
-    Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked, tally,
-    tally_for_union,
+    Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked,
+    retention_guard_veto, tally, tally_for_union,
 };
 pub use source_anchor::SourceEvidence;
 
@@ -112,6 +112,16 @@ pub struct NegatedMixedFilter {
 }
 
 impl Find {
+    /// Positive version and current-installation rules protect an inode
+    /// independently of the evidence that admits a union term.
+    pub fn has_retention_guard(&self) -> bool {
+        self.keep_newest.is_some()
+            || !self.protect_links.is_empty()
+            || !self.protect_link_dirs.is_empty()
+            || self.protect_parent_link.is_some()
+            || self.protect_cursor_extensions.is_some()
+    }
+
     /// Conjoin a positive version filter. More retention wins when two
     /// `keep_newest` rules occur; conflicting grouping or parent-link
     /// scopes are errors rather than silently changing either rule.

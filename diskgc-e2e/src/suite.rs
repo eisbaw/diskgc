@@ -882,6 +882,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_union_checkout_aliases_and_mixed_roots,
     },
     Test {
+        name: "fs_union_retention_guards_veto_shared_candidates",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_union_retention_guards_veto_shared_candidates,
+    },
+    Test {
         name: "fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout",
         tier: Tier::Fast,
         expect: Expect::Pass,

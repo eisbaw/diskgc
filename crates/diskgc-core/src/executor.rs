@@ -2666,12 +2666,81 @@ fn plan_fs<H: Host>(
     planned
 }
 
-/// One inode found by one or more positive filesystem sources. Retaining
-/// every contributing `Found` keeps each root and source predicate available
-/// for the lock-time recheck. Discovery order chooses the report path.
+/// One inode admitted by at least one filesystem source. `found_by` supplies
+/// action choices; `guard_by` also retains structural matches whose source
+/// evidence failed, so each positive guard has its own root and path for
+/// lock-time rechecks. Discovery order chooses the report path.
 struct FsUnionCandidate {
     identity: Identity,
     found_by: Vec<(usize, fs_kind::Found)>,
+    guard_by: Vec<(usize, fs_kind::Found)>,
+    invalid: bool,
+}
+
+impl FsUnionCandidate {
+    fn contributors(&self) -> Vec<(usize, &fs_kind::Found, bool)> {
+        let mut contributors: Vec<_> = self
+            .found_by
+            .iter()
+            .map(|(index, found)| (*index, found, true))
+            .collect();
+        for (index, found) in &self.guard_by {
+            if !self.found_by.iter().any(|(admitted_index, admitted)| {
+                admitted_index == index
+                    && admitted.root == found.root
+                    && admitted.path == found.path
+            }) {
+                contributors.push((*index, found, false));
+            }
+        }
+        contributors
+    }
+}
+
+fn merge_fs_union_found(
+    candidates: &mut Vec<FsUnionCandidate>,
+    by_inode: &mut HashMap<DevIno, usize>,
+    refused: &mut Vec<(usize, Skip)>,
+    source_index: usize,
+    found: fs_kind::Found,
+    admitted: bool,
+) {
+    if let Some(&index) = by_inode.get(&found.identity.id) {
+        let candidate = &mut candidates[index];
+        if candidate.identity != found.identity {
+            refused.push((
+                source_index,
+                Skip::new(
+                    Reason::Changed,
+                    found.path,
+                    "the inode changed identity between source discoveries",
+                ),
+            ));
+            candidate.invalid = true;
+            candidate.found_by.clear();
+            candidate.guard_by.clear();
+        } else if !candidate.invalid {
+            if admitted {
+                candidate.found_by.push((source_index, found));
+            } else {
+                candidate.guard_by.push((source_index, found));
+            }
+        }
+    } else {
+        by_inode.insert(found.identity.id, candidates.len());
+        let mut candidate = FsUnionCandidate {
+            identity: found.identity,
+            found_by: Vec::new(),
+            guard_by: Vec::new(),
+            invalid: false,
+        };
+        if admitted {
+            candidate.found_by.push((source_index, found));
+        } else {
+            candidate.guard_by.push((source_index, found));
+        }
+        candidates.push(candidate);
+    }
 }
 
 fn discover_fs_union<H: Host>(
@@ -2683,14 +2752,25 @@ fn discover_fs_union<H: Host>(
     let mut by_inode: HashMap<DevIno, usize> = HashMap::new();
     let mut refused = Vec::new();
     for (source_index, source) in sources.iter().enumerate() {
-        let (discovery, stopped) = fs_kind::discover(host, source.roots, source.find, deadline);
+        let (discovery, stopped) =
+            fs_kind::discover_union(host, source.roots, source.find, deadline);
+        for found in discovery.guard_candidates {
+            merge_fs_union_found(
+                &mut candidates,
+                &mut by_inode,
+                &mut refused,
+                source_index,
+                found,
+                false,
+            );
+        }
         refused.extend(
             discovery
                 .refused
                 .into_iter()
                 .map(|skip| (source_index, skip)),
         );
-        for (path, found) in discovery.candidates {
+        for (_, found) in discovery.candidates {
             let found = match found {
                 Ok(found) => found,
                 Err(skip) => {
@@ -2698,35 +2778,20 @@ fn discover_fs_union<H: Host>(
                     continue;
                 }
             };
-            if let Some(&index) = by_inode.get(&found.identity.id) {
-                if candidates[index].identity != found.identity {
-                    refused.push((
-                        source_index,
-                        Skip::new(
-                            Reason::Changed,
-                            path,
-                            "the inode changed identity between source discoveries",
-                        ),
-                    ));
-                    // Neither old nor new identity is safe to reclaim from
-                    // this incomplete view of the union.
-                    candidates[index].found_by.clear();
-                } else if !candidates[index].found_by.is_empty() {
-                    candidates[index].found_by.push((source_index, found));
-                }
-            } else {
-                by_inode.insert(found.identity.id, candidates.len());
-                candidates.push(FsUnionCandidate {
-                    identity: found.identity,
-                    found_by: vec![(source_index, found)],
-                });
-            }
+            merge_fs_union_found(
+                &mut candidates,
+                &mut by_inode,
+                &mut refused,
+                source_index,
+                found,
+                true,
+            );
         }
         if let Some(stop) = stopped {
             return (candidates, refused, Some(stop));
         }
     }
-    candidates.retain(|candidate| !candidate.found_by.is_empty());
+    candidates.retain(|candidate| !candidate.invalid && !candidate.found_by.is_empty());
     (candidates, refused, None)
 }
 
@@ -2899,6 +2964,42 @@ fn union_checkout_path<'a>(
         })
 }
 
+/// Retention belongs to every source that discovered this inode, regardless
+/// of which source's evidence eventually admits it. Checkout policy remains
+/// a separate decision over admitted terms only.
+fn union_guard_veto<H: Host>(
+    host: &H,
+    candidate: &FsUnionCandidate,
+    sources: &[FsUnionSourceRef<'_>],
+    rules: &Rules<'_>,
+    dev: Dev,
+    deadline: Option<MonoTime>,
+) -> Result<Option<(usize, Skip)>, Stop> {
+    let evaluation_rules = Rules {
+        checkouts: Checkouts::Allow,
+        ..*rules
+    };
+    let alternatives: Vec<_> = candidate
+        .guard_by
+        .iter()
+        .map(|(index, found)| {
+            let source = &sources[*index];
+            fs_kind::Alternative {
+                judge: fs_kind::Judge {
+                    find: source.find,
+                    rules: &evaluation_rules,
+                    idle: source.idle,
+                    dev,
+                },
+                found,
+                checkouts: source.checkouts,
+                admitted: false,
+            }
+        })
+        .collect();
+    fs_kind::retention_guard_veto(host, &alternatives, deadline)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plan_fs_union<H: Host>(
     host: &H,
@@ -2958,6 +3059,22 @@ fn plan_fs_union<H: Host>(
     for candidate in &candidates {
         if host.interrupted().is_some() {
             return planned;
+        }
+        match union_guard_veto(host, candidate, &sources, rules, dev, deadline) {
+            Ok(Some((index, skip))) => {
+                let source_index = candidate.guard_by[index].0;
+                log_skip(log, tier, &skip);
+                let mut entry = plan_entry(tier, &skip.path, Some(skip.reason.as_str()), None);
+                entry.profile = sources[source_index].profile.to_owned();
+                entry.checkouts = sources[source_index].checkouts;
+                planned.skipped.push(entry);
+                continue;
+            }
+            Ok(None) => {}
+            Err(stop) => {
+                planned.stopped = Some(stop);
+                return planned;
+            }
         }
         let evaluation_rules = Rules {
             checkouts: Checkouts::Allow,
@@ -4231,6 +4348,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             judge,
                             found,
                             checkouts: judge.rules.checkouts,
+                            admitted: true,
                         }],
                         *make_writable,
                         checker,
@@ -4389,6 +4507,33 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             if !untallied.is_empty() {
                 untallied.push(candidate);
                 continue;
+            }
+            let started = self.host.now();
+            let guard = union_guard_veto(
+                self.host,
+                candidate,
+                &sources,
+                base_rules,
+                self.measured.dev,
+                tally_until,
+            );
+            self.record_overrun("retention", path, started, self.host.now());
+            if self.past_deadline() {
+                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
+            }
+            match guard {
+                Ok(Some((index, skip))) => {
+                    let source_index = candidate.guard_by[index].0;
+                    self.skip_as(&skip.path, sources[source_index].profile, &skip);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(Stop::DeadlinePassed { .. }) if !self.past_deadline() => {
+                    self.budget_spent(path);
+                    untallied.push(candidate);
+                    continue;
+                }
+                Err(stop) => return self.stop(&stop),
             }
             let evaluation_rules = Rules {
                 checkouts: Checkouts::Allow,
@@ -4559,10 +4704,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 checkouts: Checkouts::Allow,
                 ..*base_rules
             };
-            let alternatives: Vec<_> = candidate
-                .found_by
+            let contributors = candidate.contributors();
+            let alternatives: Vec<_> = contributors
                 .iter()
-                .map(|(index, found)| {
+                .map(|(index, found, admitted)| {
                     let source = &sources[*index];
                     fs_kind::Alternative {
                         judge: fs_kind::Judge {
@@ -4573,6 +4718,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         },
                         found,
                         checkouts: source.checkouts,
+                        admitted: *admitted,
                     }
                 })
                 .collect();
@@ -4590,7 +4736,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         checker,
                         self.deadline,
                         &mut |selected, path| {
-                            let source = &sources[candidate.found_by[selected].0];
+                            let source = &sources[contributors[selected].0];
                             policy_skip(
                                 self.host,
                                 &self.tier.protections,
@@ -4603,10 +4749,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     (done.selected, done.removed_entries, false, done.end)
                 }
                 Action::Command { argv, cwd } => {
-                    let command_sources: Vec<_> = candidate
-                        .found_by
+                    let command_sources: Vec<_> = contributors
                         .iter()
-                        .map(|(index, _)| {
+                        .map(|(index, _, _)| {
                             let profile = sources[*index].profile;
                             fs_kind::CommandSource {
                                 profile,
@@ -4628,7 +4773,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             deadline: self.deadline,
                         },
                         &mut |selected, path| {
-                            let source = &sources[candidate.found_by[selected].0];
+                            let source = &sources[contributors[selected].0];
                             policy_skip(
                                 self.host,
                                 &self.tier.protections,
@@ -4643,10 +4788,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 _ => unreachable!("filesystem unions admit delete or command"),
             };
             let profile = selected
-                .map(|selected| sources[candidate.found_by[selected].0].profile.to_owned())
+                .map(|selected| sources[contributors[selected].0].profile.to_owned())
                 .unwrap_or_else(|| sources[candidate.found_by[0].0].profile.to_owned());
             let reported_path = selected
-                .map(|selected| &candidate.found_by[selected].1.path)
+                .map(|selected| &contributors[selected].1.path)
                 .unwrap_or(path);
             let outcome = Outcome {
                 started,

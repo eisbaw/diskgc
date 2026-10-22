@@ -654,10 +654,21 @@ of positive filesystem sources with exactly the same `delete` or `command`
 action and options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source term that admits it after its filters refuses
-checkouts. It rechecks each term under one candidate lock. In this development
-build, a retention guard in one filesystem union term does not yet veto a
-candidate admitted by another matching term (TASK-111). Such a union can
-remove a candidate that the guarded term would have kept. A command union
+checkouts. A source contributes retention guards when its bound root, included
+path pattern and type match after `find.exclude` and safe mount and identity
+checks. Its own `where`, anchor and term filters govern action admission;
+failing or uncertain source evidence does not erase the raw guard match.
+Every such source applies its positive `keep_newest`, link and
+installed-extension guards to the shared candidate, even when that term's
+evidence, idle or negated-profile checks fail. A protected or unclassifiable
+guard retains the candidate. Tallied candidates are checked before ranking;
+an exhausted tally budget defers that check for untallied candidates until
+reclaim. Every candidate is checked before its action, under the candidate
+lock if it proceeds that far, and immediately before delete or command. A
+guard refusal is attributed to the guarding source. For an admitted candidate,
+term-local evidence and admitted-term checkout policy still decide which source
+supplies the action and report identity. It rechecks each term under one
+candidate lock. A command union
 invokes its shared argv at most once per inode, with `DISKGC_PROFILE` and the
 output prefix of the source selected by that locked recheck. If the final
 policy scan excludes that source before the command starts, the union judges
@@ -788,7 +799,7 @@ Fields (an unknown key anywhere in a profile is a load-time error):
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
-| `where` | filters (at least one predicate); optional on sources | See Predicates. A source’s own predicates narrow it in every term; `!profile:` and `protect` ignore them. A source has no `where.idle_for`; the tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
+| `where` | filters (at least one predicate); optional on sources | See Predicates. A source’s own predicates narrow action admission in every term, but its positive retention guards cover raw `find` matches even when other source predicates fail. `!profile:` and `protect` ignore source `where`. A source has no `where.idle_for`; the tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
 | `action` | kinds `fs` and Docker, required | See Actions. Cargo and Nix kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). With `roots: required`, an optional `root: /absolute/sample/root` pins the supplied root used to check path depth in these examples; without it, any absolute ancestor can supply the root. Config load and `check` reject examples that contradict the path patterns. |

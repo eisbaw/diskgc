@@ -127,6 +127,24 @@ impl Walked {
 }
 
 impl Judge<'_> {
+    /// Check only the positive retention rules of this source. A union
+    /// checks every source that discovered the inode, even when that term's
+    /// evidence, idle filter, negation or checkout policy does not admit it.
+    /// The path is reached afresh so an unclassifiable guard retains data.
+    pub(crate) fn retention_guard<H: Host>(
+        &self,
+        host: &H,
+        found: &Found,
+        mounts: &[MountEntry],
+        deadline: Option<MonoTime>,
+    ) -> Judged<()> {
+        if !self.find.has_retention_guard() {
+            return Ok(Ok(()));
+        }
+        let reached = judged!(self.approach(host, found, mounts, deadline));
+        self.version_where(host, reached.parent(), found, deadline)
+    }
+
     /// Steps 1 and 2 (see the module docs), the approach every use of a
     /// found candidate starts with (the plan, the tally, the reclaim before
     /// its lock): its place under the mount table `mounts`, reached again

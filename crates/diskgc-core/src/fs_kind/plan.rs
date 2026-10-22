@@ -64,6 +64,7 @@ pub fn plan<H: Host>(
         refused,
         duplicates,
         private_tmp,
+        ..
     } = found;
     let mut out = Planned {
         refused,
