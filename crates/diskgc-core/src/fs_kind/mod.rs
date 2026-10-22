@@ -72,6 +72,9 @@ pub struct Find {
     /// Selection filters are judged after discovery and again under the
     /// candidate lock. They must not narrow the source's discovered set.
     pub entry_filters: Vec<EntryFilter>,
+    /// Each negated mixed filter is one conjunction. Its complement is
+    /// evaluated after the walk supplies the newest-change measure.
+    pub negated_mixed_filters: Vec<NegatedMixedFilter>,
     pub app_not_running: Option<std::path::PathBuf>,
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
@@ -93,6 +96,16 @@ pub struct EntryFilter {
     pub entry: String,
     pub has: bool,
     pub negated: bool,
+}
+
+/// A single `!filter:` with entry and idle predicates. Unknown evidence
+/// admits neither this conjunction nor its complement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegatedMixedFilter {
+    pub name: String,
+    pub has: Option<String>,
+    pub has_not: Option<String>,
+    pub idle_for: Option<crate::profile::IdleFor>,
 }
 
 impl Find {
@@ -190,6 +203,7 @@ impl Find {
             has_dir: where_.has_dir.clone(),
             has_not: where_.has_not.clone(),
             entry_filters: Vec::new(),
+            negated_mixed_filters: Vec::new(),
             app_not_running: where_
                 .app_not_running
                 .as_ref()

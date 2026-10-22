@@ -48,7 +48,7 @@ use crate::docker_backend::{self, Binding, Bound, Storage};
 use crate::engine::{
     Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below, may_be_networked,
 };
-use crate::fs_kind::{self, EntryFilter, Find};
+use crate::fs_kind::{self, EntryFilter, Find, NegatedMixedFilter};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno, Host, HostError,
     MonoTime, MountEntry, Space, Timestamp,
@@ -480,10 +480,9 @@ impl Tier {
                 continue;
             }
             // A positive filter is a conjunction: its entry checks and
-            // idle requirement are already judged by the same candidate
-            // path, including the locked reclaim pass. A negated filter
-            // complements the *whole* conjunction, so only the existing
-            // single-entry case can be represented by EntryFilter.
+            // idle requirement are judged by the same candidate path.
+            // A negated mixed filter complements the entire conjunction,
+            // using the walk's newest-change measure under the lock.
             let entry_count =
                 usize::from(where_.has.is_some()) + usize::from(where_.has_not.is_some());
             let entry_and_idle_only = where_.predicates().iter().all(|predicate| {
@@ -494,14 +493,19 @@ impl Tier {
                         | crate::kind::PredicateName::IdleFor
                 )
             });
-            if matches!(kind, SourceKind::Fs(_))
-                && entry_count > 0
-                && entry_and_idle_only
-                && (!is_negated || (entry_count == 1 && where_.idle_for.is_none()))
-            {
+            if matches!(kind, SourceKind::Fs(_)) && entry_count > 0 && entry_and_idle_only {
                 let SourceKind::Fs(find) = &mut kind else {
                     unreachable!()
                 };
+                if is_negated && (entry_count > 1 || where_.idle_for.is_some()) {
+                    find.negated_mixed_filters.push(NegatedMixedFilter {
+                        name: name.clone(),
+                        has: where_.has.clone(),
+                        has_not: where_.has_not.clone(),
+                        idle_for: where_.idle_for,
+                    });
+                    continue;
+                }
                 for (entry, has) in [(&where_.has, true), (&where_.has_not, false)] {
                     if let Some(entry) = entry {
                         find.entry_filters.push(EntryFilter {

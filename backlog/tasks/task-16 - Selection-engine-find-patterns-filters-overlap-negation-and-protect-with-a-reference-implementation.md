@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 03:52'
+updated_date: '2026-10-22 04:21'
 labels:
   - wave-2
   - irreversible
@@ -92,6 +92,10 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 mixed positive entry-filter increment: a filesystem filter profile may conjoin has, has_not and idle_for; Tier::select keeps both entry predicates and the idle bound, and plan/tally/reclaim use the existing shared judgement with locked rechecks. Mixed !filter remains an explicit task-16 usage error because it must complement the entire conjunction. ModelHost dry-run cases cover all three failed predicates; lock-time cases cover added forbidden marker, removed required marker and a fresh child invalidating idle. Focused model tests passed and disposable Podman real-binary deletion-oracle case passed 1/1. Full just e2e and parallel QA/MPED review remain for parent; TASK-16 AC/DoD unchanged.
 
 2026-10-22 mixed-filter union review follow-up: positive mixed has/has_not/idle_for filter is covered as a refusing term beside an allowing term in both union orders. ModelHost dry-run and prequeue reclaim agree: only the old tagged unmarked checkout is vetoed before flock; recent, untagged and .keep-marked candidates are admitted by the allowing term. A separate event creates the required tag under flock and advances the model clock; locked recheck then admits the refusing term and retains the checkout. Focused mixed_filter_union tests pass 2/2. Correction to the preceding note: a single-source ordering tally intentionally omits idle; union prequeue tally evaluates each term including idle so checkout policy uses only admitted terms.
+
+2026-10-22 negated mixed filesystem filter increment (pending parent full gate/review): !filter with has, has_not and optional idle_for now complements the complete conjunction. A typed grouped filter is evaluated after the filesystem walk supplies newest-change evidence, in dry-run, single-source ordering tally, union prequeue tally, and locked reclaim. Unknown entry type or age admits neither polarity; known full match skips filtered, unknown age reports unsupported_fs or future_time. Focused ModelHost regressions cover each failed predicate, both union orders and checkout veto before queue, three lock-time changes, and unknown/future age. Disposable Podman real-binary deletion-oracle case passed 1/1 before helper refactor; Clippy passed. TASK-16 AC/DoD remain open for the full random-profile reference property and remaining runtime combinations. Parent must run exact just e2e plus parallel QA/MPED before commit.
+
+2026-10-22 final MPED file-candidate follow-up (pending parent exact gate/review): both shared filesystem filter paths now use a child-lookup fd only when the discovered candidate identity is Directory. A regular-file candidate has known absence of child entries even if a caller supplies a held fd. ModelHost dry-run and reclaim regression covers positive has_not, !has, and negated mixed filter on a file: all three select and delete exactly that file; 1/1 focused test passed. The current directory-only lock protocol normally supplies no locked fd for a file, so this regression protects the intended semantics while the explicit identity guard closes the reviewed edge case. Focused negated-mixed tests 5/5, both fmt checks and diff check passed. AC/DoD unchanged; parent full e2e and parallel QA/MPED still required.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

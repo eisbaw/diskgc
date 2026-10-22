@@ -660,12 +660,15 @@ Filesystem and Cargo sources can use negated profiles. Filesystem terms can
 use either polarity of a filter with a single `has` or `has_not` predicate.
 Positive filesystem filters may also combine `has`, `has_not`, and `idle_for`
 in one profile: all predicates must pass. The entry checks and idle measure
-are repeated under the candidate lock. Negated mixed filters remain deferred
-because their verdict complements the whole profile, not each predicate.
-It refuses
-a nonempty `ipc: live-only` until its run-time check is implemented (tasks 16
-and 21). Root mode
-requires a protected config with `owners:`, resolves those owners before
+are repeated under the candidate lock. A negated filesystem filter may
+combine these predicates too: it admits a candidate when the complete
+conjunction is known false, and excludes it as `filtered` when all predicates
+match. Unknown entry type or age admits neither polarity, even if another
+predicate is known false. Its entry checks and idle measure are repeated
+under the candidate lock; in a union, only admitted terms can impose their
+checkout policy. The development build refuses a nonempty `ipc: live-only`
+until its run-time check is implemented (tasks 16 and 21). Root mode requires
+a protected config with `owners:`, resolves those owners before
 planning, and refuses generic command, Docker prune and `{uid}` sources.
 It never ignores a safety setting.
 

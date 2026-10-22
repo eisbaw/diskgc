@@ -1948,11 +1948,29 @@ fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
     nothing_locked_or_deleted(&host);
 
     let negated = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
-    let error = Tier::select(negated, &library(), None, 1000).expect_err(negated);
-    assert!(
-        error.contains("unsupported predicates") && error.contains("task-16"),
-        "{error}"
-    );
+    let tier = Tier::select(negated, &library(), None, 1000).expect(negated);
+    let SourceKind::Fs(find) = tier.source else {
+        panic!("filesystem source");
+    };
+    assert_eq!(find.negated_mixed_filters.len(), 1);
+    let negated_host = common::host(&yaml(tree));
+    let report = dry_run(&negated_host, &request(negated, &[], "/tmp"));
+    for (name, reason) in [
+        ("good", Some("filtered")),
+        ("new", None),
+        ("untagged", None),
+        ("kept", None),
+    ] {
+        let path = format!("/tmp/pytest-of-{name}");
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+            "{path}: {report:#?}"
+        );
+    }
+    nothing_locked_or_deleted(&negated_host);
 }
 
 #[test]
@@ -1962,6 +1980,10 @@ fn unknown_marker_type_passes_neither_source_has_not_nor_term_has_not() {
         ("profile:unmounted", "/tmp/pytest-of-a/mounted"),
         (
             "profile:pytest-of-dir && filter:has-not-tag",
+            "/tmp/pytest-of-a/CACHEDIR.TAG",
+        ),
+        (
+            "profile:pytest-of-dir && !filter:tagged-idle-unkept",
             "/tmp/pytest-of-a/CACHEDIR.TAG",
         ),
     ] {
@@ -1982,6 +2004,25 @@ fn unknown_marker_type_passes_neither_source_has_not_nor_term_has_not() {
         );
         nothing_locked_or_deleted(&host);
     }
+}
+
+#[test]
+fn negated_mixed_filter_unknown_second_entry_type_is_not_a_complement_match() {
+    let tree =
+        "  /tmp/pytest-of-a: {.: {}, CACHEDIR.TAG: {size: 1K}, .keep: {size: 1K}, f: {size: 1M}}\n";
+    let host = host(&yaml(tree));
+    host.omit_statx_type_at(PathBuf::from("/tmp/pytest-of-a/.keep"));
+    let selection = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
+    let report = dry_run(&host, &request(selection, &[], "/tmp"));
+    assert!(
+        report
+            .plan
+            .iter()
+            .any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
+                && entry.reason == Some("unsupported_fs")),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
 }
 
 /// A dry run reuses one process scan for later candidates for up to

@@ -199,6 +199,14 @@ impl Judge<'_> {
         }
         judged!(self.version_where(host, reached.parent(), found, deadline));
         let mut walked = judged!(self.walk(host, candidate_view.candidate, found, idle, deadline));
+        judged!(self.negated_mixed_filters(
+            host,
+            reached.parent(),
+            candidate_view.locked_fd,
+            found,
+            walked.newest_change,
+            deadline
+        ));
         walked.source_evidence = source_evidence;
         Ok(Ok(walked))
     }
@@ -328,59 +336,21 @@ impl Judge<'_> {
         }
         // A file has no child entries. These are known predicate verdicts,
         // matching the source `has` / `has_not` semantics.
-        let opened;
+        let opened = judged!(open_selection_dir(host, parent, locked_fd, found, deadline));
         let candidate_fd = if found.identity.file_type == FileType::Directory {
-            if let Some(fd) = locked_fd {
-                Some(fd)
-            } else {
-                check_deadline(host, deadline, &found.path)?;
-                let name = file_name(found)?;
-                opened = match open_beneath(
-                    host,
-                    &parent.fd,
-                    parent.mount.id,
-                    Path::new(name),
-                    Access::Path,
-                    Want::Directory,
-                ) {
-                    Ok((fd, _)) => fd,
-                    Err(ResolveError::Host(error)) => {
-                        return Ok(Err(skip_or_stop(found.path.clone(), "open", &error)?));
-                    }
-                    Err(error) => {
-                        return Ok(Err(Skip::new(
-                            Reason::Changed,
-                            found.path.clone(),
-                            format!("cannot inspect selection filters: {error}"),
-                        )));
-                    }
-                };
-                Some(&opened)
-            }
+            locked_fd.or(opened.as_ref())
         } else {
             None
         };
         for filter in &self.find.entry_filters {
-            let regular = if let Some(fd) = candidate_fd {
-                let path = found.path.join(&filter.entry);
-                check_deadline(host, deadline, &path)?;
-                match host.statx(Base::Dir(fd), Path::new(&filter.entry)) {
-                    Ok(stat) => match stat.file_type {
-                        Some(file_type) => file_type == FileType::Regular,
-                        None => {
-                            return Ok(Err(Skip::new(
-                                Reason::UnsupportedFs,
-                                path,
-                                format!("filter:{}: kernel did not report entry type", filter.name),
-                            )));
-                        }
-                    },
-                    Err(error) if error.is(Errno::ENOENT) => false,
-                    Err(error) => return Ok(Err(skip_or_stop(path, "stat", &error)?)),
-                }
-            } else {
-                false
-            };
+            let regular = judged!(selection_regular_child(
+                host,
+                candidate_fd,
+                found,
+                &filter.entry,
+                &filter.name,
+                deadline
+            ));
             let matches = if filter.has { regular } else { !regular };
             if matches == filter.negated {
                 return Ok(Err(Skip::new(
@@ -391,6 +361,73 @@ impl Judge<'_> {
                         if filter.negated { "!" } else { "" },
                         filter.name
                     ),
+                )));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Complement each complete filter conjunction. Every predicate must
+    /// have a known verdict before a mismatch can admit the candidate.
+    /// This also runs in the single-source ordering tally: unlike the tier's
+    /// positive idle bound, a mixed complement defines membership itself.
+    fn negated_mixed_filters<H: Host>(
+        &self,
+        host: &H,
+        parent: &Resolved<H::Fd>,
+        locked_fd: Option<&H::Fd>,
+        found: &Found,
+        newest: Option<Timestamp>,
+        deadline: Option<MonoTime>,
+    ) -> Judged<()> {
+        if self.find.negated_mixed_filters.is_empty() {
+            return Ok(Ok(()));
+        }
+        let opened = judged!(open_selection_dir(host, parent, locked_fd, found, deadline));
+        let candidate_fd = if found.identity.file_type == FileType::Directory {
+            locked_fd.or(opened.as_ref())
+        } else {
+            None
+        };
+        for filter in &self.find.negated_mixed_filters {
+            let mut matches = true;
+            for (entry, requires_regular) in [(&filter.has, true), (&filter.has_not, false)] {
+                let Some(entry) = entry else { continue };
+                let regular = judged!(selection_regular_child(
+                    host,
+                    candidate_fd,
+                    found,
+                    entry,
+                    &filter.name,
+                    deadline
+                ));
+                matches &= regular == requires_regular;
+            }
+            if let Some(bound) = filter.idle_for {
+                match bound.verdict(newest, host.wall_clock()) {
+                    Idleness::Idle => {}
+                    Idleness::NotIdle => matches = false,
+                    Idleness::Unknown(unknown) => {
+                        let reason = match unknown {
+                            Unknown::Unanswered => Reason::UnsupportedFs,
+                            Unknown::InFuture => Reason::FutureTime,
+                        };
+                        return Ok(Err(Skip::new(
+                            reason,
+                            found.path.clone(),
+                            format!(
+                                "!filter:{}: unknown idle age ({unknown:?}) passes neither polarity",
+                                filter.name
+                            ),
+                        )));
+                    }
+                }
+            }
+            if matches {
+                return Ok(Err(Skip::new(
+                    Reason::Filtered,
+                    found.path.clone(),
+                    format!("selection filter !filter:{} matches candidate", filter.name),
                 )));
             }
         }
@@ -476,6 +513,69 @@ impl Judge<'_> {
             newest_change,
             source_evidence: None,
         }))
+    }
+}
+
+/// Open an unlocked directory candidate once for all of a filter pass. A
+/// file candidate has no entries; a reclaim uses the already-held lock fd.
+fn open_selection_dir<H: Host>(
+    host: &H,
+    parent: &Resolved<H::Fd>,
+    locked_fd: Option<&H::Fd>,
+    found: &Found,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<H::Fd>> {
+    if found.identity.file_type != FileType::Directory || locked_fd.is_some() {
+        return Ok(Ok(None));
+    }
+    check_deadline(host, deadline, &found.path)?;
+    let name = file_name(found)?;
+    match open_beneath(
+        host,
+        &parent.fd,
+        parent.mount.id,
+        Path::new(name),
+        Access::Path,
+        Want::Directory,
+    ) {
+        Ok((fd, _)) => Ok(Ok(Some(fd))),
+        Err(ResolveError::Host(error)) => {
+            Ok(Err(skip_or_stop(found.path.clone(), "open", &error)?))
+        }
+        Err(error) => Ok(Err(Skip::new(
+            Reason::Changed,
+            found.path.clone(),
+            format!("cannot inspect selection filters: {error}"),
+        ))),
+    }
+}
+
+/// A missing regular child is a known false; an unanswered type or failed
+/// stat is unknown and cannot satisfy either polarity of `!filter:`.
+fn selection_regular_child<H: Host>(
+    host: &H,
+    candidate_fd: Option<&H::Fd>,
+    found: &Found,
+    entry: &str,
+    filter_name: &str,
+    deadline: Option<MonoTime>,
+) -> Judged<bool> {
+    let Some(fd) = candidate_fd else {
+        return Ok(Ok(false));
+    };
+    let path = found.path.join(entry);
+    check_deadline(host, deadline, &path)?;
+    match host.statx(Base::Dir(fd), Path::new(entry)) {
+        Ok(stat) => match stat.file_type {
+            Some(file_type) => Ok(Ok(file_type == FileType::Regular)),
+            None => Ok(Err(Skip::new(
+                Reason::UnsupportedFs,
+                path,
+                format!("filter:{filter_name}: kernel did not report entry type"),
+            ))),
+        },
+        Err(error) if error.is(Errno::ENOENT) => Ok(Ok(false)),
+        Err(error) => Ok(Err(skip_or_stop(path, "stat", &error)?)),
     }
 }
 

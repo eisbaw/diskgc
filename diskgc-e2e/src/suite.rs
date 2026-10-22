@@ -796,6 +796,12 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_mixed_entry_and_idle_filter,
     },
     Test {
+        name: "fs_reclaim_negated_mixed_entry_and_idle_filter",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_negated_mixed_entry_and_idle_filter,
+    },
+    Test {
         name: "fs_union_checkout_policy_uses_admitted_terms",
         tier: Tier::Fast,
         expect: Expect::Pass,

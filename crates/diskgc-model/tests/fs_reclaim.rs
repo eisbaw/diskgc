@@ -333,6 +333,191 @@ fn mixed_entry_and_idle_filter_rechecks_under_candidate_lock() {
 }
 
 #[test]
+fn negated_mixed_filter_complements_the_whole_conjunction() {
+    let tree = format!(
+        "  /tmp/pytest-of-matches: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n  /tmp/pytest-of-no-tag: {{.: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n  /tmp/pytest-of-marked: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{mtime: {OLD}}}, .keep: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n  /tmp/pytest-of-recent: {{.: {{}}, CACHEDIR.TAG: {{}}, f: {{size: 1M}}}}\n"
+    );
+    let selection = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
+    let request = tmp(selection);
+    let plan_host = host(&yaml("", &tree, ""));
+    let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
+    for (name, reason) in [
+        ("matches", Some("filtered")),
+        ("no-tag", None),
+        ("marked", None),
+        ("recent", None),
+    ] {
+        let path = format!("/tmp/pytest-of-{name}");
+        assert!(
+            plan.plan
+                .iter()
+                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+            "{path}: {plan:#?}"
+        );
+    }
+    let reclaim_host = host(&yaml("", &tree, ""));
+    let report = ensure(&reclaim_host, &request);
+    let mut removed = actions(&report);
+    removed.sort();
+    assert_eq!(
+        removed,
+        [
+            "/tmp/pytest-of-marked",
+            "/tmp/pytest-of-no-tag",
+            "/tmp/pytest-of-recent"
+        ],
+        "{report:#?}"
+    );
+    assert!(exists(&reclaim_host, "/tmp/pytest-of-matches"));
+    assert!(
+        !reclaim_host.trace().iter().any(|call| call.op == Op::Flock
+            && call.path.as_deref() == Some(Path::new("/tmp/pytest-of-matches"))),
+        "excluded candidate entered the reclaim queue"
+    );
+}
+
+#[test]
+fn negated_mixed_filter_is_rechecked_under_candidate_lock() {
+    let selection = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
+    for (tree, event) in [
+        (
+            "  /tmp/pytest-of-a: {.: {}, CACHEDIR.TAG: {}, f: {size: 1M}}\n".to_owned(),
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, advance: 3d}\n".to_owned(),
+        ),
+        (
+            format!("  /tmp/pytest-of-a: {{.: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"),
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, create: /tmp/pytest-of-a/CACHEDIR.TAG}\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, advance: 3d}\n".to_owned(),
+        ),
+        (
+            format!("  /tmp/pytest-of-a: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{mtime: {OLD}}}, .keep: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"),
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, remove: /tmp/pytest-of-a/.keep}\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, advance: 3d}\n".to_owned(),
+        ),
+    ] {
+        let mut request = tmp(selection);
+        request.timeout = Some(Duration::from_secs(4 * 86_400));
+        let reclaim_host = host(&yaml("", &tree, &event));
+        let report = ensure(&reclaim_host, &request);
+        assert!(report.actions.is_empty(), "{event}: {report:#?}");
+        assert!(
+            report.skipped.iter().any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
+                && entry.reason == "filtered"),
+            "{event}: {report:#?}"
+        );
+        assert!(exists(&reclaim_host, "/tmp/pytest-of-a"));
+        assert!(reclaim_host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn negated_mixed_filter_unknown_age_passes_neither_polarity() {
+    let mounts = "  - {id: 31, at: /tmp, fs: odd, dev: \"0:42\", size: 1G, other_used: 500M, parent: 1, statx_missing: [mtime]}\n";
+    let tree = format!(
+        "  /tmp/pytest-of-unknown: {{.: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"
+    );
+    let model = yaml("", &tree, "").replace(
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, other_used: 500M, parent: 1}\n",
+        mounts,
+    );
+    let host = host(&model);
+    let plan = executor::dry_run(
+        &host,
+        &tmp("profile:pytest-of-dir && !filter:tagged-idle-unkept"),
+        &[1000],
+        &mut |_| {},
+    );
+    assert!(
+        plan.plan.iter().any(
+            |entry| entry.candidate == Path::new("/tmp/pytest-of-unknown")
+                && entry.reason == Some("unsupported_fs")
+        ),
+        "{plan:#?}"
+    );
+}
+
+#[test]
+fn negated_mixed_filter_future_age_does_not_admit_a_known_entry_mismatch() {
+    let tree = "  /tmp/pytest-of-future: {.: {mtime: 2026-10-16T00:00:00Z}, f: {size: 1M, mtime: 2026-10-16T00:00:00Z}}\n";
+    let host = host(&yaml("", tree, ""));
+    let plan = executor::dry_run(
+        &host,
+        &tmp("profile:pytest-of-dir && !filter:tagged-idle-unkept"),
+        &[1000],
+        &mut |_| {},
+    );
+    assert!(
+        plan.plan.iter().any(
+            |entry| entry.candidate == Path::new("/tmp/pytest-of-future")
+                && entry.reason == Some("future_time")
+        ),
+        "{plan:#?}"
+    );
+}
+
+#[test]
+fn negated_mixed_filter_union_checkout_policy_uses_admitted_terms() {
+    let tree = "  /tmp/union-shared-old: {.: {mtime: @OLD@}, .git: {.: {mtime: @OLD@}, HEAD: {mtime: @OLD@}}, CACHEDIR.TAG: {mtime: @OLD@}, f: {size: 1M, mtime: @OLD@}}\n  /tmp/union-shared-recent: {.: {}, .git: {HEAD: {}}, CACHEDIR.TAG: {}, f: {size: 1M}}\n".replace("@OLD@", OLD);
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && !filter:tagged-idle-unkept)",
+        "(profile:union-refuse && !filter:tagged-idle-unkept) || profile:union-allow",
+    ] {
+        let request = tmp(selection);
+        let plan_host = host(&yaml("", &tree, ""));
+        let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
+        for (name, reason, checkouts) in [
+            ("old", None, Checkouts::Allow),
+            ("recent", Some("contains_checkout"), Checkouts::Refuse),
+        ] {
+            let path = format!("/tmp/union-shared-{name}");
+            assert!(
+                plan.plan
+                    .iter()
+                    .any(|entry| entry.candidate == Path::new(&path)
+                        && entry.reason == reason
+                        && entry.checkouts == checkouts),
+                "{selection}: {path}: {plan:#?}"
+            );
+        }
+        let reclaim_host = host(&yaml("", &tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        assert_eq!(
+            actions(&report),
+            ["/tmp/union-shared-old"],
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&reclaim_host, "/tmp/union-shared-recent"));
+        assert!(
+            !reclaim_host.trace().iter().any(|call| call.op == Op::Flock
+                && call.path.as_deref() == Some(Path::new("/tmp/union-shared-recent"))),
+            "checkout veto must happen before queue insertion: {selection}"
+        );
+    }
+}
+
+#[test]
+fn file_candidate_entry_filters_use_known_absence_during_reclaim() {
+    let path = "/tmp/filter-file";
+    let tree = "  /tmp/filter-file: {size: 1M}\n";
+    for selection in [
+        "profile:tmp-entry && filter:has-not-tag",
+        "profile:tmp-entry && !filter:has-tag",
+        "profile:tmp-entry && !filter:tagged-idle-unkept",
+    ] {
+        let planned_host = host(&yaml("", tree, ""));
+        let plan = executor::dry_run(&planned_host, &tmp(selection), &[1000], &mut |_| {});
+        assert!(
+            plan.plan
+                .iter()
+                .any(|entry| entry.candidate == Path::new(path) && entry.reason.is_none()),
+            "{selection}: {plan:#?}"
+        );
+        let reclaim_host = host(&yaml("", tree, ""));
+        let report = ensure(&reclaim_host, &tmp(selection));
+        assert_eq!(actions(&report), [path], "{selection}: {report:#?}");
+        assert!(!exists(&reclaim_host, path), "{selection}: file remains");
+    }
+}
+
+#[test]
 fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
     let tree = "  /tmp/union-shared-clear: {.: {}, .git: {HEAD: {size: 1K}}, f: {size: 1M}}\n  /tmp/union-shared-tagged: {.: {}, .git: {HEAD: {size: 1K}}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n";
     for selection in [

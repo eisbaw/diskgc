@@ -69,8 +69,12 @@ profiles:
     action: delete
     examples: {match: [/tmp/entry-mixed-good]}
   - name: mixed-tagged-idle-unkept
-    where: {has: CACHEDIR.TAG, has_not: DO_NOT_DELETE, idle_for: 3s}
+    where: {has: CACHEDIR.TAG, has_not: DO_NOT_DELETE, idle_for: 10s}
 "#;
+
+// The recent candidate is created only after this wait. Five seconds of
+// margin keep container setup and CLI startup from crossing its 10s bound.
+const MIXED_FILTER_AGE_SETTLE: Duration = Duration::from_secs(15);
 
 const FS_UNION_TEST_PROFILE: &str = r#"version: 1
 profiles:
@@ -658,7 +662,7 @@ pub fn fs_reclaim_mixed_entry_and_idle_filter(ctx: &Ctx) -> TestResult {
     let marked = s.mkdir("entry-mixed-marked", 0o700, TESTER)?;
     s.write_file("entry-mixed-marked/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
     s.write_file("entry-mixed-marked/DO_NOT_DELETE", b"keep", 0o600, TESTER)?;
-    std::thread::sleep(Duration::from_secs(4));
+    std::thread::sleep(MIXED_FILTER_AGE_SETTLE);
     let recent = s.mkdir("entry-mixed-recent", 0o700, TESTER)?;
     s.write_file("entry-mixed-recent/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
 
@@ -685,6 +689,62 @@ pub fn fs_reclaim_mixed_entry_and_idle_filter(ctx: &Ctx) -> TestResult {
         ensure!(path.exists(), "{} was removed", path.display());
     }
     ensure!(!good.exists(), "admitted candidate remains");
+    verdict.assert_clean()
+}
+
+/// The real filesystem complements the entire mixed conjunction. An old
+/// tagged unmarked directory is excluded; each single failed predicate
+/// admits the other directories. The trace oracle constrains every unlink.
+pub fn fs_reclaim_negated_mixed_entry_and_idle_filter(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        MIXED_ENTRY_FILTER_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let matched = s.mkdir("entry-mixed-good", 0o700, TESTER)?;
+    s.write_file("entry-mixed-good/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+    s.write_file("entry-mixed-good/payload", b"preserve", 0o600, TESTER)?;
+    let untagged = s.mkdir("entry-mixed-untagged", 0o700, TESTER)?;
+    s.write_file("entry-mixed-untagged/payload", b"delete", 0o600, TESTER)?;
+    let marked = s.mkdir("entry-mixed-marked", 0o700, TESTER)?;
+    s.write_file("entry-mixed-marked/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+    s.write_file("entry-mixed-marked/DO_NOT_DELETE", b"marker", 0o600, TESTER)?;
+    std::thread::sleep(MIXED_FILTER_AGE_SETTLE);
+    let recent = s.mkdir("entry-mixed-recent", 0o700, TESTER)?;
+    s.write_file("entry-mixed-recent/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(untagged.clone())
+            .eligible(marked.clone())
+            .eligible(recent.clone()),
+    )?;
+    let selection = "profile:mixed-entry-kernel && !filter:mixed-tagged-idle-unkept";
+    let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", selection])?;
+    let verdict = oracle.judge_runs(&[&run])?;
+    run.expect_code(1)?;
+    let (skips, mut actions) = outcome(&report(&run)?);
+    actions.sort();
+    let mut expected = [&untagged, &marked, &recent]
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    ensure!(actions == expected, "{actions:?}");
+    ensure!(
+        skips
+            .get(matched.to_str().ok_or("matched path")?)
+            .map(String::as_str)
+            == Some("filtered"),
+        "{skips:?}"
+    );
+    ensure!(matched.exists(), "matched conjunction was deleted");
+    ensure!(
+        !untagged.exists() && !marked.exists() && !recent.exists(),
+        "admitted candidate remains"
+    );
     verdict.assert_clean()
 }
 
