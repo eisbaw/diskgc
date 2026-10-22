@@ -109,6 +109,7 @@ dependencies = [
  "diskgc-core",
  "diskgc-linux",
  "diskgc-model",
+ "jiff",
  "libc",
  "rustix",
  "serde_json",

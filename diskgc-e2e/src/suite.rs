@@ -496,6 +496,18 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::historical_ctime_originals_refuse_before_fixture_writes,
     },
     Test {
+        name: "west_vector_matches_linux_under_clock_offset",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::west_vector_matches_linux_under_clock_offset,
+    },
+    Test {
+        name: "xdg_vector_matches_linux_under_clock_offset",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::xdg_vector_matches_linux_under_clock_offset,
+    },
+    Test {
         name: "cargo_target_vector_matches_linux_outcomes_and_deletion_diff",
         tier: Tier::Fast,
         expect: Expect::Pass,

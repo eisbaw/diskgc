@@ -454,19 +454,25 @@ the dry-run plan, reclaim exit, actions, skips, and deletion diff must match.
 The independent deletion oracle judges every traced Linux run, including
 dry-run. Host call traces are excluded from this comparison because the
 `Host` trait is tentative; the oracle's syscall trace remains safety evidence.
-Model fields that cannot be built for real in a rootless container (clock,
-kernel capabilities, exact `statvfs`
+Model fields that cannot ordinarily be built for real in a rootless container
+(clock except the bounded sandbox offset, kernel capabilities, exact `statvfs`
 numbers, filesystem types other than tmpfs, NFS, scripted Docker/Nix,
 delayed freeing) are marked *model-only*; tests that use them say so.
 The checked-in profile-vector inventory in
 `diskgc-e2e/src/differential_suite.rs` classifies each original YAML by
 filename and reason: 18 direct replays, four browser-home projections, two
-process projections, and six model-only originals. Every direct or projected
+process projections, two single-age clock projections, and four model-only
+originals. Every direct or projected
 entry names its registered container case. The projections keep the
-original expectations and check them before the transformed replay. The six
-model-only originals require `idle_for` on historical ctime; a fresh tmpfs
-inode has current ctime even after its mtime is set, so vector replay
-preflight refuses them before writing a fixture or CLI config. The
+original expectations and check them before the transformed replay. West and
+XDG use one historical timestamp cohort: the replay shifts the model clock
+and explicit mtimes together, then uses the sandbox-only clock offset to make
+the real tmpfs ctime of newly created objects the same age. Both real-kernel
+replays pass the independent vector expectation and deletion oracle. The four
+remaining model-only originals require both old and fresh `idle_for` ctime
+cohorts; a fresh tmpfs inode has current ctime even after its mtime is set,
+so vector replay preflight refuses them before writing a fixture or CLI
+config. The
 containers-image original also refers to `/var/tmp` and a process outside
 this scratch replay. The materializer itself cannot infer outcome dependence
 from a host model alone. The vector replay gate checks the selected profile's
@@ -481,14 +487,18 @@ sizes, a second tagged cache, a matching path without `CACHEDIR.TAG`, and a
 tagged cache containing a checkout; an independent expectation rejects a
 missing tag on an expected eligible cache. Both generators run the same
 ModelHost/LinuxHost outcome comparison and deletion oracle as checked-in
-vectors. This does not establish parity for the six historical-ctime
-originals. A uniform sandbox clock offset (task-89) could make newly created
-inodes old enough for the West and XDG fixtures after the model clock is
-rebased. It cannot simultaneously reproduce the old eligible and fresh
+vectors. This does not establish parity for the four mixed-age historical-ctime
+originals. A uniform sandbox clock offset (task-89) makes newly created
+inodes old enough for the West and XDG fixtures after the model clock and
+explicit mtimes are rebased. It cannot simultaneously reproduce the old eligible and fresh
 `not_idle` inodes in the Autotools, CMake, Meson, and containers-image
 fixtures: all get the same fresh kernel ctime after materialization. Those
 four originals need staged kernel creation times in an isolated clock domain,
-or another truthful ctime mechanism. Containers-image also needs its
+such as a disposable QEMU guest whose wall clock changes between creating
+the old and fresh cohorts. A host container cannot safely set the wall clock:
+`CLOCK_REALTIME` is not time namespaced, and the sandbox offset changes only
+diskgc's read of time, not the kernel's ctime. No VM replay is implemented in
+this suite yet. Containers-image also needs its
 `/var/tmp` and process shape materialized.
 
 ## 5. End-to-end tests in containers

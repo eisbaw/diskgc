@@ -3,6 +3,7 @@
 //! fixture objects that actually disappeared, but excludes incidental inode
 //! numbers, mount ids, timings, and Host call text.
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fs, io};
@@ -16,7 +17,7 @@ use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
 use diskgc_model::spec::{
     Bytes, DevSpec, DirSpec, FileSpec, LockModeSpec, LockSpec, Mode, MountSpec, NodeSpec,
-    ProcessSpec,
+    ProcessSpec, WallTime,
 };
 use diskgc_model::state::Fault;
 use serde_json::Value;
@@ -57,6 +58,10 @@ const PYTEST_UNSAFE_PROFILE: &str = "- name: pytest-tmp-unsafe-probe
 const PYTEST_ACTIVE: &str = "/tmp/pytest-of-tester/pytest-0/test_active0";
 const PYTEST_UNRELATED: &str = "/home/tester/pytest-unrelated-open-file";
 const PYTEST_RETAINED: &str = "/tmp/differential-persistent/payload";
+const WEST_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/west-build-anchored.yaml");
+const XDG_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/xdg-cache-entry-v2-match.yaml");
 #[cfg(test)]
 const BROWSER_VECTORS: &[&str] = &[
     BRAVE_BROWSER_VECTOR,
@@ -274,13 +279,17 @@ const PROFILE_FIXTURES: &[FixtureClassification] = &[
         "renode_tmp_vector_matches_linux_outcomes_and_deletion_diff",
         renode_tmp_vector
     ),
-    model_only!(
+    projected!(
         "west-build-anchored.yaml",
-        "historical ctime required by idle_for"
+        "single historical age cohort rebased onto the sandbox clock offset",
+        "west_vector_matches_linux_under_clock_offset",
+        west_vector_matches_linux_under_clock_offset
     ),
-    model_only!(
+    projected!(
         "xdg-cache-entry-v2-match.yaml",
-        "historical ctime required by idle_for"
+        "single historical age cohort rebased onto the sandbox clock offset",
+        "xdg_vector_matches_linux_under_clock_offset",
+        xdg_vector_matches_linux_under_clock_offset
     ),
     direct!(
         "zephyr-tmp-match.yaml",
@@ -327,7 +336,7 @@ fn verify_registered_replays() -> Result<(), String> {
     Ok(())
 }
 
-/// All six original age-dependent vectors must refuse before any scratch
+/// The four mixed-age originals must refuse before any scratch
 /// fixture or CLI config write. A fresh tmpfs inode's ctime is always now.
 pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> TestResult {
     verify_registered_replays()?;
@@ -395,6 +404,14 @@ pub fn mypy_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestRe
     replay_vector(ctx, MYPY_VECTOR, false)
 }
 
+pub fn west_vector_matches_linux_under_clock_offset(ctx: &Ctx) -> TestResult {
+    replay_single_cohort_vector(ctx, WEST_VECTOR)
+}
+
+pub fn xdg_vector_matches_linux_under_clock_offset(ctx: &Ctx) -> TestResult {
+    replay_single_cohort_vector(ctx, XDG_VECTOR)
+}
+
 macro_rules! browser_replay {
     ($name:ident, $yaml:ident) => {
         pub fn $name(ctx: &Ctx) -> TestResult {
@@ -426,6 +443,7 @@ pub fn pytest_unsafe_unrelated_fd_matches_linux(ctx: &Ctx) -> TestResult {
         false,
         Some(PYTEST_UNSAFE_PROFILE),
         Some(Path::new(PYTEST_ACTIVE)),
+        false,
     )
 }
 
@@ -1151,7 +1169,145 @@ fn replay_vector(ctx: &Ctx, yaml: &str, with_dangling_link: bool) -> TestResult 
 }
 
 fn replay_model(ctx: &Ctx, vector: ProfileVector, with_dangling_link: bool) -> TestResult {
-    replay_model_with_profile(ctx, vector, with_dangling_link, None, None)
+    replay_model_with_profile(ctx, vector, with_dangling_link, None, None, false)
+}
+
+/// A single old timestamp cohort can be recreated with a real tmpfs ctime:
+/// shift its explicit mtimes to kernel-now, and advance only the sandboxed
+/// binary's clock by the cohort's original age. Default-time nodes are not
+/// selected by these vectors; the independent expectation checks that.
+fn replay_single_cohort_vector(ctx: &Ctx, yaml: &str) -> TestResult {
+    let mut vector = ProfileVector::parse(yaml)?;
+    vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
+    let offset_seconds = rebase_single_cohort(&mut vector)?;
+    let _clock_offset = DifferentialClockOffset::install(offset_seconds)?;
+    replay_model_with_profile(ctx, vector, false, None, None, true)
+}
+
+struct DifferentialClockOffset;
+
+impl DifferentialClockOffset {
+    fn install(seconds: u64) -> Result<Self, String> {
+        let path = diskgc_linux::sandbox::CLOCK_OFFSET_PATH;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(path)
+            .map_err(|error| format!("create {path} in disposable container: {error}"))?;
+        let guard = Self;
+        use std::io::Write;
+        writeln!(file, "{seconds}").map_err(|error| format!("write {path}: {error}"))?;
+        Ok(guard)
+    }
+}
+
+impl Drop for DifferentialClockOffset {
+    fn drop(&mut self) {
+        fs::remove_file(diskgc_linux::sandbox::CLOCK_OFFSET_PATH)
+            .expect("remove differential clock offset from disposable container");
+    }
+}
+
+fn rebase_single_cohort(vector: &mut ProfileVector) -> Result<u64, String> {
+    if vector
+        .expect
+        .plan
+        .iter()
+        .any(|entry| entry.reason.as_deref() == Some("not_idle"))
+    {
+        return Err("single-cohort replay cannot preserve a fresh not_idle candidate".into());
+    }
+    let [candidate] = vector.expect.removed.as_slice() else {
+        return Err("single-cohort replay requires one independently expected removal".into());
+    };
+    let node = vector.host.tree.get(candidate).ok_or_else(|| {
+        format!(
+            "single-cohort replay has no explicit candidate {}",
+            candidate.display()
+        )
+    })?;
+    let old = match node {
+        NodeSpec::File(file) => file.mtime,
+        NodeSpec::Dir(dir) => dir.attrs.mtime,
+    }
+    .ok_or_else(|| {
+        format!(
+            "single-cohort candidate {} has no old mtime",
+            candidate.display()
+        )
+    })?;
+    for node in vector.host.tree.values() {
+        require_one_explicit_mtime(node, old)?;
+    }
+    let age_nanos = vector.host.clock.0.as_nanosecond() - old.0.as_nanosecond();
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    if age_nanos <= 0 || age_nanos % NANOS_PER_SECOND != 0 {
+        return Err(format!(
+            "single-cohort age must be positive whole seconds: {age_nanos}ns"
+        ));
+    }
+    let seconds = u64::try_from(age_nanos / NANOS_PER_SECOND)
+        .map_err(|error| format!("single-cohort age overflows u64: {error}"))?;
+    if seconds > 366 * 24 * 60 * 60 {
+        return Err(format!(
+            "single-cohort age {seconds}s exceeds sandbox clock offset bound"
+        ));
+    }
+    let shift = jiff::Timestamp::now().as_nanosecond() - old.0.as_nanosecond();
+    vector.host.clock = shifted_wall_time(vector.host.clock, shift)?;
+    for node in vector.host.tree.values_mut() {
+        shift_node_mtime(node, shift)?;
+    }
+    Ok(seconds)
+}
+
+fn require_one_explicit_mtime(node: &NodeSpec, old: WallTime) -> TestResult {
+    match node {
+        NodeSpec::File(file) if file.mtime.is_some_and(|time| time != old) => {
+            Err("single-cohort replay contains a second explicit age".into())
+        }
+        NodeSpec::Dir(dir) => {
+            if dir.attrs.mtime.is_some_and(|time| time != old) {
+                return Err("single-cohort replay contains a second explicit age".into());
+            }
+            for child in dir.entries.values() {
+                require_one_explicit_mtime(child, old)?;
+            }
+            Ok(())
+        }
+        NodeSpec::File(_) => Ok(()),
+    }
+}
+
+fn shifted_wall_time(time: WallTime, nanos: i128) -> Result<WallTime, String> {
+    let shifted = time
+        .0
+        .as_nanosecond()
+        .checked_add(nanos)
+        .ok_or("single-cohort timestamp shift overflowed")?;
+    jiff::Timestamp::from_nanosecond(shifted)
+        .map(WallTime)
+        .map_err(|error| format!("single-cohort timestamp is out of range: {error}"))
+}
+
+fn shift_node_mtime(node: &mut NodeSpec, nanos: i128) -> TestResult {
+    match node {
+        NodeSpec::File(file) => {
+            if let Some(time) = file.mtime.as_mut() {
+                *time = shifted_wall_time(*time, nanos)?;
+            }
+        }
+        NodeSpec::Dir(dir) => {
+            if let Some(time) = dir.attrs.mtime.as_mut() {
+                *time = shifted_wall_time(*time, nanos)?;
+            }
+            for child in dir.entries.values_mut() {
+                shift_node_mtime(child, nanos)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn replay_model_with_profile(
@@ -1160,11 +1316,12 @@ fn replay_model_with_profile(
     with_dangling_link: bool,
     profile_yaml: Option<&str>,
     unrelated_to: Option<&Path>,
+    sandbox_clock_offset: bool,
 ) -> TestResult {
     // Preflight the semantic contract before even writing the CLI config.
     // The model's old clock and ctime cannot be installed on a fresh tmpfs.
     adapt_home_mount(&mut vector);
-    preflight_vector(&vector)?;
+    preflight_vector(&vector, sandbox_clock_offset)?;
     let config_path = match profile_yaml {
         Some(profile_yaml) => {
             ensure!(
@@ -1279,7 +1436,7 @@ fn replay_model_with_profile(
     Ok(())
 }
 
-fn preflight_vector(vector: &ProfileVector) -> Result<(), String> {
+fn preflight_vector(vector: &ProfileVector, sandbox_clock_offset: bool) -> Result<(), String> {
     let library = if vector.user_profiles.is_empty() {
         Library::builtin().map_err(|error| error.to_string())?
     } else {
@@ -1292,7 +1449,7 @@ fn preflight_vector(vector: &ProfileVector) -> Result<(), String> {
         (!vector.roots.is_empty()).then_some(vector.roots.as_slice()),
         vector.host.own_uid.unwrap_or(1000),
     )?;
-    if tier.idle_for.is_some() || tier.idle_before.is_some() {
+    if !sandbox_clock_offset && (tier.idle_for.is_some() || tier.idle_before.is_some()) {
         return Err(format!(
             "materialize(model): profile {} idle_for is model-only: fresh tmpfs ctime cannot reproduce the model clock and historical inode changes",
             vector.profile_name()
@@ -1856,7 +2013,7 @@ mod tests {
                 .expect("listed fixture classification");
             match classification.replay {
                 FixtureReplay::Direct { test, run } => {
-                    preflight_vector(&vector).unwrap_or_else(|error| {
+                    preflight_vector(&vector, false).unwrap_or_else(|error| {
                         panic!("{name}: direct replay fails preflight: {error}")
                     });
                     let registered = crate::suite::TESTS
@@ -1871,7 +2028,7 @@ mod tests {
                 }
                 FixtureReplay::Projected { reason, test, run } => {
                     assert!(!reason.is_empty(), "{name}: projection reason is empty");
-                    let error = preflight_vector(&vector)
+                    let error = preflight_vector(&vector, false)
                         .expect_err("original projected vector must refuse direct materialization");
                     assert!(
                         error.contains("model-only")
@@ -1890,7 +2047,7 @@ mod tests {
                 }
                 FixtureReplay::ModelOnly { reason, .. } => {
                     assert!(reason.contains("historical ctime"), "{name}: {reason}");
-                    let error = preflight_vector(&vector)
+                    let error = preflight_vector(&vector, false)
                         .expect_err("historical ctime must be rejected before writes");
                     assert!(
                         error.contains("ctime") && error.contains("model-only"),
@@ -1898,6 +2055,41 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn single_cohort_rebase_preserves_original_age_and_refuses_mixed_age() {
+        let library = Library::builtin().expect("built-in profiles");
+        for yaml in [WEST_VECTOR, XDG_VECTOR] {
+            let mut vector = ProfileVector::parse(yaml).expect("checked-in vector");
+            let original = vector.host.clock;
+            vector.check(&library).expect("original expectation");
+            let offset = rebase_single_cohort(&mut vector).expect("single age cohort");
+            assert!(offset >= 30 * 24 * 60 * 60);
+            assert_ne!(vector.host.clock, original);
+            vector.check(&library).expect("rebased expectation");
+            adapt_home_mount(&mut vector);
+            preflight_vector(&vector, true).expect("sandbox clock replay preflight");
+        }
+        for yaml in [
+            include_str!(
+                "../../crates/diskgc-model/tests/models/profiles/autotools-source-anchor.yaml"
+            ),
+            include_str!(
+                "../../crates/diskgc-model/tests/models/profiles/cmake-source-anchor.yaml"
+            ),
+            include_str!(
+                "../../crates/diskgc-model/tests/models/profiles/meson-source-anchor.yaml"
+            ),
+            include_str!(
+                "../../crates/diskgc-model/tests/models/profiles/containers-image-age.yaml"
+            ),
+        ] {
+            let mut vector = ProfileVector::parse(yaml).expect("checked-in mixed-age vector");
+            let error = rebase_single_cohort(&mut vector)
+                .expect_err("a uniform clock offset cannot preserve fresh candidates");
+            assert!(error.contains("fresh not_idle"), "{error}");
         }
     }
 }

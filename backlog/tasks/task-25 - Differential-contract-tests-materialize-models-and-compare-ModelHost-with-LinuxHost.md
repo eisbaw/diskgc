@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-22 06:23'
+updated_date: '2026-10-22 07:52'
 labels:
   - wave-2
   - testing
@@ -62,6 +62,10 @@ From task-14: model-only fields and behaviours to reject or skip in materialize:
 2026-10-22 differential generator increment: added 100 disjoint generated Mypy cache models alongside the existing 100 Python models. Each Mypy case varies payload size and one of four branches: base tagged cache, second tagged eligible cache, matching untagged cache excluded from plan, or tagged checkout cache refused. Independent ModelHost expectations cover plan/actions/skips/removed/preserved; mutation removing the tag from an expected eligible cache fails before Linux comparison. The common replay invokes real LinuxHost dry/reclaim and the strace deletion oracle on every model. Focused unit 1/1 PASS and disposable Podman 100/100 PASS with host canary refusal exit 86. Precise unresolved original-fixture limit: Autotools, CMake, Meson, West, XDG cache, and containers-image include a 3d or 30d built-in minimum and mixed old eligible/fresh not_idle entries. Fresh tmpfs ctime is kernel now for both cohorts. TASK-89 uniform sandbox clock offset can age both cohorts but cannot recreate their distinct historical ctimes in one fixture; full original parity needs staged kernel creation times in an isolated clock domain or another truthful ctime mechanism. TASK-25 AC/DoD remain open.
 
 Correction to immediately preceding TASK-25 note: four originals, not all six, mix old eligible and fresh not_idle entries: Autotools, CMake, Meson, and containers-image. West and XDG have old eligible entries plus structural exclusions, so a sandbox-only uniform offset with truthful model-time rebasing may replay those two. The four mixed-age originals still require distinct real kernel ctimes, beyond TASK-89 as currently scoped.
+
+2026-10-22 TASK-25 historical-ctime increment: West and XDG checked-in originals now each have a Fast disposable Podman ModelHost/LinuxHost differential replay. The original independent ProfileVector expectation is checked first; projection moves its one explicit old timestamp cohort to kernel-now and shifts model clock/mtimes together, using TASK-89's sandbox-only clock offset for real ctime age. Both focused Podman cases PASS with strace deletion oracle clean and host canary refusal exit 86; the four remaining historical originals still refuse preflight before fixture writes (focused Podman PASS). A unit regression confirms rebased expectations/preflight for West/XDG and explicitly rejects Autotools/CMake/Meson/containers-image as mixed-age fresh not_idle vectors; exact registry unit and e2e Clippy all targets warnings-denied PASS. QEMU and /dev/kvm exist, but this repo has no disposable VM harness. The four mixed-age originals need a guest root with CAP_SYS_TIME, staged inode creation across guest wall-clock changes, then full parity/oracle replay; a host container's CLOCK_REALTIME is not namespaced and TASK-89's offset does not change kernel ctime. Containers-image additionally needs /var/tmp and process materialization. AC #1/#2 and DoD stay open; no full gate or commit in this slice.
+
+2026-10-22 parent final gate for West/XDG projected replay: exact nix develop -c just e2e exited 0 on the frozen tree; Nix E2E units 99/99, Podman 216/216 including both new replays, Docker 7/7, workspace fmt/Clippy/tests passed (one intentional ignored Linux helper). Read-only MPED review GO; four mixed-age originals remain model-only, so AC/DoD remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
