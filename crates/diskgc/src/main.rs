@@ -26,16 +26,17 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Owner, Ranking};
-use diskgc_core::executor::{self, Request, Tier};
+use diskgc_core::executor::{self, Request, SelectionFailure, Tier};
 use diskgc_core::host::Errno;
+use diskgc_core::kernel::KernelError;
 use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
 use diskgc_core::report::json::Json;
-use diskgc_core::report::{Report, Status};
+use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::select;
 use diskgc_core::units::{Size, parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
@@ -155,6 +156,12 @@ fn parse(args: &[OsString]) -> Invocation {
     }
     match args {
         [flag] if flag == "--version" || flag == "-V" => Invocation::Version,
+        [first, second]
+            if (first == "--version" || first == "-V") && second == "--json"
+                || first == "--json" && (second == "--version" || second == "-V") =>
+        {
+            Invocation::Version
+        }
         [] => Invocation::UsageError("no command given".to_owned()),
         [command, rest @ ..] if command == "ensure" => match parse_ensure(rest) {
             Ok(args) => Invocation::Ensure(args),
@@ -401,10 +408,63 @@ fn set<T>(slot: &mut Option<T>, name: &str, value: Result<T, String>) -> Result<
 /// Startup checks for every invocation that may touch the machine:
 /// `--version` and `--help` are exempt (they only print), and so must be
 /// `check`, which is machine-independent (docs/reference.md, check).
-fn startup() -> Result<LinuxHost, String> {
-    let host = LinuxHost::new().map_err(|e| e.to_string())?;
-    diskgc_core::kernel::require_supported(&host).map_err(|e| e.to_string())?;
+enum StartupFailure {
+    Host(String),
+    UnsupportedKernel(String),
+}
+
+impl StartupFailure {
+    fn status(&self) -> Status {
+        match self {
+            Self::Host(_) => Status::Error,
+            Self::UnsupportedKernel(_) => Status::UsageError,
+        }
+    }
+
+    fn cause(&self) -> ErrorCause {
+        match self {
+            Self::Host(_) => ErrorCause::Host,
+            Self::UnsupportedKernel(_) => ErrorCause::Usage,
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Host(message) | Self::UnsupportedKernel(message) => message,
+        }
+    }
+}
+
+fn startup() -> Result<LinuxHost, StartupFailure> {
+    let host = LinuxHost::new().map_err(|e| StartupFailure::Host(e.to_string()))?;
+    diskgc_core::kernel::require_supported(&host).map_err(kernel_failure)?;
     Ok(host)
+}
+
+fn kernel_failure(error: KernelError) -> StartupFailure {
+    match error {
+        KernelError::Host(_) => StartupFailure::Host(error.to_string()),
+        KernelError::TooOld { .. } | KernelError::Unparseable { .. } => {
+            StartupFailure::UnsupportedKernel(error.to_string())
+        }
+    }
+}
+
+fn failed_report(
+    status: Status,
+    cause: ErrorCause,
+    message: String,
+    path: Option<&Path>,
+) -> Report {
+    let mut report = Report::new(status, path);
+    report.errors.push(ErrorEntry {
+        tier: String::new(),
+        profile: String::new(),
+        candidate: String::new(),
+        cause,
+        message,
+    });
+    report
 }
 
 /// The configuration file (docs/reference.md, Configuration file), given
@@ -541,22 +601,33 @@ fn tier(
     config: Option<&Config>,
     uid: u32,
     allow_root: bool,
-) -> Result<Tier, String> {
+) -> Result<Tier, (ErrorCause, String)> {
     let Some(expr) = &args.select else {
-        return Err("an explicit tier requires --select".to_owned());
+        return Err((
+            ErrorCause::Usage,
+            "an explicit tier requires --select".to_owned(),
+        ));
     };
     let builtin;
     let library = match config {
         Some(config) => &config.library,
         None => {
-            builtin = builtin_library()?;
+            builtin = builtin_library().map_err(|message| (ErrorCause::Config, message))?;
             &builtin
         }
     };
     let roots = (!args.roots.is_empty()).then_some(args.roots.as_slice());
-    let selected = Tier::select(expr, library, roots, uid)?;
+    let (selected, warnings) =
+        Tier::select_with_warnings(expr, library, roots, uid).map_err(|failure| match failure {
+            SelectionFailure::Parse(message) => (ErrorCause::Parse, message),
+            SelectionFailure::Usage(message) => (ErrorCause::Usage, message),
+        })?;
+    for warning in warnings {
+        log(&format!("warning: --select {expr:?}: {warning}"));
+    }
     if allow_root {
-        reject_root_uid_selected(&selected, library, &args.roots)?;
+        reject_root_uid_selected(&selected, library, &args.roots)
+            .map_err(|message| (ErrorCause::Safety, message))?;
     }
     Ok(selected)
 }
@@ -730,20 +801,25 @@ fn validate_selected_root_action(allow_root: bool, tier: &Tier) -> Result<(), St
 fn ensure(args: &EnsureArgs) -> Report {
     // Every error is logged where it is recorded: here for those found
     // before the executor runs, by the executor for its own.
-    let fail = |why: String| {
+    let fail = |cause: ErrorCause, why: String| {
         log(&format!("error: {why}"));
-        Report::new(Status::UsageError, Some(&args.path)).usage_error(why)
+        Report::new(Status::UsageError, Some(&args.path)).usage_error_with_cause(cause, why)
+    };
+    let fail_host = |why: String| {
+        log(&format!("error: {why}"));
+        failed_report(Status::Error, ErrorCause::Host, why, Some(&args.path))
     };
     if let Err(error) = LinuxHost::install_interrupt_handlers() {
-        return fail(format!("install signal handlers: {error}"));
+        return fail_host(format!("install signal handlers: {error}"));
     }
     let host = match startup() {
         Ok(host) => host,
-        Err(why) => return fail(why),
+        Err(StartupFailure::Host(why)) => return fail_host(why),
+        Err(StartupFailure::UnsupportedKernel(why)) => return fail(ErrorCause::Usage, why),
     };
     let config = match ensure_config(args) {
         Ok(config) => config,
-        Err(why) => return fail(why),
+        Err(why) => return fail(ErrorCause::Config, why),
     };
     if let Some(config) = &config {
         log(&format!("config {}", config.path.display()));
@@ -751,20 +827,20 @@ fn ensure(args: &EnsureArgs) -> Report {
             log(&format!("warning: {warning}"));
         }
         if let Err(why) = config.validate_mode(args.allow_root) {
-            return fail(why);
+            return fail(ErrorCause::Safety, why);
         }
         if config.ipc == IpcPolicy::LiveOnly {
-            return fail("ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)".to_owned());
+            return fail(ErrorCause::Safety, "ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)".to_owned());
         }
     }
     let uid = match executor::privileges(&host, args.allow_root) {
         Ok(uid) => uid,
-        Err(why) => return fail(why),
+        Err(why) => return fail(ErrorCause::Safety, why),
     };
     let owners = if args.allow_root {
         match resolved_owners(config.as_ref().expect("root mode requires config")) {
             Ok(owners) => owners,
-            Err(why) => return fail(why),
+            Err(why) => return fail(ErrorCause::Config, why),
         }
     } else {
         vec![uid]
@@ -772,7 +848,7 @@ fn ensure(args: &EnsureArgs) -> Report {
     let protections = match config.as_ref() {
         Some(config) => match executor::bind_protections(config, uid, args.allow_root) {
             Ok(protections) => protections,
-            Err(why) => return fail(why),
+            Err(why) => return fail(ErrorCause::Config, why),
         },
         None => Vec::new(),
     };
@@ -780,11 +856,11 @@ fn ensure(args: &EnsureArgs) -> Report {
         let config = config.as_ref().expect("unselected ensure requires config");
         let seed = match configured_seed(config) {
             Ok(seed) => seed,
-            Err(why) => return fail(why),
+            Err(why) => return fail(ErrorCause::Config, why),
         };
         match configured_tiers(config, uid, args.allow_root, seed) {
             Ok((tiers, timeouts)) => Some((tiers, timeouts, seed)),
-            Err(why) => return fail(why),
+            Err(why) => return fail(ErrorCause::Config, why),
         }
     } else {
         None
@@ -799,10 +875,10 @@ fn ensure(args: &EnsureArgs) -> Report {
     } else {
         let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
             Ok(tier) => tier,
-            Err(why) => return fail(why),
+            Err((cause, why)) => return fail(cause, why),
         };
         if let Err(why) = validate_selected_root_action(args.allow_root, &tier) {
-            return fail(why);
+            return fail(ErrorCause::Safety, why);
         }
         tier
     };
@@ -849,12 +925,33 @@ fn builtin_library() -> Result<Library, String> {
 /// profiles; without a configuration file (none found by the search), the
 /// built-ins alone. A given file that is missing, or any file that does
 /// not load, is an error, as for `ensure`.
-fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
+enum ProfilesFailure {
+    Config(String),
+    UnknownName(String),
+}
+
+impl ProfilesFailure {
+    fn cause(&self) -> ErrorCause {
+        match self {
+            Self::Config(_) => ErrorCause::Config,
+            Self::UnknownName(_) => ErrorCause::Usage,
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Config(message) | Self::UnknownName(message) => message,
+        }
+    }
+}
+
+fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesFailure> {
     let (_, config) = load_config(
         args.config.as_deref(),
         matches!(&args.command, ProfilesCommand::Test),
         false,
-    )?;
+    )
+    .map_err(ProfilesFailure::Config)?;
     let config_path = config.as_ref().map(|c| c.path.as_path());
     if let Some(path) = config_path {
         log(&format!("config {}", path.display()));
@@ -863,7 +960,7 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
     let library = match &config {
         Some(config) => &config.library,
         None => {
-            builtin = builtin_library()?;
+            builtin = builtin_library().map_err(ProfilesFailure::Config)?;
             &builtin
         }
     };
@@ -874,9 +971,9 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), String> {
             false,
         ),
         (ProfilesCommand::Show(name), json) => {
-            let profile = library
-                .get(name)
-                .ok_or_else(|| describe::unknown_name(library, name))?;
+            let profile = library.get(name).ok_or_else(|| {
+                ProfilesFailure::UnknownName(describe::unknown_name(library, name))
+            })?;
             if json {
                 (
                     describe::show_json(profile, config_path).to_text() + "\n",
@@ -971,10 +1068,15 @@ fn check(flag: Option<&OsStr>) -> Result<String, String> {
 /// report says it): `status` as `ensure`'s usage-error report has it, the
 /// exit code (which `ensure`'s report does not carry: there it is only the
 /// process's), and the message (docs/reference.md, `profiles` command).
-fn error_json(why: &str) -> String {
+fn error_json(cause: ErrorCause, why: &str) -> String {
+    error_json_status(Status::UsageError, cause, why)
+}
+
+fn error_json_status(status: Status, cause: ErrorCause, why: &str) -> String {
     Json::Obj(vec![
-        ("status", Json::str(Status::UsageError.as_str())),
-        ("exit_code", Json::U64(EXIT_USAGE.into())),
+        ("status", Json::str(status.as_str())),
+        ("exit_code", Json::U64(status.exit_code().into())),
+        ("cause", Json::str(cause.as_str())),
         ("error", Json::str(why)),
     ])
     .to_text()
@@ -1050,7 +1152,10 @@ fn main() -> ExitCode {
             Err(why) => {
                 log(&format!("error: {why}"));
                 if json {
-                    output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+                    output(
+                        &format!("{}\n", error_json(ErrorCause::Config, &why)),
+                        EXIT_USAGE,
+                    )
                 } else {
                     ExitCode::from(EXIT_USAGE)
                 }
@@ -1058,10 +1163,12 @@ fn main() -> ExitCode {
         },
         Invocation::Profiles(args) => match profiles(&args, json) {
             Ok((out, failed)) => output(&out, u8::from(failed)),
-            Err(why) => {
+            Err(failure) => {
+                let cause = failure.cause();
+                let why = failure.message();
                 log(&format!("error: {why}"));
                 if json {
-                    output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+                    output(&format!("{}\n", error_json(cause, &why)), EXIT_USAGE)
                 } else {
                     ExitCode::from(EXIT_USAGE)
                 }
@@ -1071,7 +1178,10 @@ fn main() -> ExitCode {
             let why = format!("{command} is not implemented in this build yet ({task})");
             eprintln!("diskgc: {why}");
             if json {
-                output(&format!("{}\n", error_json(&why)), EXIT_USAGE)
+                output(
+                    &format!("{}\n", error_json(ErrorCause::Usage, &why)),
+                    EXIT_USAGE,
+                )
             } else {
                 ExitCode::from(EXIT_USAGE)
             }
@@ -1079,37 +1189,43 @@ fn main() -> ExitCode {
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
             // touch the machine: an old kernel is the reason to report.
-            let reason = if args
+            let (reason, cause, status) = if args
                 .first()
                 .is_some_and(|a| a == "check" || a == "profiles")
             {
-                reason
+                (reason, ErrorCause::Parse, Status::UsageError)
             } else {
                 match startup() {
-                    Err(why) => why,
-                    Ok(_) => reason,
+                    Err(failure) => {
+                        let status = failure.status();
+                        let cause = failure.cause();
+                        (failure.message(), cause, status)
+                    }
+                    Ok(_) => (reason, ErrorCause::Parse, Status::UsageError),
                 }
             };
             match (json, report) {
                 (true, true) => {
                     eprintln!("diskgc: error: {reason}");
                     output(
-                        &format!(
-                            "{}\n",
-                            Report::new(Status::UsageError, None)
-                                .usage_error(reason)
-                                .to_json()
-                        ),
-                        EXIT_USAGE,
+                        &format!("{}\n", failed_report(status, cause, reason, None).to_json()),
+                        status.exit_code(),
                     )
                 }
                 (true, false) => {
                     eprintln!("diskgc: error: {reason}");
-                    output(&format!("{}\n", error_json(&reason)), EXIT_USAGE)
+                    output(
+                        &format!("{}\n", error_json_status(status, cause, &reason)),
+                        status.exit_code(),
+                    )
                 }
                 (false, _) => {
-                    eprint!("diskgc: {reason}\n{USAGE}");
-                    ExitCode::from(EXIT_USAGE)
+                    if status == Status::UsageError {
+                        eprint!("diskgc: {reason}\n{USAGE}");
+                    } else {
+                        eprintln!("diskgc: error: {reason}");
+                    }
+                    ExitCode::from(status.exit_code())
                 }
             }
         }
@@ -1119,6 +1235,28 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_classifies_kernel_io_separately_from_unsupported_versions() {
+        let host = kernel_failure(KernelError::Host(diskgc_core::host::HostError::invalid(
+            "kernel_release",
+            "/proc/sys/kernel/osrelease",
+            "EIO",
+        )));
+        assert_eq!(host.status(), Status::Error);
+        assert_eq!(host.cause(), ErrorCause::Host);
+        let old = kernel_failure(KernelError::TooOld {
+            release: "5.4.0".to_owned(),
+            version: diskgc_core::kernel::KernelVersion { major: 5, minor: 4 },
+        });
+        assert_eq!(old.status(), Status::UsageError);
+        assert_eq!(old.cause(), ErrorCause::Usage);
+        let unknown = kernel_failure(KernelError::Unparseable {
+            release: "unknown".to_owned(),
+        });
+        assert_eq!(unknown.status(), Status::UsageError);
+        assert_eq!(unknown.cause(), ErrorCause::Usage);
+    }
 
     struct FailingWriter {
         errno: i32,

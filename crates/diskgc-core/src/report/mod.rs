@@ -261,7 +261,41 @@ pub struct ErrorEntry {
     pub tier: String,
     pub profile: String,
     pub candidate: String,
+    pub cause: ErrorCause,
     pub message: String,
+}
+
+/// Stable machine-readable reason for a reported error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCause {
+    Parse,
+    Config,
+    Safety,
+    Host,
+    Operation,
+    Usage,
+}
+
+impl ErrorCause {
+    pub const ALL: [Self; 6] = [
+        Self::Parse,
+        Self::Config,
+        Self::Safety,
+        Self::Host,
+        Self::Operation,
+        Self::Usage,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Config => "config",
+            Self::Safety => "safety",
+            Self::Host => "host",
+            Self::Operation => "operation",
+            Self::Usage => "usage",
+        }
+    }
 }
 
 /// The report of one `ensure`.
@@ -274,6 +308,8 @@ pub struct Report {
     pub duration_ms: Option<u64>,
     /// The seed used to shuffle configured random groups, if any.
     pub seed: Option<u64>,
+    /// A reclaim's tally budget ended before all candidates were tallied.
+    pub tally_cut_short: bool,
     /// The mount point of `path`'s filesystem; `None` before it was
     /// resolved.
     pub mount: Option<PathBuf>,
@@ -378,6 +414,7 @@ impl Report {
             started_at: None,
             duration_ms: None,
             seed: None,
+            tally_cut_short: false,
             mount: None,
             path: path.map(Path::to_owned),
             min_free_bytes: None,
@@ -396,11 +433,17 @@ impl Report {
     /// A usage error (exit 2) saying `message`; the fields determined so
     /// far are kept.
     pub fn usage_error(mut self, message: impl Into<String>) -> Self {
+        self = self.usage_error_with_cause(ErrorCause::Usage, message);
+        self
+    }
+
+    pub fn usage_error_with_cause(mut self, cause: ErrorCause, message: impl Into<String>) -> Self {
         self.status = Status::UsageError;
         self.errors.push(ErrorEntry {
             tier: String::new(),
             profile: String::new(),
             candidate: String::new(),
+            cause,
             message: message.into(),
         });
         self
@@ -431,6 +474,7 @@ impl Report {
             ("mount", Json::opt(self.mount.as_deref(), path)),
             ("path", Json::opt(self.path.as_deref(), path)),
             ("seed", Json::opt(self.seed, Json::U64)),
+            ("tally_cut_short", Json::Bool(self.tally_cut_short)),
             // No index exists yet (task-28/29): every run discovers afresh.
             ("index", Json::Null),
             ("min_free_bytes", opt_u64(self.min_free_bytes)),
@@ -563,6 +607,7 @@ impl Report {
                                 ("tier", Json::str(&e.tier)),
                                 ("profile", Json::str(&e.profile)),
                                 ("candidate", Json::str(&e.candidate)),
+                                ("cause", Json::str(e.cause.as_str())),
                                 ("message", Json::str(&e.message)),
                             ])
                         })

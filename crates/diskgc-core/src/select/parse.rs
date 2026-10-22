@@ -11,6 +11,10 @@ use std::fmt;
 
 use super::{Expr, Factor, Term, distribute};
 
+/// Spelling suggestions are useful for short identifiers, and must not
+/// turn a large invalid input into a quadratic diagnostic scan.
+pub(super) const MAX_SUGGESTION_NAME_CHARS: usize = 256;
+
 /// Why an expression does not parse, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxError {
@@ -27,7 +31,9 @@ impl fmt::Display for SyntaxError {
         write!(
             f,
             "invalid selection `{}` at column {}: {}",
-            self.expr, self.column, self.problem
+            self.expr.escape_debug(),
+            self.column,
+            self.problem
         )
     }
 }
@@ -138,10 +144,16 @@ impl fmt::Display for Syntax {
                  `_`, starting with a letter or a digit"
             ),
             Self::SingleOperator(c) => write!(f, "a single `{c}`: the operator is `{c}{c}`"),
-            Self::UnknownQualifier(q) => write!(
-                f,
-                "unknown qualifier `{q}:`: names are written `profile:NAME` or `filter:NAME`"
-            ),
+            Self::UnknownQualifier(q) => {
+                write!(
+                    f,
+                    "unknown qualifier `{q}:`: names are written `profile:NAME` or `filter:NAME`"
+                )?;
+                if let Some(qualifier) = closest_qualifier(q) {
+                    write!(f, "; did you mean `{qualifier}:`?")?;
+                }
+                Ok(())
+            }
             Self::MissingName(q) => write!(f, "`{q}:` must be followed directly by a name"),
             Self::Unqualified(name) => write!(
                 f,
@@ -153,7 +165,7 @@ impl fmt::Display for Syntax {
             Self::Mixed { readings } => {
                 f.write_str("`||` and `&&` cannot be mixed without parentheses; ")?;
                 match readings.as_slice() {
-                    [] => f.write_str("add parentheses to say which applies first"),
+                    [] => f.write_str("no suggested parenthesisation is valid; rewrite as valid terms or separate tiers"),
                     [one] => write!(f, "write `{one}`"),
                     [first, rest @ ..] => {
                         write!(f, "write `{first}`")?;
@@ -238,6 +250,33 @@ impl fmt::Display for Syntax {
             ),
         }
     }
+}
+
+fn closest_qualifier(written: &str) -> Option<&'static str> {
+    let written_len = written.chars().count();
+    if written_len > MAX_SUGGESTION_NAME_CHARS {
+        return None;
+    }
+    ["profile", "filter"]
+        .into_iter()
+        .filter(|known| written_len.abs_diff(known.chars().count()) <= 2)
+        .filter(|known| edit_distance(written, known) <= 2)
+        .min_by_key(|known| (edit_distance(written, known), *known))
+}
+
+/// Character edit distance, used only for short diagnostic suggestions.
+pub(super) fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = previous[j] + usize::from(ca != *cb);
+            current.push(substitute.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
 }
 
 /// Whether `s` is a valid NAME in the grammar, `[a-z0-9][a-z0-9_-]*`:

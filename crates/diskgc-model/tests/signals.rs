@@ -407,12 +407,16 @@ fn command_preflight_overrun_exits_met_when_space_appeared() {
 }
 
 #[test]
-fn command_preflight_overrun_with_failed_first_sample_is_usage_error() {
+fn command_preflight_overrun_with_failed_first_sample_is_host_error() {
     let extra = "  /usr/bin/pip: {mode: '0755'}\nevents:\n  - {at: {op: executable_file, path: /usr/bin/pip, nth: 1, when: before}, advance: 20m}\n  - {at: {op: openat2, path: /home/mark/src, nth: 1, when: before}, fail: EIO}\n";
     let host = common::host(&model(extra));
     let report = executor::ensure(&host, &command_request(), &[1000], &mut |_| {});
-    assert_eq!(report.status, Status::UsageError, "{report:#?}");
-    assert_eq!(report.exit_code(), 2);
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(
+        report.errors[0].cause,
+        diskgc_core::report::ErrorCause::Host
+    );
     assert!(
         report
             .overruns

@@ -54,6 +54,163 @@ fn version_prints_name_and_package_version() {
 }
 
 #[test]
+fn version_with_json_in_either_order_is_plain_text() {
+    for args in [
+        ["--version", "--json"],
+        ["--json", "--version"],
+        ["-V", "--json"],
+        ["--json", "-V"],
+    ] {
+        let out = diskgc(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            text(&out.stdout),
+            format!("diskgc {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn non_ensure_json_errors_have_typed_causes() {
+    let bad_flag = diskgc(&["profiles", "list", "--json=maybe"]);
+    assert_eq!(bad_flag.status.code(), Some(2));
+    let parsed = json(&bad_flag);
+    let keys: BTreeSet<&str> = parsed
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["status", "exit_code", "cause", "error"])
+    );
+    assert_eq!(parsed["status"], "usage_error");
+    assert_eq!(parsed["exit_code"], 2);
+    assert_eq!(parsed["cause"], "parse");
+    assert!(parsed["error"].as_str().unwrap().contains("--json"));
+
+    let missing = diskgc(&[
+        "profiles",
+        "list",
+        "--config",
+        "/nonexistent-diskgc-config.yaml",
+        "--json",
+    ]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(json(&missing)["cause"], "config");
+}
+
+#[test]
+fn explicit_selection_syntax_and_root_binding_have_distinct_causes() {
+    let common = ["ensure", "--dry-run", "--json", "--min-free", "1G"];
+    for (selection, cause) in [
+        ("profile:cargo-target && (", "parse"),
+        ("profile:cargo-target", "usage"),
+    ] {
+        let out = diskgc(
+            &[
+                &common[..],
+                &["--select", selection, "/nonexistent-diskgc-test"],
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{selection}: {}",
+            text(&out.stderr)
+        );
+        let report = json(&out);
+        assert_eq!(report["errors"][0]["cause"], cause, "{selection}");
+    }
+}
+
+#[test]
+fn selection_error_escapes_control_characters_in_the_original_argument() {
+    let out = diskgc(&[
+        "ensure",
+        "--dry-run",
+        "--json",
+        "--min-free",
+        "1G",
+        "--select",
+        "profile:cargo-target\n",
+        "/nonexistent-diskgc-test",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("profile:cargo-target\\n"), "{stderr:?}");
+    assert!(!stderr.contains("profile:cargo-target\n"), "{stderr:?}");
+}
+
+#[test]
+fn unsupported_valid_selection_escapes_newline_in_its_diagnostic() {
+    let expression = "(profile:cargo-target && !filter:idle-1d)\n || profile:cargo-target";
+    let out = diskgc(&[
+        "ensure",
+        "--dry-run",
+        "--json",
+        "--min-free",
+        "1G",
+        "--select",
+        expression,
+        "--roots",
+        "/nonexistent-diskgc-test",
+        "/nonexistent-diskgc-test",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let report = json(&out);
+    assert_eq!(report["errors"][0]["cause"], "usage");
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("!filter:idle-1d)\\n"), "{stderr:?}");
+    assert!(!stderr.contains("!filter:idle-1d)\n"), "{stderr:?}");
+}
+
+#[test]
+fn selected_redundancy_warning_reaches_cli_without_changing_result() {
+    let tmp = TempDir::new("select-warning");
+    let config = tmp.0.join("config.yaml");
+    std::fs::write(&config, "version: 1\n").expect("write config");
+    let base = [
+        "ensure",
+        "--dry-run",
+        "--json",
+        "--config",
+        config.to_str().expect("UTF-8"),
+        "--min-free",
+        "1G",
+    ];
+    let roots = [
+        "--roots",
+        "/nonexistent-diskgc-test",
+        "/nonexistent-diskgc-test",
+    ];
+    let plain = diskgc(&[&base[..], &["--select", "profile:cargo-target"], &roots].concat());
+    let redundant = diskgc(
+        &[
+            &base[..],
+            &["--select", "profile:cargo-target || profile:cargo-target"],
+            &roots,
+        ]
+        .concat(),
+    );
+    assert_eq!(plain.status.code(), redundant.status.code());
+    assert_eq!(redundant.status.code(), Some(2));
+    assert_eq!(json(&plain)["status"], json(&redundant)["status"]);
+    let stderr = text(&redundant.stderr);
+    assert!(
+        stderr.contains("warning: --select") && stderr.contains("duplicate"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn no_arguments_is_a_usage_error_with_exit_2() {
     let out = diskgc(&[]);
     assert_eq!(out.status.code(), Some(2));
@@ -97,6 +254,7 @@ fn bare_numbers_and_months_are_usage_errors() {
         assert_eq!(out.status.code(), Some(2));
         let report = json(&out);
         assert_eq!(report["status"], "usage_error");
+        assert_eq!(report["errors"][0]["cause"], "parse");
         assert!(report["path"].is_null() && report["mount"].is_null());
         let message = report["errors"][0]["message"].as_str().expect("message");
         assert!(message.contains(needle), "{message}");
@@ -866,6 +1024,7 @@ fn profiles_show_of_an_unknown_name_is_exit_2() {
     );
     let out = diskgc(&["profiles", "show", "idle-5d", "--json"]);
     assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out)["cause"], "usage");
     let error = error_of(&out);
     assert!(error.contains("`idle-1d`, `idle-2d`"), "{error}");
 }

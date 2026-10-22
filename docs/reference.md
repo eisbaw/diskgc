@@ -11,16 +11,16 @@ and the reclaim walk in [architecture.md](architecture.md).
 diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
               [--tally-budget DUR] [--no-index] [--select EXPR] [--roots DIR]...
               [--dry-run] [--json] [--config FILE] [--allow-root] PATH
-diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR]
-              [--select EXPR] [--roots DIR]... [--config FILE] [--allow-root] PATH
-diskgc watch  --tally-only [--config FILE] PATH
 diskgc check  [--config FILE]
-diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--config FILE] PATH...
 diskgc profiles list [--json] [--config FILE]
 diskgc profiles show NAME [--json] [--config FILE]
-diskgc profiles test [--config FILE]
+diskgc profiles test [--json] [--config FILE]
 diskgc --help | --version
 ```
+
+`watch` and `survey` are planned commands (tasks 32 and 38). This build
+returns exit 2 for either; their intended interfaces are described below
+for design review, not as available CLI behavior.
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
 (the config's user profiles and `protect` list still apply); reports name
@@ -114,7 +114,9 @@ process runs, even if that Cargo works in an unrelated directory; see
   skipped with that reason for the run and never locked; a refusal that
   stops being true later (a `.diskgc-keep` removed after the tally) is a
   missed reclaim until the next run, never an unsafe delete. The dry run
-  judges every candidate fully and is not bounded by it.
+  judges every candidate fully and is not bounded by it. The result's
+  `tally_cut_short` is true when the budget leaves at least one discovered
+  candidate untallied during reclaim.
 - `--dry-run`: print, in order, every candidate diskgc would consider,
   whether it is eligible or the skip reason, its estimated size and the
   operation it would run (JSON: the `plan` array); delete nothing. The
@@ -130,8 +132,12 @@ process runs, even if that Cargo works in an unrelated directory; see
   for up to a minute (half a second for a scan that blocks every candidate).
   With a `random` group, the order is for the printed seed
   only. Sizes are estimates; Docker and Nix tiers can only say what they
-  would run. Exits 0 (2 on usage errors, 124 at the deadline, 130/143 when
-  interrupted); JSON `status` is `dry_run`.
+  would run. A complete plan exits 0 with JSON `status: dry_run`; a host or
+  planning failure exits 3 with `status: error` and the available partial
+  plan and `errors` (2 on usage errors, 124 at the deadline, 130/143 when
+  interrupted). If one configured tier exhausts its own timeout, later
+  tiers are still planned, but the incomplete grouped plan exits 3; the
+  overall `--timeout` still exits 124.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
   code including usage errors, when stdout accepts the write. Any argument
   `--json` (or `--json=...`, a usage error) asks for it, wherever it stands,
@@ -139,6 +145,14 @@ process runs, even if that Cargo works in an unrelated directory; see
   `--help` (or `-h`) wins over it: the help is printed as text, exit 0.
 
 ### `watch`
+
+Planned; this build returns exit 2. Intended syntax:
+
+```
+diskgc watch --min-free SIZE --target-free SIZE [--interval DUR]
+             [--select EXPR] [--roots DIR]... [--config FILE] [--allow-root] PATH
+diskgc watch --tally-only [--config FILE] PATH
+```
 
 - One process per filesystem, under any supervisor (e.g. one instance of a
   systemd template unit per watched path; systemd is not required).
@@ -163,6 +177,12 @@ process runs, even if that Cargo works in an unrelated directory; see
 - On SIGTERM/SIGINT: stop as described under Signals, exit 0.
 
 ### `survey`
+
+Planned; this build returns exit 2. Intended syntax:
+
+```
+diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--config FILE] PATH...
+```
 
 Read-only: takes no lock and deletes nothing. For each `PATH`:
 
@@ -218,9 +238,10 @@ stderr (`diskgc: config PATH`).
   fixed action (`cargo-target`'s lock protocol) is a comment, since the
   schema takes no `action` there. Pasted under a config's `profiles:`,
   it loads as the same profile (a built-in's name needs `override: true`
-  there). An unknown `NAME` is exit 2, naming the close names
+  there). An unknown `NAME` is exit 2 with JSON `cause: usage`, naming the close names
   (those containing it or contained in it, then the fewest edits away,
-  at most two) or, without any, pointing to `profiles list`.
+  at most two) or, without any, pointing to `profiles list`. Fuzzy
+  suggestions are omitted for names over 256 characters.
 - `test`: run every source profile's path `examples` against an in-memory
   model of path, entry type and direct marker files. The abstract uid is
   1000; `{uid}` in an example is expanded to it. A string example has the
@@ -283,10 +304,10 @@ under `profile`:
 - `kind`, `find`, `action`, `checkouts` and `examples` are `null` for a
   filter; `examples` is also `null` for `cargo-target`, which takes none;
   `verified_with` is set on built-in sources only.
-- `find.roots` is the list of fixed roots, or `null` when
+- `find.roots` is the list of fixed roots, `null` when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
-  supplies them); `find.paths`, `find.exclude` and `find.type` are `null` for
-  `cargo-target`.
+  supplies them), or `"daemon"` for a Docker backend. `find.paths`,
+  `find.exclude` and `find.type` are `null` for `cargo-target`.
 - `where` always has its fields, `null` when unused (link lists are empty);
   `idle_for` is a duration (`3d`).
 - `min_idle_for` is a source's mandatory minimum age, or `null`; it is
@@ -295,8 +316,11 @@ under `profile`:
   `command` (the argv) and `cwd` (`candidate`, `parent`, or `null` when
   it is decided per candidate: `type: any` without `cwd`) for `command`;
   neither for `cargo_lock_protocol`. Later kinds add their own `type`.
-- On an error (exit 2): `{"status": "usage_error", "exit_code": 2,
-  "error": "message"}`, the message as on stderr; `status` is the field
+- On an invalid-input error: `{"status": "usage_error", "exit_code": 2,
+  "cause": "parse | config | safety | host | operation | usage", "error": "message"}`,
+  the message as on stderr. Host I/O during startup has `status: error`
+  and `exit_code: 3`; invalid input and configuration use exit 2.
+  `status` is the field
   `ensure`'s report has too. Every command but `ensure` fails with this
   object under `--json`.
 
@@ -335,7 +359,8 @@ order: `GROUP.TIER: NORMALIZED_EXPRESSION => [source profiles]`. Advisory
 warnings go to stderr. A user profile with `checkouts: allow` warns about
 repository contents; a path pattern ending in only wildcards warns when a
 fixed or tier-bound root lies outside `/tmp` and `/var/tmp`. Warnings do
-not make the configuration invalid.
+not make the configuration invalid. Selection warnings are described under
+Selection grammar.
 
 `check` validates an `owners:` list's shape and rejects system UIDs; whether
 it is permitted is checked when `ensure` is invoked with or without
@@ -352,7 +377,7 @@ The first matching row wins:
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
 | 124 | Deadline reached during reclaim, below `--min-free`. |
-| 3 | A tier failed (command error, permission error, daemon gone) or was excluded as misconfigured, below `--min-free`, or the final sample could not be taken. Something may have been deleted; the report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
+| 3 | A host or planning operation failed (including the first or final space sample), or a tier failed or was excluded as misconfigured below `--min-free`. A dry run may have a partial plan; a reclaim may have deleted something. The report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
 The mapping is explicit in code and covered by tests. A failed stdout write
@@ -366,12 +391,12 @@ collision (the shell reports 126 and 127 for a command it cannot run, and
 [ci-pre-job.sh](ci-pre-job.sh), uses 4 for a missing report). In a
 reclaiming run, available space decides 0, 75, 124, 3 and 1 by a fresh
 sample: a sample that could not be taken is a run error (3); 75 and 124
-require a fresh sample below `--min-free`. The first sample, of `PATH`'s
-filesystem before anything is done, is the exception: when it cannot be
-taken nothing was measured or done, and it is exit 2, like an unusable
-`PATH`. A dry run keeps its exits (0, 2, 124, 130/143) and reports a final
-sample it could not take as `avail_after_bytes: null` with an `errors`
-entry. The JSON `status` of each: 2 `usage_error` (also for a refusal to
+require a fresh sample below `--min-free`. An I/O failure in the first
+sample or startup host check is exit 3; an invalid `PATH` or unsupported
+kernel remains exit 2. A dry run with a host
+or planning error also exits 3, reports its partial plan and errors, and
+uses `avail_after_bytes: null` when its final sample failed. The JSON
+`status` of each: 2 `usage_error` (also for a refusal to
 run as root, a missing host lock file when reclaim is needed and, in
 development builds, the pre-release sandbox gate,
 [safety.md](safety.md#pre-release-sandbox-gate)),
@@ -398,6 +423,7 @@ JSON result (field names are part of the contract):
   "started_at": "2026-10-21T12:00:00Z", "duration_ms": 0, "version": "0.1.0",
   "mount": "/", "path": "/home/mark/src/app", "seed": null,
   "index": {"source": "live | snapshot | sync", "age_s": 0, "units": 0, "untallied": 0, "coverage": "complete | partial"},
+  "tally_cut_short": false,
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
@@ -405,9 +431,22 @@ JSON result (field names are part of the contract):
     "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
-  "errors":   [{"tier": "", "profile": "", "candidate": "", "message": ""}]
+  "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage", "message": ""}]
 }
 ```
+
+`cause` is a stable fault-class code in error objects and `errors[]`.
+Scripts match `cause`, `status` and the process exit code; message text is
+for people and may change. `parse` means invalid command or explicit
+`--select` syntax and grammar; `config` means invalid or missing
+configuration, `safety` means a safety or privilege
+precondition refused the run, `host` means a typed operating-system path,
+sampling or startup failure, `operation` means a tier planning, action or
+backend failure without a more specific typed cause, and `usage` covers
+other invalid caller inputs, including `--roots` binding and an unsupported
+kernel. An unsafe configured root is a `safety` refusal even when found
+after initial root preflight; a host I/O failure while checking that root
+is `host`.
 
 - `started_at` is the UTC wall-clock time when an executor run entered the
   library, in RFC 3339 form, or `null` if the host time is outside the
@@ -422,11 +461,15 @@ JSON result (field names are part of the contract):
   were not yet tallied, and whether the index covers everything it should
   (`partial` when it hit its memory budget). Builds without an index
   (before task-29) emit `null`.
+- `tally_cut_short` is true only after the reclaim tally actually stops at
+  `--tally-budget` with at least one candidate left untallied. It is false
+  for dry runs, runs that stop before tallying, and tallies that complete;
+  false does not say that every possible candidate was discovered.
 - Paths are JSON strings; bytes of a path that are not UTF-8 are shown as
   U+FFFD (the text is for reading; diskgc itself compares paths byte for
   byte).
-- `plan` is filled only by `--dry-run`; `reason` uses the skip-reason enum; a
-  bucket is one plan entry with a member `count`; `estimated_bytes` is
+- `plan` is filled only by `--dry-run`; `reason` uses the skip-reason enum.
+  The current plan has one row per candidate. `estimated_bytes` is
   `null` for Docker and Nix without a reported size, for candidates not
   yet tallied, and for every skipped candidate (its checks stopped before
   its walk was complete, so a size would be a partial count); `checkouts`
@@ -450,7 +493,10 @@ JSON result (field names are part of the contract):
   then `target_met` too, and the run never counts as met). A candidate
   deleted part-way (its deletion stopped, `changed`, `in_use` or an error)
   is an action too, and also in `skipped` or `errors` with why it
-  stopped.
+  stopped. `actions` records attempts, not a guarantee that each candidate
+  was completely removed. The summary rows described below mean a consumer
+  cannot always join an action to its final candidate outcome; use the run's
+  status and exit code for the overall result.
 - `actions[].idle_age_seconds` is the age of the newest recorded change or
   last Cargo build from a completed tally, measured against the wall clock
   just before that action starts. It is `null` when untallied, unknown, in
@@ -790,6 +836,11 @@ profiles apply and when.
 
 Fields (an unknown key anywhere in a profile is a load-time error):
 
+The `command` action and Docker and Nix kind schema fields in this table
+(`kind`, `find.roots: daemon`, their `action` forms and kind-specific
+constraints) are **provisional until the release review (task-49)**. The
+schema v1 freeze covers the other fields and the `delete` and Cargo actions.
+
 | Field | On | Meaning |
 |---|---|---|
 | `name` | every profile | A `NAME` (see Selection grammar), unique among built-in and user profiles. |
@@ -934,6 +985,12 @@ fixture-only parser catalog; that deletion profile is not shipped:
   `!(profile:a || profile:b)` is written `!profile:a && !profile:b`.
 - **One source per term** (after distribution). Intersecting two source
   profiles that find at different depths matches only by accident.
+- **Advisory warnings preserve the selection.** A duplicate union term or
+  repeated filter factor warns. A term that excludes its own source with
+  a negated source factor, or requires both positive and negative forms of
+  the same filter, also warns because that term selects nothing. Other terms
+  in its union can still select candidates. `check` and `ensure --select` print these
+  warnings on stderr; they do not change the exit status.
 - **Depth is explicit.** A `find.paths` segment reaches exactly one level;
   there is no `**` or implicit any-depth search. Profiles for project
   artifacts list the supported depths or take each project as a root. A
@@ -1010,11 +1067,11 @@ action `delete`) and `f` (`idle_for`):
 | Action | Use |
 |---|---|
 | `delete` | diskgc's own deletion ([safety.md](safety.md#deletion)). Option `make_writable: true` adds owner write permission to directories during the delete walk, after the last in-use recheck, for read-only trees such as Go's module cache or files copied from the Nix store. Opt-in per profile, since a read-only directory can be a deliberate protection. |
-| `command` | an argv list run per candidate, e.g. `[env, "GOCACHE={path}", go, clean, -cache]`. Trusted, arbitrary command execution; never run as root. See [safety.md](safety.md#command-actions). |
-| `docker-builder-prune` | Prune the bound Docker Engine's built-in BuildKit cache with `--all`, adding `--filter until=...` when the tier selects `idle_for`. One action covers the daemon cache. |
-| `docker-image-prune` | Prune dangling images in the bound Docker daemon. |
-| `docker-image-prune-all` | Prune all images unused by containers in the bound Docker daemon. |
-| kind actions | Cargo lock protocol and Nix GC are fixed by their kinds ([safety.md](safety.md#cargo-target)). |
+| `command` (provisional) | an argv list run per candidate, e.g. `[env, "GOCACHE={path}", go, clean, -cache]`. Trusted, arbitrary command execution; never run as root. See [safety.md](safety.md#command-actions). |
+| `docker-builder-prune` (provisional) | Prune the bound Docker Engine's built-in BuildKit cache with `--all`, adding `--filter until=...` when the tier selects `idle_for`. One action covers the daemon cache. |
+| `docker-image-prune` (provisional) | Prune dangling images in the bound Docker daemon. |
+| `docker-image-prune-all` (provisional) | Prune all images unused by containers in the bound Docker daemon. |
+| kind actions | Cargo lock protocol is fixed by its kind. Nix GC is provisional ([safety.md](safety.md#cargo-target)). |
 
 In YAML:
 

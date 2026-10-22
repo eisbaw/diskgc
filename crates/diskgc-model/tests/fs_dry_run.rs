@@ -2181,7 +2181,8 @@ fn a_root_inside_private_tmp_is_never_searched() {
     let host = host(&yaml(&format!("  {private}/f: {{}}\n  /tmp/g: {{}}\n")));
     let report = dry_run(&host, &request("profile:anything", &[private], "/tmp"));
     assert_eq!(plan(&report), [], "{:#?}", report.plan);
-    assert_eq!(report.status, Status::DryRun);
+    assert_eq!(report.status, Status::Error);
+    assert_eq!(report.exit_code(), 3);
     // Reported as a misconfigured root (an error), as the reclaim does.
     assert!(
         report

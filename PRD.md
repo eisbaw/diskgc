@@ -236,7 +236,7 @@ whatever the profile.
 | Decision | Chosen | Why |
 |---|---|---|
 | What vs when | Profiles (what and how) separate from tiers (which and when) | The same cruft knowledge serves every machine; only policy differs. |
-| Composition | Qualified names; terms of one `profile:` (or a group) `&&` `filter:`s; `\|\|` only with parentheses; `!` only narrows | Composable by name, no precedence traps, nothing deleted that no profile found. |
+| Composition | Qualified names; terms of one `profile:` (or a group) `&&` `filter:`s; `\|\|` may join source terms directly, but mixed `&&` and `\|\|` requires explicit grouping; `!` only narrows | Composable by name, no precedence traps, nothing deleted that no profile found. |
 | Roots | Fixed, or `roots: required` supplied by a tier, `--roots` or a `protect` entry | A selection or protection can never be re-pointed or left unbound. |
 | Built-in profiles | YAML data with examples, golden sets and `verified_with`; a changed matching set means a new name | Narrowing is unsafe under negation and protection, so meaning is immutable per name. |
 | Safety | Code, always on; eligibility walk, ownership of every entry, in-use and identity checks at deletion time; the checkout guard is on by default, and a profile may allow checkouts | A wrong profile or a stale index costs at most unused own files or speed; one that says `checkouts: allow` can also cost a repository's uncommitted or unpushed work. |

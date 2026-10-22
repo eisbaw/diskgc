@@ -387,17 +387,19 @@ pub fn docker_query_descendant_pipe_holder_hits_deadline(ctx: &Ctx) -> TestResul
         "Docker query waited for pipe holder after its 10-second bound: {:?}",
         run.took
     );
-    run.expect_code(0)?;
+    // The read-only query timed out, so this dry run has an incomplete plan.
+    run.expect_code(3)?;
     let result = report(&run)?;
     ensure!(
-        result["status"] == "dry_run"
+        result["status"] == "error"
             && result["actions"].as_array().is_some_and(Vec::is_empty)
             && result["errors"]
                 .as_array()
                 .is_some_and(|errors| errors.iter().any(|error| {
-                    error["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("read-only query exceeded 10s"))
+                    error["cause"] == "operation"
+                        && error["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("read-only query exceeded 10s"))
                 })),
         "Docker query timeout was not reported without action: {result}"
     );

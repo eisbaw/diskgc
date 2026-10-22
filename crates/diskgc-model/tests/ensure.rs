@@ -14,7 +14,7 @@ use diskgc_core::config;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::hostlock::TMPFILES_LINES;
 use diskgc_core::profile::{Library, parse_profiles};
-use diskgc_core::report::{Report, Status};
+use diskgc_core::report::{ErrorCause, Report, Status};
 use diskgc_core::units::{Size, parse_size};
 use diskgc_model::spec::Op;
 use diskgc_model::{Call, Holder, ModelHost};
@@ -442,7 +442,8 @@ fn configured_dry_run_continues_after_one_tier_budget_expires() {
     request.tier = tiers[0].clone();
     let report =
         executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
-    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
     assert!(
         report
             .errors
@@ -455,6 +456,37 @@ fn configured_dry_run_continues_after_one_tier_budget_expires() {
             .plan
             .iter()
             .any(|entry| entry.tier == "later" && entry.reason.is_none()),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Flock).is_empty());
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+    assert!(host.unfired_events().is_empty());
+}
+
+#[test]
+fn configured_dry_run_reports_later_tier_budget_expiry_as_error() {
+    let policy = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        timeout: 30s\n      - name: quick\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        timeout: 1s\n";
+    let (tiers, timeouts) = configured(policy);
+    let events = "events:\n  - {at: {op: statvfs, path: /home/mark/src, nth: 3, when: after}, advance: 2s}\n";
+    let host = host(&yaml(true, events));
+    let mut request = cargo("12G", Some("15G"));
+    request.tier = tiers[0].clone();
+    let report =
+        executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier == "quick" && error.message.contains("deadline")),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .plan
+            .iter()
+            .any(|entry| entry.tier == "first" && entry.reason.is_none()),
         "{report:#?}"
     );
     assert!(calls(&host, Op::Flock).is_empty());
@@ -744,6 +776,7 @@ fn a_failed_delete_is_an_error_exit_3_and_the_next_target_is_tried() {
     assert_eq!(report.exit_code(), 3);
     assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
     assert_eq!(report.errors[0].candidate, OLD);
+    assert_eq!(report.errors[0].cause, ErrorCause::Operation);
     assert!(
         report.errors[0].message.contains("EACCES"),
         "{:?}",
@@ -947,31 +980,153 @@ fn without_a_sample_before_the_first_action_nothing_is_reclaimed() {
     assert!(report.errors[0].message.contains("EIO"));
 }
 
-/// B1: a dry run whose final sample fails reports it unknown, not the
-/// earlier sample.
+/// A dry run whose final sample fails reports it unknown and fails the run.
 #[test]
 fn a_dry_run_with_an_unmeasured_final_sample_reports_it_unknown() {
     let host = host(&yaml(false, &failing_statvfs(2)));
     let report = dry_run(&host, &cargo("1G", None));
     assert_eq!(report.avail_after_bytes, None, "{report:#?}");
-    // R3: a dry run keeps its exits; the unknown sample is reported, not
-    // turned into exit 3.
-    assert_eq!(report.status, Status::DryRun);
-    assert_eq!(report.exit_code(), 0);
+    assert_eq!(report.status, Status::Error);
+    assert_eq!(report.exit_code(), 3);
     assert!(report.avail_before_bytes.is_some());
     assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
 }
 
-/// R4: the first sample (of PATH's filesystem, before anything is done)
-/// failing is exit 2 (usage_error): nothing was measured or done.
+/// The first sample is a host operation; its I/O failure is exit 3 even
+/// though nothing was measured or done.
 #[test]
-fn a_failed_first_sample_is_exit_2() {
+fn a_failed_first_sample_is_a_host_error() {
     let host = host(&yaml(true, &failing_statvfs(1)));
     let report = ensure(&host, &cargo("12G", None));
-    assert_eq!(report.status, Status::UsageError, "{report:#?}");
-    assert_eq!(report.exit_code(), 2);
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
     assert_eq!(report.avail_before_bytes, None);
     assert!(calls(&host, Op::Flock).is_empty());
+}
+
+#[test]
+fn a_host_error_resolving_path_is_exit_3_but_missing_path_is_usage() {
+    let event =
+        "events:\n  - {at: {op: openat2, path: /home/mark/src, nth: 1, when: before}, fail: EIO}\n";
+    for planning in [false, true] {
+        let host = host(&yaml(!planning, event));
+        let request = cargo("12G", None);
+        let report = if planning {
+            dry_run(&host, &request)
+        } else {
+            ensure(&host, &request)
+        };
+        assert_eq!(report.status, Status::Error, "{planning}: {report:#?}");
+        assert_eq!(report.exit_code(), 3);
+        assert_eq!(report.errors[0].cause, ErrorCause::Host);
+        assert!(report.errors[0].message.contains("EIO"));
+        assert!(calls(&host, Op::Unlinkat).is_empty());
+    }
+
+    let host = host(&yaml(false, ""));
+    let mut request = cargo("12G", None);
+    request.path = PathBuf::from("/home/mark/missing");
+    let missing = dry_run(&host, &request);
+    assert_eq!(missing.status, Status::UsageError, "{missing:#?}");
+    assert_eq!(missing.exit_code(), 2);
+}
+
+#[test]
+fn a_host_error_during_root_preflight_is_not_a_safety_refusal() {
+    let event =
+        "events:\n  - {at: {op: openat2, path: /home/mark/src, nth: 2, when: before}, fail: EIO}\n";
+    let host = host(&yaml(true, event));
+    let report = ensure(&host, &cargo("12G", None));
+    assert!(host.unfired_events().is_empty(), "{:#?}", host.trace());
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.cause == ErrorCause::Host && error.message.contains("EIO")),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn discovery_host_failure_in_dry_run_has_host_cause() {
+    let event = "events:\n  - {at: {op: read_dir, path: /home/mark/src, nth: 1, when: before}, fail: EIO}\n";
+    let host = host(&yaml(false, event));
+    let report = dry_run(&host, &cargo("1G", None));
+    assert!(host.unfired_events().is_empty(), "{:#?}", host.trace());
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.cause == ErrorCause::Host && error.message.contains("EIO")),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn tally_host_failure_in_reclaim_has_host_cause() {
+    let event = "events:\n  - {at: {op: read_dir, path: /home/mark/src/old/target, nth: 1, when: before}, fail: EIO}\n";
+    let host = host(&yaml(true, event));
+    let report = ensure(&host, &cargo("12G", None));
+    assert!(host.unfired_events().is_empty(), "{:#?}", host.trace());
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.cause == ErrorCause::Host && error.message.contains("EIO")),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn a_failed_first_sample_in_dry_run_and_grouped_paths_is_a_host_error() {
+    let policy = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: later\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    let (tiers, timeouts) = configured(policy);
+    for grouped in [false, true] {
+        let host = host(&yaml(false, &failing_statvfs(1)));
+        let mut request = cargo("12G", None);
+        request.tier = tiers[0].clone();
+        let report = if grouped {
+            executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {})
+        } else {
+            dry_run(&host, &request)
+        };
+        assert_eq!(report.status, Status::Error, "{grouped}: {report:#?}");
+        assert_eq!(report.exit_code(), 3);
+        assert_eq!(report.errors[0].cause, ErrorCause::Host);
+        assert!(report.plan.is_empty());
+    }
+    let host = host(&yaml(true, &failing_statvfs(1)));
+    let report = grouped(&host, policy, "12G", None);
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn grouped_dry_run_reports_later_tier_preflight_failure_with_a_partial_plan() {
+    let policy = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: unsafe\n        select: profile:cargo-target\n        roots: [/tmp/systemd-private-abc-cups.service-x1/tmp]\n";
+    let (tiers, timeouts) = configured(policy);
+    let host = host(&yaml(false, ""));
+    let mut request = cargo("12G", None);
+    request.tier = tiers[0].clone();
+    let report =
+        executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert!(report.plan.iter().any(|entry| entry.tier == "first"));
+    assert!(report.errors.iter().any(|error| error.tier == "unsafe"
+        && error.cause == ErrorCause::Safety
+        && error.message.contains("PrivateTmp")));
+    assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
 /// Every error recorded reaches the log too.
@@ -1004,6 +1159,11 @@ fn the_tally_budget_leaves_targets_untallied_in_discovery_order() {
     let host = host(&yaml(true, ""));
     let report = ensure(&host, &req);
     assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(report.tally_cut_short);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&report.to_json()).unwrap()["tally_cut_short"],
+        true
+    );
     let order: Vec<&Path> = report
         .actions
         .iter()
@@ -1014,6 +1174,7 @@ fn the_tally_budget_leaves_targets_untallied_in_discovery_order() {
     req.tally_budget = Some(Duration::from_secs(30));
     let host = common::host(&yaml(true, ""));
     let report = ensure(&host, &req);
+    assert!(!report.tally_cut_short);
     let order: Vec<&Path> = report
         .actions
         .iter()
@@ -1195,6 +1356,7 @@ fn an_unsafe_root_is_a_misconfiguration_that_excludes_the_tier() {
         assert_eq!(report.status, Status::Error, "{roots:?}: {report:#?}");
         assert_eq!(report.exit_code(), 3);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert_eq!(report.errors[0].cause, ErrorCause::Safety);
         let message = &report.errors[0].message;
         assert!(
             message.starts_with(
@@ -1361,6 +1523,7 @@ fn a_budget_spent_mid_tally_orders_tallied_then_untallied_as_found() {
     req.tally_budget = Some(Duration::from_secs(30));
     let report = ensure(&host, &req);
     assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(report.tally_cut_short);
     let order: Vec<String> = report
         .actions
         .iter()
@@ -1377,6 +1540,7 @@ fn a_budget_spent_mid_tally_orders_tallied_then_untallied_as_found() {
     // The same without a jump: the oldest order.
     let host = common::host(&three(""));
     let report = ensure(&host, &req);
+    assert!(!report.tally_cut_short);
     let first = report.actions[0].candidate.display().to_string();
     assert_eq!(first, "/home/mark/src/c/target");
 }
@@ -1544,6 +1708,7 @@ fn a_spent_tally_budget_does_not_truncate_the_dry_run_plan() {
     let spent = dry_run(&host(&yaml(false, "")), &request);
     assert_eq!(ordinary.status, Status::DryRun);
     assert_eq!(spent.status, Status::DryRun, "{spent:#?}");
+    assert!(!ordinary.tally_cut_short && !spent.tally_cut_short);
     assert_eq!(
         spent.plan, ordinary.plan,
         "a budget only limits reclaim tallying"

@@ -3,10 +3,10 @@ id: TASK-26
 title: >-
   Review checkpoint: freeze YAML schema v1, selection grammar, CLI flags, exit
   codes and JSON
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-19 13:40'
+updated_date: '2026-10-22 17:11'
 labels:
   - wave-2
   - review
@@ -31,9 +31,9 @@ Why: these surfaces become a contract once anyone deploys diskgc; this is the la
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each reviewer's findings are fixed or explicitly accepted with a reason recorded in the task
-- [ ] #2 docs/reference.md and the implementation agree (spot-checked by tests for every flag, field and grammar rule)
-- [ ] #3 The command-action, Docker and Nix parts of the schema are marked provisional until the release review
+- [x] #1 Each reviewer's findings are fixed or explicitly accepted with a reason recorded in the task
+- [x] #2 docs/reference.md and the implementation agree (spot-checked by tests for every flag, field and grammar rule)
+- [x] #3 The command-action, Docker and Nix parts of the schema are marked provisional until the release review
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -76,9 +76,19 @@ Pre-freeze addition (task-92, 2026-10-19): `diskgc profiles list --json` / `show
 Update (task-92 round 2, 2026-10-19), superseding parts of the note above: the profile JSON now has `find.roots` a list or null plus `find.roots_required` (bool), never string-or-list; JSON-only values are snake_case like the report (`origin` built_in | user, `action.type` cargo_lock_protocol), YAML identifiers keep their YAML spelling (kind names, delete, command, dir); the list table uses the same spellings. Error object of every command but ensure under --json: {"status": "usage_error", "exit_code": 2, "error": message}, so agents branch on `status` as in ensure's report (ensure keeps its report). `--json` is now detected on the raw arguments (any `--json` or `--json=...`, also as another flag's value), for ensure too, so every exit prints one object. `-h`/`--help` anywhere is help, exit 0. Still to review at the freeze: `role` as a field name; whether `exit_code` belongs in ensure's report too; stable error codes (H7).
 
 From task-92 round 3 (2026-10-19), for the freeze: (a) spelling across commands: the report's plan[].operation is human-readable text ("cargo lock protocol", a command's argv; documented so in reference.md, Output), while the profiles JSON's action.type is the enum-like "cargo_lock_protocol"; decide whether operation stays free text or gains an enum next to it. (b) mped: the profiles JSON on success has no `status` (errors have "status": "usage_error"); consider "status": "ok" so every object can be branched on one field. (c) mped: profiles JSON `where.idle_for` is duration text ("3d", the YAML spelling) while the report's durations are numbers (duration_ms, over_ms); decide one convention.
+
+2026-10-22 initial three-reviewer checkpoint (mped-architect, CLI/UX, safety): NO-GO. Shared P1s: dry-run could exit 0 with errors; initial statvfs I/O was exit 2; JSON faults lacked stable codes; command/Docker/Nix schema lacked provisional marking. Additional mismatches: version plus --json, planned watch/survey syntax presented as available, profiles test --json omitted from synopsis, plan bucket count documented but absent, Docker find.roots JSON daemon value omitted, grammar diagnostics H1-H5, and PRD expression drift H8d. Root and two workers are correcting these; do not freeze until exact E2E and fresh reviews pass. No host deletion.
+
+Freeze decisions accepted after MPED review (2026-10-22): actions[] records attempted work; partial completion is represented in skipped[] or errors[], and compacted reports (>1000 actions or >20 same-reason skips) cannot support a precise per-candidate join, so JSON is not a per-candidate completion audit. Process exit code remains authoritative; status maps deterministically to it, so ensure JSON does not duplicate exit_code. Successful profiles list/show JSON has a typed payload without status; errors carry status and cause, preserving existing success shape. plan[].operation remains human-readable action text, not an action enum; profile action.type is the machine enum. Profile where.idle_for retains a YAML duration string, while report durations are measured numeric units; they describe different domains. These are deliberate v1 contract choices, not unreviewed omissions.
+
+Compass domain review (2026-10-22): NO-GO until explicit --select/--roots caller errors stop masquerading as config faults, and typed ResolveError::Host in root preflight stops masquerading as a safety refusal. Worker is adding typed causes and tests. Compass otherwise accepted the dry-run partial-plan, action-attempt, tally-cutoff and provisional-schema language.
+
+Final-review follow-up (2026-10-22): typed selection and profiles-show caller faults now use parse/usage instead of config; typed startup, discovery, eligibility and root-preflight host faults use host/error/exit 3; unsafe roots use safety consistently; raw expressions and unknown names are escaped in diagnostics. Fuzzy suggestions skip names over 256 characters and avoid edit-distance scans when name lengths differ by more than two; long-input tests added. QA exact e2e and MPED rereview are running in parallel before freeze.
+
+Final checkpoint (2026-10-22): Compass domain review findings fixed; MPED architecture, CLI/UX and safety rereviews GO. Deliberately malformed sandbox clock fixture now expects typed startup host exit 3; Docker read-only query timeout fixture expects incomplete dry-run error/exit 3. QA exact nix develop -c just e2e exited 0 on stable tree: fmt, Python 4/4, Clippy, workspace/doctests, Nix fast 219/219, Docker fast 7/7, and five VMs. git diff --check clean. Schema v1 frozen except command action, Docker and Nix portions explicitly provisional until TASK-49.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

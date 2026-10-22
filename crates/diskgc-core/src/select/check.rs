@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use super::parse::{Syntax, SyntaxError, parse};
+use super::parse::{MAX_SUGGESTION_NAME_CHARS, Syntax, SyntaxError, edit_distance, parse};
 use super::{Expr, Factor, Term};
 use crate::kind::{Kind, PredicateName};
 
@@ -29,6 +29,12 @@ pub trait Catalog {
 
     /// The profile called `name`, if any.
     fn lookup(&self, name: &str) -> Option<Entry<'_, Self::Action>>;
+
+    /// Names available for spelling suggestions. Small test catalogs may
+    /// leave this empty; the production library returns all active names.
+    fn names(&self) -> Vec<&str> {
+        Vec::new()
+    }
 }
 
 /// A profile as the checker sees it.
@@ -46,6 +52,7 @@ pub enum Entry<'a, A> {
 pub struct Checked {
     expr: Expr,
     kind: Kind,
+    warnings: Vec<String>,
 }
 
 impl Checked {
@@ -56,6 +63,11 @@ impl Checked {
     /// The one kind of every source in the expression.
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Advisory diagnostics that do not make a selection invalid.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 }
 
@@ -75,12 +87,11 @@ pub enum CheckError {
     Unknown {
         written: String,
         name: String,
+        suggestions: Vec<String>,
     },
     /// `profile:NAME` where `NAME` is a filter: a term must start with a
     /// source.
-    FilterAsSource {
-        name: String,
-    },
+    FilterAsSource { name: String },
     /// The name is a profile of the other sort. `fix` is the name written
     /// with the other qualifier, when the expression would then be accepted
     /// as far as this name is concerned.
@@ -103,10 +114,7 @@ pub enum CheckError {
         other_action: String,
     },
     /// A non-enumerating kind in a union.
-    OneTerm {
-        kind: Kind,
-        terms: usize,
-    },
+    OneTerm { kind: Kind, terms: usize },
     UnsupportedPredicate {
         filter: String,
         predicate: PredicateName,
@@ -118,23 +126,29 @@ pub enum CheckError {
         predicate: PredicateName,
     },
     /// A factor that a non-enumerating kind does not take.
-    KindShape {
-        kind: Kind,
-        factor: String,
-    },
+    KindShape { kind: Kind, factor: String },
     /// `!profile:NAME` with a profile of a non-enumerating kind.
-    NegatedKind {
-        name: String,
-        kind: Kind,
-    },
+    NegatedKind { name: String, kind: Kind },
 }
 
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoTerms => f.write_str("the expression has no terms"),
-            Self::Unknown { written, name } => {
-                write!(f, "`{written}`: no profile or filter is named `{name}`")
+            Self::Unknown {
+                written,
+                name,
+                suggestions,
+            } => {
+                write!(f, "`{written}`: no profile or filter is named `{name}`")?;
+                if !suggestions.is_empty() {
+                    let names = suggestions
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>();
+                    write!(f, "; did you mean {}?", names.join(", "))?;
+                }
+                Ok(())
             }
             Self::FilterAsSource { name } => write!(
                 f,
@@ -232,6 +246,8 @@ pub struct CheckErrors {
     /// The expression: as written when it came through
     /// [`compile`](super::compile), normalised from a bare [`check`].
     pub expr: String,
+    /// Source column when this static error restates a parser error.
+    pub column: Option<usize>,
     /// In the order found, without duplicates (distribution repeats
     /// factors).
     pub errors: Vec<CheckError>,
@@ -239,7 +255,11 @@ pub struct CheckErrors {
 
 impl fmt::Display for CheckErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid selection `{}`: ", self.expr)?;
+        write!(f, "invalid selection `{}`", self.expr.escape_debug())?;
+        if let Some(column) = self.column {
+            write!(f, " at column {column}")?;
+        }
+        f.write_str(": ")?;
         for (i, error) in self.errors.iter().enumerate() {
             if i > 0 {
                 f.write_str("; ")?;
@@ -257,7 +277,14 @@ impl std::error::Error for CheckErrors {}
 pub fn check<C: Catalog>(expr: Expr, catalog: &C) -> Result<Checked, CheckErrors> {
     let (kind, mut errors) = rules(&expr, catalog);
     match kind {
-        Some(kind) if errors.is_empty() => Ok(Checked { expr, kind }),
+        Some(kind) if errors.is_empty() => {
+            let warnings = selection_warnings(&expr);
+            Ok(Checked {
+                expr,
+                kind,
+                warnings,
+            })
+        }
         _ => {
             if expr.terms.is_empty() {
                 errors.push(CheckError::NoTerms);
@@ -265,6 +292,7 @@ pub fn check<C: Catalog>(expr: Expr, catalog: &C) -> Result<Checked, CheckErrors
             keep_working_fixes(&expr, catalog, &mut errors);
             Err(CheckErrors {
                 expr: expr.to_string(),
+                column: None,
                 errors,
             })
         }
@@ -280,7 +308,11 @@ fn rules<C: Catalog>(expr: &Expr, catalog: &C) -> (Option<Kind>, Vec<CheckError>
     for term in &expr.terms {
         let kind = match catalog.lookup(&term.source) {
             None => {
-                errors.push(unknown(format!("profile:{}", term.source), &term.source));
+                errors.push(unknown(
+                    format!("profile:{}", term.source),
+                    &term.source,
+                    catalog,
+                ));
                 None
             }
             Some(Entry::Filter { .. }) => {
@@ -368,7 +400,7 @@ fn check_factor<C: Catalog>(factor: &Factor, kind: Option<Kind>, catalog: &C, er
     };
     match factor {
         Factor::Filter(name) | Factor::NotFilter(name) => match catalog.lookup(name) {
-            None => errors.push(unknown(written.clone(), name)),
+            None => errors.push(unknown(written.clone(), name, catalog)),
             Some(Entry::Source { kind: is, .. }) => errors.push(CheckError::WrongQualifier {
                 written: written.clone(),
                 name: name.clone(),
@@ -403,7 +435,7 @@ fn check_factor<C: Catalog>(factor: &Factor, kind: Option<Kind>, catalog: &C, er
             }
         },
         Factor::NotProfile(name) => match catalog.lookup(name) {
-            None => errors.push(unknown(written.clone(), name)),
+            None => errors.push(unknown(written.clone(), name, catalog)),
             Some(Entry::Filter { .. }) => errors.push(CheckError::WrongQualifier {
                 written: written.clone(),
                 name: name.clone(),
@@ -423,11 +455,86 @@ fn check_factor<C: Catalog>(factor: &Factor, kind: Option<Kind>, catalog: &C, er
     }
 }
 
-fn unknown(written: String, name: &str) -> CheckError {
+fn unknown<C: Catalog>(written: String, name: &str, catalog: &C) -> CheckError {
+    let name_len = name.chars().count();
+    if name_len > MAX_SUGGESTION_NAME_CHARS {
+        return CheckError::Unknown {
+            written,
+            name: name.to_owned(),
+            suggestions: Vec::new(),
+        };
+    }
+    let mut near: Vec<(&str, usize)> = catalog
+        .names()
+        .into_iter()
+        .filter_map(|candidate| {
+            // Preserve substring suggestions while avoiding an edit-distance
+            // scan of a huge unknown name for every catalog entry.
+            let contained = name.len() >= 3
+                && candidate.len() >= 3
+                && (candidate.contains(name) || name.contains(candidate));
+            let distance = (name_len.abs_diff(candidate.chars().count()) <= 2)
+                .then(|| edit_distance(name, candidate));
+            (contained || distance.is_some_and(|d| d <= 2))
+                .then_some((candidate, distance.unwrap_or(usize::MAX)))
+        })
+        .collect();
+    near.sort_unstable_by_key(|(candidate, distance)| (*distance, *candidate));
+    near.dedup_by_key(|(candidate, _)| *candidate);
+    let suggestions = near
+        .into_iter()
+        .take(5)
+        .map(|(name, _)| name.to_owned())
+        .collect();
     CheckError::Unknown {
         written,
         name: name.to_owned(),
+        suggestions,
     }
+}
+
+fn selection_warnings(expr: &Expr) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for term in &expr.terms {
+        if term
+            .factors
+            .iter()
+            .any(|factor| matches!(factor, Factor::NotProfile(name) if name == &term.source))
+        {
+            warnings.push(format!(
+                "term `{term}` selects nothing: its source is excluded by `!profile:{}`",
+                term.source
+            ));
+        }
+        for factor in &term.factors {
+            let count = term.factors.iter().filter(|other| *other == factor).count();
+            if count > 1 {
+                let warning = format!("term `{term}` repeats `{factor}`");
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
+            if let Factor::Filter(name) = factor
+                && term.factors.contains(&Factor::NotFilter(name.clone()))
+            {
+                let warning = format!(
+                    "term `{term}` selects nothing: `filter:{name}` and `!filter:{name}` contradict"
+                );
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
+        }
+    }
+    for (i, term) in expr.terms.iter().enumerate() {
+        if expr.terms[..i].contains(term) {
+            let warning = format!("duplicate term `{term}` in selection");
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+    warnings
 }
 
 /// Drop each wrong-qualifier fix whose rewrite of `expr` breaks a rule that

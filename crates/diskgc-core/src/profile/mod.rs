@@ -451,6 +451,12 @@ impl Library {
 impl Catalog for Library {
     type Action = Action;
 
+    fn names(&self) -> Vec<&str> {
+        self.profiles()
+            .map(|profile| profile.name.as_str())
+            .collect()
+    }
+
     fn lookup(&self, name: &str) -> Option<Entry<'_, Action>> {
         Some(match &self.get(name)?.body {
             Body::Source(source) => Entry::Source {

@@ -586,6 +586,8 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
 
 /// The most names [`close_names`] suggests.
 const MAX_CLOSE: usize = 5;
+/// Bound fuzzy diagnostics independently of configuration and CLI input size.
+const MAX_SUGGESTION_NAME_CHARS: usize = 256;
 
 /// The names in `library` close to `name`: those that contain it or that
 /// it contains (a qualified `profile:cargo-target`, a bare `cargo`), then
@@ -593,11 +595,16 @@ const MAX_CLOSE: usize = 5;
 /// `idle-2d`, ..., not `idle-10d`). At most [`MAX_CLOSE`], by name within
 /// each group.
 pub fn close_names<'a>(library: &'a Library, name: &str) -> Vec<&'a str> {
+    let name_len = name.chars().count();
+    if name_len > MAX_SUGGESTION_NAME_CHARS {
+        return Vec::new();
+    }
     let names = || library.profiles().map(|p| p.name.as_str());
     let contained =
         names().filter(|known| name.len() >= 3 && (known.contains(name) || name.contains(known)));
-    let nearest = names().map(|known| edit_distance(name, known)).min();
-    let edited = names().filter(|known| {
+    let nearby = || names().filter(|known| name_len.abs_diff(known.chars().count()) <= 2);
+    let nearest = nearby().map(|known| edit_distance(name, known)).min();
+    let edited = nearby().filter(|known| {
         let distance = edit_distance(name, known);
         distance <= 2 && Some(distance) == nearest
     });
@@ -614,12 +621,13 @@ pub fn close_names<'a>(library: &'a Library, name: &str) -> Vec<&'a str> {
 /// Why `show NAME` found nothing, naming the close names if any.
 pub fn unknown_name(library: &Library, name: &str) -> String {
     let close = close_names(library, name);
+    let escaped = name.escape_debug();
     if close.is_empty() {
-        format!("no profile is named `{name}`; `diskgc profiles list` lists them")
+        format!("no profile is named `{escaped}`; `diskgc profiles list` lists them")
     } else {
         let quoted: Vec<String> = close.iter().map(|n| format!("`{n}`")).collect();
         format!(
-            "no profile is named `{name}`; close names: {}",
+            "no profile is named `{escaped}`; close names: {}",
             quoted.join(", ")
         )
     }

@@ -330,6 +330,7 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
     let mut tier_names = BTreeSet::new();
     let mut group_names = BTreeSet::new();
     let mut groups = Vec::new();
+    let mut selection_warnings = Vec::new();
     for group in spec.groups {
         valid_name(&group.name, "group").map_err(error)?;
         if !group_names.insert(group.name.clone()) {
@@ -343,6 +344,12 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
             }
             let checked = select::compile(&tier.select, &library)
                 .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
+            selection_warnings.extend(
+                checked
+                    .warnings()
+                    .iter()
+                    .map(|warning| format!("tier `{}`: {warning}", tier.name)),
+            );
             let roots = library
                 .bind_roots(&checked, tier.roots.as_deref())
                 .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
@@ -416,6 +423,7 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         }
     }
     let mut warnings = profile_warnings(&library, &groups, &protect);
+    warnings.extend(selection_warnings);
     warnings.extend(
         spec.profile_policies
             .iter()
@@ -906,6 +914,20 @@ mod tests {
         assert_eq!(config.warnings.len(), 2);
         assert!(config.warnings.iter().any(|w| w.contains("only wildcards")));
         assert!(config.warnings.iter().any(|w| w.contains("VCS checkouts")));
+    }
+
+    #[test]
+    fn selection_warnings_reach_loaded_config_with_tier_context() {
+        let config = parsed(&policy("groups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:scratch || profile:scratch\n"))
+            .expect("duplicate selection is valid but worth warning about");
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("tier `t`: duplicate term `profile:scratch`")),
+            "{:?}",
+            config.warnings
+        );
     }
 
     #[test]

@@ -57,8 +57,8 @@ use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, Where};
 use crate::report::{
-    ActionEntry, BuildEvidence, ErrorEntry, Final, HeldEntry, OverrunEntry, PlanEntry, Report,
-    SkipEntry, Status, after_lock_timeout, conclude, signed_bytes,
+    ActionEntry, BuildEvidence, ErrorCause, ErrorEntry, Final, HeldEntry, OverrunEntry, PlanEntry,
+    Report, SkipEntry, Status, after_lock_timeout, conclude, signed_bytes,
 };
 use crate::resolve::{
     ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
@@ -305,6 +305,21 @@ pub enum SourceKind {
     DockerImages,
 }
 
+/// An explicit caller selection failed before it became a runnable tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionFailure {
+    Parse(String),
+    Usage(String),
+}
+
+impl SelectionFailure {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::Parse(message) | Self::Usage(message) => message,
+        }
+    }
+}
+
 impl Tier {
     /// The tier `--select EXPR` makes (with `--roots`, `roots`), checked
     /// against `library` (the built-ins plus the config's profiles), for
@@ -317,11 +332,26 @@ impl Tier {
         roots: Option<&[String]>,
         uid: u32,
     ) -> Result<Tier, String> {
-        let checked = select::compile(expr, library).map_err(|e| e.to_string())?;
+        Self::select_with_warnings(expr, library, roots, uid)
+            .map(|(tier, _)| tier)
+            .map_err(SelectionFailure::into_message)
+    }
+
+    /// Like `select`, returning the parser's nonfatal redundancy warnings.
+    pub fn select_with_warnings(
+        expr: &str,
+        library: &Library,
+        roots: Option<&[String]>,
+        uid: u32,
+    ) -> Result<(Tier, Vec<String>), SelectionFailure> {
+        let checked = select::compile(expr, library)
+            .map_err(|error| SelectionFailure::Parse(error.to_string()))?;
         let bound = library
             .bind_roots(&checked, roots)
-            .map_err(|e| format!("--select `{expr}`: {e}"))?;
-        Self::from_checked(expr, &checked, library, &bound, uid)
+            .map_err(|error| SelectionFailure::Usage(format!("--select {expr:?}: {error}")))?;
+        let tier = Self::from_checked(expr, &checked, library, &bound, uid)
+            .map_err(SelectionFailure::Usage)?;
+        Ok((tier, checked.warnings().to_vec()))
     }
 
     /// Compile a statically checked config tier using its already-bound
@@ -349,9 +379,10 @@ impl Tier {
         bound: &std::collections::BTreeMap<String, Vec<String>>,
         uid: u32,
     ) -> Result<Self, String> {
+        let diagnostic_expr = format!("{expr:?}");
         let not_yet = |what: &str, task: &str| {
             format!(
-                "--select `{expr}`: {what} is not supported by ensure in this build yet \
+                "--select {diagnostic_expr}: {what} is not supported by ensure in this build yet \
                  ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
                  kind fs), optionally with supported filters, a positive fs union with one action, or a \
                  same-source Cargo union with only positive idle filters"
@@ -403,7 +434,7 @@ impl Tier {
             }
             if terms.iter().any(|term| term.action != first.action) {
                 return Err(format!(
-                    "--select `{expr}`: filesystem union sources must have exactly the same action and options"
+                    "--select {diagnostic_expr}: filesystem union sources must have exactly the same action and options"
                 ));
             }
             let mut extra = Vec::with_capacity(terms.len());
@@ -437,9 +468,10 @@ impl Tier {
         uid: u32,
         not_yet: &impl Fn(&str, &str) -> String,
     ) -> Result<Tier, String> {
+        let diagnostic_expr = format!("{expr:?}");
         let Some(Body::Source(source)) = library.get(&term.source).map(|p| &p.body) else {
             return Err(format!(
-                "--select `{expr}`: no source profile `{}`",
+                "--select {diagnostic_expr}: no source profile `{}`",
                 term.source
             ));
         };
@@ -461,7 +493,7 @@ impl Tier {
                 Factor::NotProfile(name) => {
                     let Some(Body::Source(other)) = library.get(name).map(|p| &p.body) else {
                         return Err(format!(
-                            "--select `{expr}`: no negated source profile `{name}`"
+                            "--select {diagnostic_expr}: no negated source profile `{name}`"
                         ));
                     };
                     let source = match &other.finds {
@@ -482,7 +514,9 @@ impl Tier {
                     let roots = bound
                         .get(name)
                         .ok_or_else(|| {
-                            format!("--select `{expr}`: no bound roots for `!profile:{name}`")
+                            format!(
+                                "--select {diagnostic_expr}: no bound roots for `!profile:{name}`"
+                            )
                         })?
                         .iter()
                         .map(|root| PathBuf::from(root.replace("{uid}", &uid.to_string())))
@@ -496,7 +530,9 @@ impl Tier {
                 }
             };
             let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
-                return Err(format!("--select `{expr}`: no filter profile `{name}`"));
+                return Err(format!(
+                    "--select {diagnostic_expr}: no filter profile `{name}`"
+                ));
             };
             if is_negated && where_.predicates() == [crate::kind::PredicateName::IdleFor] {
                 let bound = where_.idle_for.expect("idle predicate present");
@@ -547,8 +583,9 @@ impl Tier {
                 // guards are independent retention checks. A filter can
                 // specify both, so neither may disappear when compiling it.
                 if !is_negated {
-                    find.apply_version_filter(where_)
-                        .map_err(|error| format!("--select `{expr}`: filter:{name}: {error}"))?;
+                    find.apply_version_filter(where_).map_err(|error| {
+                        format!("--select {diagnostic_expr}: filter:{name}: {error}")
+                    })?;
                 }
                 continue;
             }
@@ -565,8 +602,9 @@ impl Tier {
                 ));
             }
             if let SourceKind::Fs(find) = &mut kind {
-                find.apply_version_filter(where_)
-                    .map_err(|error| format!("--select `{expr}`: filter:{name}: {error}"))?;
+                find.apply_version_filter(where_).map_err(|error| {
+                    format!("--select {diagnostic_expr}: filter:{name}: {error}")
+                })?;
             }
         }
         let idle_for = library.idle_for(term)?;
@@ -713,6 +751,30 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
     report.usage_error(message)
 }
 
+enum MeasureFailure {
+    Usage(String),
+    Host(String),
+}
+
+fn measure_failure(report: Report, log: &mut dyn FnMut(&str), failure: MeasureFailure) -> Report {
+    match failure {
+        MeasureFailure::Usage(message) => usage(report, log, message),
+        MeasureFailure::Host(message) => {
+            log(&format!("error: {message}"));
+            let mut report = report;
+            report.status = Status::Error;
+            report.errors.push(ErrorEntry {
+                tier: String::new(),
+                profile: String::new(),
+                candidate: String::new(),
+                cause: ErrorCause::Host,
+                message,
+            });
+            report
+        }
+    }
+}
+
 /// Privileges (docs/safety.md, Privileges): diskgc refuses to run as root
 /// without `--allow-root`. The caller validates and resolves `owners:`
 /// before passing those IDs to the planner or reclaim. Returns the effective
@@ -740,36 +802,43 @@ struct Measured<F> {
 }
 
 /// Reaches `PATH`, samples its filesystem and turns the sizes into bytes;
-/// fills the report's `mount`, sizes and `avail_before_bytes`. An error is
-/// a usage error (the report says why).
+/// fills the report's `mount`, sizes and `avail_before_bytes`. Host sampling
+/// failures remain distinct from invalid path and size requests.
 fn measure<H: Host>(
     host: &H,
     request: &Request,
     report: &mut Report,
-) -> Result<Measured<H::Fd>, String> {
-    let at = resolve(host, &request.path, Want::Directory)
-        .map_err(|e| format!("PATH {}: {e}", request.path.display()))?;
+) -> Result<Measured<H::Fd>, MeasureFailure> {
+    let at = resolve(host, &request.path, Want::Directory).map_err(|error| {
+        let message = format!("PATH {}: {error}", request.path.display());
+        match error {
+            ResolveError::Host(_) => MeasureFailure::Host(message),
+            ResolveError::UnsafePath { .. }
+            | ResolveError::UnsupportedFs { .. }
+            | ResolveError::Missing { .. } => MeasureFailure::Usage(message),
+        }
+    })?;
     report.mount = Some(at.mount.mount_point.clone());
     let space = host
         .statvfs(&at.fd)
-        .map_err(|e| format!("PATH {}: {e}", request.path.display()))?;
+        .map_err(|e| MeasureFailure::Host(format!("PATH {}: {e}", request.path.display())))?;
     report.avail_before_bytes = Some(space.avail_bytes);
     let min = request
         .min_free
         .bytes(space.size_bytes)
-        .map_err(|e| format!("--min-free {}: {e}", request.min_free))?;
+        .map_err(|e| MeasureFailure::Usage(format!("--min-free {}: {e}", request.min_free)))?;
     report.min_free_bytes = Some(min);
     let target = match request.target_free {
         None => min,
         Some(size) => size
             .bytes(space.size_bytes)
-            .map_err(|e| format!("--target-free {size}: {e}"))?,
+            .map_err(|e| MeasureFailure::Usage(format!("--target-free {size}: {e}")))?,
     };
     report.target_free_bytes = Some(target);
     if target < min {
-        return Err(format!(
+        return Err(MeasureFailure::Usage(format!(
             "--target-free ({target} bytes) is below --min-free ({min} bytes)"
-        ));
+        )));
     }
     Ok(Measured {
         dev: at.stat.dev,
@@ -785,7 +854,7 @@ fn measure_until<H: Host>(
     request: &Request,
     report: &mut Report,
     deadline: Option<MonoTime>,
-) -> Result<Measured<H::Fd>, String> {
+) -> Result<Measured<H::Fd>, MeasureFailure> {
     let started = host.now();
     let result = measure(host, request, report);
     record_deadline_overrun(host, report, deadline, started, "measure", &request.path);
@@ -793,8 +862,8 @@ fn measure_until<H: Host>(
 }
 
 /// Setup can consume the whole call deadline before its first space sample.
-/// Take that sample before choosing 0/124; a failed first sample remains a
-/// usage error because there is no measured filesystem to judge.
+/// Take that sample before choosing 0/124. A failed host sample is a run
+/// error even when no prior measurement exists.
 fn deadline_before_first_sample<H: Host>(
     host: &H,
     request: &Request,
@@ -805,7 +874,7 @@ fn deadline_before_first_sample<H: Host>(
     let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(measured) => measured,
         Err(_) if host.interrupted().is_some() => return report,
-        Err(error) => return usage(report, log, error),
+        Err(error) => return measure_failure(report, log, error),
     };
     report.avail_after_bytes = report.avail_before_bytes;
     report.status = conclude(
@@ -930,6 +999,7 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
             tier: tier.name.clone(),
             profile: (*profile).to_owned(),
             candidate: root.display().to_string(),
+            cause: ErrorCause::Safety,
             message: format!(
                 "root {}: inside systemd PrivateTmp (systemd-private-*); misconfigured root; the tier is excluded",
                 root.display()
@@ -943,7 +1013,7 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
     let mounts = match host.mountinfo() {
         Ok(mounts) => mounts,
         Err(error) => {
-            errors.push(run_error(
+            errors.push(host_error(
                 tier,
                 format!("cannot read mountinfo for root preflight: {error}; the tier is excluded"),
             ));
@@ -951,21 +1021,22 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
         }
     };
     for (profile, root) in roots {
-        let mut error = |message: String| {
+        let mut error = |cause: ErrorCause, message: String| {
             errors.push(ErrorEntry {
                 tier: tier.name.clone(),
                 profile: profile.to_owned(),
                 candidate: root.display().to_string(),
+                cause,
                 message,
             })
         };
         // A local bind mount can sit below an unsafe ancestor. Screen the
         // full mount chain before resolve_in opens any of it.
         if let Err(why) = screen_mount_chain(&mounts, root) {
-            error(format!(
-                "root {}: {why}; the tier is excluded",
-                root.display()
-            ));
+            error(
+                ErrorCause::Safety,
+                format!("root {}: {why}; the tier is excluded", root.display()),
+            );
             continue;
         }
         match resolve_in(host, &mounts, root, Want::Directory) {
@@ -981,16 +1052,27 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 estimated_bytes: None,
             }),
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
-            Err(ResolveError::UnsafePath { why, .. }) => error(format!(
-                "root {}: unsafe_path (misconfigured, or the mounts changed): {why}; the tier is excluded",
-                root.display()
-            )),
-            Err(resolve_error) => {
-                error(format!(
-                    "root {}: {resolve_error} (misconfigured, or the environment changed); the tier is excluded",
+            Err(ResolveError::UnsafePath { why, .. }) => error(
+                ErrorCause::Safety,
+                format!(
+                    "root {}: unsafe_path (misconfigured, or the mounts changed): {why}; the tier is excluded",
                     root.display()
-                ));
-            }
+                ),
+            ),
+            Err(ResolveError::Host(host_error)) => error(
+                ErrorCause::Host,
+                format!(
+                    "root {}: {host_error}; the tier is excluded",
+                    root.display()
+                ),
+            ),
+            Err(ResolveError::UnsupportedFs { missing, .. }) => error(
+                ErrorCause::Safety,
+                format!(
+                    "root {}: unsupported filesystem check {missing}; the tier is excluded",
+                    root.display()
+                ),
+            ),
         }
     }
     RootPreflight { errors, skipped }
@@ -1302,7 +1384,7 @@ fn ensure_inner<H: Delete>(
                 let measured = match measure_until(host, request, &mut report, deadline) {
                     Ok(measured) => measured,
                     Err(_) if host.interrupted().is_some() => return report,
-                    Err(error) => return usage(report, log, error),
+                    Err(error) => return measure_failure(report, log, error),
                 };
                 if deadline_passed(host, deadline) {
                     return deadline_before_reclaim(
@@ -1344,7 +1426,7 @@ fn ensure_inner<H: Delete>(
                 let measured = match measure_until(host, request, &mut report, deadline) {
                     Ok(measured) => measured,
                     Err(_) if host.interrupted().is_some() => return report,
-                    Err(message) => return usage(report, log, message),
+                    Err(message) => return measure_failure(report, log, message),
                 };
                 if deadline_passed(host, deadline) {
                     return deadline_before_reclaim(
@@ -1376,7 +1458,7 @@ fn ensure_inner<H: Delete>(
     let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(m) => m,
         Err(_) if host.interrupted().is_some() => return report,
-        Err(e) => return usage(report, log, e),
+        Err(e) => return measure_failure(report, log, e),
     };
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
@@ -1457,7 +1539,7 @@ fn ensure_inner<H: Delete>(
         }
         Ok(_) => {}
         Err(e) => {
-            record_error(&mut report, log, run_error(&request.tier, e));
+            record_error(&mut report, log, host_error(&request.tier, e));
             return report;
         }
     }
@@ -1628,7 +1710,7 @@ fn ensure_grouped_inner<H: Delete>(
     let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(measured) => measured,
         Err(_) if host.interrupted().is_some() => return report,
-        Err(error) => return usage(report, log, error),
+        Err(error) => return measure_failure(report, log, error),
     };
     let first = &tiers[0];
     if deadline_passed(host, deadline) {
@@ -1697,7 +1779,7 @@ fn ensure_grouped_inner<H: Delete>(
         }
         Ok(_) => {}
         Err(error) => {
-            record_error(&mut report, log, run_error(first, error));
+            record_error(&mut report, log, host_error(first, error));
             return report;
         }
     }
@@ -1905,7 +1987,7 @@ fn ensure_grouped_inner<H: Delete>(
         let avail = match sampled {
             Ok(space) => space.avail_bytes,
             Err(error) => {
-                record_error(&mut report, log, run_error(tier, error));
+                record_error(&mut report, log, host_error(tier, error));
                 break;
             }
         };
@@ -1975,7 +2057,13 @@ pub fn dry_run<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || dry_run_inner(host, request, owners, log))
+    timed_report(host, || {
+        let mut report = dry_run_inner(host, request, owners, log);
+        if report.status == Status::DryRun && !report.errors.is_empty() {
+            report.status = Status::Error;
+        }
+        report
+    })
 }
 
 fn dry_run_inner<H: Host>(
@@ -1992,7 +2080,7 @@ fn dry_run_inner<H: Host>(
     let measured = match measure_until(host, request, &mut report, deadline) {
         Ok(m) => m,
         Err(_) if host.interrupted().is_some() => return report,
-        Err(e) => return usage(report, log, e),
+        Err(e) => return measure_failure(report, log, e),
     };
     if host.interrupted().is_some() {
         return report;
@@ -2265,7 +2353,7 @@ fn dry_run_inner<H: Host>(
         record_error(
             &mut report,
             log,
-            run_error(tier, format!("stopped: {stop}")),
+            stop_error(tier, &stop, format!("stopped: {stop}")),
         );
     }
     // Unmeasured: unknown, not the earlier sample.
@@ -2331,9 +2419,9 @@ fn dry_run_grouped_inner<H: Host>(
         if run_deadline.is_some_and(|end| host.now() >= end) {
             return report;
         }
-        // Only this tier's budget expired. Reclaim excludes that tier and
-        // continues; a grouped plan must still show later tiers.
-        report.status = Status::DryRun;
+        // Only this tier's budget expired. Keep planning later tiers, but
+        // the partial plan is an error, never a successful dry run.
+        report.status = Status::Error;
     }
     for (tier, timeout) in tiers.iter().zip(tier_timeouts).skip(1) {
         if host.interrupted().is_some() {
@@ -2361,7 +2449,10 @@ fn dry_run_grouped_inner<H: Host>(
             report.status = Status::Deadline;
             break;
         }
-        // A tier deadline alone does not stop the overall plan.
+        if part.status == Status::Deadline {
+            // A tier deadline alone does not stop the overall plan.
+            report.status = Status::Error;
+        }
     }
     report
 }
@@ -2456,7 +2547,7 @@ fn plan_cargo<H: Host>(
                 }
             }
             for skip in &misconfigured {
-                record_error(report, log, run_error(tier, excluded(skip)));
+                record_error(report, log, safety_error(tier, excluded(skip)));
             }
             let negated_matches = match scan_negated(host, &tier.negated, deadline) {
                 Ok(matches) => matches,
@@ -2607,7 +2698,7 @@ fn plan_fs<H: Host>(
         .filter(|skip| is_misconfigured(tier, skip))
         .collect();
     for skip in &misconfigured {
-        record_error(report, log, run_error(tier, excluded(skip)));
+        record_error(report, log, safety_error(tier, excluded(skip)));
     }
     for skip in found.refused.iter().filter(|s| !is_misconfigured(tier, s)) {
         log_skip(log, tier, skip);
@@ -3032,7 +3123,7 @@ fn plan_fs_union<H: Host>(
         .filter(|(index, skip)| is_misconfigured_source(&sources[*index], skip))
         .collect();
     for (index, skip) in &misconfigured {
-        let mut entry = run_error(tier, excluded(skip));
+        let mut entry = safety_error(tier, excluded(skip));
         entry.profile = sources[*index].profile.to_owned();
         record_error(report, log, entry);
     }
@@ -3224,7 +3315,7 @@ fn final_sample<H: Host>(
     match result {
         Ok(space) => Some(space.avail_bytes),
         Err(e) => {
-            record_error(report, log, run_error(tier, e));
+            record_error(report, log, host_error(tier, e));
             None
         }
     }
@@ -3401,7 +3492,27 @@ fn run_error(tier: &Tier, message: impl Into<String>) -> ErrorEntry {
         tier: tier.name.clone(),
         profile: tier.profile.clone(),
         candidate: String::new(),
+        cause: ErrorCause::Operation,
         message: message.into(),
+    }
+}
+
+fn host_error(tier: &Tier, message: impl Into<String>) -> ErrorEntry {
+    let mut entry = run_error(tier, message);
+    entry.cause = ErrorCause::Host;
+    entry
+}
+
+fn safety_error(tier: &Tier, message: impl Into<String>) -> ErrorEntry {
+    let mut entry = run_error(tier, message);
+    entry.cause = ErrorCause::Safety;
+    entry
+}
+
+fn stop_error(tier: &Tier, stop: &Stop, message: impl Into<String>) -> ErrorEntry {
+    match stop {
+        Stop::Failed { .. } => host_error(tier, message),
+        Stop::DeadlinePassed { .. } => run_error(tier, message),
     }
 }
 
@@ -3596,7 +3707,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let before = match sampled {
             Ok(space) => space.avail_bytes,
             Err(error) => {
-                self.run_error(error);
+                self.host_failure(error);
                 return;
             }
         };
@@ -3797,6 +3908,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             tier: self.tier.name.clone(),
             profile: profile.to_owned(),
             candidate: candidate.to_string_lossy().into_owned(),
+            cause: ErrorCause::Operation,
             message,
         };
         record_error(self.report, self.log, entry);
@@ -3814,6 +3926,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         self.tier_error(message);
     }
 
+    fn host_failure(&mut self, message: String) {
+        self.run_stopped = true;
+        record_error(self.report, self.log, host_error(self.tier, message));
+    }
+
     /// An error of the run: recorded, and the run stops.
     fn stop(&mut self, stop: &Stop) {
         self.run_stopped = true;
@@ -3822,7 +3939,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             (self.log)(&format!("{}: the deadline passed: {stop}", self.tier.name));
             return;
         }
-        self.run_error(format!("the run stops: {stop}"));
+        self.host_failure(format!("the run stops: {stop}"));
     }
 
     fn past_deadline(&self) -> bool {
@@ -3905,7 +4022,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         for skip in &misconfigured {
             // A bad configured root excludes this tier only. Other tiers
             // were independently preflighted and may still run.
-            self.tier_error(excluded(skip));
+            record_error(
+                self.report,
+                self.log,
+                safety_error(self.tier, excluded(skip)),
+            );
         }
         misconfigured.is_empty()
     }
@@ -4073,7 +4194,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Err(e) => {
                 // Without a sample, the goal cannot be observed: reclaim
                 // nothing.
-                return self.run_error(e);
+                return self.host_failure(e);
             }
         };
         while !queue.is_empty() {
@@ -4288,7 +4409,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         let mut avail = match sampled {
             Ok(space) => space.avail_bytes,
-            Err(e) => return self.run_error(e),
+            Err(e) => return self.host_failure(e),
         };
         while !queue.is_empty() {
             if self.stop_if_interrupted() {
@@ -4442,7 +4563,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         for (index, skip) in &refused {
             let source = &sources[*index];
             if is_misconfigured_source(source, skip) {
-                let mut entry = run_error(self.tier, excluded(skip));
+                let mut entry = safety_error(self.tier, excluded(skip));
                 entry.profile = source.profile.to_owned();
                 record_error(self.report, self.log, entry);
                 misconfigured = true;
@@ -4660,7 +4781,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         let mut avail = match sampled {
             Ok(space) => space.avail_bytes,
-            Err(error) => return self.run_error(error),
+            Err(error) => return self.host_failure(error),
         };
         while !queue.is_empty() {
             if self.stop_if_interrupted() {
@@ -4816,6 +4937,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn budget_spent(&mut self, at: &Path) {
+        self.report.tally_cut_short = true;
         (self.log)(&format!(
             "{}: --tally-budget spent at {}: it and the candidates after it are taken after \
              the tallied ones, in the order found",
@@ -4858,7 +4980,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Err(e) => {
                 // Unmeasured: the change is unknown (null), never 0, and
                 // the goal can no longer be observed: the run stops below.
-                self.run_error(e);
+                self.host_failure(e);
                 None
             }
         };
@@ -4905,7 +5027,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             after = Some(observed);
                         }
                         Err(error) => {
-                            self.run_error(error);
+                            self.host_failure(error);
                             after = None;
                             break;
                         }

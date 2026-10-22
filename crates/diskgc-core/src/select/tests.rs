@@ -52,6 +52,14 @@ struct TestCatalog {
 impl Catalog for TestCatalog {
     type Action = TestAction;
 
+    fn names(&self) -> Vec<&str> {
+        self.library
+            .profiles()
+            .map(|p| p.name.as_str())
+            .chain(self.sources.keys().map(String::as_str))
+            .collect()
+    }
+
     fn lookup(&self, name: &str) -> Option<Entry<'_, TestAction>> {
         if let Some((kind, action)) = self.sources.get(name) {
             return Some(Entry::Source {
@@ -137,6 +145,29 @@ fn filter(name: &str) -> Factor {
 /// The Selection grammar section of docs/reference.md.
 fn grammar_section() -> String {
     section(&reference_md(), "### Selection grammar")
+}
+
+/// Keep actual selection examples in the PRD aligned with the parser too.
+/// The Composition table contains syntax fragments, so it is excluded.
+#[test]
+fn prd_selection_expressions_are_classified() {
+    let prd = include_str!("../../../../PRD.md");
+    let found: Vec<&str> = prd
+        .lines()
+        .filter(|line| !line.starts_with('|'))
+        .flat_map(|line| line.split('`').skip(1).step_by(2))
+        .filter(|span| span.contains("profile:") && (span.contains("&&") || span.contains("||")))
+        .collect();
+    assert_eq!(
+        found,
+        ["(profile:node-compile-cache || profile:playwright-tmp) && filter:idle-3d"]
+    );
+    for expression in found {
+        assert!(
+            compile(expression, &catalog()).is_ok(),
+            "invalid PRD selection `{expression}`"
+        );
+    }
 }
 
 /// Every inline code span in the section's prose (outside fences and
@@ -726,17 +757,116 @@ fn unknown_names_are_errors() {
         vec![
             CheckError::Unknown {
                 written: "profile:nope".into(),
-                name: "nope".into()
+                name: "nope".into(),
+                suggestions: vec![],
             },
             CheckError::Unknown {
                 written: "!filter:nada".into(),
-                name: "nada".into()
+                name: "nada".into(),
+                suggestions: vec![],
             },
             CheckError::Unknown {
                 written: "!profile:zip".into(),
-                name: "zip".into()
+                name: "zip".into(),
+                suggestions: vec![],
             },
         ]
+    );
+}
+
+#[test]
+fn spelling_suggestions_use_the_real_profile_catalog() {
+    let library = Library::with_user_profiles(&[]).unwrap();
+    let error = compile("profile:cargo-targt", &library)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("did you mean `cargo-target`?"), "{error}");
+    let error = compile("profile:cargo-target && filter:idle-3e", &library)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`idle-3d`"), "{error}");
+    let error = compile("profile:totally-unrelated-name", &library)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("did you mean"), "{error}");
+}
+
+#[test]
+fn long_unknown_names_do_not_trigger_unbounded_suggestion_work() {
+    let library = Library::with_user_profiles(&[]).unwrap();
+    let name = "cargo-target".repeat(10_000);
+    let error = compile(&format!("profile:{name}"), &library)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("invalid selection `profile:"));
+    assert!(!error.contains("did you mean"));
+
+    let qualifier = "profile".repeat(10_000);
+    let error = parse(&format!("{qualifier}:cargo-target"))
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("did you mean"));
+}
+
+#[test]
+fn qualifier_suggestions_and_columns_survive_restatement() {
+    let typo = parse("profle:a").unwrap_err();
+    assert_eq!(typo.column, 1);
+    assert!(typo.to_string().contains("did you mean `profile:`?"));
+    let error = compile("  filter:pytest-tmp", &catalog())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("at column 3:"), "{error}");
+    let error = compile("profile:a && profile:idle-3d", &catalog())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("at column 14:"), "{error}");
+}
+
+#[test]
+fn diagnostics_escape_control_characters_and_do_not_promise_invalid_rewrites() {
+    let error = parse("profile:a\n#").unwrap_err().to_string();
+    assert!(error.contains("`profile:a\\n#`"), "{error}");
+    assert!(!error.contains('\n'), "{error}");
+    let error = compile("profile:nope\t", &catalog())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`profile:nope\\t`"), "{error}");
+    assert!(!error.contains('\t'), "{error}");
+    let error = compile("profile:a || profile:cargo-target && filter:f", &catalog())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no suggested parenthesisation is valid"),
+        "{error}"
+    );
+    assert!(!error.contains("add parentheses"), "{error}");
+}
+
+#[test]
+fn successful_selections_report_duplicate_and_contradictory_terms() {
+    let catalog = catalog();
+    for (text, expected) in [
+        ("profile:a || profile:a", "duplicate term"),
+        ("profile:a && !profile:a", "selects nothing"),
+        ("profile:a && filter:f && !filter:f", "contradict"),
+        ("profile:a && filter:f && filter:f", "repeats"),
+    ] {
+        let checked = compile(text, &catalog).unwrap();
+        assert!(
+            checked
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(expected)),
+            "{text}: {:?}",
+            checked.warnings()
+        );
+    }
+    assert!(
+        compile("profile:a && filter:f", &catalog)
+            .unwrap()
+            .warnings()
+            .is_empty()
     );
 }
 
@@ -786,7 +916,7 @@ fn wrong_qualifiers_name_what_the_name_is() {
     };
     assert_eq!(
         errors.to_string(),
-        "invalid selection `filter:pytest-tmp`: `filter:pytest-tmp`: `pytest-tmp` is a source \
+        "invalid selection `filter:pytest-tmp` at column 1: `filter:pytest-tmp`: `pytest-tmp` is a source \
          profile of kind fs, not a filter; write `profile:pytest-tmp`"
     );
 }

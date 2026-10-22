@@ -83,6 +83,20 @@ fn cmake_lacks_entry_survives_show_and_json() {
     assert_eq!(json["where"]["has_not"], Value::Null);
 }
 
+#[test]
+fn docker_backend_roots_match_the_documented_json_shape() {
+    let library = Library::builtin().expect("built-ins");
+    let profile = library.get("docker-dangling").expect("Docker built-in");
+    let json: Value = serde_json::from_str(&profile_json(profile).to_text()).expect("JSON");
+    assert_eq!(json["find"]["roots"], "daemon");
+    assert_eq!(json["find"]["roots_required"], false);
+    let docs = section(&reference_md(), "### `profiles` command");
+    assert!(
+        docs.contains("`\"daemon\"` for a Docker backend"),
+        "the documented roots JSON shape omitted the Docker backend"
+    );
+}
+
 /// `checkouts` is spelled out for every source, the default too
 /// (docs/reference.md, `profiles` command).
 #[test]
@@ -530,6 +544,16 @@ fn edit_distance_counts_insertions_deletions_and_substitutions() {
         assert_eq!(edit_distance(a, b), d, "{a} {b}");
         assert_eq!(edit_distance(b, a), d, "{b} {a}");
     }
+}
+
+#[test]
+fn long_unknown_profile_name_has_no_costly_suggestions_or_raw_controls() {
+    let library = Library::with_user_profiles(&[]).unwrap();
+    let name = format!("{}\n", "cargo-target".repeat(10_000));
+    assert!(close_names(&library, &name).is_empty());
+    let error = unknown_name(&library, &name);
+    assert!(!error.contains('\n'), "{error}");
+    assert!(error.contains("\\n"), "{error}");
 }
 
 /// The listing names the program a command action runs, also behind `env`.

@@ -86,6 +86,7 @@ fn full() -> Report {
         tier: "--select".into(),
         profile: "cargo-target".into(),
         candidate: "/v".into(),
+        cause: ErrorCause::Host,
         message: "EACCES".into(),
     }];
     r
@@ -172,6 +173,11 @@ fn the_json_fields_are_the_docs() {
 #[test]
 fn every_status_and_reason_is_a_documented_value() {
     let doc = documented();
+    let causes: BTreeSet<String> = ErrorCause::ALL
+        .iter()
+        .map(|cause| cause.as_str().to_owned())
+        .collect();
+    assert_eq!(causes, alternatives(&doc["errors"][0]["cause"]));
     let statuses: BTreeSet<String> = Status::ALL.iter().map(|s| s.as_str().to_owned()).collect();
     assert_eq!(statuses, alternatives(&doc["status"]), "status values");
     let checkouts: BTreeSet<String> = Checkouts::ALL
@@ -368,6 +374,8 @@ fn a_usage_error_report_keeps_every_field() {
         "--min-free: `50`: a bare number"
     );
     assert_eq!(got["errors"][0]["candidate"], "");
+    assert_eq!(got["errors"][0]["cause"], "usage");
+    assert_eq!(got["tally_cut_short"], false);
     assert_eq!(r.exit_code(), 2);
     assert_eq!(r.summary(), None, "a usage error goes to stderr only");
 }
@@ -488,11 +496,9 @@ fn an_unknown_final_sample_is_a_run_error_whatever_else_happened() {
         "In a reclaiming run, available space decides 0, 75, 124, 3 and 1 by a fresh sample: a \
          sample that could not be taken is a run error (3); 75 and 124 require a fresh sample \
          below `--min-free`.",
-        "The first sample, of `PATH`'s filesystem before anything is done, is the exception: \
-         when it cannot be taken nothing was measured or done, and it is exit 2,",
-        "A dry run keeps its exits (0, 2, 124, 130/143) and reports a final sample it could not \
-         take as `avail_after_bytes: null` with an `errors` entry.",
-        "or the final sample could not be taken.",
+        "An I/O failure in the first sample or startup host check is exit 3; an invalid `PATH` or unsupported kernel remains exit 2.",
+        "A dry run with a host or planning error also exits 3, reports its partial plan and \
+         errors, and uses `avail_after_bytes: null` when its final sample failed.",
     ] {
         assert!(codes.contains(sentence), "{sentence:?} not in: {codes}");
     }

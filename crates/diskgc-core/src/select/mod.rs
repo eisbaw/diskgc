@@ -88,6 +88,7 @@ pub fn compile<C: Catalog>(text: &str, catalog: &C) -> Result<Checked, SelectErr
         Err(mut syntax) => Err(match check::requalify(&syntax, catalog) {
             Some(error) => SelectError::Check(CheckErrors {
                 expr: text.to_owned(),
+                column: Some(syntax.column),
                 errors: vec![error],
             }),
             None => {

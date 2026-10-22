@@ -226,7 +226,9 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         ],
     )?;
     oracle.judge(&malformed)?.assert_clean()?;
-    malformed.expect_code(2)?;
+    // The malformed sandbox clock file prevents LinuxHost startup, so its
+    // typed host failure exits 3.
+    malformed.expect_code(3)?;
     ensure!(
         malformed.stderr.contains("clock offset"),
         "a malformed test clock offset did not stop the real binary: {:?}, {}",
