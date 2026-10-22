@@ -43,6 +43,8 @@ const PROFILES: &str = r#"
   where: {has: CACHEDIR.TAG}
 - name: has-not-tag
   where: {has_not: CACHEDIR.TAG}
+- name: tagged-idle-unkept
+  where: {has: CACHEDIR.TAG, has_not: .keep, idle_for: 2d}
 - name: anything
   find: {roots: required, paths: ["*"], type: any}
   action: delete
@@ -292,6 +294,45 @@ fn entry_filters_are_rechecked_after_candidate_lock() {
 }
 
 #[test]
+fn mixed_entry_and_idle_filter_rechecks_under_candidate_lock() {
+    let selection = "profile:pytest-of-dir && filter:tagged-idle-unkept";
+    let tree = format!(
+        "  /tmp/pytest-of-a: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{size: 1K, mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"
+    );
+    for (event, expected) in [
+        ("create: /tmp/pytest-of-a/.keep", "filtered"),
+        ("remove: /tmp/pytest-of-a/CACHEDIR.TAG", "filtered"),
+        ("create: /tmp/pytest-of-a/newer", "not_idle"),
+    ] {
+        let event = format!(
+            "events:\n  - {{at: {{op: flock, path: /tmp/pytest-of-a, when: after}}, {event}}}\n"
+        );
+        let host = host(&yaml("", &tree, &event));
+        let report = ensure(&host, &tmp(selection));
+        assert!(report.actions.is_empty(), "{report:#?}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|skip| skip.candidate == Path::new("/tmp/pytest-of-a")
+                    && skip.reason == expected),
+            "{report:#?}"
+        );
+        assert!(exists(&host, "/tmp/pytest-of-a"));
+        assert!(host.unfired_events().is_empty());
+    }
+    let host = host(&yaml("", &tree, ""));
+    let report = ensure(&host, &tmp(selection));
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|action| action.candidate == Path::new("/tmp/pytest-of-a")),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
     let tree = "  /tmp/union-shared-clear: {.: {}, .git: {HEAD: {size: 1K}}, f: {size: 1M}}\n  /tmp/union-shared-tagged: {.: {}, .git: {HEAD: {size: 1K}}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n";
     for selection in [
@@ -334,6 +375,92 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
             }),
             "a checkout vetoed before the ranked reclaim queue: {selection}"
         );
+    }
+}
+
+#[test]
+fn mixed_filter_union_uses_only_admitted_terms_in_plan_and_prequeue_tally() {
+    let tree = "  /tmp/union-shared-old: {.: {mtime: @OLD@}, .git: {.: {mtime: @OLD@}, HEAD: {size: 1K, mtime: @OLD@}}, CACHEDIR.TAG: {size: 1K, mtime: @OLD@}, f: {size: 1M, mtime: @OLD@}}\n  /tmp/union-shared-recent: {.: {}, .git: {HEAD: {size: 1K}}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n  /tmp/union-shared-untagged: {.: {mtime: @OLD@}, .git: {.: {mtime: @OLD@}, HEAD: {size: 1K, mtime: @OLD@}}, f: {size: 1M, mtime: @OLD@}}\n  /tmp/union-shared-marked: {.: {mtime: @OLD@}, .git: {.: {mtime: @OLD@}, HEAD: {size: 1K, mtime: @OLD@}}, CACHEDIR.TAG: {size: 1K, mtime: @OLD@}, .keep: {size: 1K, mtime: @OLD@}, f: {size: 1M, mtime: @OLD@}}\n".replace("@OLD@", OLD);
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && filter:tagged-idle-unkept)",
+        "(profile:union-refuse && filter:tagged-idle-unkept) || profile:union-allow",
+    ] {
+        let request = tmp(selection);
+        let planned_host = host(&yaml("", &tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        for (name, reason, checkouts) in [
+            ("old", Some("contains_checkout"), Checkouts::Refuse),
+            ("recent", None, Checkouts::Allow),
+            ("untagged", None, Checkouts::Allow),
+            ("marked", None, Checkouts::Allow),
+        ] {
+            let path = format!("/tmp/union-shared-{name}");
+            assert!(
+                plan.plan
+                    .iter()
+                    .any(|entry| entry.candidate == Path::new(&path)
+                        && entry.reason == reason
+                        && entry.checkouts == checkouts),
+                "{selection}, {path}: {plan:#?}"
+            );
+        }
+
+        let reclaim_host = host(&yaml("", &tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        let mut deleted = actions(&report);
+        deleted.sort();
+        assert_eq!(
+            deleted,
+            [
+                "/tmp/union-shared-marked",
+                "/tmp/union-shared-recent",
+                "/tmp/union-shared-untagged",
+            ],
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&reclaim_host, "/tmp/union-shared-old"));
+        assert_eq!(unlinked_below(&reclaim_host, "/tmp/union-shared-old"), 0);
+        assert!(
+            !reclaim_host.trace().iter().any(|call| call.op == Op::Flock
+                && call.path.as_deref() == Some(Path::new("/tmp/union-shared-old"))),
+            "the mixed-filter checkout veto must happen before the ranked queue: {selection}"
+        );
+    }
+}
+
+#[test]
+fn mixed_filter_union_rechecks_newly_admitted_term_under_candidate_lock() {
+    let tree = "  /tmp/union-shared-clear: {.: {mtime: @OLD@}, .git: {.: {mtime: @OLD@}, HEAD: {size: 1K, mtime: @OLD@}}, f: {size: 1M, mtime: @OLD@}}\n".replace("@OLD@", OLD);
+    let event = "events:\n  - {at: {op: flock, path: /tmp/union-shared-clear, when: after}, create: /tmp/union-shared-clear/CACHEDIR.TAG}\n  - {at: {op: flock, path: /tmp/union-shared-clear, when: after}, advance: 3d}\n";
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && filter:tagged-idle-unkept)",
+        "(profile:union-refuse && filter:tagged-idle-unkept) || profile:union-allow",
+    ] {
+        let mut request = tmp(selection);
+        request.timeout = Some(Duration::from_secs(4 * 86_400));
+        let planned_host = host(&yaml("", &tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert!(
+            plan.plan.iter().any(
+                |entry| entry.candidate == Path::new("/tmp/union-shared-clear")
+                    && entry.reason.is_none()
+                    && entry.checkouts == Checkouts::Allow
+            ),
+            "{selection}: {plan:#?}"
+        );
+
+        let host = host(&yaml("", &tree, event));
+        let report = ensure(&host, &request);
+        assert!(report.actions.is_empty(), "{selection}: {report:#?}");
+        assert!(
+            report.skipped.iter().any(|entry| entry.candidate
+                == Path::new("/tmp/union-shared-clear")
+                && entry.reason == "contains_checkout"),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/union-shared-clear"));
+        assert_eq!(unlinked_below(&host, "/tmp/union-shared-clear"), 0);
+        assert!(host.unfired_events().is_empty());
     }
 }
 

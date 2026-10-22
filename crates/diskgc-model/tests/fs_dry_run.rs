@@ -56,6 +56,8 @@ const PROFILES: &str = r#"
   where: {has: CACHEDIR.TAG}
 - name: has-not-tag
   where: {has_not: CACHEDIR.TAG}
+- name: tagged-idle-unkept
+  where: {has: CACHEDIR.TAG, has_not: .keep, idle_for: 2d}
 - name: unmounted
   find: {roots: [/tmp], paths: ["pytest-of-*"], type: dir}
   where: {has_not: mounted}
@@ -1913,6 +1915,44 @@ fn entry_filters_have_known_and_unknown_verdicts() {
         assert!(host.unfired_events().is_empty());
         nothing_locked_or_deleted(&host);
     }
+}
+
+#[test]
+fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
+    let selection = "profile:pytest-of-dir && filter:tagged-idle-unkept";
+    let tier = Tier::select(selection, &library(), None, 1000).expect(selection);
+    assert_eq!(tier.idle_for.unwrap().0, Duration::from_secs(2 * 86_400));
+    let SourceKind::Fs(find) = tier.source else {
+        panic!("filesystem source");
+    };
+    assert_eq!(find.entry_filters.len(), 2);
+
+    let tree = "  /tmp/pytest-of-good: {.: {mtime: 2026-10-01T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/pytest-of-new: {.: {mtime: 2026-10-14T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-14T00:00:00Z}}\n  /tmp/pytest-of-untagged: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 1K, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/pytest-of-kept: {.: {mtime: 2026-10-01T00:00:00Z}, CACHEDIR.TAG: {size: 1K, mtime: 2026-10-01T00:00:00Z}, .keep: {size: 1K, mtime: 2026-10-01T00:00:00Z}}\n";
+    let host = host(&yaml(tree));
+    let report = dry_run(&host, &request(selection, &[], "/tmp"));
+    for (name, reason) in [
+        ("good", None),
+        ("new", Some("not_idle")),
+        ("untagged", Some("filtered")),
+        ("kept", Some("filtered")),
+    ] {
+        let path = format!("/tmp/pytest-of-{name}");
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+            "{path}: {report:#?}"
+        );
+    }
+    nothing_locked_or_deleted(&host);
+
+    let negated = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
+    let error = Tier::select(negated, &library(), None, 1000).expect_err(negated);
+    assert!(
+        error.contains("unsupported predicates") && error.contains("task-16"),
+        "{error}"
+    );
 }
 
 #[test]

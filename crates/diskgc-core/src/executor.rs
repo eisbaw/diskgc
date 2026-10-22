@@ -479,26 +479,39 @@ impl Tier {
                 idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
                 continue;
             }
-            if matches!(kind, SourceKind::Fs(_))
-                && matches!(
-                    where_.predicates().as_slice(),
-                    [crate::kind::PredicateName::Has | crate::kind::PredicateName::HasNot]
+            // A positive filter is a conjunction: its entry checks and
+            // idle requirement are already judged by the same candidate
+            // path, including the locked reclaim pass. A negated filter
+            // complements the *whole* conjunction, so only the existing
+            // single-entry case can be represented by EntryFilter.
+            let entry_count =
+                usize::from(where_.has.is_some()) + usize::from(where_.has_not.is_some());
+            let entry_and_idle_only = where_.predicates().iter().all(|predicate| {
+                matches!(
+                    predicate,
+                    crate::kind::PredicateName::Has
+                        | crate::kind::PredicateName::HasNot
+                        | crate::kind::PredicateName::IdleFor
                 )
+            });
+            if matches!(kind, SourceKind::Fs(_))
+                && entry_count > 0
+                && entry_and_idle_only
+                && (!is_negated || (entry_count == 1 && where_.idle_for.is_none()))
             {
                 let SourceKind::Fs(find) = &mut kind else {
                     unreachable!()
                 };
-                find.entry_filters.push(EntryFilter {
-                    name: name.clone(),
-                    entry: where_
-                        .has
-                        .as_ref()
-                        .or(where_.has_not.as_ref())
-                        .expect("entry predicate present")
-                        .clone(),
-                    has: where_.has.is_some(),
-                    negated: is_negated,
-                });
+                for (entry, has) in [(&where_.has, true), (&where_.has_not, false)] {
+                    if let Some(entry) = entry {
+                        find.entry_filters.push(EntryFilter {
+                            name: name.clone(),
+                            entry: entry.clone(),
+                            has,
+                            negated: is_negated,
+                        });
+                    }
+                }
                 continue;
             }
             if is_negated {

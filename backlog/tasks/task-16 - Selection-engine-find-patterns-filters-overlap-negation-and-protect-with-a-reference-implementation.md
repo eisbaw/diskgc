@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 03:37'
+updated_date: '2026-10-22 03:52'
 labels:
   - wave-2
   - irreversible
@@ -88,6 +88,10 @@ Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must
 MPED hardlink alias review: filesystem union plan and prequeue tally now aggregate checkout markers from every admitted refusing source, even when the same inode has an allowing cache-file alias and a refusing .git alias. ModelHost regressions exercise both source orders in plan, prequeue tally, and direct lock-time recheck; complementary cases confirm an allowing marker alias does not veto a clean refusing alias. Focused fs_reclaim suite: 55 passed, 1 long stress test skipped. TASK-16 remains open for other runtime combinations.
 
 2026-10-22 Linux parity review: added disposable Podman real-binary deletion-oracle E2E fs_union_checkout_aliases_and_mixed_roots. A hard-linked cache-file/.git inode is refused, while a separate file found through /tmp and a root inside .git is eligible; plan and reclaim are checked in both source orders. The oracle permits unlink only of the eligible file and checks strace and filesystem snapshots. Focused Nix E2E 1/1 passed and Docker runner Nix build passed. Full exact just e2e and parallel QA/MPED final review remain for the parent; AC/DoD unchanged.
+
+2026-10-22 mixed positive entry-filter increment: a filesystem filter profile may conjoin has, has_not and idle_for; Tier::select keeps both entry predicates and the idle bound, and plan/tally/reclaim use the existing shared judgement with locked rechecks. Mixed !filter remains an explicit task-16 usage error because it must complement the entire conjunction. ModelHost dry-run cases cover all three failed predicates; lock-time cases cover added forbidden marker, removed required marker and a fresh child invalidating idle. Focused model tests passed and disposable Podman real-binary deletion-oracle case passed 1/1. Full just e2e and parallel QA/MPED review remain for parent; TASK-16 AC/DoD unchanged.
+
+2026-10-22 mixed-filter union review follow-up: positive mixed has/has_not/idle_for filter is covered as a refusing term beside an allowing term in both union orders. ModelHost dry-run and prequeue reclaim agree: only the old tagged unmarked checkout is vetoed before flock; recent, untagged and .keep-marked candidates are admitted by the allowing term. A separate event creates the required tag under flock and advances the model clock; locked recheck then admits the refusing term and retains the checkout. Focused mixed_filter_union tests pass 2/2. Correction to the preceding note: a single-source ordering tally intentionally omits idle; union prequeue tally evaluates each term including idle so checkout policy uses only admitted terms.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
