@@ -469,6 +469,24 @@ pub fn host_inuse_scan_settles_after_fork_churn(ctx: &Ctx) -> TestResult {
     verdict.assert_clean()
 }
 
+/// Pin a live child through LinuxHost, then prove that LinuxHost recognizes
+/// its release after reap. In the pinned 6.6 VM, the independent syscall
+/// probe establishes POLLIN without HUP, so the final answer bites the
+/// pidfd_send_signal(0) fallback itself.
+pub fn host_pidfd_release_after_reap(ctx: &Ctx) -> TestResult {
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.probe_as_tester(&["host-pidfd-release"])?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stdout.trim() == "live_released=false reaped_released=true",
+        "LinuxHost pidfd release result: {:?}",
+        run.stdout
+    );
+    info!("LinuxHost pidfd: {}", run.stdout.trim());
+    verdict.assert_clean()
+}
+
 /// The `/proc` readers on a process using scratch objects: an open file
 /// (fd), a working directory, its executable (exe and a mapping) and its
 /// initial environment, matched by (device, inode) against the harness's

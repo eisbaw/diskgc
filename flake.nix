@@ -644,6 +644,11 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
+      vmOldKernelPidfd = import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
+        inherit pkgs;
+        image = e2eVmImage;
+        underTest = e2eUnderTest;
+      };
     in
     {
       packages.${system} = {
@@ -652,6 +657,7 @@
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
         vm-historical-ctime = vmHistoricalCtime;
+        vm-old-kernel-pidfd = vmOldKernelPidfd;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
@@ -757,6 +763,7 @@
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
         vm-historical-ctime = vmHistoricalCtime;
+        vm-old-kernel-pidfd = vmOldKernelPidfd;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

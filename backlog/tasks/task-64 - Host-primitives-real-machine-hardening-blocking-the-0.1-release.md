@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-22 02:41'
+updated_date: '2026-10-22 10:20'
 labels:
   - wave-1
   - hardening
@@ -139,6 +139,10 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-22 G review correction: the live probe now counts child launches and completions before and after each raw scan and Checker call; at least one raw scan must overlap both a launch and a completion. It asserts a raw unsettled scan blocks its candidate, and an unsettled final Checker scan also blocks; the retry line is diagnostic because it may settle during the storm. Focused disposable Nix-container test passed after this change: 1 worker launched/completed 5/5 during the raw scan; 4 workers 84/85 and 8 workers 88/87, with both raw scans hitting 16 listings and blocking. The 8-worker final Checker scan was unsettled and blocked; post-storm scan cleared. Each worker stops launching after 500 ms or 64 launches, but these are not hard child-runtime limits; the E2E runner bounds the whole test. Old-kernel coverage and the historical flock failure remain unresolved; AC7/AC8 stay open.
 
 2026-10-22 final G overlap-proof correction: counter snapshots alone could include a child event after scan return if the probe thread was descheduled. The disposable-container probe now timestamps before spawn, after spawn, and after wait using the same CLOCK_BOOTTIME representation as LinuxHost; it requires an entire successful child spawn-and-wait interval to fall within Scan::started() through started()+took() for at least one raw scan. Focused test passed on the current 7.2.9 kernel: 4 workers had 61 such complete intervals and 8 workers had 59; each raw scan hit 16 listings, reported unsettled and blocked. The final Checker result was also unsettled and blocked at 4/8 workers; post-storm scan cleared. This is current-kernel evidence only, with AC7/AC8 still open.
+
+2026-10-22 Group G old-kernel evidence: added a Nix QEMU check pinned to linuxPackages_6_6 (guest uname 6.6.158). A guest Python probe holds a pidfd while a child is live, then reaps it and confirms poll returns POLLIN without HUP while pidfd_send_signal(0) gives ESRCH. The existing LinuxHost host_inuse_scan_settles_after_fork_churn E2E passed inside a disposable Podman container on that guest: 4 and 8 workers each reached 16 listings and conservatively blocked, then a post-storm scan cleared. Podman used its private guest ext4 graph root and only read-only Nix store/test-binary binds. Focused nix build .#checks.x86_64-linux.vm-old-kernel-pidfd passed; exact just e2e and independent QA/MPED review pending. This is one kernel point; 5.8, 5.15, 6.1, 6.8, a 6.9+ control and prolonged loaded-CI measurement remain open. Keep AC7 and DoD unchecked.
+
+2026-10-22 Group G old-kernel evidence review correction: the first 6.6 VM check established kernel poll=IN/no HUP and signal-0 ESRCH, but fork-churn alone did not directly require LinuxHost to take that fallback. Added host_pidfd_release_after_reap: it pins a pipe-blocked live child through LinuxHost::proc_identity, requires proc_identity_released=false, reaps the child while retaining the pidfd, and requires proc_identity_released=true. The guest Python syscall probe runs first on 6.6.158, so the LinuxHost true result is a direct fallback bite; an always-false implementation fails. Focused Nix 6.6 VM check passed with live_released=false reaped_released=true, and the fork-churn case again reached 16-listing conservative blocks and cleared after the storm. Full just e2e and independent QA/MPED re-review pending. AC7 and DoD stay unchecked; other kernel points and prolonged load remain.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -15,6 +15,7 @@
 use std::io::{BufRead, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use std::ffi::OsStr;
@@ -43,12 +44,114 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-lock", [how, path]) if how == "close-semantics" => close_semantics(&host, path),
         ("host-proc", [pid]) => proc_readers(&host, pid),
         ("host-proc-replaced", []) => proc_replaced_after_startup(&host),
+        ("host-pidfd-release", []) => pidfd_release(&host),
         ("host-inuse-fork-churn", [candidate]) => inuse_fork_churn(&host, candidate),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
         ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
         _ => Err(format!("bad host probe arguments: {cmd} {args:?}")),
     }
+}
+
+/// Pin a child while it blocks on a pipe, then reap it and check the same
+/// held identity. The VM's separate syscall probe establishes that its 6.6
+/// kernel reports POLLIN without HUP after reap, so LinuxHost must use its
+/// signal-0 fallback for the final `true` result there.
+fn pidfd_release(host: &LinuxHost) -> Result<(), String> {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "IFS= read -r _ || exit 0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn held pidfd child: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        if child
+            .try_wait()
+            .map_err(|e| format!("check held child: {e}"))?
+            .is_some()
+        {
+            return Err("pidfd child exited before identity pin".to_owned());
+        }
+        let pid = Pid(child.id());
+        let identity = host
+            .proc_identity(pid)
+            .map_err(|e| format!("pin live child {pid}: {e}"))?;
+        let live_released = host
+            .proc_identity_released(&identity)
+            .map_err(|e| format!("check live child {pid}: {e}"))?;
+        if live_released {
+            return Err(format!("live child {pid} was reported released"));
+        }
+
+        // EOF releases the blocked child. Keep `identity` alive after waitpid
+        // so the result cannot be inferred from a fresh PID lookup.
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("wait for pidfd child {pid}: {e}"))?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("pidfd child {pid} did not exit within 5 seconds"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if !status.success() {
+            return Err(format!("pidfd child {pid} exited with {status}"));
+        }
+        let reaped_released = host
+            .proc_identity_released(&identity)
+            .map_err(|e| format!("check reaped child {pid}: {e}"))?;
+        if !reaped_released {
+            return Err(format!("reaped child {pid} was not reported released"));
+        }
+        println!("live_released={live_released} reaped_released={reaped_released}");
+        Ok(())
+    })();
+
+    // On failure, release the pipe and bound the kill/reap cleanup.
+    drop(child.stdin.take());
+    if child
+        .try_wait()
+        .map_err(|e| format!("clean up pidfd child: {e}"))?
+        .is_none()
+    {
+        let pid = child.id();
+        if let Err(error) = child.kill() {
+            // It may have exited between the first try_wait and kill.
+            if child
+                .try_wait()
+                .map_err(|e| format!("check pidfd child {pid} after failed kill: {e}"))?
+                .is_none()
+            {
+                return Err(format!(
+                    "kill pidfd child {pid} after probe failure: {error}; probe result: {result:?}"
+                ));
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child
+                .try_wait()
+                .map_err(|e| format!("reap killed pidfd child {pid}: {e}"))?
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "killed pidfd child {pid} was not reaped within 5 seconds; probe result: {result:?}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    result
 }
 
 /// Measure the real process scanner while short-lived children appear, then
