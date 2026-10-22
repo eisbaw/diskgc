@@ -1,0 +1,15 @@
+host_model: 1
+clock: "2026-10-15T03:00:00Z"
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+  - {id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, parent: 1}
+tree:
+  /run/diskgc/lock: {uid: 0, gid: 0}
+  /tmp/claude-1000:
+    -project:
+      session-1:
+        transcript: {size: 4K}
+    unrelated:
+      note: {size: 4K}
+  /tmp/outside:
+    payload: {size: 4K}

@@ -428,10 +428,10 @@ it under `crates/diskgc-model/tests/regressions/`, where it is replayed.
 Regression files pin the host-model schema and are migrated when it
 changes.
 
-The 0.1 property suite runs five safety properties and three integrated
+The 0.1 property suite runs five safety properties and seven integrated
 filesystem selection properties with 32 cases each in `just check` and 1,024
-each in `just soak` (`DISKGC_PROPERTY_CASES` overrides the count), plus saved
-regression replay. It covers independent checks of
+cases each in `just soak`, plus saved regression replay. It covers independent
+checks of
 the filesystem deletion trace against modelled paths, owners, symlinks and
 mounts; preservation of generated Cargo lock files during reclaim; exit-code
 precedence; supported filesystem selection expressions; and ordered dry-run
@@ -440,12 +440,29 @@ generator varies YAML source path shapes, source `where`, known `has` and
 `has_not` evidence, expressions and nested ModelHost trees. It compares the
 dry-run eligible set with an independent finite-path oracle, checks narrowing
 and union order, and verifies stable reclaim actions stay within that set.
-The saved rejected-outer-`where` vector is replayed. Protection is injected
-as a bound source in this test; it does not exercise config binding. The
-generator uses one owner and known entry evidence. Unknown evidence, retention
-guards, owner expansion, other kinds/actions and concurrent races remain
-TASK-16 coverage gaps. The index-authority property and indexed/best-fit
-dry-run cases follow the index implementation. A failing generated case prints
+Another generated family jointly varies source `has`/`has_not`, two known
+marker files, whole-tree age, positive and complemented single or mixed
+marker/age filters, two union terms, term-local `!profile:`, and config-bound
+`protect`. Its oracle derives source admission, raw outer overlap, filter
+truth and whole-tree age from generated facts without using the product
+matcher or filter evaluator. It compares the eligible plan exactly and
+checks that reclaim stays inside that set; when eligible candidates do not
+overlap, reclaim must act on the whole set. A fixed nested case makes the
+guard source's `where` reject an outer match and verifies that the raw outer
+match still vetoes its child under `!profile:` and config-bound `protect`.
+Additional generated cases check that unknown marker type admits neither
+filter polarity; a raw `keep_newest` guard vetoes a shared union candidate
+even when its source `where` fails; and `{uid}` roots select the right owner
+while config-bound protection narrows the plan and reclaim. The first
+generator injects an already-bound protection; the joint evidence generator
+and owner case exercise the config binder. Saved regressions replay a
+rejected outer `where` match and the whole Claude container exclusion with
+user YAML profiles. These finite generators cover seven fixed path shapes,
+three delete-source profiles, two known marker names, and two ages. They do
+not cover arbitrary predicates, every unknown-evidence shape, all profile
+kinds and actions, or concurrent races. The index-authority
+property and indexed/best-fit dry-run cases follow the index implementation.
+A failing generated case prints
 its shrunk host model as YAML for a regression fixture.
 
 **Profile golden sets.** Each built-in profile has a fixture tree and a

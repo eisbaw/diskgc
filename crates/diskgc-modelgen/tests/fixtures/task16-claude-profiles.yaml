@@ -1,0 +1,10 @@
+- name: tmp-entry
+  find: {roots: [/tmp], paths: ["*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/outside]}
+- name: claude-code-tmp
+  override: true
+  find: {roots: [/tmp], paths: ["claude-*/-*/session-*"], type: dir}
+  where: {has: deliberately-absent}
+  action: delete
+  examples: {match: [/tmp/claude-1000/-project/session-1]}
