@@ -4216,6 +4216,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             if self.stop_if_interrupted() {
                 return;
             }
+            let idle = IdleWindow {
+                at_least: self.tier.idle_for,
+                before: self.tier.idle_before,
+            };
+            if let Some(tally) = &tally
+                && let Err(skip) = tally.judge_idle(self.host, &target.path, idle)
+            {
+                self.skip_as_tallied(
+                    &target.path,
+                    &self.tier.profile.clone(),
+                    &skip,
+                    Some(tally.bytes),
+                );
+                continue;
+            }
             (self.log)(&match &tally {
                 Some(tally) => format!(
                     "{}: reclaiming {} (est. {}, {} entries, last build {})",
@@ -4238,19 +4253,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.host.wall_clock(),
                 tally.as_ref().and_then(|t| t.last_build),
             );
-            // judged_last_build None: an accepted tally only orders; the
-            // protocol's own recheck under the locks and the idle
-            // requirement decide.
+            // An accepted tally's age is a precheck, not a freshness bound:
+            // the protocol still measures the target under its locks and
+            // applies the idle requirement again before deleting.
             let done = cargo_target::reclaim_checked(
                 self.host,
                 target,
                 cargo_target::ReclaimPolicy {
                     judged_last_build: None,
                     rules,
-                    idle: IdleWindow {
-                        at_least: self.tier.idle_for,
-                        before: self.tier.idle_before,
-                    },
+                    idle,
                     deadline: self.deadline,
                 },
                 checker,

@@ -237,6 +237,15 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     );
     clock_offset.set(1)?;
     // The hook as shipped, with its default one-day idle selection.
+    // Independently verify that the paused build currently owns every
+    // discovered lock. A nonblocking attempt on its first lock would then
+    // return `locked`; `not_idle` below proves the tally refused it first.
+    let build_locks = cargo_under_test::lock_files(&busy_targets[1].join("debug"))?;
+    let held = Watched::files(&build_locks)?.usage(&proc_locks::sample()?, busy.build.pid());
+    ensure!(
+        !build_locks.is_empty() && build_locks.iter().all(|path| held.holds(path)),
+        "the paused build must hold every target lock before the idle precheck: {held:?}"
+    );
     let oracle = Oracle::arm(Fixture::new())?;
     let default = pre_job(
         ctx,
@@ -249,12 +258,12 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     let r = default.report?;
     ensure!(r["status"] == "exhausted" && acted(&r).is_empty(), "{r}");
     // Below min-free with nothing able to meet it, the reclaim reaches
-    // every target; idleness is judged under a target's locks (Reclaim
-    // protocol, step 2), so the paused build's target stops at its locks
-    // first: `locked`, not `not_idle` (task-87).
+    // every target. The tally's fresh build times fail the idle filter
+    // before any Cargo target lock is attempted, including the paused
+    // build's locks verified in /proc/locks immediately before this run.
     let not_idle: [(&Path, &str); 5] = [
         (&busy_targets[0], "not_idle"),
-        (&busy_targets[1], "locked"),
+        (&busy_targets[1], "not_idle"),
         (&idle[0], "not_idle"),
         (&idle[1], "not_idle"),
         (&idle[2], "not_idle"),

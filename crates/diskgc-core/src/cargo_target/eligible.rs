@@ -32,6 +32,15 @@ pub struct Tally {
     pub bytes: u64,
 }
 
+impl Tally {
+    /// Refuse an already tallied target whose measured build age fails this
+    /// tier's idle window before attempting any Cargo lock. An accepted
+    /// target is still walked and judged again under its locks by reclaim.
+    pub fn judge_idle<H: Host>(&self, host: &H, path: &Path, idle: IdleWindow) -> Result<(), Skip> {
+        judge_idle(host, path, self.last_build, idle)
+    }
+}
+
 /// A target that passed every check at the time of the check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eligible {

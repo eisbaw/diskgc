@@ -718,6 +718,47 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
     assert!(report.summary().expect("prints").starts_with("exhausted: "));
 }
 
+/// A completed tally has already measured both targets as younger than the
+/// tier's idle bound. A held Cargo lock on the newer target would produce
+/// `locked` if reclaim tried it; the trace proves neither target's lock was
+/// attempted. The host lock itself is still taken for the ensure run.
+#[test]
+fn tallied_nonidle_cargo_targets_skip_before_any_target_flock() {
+    let holder = "  /usr/bin/x: {}\nprocesses:\n  - {pid: 4242, exe: /usr/bin/x, \
+                  cwd: /, maps: [/usr/bin/x], environ: [PATH=/usr/bin]}\nlocks:\n  - \
+                  {path: /home/mark/src/new/target/debug/.cargo-lock, holder: 4242, mode: exclusive}\n";
+    let host = host(&yaml(true, holder));
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target && filter:idle-30d",
+            &[SRC],
+            SRC,
+            "12G",
+            None,
+        ),
+    );
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(report.skipped.len(), 2, "{report:#?}");
+    for path in [OLD, NEW] {
+        let skip = report
+            .skipped
+            .iter()
+            .find(|entry| entry.candidate == Path::new(path))
+            .expect("both tallied targets skipped");
+        assert_eq!(skip.reason, "not_idle", "{path}: {report:#?}");
+        assert!(skip.estimated_bytes.is_some(), "{path}: {report:#?}");
+        assert!(
+            calls(&host, Op::Flock)
+                .iter()
+                .all(|call| !touches(call, path)),
+            "{path}: target lock attempted: {:#?}",
+            host.trace()
+        );
+    }
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
 /// Btrfs subvolumes have different statx devices while sharing free space.
 /// A deleted file on a sibling mount must appear in the requested mount's
 /// report when mountinfo identifies the same backing source.

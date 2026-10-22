@@ -2944,13 +2944,16 @@ mod tests {
         }
     }
 
-    /// A fresh directory under the system temp dir, removed on drop.
+    /// A fresh directory under the system temp dir, removed on drop. Keep
+    /// its basename short: tests bind Unix sockets inside it, and repo-local
+    /// worktrees make `TMPDIR` long enough to reach Linux's sun_path limit.
     struct TempDir(PathBuf);
 
     impl TempDir {
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("diskgc-linux-{name}-{}", std::process::id()));
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("dg-{}-{serial}", std::process::id()));
             std::fs::create_dir(&dir).expect("create test dir");
             Self(dir)
         }
@@ -2976,7 +2979,7 @@ mod tests {
 
     #[test]
     fn config_reader_needs_no_host_and_refuses_non_regular_files() {
-        let tmp = TempDir::new("config-read");
+        let tmp = TempDir::new();
         let config = tmp.0.join("config.yaml");
         std::fs::write(&config, b"version: 1\n").expect("write");
         let link = tmp.0.join("link.yaml");
@@ -3371,7 +3374,7 @@ mod tests {
     #[test]
     fn root_statx_refuses_intermediate_symlinks_but_reports_a_final_symlink() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("root-statx-symlink");
+        let dir = TempDir::new();
         let actual = dir.0.join("actual");
         std::fs::create_dir(&actual).expect("create actual directory");
         std::fs::write(actual.join("file"), b"safe").expect("write file");
@@ -3397,7 +3400,7 @@ mod tests {
     #[test]
     fn final_mount_point_symlink_is_unsafe_path() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("mount-point-symlink");
+        let dir = TempDir::new();
         let actual = dir.0.join("actual");
         std::fs::create_dir(&actual).expect("create actual directory");
         let link = dir.0.join("link");
@@ -3469,7 +3472,7 @@ mod tests {
     #[test]
     fn read_dir_lists_every_name_on_each_call() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("read-dir");
+        let dir = TempDir::new();
         let mut want: Vec<OsString> = (0..3000)
             .map(|i| OsString::from(format!("entry with a fairly long name {i:05}")))
             .collect();
@@ -3515,7 +3518,7 @@ mod tests {
     #[test]
     fn read_head_reads_the_object_of_the_fd_and_refuses_non_files() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("read-head");
+        let dir = TempDir::new();
         let tag = dir.0.join("CACHEDIR.TAG");
         std::fs::write(&tag, b"Signature: 8a477f597d28d172789f06886806bc55\nrest").expect("write");
         let fd = resolve(&host, &tag, Want::Any).expect("resolve").fd;
@@ -3558,7 +3561,7 @@ mod tests {
     fn read_head_refuses_a_fifo_without_opening_it() {
         use rustix::fs::inotify;
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("read-head-unopened");
+        let dir = TempDir::new();
         let fifo = dir.0.join("fifo");
         rustix::fs::mknodat(
             CWD,
@@ -3602,7 +3605,7 @@ mod tests {
     fn reopen_regular_locks_the_object_of_the_fd_and_never_opens_a_fifo() {
         use rustix::fs::inotify;
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("reopen-regular");
+        let dir = TempDir::new();
         let lock = dir.0.join(".cargo-lock");
         std::fs::write(&lock, b"").expect("write");
         let fd = resolve(&host, &lock, Want::Any).expect("resolve").fd;
@@ -3692,7 +3695,7 @@ mod tests {
     #[test]
     fn a_directory_removed_after_it_was_opened_is_an_error_not_empty() {
         let host = LinuxHost::new().expect("host setup");
-        let tmp = TempDir::new("read-dir-removed");
+        let tmp = TempDir::new();
         let doomed = tmp.0.join("doomed");
         std::fs::create_dir(&doomed).expect("mkdir");
         let readable = rustix::fs::open(
@@ -3734,7 +3737,7 @@ mod tests {
     #[test]
     fn a_process_is_read_through_its_tasks() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("plain");
+        let dir = TempDir::new();
         let file = dir.0.join("held");
         std::fs::write(&file, b"held").expect("write");
         let holder = Holder::spawn("plain", &file, &dir.0);
@@ -3768,7 +3771,7 @@ mod tests {
     #[test]
     fn a_thread_with_its_own_fd_table_and_cwd_is_read() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("unshare");
+        let dir = TempDir::new();
         let file = dir.0.join("held");
         std::fs::write(&file, b"held").expect("write");
         let holder = Holder::spawn("unshare", &file, &dir.0);
@@ -3809,7 +3812,7 @@ mod tests {
     #[test]
     fn proc_status_shows_ids_and_dumpability() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("status");
+        let dir = TempDir::new();
         let file = dir.0.join("held");
         std::fs::write(&file, b"held").expect("write");
         let uid = rustix::process::getuid().as_raw();
@@ -3865,7 +3868,7 @@ mod tests {
         // bound past `drop` (see `fd_table_guard`).
         let _fd_table = fd_table_guard();
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("sockets");
+        let dir = TempDir::new();
         let path = dir.0.join("live.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind a socket");
         let meta = std::fs::symlink_metadata(&path).expect("stat the socket file");
@@ -3901,7 +3904,7 @@ mod tests {
         use diskgc_core::engine::{Candidate, Reason, Rules, walk};
         use diskgc_core::inuse::{Options, scan};
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("inuse");
+        let dir = TempDir::new();
         let used = dir.0.join("used");
         let free = dir.0.join("free");
         std::fs::create_dir(&used).expect("mkdir");
@@ -4031,7 +4034,7 @@ mod tests {
     #[test]
     fn a_process_execing_from_a_thread_in_a_loop_is_never_gone() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("exec-loop");
+        let dir = TempDir::new();
         let holder = Holder::spawn("exec-loop", &dir.0, &dir.0);
         let pid = holder.pid();
         let first = exec_generation(&host, pid);
@@ -4162,7 +4165,7 @@ mod tests {
     /// The fake tree makes the replacement exactly at the count boundary.
     #[test]
     fn anchored_task_listing_rejects_reused_numeric_tid() {
-        let dir = TempDir::new("fake-listing-reuse");
+        let dir = TempDir::new();
         fake_proc(&dir.0, &std::process::id().to_string());
         let root = open_proc_root(&dir.0);
         let proc = ProcRoot(root.as_fd());
@@ -4345,7 +4348,7 @@ mod tests {
     /// status, stat, fds, links, maps, environ and mountinfo there.
     #[test]
     fn every_reader_goes_through_the_held_procfs_fd() {
-        let dir = TempDir::new("fake-proc");
+        let dir = TempDir::new();
         fake_proc(&dir.0, &std::process::id().to_string());
         let host = LinuxHost::with_proc(open_proc_root(&dir.0)).expect("host on the fake tree");
         let proc = host.root();
@@ -4381,7 +4384,7 @@ mod tests {
         let mounts = host.mountinfo().expect("mountinfo");
         assert_eq!(mounts[0].mount_point, Path::new("/fake-root"));
         // The namespace check reads through the fd as well.
-        let other = TempDir::new("fake-proc-ancestor");
+        let other = TempDir::new();
         fake_proc(&other.0, &format!("1\t{}", std::process::id()));
         let refused = LinuxHost::with_proc(open_proc_root(&other.0)).unwrap_err();
         assert!(
@@ -4396,7 +4399,7 @@ mod tests {
     /// `stat` must fail instead of switching to the replacement.
     #[test]
     fn task_stat_pin_does_not_follow_a_reused_tid_within_one_tick() {
-        let dir = TempDir::new("fake-task-reuse");
+        let dir = TempDir::new();
         fake_proc(&dir.0, &std::process::id().to_string());
         let root = open_proc_root(&dir.0);
         let proc = ProcRoot(root.as_fd());
@@ -4519,7 +4522,7 @@ mod tests {
             .expect_err("this test must run outside a diskgc test container")
             .to_string();
         let host = LinuxHost::new().expect("host setup");
-        let tmp = TempDir::new("sandbox-gate");
+        let tmp = TempDir::new();
         let file = tmp.0.join("file");
         let empty_dir = tmp.0.join("empty-dir");
         std::fs::write(&file, b"keep me").expect("write test file");
@@ -4591,7 +4594,7 @@ mod tests {
         };
         sandbox::check().expect_err("this test must run outside a diskgc test container");
         let host = LinuxHost::new().expect("host setup");
-        let tmp = TempDir::new("engine");
+        let tmp = TempDir::new();
         let me = rustix::process::geteuid().as_raw();
         let owners = [me];
         let rules = Rules::new(&owners);
@@ -4678,7 +4681,7 @@ mod tests {
     #[test]
     fn a_lock_conflicts_until_its_fd_is_closed() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("flock");
+        let dir = TempDir::new();
         // The holder takes its lock only after exec, in its own fd table.
         // A parallel test's fork cannot inherit this fd and keep it alive
         // after the holder exits. This removes one possible cause of the
@@ -4713,7 +4716,7 @@ mod tests {
     fn a_failed_flock_conversion_drops_the_shared_lock_kernel_fact() {
         let _fd_table = fd_table_guard();
         use rustix::fs::FlockOperation as Op;
-        let dir = TempDir::new("convert");
+        let dir = TempDir::new();
         let open = || std::fs::File::open(&dir.0).expect("open");
         let (a, b, probe) = (open(), open(), open());
         rustix::fs::flock(&a, Op::NonBlockingLockShared).expect("a shared");
@@ -4733,7 +4736,7 @@ mod tests {
     fn a_held_shared_lock_stays_held() {
         let _fd_table = fd_table_guard();
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("shared");
+        let dir = TempDir::new();
         let lock = |mode| {
             host.flock_try(open_dir(&host, &dir.0), mode)
                 .expect("flock")
@@ -4762,7 +4765,7 @@ mod tests {
     #[test]
     fn a_big_process_is_read_completely() {
         let host = LinuxHost::new().expect("host setup");
-        let dir = TempDir::new("big");
+        let dir = TempDir::new();
         let file = dir.0.join("held");
         std::fs::write(&file, b"held").expect("write");
         let big = "e".repeat(BIG_ENV);
