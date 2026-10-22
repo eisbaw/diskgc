@@ -3,9 +3,10 @@
 //! fixture objects that actually disappeared, but excludes incidental inode
 //! numbers, mount ids, timings, and Host call text.
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use diskgc_core::executor::{self, Request, Tier};
@@ -62,6 +63,14 @@ const WEST_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/west-build-anchored.yaml");
 const XDG_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/xdg-cache-entry-v2-match.yaml");
+const CMAKE_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/cmake-source-anchor.yaml");
+const AUTOTOOLS_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/autotools-source-anchor.yaml");
+const MESON_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/meson-source-anchor.yaml");
+const CONTAINERS_IMAGE_VECTOR: &str =
+    include_str!("../../crates/diskgc-model/tests/models/profiles/containers-image-age.yaml");
 #[cfg(test)]
 const BROWSER_VECTORS: &[&str] = &[
     BRAVE_BROWSER_VECTOR,
@@ -77,8 +86,8 @@ const DANGLING_LINK: &str = "/home/tester/project/dangling-link";
 
 // This inventory is the contract for every original checked-in profile
 // vector. A projection has a separate replay and never changes its original
-// YAML or expectation. A model-only entry names the first irreproducible
-// property; it must fail preflight before the fixture is written.
+// YAML or expectation. A VM entry must fail ordinary-container preflight
+// before writing a fixture, and names its guest replay.
 #[derive(Clone, Copy)]
 enum FixtureReplay {
     Direct {
@@ -90,9 +99,11 @@ enum FixtureReplay {
         test: &'static str,
         run: fn(&Ctx) -> TestResult,
     },
-    ModelOnly {
+    Vm {
         reason: &'static str,
         yaml: &'static str,
+        test: &'static str,
+        run: fn(&Ctx) -> TestResult,
     },
 }
 
@@ -126,25 +137,29 @@ macro_rules! projected {
     };
 }
 
-macro_rules! model_only {
-    ($file:literal, $reason:literal) => {
+macro_rules! vm_replay {
+    ($file:literal, $reason:literal, $test:literal, $run:path) => {
         FixtureClassification {
             file: $file,
-            replay: FixtureReplay::ModelOnly {
+            replay: FixtureReplay::Vm {
                 reason: $reason,
                 yaml: include_str!(concat!(
                     "../../crates/diskgc-model/tests/models/profiles/",
                     $file
                 )),
+                test: $test,
+                run: $run,
             },
         }
     };
 }
 
 const PROFILE_FIXTURES: &[FixtureClassification] = &[
-    model_only!(
+    vm_replay!(
         "autotools-source-anchor.yaml",
-        "historical ctime required by idle_for"
+        "historical ctime required by idle_for",
+        "vm_autotools_original_matches_linux_outcomes_and_deletion_diff",
+        vm_autotools_original_matches_linux_outcomes_and_deletion_diff
     ),
     projected!(
         "brave-browser-cache-lock.yaml",
@@ -189,18 +204,22 @@ const PROFILE_FIXTURES: &[FixtureClassification] = &[
         "claude_code_versions_vector_matches_linux_outcomes_and_deletion_diff",
         claude_code_versions_vector
     ),
-    model_only!(
+    vm_replay!(
         "cmake-source-anchor.yaml",
-        "historical ctime required by idle_for"
+        "historical ctime required by idle_for",
+        "vm_cmake_original_matches_linux_outcomes_and_deletion_diff",
+        vm_cmake_original_matches_linux_outcomes_and_deletion_diff
     ),
     direct!(
         "codex-releases-versions.yaml",
         "codex_releases_vector_matches_linux_outcomes_and_deletion_diff",
         codex_releases_vector
     ),
-    model_only!(
+    vm_replay!(
         "containers-image-age.yaml",
-        "historical ctime required by idle_for; /var/tmp and process evidence are outside this scratch replay"
+        "historical ctime required by idle_for",
+        "vm_containers_image_original_matches_linux_outcomes_and_deletion_diff",
+        vm_containers_image_original_matches_linux_outcomes_and_deletion_diff
     ),
     direct!(
         "cursor-agent-versions-versions.yaml",
@@ -223,9 +242,11 @@ const PROFILE_FIXTURES: &[FixtureClassification] = &[
         "go_mod_cache_vector_matches_linux_outcomes_and_deletion_diff",
         go_mod_cache_vector
     ),
-    model_only!(
+    vm_replay!(
         "meson-source-anchor.yaml",
-        "historical ctime required by idle_for"
+        "historical ctime required by idle_for",
+        "vm_meson_original_matches_linux_outcomes_and_deletion_diff",
+        vm_meson_original_matches_linux_outcomes_and_deletion_diff
     ),
     direct!(
         "mypy-cache-match.yaml",
@@ -300,8 +321,8 @@ const PROFILE_FIXTURES: &[FixtureClassification] = &[
 
 fn verify_registered_replays() -> Result<(), String> {
     for classification in PROFILE_FIXTURES {
-        let (test_name, run) = match classification.replay {
-            FixtureReplay::Direct { test, run } => (test, run),
+        let (test_name, run, tier) = match classification.replay {
+            FixtureReplay::Direct { test, run } => (test, run, crate::suite::Tier::Fast),
             FixtureReplay::Projected { reason, test, run } => {
                 if reason.is_empty() {
                     return Err(format!(
@@ -309,26 +330,24 @@ fn verify_registered_replays() -> Result<(), String> {
                         classification.file
                     ));
                 }
-                (test, run)
+                (test, run, crate::suite::Tier::Fast)
             }
-            FixtureReplay::ModelOnly { reason, .. } => {
+            FixtureReplay::Vm {
+                reason, test, run, ..
+            } => {
                 if !reason.contains("historical ctime") {
-                    return Err(format!(
-                        "{}: model-only reason is incomplete",
-                        classification.file
-                    ));
+                    return Err(format!("{}: VM reason is incomplete", classification.file));
                 }
-                continue;
+                (test, run, crate::suite::Tier::Vm)
             }
         };
         let registered = crate::suite::TESTS
             .iter()
             .find(|entry| entry.name == test_name)
             .ok_or_else(|| format!("{}: missing replay {test_name}", classification.file))?;
-        if registered.tier != crate::suite::Tier::Fast || !std::ptr::fn_addr_eq(registered.run, run)
-        {
+        if registered.tier != tier || !std::ptr::fn_addr_eq(registered.run, run) {
             return Err(format!(
-                "{}: replay {test_name} is not registered with its Fast runner",
+                "{}: replay {test_name} is not registered with its declared runner",
                 classification.file
             ));
         }
@@ -354,8 +373,9 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
     }
     let home_before = top_level_entries("/home/tester")?;
     let tmp_before = top_level_entries("/tmp")?;
+    let var_tmp_before = top_level_entries("/var/tmp")?;
     for classification in PROFILE_FIXTURES {
-        let FixtureReplay::ModelOnly { yaml, .. } = classification.replay else {
+        let FixtureReplay::Vm { yaml, .. } = classification.replay else {
             continue;
         };
         let name = classification.file;
@@ -374,7 +394,344 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
             top_level_entries("/tmp")? == tmp_before,
             "{name}: preflight wrote /tmp"
         );
+        ensure!(
+            top_level_entries("/var/tmp")? == var_tmp_before,
+            "{name}: preflight wrote /var/tmp"
+        );
     }
+    Ok(())
+}
+
+/// Replay the unchanged CMake mixed-age vector in the disposable QEMU guest.
+/// The guest Podman container holds CAP_SYS_TIME; the kernel timestamps each
+/// cohort when it is actually created. The VM kernel command-line token is
+/// checked before any clock change, in addition to the ordinary E2E interlock.
+pub fn vm_cmake_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
+    replay_historical_vector(ctx, CMAKE_VECTOR, materialize_historical_cmake)
+}
+
+pub fn vm_autotools_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
+    replay_historical_vector(ctx, AUTOTOOLS_VECTOR, materialize_historical_autotools)
+}
+
+pub fn vm_meson_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
+    replay_historical_vector(ctx, MESON_VECTOR, materialize_historical_meson)
+}
+
+pub fn vm_containers_image_original_matches_linux_outcomes_and_deletion_diff(
+    ctx: &Ctx,
+) -> TestResult {
+    replay_historical_vector(
+        ctx,
+        CONTAINERS_IMAGE_VECTOR,
+        materialize_historical_containers_image,
+    )
+}
+
+fn replay_historical_vector(
+    ctx: &Ctx,
+    source: &str,
+    materialize: fn(
+        &Ctx,
+        &diskgc_model::spec::HostModel,
+    ) -> Result<model_materialize::Materialized, String>,
+) -> TestResult {
+    let vector = ProfileVector::parse(source)?;
+    vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
+    let mut clock = GuestClock::begin()?;
+    let result = replay_model_with_profile(ctx, vector, false, None, None, true, materialize);
+    let restored = clock.restore();
+    result?;
+    restored
+}
+
+const VM_CLOCK_TOKEN: &str = "diskgc.e2e.historical_ctime=1";
+const CMAKE_OLD: &str = "/home/tester/project/app/output";
+const CMAKE_CHECKOUT_OLD: &str = "/home/tester/project/checkout/output";
+const CMAKE_FRESH: &str = "/home/tester/project/fresh/output";
+
+struct GuestClock {
+    started: SystemTime,
+    elapsed: Instant,
+    restored: bool,
+}
+
+impl GuestClock {
+    fn begin() -> Result<Self, String> {
+        let cmdline = fs::read_to_string("/proc/cmdline")
+            .map_err(|error| format!("read guest kernel command line: {error}"))?;
+        ensure!(
+            cmdline.split_whitespace().any(|arg| arg == VM_CLOCK_TOKEN),
+            "historical ctime replay requires the disposable QEMU guest kernel token {VM_CLOCK_TOKEN}"
+        );
+        Ok(Self {
+            started: SystemTime::now(),
+            elapsed: Instant::now(),
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> TestResult {
+        if self.restored {
+            return Ok(());
+        }
+        let now = self.started + self.elapsed.elapsed();
+        let nanos = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("restore guest clock: {error}"))?
+            .as_nanos();
+        set_guest_clock(i128::try_from(nanos).map_err(|error| error.to_string())?)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for GuestClock {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!("restore disposable guest clock after failed replay: {error}");
+        }
+    }
+}
+
+fn set_guest_clock(nanos: i128) -> TestResult {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    let value = libc::timespec {
+        tv_sec: nanos
+            .div_euclid(NANOS_PER_SECOND)
+            .try_into()
+            .map_err(|error| format!("guest clock seconds overflow: {error}"))?,
+        tv_nsec: nanos
+            .rem_euclid(NANOS_PER_SECOND)
+            .try_into()
+            .map_err(|error| format!("guest clock nanoseconds overflow: {error}"))?,
+    };
+    // SAFETY: CLOCK_REALTIME and a fully initialized timespec are valid.
+    let result = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &value) };
+    ensure!(
+        result == 0,
+        "set disposable guest CLOCK_REALTIME to {}.{}: {}",
+        value.tv_sec,
+        value.tv_nsec,
+        io::Error::last_os_error()
+    );
+    Ok(())
+}
+
+/// Create the old candidates while the guest kernel clock is old, then the
+/// fresh and structural nodes at the vector's original model time. Both
+/// stages use the ordinary scratch materializer and its mount checks.
+fn materialize_historical_cmake(
+    ctx: &Ctx,
+    model: &diskgc_model::spec::HostModel,
+) -> Result<model_materialize::Materialized, String> {
+    materialize_historical_source(
+        ctx,
+        model,
+        &[CMAKE_OLD, CMAKE_CHECKOUT_OLD],
+        CMAKE_FRESH,
+        "cmake-build-anchored",
+    )
+}
+
+fn materialize_historical_autotools(
+    ctx: &Ctx,
+    model: &diskgc_model::spec::HostModel,
+) -> Result<model_materialize::Materialized, String> {
+    materialize_historical_source(
+        ctx,
+        model,
+        &[
+            "/home/tester/project/app/output",
+            "/home/tester/project/missing/output",
+            "/home/tester/project/copied/output",
+            "/home/tester/project/checkout/output",
+        ],
+        "/home/tester/project/fresh/output",
+        "autotools-build-anchored",
+    )
+}
+
+fn materialize_historical_meson(
+    ctx: &Ctx,
+    model: &diskgc_model::spec::HostModel,
+) -> Result<model_materialize::Materialized, String> {
+    materialize_historical_source(
+        ctx,
+        model,
+        &[
+            "/home/tester/project/app/odd-output",
+            "/home/tester/project/checkout/output",
+        ],
+        "/home/tester/project/fresh/output",
+        "meson-build-anchored",
+    )
+}
+
+fn materialize_historical_containers_image(
+    ctx: &Ctx,
+    model: &diskgc_model::spec::HostModel,
+) -> Result<model_materialize::Materialized, String> {
+    let old_paths = [
+        PathBuf::from("/var/tmp/container_images_storage-old"),
+        PathBuf::from("/var/tmp/container_images_storage-held"),
+    ];
+    let old = match model.tree.get(&old_paths[0]) {
+        Some(NodeSpec::File(file)) => file.mtime.ok_or("old container spool has no mtime")?,
+        _ => return Err("old container spool is not a file".into()),
+    };
+    for path in &old_paths {
+        let Some(NodeSpec::File(file)) = model.tree.get(path) else {
+            return Err(format!("old container spool {} is missing", path.display()));
+        };
+        ensure!(
+            file.mtime == Some(old),
+            "old container spool {} has a different model timestamp",
+            path.display()
+        );
+    }
+    let mut old_model = model.clone();
+    old_model.tree.retain(|path, _| old_paths.contains(path));
+    old_model.processes.clear();
+    old_model.locks.clear();
+    let mut fresh_model = model.clone();
+    fresh_model.tree.retain(|path, _| !old_paths.contains(path));
+    set_guest_clock(old.0.as_nanosecond())?;
+    model_materialize::materialize(ctx, &old_model)?.finish()?;
+    set_guest_clock(model.clock.0.as_nanosecond())?;
+    let materialized = model_materialize::materialize(ctx, &fresh_model)?;
+    assert_kernel_ctimes(
+        model,
+        old,
+        "containers-image-tmp",
+        "/var/tmp/buildah-fresh",
+        &old_paths.into_iter().collect(),
+        ctx.var_tmp.mnt_id(),
+    )?;
+    Ok(materialized)
+}
+
+fn materialize_historical_source(
+    ctx: &Ctx,
+    model: &diskgc_model::spec::HostModel,
+    old_paths: &[&str],
+    fresh_path: &str,
+    profile: &str,
+) -> Result<model_materialize::Materialized, String> {
+    model_materialize::validate(model)?;
+    let old = match model.tree.get(Path::new(old_paths[0])) {
+        Some(NodeSpec::Dir(dir)) => dir.attrs.mtime.ok_or("old source candidate has no mtime")?,
+        _ => return Err(format!("old {profile} candidate is not a directory")),
+    };
+    let old_paths: BTreeSet<_> = old_paths.iter().map(|path| PathBuf::from(*path)).collect();
+    for path in &old_paths {
+        let Some(NodeSpec::Dir(dir)) = model.tree.get(path) else {
+            return Err(format!(
+                "old {profile} cohort {} is missing",
+                path.display()
+            ));
+        };
+        ensure!(
+            dir.attrs.mtime == Some(old),
+            "old {profile} cohort {} has a different model timestamp",
+            path.display()
+        );
+    }
+    let mut old_model = model.clone();
+    old_model.tree.retain(|path, _| old_paths.contains(path));
+    old_model.processes.clear();
+    old_model.locks.clear();
+    let mut fresh_model = model.clone();
+    fresh_model.tree.retain(|path, _| !old_paths.contains(path));
+    set_guest_clock(old.0.as_nanosecond())?;
+    model_materialize::materialize(ctx, &old_model)?.finish()?;
+    set_guest_clock(model.clock.0.as_nanosecond())?;
+    let materialized = model_materialize::materialize(ctx, &fresh_model)?;
+    assert_kernel_ctimes(
+        model,
+        old,
+        profile,
+        fresh_path,
+        &old_paths,
+        ctx.home.mnt_id(),
+    )?;
+    Ok(materialized)
+}
+
+fn statx_ctime_seconds(path: &Path, mount_id: u64) -> Result<i64, String> {
+    use rustix::fs::{AtFlags, CWD, StatxFlags};
+    let stx = rustix::fs::statx(
+        CWD,
+        path,
+        AtFlags::SYMLINK_NOFOLLOW,
+        StatxFlags::CTIME | StatxFlags::MNT_ID,
+    )
+    .map_err(|error| format!("statx {}: {error}", path.display()))?;
+    ensure!(
+        stx.stx_mask & StatxFlags::CTIME.bits() != 0,
+        "statx {} did not provide ctime",
+        path.display()
+    );
+    ensure!(
+        stx.stx_mnt_id == mount_id,
+        "{} is outside the container scratch tmpfs",
+        path.display()
+    );
+    Ok(stx.stx_ctime.tv_sec)
+}
+
+fn assert_kernel_ctimes(
+    model: &diskgc_model::spec::HostModel,
+    old: WallTime,
+    profile: &str,
+    fresh_path: &str,
+    old_paths: &BTreeSet<PathBuf>,
+    mount_id: u64,
+) -> TestResult {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    let old_seconds = i64::try_from(old.0.as_nanosecond().div_euclid(NANOS_PER_SECOND))
+        .map_err(|error| error.to_string())?;
+    let now_seconds = i64::try_from(model.clock.0.as_nanosecond().div_euclid(NANOS_PER_SECOND))
+        .map_err(|error| error.to_string())?;
+    for path in old_paths {
+        let ctime = statx_ctime_seconds(path, mount_id)?;
+        ensure!(
+            (old_seconds..=old_seconds + 120).contains(&ctime),
+            "old {profile} kernel ctime {ctime} at {} differs from staged {old_seconds}",
+            path.display()
+        );
+    }
+    let old_ctime = statx_ctime_seconds(old_paths.first().ok_or("empty old cohort")?, mount_id)?;
+    let fresh_ctime = statx_ctime_seconds(Path::new(fresh_path), mount_id)?;
+    ensure!(
+        (now_seconds..=now_seconds + 120).contains(&fresh_ctime),
+        "fresh {profile} kernel ctime {fresh_ctime} differs from staged {now_seconds}"
+    );
+    let library = Library::builtin().map_err(|error| error.to_string())?;
+    let roots =
+        (profile != "containers-image-tmp").then(|| vec!["/home/tester/project".to_owned()]);
+    let tier = Tier::select(
+        &format!("profile:{profile}"),
+        &library,
+        roots.as_deref(),
+        TESTER.uid,
+    )?;
+    let floor = tier
+        .idle_for
+        .ok_or("CMake profile has no idle floor")?
+        .0
+        .as_secs();
+    ensure!(
+        u64::try_from(now_seconds - old_ctime).unwrap_or(0) >= floor,
+        "old {profile} kernel ctime does not meet the {floor}s idle floor"
+    );
+    ensure!(
+        u64::try_from(now_seconds - fresh_ctime).unwrap_or(0) < floor,
+        "fresh {profile} kernel ctime unexpectedly meets the {floor}s idle floor"
+    );
+    eprintln!(
+        "guest {profile} statx ctimes: old={old_ctime}, fresh={fresh_ctime}, model_now={now_seconds}, idle_floor={floor}s"
+    );
     Ok(())
 }
 
@@ -444,6 +801,7 @@ pub fn pytest_unsafe_unrelated_fd_matches_linux(ctx: &Ctx) -> TestResult {
         Some(PYTEST_UNSAFE_PROFILE),
         Some(Path::new(PYTEST_ACTIVE)),
         false,
+        model_materialize::materialize,
     )
 }
 
@@ -1169,7 +1527,15 @@ fn replay_vector(ctx: &Ctx, yaml: &str, with_dangling_link: bool) -> TestResult 
 }
 
 fn replay_model(ctx: &Ctx, vector: ProfileVector, with_dangling_link: bool) -> TestResult {
-    replay_model_with_profile(ctx, vector, with_dangling_link, None, None, false)
+    replay_model_with_profile(
+        ctx,
+        vector,
+        with_dangling_link,
+        None,
+        None,
+        false,
+        model_materialize::materialize,
+    )
 }
 
 /// A single old timestamp cohort can be recreated with a real tmpfs ctime:
@@ -1181,7 +1547,15 @@ fn replay_single_cohort_vector(ctx: &Ctx, yaml: &str) -> TestResult {
     vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
     let offset_seconds = rebase_single_cohort(&mut vector)?;
     let _clock_offset = DifferentialClockOffset::install(offset_seconds)?;
-    replay_model_with_profile(ctx, vector, false, None, None, true)
+    replay_model_with_profile(
+        ctx,
+        vector,
+        false,
+        None,
+        None,
+        true,
+        model_materialize::materialize,
+    )
 }
 
 struct DifferentialClockOffset;
@@ -1317,10 +1691,17 @@ fn replay_model_with_profile(
     profile_yaml: Option<&str>,
     unrelated_to: Option<&Path>,
     sandbox_clock_offset: bool,
+    materialize: fn(
+        &Ctx,
+        &diskgc_model::spec::HostModel,
+    ) -> Result<model_materialize::Materialized, String>,
 ) -> TestResult {
     // Preflight the semantic contract before even writing the CLI config.
     // The model's old clock and ctime cannot be installed on a fresh tmpfs.
     adapt_home_mount(&mut vector);
+    if vector.profile == "containers-image-tmp" {
+        adapt_var_tmp_mount(&mut vector)?;
+    }
     preflight_vector(&vector, sandbox_clock_offset)?;
     let config_path = match profile_yaml {
         Some(profile_yaml) => {
@@ -1363,7 +1744,7 @@ fn replay_model_with_profile(
     // shared no-op regression must fail here, before comparing the hosts.
     vector.check(&Library::builtin().map_err(|e| e.to_string())?)?;
     let model = model_outcome(&vector)?;
-    let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    let materialized = materialize(ctx, &vector.host)?;
     if let Some(candidate) = unrelated_to {
         materialized.assert_no_reference_to(candidate)?;
     }
@@ -1468,6 +1849,24 @@ fn adapt_home_mount(vector: &mut ProfileVector) {
         mount.at = "/home/tester".into();
         mount.fs = "tmpfs".into();
     }
+}
+
+fn adapt_var_tmp_mount(vector: &mut ProfileVector) -> TestResult {
+    ensure!(
+        vector.host.mounts.len() == 1,
+        "container spool vector must have only its original root mount"
+    );
+    let mut mount = vector.host.mounts[0].clone();
+    mount.id = 2;
+    mount.at = "/var/tmp".into();
+    mount.fs = "tmpfs".into();
+    mount.dev = DevSpec(Dev {
+        major: 254,
+        minor: 2,
+    });
+    mount.parent = Some(1);
+    vector.host.mounts.push(mount);
+    Ok(())
 }
 
 fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
@@ -2045,13 +2444,24 @@ mod tests {
                         "{name}: wrong projection runner"
                     );
                 }
-                FixtureReplay::ModelOnly { reason, .. } => {
+                FixtureReplay::Vm {
+                    reason, test, run, ..
+                } => {
                     assert!(reason.contains("historical ctime"), "{name}: {reason}");
                     let error = preflight_vector(&vector, false)
                         .expect_err("historical ctime must be rejected before writes");
                     assert!(
                         error.contains("ctime") && error.contains("model-only"),
                         "{name}: {error}"
+                    );
+                    let registered = crate::suite::TESTS
+                        .iter()
+                        .find(|entry| entry.name == test)
+                        .unwrap_or_else(|| panic!("{name}: missing VM replay {test}"));
+                    assert_eq!(registered.tier, crate::suite::Tier::Vm, "{name}");
+                    assert!(
+                        std::ptr::fn_addr_eq(registered.run, run),
+                        "{name}: wrong VM runner"
                     );
                 }
             }

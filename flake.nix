@@ -340,7 +340,7 @@
         mkdir -p srv/cargo-smoke
         chmod 0755 srv/cargo-smoke
 
-        # Mount points. The harness mounts tmpfs on /tmp (scratch), on
+        # Mount points. The harness mounts tmpfs on /tmp and /var/tmp (scratch), on
         # /run/diskgc (the host lock, provisioned there as the tmpfiles
         # lines of docs/safety.md do on a host whose /run is a tmpfs), on
         # /home/tester (tester's home) and on /run/diskgc-e2e (its
@@ -441,6 +441,33 @@
           printf '%s\n' ${
             lib.escapeShellArgs (map (t: "${t.name} ${t.toolchain.version} ${t.tier}") cargoUnderTest)
           } > opt/cargo-under-test/toolchains
+        '';
+        config = {
+          Cmd = [ "/bin/sh" ];
+          Env = [ "PATH=/bin" ];
+          WorkingDir = "/";
+        };
+      };
+
+      # A small VM-only variant of the same interlocked E2E image. The
+      # ordinary image contains several gigabytes of unrelated toolchains;
+      # this one mounts the guest's Nix store read-only for the test binaries.
+      e2eVmImage = pkgs.dockerTools.streamLayeredImage {
+        name = "localhost/diskgc-e2e-vm";
+        contents = [ pkgs.busybox pkgs.strace ];
+        fakeRootCommands = (e2eImageCommon [
+          "name vm"
+          "read-only /nix/store"
+          "toolchains none"
+          "tests all"
+          "tmpfiles /opt/diskgc-e2e/bin/systemd-tmpfiles"
+        ]) + ''
+          # The containers-image vector names Buildah's process. Bake a
+          # static fixture executable at that exact path; its probe holds
+          # the spool open while LinuxHost inspects /proc.
+          mkdir -p usr/bin
+          cp ${e2eUnderTest}/bin/diskgc-e2e usr/bin/buildah
+          chmod 0755 usr/bin/buildah
         '';
         config = {
           Cmd = [ "/bin/sh" ];
@@ -612,6 +639,11 @@
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
       e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard";
       e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind";
+      vmHistoricalCtime = import ./diskgc-e2e/vm-historical-ctime.nix {
+        inherit pkgs;
+        image = e2eVmImage;
+        underTest = e2eUnderTest;
+      };
     in
     {
       packages.${system} = {
@@ -619,7 +651,9 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        vm-historical-ctime = vmHistoricalCtime;
         e2e-base-image = e2eBaseImage;
+        e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
         e2e-docker-image = e2eDockerImage;
         e2e-under-test = e2eUnderTest;
@@ -722,6 +756,7 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        vm-historical-ctime = vmHistoricalCtime;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

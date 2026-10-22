@@ -37,12 +37,21 @@ impl Holder {
         program: &std::path::Path,
         args: &[&str],
     ) -> Result<Self, String> {
+        Self::tester_program_env(ctx, program, args, &[])
+    }
+
+    pub fn tester_program_env(
+        ctx: &Ctx,
+        program: &std::path::Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<Self, String> {
         let mut cmd = Command::new(&ctx.self_exe);
         cmd.args(["as-tester", "--"])
             .arg(program)
             .arg("probe")
             .args(args);
-        Self::start(cmd, args, &[])
+        Self::start(cmd, args, env)
     }
 
     /// `diskgc-e2e probe ARGS` as container root (it drops privileges or

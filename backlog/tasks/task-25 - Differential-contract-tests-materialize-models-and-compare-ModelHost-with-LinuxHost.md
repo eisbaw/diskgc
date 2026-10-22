@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-22 08:00'
+updated_date: '2026-10-22 09:02'
 labels:
   - wave-2
   - testing
@@ -68,6 +68,8 @@ Correction to immediately preceding TASK-25 note: four originals, not all six, m
 2026-10-22 parent final gate for West/XDG projected replay: exact nix develop -c just e2e exited 0 on the frozen tree; Nix E2E units 99/99, Podman 216/216 including both new replays, Docker 7/7, workspace fmt/Clippy/tests passed (one intentional ignored Linux helper). Read-only MPED review GO; four mixed-age originals remain model-only, so AC/DoD remain unchecked.
 
 2026-10-22 mixed-age kernel feasibility: booted disposable QEMU/KVM with current kernel and a static BusyBox initramfs, mounted guest tmpfs, created /scratch/old after setting guest clock to 1609459200, advanced guest clock to 1792655850, then created /scratch/fresh. Guest stat output: old ctime 1609459200 both before and after shift; fresh ctime 1792655850. QEMU exit 0; host clock 1792655900 before, 1792655901 after. This proves two genuine kernel ctime cohorts can coexist without changing host time. No deleting diskgc ran in guest: current E2E runner requires Podman native overlay and a large Nix-built image, while this proof guest had only BusyBox. TASK-25.1 captures the reproducible Podman-inside-guest harness, staged statx assertions, four unchanged originals, and Oracle parity. AC #1/#2 and DoD stay open; none of the four original mixed-age replays is claimed passing.
+
+2026-10-22 TASK-25.1 mixed-age guest replay: all four formerly unproved originals (Autotools, CMake, Meson, containers-image) now have registered Tier::Vm differential tests against unchanged YAML and independent expectations. Nix QEMU/Podman native-overlay check exited 0; each staged genuine old/fresh kernel statx ctimes, compared ModelHost/LinuxHost dry and reclaim, and passed the strace deletion oracle. The containers-image replay uses /var/tmp scratch and an image-baked static /usr/bin/buildah-named process probe for in-use evidence. Ordinary container preflight still refuses mixed-age replays before fixture writes. TASK-25.1 AC #1-#3 checked; AC #4 awaits exact just e2e gate. Parent TASK-25 AC and DoD remain unchecked until full gate and review.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

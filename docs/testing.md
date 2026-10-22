@@ -4,7 +4,8 @@ Normative for how the PRD's acceptance criteria and the guarantees in
 [safety.md](safety.md) are tested.
 
 **No test ever runs diskgc against the developer's live system.** Tests run
-against a modelled host (in-process) or inside a rootless test container.
+against a modelled host (in-process), inside a rootless test container, or
+inside a rootful Podman container on a disposable Nix-built QEMU guest.
 One named exception proves the pre-release sandbox gate itself:
 `a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate`
 (`crates/diskgc/tests/cli.rs`) runs the built binary's reclaiming
@@ -36,7 +37,7 @@ The strongest end-to-end checks; if these are green, diskgc genuinely works.
    birth time. Limit: there, a replacement that reuses the freed inode
    number is invisible to the snapshot; the strace record still shows it
    for traced processes. Objects the harness creates therefore live on
-   tmpfs mounts (`/tmp`, `/run/diskgc`, `/home/tester`; Container setup),
+   tmpfs mounts (`/tmp`, `/var/tmp`, `/run/diskgc`, `/home/tester`; Container setup),
    where the full key applies. Pseudo filesystems (`/proc`, `/sys`,
    `devpts`, cgroups, ...) and read-only mounts (the binaries under test,
    toolchains) are not walked, decided by each object's mount id; nothing
@@ -461,20 +462,26 @@ delayed freeing) are marked *model-only*; tests that use them say so.
 The checked-in profile-vector inventory in
 `diskgc-e2e/src/differential_suite.rs` classifies each original YAML by
 filename and reason: 18 direct replays, four browser-home projections, two
-process projections, two single-age clock projections, and four model-only
-originals. Every direct or projected
+process projections, two single-age clock projections, and four mixed-age
+originals requiring the QEMU guest. Every direct or projected
 entry names its registered container case. The projections keep the
 original expectations and check them before the transformed replay. West and
 XDG use one historical timestamp cohort: the replay shifts the model clock
 and explicit mtimes together, then uses the sandbox-only clock offset to make
 the real tmpfs ctime of newly created objects the same age. Both real-kernel
 replays pass the independent vector expectation and deletion oracle. The four
-remaining model-only originals require both old and fresh `idle_for` ctime
-cohorts; a fresh tmpfs inode has current ctime even after its mtime is set,
-so vector replay preflight refuses them before writing a fixture or CLI
-config. The
-containers-image original also refers to `/var/tmp` and a process outside
-this scratch replay. The materializer itself cannot infer outcome dependence
+mixed-age originals require both old and fresh `idle_for` ctime cohorts.
+Ordinary container replay preflight still refuses them before writing a
+fixture or CLI config: changing mtime does not change kernel ctime. The
+Nix-built QEMU replay creates the old inode cohort while the guest clock is
+old, advances only the guest clock, then creates the fresh cohort. `statx`
+checks both ctimes and mount ids before either diskgc run. The original YAMLs
+and independent expected outcomes remain unchanged. Inside each guest Podman
+container, ModelHost and LinuxHost run dry and reclaim, and the existing
+strace deletion oracle judges the Linux runs. The containers-image replay
+has its own `/var/tmp` tmpfs and an image-baked static process probe named
+`/usr/bin/buildah` which holds the modelled spool file open; this tests the
+in-use guard, not Buildah's own program logic. The materializer itself cannot infer outcome dependence
 from a host model alone. The vector replay gate checks the selected profile's
 time predicate before materialization, then proves that nominal clock, mount
 size, device and ID did not change the observed plan, action, skip, exit, or
@@ -487,28 +494,24 @@ sizes, a second tagged cache, a matching path without `CACHEDIR.TAG`, and a
 tagged cache containing a checkout; an independent expectation rejects a
 missing tag on an expected eligible cache. Both generators run the same
 ModelHost/LinuxHost outcome comparison and deletion oracle as checked-in
-vectors. This does not establish parity for the four mixed-age historical-ctime
-originals. A uniform sandbox clock offset (task-89) makes newly created
+vectors. A uniform sandbox clock offset (task-89) makes newly created
 inodes old enough for the West and XDG fixtures after the model clock and
 explicit mtimes are rebased. It cannot simultaneously reproduce the old eligible and fresh
 `not_idle` inodes in the Autotools, CMake, Meson, and containers-image
 fixtures: all get the same fresh kernel ctime after materialization. Those
-four originals need staged kernel creation times in an isolated clock domain,
-such as a disposable QEMU guest whose wall clock changes between creating
-the old and fresh cohorts. A host container cannot safely set the wall clock:
+four originals use staged kernel creation times in a disposable QEMU guest
+whose wall clock changes between creating the old and fresh cohorts. A host container cannot safely set the wall clock:
 `CLOCK_REALTIME` is not time namespaced, and the sandbox offset changes only
-diskgc's read of time, not the kernel's ctime. A disposable KVM/QEMU probe
-booted the current kernel with a static BusyBox initramfs, mounted guest
-tmpfs, set the guest clock to 2021-01-01, created an inode, then moved the
-guest clock forward and created another. The first inode's ctime stayed at
-1609459200 while the second received 1792655850; QEMU exited zero and the
-host clock advanced only one second across the run. Thus an isolated kernel
-can represent both age cohorts. This was a read-only feasibility probe for
-diskgc: no VM differential replay or deletion was run. The remaining replay
-needs a guest Podman container, staged fixture creation across guest clock
-changes, and the existing independent expectation and deletion oracle inside
-that container. Containers-image also needs its `/var/tmp` and process shape
-materialized.
+diskgc's read of time, not the kernel's ctime. The reproducible
+`vm-historical-ctime` flake check boots a disposable guest with a private
+ext4 disk and rootful Podman using native overlay. The Nix store and test
+binaries are mounted read-only in the guest containers; no writable host bind
+is present. A missing image marker makes the canary exit 86 before the four
+replays. The guest kernel command-line token is checked before any clock
+change, the guest clock is restored after each replay, and the VM driver
+reads its host clock while the guest is held at the old wall time, comparing
+it against a monotonic baseline before restoring the guest clock. Destructive diskgc runs remain
+inside the guest Podman containers.
 
 ## 5. End-to-end tests in containers
 
@@ -924,7 +927,7 @@ namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
 `--cap-add SYS_PTRACE` (container root's strace needs it to resolve the
 code under test's fds for `-y`; the code under test has no capabilities)
 and `--network=none`. The harness runs as container root and mounts a fresh
-tmpfs per test at `/tmp` (the scratch for fixtures), at `/run/diskgc`
+tmpfs per test at `/tmp` and `/var/tmp` (scratch for fixtures), at `/run/diskgc`
 (0755 root, where every image applies the packaged tmpfiles rule to create
 `/run/diskgc/lock`, 0644 root) and at `/home/tester` (0755 tester); it keeps
 its own records (strace output) on a further, root-only tmpfs. Objects the
@@ -951,7 +954,7 @@ anything and each test checks its root mount, and both refuse
 fuse-overlayfs or another storage driver, whose inode numbers and birth
 times the snapshot keys were not validated on.
 
-**Images.** There are three test images, each with its own runner (`nix run
+**Images.** There are three ordinary test images, each with its own runner (`nix run
 .#e2e-runner`, `.#e2e-runner-debian`, `.#e2e-runner-docker`) and the same
 static musl binaries under test. All carry, baked in by the same commands (flake.nix,
 `e2eImageCommon`), the sandbox marker, the users, the overlay-root fixture
@@ -966,6 +969,13 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   or malformed descriptor fails the listing and every test's setup;
   nothing falls back to "a Nix image". The runner names the image in its
   summary.
+
+The fourth, VM-only image (`localhost/diskgc-e2e-vm`) uses the same marker,
+users, mount points and descriptor. It contains BusyBox, strace and the
+named `/usr/bin/buildah` process probe, and mounts the guest's Nix store and
+test binaries read-only. `nix build .#checks.x86_64-linux.vm-historical-ctime`
+boots its disposable QEMU/Podman host and runs the four `Tier::Vm` replays.
+It is part of the exact `just e2e` and `just e2e-full` recipes.
 
 - **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned
   pip, uv, Go, npm, pnpm, Yarn Classic, ccache, PlatformIO and Jest cleaners, and the Cargo
@@ -1101,8 +1111,8 @@ and offset code until TASK-67 changes release packaging.
 | `just` recipe | What | When |
 |---|---|---|
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus fast Nix-image tests, the native Docker smoke, and a profile-vector replay under Docker Engine | before every commit (the gate); each runner has a 5-minute budget including setup |
-| `e2e-full` | every Nix-image test, then the Debian and native Docker suites | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
+| `e2e` | `check` plus fast Nix-image tests, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
+| `e2e-full` | every Nix-image test, then the Debian and native Docker suites and the four-vector QEMU guest check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |

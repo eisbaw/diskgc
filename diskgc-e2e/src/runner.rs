@@ -176,7 +176,7 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
         Selection::Suite { full, budget, jobs } => {
             let selected: Vec<Listed> = listed
                 .into_iter()
-                .filter(|t| *full || t.tier == Tier::Fast)
+                .filter(|t| t.tier == Tier::Fast || (*full && t.tier == Tier::Full))
                 .collect();
             if selected.is_empty() {
                 return Err("no tests selected".to_owned());

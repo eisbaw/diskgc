@@ -1,8 +1,8 @@
 //! Scratch mounts and the fixture operations that touch them (docs/testing.md,
 //! Safety interlock, layer 3).
 //!
-//! Each test gets fresh tmpfs mounts at the container's `/tmp` (where
-//! diskgc's filesystem profiles look), `/run/diskgc` (the host lock) and
+//! Each test gets fresh tmpfs mounts at the container's `/tmp` and `/var/tmp`
+//! (where diskgc's filesystem profiles look), `/run/diskgc` (the host lock) and
 //! `/home/tester`, plus a private records tmpfs for the harness: objects on a
 //! tmpfs have stable inode numbers and birth times, unlike the overlay root.
 //! Every fixture operation goes through [`Scratch`], which checks **by mount

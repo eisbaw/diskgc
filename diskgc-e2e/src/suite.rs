@@ -53,6 +53,8 @@ pub enum Tier {
     Fast,
     /// `just e2e-full` only.
     Full,
+    /// Only in the disposable, Nix-built QEMU guest with SYS_TIME.
+    Vm,
 }
 
 impl Tier {
@@ -60,6 +62,7 @@ impl Tier {
         match self {
             Tier::Fast => "fast",
             Tier::Full => "full",
+            Tier::Vm => "vm",
         }
     }
 
@@ -67,6 +70,7 @@ impl Tier {
         match text {
             "fast" => Some(Tier::Fast),
             "full" => Some(Tier::Full),
+            "vm" => Some(Tier::Vm),
             _ => None,
         }
     }
@@ -108,6 +112,22 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        "vm_cmake_original_matches_linux_outcomes_and_deletion_diff",
+        "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
+    ),
+    (
+        "vm_autotools_original_matches_linux_outcomes_and_deletion_diff",
+        "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
+    ),
+    (
+        "vm_meson_original_matches_linux_outcomes_and_deletion_diff",
+        "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
+    ),
+    (
+        "vm_containers_image_original_matches_linux_outcomes_and_deletion_diff",
+        "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
+    ),
     (
         "agent_harness_uses_json_for_all_reclaim_decisions",
         "the shipped Python example needs the pinned Python interpreter in the Nix image",
@@ -494,6 +514,30 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: differential_suite::historical_ctime_originals_refuse_before_fixture_writes,
+    },
+    Test {
+        name: "vm_cmake_original_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Vm,
+        expect: Expect::Pass,
+        run: differential_suite::vm_cmake_original_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "vm_autotools_original_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Vm,
+        expect: Expect::Pass,
+        run: differential_suite::vm_autotools_original_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "vm_meson_original_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Vm,
+        expect: Expect::Pass,
+        run: differential_suite::vm_meson_original_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "vm_containers_image_original_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Vm,
+        expect: Expect::Pass,
+        run: differential_suite::vm_containers_image_original_matches_linux_outcomes_and_deletion_diff,
     },
     Test {
         name: "west_vector_matches_linux_under_clock_offset",
@@ -1617,6 +1661,8 @@ pub fn judge_expectation(
 pub struct Ctx {
     /// tmpfs at `/tmp` (mode 1777), where diskgc's filesystem profiles look.
     pub scratch: Scratch,
+    /// tmpfs at `/var/tmp` for container image spool fixtures.
+    pub var_tmp: Scratch,
     /// tmpfs at `/run/diskgc` (0755 root) holding the host lock created
     /// from the shipped tmpfiles rule on every image.
     pub run_diskgc: Scratch,
@@ -1654,6 +1700,7 @@ impl Ctx {
         }
         let records = Scratch::mount("/run/diskgc-e2e", "0700", ROOT)?;
         let scratch = Scratch::mount("/tmp", "1777", ROOT)?;
+        let var_tmp = Scratch::mount("/var/tmp", "1777", ROOT)?;
         let run_diskgc = Scratch::mount("/run/diskgc", "0755", ROOT)?;
         let tool = &image.tmpfiles;
         let rule = Path::new(UNDER_TEST_BIN_DIR).join("diskgc-tmpfiles.conf");
@@ -1685,6 +1732,7 @@ impl Ctx {
             std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
         Ok(Self {
             scratch,
+            var_tmp,
             run_diskgc,
             home,
             records,

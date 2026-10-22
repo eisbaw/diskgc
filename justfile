@@ -41,6 +41,7 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
     just _runner e2e-runner run --suite fast --budget-secs 300
     just _e2e-docker fast 300
+    nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
 
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: check _gcroot-dev
@@ -51,6 +52,7 @@ e2e-full: check _gcroot-dev
     just _runner e2e-runner run --suite full --budget-secs 3600
     just _e2e-debian
     just _e2e-docker full 900
+    nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.

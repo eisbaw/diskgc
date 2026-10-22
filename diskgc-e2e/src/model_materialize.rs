@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ use crate::{Owner, TESTER};
 
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 pub(crate) const SCRATCH_PROBE_EXE: &str = "/home/tester/differential-process-probe";
+const IMAGE_BUILD_PROBE_EXE: &str = "/usr/bin/buildah";
 
 fn mapped_path(line: &str) -> Option<&Path> {
     line.split_whitespace().nth(5).map(Path::new)
@@ -341,8 +342,10 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
                 .find(|prior| prior.id == source)
         });
         if let Some(source) = source {
-            if !matches!(source.at.to_str(), Some("/tmp" | "/home/tester"))
-                || source.dev != mount.dev
+            if !matches!(
+                source.at.to_str(),
+                Some("/tmp" | "/var/tmp" | "/home/tester")
+            ) || source.dev != mount.dev
                 || source.fs != mount.fs
                 || source.size != mount.size
                 || source.other_used != mount.other_used
@@ -395,7 +398,7 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
         }
         if matches!(
             mount.at.to_str(),
-            Some("/tmp" | "/home/tester" | "/run/diskgc")
+            Some("/tmp" | "/var/tmp" | "/home/tester" | "/run/diskgc")
         ) {
             if mount.bind_of.is_some() {
                 return unsupported(&field, "binding over a harness scratch root is unsupported");
@@ -452,6 +455,20 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
                 return Err("materialize(model): /run/diskgc/lock must match the harness-provisioned root-owned regular lock".into());
             }
             continue; // The container image provisions this root-owned lock.
+        }
+        if path == Path::new(IMAGE_BUILD_PROBE_EXE) {
+            if node != &NodeSpec::File(FileSpec::default())
+                || !model
+                    .processes
+                    .iter()
+                    .any(|process| process.exe.as_deref() == Some(path))
+            {
+                return unsupported(
+                    "tree./usr/bin/buildah",
+                    "only the VM image's named process probe is supported",
+                );
+            }
+            continue;
         }
         let _ = destination(path)?;
         validate_node(path, node)?;
@@ -529,7 +546,13 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
         && process.environ.len() == 1
         && process.environ[0] == "PATH=/bin"
         && process.cwd.is_none();
+    let image_build_probe = process.exe.as_deref() == Some(Path::new(IMAGE_BUILD_PROBE_EXE))
+        && !locked
+        && process.maps == [PathBuf::from(IMAGE_BUILD_PROBE_EXE)]
+        && process.environ == ["PATH=/usr/bin"]
+        && process.cwd.as_deref() == Some(Path::new("/"));
     if !copied_probe
+        && !image_build_probe
         && (process.exe.is_some() || !process.maps.is_empty() || !process.environ.is_empty())
     {
         return unsupported(
@@ -570,7 +593,9 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
                 "the flock helper runs at / and cannot reproduce a custom cwd",
             );
         }
-        destination(cwd)?;
+        if !(image_build_probe && cwd == Path::new("/")) {
+            destination(cwd)?;
+        }
     }
     Ok(())
 }
@@ -673,7 +698,7 @@ fn validate_node(path: &Path, node: &NodeSpec) -> Result<(), String> {
 }
 
 fn destination(path: &Path) -> Result<(&'static str, &Path), String> {
-    for root in ["/tmp", "/home/tester"] {
+    for root in ["/tmp", "/var/tmp", "/home/tester"] {
         if let Ok(relative) = path.strip_prefix(root)
             && relative.components().next().is_some()
             && relative
@@ -687,6 +712,15 @@ fn destination(path: &Path) -> Result<(&'static str, &Path), String> {
         "materialize(model): {} lies outside the container scratch mounts",
         path.display()
     ))
+}
+
+fn scratch_for<'a>(ctx: &'a Ctx, root: &str) -> &'a Scratch {
+    match root {
+        "/tmp" => &ctx.scratch,
+        "/var/tmp" => &ctx.var_tmp,
+        "/home/tester" => &ctx.home,
+        _ => unreachable!("destination only returns known scratch roots"),
+    }
 }
 
 /// Preflight-validate, then create the model tree on fresh scratch mounts.
@@ -722,6 +756,19 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
     } else {
         None
     };
+    if model
+        .processes
+        .iter()
+        .any(|process| process.exe.as_deref() == Some(Path::new(IMAGE_BUILD_PROBE_EXE)))
+    {
+        let probe = fs::metadata(IMAGE_BUILD_PROBE_EXE)
+            .map_err(|error| format!("VM image process probe {IMAGE_BUILD_PROBE_EXE}: {error}"))?;
+        if !probe.is_file() || probe.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "VM image process probe {IMAGE_BUILD_PROBE_EXE} is not an executable regular file"
+            ));
+        }
+    }
     let inner_at = model
         .mounts
         .iter()
@@ -729,7 +776,7 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             mount.at != Path::new("/")
                 && !matches!(
                     mount.at.to_str(),
-                    Some("/tmp" | "/home/tester" | "/run/diskgc")
+                    Some("/tmp" | "/var/tmp" | "/home/tester" | "/run/diskgc")
                 )
         })
         .map(|mount| mount.at.as_path());
@@ -740,17 +787,14 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
     // Populate the parent scratch mounts before covering the mount point.
     for (path, node) in &model.tree {
         if path == Path::new("/run/diskgc/lock")
+            || path == Path::new(IMAGE_BUILD_PROBE_EXE)
             || (probe_bytes.is_some() && path == Path::new(SCRATCH_PROBE_EXE))
             || inner_at.is_some_and(|at| path.starts_with(at))
         {
             continue;
         }
         let (root, relative) = destination(path)?;
-        let scratch = if root == "/tmp" {
-            &ctx.scratch
-        } else {
-            &ctx.home
-        };
+        let scratch = scratch_for(ctx, root);
         create_node(scratch, relative, node)?;
     }
     if let Some(bytes) = probe_bytes {
@@ -760,11 +804,7 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
     let mut inner_scratch = None;
     if let Some(at) = inner_at {
         let (root, relative) = destination(at)?;
-        let parent_scratch = if root == "/tmp" {
-            &ctx.scratch
-        } else {
-            &ctx.home
-        };
+        let parent_scratch = scratch_for(ctx, root);
         parent_scratch.mkdirs(
             relative
                 .to_str()
@@ -779,11 +819,10 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
                     .iter()
                     .find(|prior| prior.id == source)
                     .ok_or_else(|| format!("materialize(model): bind_of {source} missing"))?;
-                let source_scratch = if source_mount.at == Path::new("/tmp") {
-                    &ctx.scratch
-                } else {
-                    &ctx.home
-                };
+                let source_scratch = scratch_for(
+                    ctx,
+                    source_mount.at.to_str().ok_or("non-UTF-8 scratch root")?,
+                );
                 if source_scratch.root() != Path::new(root) {
                     return Err(format!(
                         "materialize(model): bind source {} and target {} must share a scratch root",
@@ -833,6 +872,9 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
         if path == Path::new("/run/diskgc/lock") {
             continue;
         }
+        if path == Path::new(IMAGE_BUILD_PROBE_EXE) {
+            continue;
+        }
         let (scratch, relative) = if let Some(at) = inner_at.filter(|at| path.starts_with(at)) {
             (
                 inner_scratch
@@ -842,14 +884,7 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             )
         } else {
             let (root, relative) = destination(path)?;
-            (
-                if root == "/tmp" {
-                    &ctx.scratch
-                } else {
-                    &ctx.home
-                },
-                relative,
-            )
+            (scratch_for(ctx, root), relative)
         };
         apply_mtimes(scratch, relative, node)?;
     }
@@ -875,7 +910,11 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             None => vec!["hold", path_text, cwd_text],
         };
         let holder = if let Some(exe) = &process.exe {
-            Holder::tester_program(ctx, exe, &args)
+            if exe == Path::new(IMAGE_BUILD_PROBE_EXE) {
+                Holder::tester_program_env(ctx, exe, &args, &[("PATH", "/usr/bin")])
+            } else {
+                Holder::tester_program(ctx, exe, &args)
+            }
         } else {
             Holder::tester(ctx, &args, &[])
         }
