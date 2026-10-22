@@ -583,22 +583,22 @@ filesystem, processes and mounts from the developer's system.
   clearing. It reports process-list rounds, duration, whether the 16-listing bound
   was hit, and whether the checker retried. After reaping every worker,
   it requires the unused candidate to clear. This exercises the
-  current host kernel. The `vm-old-kernel-pidfd` check runs the same case
-  inside a disposable Podman container in a Nix QEMU guest pinned to Linux
-  6.6.158. Before the container run, a separate guest probe holds a pidfd
-  across child release and reap: the live child has no poll event and accepts
-  signal 0; the released pidfd polls readable without HUP, while
-  `pidfd_send_signal(pidfd, 0)` returns ESRCH. In the same guest, the
-  `host_pidfd_release_after_reap` container case pins a live child with
+  current host kernel. Three Nix QEMU checks run the same case in disposable
+  Podman containers on pinned Linux 6.1.189, 6.6.158, and 6.12.112 guests.
+  Each guest has two vCPUs so the scanner and fork workers can overlap. A
+  direct guest probe holds a pidfd across child release and reap: the live
+  child has no poll event and accepts signal 0; the released pidfd polls
+  readable without HUP on 6.1 and 6.6, with HUP on 6.12, while
+  `pidfd_send_signal(pidfd, 0)` returns ESRCH on all three. In each guest,
+  `host_pidfd_release_after_reap` pins a live child with
   `LinuxHost::proc_identity`, checks that it is not released, reaps it while
   retaining the pidfd, then requires `LinuxHost::proc_identity_released` to
-  return true. With no kernel HUP, a permanently false fallback fails this
-  case. The container's graph root is
-  on the guest's private ext4 disk; its only bind mounts are read-only Nix
-  store and test binaries. This verifies the fallback and bounded scan on
-  6.6.158, not every kernel in the supported 5.8–6.8 range. Linux 5.8,
-  5.15, 6.1, 6.8 and a 6.9+ control, plus a prolonged loaded-CI sample,
-  remain to be measured for TASK-64 G.
+  return true. The 6.1 and 6.6 cases directly bite the no-HUP fallback;
+  6.12 is a HUP control. Podman's graph root is on each guest's private ext4
+  disk; its only bind mounts are read-only Nix store and test binaries.
+  These checks cover three kernel points, not every kernel in the supported
+  5.8–6.8 range. Linux 5.8, 5.15, and 6.8, plus a prolonged loaded-CI
+  sample, remain to be measured for TASK-64 G.
 - **Root-mode owner resolution:** the static binary runs under container
   root with a protected config that names a numeric UID absent from
   `/etc/passwd`; an oracle-checked reclaim proves the UID owns every removed

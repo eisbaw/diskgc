@@ -644,11 +644,15 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
-      vmOldKernelPidfd = import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
-        inherit pkgs;
-        image = e2eVmImage;
-        underTest = e2eUnderTest;
-      };
+      mkVmPidfd = kernelPackages: expectedKernel: expectPollHup:
+        import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
+          inherit pkgs kernelPackages expectedKernel expectPollHup;
+          image = e2eVmImage;
+          underTest = e2eUnderTest;
+        };
+      vmOldKernelPidfd = mkVmPidfd pkgs.linuxPackages_6_6 "6.6.158" false;
+      vmPidfdLinux61 = mkVmPidfd pkgs.linuxPackages_6_1 "6.1.189" false;
+      vmPidfdLinux612 = mkVmPidfd pkgs.linuxPackages_6_12 "6.12.112" true;
     in
     {
       packages.${system} = {
@@ -658,6 +662,8 @@
         e2e-runner-docker = e2eRunnerDocker;
         vm-historical-ctime = vmHistoricalCtime;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
+        vm-pidfd-linux-6-1 = vmPidfdLinux61;
+        vm-pidfd-linux-6-12 = vmPidfdLinux612;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
@@ -764,6 +770,8 @@
         e2e-runner-docker = e2eRunnerDocker;
         vm-historical-ctime = vmHistoricalCtime;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
+        vm-pidfd-linux-6-1 = vmPidfdLinux61;
+        vm-pidfd-linux-6-12 = vmPidfdLinux612;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

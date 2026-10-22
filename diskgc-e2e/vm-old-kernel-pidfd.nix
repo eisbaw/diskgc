@@ -1,13 +1,21 @@
-{ pkgs, image, underTest }:
+{
+  pkgs,
+  image,
+  underTest,
+  kernelPackages,
+  expectedKernel,
+  expectPollHup,
+}:
 
 let
   # Hold a pidfd across a deterministic child release. This probes the
   # kernel behavior independently of diskgc's own interpretation of it.
-  pidfdProbe = pkgs.writeText "diskgc-pidfd-6.6-probe.py" ''
+  pidfdProbe = pkgs.writeText "diskgc-pidfd-${expectedKernel}-probe.py" ''
     import os
     import select
     import signal
 
+    expect_hup = ${if expectPollHup then "True" else "False"}
     reader, writer = os.pipe()
     child = os.fork()
     if child == 0:
@@ -34,14 +42,14 @@ let
         assert len(events) == 1 and events[0][0] == pidfd, events
         mask = events[0][1]
         assert mask & select.POLLIN, mask
-        assert not mask & select.POLLHUP, "expected Linux 6.6 poll without HUP: " + str(mask)
+        assert bool(mask & select.POLLHUP) == expect_hup, (mask, expect_hup)
         try:
             signal.pidfd_send_signal(pidfd, 0, None, 0)
         except ProcessLookupError:
             pass
         else:
             raise AssertionError("released child was not reported as ESRCH")
-        print("Linux 6.6: released pidfd is readable without HUP; signal 0 gives ESRCH")
+        print("released pidfd poll mask=" + str(mask) + "; signal 0 gives ESRCH")
     finally:
         if writer >= 0:
             os.close(writer)
@@ -53,14 +61,17 @@ let
             pass
   '';
 in
-# TASK-64 G: a pinned old-kernel guest, with any destructive diskgc work
+# TASK-64 G: a pinned kernel guest, with any destructive diskgc work
 # confined to its disposable Podman container and private ext4 disk.
+assert kernelPackages.kernel.version == expectedKernel;
 pkgs.testers.nixosTest {
-  name = "diskgc-old-kernel-pidfd";
+  name = "diskgc-pidfd-${expectedKernel}";
 
   nodes.machine = { ... }: {
-    boot.kernelPackages = pkgs.linuxPackages_6_6;
+    boot.kernelPackages = kernelPackages;
     virtualisation.podman.enable = true;
+    # The scan and fork workers need separate vCPUs to overlap reliably.
+    virtualisation.cores = 2;
     virtualisation.diskSize = 4096;
     virtualisation.memorySize = 4096;
     environment.systemPackages = [ pkgs.python3 ];
@@ -71,8 +82,9 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("multi-user.target")
 
     kernel = machine.succeed("uname -r").strip()
-    assert kernel.startswith("6.6.158"), kernel
-    machine.succeed("python3 ${pidfdProbe}")
+    assert kernel == "${expectedKernel}", kernel
+    print(f"guest kernel: {kernel}")
+    print("guest pidfd: " + machine.succeed("python3 ${pidfdProbe}").strip())
 
     # Podman's graph root is on the VM's private ext4 disk. The Nix store
     # and binaries are mounted read-only from the VM test driver/store.

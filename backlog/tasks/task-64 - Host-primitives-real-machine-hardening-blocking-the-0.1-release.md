@@ -4,7 +4,7 @@ title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
 assignee: []
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-22 10:20'
+updated_date: '2026-10-22 10:48'
 labels:
   - wave-1
   - hardening
@@ -143,6 +143,8 @@ Group C candidate (2026-10-20): LinuxHost::new now fstatfs-checks the held /proc
 2026-10-22 Group G old-kernel evidence: added a Nix QEMU check pinned to linuxPackages_6_6 (guest uname 6.6.158). A guest Python probe holds a pidfd while a child is live, then reaps it and confirms poll returns POLLIN without HUP while pidfd_send_signal(0) gives ESRCH. The existing LinuxHost host_inuse_scan_settles_after_fork_churn E2E passed inside a disposable Podman container on that guest: 4 and 8 workers each reached 16 listings and conservatively blocked, then a post-storm scan cleared. Podman used its private guest ext4 graph root and only read-only Nix store/test-binary binds. Focused nix build .#checks.x86_64-linux.vm-old-kernel-pidfd passed; exact just e2e and independent QA/MPED review pending. This is one kernel point; 5.8, 5.15, 6.1, 6.8, a 6.9+ control and prolonged loaded-CI measurement remain open. Keep AC7 and DoD unchecked.
 
 2026-10-22 Group G old-kernel evidence review correction: the first 6.6 VM check established kernel poll=IN/no HUP and signal-0 ESRCH, but fork-churn alone did not directly require LinuxHost to take that fallback. Added host_pidfd_release_after_reap: it pins a pipe-blocked live child through LinuxHost::proc_identity, requires proc_identity_released=false, reaps the child while retaining the pidfd, and requires proc_identity_released=true. The guest Python syscall probe runs first on 6.6.158, so the LinuxHost true result is a direct fallback bite; an always-false implementation fails. Focused Nix 6.6 VM check passed with live_released=false reaped_released=true, and the fork-churn case again reached 16-listing conservative blocks and cleared after the storm. Full just e2e and independent QA/MPED re-review pending. AC7 and DoD stay unchecked; other kernel points and prolonged load remain.
+
+2026-10-22 Group G kernel matrix followup: the Nix QEMU pidfd check now accepts pinned kernel packages/version/HUP expectation and runs on 6.1.189, 6.6.158, and 6.12.112. All three focused Nix VM builds passed after adding two guest vCPUs so fork workers can overlap the scanner. Direct guest syscall probe after child reap observed poll mask 1 (POLLIN without HUP) on 6.1 and 6.6, mask 17 (POLLIN|POLLHUP) on 6.12; pidfd_send_signal(0) returned ESRCH on all. In each guest Podman container, LinuxHost held-identity test returned live=false/reaped=true, and fork-churn case passed with at least one complete child spawn-and-wait interval inside a raw scan and post-storm clear. Initial 6.1 single-vCPU run failed only the overlap precondition (all scans 0-1 ms); no assertion was weakened, and two-vCPU reruns passed. The VM uses private ext4 Podman graph storage and read-only Nix store/test-binary binds. Exact just e2e and independent QA/MPED review pending. AC7/DoD stay open for 5.8, 5.15, 6.8, prolonged loaded-CI sample, and other remaining TASK-64 work including H.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
