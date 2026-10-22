@@ -1264,6 +1264,15 @@ fn a_tally_refusal_is_final_for_the_run_even_if_it_stops_being_true() {
         .collect();
     assert_eq!(order, [Path::new(NEW)], "{report:#?}");
     assert_eq!(skip_reason(&report, OLD), Some("kept"));
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .find(|entry| entry.candidate == Path::new(OLD))
+            .and_then(|entry| entry.estimated_bytes),
+        None,
+        "a tally refused before completion cannot report a size"
+    );
     assert_eq!(unlinked_below(&host, OLD), 0);
     assert!(
         calls(&host, Op::Flock).iter().all(|c| !touches(c, OLD)),
@@ -1824,6 +1833,18 @@ fn negated_idle_filter_rechecks_cargo_target_after_lock_time_passes() {
             .iter()
             .any(|e| e.candidate == Path::new(NEW) && e.reason == "too_idle"),
         "{report:#?}"
+    );
+    let late_skip = report
+        .skipped
+        .iter()
+        .find(|entry| entry.candidate == Path::new(NEW))
+        .expect("late refusal after a completed tally");
+    assert!(
+        late_skip
+            .estimated_bytes
+            .expect("completed prior tally is reported")
+            >= 4 * GIB,
+        "{late_skip:#?}"
     );
     assert!(report.actions.is_empty(), "{report:#?}");
     assert!(calls(&host, Op::Unlinkat).is_empty());
