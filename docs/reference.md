@@ -654,7 +654,10 @@ of positive filesystem sources with exactly the same `delete` or `command`
 action and options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
 candidate if any source term that admits it after its filters refuses
-checkouts. It rechecks each term under one candidate lock. A command union
+checkouts. It rechecks each term under one candidate lock. In this development
+build, a retention guard in one filesystem union term does not yet veto a
+candidate admitted by another matching term (TASK-111). Such a union can
+remove a candidate that the guarded term would have kept. A command union
 invokes its shared argv at most once per inode, with `DISKGC_PROFILE` and the
 output prefix of the source selected by that locked recheck. If the final
 policy scan excludes that source before the command starts, the union judges
@@ -671,10 +674,11 @@ use either polarity of a filter with a single `has` or `has_not` predicate.
 Positive filesystem filters may combine `has`, `has_not`, `idle_for`,
 `keep_newest` and link protection predicates in one profile: all predicates
 must pass. The entry checks, idle measure and retention guards are repeated
-under the candidate lock. A negated filesystem filter may
-combine these predicates too: it admits a candidate when the complete
+under the candidate lock. A negated filesystem filter may combine `has`,
+`has_not` and `idle_for`: it admits a candidate when their complete
 conjunction is known false, and excludes it as `filtered` when all predicates
-match. Unknown entry type or age admits neither polarity, even if another
+match. Retention guards cannot be negated, including as part of a mixed
+filter. Unknown entry type or age admits neither polarity, even if another
 predicate is known false. Its entry checks and idle measure are repeated
 under the candidate lock; in a union, only admitted terms can impose their
 checkout policy. The development build refuses a nonempty `ipc: live-only`
@@ -848,6 +852,12 @@ unrecognised version layout retains data. The
 link check occurs again immediately before the deletion walk, but no
 filesystem API makes a link update and deletion atomic: installers must
 coordinate with cleanup if they repoint a link concurrently.
+`keep_newest`, link protection (including `protect_parent_link`), and
+`protect_cursor_extensions` are retention guards. A filter containing any
+retention guard cannot be negated, even when it also contains `has`, `has_not`
+or `idle_for`. Positive guard filters remain valid. Negated `idle_for`, `has`
+and `has_not` filters still complement their known evidence; unknown evidence
+passes neither polarity.
 
 | Kind | `idle_for` means |
 |---|---|
@@ -921,7 +931,9 @@ fixture-only parser catalog; that deletion profile is not shipped:
 - **`||` is a union**; all source profiles in one expression share one kind
   and one action, so `a || b` and `b || a` select and remove exactly the
   same. Different actions belong in different tiers.
-- **`!` only narrows.** `!filter:…` is a path-local complement.
+- **`!` only narrows.** `!filter:…` is a path-local complement of known
+  evidence predicates; a filter containing a retention guard cannot be
+  negated.
   `!profile:…` removes every candidate that **overlaps** a match of that
   profile (is it, lies inside it, or contains it), using everything the
   profile finds regardless of its `where`; excluded candidates are reported
@@ -977,6 +989,7 @@ action `delete`) and `f` (`idle_for`):
 | `profile:pytest-tmp \|\| profile:cargo-target` | `profile:pytest-tmp` is of kind fs but `profile:cargo-target` is of kind cargo-target: the sources of one expression share one kind; select them in separate tiers |
 | `profile:pytest-tmp \|\| profile:pip-cache` | `profile:pytest-tmp` removes with `delete` but `profile:pip-cache` with `command ["pip", "--cache-dir", "{path}", "cache", "purge"], cwd: candidate`: the sources of one expression share one action; select them in separate tiers |
 | `profile:cargo-target && filter:has-cachedir-tag` | `filter:has-cachedir-tag` uses `has`, which kind cargo-target does not support (`has` works on: fs) |
+| `profile:tmp-entry && !filter:retention-newest` | `!filter:retention-newest` uses `keep_newest`, a retention guard that cannot be negated |
 | `profile:nix-garbage \|\| profile:nix-garbage` | kind nix-store acts on everything it finds at once (no per-candidate enumeration), so its expression has one term, not a union of 2; select each in its own tier |
 | `profile:nix-garbage && filter:idle-7d` | kind nix-store takes only `profile:NAME`, so `filter:idle-7d` cannot narrow it: it has no per-candidate enumeration |
 | `profile:tmp-entry && !profile:docker-dangling` | `!profile:docker-dangling`: a negated profile must be of kind fs or cargo-target, and `docker-dangling` is of kind docker-images |

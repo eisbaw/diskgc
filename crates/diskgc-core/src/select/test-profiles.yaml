@@ -39,3 +39,15 @@
   examples: {match: [/tmp/anything]}
 - name: has-cachedir-tag
   where: {has: CACHEDIR.TAG}
+- name: retention-newest
+  where: {keep_newest: 1}
+- name: retention-links
+  where: {protect_links: [bin/current]}
+- name: retention-link-dirs
+  where: {protect_link_dirs: [bin]}
+- name: retention-current
+  where: {protect_parent_link: current}
+- name: retention-installed
+  where: {protect_cursor_extensions: extensions.json}
+- name: retention-mixed
+  where: {has: CACHEDIR.TAG, keep_newest: 1}

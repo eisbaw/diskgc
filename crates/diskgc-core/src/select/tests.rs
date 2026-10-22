@@ -1014,6 +1014,64 @@ fn predicates_must_be_supported_by_the_kind() {
 }
 
 #[test]
+fn negated_retention_guards_are_rejected_even_in_mixed_filters() {
+    for (name, predicate) in [
+        ("retention-newest", PredicateName::KeepNewest),
+        ("retention-links", PredicateName::ProtectLinks),
+        ("retention-link-dirs", PredicateName::ProtectLinks),
+        ("retention-current", PredicateName::ProtectLinks),
+        (
+            "retention-installed",
+            PredicateName::ProtectCursorExtensions,
+        ),
+        ("retention-mixed", PredicateName::KeepNewest),
+    ] {
+        let written = format!("!filter:{name}");
+        let text = format!("profile:a && {written}");
+        assert_eq!(
+            check_errors(&text),
+            vec![CheckError::NegatedRetentionGuard {
+                filter: written,
+                predicate,
+            }],
+            "{text}"
+        );
+        compile(&format!("profile:a && filter:{name}"), &catalog())
+            .unwrap_or_else(|error| panic!("positive guard {name}: {error}"));
+    }
+    for name in ["f", "has-cachedir-tag"] {
+        compile(&format!("profile:a && !filter:{name}"), &catalog())
+            .unwrap_or_else(|error| panic!("safe complement {name}: {error}"));
+    }
+}
+
+proptest! {
+    /// The independent oracle classifies filter names by their declared
+    /// predicates, including a mixed has+guard filter; the compiler must
+    /// reject a guard on either term and accept known-evidence complements.
+    #[test]
+    fn guard_negation_is_static_for_random_union_terms(
+        first in 0usize..8,
+        second in 0usize..8,
+        source in any::<bool>(),
+    ) {
+        const FILTERS: [&str; 8] = [
+            "f", "has-cachedir-tag", "retention-newest", "retention-links",
+            "retention-link-dirs", "retention-current", "retention-installed",
+            "retention-mixed",
+        ];
+        let first_source = if source { "a" } else { "b" };
+        let second_source = if source { "b" } else { "a" };
+        let text = format!(
+            "(profile:{first_source} && !filter:{}) || (profile:{second_source} && !filter:{})",
+            FILTERS[first], FILTERS[second]
+        );
+        let expect_rejected = first >= 2 || second >= 2;
+        prop_assert_eq!(compile(&text, &catalog()).is_err(), expect_rejected, "{}", text);
+    }
+}
+
+#[test]
 fn predicate_table_matches_the_reference() {
     // docs/reference.md, Predicates (`where`).
     let table: Vec<(PredicateName, Vec<Kind>)> = PredicateName::ALL

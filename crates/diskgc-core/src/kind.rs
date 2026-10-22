@@ -78,6 +78,21 @@ impl PredicateName {
         Self::ProtectCursorExtensions,
     ];
 
+    /// Classify every predicate explicitly so adding a new one requires a
+    /// decision about whether `!filter:` may complement it.
+    pub const fn is_retention_guard(self) -> bool {
+        match self {
+            Self::KeepNewest | Self::ProtectLinks | Self::ProtectCursorExtensions => true,
+            Self::IdleFor
+            | Self::Has
+            | Self::HasDir
+            | Self::HasNot
+            | Self::AppNotRunning
+            | Self::LacksEntry
+            | Self::SourceAnchor => false,
+        }
+    }
+
     /// The name used in YAML and messages.
     pub fn name(self) -> &'static str {
         match self {

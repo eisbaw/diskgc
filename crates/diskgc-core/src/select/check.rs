@@ -112,6 +112,11 @@ pub enum CheckError {
         predicate: PredicateName,
         kind: Kind,
     },
+    /// A retention guard cannot be complemented by `!filter:`.
+    NegatedRetentionGuard {
+        filter: String,
+        predicate: PredicateName,
+    },
     /// A factor that a non-enumerating kind does not take.
     KindShape {
         kind: Kind,
@@ -202,6 +207,10 @@ impl fmt::Display for CheckError {
                     kinds.join(", ")
                 )
             }
+            Self::NegatedRetentionGuard { filter, predicate } => write!(
+                f,
+                "`{filter}` uses `{predicate}`, a retention guard that cannot be negated"
+            ),
             Self::KindShape { kind, factor } => write!(
                 f,
                 "kind {kind} takes only {}, so `{factor}` cannot narrow it: it has no \
@@ -368,6 +377,16 @@ fn check_factor<C: Catalog>(factor: &Factor, kind: Option<Kind>, catalog: &C, er
                 fix: Some(format!("!profile:{name}")),
             }),
             Some(Entry::Filter { predicates }) => {
+                if matches!(factor, Factor::NotFilter(_)) {
+                    for predicate in &predicates {
+                        if predicate.is_retention_guard() {
+                            errors.push(CheckError::NegatedRetentionGuard {
+                                filter: written.clone(),
+                                predicate: *predicate,
+                            });
+                        }
+                    }
+                }
                 if let Some(kind) = kind
                     && shape_ok(errors)
                 {

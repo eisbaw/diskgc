@@ -6,13 +6,14 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 05:59'
+updated_date: '2026-10-22 14:28'
 labels:
   - wave-2
   - irreversible
   - config
 dependencies:
   - TASK-15
+  - TASK-111
 references:
   - docs/reference.md#selection-grammar
 priority: high
@@ -110,6 +111,12 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 MPED final-boundary attribution fix (pending parent full gate/review): if fallback finds no selectable command source, the report now preserves the final refusal reason and the source selected immediately before that refusal. A prior filtered source no longer masks excluded, and report attribution no longer falls back to the union first source. ModelHost regression with filtered first term and late !profile exclusion of the second passes; command-union focused suite 10/10, core/model Clippy, format check, diff check pass. AC/DoD unchanged.
 
 2026-10-22 positive mixed entry+retention increment (pending parent full gate/review): valid fs filters with has/has_not plus idle_for and version guards (keep_newest/link protection) now compile all predicates into one term; previously has plus keep_newest was refused as an unsupported filter despite the schema allowing it. ModelHost dry run proves tagged old v1 eligible, untagged v2 filtered and newest tagged v3 retained; reclaim removes only v1, and removing its tag at flock prevents deletion. Full focused fs_dry_run 58/58 and fs_reclaim 76/76 passed; core/model Clippy and diff check pass. TASK-16 AC/DoD stay open: negated entry+version conjunctions, broader Cargo unions and full integrated random profile/tree property remain unsupported/unproved. Parent exact just e2e and parallel QA/MPED remain before commit.
+
+2026-10-22 retention safety finding: TASK-111 is a prerequisite. A filesystem union can admit a candidate through one term despite a retention guard rejecting it in another matching term; keep TASK-16 open until guard-veto semantics and end-to-end proof land.
+
+2026-10-22 retention-negation contract correction: the earlier note listing negated entry+version conjunctions as unsupported future work is superseded for retention predicates. keep_newest and link/current/installed guards are non-negatable safety rules: static selection validation now rejects !filter containing them, including mixed has+guard. Positive guards and known-evidence complements remain valid. Focused core static/property tests and disposable real-binary check/ensure no-delete E2E passed after correcting a fixture config-name collision. The first exact just e2e attempt stopped at rustfmt; formatting has been corrected, and a fresh full gate plus parallel QA/MPED re-review are pending. TASK-111 remains a prerequisite for the separate union-wide retention veto; TASK-16 AC/DoD stay open.
+
+2026-10-22 retention-negation checkpoint: exact fresh nix develop -c just e2e exited 0 after final formatting and architecture fixes. QA GO: Python 4/4, workspace Rust tests, Clippy deny-warnings, both fmt checks, Nix container 218/218, Docker-dind 7/7, and all five VM checks passed. MPED re-review GO after exhaustive predicate classification and honest TASK-111 documentation. This checkpoint is a partial implementation only; TASK-111 and the full random-profile reference contract still block TASK-16 completion.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

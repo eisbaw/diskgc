@@ -251,6 +251,90 @@ pub fn invalid_config_never_falls_back_or_reclaims(ctx: &Ctx) -> TestResult {
     Ok(())
 }
 
+/// A negated filter containing a retention guard is a static error, even
+/// when another predicate in that filter has known evidence. The real
+/// check and ensure commands must agree before either version can be
+/// reclaimed; one version is newest and selected by the current link.
+pub fn negated_retention_filters_fail_before_reclaim(ctx: &Ctx) -> TestResult {
+    let old = ctx
+        .scratch
+        .mkdirs("retention-contract/releases/v1", 0o700, TESTER)?;
+    let current = ctx
+        .scratch
+        .mkdir("retention-contract/releases/v2", 0o700, TESTER)?;
+    ctx.scratch.write_file(
+        "retention-contract/releases/v1/payload",
+        b"old",
+        0o600,
+        TESTER,
+    )?;
+    ctx.scratch.write_file(
+        "retention-contract/releases/v2/payload",
+        b"current",
+        0o600,
+        TESTER,
+    )?;
+    ctx.scratch
+        .symlink("retention-contract/current", &current)?;
+    for (filter, predicate) in [
+        ("newest", "keep_newest"),
+        ("current", "protect_links"),
+        ("installed", "protect_cursor_extensions"),
+        ("mixed", "keep_newest"),
+    ] {
+        let selection = format!("profile:retention-contract-release && !filter:{filter}");
+        let config_name = format!("retention-contract-{filter}.yaml");
+        let config_path = format!("/home/tester/{config_name}");
+        let config = format!(
+            "version: 1\nprofiles:\n  - name: retention-contract-release\n    find: {{roots: [/tmp], paths: ['retention-contract/releases/*'], type: dir}}\n    action: delete\n    examples: {{match: [/tmp/retention-contract/releases/v1]}}\n  - name: newest\n    where: {{keep_newest: 1}}\n  - name: current\n    where: {{protect_parent_link: current}}\n  - name: installed\n    where: {{protect_cursor_extensions: retention-contract/extensions.json}}\n  - name: mixed\n    where: {{has: payload, keep_newest: 1}}\ngroups:\n  - name: reclaim\n    tiers:\n      - name: releases\n        select: {selection}\n"
+        );
+        ctx.home
+            .write_file(&config_name, config.as_bytes(), 0o600, TESTER)?;
+        let oracle = Oracle::arm(Fixture::new())?;
+        let checked = under_test::run_as_tester(
+            &ctx.ledger,
+            &ctx.records,
+            Path::new("/"),
+            &ctx.diskgc(),
+            &["check", "--config", &config_path],
+        )?;
+        let run = ensure_run(
+            ctx,
+            &[
+                "--json",
+                "--config",
+                &config_path,
+                "--min-free",
+                "100%",
+                "/tmp",
+            ],
+        )?;
+        oracle.judge_runs(&[&checked, &run])?.assert_clean()?;
+        checked.expect_code(2)?;
+        run.expect_code(2)?;
+        let wanted = format!(
+            "`!filter:{filter}` uses `{predicate}`, a retention guard that cannot be negated"
+        );
+        ensure!(
+            checked.stderr.contains(&wanted),
+            "check accepted or misreported {filter}: {}",
+            checked.stderr
+        );
+        let result = report(&run)?;
+        ensure!(
+            result["status"] == "usage_error"
+                && result["actions"].as_array().is_some_and(Vec::is_empty)
+                && result["errors"][0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(&wanted))
+                && old.join("payload").exists()
+                && current.join("payload").exists(),
+            "ensure passed a negated retention guard {filter}: {result}"
+        );
+    }
+    Ok(())
+}
+
 /// Normal lookup selects the user's policy, an environment-selected policy
 /// takes precedence over it, and an explicit flag takes precedence over the
 /// environment. Each run reclaims only the candidate named by its policy.
