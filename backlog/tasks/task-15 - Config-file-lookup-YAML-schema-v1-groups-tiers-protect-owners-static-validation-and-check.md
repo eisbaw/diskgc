@@ -3,10 +3,10 @@ id: TASK-15
 title: >-
   Config file: lookup, YAML schema v1, groups/tiers/protect/owners, static
   validation and check
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-19 23:29'
+updated_date: '2026-10-22 01:51'
 labels:
   - wave-2
   - config
@@ -67,6 +67,8 @@ From task-80 QA r3: reference.md says an example config ships as docs/example.ya
 2026-10-20 integration checkpoint on 179ebb3: typed config/check plus pure task16 evaluator, nix develop -c just check PASS, nix develop -c just e2e PASS 90/90. Config example validation is strict for check/ensure; profiles test loads examples lax to report mismatch exit 1. UserOverride warnings regression added. Runtime group execution/protect/ipc live-only/root mode remain task16/20/21; task stays To Do. QA/MPED final review pending.
 
 Final checkpoint gate: parallel QA and MPED re-reviews GO after override-warning and protection-root fixes; both regressions pass. Task remains open for runtime ACs.
+
+2026-10-22: Added real-binary disposable-container regression invalid_config_never_falls_back_or_reclaims: --config typo overrides a valid DISKGC_CONFIG and search config; DISKGC_CONFIG typo overrides a valid search config; both check and ensure exit 2 without deletion; malformed existing config gives the same check/ensure error. Focused nix develop -c just e2e-one invalid_config_never_falls_back_or_reclaims passed 1/1. AC3 static-rule coverage audit and integrated gate/review still pending; do not mark complete yet.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

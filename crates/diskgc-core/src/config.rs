@@ -697,6 +697,9 @@ mod tests {
         for (text, needle) in [
             ("version: 1\nunknown: x\n".to_owned(), "unknown"),
             ("version: 2\n".to_owned(), "version: 2"),
+            ("version: 1\nversion: 1\n".to_owned(), "duplicate"),
+            (policy("  - name: scratch\n    find: {roots: [/scratch], paths: ['x-*'], type: dir}\n    action: delete\n    examples: {match: [/scratch/x-a]}\n"), "already used"),
+            (policy("  - name: instant\n    where: {idle_for: 0s}\n"), "idle_for"),
             ("version: 1\ngroups:\n  - name: g\n    tiers: []\n  - name: g\n    tiers: []\n".to_owned(), "duplicate group"),
             ("version: 1\ngroups:\n  - name: g\n    tiers: [{name: t, select: 'profile:cargo-target', roots: [/a]}]\n  - name: h\n    tiers: [{name: t, select: 'profile:cargo-target', roots: [/a]}]\n".to_owned(), "duplicate tier"),
             (valid.replace("name: t", "name: bad.name"), "tier name"),
@@ -705,6 +708,7 @@ mod tests {
             (valid.replace("select: profile:scratch", "select: profile:cargo-target"), "roots: required"),
             (valid.replace("select: profile:scratch", "select: profile:scratch\n        roots: [/a]"), "fixed roots"),
             (valid.replace("select: profile:scratch", "select: profile:scratch\n        timeout: 5"), "bare number"),
+            (valid.replace("select: profile:scratch", "select: profile:scratch\n        timeout: 5lightyears"), "5lightyears"),
             (valid.replace("select: profile:scratch", "select: profile:scratch\n        order: newest"), "newest"),
             (valid.replace("select: profile:scratch", "select: profile:scratch\n        typo: x"), "typo"),
             (valid.replace("name: g", "name: g\n    ranking: newest"), "newest"),
@@ -728,6 +732,10 @@ mod tests {
             let e = parsed(&text).expect_err(&text);
             assert!(e.contains(needle), "{needle}: {e}\n{text}");
         }
+        assert!(
+            parsed("version: [\n").is_err(),
+            "malformed YAML must fail loading"
+        );
     }
 
     #[test]
@@ -781,6 +789,24 @@ mod tests {
                     "select: profile:cargo-target && filter:has-file",
                 ),
                 "has",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch && profile:other",
+                ),
+                "source",
+            ),
+            (
+                two.replace(
+                    "select: profile:scratch",
+                    "select: profile:scratch || profile:other && filter:idle-3d",
+                ),
+                "cannot be mixed",
+            ),
+            (
+                two.replace("select: profile:scratch", "select: '!profile:other'"),
+                "only narrows",
             ),
             (
                 two.replace(

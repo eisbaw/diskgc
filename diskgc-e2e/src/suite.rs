@@ -256,6 +256,12 @@ pub static TESTS: &[Test] = &[
         run: cli_contract_suite::ensure_without_config_or_select_is_usage_error,
     },
     Test {
+        name: "invalid_config_never_falls_back_or_reclaims",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: cli_contract_suite::invalid_config_never_falls_back_or_reclaims,
+    },
+    Test {
         name: "config_environment_and_flag_precedence_reclaim_selected_policy",
         tier: Tier::Fast,
         expect: Expect::Pass,

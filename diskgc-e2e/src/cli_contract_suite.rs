@@ -39,6 +39,141 @@ pub fn ensure_without_config_or_select_is_usage_error(ctx: &Ctx) -> TestResult {
     Ok(())
 }
 
+/// An explicit or environment-selected config is authoritative even when
+/// missing. A malformed existing config has the same static error in check
+/// and ensure, before the latter can reclaim an otherwise eligible entry.
+pub fn invalid_config_never_falls_back_or_reclaims(ctx: &Ctx) -> TestResult {
+    ctx.scratch.mkdir("cli-config-guard", 0o755, TESTER)?;
+    let candidate = ctx.scratch.mkdir("cli-config-guard/cache", 0o755, TESTER)?;
+    ctx.scratch
+        .write_file("cli-config-guard/cache/payload", &[7; 8192], 0o644, TESTER)?;
+    let root = ctx.scratch.path("cli-config-guard");
+    ctx.home.mkdir(".config", 0o755, TESTER)?;
+    ctx.home.mkdir(".config/diskgc", 0o755, TESTER)?;
+    let fallback = format!(
+        "version: 1\nprofiles:\n  - name: cli-config-cache\n    find: {{roots: [{}], paths: [cache], type: dir}}\n    action: delete\n    examples: {{match: [{}/cache]}}\ngroups:\n  - name: reclaim\n    tiers:\n      - name: cache\n        select: profile:cli-config-cache\n",
+        root.display(),
+        root.display()
+    );
+    ctx.home.write_file(
+        ".config/diskgc/config.yaml",
+        fallback.as_bytes(),
+        0o600,
+        TESTER,
+    )?;
+
+    let missing = "/home/tester/misspelled-config.yaml";
+    for (source, env, flag) in [
+        ("environment", Some(missing), None),
+        (
+            "flag",
+            Some("/home/tester/.config/diskgc/config.yaml"),
+            Some(missing),
+        ),
+    ] {
+        let env = env
+            .map(|value| vec![("DISKGC_CONFIG".to_owned(), value.to_owned())])
+            .unwrap_or_default();
+        let mut check_args = vec!["check"];
+        let mut ensure_args = vec!["ensure", "--json", "--min-free", "100%"];
+        if let Some(path) = flag {
+            check_args.extend(["--config", path]);
+            ensure_args.extend(["--config", path]);
+        }
+        ensure_args.push("/tmp");
+        let oracle = Oracle::arm(Fixture::new())?;
+        let checked = under_test::run_as_tester_with_env(
+            &ctx.ledger,
+            &ctx.records,
+            Path::new("/"),
+            &env,
+            &ctx.diskgc(),
+            &check_args,
+        )?;
+        oracle.judge(&checked)?.assert_clean()?;
+        checked.expect_code(2)?;
+        ensure!(
+            checked.stderr.contains(missing),
+            "{source} missing config was not reported: {}",
+            checked.stderr
+        );
+
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = under_test::run_as_tester_with_env(
+            &ctx.ledger,
+            &ctx.records,
+            Path::new("/"),
+            &env,
+            &ctx.diskgc(),
+            &ensure_args,
+        )?;
+        oracle.judge(&run)?.assert_clean()?;
+        run.expect_code(2)?;
+        ensure!(
+            report(&run)?["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(missing))
+                && candidate.exists(),
+            "{source} missing config fell back or reclaimed: {}",
+            run.stdout
+        );
+    }
+
+    let invalid = "/home/tester/invalid-config.yaml";
+    ctx.home.write_file(
+        "invalid-config.yaml",
+        b"version: 1\nunknown_field: true\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let checked = under_test::run_as_tester(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &["check", "--config", invalid],
+    )?;
+    oracle.judge(&checked)?.assert_clean()?;
+    checked.expect_code(2)?;
+    let check_error = checked
+        .stderr
+        .trim()
+        .strip_prefix("diskgc: error: ")
+        .ok_or_else(|| format!("check did not report a config error: {}", checked.stderr))?;
+    ensure!(
+        check_error.contains("unknown_field"),
+        "check missed the invalid key: {check_error}"
+    );
+
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = under_test::run_as_tester(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            invalid,
+            "--min-free",
+            "100%",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(2)?;
+    let result = report(&run)?;
+    ensure!(
+        result["errors"][0]["message"] == check_error
+            && result["actions"].as_array().is_some_and(Vec::is_empty)
+            && candidate.exists(),
+        "ensure did not preserve check's error before reclaim: {result}"
+    );
+    Ok(())
+}
+
 /// Normal lookup selects the user's policy, an environment-selected policy
 /// takes precedence over it, and an explicit flag takes precedence over the
 /// environment. Each run reclaims only the candidate named by its policy.
