@@ -33,11 +33,12 @@ check:
 # budget is measured by the runner and is also the deadline for hung tests.
 # Host requirement: rootless Podman (not provided by the dev shell).
 
-# `check`, a sandboxed config check, and fast Nix and Docker container tests.
+# `check`, sandboxed config and release checks, and fast Nix and Docker container tests.
 e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
+    nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
     just _runner e2e-runner run --suite fast --budget-secs 300
     just _e2e-docker fast 300
 
@@ -45,6 +46,8 @@ e2e: check _gcroot-dev
 e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
+    nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
     just _runner e2e-runner run --suite full --budget-secs 3600
     just _e2e-debian
     just _e2e-docker full 900

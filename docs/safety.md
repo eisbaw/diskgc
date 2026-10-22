@@ -1773,6 +1773,19 @@ these features backported, and an unparseable release is refused too.
 
 ## Pre-release sandbox gate
 
+The test-only clock offset uses the same two markers. In a development
+build, `LinuxHost::new` reads `/.diskgc-test-clock-offset` only after the
+marker check passes. The optional file contains positive decimal seconds
+plus one newline, bounded to 366 days; malformed files, symlinks, FIFOs and
+read errors fail host construction. The offset is fixed for the process and
+advances only the wall-clock input used for age and idleness. It cannot
+change `CLOCK_BOOTTIME` deadlines or kernel timestamps. A development build
+outside a marked container ignores the file. The
+`release-without-sandbox-gate` feature compiles out the offset; the
+`release-excludes-clock-offset` check tests its feature-built binary against
+a development positive control. The default Nix package remains a
+pre-release build until TASK-67 enables the feature in release packaging.
+
 In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act
 unless they run inside a test container, so every entry point, including

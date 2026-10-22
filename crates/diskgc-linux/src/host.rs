@@ -128,6 +128,8 @@ impl AsFd for LinuxFd {
 pub struct LinuxHost {
     /// The procfs mount checked at construction (`O_PATH` directory).
     proc: OwnedFd,
+    #[cfg(not(feature = "release-without-sandbox-gate"))]
+    clock_offset_seconds: u64,
 }
 
 impl LinuxHost {
@@ -198,7 +200,15 @@ impl LinuxHost {
                 .map(drop)
                 .map_err(errno_of),
         )?;
-        Ok(Self { proc })
+        #[cfg(not(feature = "release-without-sandbox-gate"))]
+        let clock_offset_seconds = sandbox::clock_offset().map_err(|why| {
+            HostError::invalid("read clock offset", sandbox::CLOCK_OFFSET_PATH, why)
+        })?;
+        Ok(Self {
+            proc,
+            #[cfg(not(feature = "release-without-sandbox-gate"))]
+            clock_offset_seconds,
+        })
     }
 
     /// The contents of diskgc's configuration file at the absolute `path`
@@ -1434,8 +1444,15 @@ impl Host for LinuxHost {
 
     fn wall_clock(&self) -> Timestamp {
         let t = rustix::time::clock_gettime(rustix::time::ClockId::Realtime);
+        #[cfg(not(feature = "release-without-sandbox-gate"))]
+        let secs = t
+            .tv_sec
+            .checked_add(i64::try_from(self.clock_offset_seconds).expect("bounded offset"))
+            .expect("test clock offset exceeded timestamp range");
+        #[cfg(feature = "release-without-sandbox-gate")]
+        let secs = t.tv_sec;
         Timestamp {
-            secs: t.tv_sec,
+            secs,
             // tv_nsec is below one second.
             nanos: u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
         }

@@ -6,6 +6,7 @@
 //! as backlog tasks, not fixed silently (the journey tasks, e.g. task-12).
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -60,6 +61,42 @@ const VENDORED_CHECKOUT: &str = "builds/idle-1/target/debug/build/vendored-0000/
 const HELD_LOG: &str = "ci/previous-job.log";
 const HELD_LOG_BYTES: usize = 4 << 20;
 
+/// A control file in this disposable container's image root, beside the
+/// sandbox marker. It is never a candidate or a host bind mount. Each
+/// diskgc process reads it once when constructing LinuxHost.
+struct ClockOffset;
+
+impl ClockOffset {
+    fn install(seconds: u64) -> Result<Self, String> {
+        let path = diskgc_linux::sandbox::CLOCK_OFFSET_PATH;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(path)
+            .map_err(|error| format!("create {path}: {error}"))?;
+        use std::io::Write;
+        writeln!(file, "{seconds}").map_err(|error| format!("write {path}: {error}"))?;
+        Ok(Self)
+    }
+
+    fn set(&self, seconds: u64) -> TestResult {
+        self.set_raw(&format!("{seconds}\n"))
+    }
+
+    fn set_raw(&self, content: &str) -> TestResult {
+        let path = diskgc_linux::sandbox::CLOCK_OFFSET_PATH;
+        std::fs::write(path, content).map_err(|error| format!("write {path}: {error}"))
+    }
+}
+
+impl Drop for ClockOffset {
+    fn drop(&mut self) {
+        std::fs::remove_file(diskgc_linux::sandbox::CLOCK_OFFSET_PATH)
+            .expect("remove clock offset from the disposable container");
+    }
+}
+
 /// The busy work on the runner while the hook runs, and the stale holder.
 struct Busy {
     tests: CargoChild,
@@ -84,8 +121,8 @@ fn target_of(rel: &str) -> PathBuf {
 ///
 /// - the operator previews with `--dry-run` (human mode);
 /// - the shipped hook (docs/ci-pre-job.sh) with its default selection
-///   (`filter:idle-1d`) and A's goal: every target is seconds old, so
-///   nothing is selected, exit 1, nothing deleted;
+///   (`filter:idle-1d`) and A's goal: a one-second sandbox clock advance
+///   still refuses every fresh target, exit 1, nothing deleted;
 /// - A: the hook with a `--min-free` / `--target-free` pair set from the
 ///   harness's statvfs and its own count of what each target frees, so the
 ///   run must reclaim the two oldest idle targets and stop: exit 0, `met`,
@@ -110,11 +147,9 @@ fn target_of(rel: &str) -> PathBuf {
 /// its locks, the test binary none) and by the busy commands finishing
 /// successfully afterwards; the idle projects build again.
 ///
-/// Apart from the default-selection case, the hook selects
-/// `profile:cargo-target` without the idle filter: a target's last build is
-/// the newest mtime or ctime of its entries, and a ctime cannot be set
-/// back, so every fixture target is seconds old. The in-use checks, not the
-/// idle filter, are what keeps the busy targets in A and B.
+/// A two-day sandbox clock advance makes the idle targets selectable for
+/// A and B through the hook's real default filter. The in-use checks still
+/// keep the busy targets.
 pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolchain) -> TestResult {
     let busy = set_up_runner(ctx, toolchain)?;
     let busy_targets = [target_of(TESTS_RUNNING), target_of(BUILD_RUNNING)];
@@ -172,8 +207,34 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     preview.expect_code(0)?;
     expect_preview(&preview, &idle, &busy_targets)?;
 
-    // The hook as shipped, its default selection (targets idle for a day)
-    // left in place: every target is seconds old, so nothing is selected.
+    // A one-second advance still leaves every target fresh. The file is
+    // inside this disposable container and its marker must pass before the
+    // binary will read it.
+    let clock_offset = ClockOffset::install(1)?;
+    clock_offset.set_raw("invalid\n")?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let malformed = ensure_run(
+        ctx,
+        &[
+            "--min-free",
+            &min_free.text,
+            "--select",
+            "profile:cargo-target && filter:idle-1d",
+            "--roots",
+            BUILDS,
+            BUILDS,
+        ],
+    )?;
+    oracle.judge(&malformed)?.assert_clean()?;
+    malformed.expect_code(2)?;
+    ensure!(
+        malformed.stderr.contains("clock offset"),
+        "a malformed test clock offset did not stop the real binary: {:?}, {}",
+        malformed.code,
+        malformed.stderr
+    );
+    clock_offset.set(1)?;
+    // The hook as shipped, with its default one-day idle selection.
     let oracle = Oracle::arm(Fixture::new())?;
     let default = pre_job(
         ctx,
@@ -200,9 +261,12 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     expect_summary(&default.run, &r)?;
     expect_unchanged(&busy_before, "the default selection")?;
 
-    // A: the hook frees the two oldest idle targets and stops.
+    // Every new diskgc process now sees the targets' kernel ctime as more
+    // than a day old; the offset does not affect the deadline clock.
+    clock_offset.set(172800)?;
+    // A: the hook's default selection frees two old idle targets and stops.
     let oracle = Oracle::arm(only_idle()?)?;
-    let a = pre_job(ctx, "a", &goal_a)?;
+    let a = pre_job(ctx, "a", &[goal_a[0], goal_a[1], ("DISKGC_SELECT", None)])?;
     oracle.judge(&a.run)?.assert_clean()?;
     expect_space_agrees(&a.run, BUILDS, &min_free)?;
     a.run.expect_code(0)?;
@@ -248,7 +312,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         ("DISKGC_TARGET_FREE", Some(unreachable.text.as_str())),
     ];
     let oracle = Oracle::arm(only_idle()?)?;
-    let b = pre_job(ctx, "b", &goal_b)?;
+    let b = pre_job(ctx, "b", &[goal_b[0], goal_b[1], ("DISKGC_SELECT", None)])?;
     oracle.judge(&b.run)?.assert_clean()?;
     expect_space_agrees(&b.run, BUILDS, &unreachable)?;
     b.run.expect_code(1)?;
@@ -285,7 +349,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
             "--min-free",
             &unreachable.text,
             "--select",
-            "profile:cargo-target",
+            "profile:cargo-target && filter:idle-1d",
             "--roots",
             BUILDS,
             BUILDS,
@@ -642,8 +706,8 @@ struct HookRun {
 }
 
 /// Runs the pre-job hook as tester, traced, with the operator's settings:
-/// diskgc on `PATH`, `CI_BUILDS_DIR` [`BUILDS`], `DISKGC_SELECT`
-/// `profile:cargo-target` (see the journey's note on `filter:idle-1d`) and
+/// diskgc on `PATH`, `CI_BUILDS_DIR` [`BUILDS`], the hook's default
+/// `DISKGC_SELECT` and
 /// the report at `REPORTS/<case>.json` (unset: the path the hook prints);
 /// `vars` then sets (`Some`) or unsets (`None`) variables. The caller arms
 /// and judges the oracle.
@@ -651,7 +715,6 @@ fn pre_job(ctx: &Ctx, case: &str, vars: &[Var]) -> Result<HookRun, String> {
     let mut env: BTreeMap<String, String> = [
         ("PATH", format!("{UNDER_TEST_BIN_DIR}:/bin")),
         ("CI_BUILDS_DIR", BUILDS.to_owned()),
-        ("DISKGC_SELECT", "profile:cargo-target".to_owned()),
         ("DISKGC_REPORT", format!("{REPORTS}/{case}.json")),
     ]
     .into_iter()

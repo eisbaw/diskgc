@@ -604,14 +604,12 @@ filesystem, processes and mounts from the developer's system.
   or 1 is checked against that `statvfs` and `--min-free`
   (`journey_ci_operator_frees_space_with_ensure`, once per toolchain in
   its tier). It also runs the hook's default selection
-  (`filter:idle-1d`), which refuses every fixture target. Limit: no test
-  has the binary's idle filter *select* an old target: a target's last
-  build is the newest mtime or ctime of its entries, a fixture cannot set
-  a ctime back, and the shortest built-in filter is `idle-1h` (task-89).
-  Refusal (`not_idle`) through the binary is covered here and by
-  `ensure_exits_1_when_every_candidate_was_processed_below_min_free`;
-  selection by model tests and by the test driver's `--idle-for 1s`
-  (`cargo_target_suite.rs`).
+  (`filter:idle-1d`) for its main cases. The sandbox-gated clock-offset
+  file first advances the binary's wall clock one second to prove fresh
+  targets get `not_idle`, then two days to prove real-binary selection of
+  old targets through the same filter. The oracle and statvfs checks judge
+  the resulting deletion and space claim. The offset is uniform within a
+  run; it does not solve the mixed historical/fresh ctime vector gap below.
 - **Agent pre-job journey** (`agent_journey.rs`, Nix image): the shipped
   [agent-pre-job.py](agent-pre-job.py) runs real `ensure --json` and decides
   from its exit code and parsed JSON alone. Separate traced runs exercise
@@ -1021,7 +1019,12 @@ Docker-only tests; `tests portable` also excludes `NIX_ONLY_TESTS`;
   containerd root derived from `docker info`. A separate system containerd
   socket still maps to `unsupported_backend`. Native prune tests cover cache
   and image deletion, preservation, and socket replacement. Run the full
-  Docker suite with `nix develop -c just e2e-docker`.
+  Docker suite with `nix develop -c just e2e-docker`. If the native image
+  prune test gets no JSON line, its assertion prints the exact argv, exit
+  code, signal, stdout and stderr, plus bounded tails of each process's raw
+  strace file and the private dockerd log. This preserves the first failure
+  in the grouped runner's host log even though that container is removed.
+  A passing rerun does not identify the cause of an earlier missing report.
 - **GC roots.** The container recipes build each runner to an out-link
   in `.gcroots/` at the repository root (gitignored, outside `target/`,
   so `cargo clean` does not drop it) and run it from there; `just e2e`,
@@ -1059,6 +1062,20 @@ CI settings). Three layers:
 3. **Per operation:** every test asserts that the paths it touches are on
    the scratch tmpfs the harness mounted for it (checked by mount id), and
    aborts otherwise.
+
+The CI operator journey has one test-control file beside the image marker:
+`/.diskgc-test-clock-offset`, containing decimal positive seconds and one
+newline. The harness writes it only in the disposable container's overlay
+root, never in a host bind mount. A development `LinuxHost` reads it once
+at construction only after both sandbox markers pass; absent means zero,
+invalid means construction fails. The file advances only the realtime value
+returned by `LinuxHost::wall_clock()`. `CLOCK_BOOTTIME` deadlines and actual
+kernel ctime remain unchanged. The feature
+`diskgc-linux/release-without-sandbox-gate` compiles
+out the offset path and reader. The `release-excludes-clock-offset` flake
+check compares that feature-built binary with a positive development
+control. The default package is still pre-release and carries the gate
+and offset code until TASK-67 changes release packaging.
 
 ## Commands
 

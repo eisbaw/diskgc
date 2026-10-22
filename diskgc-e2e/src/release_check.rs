@@ -31,7 +31,29 @@ use crate::controlled::CONTROL_PREFIX;
 use crate::{driver, exit};
 
 const USAGE: &str = "\
-usage: diskgc-e2e-release-check --shipped BIN --dep-tree FILE --control BIN";
+usage: diskgc-e2e-release-check --shipped BIN --dep-tree FILE --control BIN\n\
+       diskgc-e2e-release-check --clock-offset-excluded BIN --clock-offset-control BIN";
+
+/// The complete runtime switch for TASK-89. The positive control is a
+/// development binary built from the same source, while the excluded binary
+/// has the release-without-sandbox-gate feature enabled.
+const CLOCK_OFFSET_NEEDLE: &str = "/.diskgc-test-clock-offset";
+
+pub fn check_clock_offset(excluded: &[u8], control: &[u8]) -> Vec<String> {
+    let mut problems = Vec::new();
+    if contains(excluded, CLOCK_OFFSET_NEEDLE) {
+        problems.push(format!(
+            "feature-built binary contains test clock offset path {CLOCK_OFFSET_NEEDLE:?}"
+        ));
+    }
+    if !contains(control, CLOCK_OFFSET_NEEDLE) {
+        problems.push(format!(
+            "positive control: development binary lacks test clock offset path \
+             {CLOCK_OFFSET_NEEDLE:?}; the exclusion check would be vacuous"
+        ));
+    }
+    problems
+}
 
 /// The crate whose code must never reach the release package.
 pub const E2E_CRATE: &str = "diskgc-e2e";
@@ -116,6 +138,32 @@ fn read(path: &PathBuf) -> Result<Vec<u8>, String> {
 
 /// Entry point of `diskgc-e2e-release-check`; returns the exit code.
 pub fn main(args: &[String]) -> i32 {
+    if let [flag, excluded, control_flag, control] = args
+        && flag == "--clock-offset-excluded"
+        && control_flag == "--clock-offset-control"
+    {
+        let inputs = read(&PathBuf::from(excluded)).and_then(|excluded_bytes| {
+            read(&PathBuf::from(control)).map(|bytes| (excluded_bytes, bytes))
+        });
+        let (excluded_bytes, control_bytes) = match inputs {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                eprintln!("diskgc-e2e-release-check: {error}");
+                return exit::FAIL;
+            }
+        };
+        let problems = check_clock_offset(&excluded_bytes, &control_bytes);
+        if problems.is_empty() {
+            println!(
+                "test clock offset absent from feature-built binary and present in development control"
+            );
+            return exit::PASS;
+        }
+        for problem in problems {
+            eprintln!("diskgc-e2e-release-check: {problem}");
+        }
+        return exit::FAIL;
+    }
     let paths = match args {
         [a, shipped, b, tree, c, control]
             if a == "--shipped" && b == "--dep-tree" && c == "--control" =>
@@ -162,6 +210,23 @@ pub fn main(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_offset_exclusion_has_a_positive_control() {
+        assert!(check_clock_offset(b"feature build", CLOCK_OFFSET_NEEDLE.as_bytes()).is_empty());
+        assert_eq!(
+            check_clock_offset(
+                CLOCK_OFFSET_NEEDLE.as_bytes(),
+                CLOCK_OFFSET_NEEDLE.as_bytes()
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            check_clock_offset(b"feature build", b"development without offset").len(),
+            1
+        );
+    }
 
     const TREE: &str = "\
 diskgc v0.1.0 (/build/source/crates/diskgc)

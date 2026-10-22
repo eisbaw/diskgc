@@ -391,8 +391,22 @@ pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestR
 /// The one JSON object a `--json` run printed.
 pub(crate) fn report(run: &Run) -> Result<Value, String> {
     let lines: Vec<&str> = run.stdout.lines().collect();
-    ensure!(lines.len() == 1, "--json prints one line: {:?}", run.stdout);
-    serde_json::from_str(lines[0]).map_err(|e| format!("{e}: {:?}", lines[0]))
+    ensure!(
+        lines.len() == 1,
+        "--json expected one line, got {}: argv={:?}, exit={:?}, signal={:?}, stdout={:?}, stderr={:?}",
+        lines.len(),
+        run.argv,
+        run.code,
+        run.signal,
+        run.stdout,
+        run.stderr
+    );
+    serde_json::from_str(lines[0]).map_err(|error| {
+        format!(
+            "--json parse: {error}: argv={:?}, exit={:?}, signal={:?}, stdout={:?}, stderr={:?}",
+            run.argv, run.code, run.signal, run.stdout, run.stderr
+        )
+    })
 }
 
 /// A configured command profile must pass every candidate safety check

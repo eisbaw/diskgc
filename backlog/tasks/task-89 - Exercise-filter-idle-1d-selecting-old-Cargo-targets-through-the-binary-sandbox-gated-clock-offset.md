@@ -3,10 +3,10 @@ id: TASK-89
 title: >-
   Exercise filter:idle-1d selecting old Cargo targets through the binary
   (sandbox-gated clock offset)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-19 02:54'
-updated_date: '2026-10-19 03:21'
+updated_date: '2026-10-22 07:03'
 labels:
   - wave-2
   - testing
@@ -30,9 +30,17 @@ Proposal: a clock offset that diskgc's clock reading honours only in sandbox-gat
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With the offset file in the container, ensure --select 'profile:cargo-target && filter:idle-1d' reclaims a target the harness made old by the offset, and refuses a fresh one; the CI operator journey uses it for its main cases
+- [x] #1 With the offset file in the container, ensure --select 'profile:cargo-target && filter:idle-1d' reclaims a target the harness made old by the offset, and refuses a fresh one; the CI operator journey uses it for its main cases
 - [ ] #2 Release packages contain no trace of the offset (release-excludes-e2e or a sibling check), and a development build outside a container ignores the file
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-22: Development LinuxHost reads a bounded decimal wall-clock offset only after sandbox markers pass; malformed files stop construction. CI operator journey uses the real hook default idle-1d selection with 1-second fresh refusal and 2-day old-target reclaim; Nix Cargo 1.90.0 and 1.99.1 focused journeys passed. Release-excludes-clock-offset checks the feature-built control against a development positive control. AC2 remains open: the default Nix package still has the pre-release gate/offset until TASK-67 switches release packaging; TASK-89 also awaits the full gate and deep reviews. A uniform offset cannot model mixed historical/fresh ctime cohorts in TASK-25.
+
+2026-10-22 review fixes: offset reader now reads one byte past the 12-byte bound and rejects valid-prefix trailing data (including 00000000001 followed by newline and X); focused sandbox regression passes. e2e-full now includes both release exclusion checks. Shared E2E report diagnostic retains argv, exit, signal, stdout and stderr. A prior full gate had intermittent empty stdout in native Docker image-prune despite expected exit 1; 20/20 grouped fast Docker runs passed after diagnostics, with no proven cause. TASK-109 tracks investigation; do not call it fixed. Parent will rerun full e2e and deep reviews before commit.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

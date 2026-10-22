@@ -37,7 +37,7 @@
 //!   when it drops to uid 1000.
 
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -83,10 +83,21 @@ pub struct Run {
     pub started: Instant,
     /// Wall time from starting strace to its exit.
     pub took: Duration,
+    /// Root-only strace files for this invocation. Read only when a test
+    /// fails, before its disposable container is removed.
+    record_dir: PathBuf,
     judged: Arc<AtomicBool>,
 }
 
 impl Run {
+    /// The end of each per-process trace, bounded so a failed grouped run
+    /// keeps useful process evidence in its host log without dumping all
+    /// traced calls. Trace read errors are returned as evidence too.
+    pub fn trace_evidence(&self) -> String {
+        trace_evidence(&self.record_dir)
+            .unwrap_or_else(|error| format!("cannot read strace evidence: {error}"))
+    }
+
     /// Fails unless the code under test exited with `code`.
     pub fn expect_code(&self, code: i32) -> Result<&Self, String> {
         if self.code == Some(code) {
@@ -104,6 +115,64 @@ impl Run {
     pub(crate) fn mark_judged(&self) {
         self.judged.store(true, Ordering::SeqCst);
     }
+}
+
+/// Read only a tail of each raw strace file. The deletion oracle parses the
+/// same files, but retains only removal calls; a failed process may have
+/// exited before it removed anything. Keep the parent file and the newest
+/// children when there are many traced processes.
+fn trace_evidence(dir: &Path) -> Result<String, String> {
+    const MAX_FILES: usize = 32;
+    const TAIL_BYTES: u64 = 2048;
+    let mut paths = std::fs::read_dir(dir)
+        .map_err(|error| format!("list {}: {error}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("list {}: {error}", dir.display()))?;
+    paths.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("trace."))
+            .is_some_and(|pid| pid.parse::<u32>().is_ok())
+    });
+    paths.sort_by_key(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("trace."))
+            .and_then(|pid| pid.parse::<u32>().ok())
+    });
+    if paths.is_empty() {
+        return Ok(format!("no raw strace files in {}\n", dir.display()));
+    }
+    let omitted = paths.len().saturating_sub(MAX_FILES);
+    if omitted > 0 {
+        paths.drain(8..8 + omitted);
+    }
+    let mut evidence = String::new();
+    for path in paths {
+        let mut file = std::fs::File::open(&path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        let size = file
+            .metadata()
+            .map_err(|error| format!("stat {}: {error}", path.display()))?
+            .len();
+        file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))
+            .map_err(|error| format!("seek {}: {error}", path.display()))?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        evidence.push_str(&format!(
+            "--- {} ({} bytes; last {} bytes)\n{}\n",
+            path.display(),
+            size,
+            tail.len(),
+            String::from_utf8_lossy(&tail)
+        ));
+    }
+    if omitted > 0 {
+        evidence.push_str(&format!("--- {omitted} intermediate trace files omitted\n"));
+    }
+    Ok(evidence)
 }
 
 /// The traced runs of one test and whether the oracle judged each. Shared
@@ -650,6 +719,7 @@ impl Spawned {
             unnamed_calls: record.unnamed,
             started: self.started,
             took,
+            record_dir: self.record_dir,
             judged: self.judged,
         })
     }

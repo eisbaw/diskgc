@@ -135,6 +135,19 @@
         }
       );
 
+      # A feature-built control for the clock-offset exclusion check. This
+      # is not the default pre-release package; TASK-67 owns the release
+      # packaging transition and its container evidence.
+      diskgcWithoutGate = craneLib.buildPackage (
+        workspaceArgs
+        // {
+          pname = "diskgc-without-gate-control";
+          cargoArtifacts = workspaceDeps;
+          cargoExtraArgs = "--locked --package diskgc --features diskgc-linux/release-without-sandbox-gate";
+          doCheck = false;
+        }
+      );
+
       # A separate feature-built binary for catalog-policy container tests.
       # This is not the default package and retains the pre-release gate.
       diskgcProposed01 = craneLib.buildPackage (
@@ -660,6 +673,13 @@
             --shipped ${lib.getExe diskgc} \
             --dep-tree ${releaseDepTree} \
             --control ${e2eBins}/bin/diskgc-e2e-driver
+          touch $out
+        '';
+
+        release-excludes-clock-offset = pkgs.runCommand "diskgc-release-excludes-clock-offset" { } ''
+          ${e2eBins}/bin/diskgc-e2e-release-check \
+            --clock-offset-excluded ${diskgcWithoutGate}/bin/diskgc \
+            --clock-offset-control ${lib.getExe diskgc}
           touch $out
         '';
 

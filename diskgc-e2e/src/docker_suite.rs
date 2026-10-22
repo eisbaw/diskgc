@@ -562,7 +562,7 @@ pub fn native_docker_image_prune_preserves_containers_volumes(ctx: &Ctx) -> Test
         0o644,
         TESTER,
     )?;
-    let _daemon = Daemon::start(ctx)?;
+    let mut daemon = Daemon::start(ctx)?;
     assert_native_server_identity(ctx)?;
     let held = import_image(ctx, Some("diskgc-held:1"))?;
     let unused = import_image(ctx, Some("diskgc-unused:1"))?;
@@ -683,7 +683,18 @@ pub fn native_docker_image_prune_preserves_containers_volumes(ctx: &Ctx) -> Test
     let verdict = oracle.judge(&run)?;
     run.expect_code(1)?;
     verdict.assert_clean()?;
-    let result = report(&run)?;
+    let result = report(&run).map_err(|error| {
+        let daemon_status = daemon
+            .child
+            .try_wait()
+            .map(|status| format!("{status:?}"))
+            .unwrap_or_else(|status_error| format!("status unavailable: {status_error}"));
+        format!(
+            "{error}\n--- raw strace tails\n{}--- dockerd status: {daemon_status}\n--- dockerd log tail\n{}",
+            run.trace_evidence(),
+            daemon.log_tail()
+        )
+    })?;
     ensure!(
         result["actions"]
             .as_array()

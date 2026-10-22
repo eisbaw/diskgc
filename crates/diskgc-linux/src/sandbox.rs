@@ -30,6 +30,83 @@ pub const CONTAINERENV_PATH: &str = "/run/.containerenv";
 /// Exact bytes the image marker must hold.
 pub const MARKER_CONTENT: &[u8] = include_bytes!("sandbox-marker");
 
+/// A test-only wall-clock advance, written inside a disposable test image.
+/// This name and its reader are omitted from feature-built release binaries.
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+pub const CLOCK_OFFSET_PATH: &str = "/.diskgc-test-clock-offset";
+
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+const MAX_CLOCK_OFFSET_SECONDS: u64 = 366 * 24 * 60 * 60;
+
+/// Read a fixed positive number of seconds only after both sandbox markers
+/// have passed. A missing file means no offset; an existing but invalid file
+/// is an error, so it cannot silently change a deletion decision. The file
+/// is opened without following a final symlink or blocking on a FIFO.
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+pub(crate) fn clock_offset() -> Result<u64, String> {
+    clock_offset_under(Path::new("/"))
+}
+
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+fn clock_offset_under(root: &Path) -> Result<u64, String> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::io::Read;
+
+    // The offset is meaningless outside the marked test image, including
+    // when a copied offset file happens to exist on a development host.
+    if check_under(root).is_err() {
+        return Ok(0);
+    }
+    let path = root.join(CLOCK_OFFSET_PATH.trim_start_matches('/'));
+    let fd = match rustix::fs::open(
+        &path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(0),
+        Err(error) => return Err(format!("open {}: {error}", path.display())),
+    };
+    let stat =
+        rustix::fs::fstat(&fd).map_err(|error| format!("stat {}: {error}", path.display()))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let mut bytes = Vec::new();
+    // Read one byte past the accepted bound. Stopping exactly at the bound
+    // would accept a valid prefix followed by arbitrary trailing bytes.
+    std::fs::File::from(fd)
+        .take(13)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if bytes.len() > 12 {
+        return Err(format!("{} exceeds 12 bytes", path.display()));
+    }
+    let Some(digits) = bytes.strip_suffix(b"\n") else {
+        return Err(format!(
+            "{} must contain decimal seconds and one newline",
+            path.display()
+        ));
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(format!(
+            "{} must contain decimal seconds and one newline",
+            path.display()
+        ));
+    }
+    let seconds = std::str::from_utf8(digits)
+        .expect("ASCII digits")
+        .parse::<u64>()
+        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    if seconds == 0 || seconds > MAX_CLOCK_OFFSET_SECONDS {
+        return Err(format!(
+            "{} must be between 1 and {MAX_CLOCK_OFFSET_SECONDS} seconds",
+            path.display()
+        ));
+    }
+    Ok(seconds)
+}
+
 /// Why the current root filesystem is not a diskgc test sandbox.
 #[derive(Debug)]
 pub enum NotInSandbox {
@@ -264,11 +341,10 @@ mod tests {
 
     /// AC #3 of task-50, the configuration half: the feature that removes the
     /// gate is defined once, in diskgc-linux's manifest, is not a default
-    /// feature, and no manifest, flake or justfile enables it, by name or by
-    /// `--all-features`. So the flake's packages and checks, `just` and plain
-    /// `cargo` all build with the gate. Only the release task may change this
-    /// test, when it enables the feature for the release packages (0.1
-    /// onwards, the `ensure` MVP) in one place.
+    /// feature, and only the dedicated feature-built exclusion control in
+    /// the flake enables it. The default package, checks, `just` and plain
+    /// `cargo` all build with the gate. TASK-67 must change this test when
+    /// it enables the feature in the actual release package.
     ///
     /// flake.nix, the justfile and diskgc-e2e's manifest are not part of the
     /// flake's filtered build source, so the flake's workspace-tests cannot
@@ -323,12 +399,31 @@ mod tests {
         scanned.extend(cargo_configs_under(&repo));
 
         let found = gate_enablers(&repo, &scanned);
+        let allowed_control = "cargoExtraArgs = \"--locked --package diskgc --features diskgc-linux/release-without-sandbox-gate\";";
+        let unexpected: Vec<&String> = found
+            .iter()
+            .filter(|line| !line.starts_with("flake.nix:") || !line.ends_with(allowed_control))
+            .collect();
         assert!(
-            found.is_empty(),
-            "the pre-release sandbox gate is removed by build configuration (only release \
-             packages, 0.1 onwards, may do that):\n{}",
+            unexpected.is_empty() && found.len() <= 1,
+            "the pre-release sandbox gate has an unexpected build enabler:\n{}",
             found.join("\n")
         );
+        if checkout {
+            assert_eq!(found.len(), 1, "the feature-built control vanished");
+            let flake = std::fs::read_to_string(repo.join("flake.nix")).expect("flake");
+            let control = flake
+                .split_once("diskgcWithoutGate = craneLib.buildPackage")
+                .expect("the feature-built control")
+                .1
+                .split_once("      );")
+                .expect("the end of the control build")
+                .0;
+            assert!(
+                control.contains(allowed_control),
+                "only the named control may enable the feature"
+            );
+        }
         if !not_seen.is_empty() {
             println!(
                 "NOT SCANNED here (not in this source tree; `just check` scans them in a git \
@@ -541,5 +636,62 @@ mod tests {
             check_under(&root.0),
             Err(NotInSandbox::ContainerEnvMissing { .. })
         ));
+    }
+
+    #[cfg(not(feature = "release-without-sandbox-gate"))]
+    #[test]
+    fn clock_offset_requires_both_markers_and_valid_bounded_file() {
+        let root = TempRoot::new("clock-offset");
+        root.write(".diskgc-test-clock-offset", b"172800\n");
+        assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
+        root.write(".diskgc-test-sandbox", MARKER_CONTENT);
+        assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
+        root.write("run/.containerenv", b"");
+        assert_eq!(clock_offset_under(&root.0).unwrap(), 172800);
+
+        for bad in [
+            b"0\n".as_slice(),
+            b"-1\n",
+            b"36600000\n",
+            b"2 days\n",
+            b"1",
+            b"1\n\n",
+            b"00000000001\nX",
+            b"00000000001\nXtrailing",
+        ] {
+            root.write(".diskgc-test-clock-offset", bad);
+            assert!(clock_offset_under(&root.0).is_err(), "accepted {bad:?}");
+        }
+        std::fs::remove_file(root.0.join(".diskgc-test-clock-offset")).unwrap();
+        assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
+    }
+
+    #[cfg(not(feature = "release-without-sandbox-gate"))]
+    #[test]
+    fn clock_offset_refuses_symlink_and_fifo_without_blocking() {
+        let root = TempRoot::new("clock-offset-special");
+        root.write(".diskgc-test-sandbox", MARKER_CONTENT);
+        root.write("run/.containerenv", b"");
+        root.write("target", b"172800\n");
+        let offset = root.0.join(".diskgc-test-clock-offset");
+        std::os::unix::fs::symlink(root.0.join("target"), &offset).unwrap();
+        assert!(clock_offset_under(&root.0).is_err());
+        std::fs::remove_file(&offset).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &offset,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let dir = root.0.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(clock_offset_under(&dir)).unwrap());
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .is_err()
+        );
     }
 }
