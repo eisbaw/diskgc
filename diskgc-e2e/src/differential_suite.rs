@@ -986,6 +986,97 @@ pub fn generated_python_models_match_linux(ctx: &Ctx) -> TestResult {
     Ok(())
 }
 
+/// Vary the tagged Mypy cache independently of the Python bytecode cases.
+/// The extra branches exercise the required tag, checkout refusal, and
+/// similar names while each model keeps a distinct search root.
+pub fn generated_mypy_models_match_linux(ctx: &Ctx) -> TestResult {
+    for index in 0..100 {
+        let vector = generated_mypy_vector(index)?;
+        replay_model(ctx, vector, false)
+            .map_err(|error| format!("generated Mypy model {index}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn generated_mypy_vector(index: u32) -> Result<ProfileVector, String> {
+    let root = format!("/home/tester/differential-mypy-{index:03}");
+    let project = format!("{root}/project");
+    let yaml = MYPY_VECTOR.replace("/home/tester/project", &project);
+    let mut vector = ProfileVector::parse(&yaml)?;
+    vector.path = root.clone().into();
+    vector.roots = vec![root];
+
+    let base_cache = PathBuf::from(format!("{project}/.mypy_cache"));
+    let Some(NodeSpec::Dir(cache)) = vector.host.tree.get_mut(&base_cache) else {
+        return Err("generated Mypy vector is missing its tagged base cache".into());
+    };
+    let Some(NodeSpec::Dir(version)) = cache.entries.get_mut("3.13") else {
+        return Err("generated Mypy vector is missing its version directory".into());
+    };
+    version.entries.insert(
+        format!("generated-{index}.json"),
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(1024 + u64::from(index) * 97)),
+            ..FileSpec::default()
+        }),
+    );
+
+    let extra = PathBuf::from(format!("{project}/variation/.mypy_cache"));
+    let mut cache = DirSpec::default();
+    cache.entries.insert(
+        "payload.json".into(),
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(512 + u64::from(index) * 31)),
+            ..FileSpec::default()
+        }),
+    );
+    match index % 4 {
+        0 => {} // Only the tagged base cache is eligible.
+        1 | 3 => {
+            cache.entries.insert(
+                "CACHEDIR.TAG".into(),
+                NodeSpec::File(FileSpec {
+                    cachedir_tag: true,
+                    ..FileSpec::default()
+                }),
+            );
+            if index % 4 == 3 {
+                let mut git = DirSpec::default();
+                git.entries
+                    .insert("HEAD".into(), NodeSpec::File(FileSpec::default()));
+                cache.entries.insert(".git".into(), NodeSpec::Dir(git));
+                vector.expect.plan.push(PlanVerdict {
+                    candidate: extra.clone(),
+                    reason: Some("contains_checkout".into()),
+                    source: None,
+                });
+                vector.expect.skipped.push(SkipVerdict {
+                    candidate: extra.clone(),
+                    reason: "contains_checkout".into(),
+                });
+                vector.expect.preserved.push(extra.join(".git/HEAD"));
+            } else {
+                vector.expect.plan.push(PlanVerdict {
+                    candidate: extra.clone(),
+                    reason: None,
+                    source: None,
+                });
+                vector.expect.actions.push(extra.clone());
+                vector.expect.removed.push(extra.clone());
+            }
+        }
+        2 => {
+            // The path matches, but an absent tag keeps it out of the plan.
+            vector.expect.preserved.push(extra.join("payload.json"));
+        }
+        _ => unreachable!(),
+    }
+    if !index.is_multiple_of(4) {
+        vector.host.tree.insert(extra, NodeSpec::Dir(cache));
+    }
+    Ok(vector)
+}
+
 fn generated_python_vector(index: u32) -> Result<ProfileVector, String> {
     let root = format!("/home/tester/differential-{index:03}");
     let yaml = PYTHON_VECTOR.replace("/home/tester/project", &root);
@@ -1502,6 +1593,33 @@ mod tests {
                 .check(&library)
                 .expect("independent generated expectation");
         }
+    }
+
+    #[test]
+    fn generated_mypy_models_have_independent_expectations() {
+        let library = Library::builtin().expect("built-in library");
+        let mut roots = std::collections::BTreeSet::new();
+        for index in 0..100 {
+            let vector = generated_mypy_vector(index).expect("generated model");
+            assert!(
+                roots.insert(vector.path.clone()),
+                "generated roots must differ"
+            );
+            assert_eq!(vector.expect.actions.len(), 1 + usize::from(index % 4 == 1));
+            vector
+                .check(&library)
+                .expect("independent generated Mypy expectation");
+        }
+        let mut broken = generated_mypy_vector(1).expect("generated model");
+        let extra = broken.expect.actions[1].clone();
+        let Some(NodeSpec::Dir(cache)) = broken.host.tree.get_mut(&extra) else {
+            panic!("generated extra cache missing");
+        };
+        cache.entries.remove("CACHEDIR.TAG");
+        assert!(
+            broken.check(&library).is_err(),
+            "an eligible expectation must fail without the required tag"
+        );
     }
 
     #[test]

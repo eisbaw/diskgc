@@ -475,6 +475,22 @@ size, device and ID did not change the observed plan, action, skip, exit, or
 deletion diff for each accepted replay. Adding a checked-in vector requires
 a new classification and parity evidence.
 
+The generated differential cases run 100 disjoint Python bytecode models and
+100 disjoint Mypy cache models per container run. The Mypy cases vary payload
+sizes, a second tagged cache, a matching path without `CACHEDIR.TAG`, and a
+tagged cache containing a checkout; an independent expectation rejects a
+missing tag on an expected eligible cache. Both generators run the same
+ModelHost/LinuxHost outcome comparison and deletion oracle as checked-in
+vectors. This does not establish parity for the six historical-ctime
+originals. A uniform sandbox clock offset (task-89) could make newly created
+inodes old enough for the West and XDG fixtures after the model clock is
+rebased. It cannot simultaneously reproduce the old eligible and fresh
+`not_idle` inodes in the Autotools, CMake, Meson, and containers-image
+fixtures: all get the same fresh kernel ctime after materialization. Those
+four originals need staged kernel creation times in an isolated clock domain,
+or another truthful ctime mechanism. Containers-image also needs its
+`/var/tmp` and process shape materialized.
+
 ## 5. End-to-end tests in containers
 
 The real binary in **rootless Podman containers**, built from images Nix
