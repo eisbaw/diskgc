@@ -36,6 +36,7 @@
 //! it never polls.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
@@ -123,6 +124,9 @@ struct Inner {
     injected: Option<Errno>,
     /// The most fds diskgc held open at once (`ModelFd`s alive).
     peak_open_fds: usize,
+    /// Targeted kernel capability fault for tests: other entries on the
+    /// same filesystem can still report their type for discovery.
+    missing_statx_type_at: BTreeSet<PathBuf>,
 }
 
 /// A `Host` backed by a host model. Not `Send`: a run is one thread.
@@ -186,6 +190,7 @@ impl ModelHost {
                 trace: Vec::new(),
                 injected: None,
                 peak_open_fds: 0,
+                missing_statx_type_at: BTreeSet::new(),
             })),
         })
     }
@@ -196,6 +201,12 @@ impl ModelHost {
     }
 
     // ---- Inspection for tests (not port calls: no trace, no events) ----
+
+    /// Make `statx` omit the type only at this path. This exercises
+    /// candidate marker verdicts without making discovery itself unknown.
+    pub fn omit_statx_type_at(&self, path: PathBuf) {
+        self.inner.borrow_mut().missing_statx_type_at.insert(path);
+    }
 
     /// Every call so far.
     pub fn trace(&self) -> Vec<Call> {
@@ -777,6 +788,7 @@ impl Host for ModelHost {
         }
         let full = self.base_path(base, path);
         let shown = full.display().to_string();
+        let target = full.clone();
         let entry = (!name.is_empty()).then(|| (self.fd_object(ofd), name.to_owned()));
         self.call_on(Op::Statx, Some(full), None, entry, None, |inner| {
             if let Some(e) = inner.injected.take() {
@@ -794,7 +806,10 @@ impl Host for ModelHost {
             };
             match found {
                 Ok(loc) => {
-                    let stat = inner.state.stat(loc);
+                    let mut stat = inner.state.stat(loc);
+                    if inner.missing_statx_type_at.contains(&target) {
+                        stat.file_type = None;
+                    }
                     (Ok(stat), Some(inner.state.dev_ino(loc)), "ok".to_owned())
                 }
                 Err(e) => (

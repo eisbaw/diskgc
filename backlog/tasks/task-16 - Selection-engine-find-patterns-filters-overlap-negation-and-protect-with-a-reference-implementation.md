@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-21 08:23'
+updated_date: '2026-10-22 03:37'
 labels:
   - wave-2
   - irreversible
@@ -76,6 +76,18 @@ Compass root-mode finding (TASK21 AC5): protect and negated profile overlap must
 2026-10-21 !profile runtime candidate integrated: term-local bound fs/Cargo negated sources discover raw matches, ignore negated where, exclude component-overlapping candidates, and fail closed on incomplete scans; fs/Cargo reclaim rechecks under candidate locks and immediately before unlink. Root {uid} guard now checks negated sources. Read-only ModelHost and disposable-container dry-run regressions added, but not run under no-deletion restriction. Fresh isolated-target workspace/E2E crate cargo check passed after integration compile fixes; full E2E and independent review pending. Concurrent changes to the negated tree after the final scan remain a documented non-atomic race; TASK16 AC/DoD remain open.
 
 2026-10-21 integrated verification: fs union, !profile and protect runtime slices passed full just e2e (152/152 Nix containers, 6/6 Docker), including deletion-oracle cases, and parallel QA/MPED review. Root-mode {uid} guards and mount-chain screening passed. Runtime support for every documented filter/action combination and the full TASK16 completion review remain open.
+
+2026-10-22 runtime entry-filter increment: positive filesystem filter:has and filter:has_not with one predicate now use the same fail-closed entry verdict as the existing complements, including locked candidate recheck. Focused ModelHost dry-run/reclaim cases passed for both polarities, unreadable marker and marker changes after flock; disposable Podman real-binary deletion-oracle case passed 1/1. docs/reference.md names the supported subset. Mixed-predicate entry filters, command and other-kind unions, !profile with non-delete/non-Cargo actions, and full TASK16 property/review acceptance remain open; AC/DoD unchanged.
+
+2026-10-22 review fix: union checkout refusal now derives from source terms actually admitted after their filters, at dry-run and under-lock reclaim; failed terms cannot veto an allow term. The candidate walk records checkout markers once, and the lock-time pass tests every admitted alternative before deletion. Model tests cover both union orders, filter change at flock, and source/term has_not with unknown statx type; unknown source entry type now fails closed. Disposable Podman real-binary union deletion-oracle case passed 1/1. Existing model reclaim suite 50/50 excluding the unchanged 40k stress case passed after preserving the originally reached locked inode. Final full just e2e and parallel QA/MPED review remain pending; AC/DoD unchanged.
+
+2026-10-22 final review fix: filesystem union reclaim tally now evaluates every source term (including idle requirement) before ranked queue insertion; a later admitted refusing term vetoes a checkout before flock, while a filter-failed term cannot veto. A direct ModelHost reclaim case inside checkout metadata with no admitted term now reports filtered, not contains_checkout; removed the all-refuse prefilter shortcut. Model regressions cover both term orders, positive entry filter, failed idle filter, and after-lock marker change. The Podman real-binary union deletion-oracle case passed after the fix; broader fs_reclaim tests 51/51 excluding existing 40k stress passed, Clippy passed. Full exact just e2e and parallel QA/MPED review still required; AC/DoD unchanged.
+
+2026-10-22 MPED mixed-root review fix: checkout-metadata path refusal in union plan/tally now inspects only roots of admitted checkouts:refuse terms, matching lock-time policy. ModelHost regression finds one file through /tmp (allow, under .git) and /tmp/repo/.git (refuse, root itself excluded by path rule); both term orders plan and reclaim it. docs/safety.md now distinguishes single-source tally (no idle filter) from union prequeue tally (every term including idle). Focused regression passed; final full just e2e and parallel QA/MPED review remain pending; AC/DoD unchanged.
+
+MPED hardlink alias review: filesystem union plan and prequeue tally now aggregate checkout markers from every admitted refusing source, even when the same inode has an allowing cache-file alias and a refusing .git alias. ModelHost regressions exercise both source orders in plan, prequeue tally, and direct lock-time recheck; complementary cases confirm an allowing marker alias does not veto a clean refusing alias. Focused fs_reclaim suite: 55 passed, 1 long stress test skipped. TASK-16 remains open for other runtime combinations.
+
+2026-10-22 Linux parity review: added disposable Podman real-binary deletion-oracle E2E fs_union_checkout_aliases_and_mixed_roots. A hard-linked cache-file/.git inode is refused, while a separate file found through /tmp and a root inside .git is eligible; plan and reclaim are checked in both source orders. The oracle permits unlink only of the eligible file and checks strace and filesystem snapshots. Focused Nix E2E 1/1 passed and Docker runner Nix build passed. Full exact just e2e and parallel QA/MPED final review remain for the parent; AC/DoD unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

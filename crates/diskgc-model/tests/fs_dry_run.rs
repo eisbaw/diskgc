@@ -1800,17 +1800,20 @@ fn shipped_project_python_caches_find_only_cache_directories() {
     nothing_locked_or_deleted(&host);
 }
 
-/// Unsupported term forms are refused, never silently ignored. An idle
-/// complement is supported and its exclusive bound is retained.
+/// The compiled term retains entry and idle filters. Unsupported forms are
+/// refused rather than silently ignored.
 #[test]
-fn positive_has_filter_is_refused_and_filesystem_union_is_compiled() {
+fn positive_has_filter_and_filesystem_union_are_compiled() {
     let library = library();
     let expr = "profile:tmp-entry && filter:has-tag";
-    let error = Tier::select(expr, &library, None, 1000).expect_err(expr);
-    assert!(
-        error.contains("`filter:has-tag`") && error.contains("task-16"),
-        "{expr}: {error}"
-    );
+    let tier = Tier::select(expr, &library, None, 1000).expect(expr);
+    let SourceKind::Fs(find) = tier.source else {
+        panic!("entry filter requires fs source");
+    };
+    assert_eq!(find.entry_filters.len(), 1);
+    assert_eq!(find.entry_filters[0].entry, "CACHEDIR.TAG");
+    assert!(find.entry_filters[0].has);
+    assert!(!find.entry_filters[0].negated);
     let union = Tier::select(
         "profile:tmp-entry || profile:pytest-of-dir",
         &library,
@@ -1849,7 +1852,7 @@ fn filesystem_union_dedupes_hardlink_aliases_by_inode_identity() {
 }
 
 #[test]
-fn negated_entry_filters_have_known_and_unknown_verdicts() {
+fn entry_filters_have_known_and_unknown_verdicts() {
     let tree = "  /tmp/pytest-of-tagged: {.: {}, CACHEDIR.TAG: {size: 1K}}\n  /tmp/pytest-of-plain: {.: {}, f: {size: 1K}}\n";
     for (selection, eligible, filtered) in [
         (
@@ -1861,6 +1864,16 @@ fn negated_entry_filters_have_known_and_unknown_verdicts() {
             "profile:pytest-of-dir && !filter:has-not-tag",
             "/tmp/pytest-of-tagged",
             "/tmp/pytest-of-plain",
+        ),
+        (
+            "profile:pytest-of-dir && filter:has-tag",
+            "/tmp/pytest-of-tagged",
+            "/tmp/pytest-of-plain",
+        ),
+        (
+            "profile:pytest-of-dir && filter:has-not-tag",
+            "/tmp/pytest-of-plain",
+            "/tmp/pytest-of-tagged",
         ),
     ] {
         let host = host(&yaml(tree));
@@ -1883,21 +1896,52 @@ fn negated_entry_filters_have_known_and_unknown_verdicts() {
     }
 
     let unknown = "events:\n  - {at: {op: statx, path: /tmp/pytest-of-plain/CACHEDIR.TAG, when: before}, fail: EACCES}\n";
-    let host = host(&yaml(&format!("{tree}{unknown}")));
-    let report = dry_run(
-        &host,
-        &request("profile:pytest-of-dir && !filter:has-tag", &[], "/tmp"),
-    );
-    assert!(
-        report
-            .plan
-            .iter()
-            .any(|p| p.candidate == Path::new("/tmp/pytest-of-plain")
-                && p.reason == Some("unreadable")),
-        "{report:#?}"
-    );
-    assert!(host.unfired_events().is_empty());
-    nothing_locked_or_deleted(&host);
+    for selection in [
+        "profile:pytest-of-dir && !filter:has-tag",
+        "profile:pytest-of-dir && filter:has-tag",
+    ] {
+        let host = host(&yaml(&format!("{tree}{unknown}")));
+        let report = dry_run(&host, &request(selection, &[], "/tmp"));
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|p| p.candidate == Path::new("/tmp/pytest-of-plain")
+                    && p.reason == Some("unreadable")),
+            "{report:#?}"
+        );
+        assert!(host.unfired_events().is_empty());
+        nothing_locked_or_deleted(&host);
+    }
+}
+
+#[test]
+fn unknown_marker_type_passes_neither_source_has_not_nor_term_has_not() {
+    let tree = "  /tmp/pytest-of-a: {.: {}, mounted: {size: 1K}, CACHEDIR.TAG: {size: 1K}}\n";
+    for (selection, marker) in [
+        ("profile:unmounted", "/tmp/pytest-of-a/mounted"),
+        (
+            "profile:pytest-of-dir && filter:has-not-tag",
+            "/tmp/pytest-of-a/CACHEDIR.TAG",
+        ),
+    ] {
+        let host = host(&yaml(tree));
+        host.omit_statx_type_at(PathBuf::from(marker));
+        let report = dry_run(&host, &request(selection, &[], "/tmp"));
+        assert!(
+            report.plan.iter().any(|entry| {
+                entry.candidate
+                    == Path::new(if selection == "profile:unmounted" {
+                        marker
+                    } else {
+                        "/tmp/pytest-of-a"
+                    })
+                    && entry.reason == Some("unsupported_fs")
+            }),
+            "{selection}: {report:#?}"
+        );
+        nothing_locked_or_deleted(&host);
+    }
 }
 
 /// A dry run reuses one process scan for later candidates for up to

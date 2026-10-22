@@ -784,6 +784,24 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_negated_entry_filters,
     },
     Test {
+        name: "fs_reclaim_positive_entry_filters",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_positive_entry_filters,
+    },
+    Test {
+        name: "fs_union_checkout_policy_uses_admitted_terms",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_union_checkout_policy_uses_admitted_terms,
+    },
+    Test {
+        name: "fs_union_checkout_aliases_and_mixed_roots",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_union_checkout_aliases_and_mixed_roots,
+    },
+    Test {
         name: "fs_reclaim_positive_union_dedupes_and_refuses_shared_checkout",
         tier: Tier::Fast,
         expect: Expect::Pass,

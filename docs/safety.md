@@ -182,8 +182,11 @@ Immediately before acting, diskgc walks the candidate's whole tree
     that does not say `allow` refuses a target holding a checkout.
     **Overlap:** where one candidate is found by several source profiles
     of one tier (a union, `a || b`), it may hold a checkout only if every
-    one of them allows checkouts: `refuse` wins. Filesystem delete unions
-    apply this rule during planning and reclaim; other union forms remain
+    source term that admits it after its filters allows checkouts: `refuse`
+    wins among admitted terms. Filesystem delete unions
+    inspect every admitted refusing source's candidate view, including
+    different names for one hard-linked inode, during planning, tally, and
+    reclaim. Other union forms remain
     unsupported. Each tier judges its own candidates by its source
     settings. Protected matches are enumerated before reclaim and rechecked
     under the candidate lock and immediately before deletion. Changes in a
@@ -777,9 +780,11 @@ error of the run reclaims nothing of the tier.
 
 **The tally** (the tier's order, docs/architecture.md, The reclaim walk)
 runs steps 1 and 2 below and, of step 4, the source's `where` and the
-eligibility walk on each candidate, read-only: no lock, no idle
-requirement, no in-use check. A candidate it refuses is skipped for the
-run and never locked.
+eligibility walk on each candidate, read-only. A single-source tally does
+not apply the idle requirement; a filesystem union tallies every term with
+its idle requirement so only admitted terms determine the effective checkout
+policy before queueing. Neither form takes a lock or performs an in-use
+check. A candidate it refuses is skipped for the run and never locked.
 
 **Per candidate**, in the tier's order, every check is made again on the
 filesystem as it is then, whatever the tally or a plan said:

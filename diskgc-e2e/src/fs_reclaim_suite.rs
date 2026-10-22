@@ -73,6 +73,30 @@ profiles:
     find: {roots: [/tmp], paths: ["union-b*", "union-shared*"], type: dir}
     action: delete
     examples: {match: [/tmp/union-b]}
+  - name: union-has-tag
+    where: {has: CACHEDIR.TAG}
+"#;
+
+const FS_UNION_ALIAS_TEST_PROFILE: &str = r#"version: 1
+profiles:
+  - name: alias-cache-allow-kernel
+    find: {roots: [/tmp/alias-case], paths: [cache-file], type: file}
+    checkouts: allow
+    action: delete
+    examples: {match: [/tmp/alias-case/cache-file]}
+  - name: alias-marker-refuse-kernel
+    find: {roots: [/tmp/alias-case], paths: [.git], type: file}
+    action: delete
+    examples: {match: [/tmp/alias-case/.git]}
+  - name: mixed-root-allow-kernel
+    find: {roots: [/tmp], paths: [mixed-case/.git/cache-file], type: file}
+    checkouts: allow
+    action: delete
+    examples: {match: [/tmp/mixed-case/.git/cache-file]}
+  - name: mixed-root-refuse-kernel
+    find: {roots: [/tmp/mixed-case/.git], paths: [cache-file], type: file}
+    action: delete
+    examples: {match: [/tmp/mixed-case/.git/cache-file]}
 "#;
 
 const EXCLUDED_CACHE_TEST_PROFILE: &str = r#"version: 1
@@ -554,6 +578,172 @@ pub fn fs_reclaim_negated_entry_filters(ctx: &Ctx) -> TestResult {
         "selected candidates remain"
     );
     verdict.assert_clean()
+}
+
+/// Positive `has` and `has_not` select opposite real directories. The
+/// independent deletion oracle permits only those two selected candidates.
+pub fn fs_reclaim_positive_entry_filters(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        ENTRY_NEGATION_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let plain = s.mkdir("entry-negation-plain", 0o700, TESTER)?;
+    s.write_file("entry-negation-plain/payload", b"delete", 0o600, TESTER)?;
+    let tagged = s.mkdir("entry-negation-tagged", 0o700, TESTER)?;
+    s.write_file("entry-negation-tagged/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(plain.clone())
+            .eligible(tagged.clone()),
+    )?;
+    let has = "profile:entry-negation-kernel && filter:entry-has-tag";
+    let has_not = "profile:entry-negation-kernel && filter:entry-has-not-tag";
+    let first = ensure_tmp(ctx, &["--min-free", "100%", "--select", has])?;
+    let second = ensure_tmp(ctx, &["--min-free", "100%", "--select", has_not])?;
+    let verdict = oracle.judge_runs(&[&first, &second])?;
+    first.expect_code(1)?;
+    second.expect_code(0)?;
+    let (first_skips, first_actions) = outcome(&report(&first)?);
+    ensure!(
+        first_actions == [tagged.display().to_string()],
+        "{first_actions:?}"
+    );
+    ensure!(
+        first_skips
+            .get(plain.to_str().ok_or("plain path")?)
+            .map(String::as_str)
+            == Some("filtered"),
+        "{first_skips:?}"
+    );
+    let (_, second_actions) = outcome(&report(&second)?);
+    ensure!(
+        second_actions == [plain.display().to_string()],
+        "{second_actions:?}"
+    );
+    ensure!(
+        !plain.exists() && !tagged.exists(),
+        "selected candidates remain"
+    );
+    verdict.assert_clean()
+}
+
+/// A source excluded by its positive filter cannot impose its checkout
+/// refusal on the source that still admits the candidate.
+pub fn fs_union_checkout_policy_uses_admitted_terms(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        FS_UNION_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let clear = s.mkdir("union-shared-clear", 0o700, TESTER)?;
+    s.mkdirs("union-shared-clear/.git", 0o700, TESTER)?;
+    s.write_file("union-shared-clear/.git/HEAD", b"ref: x\n", 0o600, TESTER)?;
+    let tagged = s.mkdir("union-shared-tagged", 0o700, TESTER)?;
+    s.mkdirs("union-shared-tagged/.git", 0o700, TESTER)?;
+    s.write_file("union-shared-tagged/.git/HEAD", b"ref: y\n", 0o600, TESTER)?;
+    s.write_file("union-shared-tagged/CACHEDIR.TAG", b"tag", 0o600, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(clear.clone()))?;
+    let expression =
+        "profile:union-allow-kernel || (profile:union-refuse-kernel && filter:union-has-tag)";
+    let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", expression])?;
+    let verdict = oracle.judge_runs(&[&run])?;
+    run.expect_code(1)?;
+    let (skipped, actions) = outcome(&report(&run)?);
+    ensure!(actions == [clear.display().to_string()], "{actions:?}");
+    ensure!(
+        skipped
+            .get(tagged.to_str().ok_or("tagged path")?)
+            .map(String::as_str)
+            == Some("contains_checkout"),
+        "{skipped:?}"
+    );
+    ensure!(
+        !clear.exists() && tagged.exists(),
+        "wrong checkout candidate removed"
+    );
+    verdict.assert_clean()
+}
+
+/// A hard-linked `.git` name must veto its allowing alias, while a source
+/// rooted inside `.git` may still delete a file whose other admitted source
+/// explicitly allows that metadata path. The oracle catches every unlink
+/// outside the one eligible file independently of the reported outcome.
+pub fn fs_union_checkout_aliases_and_mixed_roots(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    ctx.home.write_file(
+        "diskgc.yaml",
+        FS_UNION_ALIAS_TEST_PROFILE.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("alias-case", 0o700, TESTER)?;
+    let cache_alias = s.write_file("alias-case/cache-file", b"linked", 0o600, TESTER)?;
+    let marker_alias = s.hard_link("alias-case/cache-file", "alias-case/.git")?;
+    s.mkdirs("mixed-case/.git", 0o700, TESTER)?;
+    let selections = [
+        "profile:alias-cache-allow-kernel || profile:alias-marker-refuse-kernel || profile:mixed-root-allow-kernel || profile:mixed-root-refuse-kernel",
+        "profile:mixed-root-refuse-kernel || profile:mixed-root-allow-kernel || profile:alias-marker-refuse-kernel || profile:alias-cache-allow-kernel",
+    ];
+    for (order, expression) in selections.into_iter().enumerate() {
+        let mixed = s.write_file(
+            "mixed-case/.git/cache-file",
+            format!("payload-{order}").as_bytes(),
+            0o600,
+            TESTER,
+        )?;
+        let oracle = Oracle::arm(Fixture::new().eligible(mixed.clone()))?;
+        let plan = ensure_tmp(
+            ctx,
+            &["--dry-run", "--min-free", "100%", "--select", expression],
+        )?;
+        let run = ensure_tmp(ctx, &["--min-free", "100%", "--select", expression])?;
+        let verdict = oracle.judge_runs(&[&plan, &run])?;
+        plan.expect_code(0)?;
+        run.expect_code(1)?;
+        let planned = report(&plan)?;
+        let entries = planned["plan"].as_array().ok_or("plan is not an array")?;
+        ensure!(entries.len() == 2, "order {order}: {planned}");
+        ensure!(
+            entries.iter().any(|entry| {
+                (entry["candidate"] == cache_alias.display().to_string()
+                    || entry["candidate"] == marker_alias.display().to_string())
+                    && entry["reason"] == "contains_checkout"
+            }),
+            "hardlink alias was not refused in plan, order {order}: {planned}"
+        );
+        ensure!(
+            entries.iter().any(|entry| {
+                entry["candidate"] == mixed.display().to_string() && entry["reason"].is_null()
+            }),
+            "mixed-root file was not eligible in plan, order {order}: {planned}"
+        );
+        let (skipped, actions) = outcome(&report(&run)?);
+        ensure!(
+            actions == [mixed.display().to_string()],
+            "wrong actions in order {order}: {actions:?}"
+        );
+        ensure!(
+            [cache_alias.as_path(), marker_alias.as_path()]
+                .iter()
+                .any(|path| path
+                    .to_str()
+                    .and_then(|text| skipped.get(text))
+                    .map(String::as_str)
+                    == Some("contains_checkout")),
+            "hardlink alias was not refused in reclaim, order {order}: {skipped:?}"
+        );
+        ensure!(
+            cache_alias.exists() && marker_alias.exists() && !mixed.exists(),
+            "wrong file survived in order {order}"
+        );
+        verdict.assert_clean()?;
+    }
+    Ok(())
 }
 
 /// The real binary unions two user sources, removes an overlapping inode

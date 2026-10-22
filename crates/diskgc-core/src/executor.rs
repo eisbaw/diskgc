@@ -474,23 +474,17 @@ impl Tier {
             let Some(Body::Filter(where_)) = library.get(name).map(|p| &p.body) else {
                 return Err(format!("--select `{expr}`: no filter profile `{name}`"));
             };
-            if is_negated {
-                if where_.predicates() == [crate::kind::PredicateName::IdleFor] {
-                    let bound = where_.idle_for.expect("idle predicate present");
-                    idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
-                    continue;
-                }
-                if !matches!(kind, SourceKind::Fs(_))
-                    || !matches!(
-                        where_.predicates().as_slice(),
-                        [crate::kind::PredicateName::Has | crate::kind::PredicateName::HasNot]
-                    )
-                {
-                    return Err(not_yet(
-                        &format!("`!filter:{name}` (unsupported predicates)"),
-                        "task-16",
-                    ));
-                }
+            if is_negated && where_.predicates() == [crate::kind::PredicateName::IdleFor] {
+                let bound = where_.idle_for.expect("idle predicate present");
+                idle_before = Some(idle_before.map_or(bound, |old| old.min(bound)));
+                continue;
+            }
+            if matches!(kind, SourceKind::Fs(_))
+                && matches!(
+                    where_.predicates().as_slice(),
+                    [crate::kind::PredicateName::Has | crate::kind::PredicateName::HasNot]
+                )
+            {
                 let SourceKind::Fs(find) = &mut kind else {
                     unreachable!()
                 };
@@ -503,9 +497,15 @@ impl Tier {
                         .expect("entry predicate present")
                         .clone(),
                     has: where_.has.is_some(),
-                    negated: true,
+                    negated: is_negated,
                 });
                 continue;
+            }
+            if is_negated {
+                return Err(not_yet(
+                    &format!("`!filter:{name}` (unsupported predicates)"),
+                    "task-16",
+                ));
             }
             if where_.has.is_some() || where_.has_dir.is_some() || where_.has_not.is_some() {
                 return Err(not_yet(
@@ -2820,11 +2820,10 @@ fn scan_union_negated<H: Host>(
         .collect()
 }
 
-fn union_checkouts(sources: &[FsUnionSourceRef<'_>], candidate: &FsUnionCandidate) -> Checkouts {
-    if candidate
-        .found_by
+fn union_checkouts(sources: &[FsUnionSourceRef<'_>], admitted: &[usize]) -> Checkouts {
+    if admitted
         .iter()
-        .any(|(index, _)| sources[*index].checkouts == Checkouts::Refuse)
+        .any(|index| sources[*index].checkouts == Checkouts::Refuse)
     {
         Checkouts::Refuse
     } else {
@@ -2832,14 +2831,21 @@ fn union_checkouts(sources: &[FsUnionSourceRef<'_>], candidate: &FsUnionCandidat
     }
 }
 
-fn union_checkout_path(
-    candidate: &FsUnionCandidate,
-    checkouts: Checkouts,
-) -> Option<(usize, &Path, Skip)> {
-    candidate.found_by.iter().find_map(|(index, found)| {
-        checkout_metadata_below(checkouts, &found.root, &found.path)
-            .map(|skip| (*index, found.path.as_path(), skip))
-    })
+fn union_checkout_path<'a>(
+    sources: &[FsUnionSourceRef<'_>],
+    candidate: &'a FsUnionCandidate,
+    admitted: &[usize],
+) -> Option<(usize, &'a Path, Skip)> {
+    candidate
+        .found_by
+        .iter()
+        .filter(|(index, _)| {
+            admitted.contains(index) && sources[*index].checkouts == Checkouts::Refuse
+        })
+        .find_map(|(index, found)| {
+            checkout_metadata_below(Checkouts::Refuse, &found.root, &found.path)
+                .map(|skip| (*index, found.path.as_path(), skip))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2902,20 +2908,14 @@ fn plan_fs_union<H: Host>(
         if host.interrupted().is_some() {
             return planned;
         }
-        let checkouts = union_checkouts(&sources, candidate);
-        if let Some((index, path, skip)) = union_checkout_path(candidate, checkouts) {
-            let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
-            entry.profile = sources[index].profile.to_owned();
-            entry.checkouts = checkouts;
-            planned.skipped.push(entry);
-            continue;
-        }
-        let rules = Rules {
-            checkouts,
+        let evaluation_rules = Rules {
+            checkouts: Checkouts::Allow,
             ..*rules
         };
         let mut first_skip = None;
         let mut selected = None;
+        let mut admitted = Vec::new();
+        let mut checkout_marker = None;
         for (index, found) in &candidate.found_by {
             let source = &sources[*index];
             let excluded =
@@ -2940,14 +2940,19 @@ fn plan_fs_union<H: Host>(
             }
             let judge = fs_kind::Judge {
                 find: source.find,
-                rules: &rules,
+                rules: &evaluation_rules,
                 idle: source.idle,
                 dev,
             };
             match fs_kind::judge_one(host, &judge, found, &mut checker, deadline) {
                 Ok(Ok(tally)) => {
-                    selected = Some((*index, found.path.as_path(), tally));
-                    break;
+                    admitted.push(*index);
+                    if source.checkouts == Checkouts::Refuse && tally.contains_checkout {
+                        checkout_marker.get_or_insert((*index, found.path.as_path()));
+                    }
+                    if selected.is_none() {
+                        selected = Some((*index, found.path.as_path(), tally));
+                    }
                 }
                 Ok(Err(skip)) => {
                     first_skip.get_or_insert((*index, found.path.as_path(), skip));
@@ -2959,6 +2964,27 @@ fn plan_fs_union<H: Host>(
             }
         }
         if let Some((index, path, tally)) = selected {
+            let checkouts = union_checkouts(&sources, &admitted);
+            if checkouts == Checkouts::Refuse {
+                let refused = union_checkout_path(&sources, candidate, &admitted)
+                    .map(|(index, _, skip)| (index, skip));
+                if let Some((refusing_index, skip)) = refused.or_else(|| {
+                    checkout_marker.map(|(index, marker_path)| {
+                        (index,
+                        Skip::new(
+                            Reason::ContainsCheckout,
+                            marker_path.to_path_buf(),
+                            "an admitted source refuses a version-control checkout in this candidate",
+                        ))
+                    })
+                }) {
+                    let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                    entry.profile = sources[refusing_index].profile.to_owned();
+                    entry.checkouts = checkouts;
+                    planned.skipped.push(entry);
+                    continue;
+                }
+            }
             let source = &sources[index];
             let mut entry = plan_entry(tier, path, None, Some(tally.bytes));
             entry.profile = source.profile.to_owned();
@@ -2977,7 +3003,7 @@ fn plan_fs_union<H: Host>(
             log_skip(log, tier, &skip);
             let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
             entry.profile = sources[index].profile.to_owned();
-            entry.checkouts = checkouts;
+            entry.checkouts = sources[index].checkouts;
             planned.skipped.push(entry);
         }
     }
@@ -2997,7 +3023,7 @@ fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules
             .filter(|source| source.checkouts == Checkouts::Allow)
         {
             log(&format!(
-                "{}: profile `{}` says `checkouts: allow`; in a union, a candidate also found by any refusing source uses `checkouts: refuse`",
+                "{}: profile `{}` says `checkouts: allow`; in a union, a candidate also admitted by any refusing source uses `checkouts: refuse`",
                 tier.name, source.profile
             ));
         }
@@ -4150,7 +4176,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Action::Delete { make_writable } => {
                     let done = fs_kind::reclaim_alternatives_checked(
                         self.host,
-                        &[fs_kind::Alternative { judge, found }],
+                        &[fs_kind::Alternative {
+                            judge,
+                            found,
+                            checkouts: judge.rules.checkouts,
+                        }],
                         *make_writable,
                         checker,
                         self.deadline,
@@ -4307,18 +4337,14 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 untallied.push(candidate);
                 continue;
             }
-            let checkouts = union_checkouts(&sources, candidate);
-            if let Some((index, path, skip)) = union_checkout_path(candidate, checkouts) {
-                let profile = sources[index].profile;
-                self.skip_as(path, profile, &skip);
-                continue;
-            }
-            let rules = Rules {
-                checkouts,
+            let evaluation_rules = Rules {
+                checkouts: Checkouts::Allow,
                 ..*base_rules
             };
             let mut first_skip = None;
             let mut tally = None;
+            let mut admitted = Vec::new();
+            let mut checkout_marker = None;
             let mut budget_exhausted = false;
             for (index, found) in &candidate.found_by {
                 let source = &sources[*index];
@@ -4353,12 +4379,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 }
                 let judge = fs_kind::Judge {
                     find: source.find,
-                    rules: &rules,
+                    rules: &evaluation_rules,
                     idle: source.idle,
                     dev: self.measured.dev,
                 };
                 let started = self.host.now();
-                let result = fs_kind::tally(self.host, &judge, found, tally_until);
+                let result = fs_kind::tally_for_union(self.host, &judge, found, tally_until);
                 self.record_overrun("tally", &found.path, started, self.host.now());
                 if self.past_deadline() {
                     return self.stop(&Stop::DeadlinePassed {
@@ -4367,8 +4393,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 }
                 match result {
                     Ok(Ok(value)) => {
-                        tally = Some(value);
-                        break;
+                        admitted.push(*index);
+                        if source.checkouts == Checkouts::Refuse && value.contains_checkout {
+                            checkout_marker.get_or_insert((*index, found.path.as_path()));
+                        }
+                        if tally.is_none() {
+                            tally = Some(value);
+                        }
                     }
                     Ok(Err(skip)) => {
                         first_skip.get_or_insert((*index, found.path.as_path(), skip));
@@ -4382,9 +4413,29 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     Err(stop) => return self.stop(&stop),
                 }
             }
+            if budget_exhausted {
+                continue;
+            }
             if let Some(tally) = tally {
+                if union_checkouts(&sources, &admitted) == Checkouts::Refuse {
+                    let refusal = union_checkout_path(&sources, candidate, &admitted)
+                        .map(|(index, _, skip)| (index, skip))
+                        .or_else(|| {
+                            checkout_marker.map(|(index, marker_path)| {
+                                (index, Skip::new(
+                                    Reason::ContainsCheckout,
+                                    marker_path.to_path_buf(),
+                                    "an admitted source refuses a version-control checkout in this candidate",
+                                ))
+                            })
+                        });
+                    if let Some((refusing_index, skip)) = refusal {
+                        self.skip_as(path, sources[refusing_index].profile, &skip);
+                        continue;
+                    }
+                }
                 tallied.push((candidate, tally));
-            } else if !budget_exhausted {
+            } else {
                 let (index, path, skip) =
                     first_skip.expect("a union candidate has a tally verdict");
                 self.skip_as(path, sources[index].profile, &skip);
@@ -4451,8 +4502,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     .map_or_else(|| "not tallied".to_owned(), |t| format_bytes(t.bytes)),
                 candidate.found_by.len(),
             ));
-            let rules = Rules {
-                checkouts: union_checkouts(&sources, candidate),
+            let evaluation_rules = Rules {
+                checkouts: Checkouts::Allow,
                 ..*base_rules
             };
             let alternatives: Vec<_> = candidate
@@ -4463,11 +4514,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     fs_kind::Alternative {
                         judge: fs_kind::Judge {
                             find: source.find,
-                            rules: &rules,
+                            rules: &evaluation_rules,
                             idle: source.idle,
                             dev: self.measured.dev,
                         },
                         found,
+                        checkouts: source.checkouts,
                     }
                 })
                 .collect();

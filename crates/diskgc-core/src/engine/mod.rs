@@ -310,6 +310,14 @@ impl WalkRecord {
         std::iter::once(&self.root).chain(self.listings.iter().flatten())
     }
 
+    /// Whether the checked tree contains any version-control checkout
+    /// marker. Union selection uses the same names as the walk's guard when
+    /// it combines checkout policies after term predicates are known.
+    pub fn contains_checkout(&self) -> bool {
+        self.all_entries()
+            .any(|entry| is_checkout_marker(&entry.name))
+    }
+
     /// (device, inode) of every entry, the candidate first: what the in-use
     /// check matches processes against (docs/safety.md, In use).
     pub fn objects(&self) -> impl Iterator<Item = DevIno> + '_ {

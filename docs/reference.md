@@ -653,11 +653,13 @@ supported idle and version filters, including negated idle filters, and unions
 of positive filesystem sources with exactly the same `delete` action and
 options. A filesystem union discovers each source separately, deduplicates
 matching candidates by inode identity, and applies `checkouts: refuse` to a
-candidate if any source that found it refuses checkouts. It rechecks each
-term under the candidate lock. Command and other-kind unions and positive
-entry filters are deferred. Filesystem and Cargo sources can use negated
-profiles. Filesystem terms can use
-`!filter:` with a single `has` or `has_not` predicate. It refuses
+candidate if any source term that admits it after its filters refuses
+checkouts. It rechecks each
+term under the candidate lock. Command and other-kind unions are deferred.
+Filesystem and Cargo sources can use negated profiles. Filesystem terms can
+use either polarity of a filter with a single `has` or `has_not` predicate;
+the entry is checked again under the candidate lock. Mixed-predicate entry
+filters remain deferred. It refuses
 a nonempty `ipc: live-only` until its run-time check is implemented (tasks 16
 and 21). Root mode
 requires a protected config with `owners:`, resolves those owners before

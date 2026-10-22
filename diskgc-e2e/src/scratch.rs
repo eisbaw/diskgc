@@ -247,6 +247,18 @@ impl Scratch {
         Ok(path)
     }
 
+    /// Creates a second name for an existing scratch file. Checks the source
+    /// and destination parent mounts before linking, then the new name's
+    /// mount after linking.
+    pub fn hard_link(&self, from_rel: &str, to_rel: &str) -> Result<PathBuf, String> {
+        let from = self.for_existing("hard_link", from_rel);
+        let to = self.for_create("hard_link", to_rel);
+        std::fs::hard_link(&from, &to)
+            .map_err(|e| format!("hard_link {} -> {}: {e}", from.display(), to.display()))?;
+        self.require_on_scratch("hard_link", &to, false);
+        Ok(to)
+    }
+
     /// Changes the mode of the existing non-symlink entry `rel`.
     pub fn chmod(&self, rel: &str, mode: u32) -> Result<(), String> {
         let path = self.for_existing("chmod", rel);

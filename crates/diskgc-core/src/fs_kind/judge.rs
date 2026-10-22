@@ -86,6 +86,9 @@ pub struct Tally {
     pub entries: usize,
     /// Their allocated bytes, each object once ([`Walked::bytes`]).
     pub bytes: u64,
+    /// Checkout markers in the checked tree, used when a union combines
+    /// only the policies of terms that actually admitted this candidate.
+    pub contains_checkout: bool,
     pub source_evidence: Option<SourceEvidence>,
 }
 
@@ -103,6 +106,7 @@ impl Walked {
             newest_change: self.newest_change,
             entries: self.record.entries(),
             bytes: self.bytes(),
+            contains_checkout: self.record.contains_checkout(),
             source_evidence: self.source_evidence.clone(),
         }
     }
@@ -163,8 +167,9 @@ impl Judge<'_> {
 
     /// Steps 3 and 4, what the candidate holds: the source's own `where`
     /// and the eligibility walk of `candidate` (the object `found`, reached
-    /// as `reached`), with the idle requirement when `idle` (the tally
-    /// orders without it).
+    /// as `reached`), with the idle requirement when `idle`. Single-source
+    /// ordering tallies omit idle; union pre-queue tallies include it so an
+    /// ineligible term cannot impose its checkout policy.
     pub(crate) fn contents<H: Host>(
         &self,
         host: &H,
@@ -1318,7 +1323,14 @@ pub(super) fn source_where<H: Host>(
     let holds = |file: &str| -> Judged<bool> {
         check_deadline(host, deadline, &at.join(file))?;
         match host.statx(Base::Dir(&fd), Path::new(file)) {
-            Ok(stat) => Ok(Ok(stat.file_type == Some(FileType::Regular))),
+            Ok(stat) => match stat.file_type {
+                Some(file_type) => Ok(Ok(file_type == FileType::Regular)),
+                None => Ok(Err(Skip::new(
+                    Reason::UnsupportedFs,
+                    at.join(file),
+                    "source where: kernel did not report entry type",
+                ))),
+            },
             Err(e) if e.is(Errno::ENOENT) => Ok(Ok(false)),
             Err(e) => Ok(Err(skip_or_stop(at.join(file), "stat", &e)?)),
         }

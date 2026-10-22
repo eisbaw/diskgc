@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
-use diskgc_core::engine::Rules;
+use diskgc_core::engine::{Checkouts, Rules};
 use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::fs_kind::{self, Find, Judge};
+use diskgc_core::fs_kind::{self, EntryFilter, Find, Judge};
 use diskgc_core::host::Host;
 use diskgc_core::inuse::{Checker, REUSE_LIMIT};
 use diskgc_core::outcome::{ReclaimEnd, Stop};
@@ -99,6 +99,33 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["union-b*", "union-shared*"], type: dir}
   action: delete
   examples: {match: [/tmp/union-b]}
+- name: metadata-root-allow
+  find: {roots: [/tmp], paths: [repo/.git/cache-file], type: file}
+  checkouts: allow
+  action: delete
+  examples: {match: [/tmp/repo/.git/cache-file]}
+- name: metadata-root-refuse
+  find: {roots: [/tmp/repo/.git], paths: [cache-file], type: file}
+  action: delete
+  examples: {match: [/tmp/repo/.git/cache-file]}
+- name: alias-cache-allow
+  find: {roots: [/tmp], paths: [cache-file], type: file}
+  checkouts: allow
+  action: delete
+  examples: {match: [/tmp/cache-file]}
+- name: alias-cache-refuse
+  find: {roots: [/tmp], paths: [cache-file], type: file}
+  action: delete
+  examples: {match: [/tmp/cache-file]}
+- name: alias-marker-allow
+  find: {roots: [/tmp], paths: [.git], type: file}
+  checkouts: allow
+  action: delete
+  examples: {match: [/tmp/.git]}
+- name: alias-marker-refuse
+  find: {roots: [/tmp], paths: [.git], type: file}
+  action: delete
+  examples: {match: [/tmp/.git]}
 - name: union-recent
   find: {roots: [/tmp], paths: ["union-clock*"], type: dir}
   action: delete
@@ -222,7 +249,7 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
 }
 
 #[test]
-fn negated_entry_filters_are_rechecked_after_candidate_lock() {
+fn entry_filters_are_rechecked_after_candidate_lock() {
     for (selection, tree, event, candidate) in [
         (
             "profile:pytest-of-dir && !filter:has-tag",
@@ -234,6 +261,18 @@ fn negated_entry_filters_are_rechecked_after_candidate_lock() {
             "profile:pytest-of-dir && !filter:has-not-tag",
             "  /tmp/pytest-of-a: {.: {}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n",
             "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, remove: /tmp/pytest-of-a/CACHEDIR.TAG}\n",
+            "/tmp/pytest-of-a",
+        ),
+        (
+            "profile:pytest-of-dir && filter:has-tag",
+            "  /tmp/pytest-of-a: {.: {}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n",
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, remove: /tmp/pytest-of-a/CACHEDIR.TAG}\n",
+            "/tmp/pytest-of-a",
+        ),
+        (
+            "profile:pytest-of-dir && filter:has-not-tag",
+            "  /tmp/pytest-of-a: {.: {}, f: {size: 1M}}\n",
+            "events:\n  - {at: {op: flock, path: /tmp/pytest-of-a, when: after}, create: /tmp/pytest-of-a/CACHEDIR.TAG}\n",
             "/tmp/pytest-of-a",
         ),
     ] {
@@ -250,6 +289,312 @@ fn negated_entry_filters_are_rechecked_after_candidate_lock() {
         assert!(exists(&host, candidate));
         assert!(host.unfired_events().is_empty());
     }
+}
+
+#[test]
+fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
+    let tree = "  /tmp/union-shared-clear: {.: {}, .git: {HEAD: {size: 1K}}, f: {size: 1M}}\n  /tmp/union-shared-tagged: {.: {}, .git: {HEAD: {size: 1K}}, CACHEDIR.TAG: {size: 1K}, f: {size: 1M}}\n";
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && filter:has-tag)",
+        "(profile:union-refuse && filter:has-tag) || profile:union-allow",
+    ] {
+        let planned_host = host(&yaml("", tree, ""));
+        let request = tmp(selection);
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert!(
+            plan.plan.iter().any(|entry| {
+                entry.candidate == Path::new("/tmp/union-shared-clear")
+                    && entry.reason.is_none()
+                    && entry.checkouts == diskgc_core::engine::Checkouts::Allow
+            }),
+            "{selection}: {plan:#?}"
+        );
+        assert!(
+            plan.plan.iter().any(|entry| {
+                entry.candidate == Path::new("/tmp/union-shared-tagged")
+                    && entry.reason == Some("contains_checkout")
+            }),
+            "{selection}: {plan:#?}"
+        );
+
+        let reclaim_host = host(&yaml("", tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        assert_eq!(
+            actions(&report),
+            ["/tmp/union-shared-clear"],
+            "{selection}: {report:#?}"
+        );
+        assert!(!exists(&reclaim_host, "/tmp/union-shared-clear"));
+        assert!(exists(&reclaim_host, "/tmp/union-shared-tagged"));
+        assert_eq!(unlinked_below(&reclaim_host, "/tmp/union-shared-tagged"), 0);
+        assert!(
+            !reclaim_host.trace().iter().any(|call| {
+                call.op == Op::Flock
+                    && call.path.as_deref() == Some(Path::new("/tmp/union-shared-tagged"))
+            }),
+            "a checkout vetoed before the ranked reclaim queue: {selection}"
+        );
+    }
+}
+
+#[test]
+fn union_checkout_policy_rechecks_filter_under_candidate_lock() {
+    let tree = "  /tmp/union-shared-clear: {.: {}, .git: {HEAD: {size: 1K}}, f: {size: 1M}}\n";
+    let event = "events:\n  - {at: {op: flock, path: /tmp/union-shared-clear, when: after}, create: /tmp/union-shared-clear/CACHEDIR.TAG}\n";
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && filter:has-tag)",
+        "(profile:union-refuse && filter:has-tag) || profile:union-allow",
+    ] {
+        let host = host(&yaml("", tree, event));
+        let report = ensure(&host, &tmp(selection));
+        assert!(report.actions.is_empty(), "{selection}: {report:#?}");
+        assert!(
+            report.skipped.iter().any(|entry| {
+                entry.candidate == Path::new("/tmp/union-shared-clear")
+                    && entry.reason == "contains_checkout"
+            }),
+            "{selection}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/union-shared-clear"));
+        assert_eq!(unlinked_below(&host, "/tmp/union-shared-clear"), 0);
+        assert!(host.unfired_events().is_empty());
+    }
+}
+
+#[test]
+fn union_checkout_policy_excludes_idle_failed_refusing_term_before_ranking() {
+    let tree = "  /tmp/union-shared-recent: {.: {}, .git: {HEAD: {size: 1K}}, f: {size: 1M}}\n";
+    for selection in [
+        "profile:union-allow || (profile:union-refuse && filter:idle-1d)",
+        "(profile:union-refuse && filter:idle-1d) || profile:union-allow",
+    ] {
+        let host = host(&yaml("", tree, ""));
+        let report = ensure(&host, &tmp(selection));
+        assert_eq!(
+            actions(&report),
+            ["/tmp/union-shared-recent"],
+            "{selection}: {report:#?}"
+        );
+        assert!(!exists(&host, "/tmp/union-shared-recent"));
+    }
+}
+
+#[test]
+fn union_checkout_metadata_uses_only_admitted_refusing_source_roots() {
+    let tree = "  /tmp/repo/.git/cache-file: {size: 1M}\n";
+    for selection in [
+        "profile:metadata-root-allow || profile:metadata-root-refuse",
+        "profile:metadata-root-refuse || profile:metadata-root-allow",
+    ] {
+        let request = tmp(selection);
+        let planned_host = host(&yaml("", tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert!(
+            plan.plan.iter().any(|entry| {
+                entry.candidate == Path::new("/tmp/repo/.git/cache-file")
+                    && entry.reason.is_none()
+                    && entry.checkouts == Checkouts::Refuse
+            }),
+            "{selection}: {plan:#?}"
+        );
+
+        let reclaim_host = host(&yaml("", tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        assert_eq!(
+            actions(&report),
+            ["/tmp/repo/.git/cache-file"],
+            "{selection}: {report:#?}"
+        );
+        assert!(!exists(&reclaim_host, "/tmp/repo/.git/cache-file"));
+    }
+}
+
+#[test]
+fn union_checkout_marker_uses_every_admitted_refusing_hardlink_alias() {
+    let tree = "  /tmp/cache-file: {size: 1M}\n  /tmp/.git: {link: /tmp/cache-file}\n";
+    for selection in [
+        "profile:alias-cache-allow || profile:alias-marker-refuse",
+        "profile:alias-marker-refuse || profile:alias-cache-allow",
+    ] {
+        let request = tmp(selection);
+        let planned_host = host(&yaml("", tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert_eq!(plan.plan.len(), 1, "{selection}: {plan:#?}");
+        assert_eq!(
+            plan.plan[0].reason,
+            Some("contains_checkout"),
+            "{selection}: {plan:#?}"
+        );
+        assert_eq!(plan.plan[0].profile, "alias-marker-refuse");
+
+        let reclaim_host = host(&yaml("", tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        assert!(report.actions.is_empty(), "{selection}: {report:#?}");
+        assert_eq!(report.skipped.len(), 1, "{selection}: {report:#?}");
+        assert_eq!(report.skipped[0].reason, "contains_checkout");
+        assert_eq!(report.skipped[0].profile, "alias-marker-refuse");
+        assert!(exists(&reclaim_host, "/tmp/cache-file"));
+        assert!(exists(&reclaim_host, "/tmp/.git"));
+        assert!(calls(&reclaim_host, Op::Unlinkat).is_empty());
+    }
+
+    // The marker visible only to an allowing source must not veto the
+    // refusing source's clean alias of the same inode.
+    for selection in [
+        "profile:alias-marker-allow || profile:alias-cache-refuse",
+        "profile:alias-cache-refuse || profile:alias-marker-allow",
+    ] {
+        let request = tmp(selection);
+        let planned_host = host(&yaml("", tree, ""));
+        let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
+        assert_eq!(plan.plan.len(), 1, "{selection}: {plan:#?}");
+        assert!(plan.plan[0].reason.is_none(), "{selection}: {plan:#?}");
+        let reclaim_host = host(&yaml("", tree, ""));
+        let report = ensure(&reclaim_host, &request);
+        assert_eq!(report.actions.len(), 1, "{selection}: {report:#?}");
+    }
+}
+
+#[test]
+fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
+    let tree = "  /tmp/cache-file: {size: 1M}\n  /tmp/.git: {link: /tmp/cache-file}\n";
+    for marker_first in [false, true] {
+        let host = host(&yaml("", tree, ""));
+        let cache_find = Find::new(
+            &["cache-file".to_owned()],
+            EntryType::File,
+            &Where::default(),
+            1000,
+        );
+        let marker_find = Find::new(
+            &[".git".to_owned()],
+            EntryType::File,
+            &Where::default(),
+            1000,
+        );
+        let roots = [PathBuf::from("/tmp")];
+        let (cache_discovered, cache_stop) = fs_kind::discover(&host, &roots, &cache_find, None);
+        let (marker_discovered, marker_stop) = fs_kind::discover(&host, &roots, &marker_find, None);
+        assert!(cache_stop.is_none() && marker_stop.is_none());
+        let cache_found = cache_discovered.candidates[0]
+            .1
+            .as_ref()
+            .expect("cache alias");
+        let marker_found = marker_discovered.candidates[0]
+            .1
+            .as_ref()
+            .expect("marker alias");
+        let owners = [1000];
+        let rules = Rules {
+            checkouts: Checkouts::Allow,
+            ..Rules::new(&owners)
+        };
+        let dev = host.stat_path(Path::new("/tmp")).expect("/tmp").dev;
+        let idle = diskgc_core::profile::IdleWindow::default();
+        let cache = fs_kind::Alternative {
+            judge: Judge {
+                find: &cache_find,
+                rules: &rules,
+                idle,
+                dev,
+            },
+            found: cache_found,
+            checkouts: Checkouts::Allow,
+        };
+        let marker = fs_kind::Alternative {
+            judge: Judge {
+                find: &marker_find,
+                rules: &rules,
+                idle,
+                dev,
+            },
+            found: marker_found,
+            checkouts: Checkouts::Refuse,
+        };
+        let alternatives = if marker_first {
+            [marker, cache]
+        } else {
+            [cache, marker]
+        };
+        let mut checker = Checker::new(&rules, REUSE_LIMIT);
+        let done = fs_kind::reclaim_alternatives_checked(
+            &host,
+            &alternatives,
+            false,
+            &mut checker,
+            None,
+            &mut |_, _| Ok(None),
+        );
+        assert!(
+            matches!(done.end, ReclaimEnd::Skipped(ref skip) if skip.reason.as_str() == "contains_checkout"),
+            "marker_first={marker_first}: {done:?}"
+        );
+        assert!(exists(&host, "/tmp/cache-file"));
+        assert!(exists(&host, "/tmp/.git"));
+        assert!(calls(&host, Op::Unlinkat).is_empty());
+    }
+}
+
+#[test]
+fn no_admitted_union_term_reports_filtered_even_inside_checkout_metadata() {
+    let host = host(&yaml(
+        "",
+        "  /tmp/repo/.git/objects: {.: {}, payload: {size: 1M}}\n",
+        "",
+    ));
+    let mut find = Find::new(
+        &["repo/.git/objects".to_owned()],
+        EntryType::Dir,
+        &Where::default(),
+        1000,
+    );
+    find.entry_filters.push(EntryFilter {
+        name: "has-tag".to_owned(),
+        entry: "CACHEDIR.TAG".to_owned(),
+        has: true,
+        negated: false,
+    });
+    let (discovered, stopped) = fs_kind::discover(&host, &[PathBuf::from("/tmp")], &find, None);
+    assert!(stopped.is_none(), "{stopped:?}");
+    let found = discovered.candidates[0].1.as_ref().expect("candidate");
+    let owners = [1000];
+    let rules = Rules {
+        checkouts: Checkouts::Allow,
+        ..Rules::new(&owners)
+    };
+    let judge = Judge {
+        find: &find,
+        rules: &rules,
+        idle: diskgc_core::profile::IdleWindow::default(),
+        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+    };
+    let alternatives = [
+        fs_kind::Alternative {
+            judge,
+            found,
+            checkouts: Checkouts::Refuse,
+        },
+        fs_kind::Alternative {
+            judge,
+            found,
+            checkouts: Checkouts::Refuse,
+        },
+    ];
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let done = fs_kind::reclaim_alternatives_checked(
+        &host,
+        &alternatives,
+        false,
+        &mut checker,
+        None,
+        &mut |_, _| Ok(None),
+    );
+    assert!(
+        matches!(done.end, ReclaimEnd::Skipped(ref skip) if skip.reason.as_str() == "filtered"),
+        "{done:?}"
+    );
+    assert!(exists(&host, "/tmp/repo/.git/objects"));
+    assert_eq!(unlinked_below(&host, "/tmp/repo/.git/objects"), 0);
 }
 
 #[test]

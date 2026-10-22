@@ -47,6 +47,7 @@ pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except}
 pub use plan::{Planned, judge_one, plan};
 pub use reclaim::{
     Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked, tally,
+    tally_for_union,
 };
 pub use source_anchor::SourceEvidence;
 
