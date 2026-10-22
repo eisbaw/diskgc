@@ -243,6 +243,7 @@ enum Prose {
 const PROSE: &[(&str, Prose)] = &[
     ("profile:", Prose::Fragment),
     ("filter:", Prose::Fragment),
+    ("!profile:", Prose::Fragment),
     ("profile:NAME", Prose::Fragment),
     ("!filter:…", Prose::Fragment),
     ("!profile:…", Prose::Fragment),

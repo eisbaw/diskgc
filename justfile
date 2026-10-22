@@ -119,9 +119,10 @@ _gcroot-dev:
 gcroots-drop:
     rm -rf .gcroots
 
-# Property tests with many cases.
+# Safety and integrated selection properties with many cases.
 soak:
     DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test properties --locked
+    DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test selection_reference --locked
 
 # cargo-fuzz targets, in a nightly dev shell.
 fuzz:

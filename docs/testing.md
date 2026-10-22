@@ -428,16 +428,25 @@ it under `crates/diskgc-model/tests/regressions/`, where it is replayed.
 Regression files pin the host-model schema and are migrated when it
 changes.
 
-The 0.1 property suite runs five generated properties with 32 cases each in
-`just check` and 1,024 each in `just soak` (`DISKGC_PROPERTY_CASES` overrides
-the count), plus a saved regression replay. It covers independent checks of
+The 0.1 property suite runs five safety properties and three integrated
+filesystem selection properties with 32 cases each in `just check` and 1,024
+each in `just soak` (`DISKGC_PROPERTY_CASES` overrides the count), plus saved
+regression replay. It covers independent checks of
 the filesystem deletion trace against modelled paths, owners, symlinks and
 mounts; preservation of generated Cargo lock files during reclaim; exit-code
 precedence; supported filesystem selection expressions; and ordered dry-run
-agreement on stable, non-overlapping candidates. The index-authority property and
-indexed/best-fit dry-run cases follow the index implementation; the complete
-random profile/expression selection reference belongs to TASK-16. A failing
-generated case prints its shrunk host model as YAML for a regression fixture.
+agreement on stable, non-overlapping candidates. The integrated selection
+generator varies YAML source path shapes, source `where`, known `has` and
+`has_not` evidence, expressions and nested ModelHost trees. It compares the
+dry-run eligible set with an independent finite-path oracle, checks narrowing
+and union order, and verifies stable reclaim actions stay within that set.
+The saved rejected-outer-`where` vector is replayed. Protection is injected
+as a bound source in this test; it does not exercise config binding. The
+generator uses one owner and known entry evidence. Unknown evidence, retention
+guards, owner expansion, other kinds/actions and concurrent races remain
+TASK-16 coverage gaps. The index-authority property and indexed/best-fit
+dry-run cases follow the index implementation. A failing generated case prints
+its shrunk host model as YAML for a regression fixture.
 
 **Profile golden sets.** Each built-in profile has a fixture tree and a
 golden set of what it matches there. Any change to that set fails CI unless

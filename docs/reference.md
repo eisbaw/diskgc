@@ -995,7 +995,11 @@ fixture-only parser catalog; that deletion profile is not shipped:
   there is no `**` or implicit any-depth search. Profiles for project
   artifacts list the supported depths or take each project as a root. A
   deeper artifact outside those patterns is not found, even when a shallower
-  one has the same name.
+  one has the same name. When a source finds an outer candidate, it does not
+  descend into that candidate to find a nested match of the same source. A
+  path that matches a pattern but fails the source's own `where` is not a
+  candidate, so discovery may continue to a deeper pattern. `!profile:` and
+  `protect` ignore that `where` and use the outer raw match for overlap.
 - **`||` is a union**; all source profiles in one expression share one kind
   and one action, so `a || b` and `b || a` select and remove exactly the
   same. Different actions belong in different tiers.

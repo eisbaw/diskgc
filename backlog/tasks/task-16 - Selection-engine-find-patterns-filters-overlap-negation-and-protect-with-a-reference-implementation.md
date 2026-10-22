@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 14:28'
+updated_date: '2026-10-22 17:54'
 labels:
   - wave-2
   - irreversible
@@ -28,9 +28,9 @@ Why: what gets selected must equal the documented set semantics exactly. Write t
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Property test: eligible set equals the reference implementation for random profiles, expressions and trees
-- [ ] #2 Property test: ! and protect never add a candidate; a || b equals b || a
+- [x] #2 Property test: ! and protect never add a candidate; a || b equals b || a
 - [ ] #3 profile:tmp-entry && !profile:claude-code-tmp excludes /tmp/claude-1000 as a whole (model test with both written as user profiles in the fixture)
-- [ ] #4 The any-depth rule is decided and documented in docs/reference.md
+- [x] #4 The any-depth rule is decided and documented in docs/reference.md
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -117,6 +117,10 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 retention-negation contract correction: the earlier note listing negated entry+version conjunctions as unsupported future work is superseded for retention predicates. keep_newest and link/current/installed guards are non-negatable safety rules: static selection validation now rejects !filter containing them, including mixed has+guard. Positive guards and known-evidence complements remain valid. Focused core static/property tests and disposable real-binary check/ensure no-delete E2E passed after correcting a fixture config-name collision. The first exact just e2e attempt stopped at rustfmt; formatting has been corrected, and a fresh full gate plus parallel QA/MPED re-review are pending. TASK-111 remains a prerequisite for the separate union-wide retention veto; TASK-16 AC/DoD stay open.
 
 2026-10-22 retention-negation checkpoint: exact fresh nix develop -c just e2e exited 0 after final formatting and architecture fixes. QA GO: Python 4/4, workspace Rust tests, Clippy deny-warnings, both fmt checks, Nix container 218/218, Docker-dind 7/7, and all five VM checks passed. MPED re-review GO after exhaustive predicate classification and honest TASK-111 documentation. This checkpoint is a partial implementation only; TASK-111 and the full random-profile reference contract still block TASK-16 completion.
+
+2026-10-22 integrated random-reference slice in tmp/worktrees/task16-integrated-reference (pending parent integration/gate): independent finite-path oracle derives eligible sets from generated YAML source profiles, nested ModelHost trees, source has predicates, has/has_not filters and complements, unions, !profile and protect. 1024 deterministic shrunk cases each passed for dry-run equality, !/protect monotonicity and union order, and ModelHost reclaim actions within oracle eligible set (equal when candidates do not overlap). Saved shrunk b0/y0 regression: positive discovery descends past outer raw pattern rejected by source where.has, while !profile/protect ignore where and exclude via the raw outer match. docs/reference.md clarified that rule. Mutating fs_kind::discover where-false return from false to true makes the regression fail 0/1; mutation reverted and focused suite passed 4/4. The generator currently covers filesystem delete, known entry evidence and one owner; unknown evidence, retention guards, cross-owner root expansion, Cargo/command actions and concurrent races remain outside this slice. Full just e2e and parallel QA/MPED review remain for parent. AC/DoD left unchecked pending integrated gate and broader coverage judgement.
+
+2026-10-22 integrated-reference checkpoint after parent gate: exact nix develop -c just e2e exited 0 on stable tree. QA GO: both fmt checks, Python 4/4, Clippy, workspace Cargo/doctests 919 passed +1 ignored, selection_reference 4/4 at default 32 cases, Nix E2E 102/102, fast Nix containers 219/219, Docker 7/7, all five VMs; post-gate git diff --check clean. Separately, 1024 deterministic cases per generated property passed 4/4 in 52.20s; deliberate discovery mutation stopping at a source-where-rejected outer path failed the saved regression and was reverted. MPED GO for this bounded slice, Compass conditional GO with domain clarification. Earlier exact gates exited 101 at new-test Clippy warnings and then at the docs-expression classification; both causes fixed, final gate clean. AC2 monotonicity/union property and AC4 explicit-depth/nested rule are checked. TASK-16 remains In Progress: integrated oracle covers fs delete, seven path shapes, known marker evidence and one owner; AC1 broader random-selection contract and AC3 user-profile Claude fixture remain unchecked, as do config protection binding, unknown evidence, retention guards, other kinds/actions and races. No host data deleted. Broad fuzz/mutation/sanitizer gate not run.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
