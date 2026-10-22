@@ -31,10 +31,27 @@
         "type": "github"
       }
     },
+    "nixpkgs515": {
+      "locked": {
+        "lastModified": 1790723065,
+        "narHash": "sha256-zeYMhxZO8Hs5vdRJ3vo9XCdbwctFjEuUoLW1+qTbgy0=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "6f3b13fcf904691a274955cc80c9f2ed655ff6a9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "6f3b13fcf904691a274955cc80c9f2ed655ff6a9",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
         "nixpkgs": "nixpkgs",
+        "nixpkgs515": "nixpkgs515",
         "rust-overlay": "rust-overlay",
         "zephyr-src": "zephyr-src"
       }

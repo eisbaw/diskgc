@@ -157,15 +157,16 @@ fn pidfd_release(host: &LinuxHost) -> Result<(), String> {
 /// Measure the real process scanner while short-lived children appear, then
 /// prove that a scan after all children are reaped can clear an unused tree.
 /// This runs only in the disposable E2E container. Each worker stops
-/// launching children after 500 ms or 64 launches; the E2E runner bounds
-/// the whole test if a child itself cannot exit promptly.
+/// launching children after 500 ms or 64 launches; the probe takes bounded
+/// scan samples until one contains a full child lifetime. The E2E runner
+/// bounds the whole test if a child itself cannot exit promptly.
 fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use diskgc_core::engine::{Candidate, Rules, walk};
     use diskgc_core::host::MonoTime;
-    use diskgc_core::inuse::{Checker, Options, scan};
+    use diskgc_core::inuse::{Checker, Options, Scan, scan};
     use diskgc_core::resolve::{Want, resolve};
 
     /// The same CLOCK_BOOTTIME representation as LinuxHost::now, so these
@@ -183,6 +184,25 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         after_spawn: MonoTime,
         after_wait: MonoTime,
     }
+
+    fn complete_events_in_scan(scan: &Scan, events: &[ChildEvent]) -> usize {
+        let end = scan
+            .started()
+            .checked_add(scan.took())
+            .expect("scan end fits in CLOCK_BOOTTIME");
+        events
+            .iter()
+            .filter(|event| {
+                scan.started() <= event.before_spawn
+                    && event.before_spawn <= event.after_spawn
+                    && event.after_spawn <= event.after_wait
+                    && event.after_wait <= end
+            })
+            .count()
+    }
+
+    const MAX_SCAN_SAMPLES: usize = 128;
+    const FORK_WINDOW: Duration = Duration::from_millis(500);
 
     let path = Path::new(candidate);
     let parent_path = path.parent().ok_or("candidate has no parent")?;
@@ -208,7 +228,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
             let completed = Arc::clone(&completed);
             let events = Arc::clone(&events);
             threads.push(std::thread::spawn(move || -> Result<(), String> {
-                let until = Instant::now() + Duration::from_millis(500);
+                let until = Instant::now() + FORK_WINDOW;
                 for _ in 0..64 {
                     if stop.load(Ordering::Relaxed) || Instant::now() >= until {
                         break;
@@ -245,6 +265,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
+        let overlap_deadline = Instant::now() + FORK_WINDOW;
         let before_scan = (
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
@@ -254,6 +275,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
         );
+        let mut samples = vec![(measured, before_scan, after_scan)];
         let mut checker = Checker::new(&rules, Duration::ZERO);
         let before_check = (
             launched.load(Ordering::SeqCst),
@@ -264,6 +286,42 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
         );
+        // A single scan can be shorter than one /bin/true lifetime, even
+        // when launches occur during it. Keep sampling the same real host
+        // while workers run; only timestamped full lifetimes count as proof.
+        // Both the worker storm and number of scans are bounded.
+        let mut sample_error = None;
+        if workers > 0 && samples[0].0.is_ok() {
+            while samples.len() < MAX_SCAN_SAMPLES && Instant::now() < overlap_deadline {
+                let witnessed = match events.lock() {
+                    Ok(events) => samples.iter().any(|(scan, _, _)| {
+                        scan.as_ref()
+                            .is_ok_and(|scan| complete_events_in_scan(scan, &events) > 0)
+                    }),
+                    Err(_) => {
+                        sample_error = Some("fork event lock poisoned".to_owned());
+                        break;
+                    }
+                };
+                if witnessed || completed.load(Ordering::SeqCst) >= workers * 64 {
+                    break;
+                }
+                let before = (
+                    launched.load(Ordering::SeqCst),
+                    completed.load(Ordering::SeqCst),
+                );
+                let next = scan(host, &options);
+                let after = (
+                    launched.load(Ordering::SeqCst),
+                    completed.load(Ordering::SeqCst),
+                );
+                let failed = next.is_err();
+                samples.push((next, before, after));
+                if failed {
+                    break;
+                }
+            }
+        }
         stop.store(true, Ordering::Relaxed);
         let mut worker_error = None;
         for thread in threads {
@@ -277,28 +335,43 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         if let Some(error) = worker_error {
             return Err(error);
         }
+        if let Some(error) = sample_error {
+            return Err(error);
+        }
         if workers > 0 && launched.load(Ordering::SeqCst) < workers {
             return Err(format!(
                 "only {} child launches occurred with {workers} workers",
                 launched.load(Ordering::SeqCst)
             ));
         }
-        let measured = measured.map_err(|e| format!("scan with {workers} workers: {e}"))?;
-        let scan_end = measured
-            .started()
-            .checked_add(measured.took())
-            .expect("scan end fits in CLOCK_BOOTTIME");
-        let events_within_scan = events
+        let events = events
             .lock()
-            .map_err(|_| "fork event lock poisoned".to_owned())?
-            .iter()
-            .filter(|event| {
-                measured.started() <= event.before_spawn
-                    && event.before_spawn <= event.after_spawn
-                    && event.after_spawn <= event.after_wait
-                    && event.after_wait <= scan_end
+            .map_err(|_| "fork event lock poisoned".to_owned())?;
+        let samples: Vec<_> = samples
+            .into_iter()
+            .enumerate()
+            .map(|(index, (scan, before, after))| {
+                scan.map(|scan| (scan, before, after))
+                    .map_err(|e| format!("scan with {workers} workers, sample {}: {e}", index + 1))
             })
-            .count();
+            .collect::<Result<_, _>>()?;
+        let sample_count = samples.len();
+        for (scan, _, _) in &samples {
+            let unsettled = scan
+                .notes()
+                .iter()
+                .any(|note| note.starts_with("process scan unsettled:"));
+            if unsettled && scan.check(&candidate, &record).is_ok() {
+                return Err(format!(
+                    "{workers}-worker scan was unsettled but cleared the candidate"
+                ));
+            }
+        }
+        let (measured, before_scan, after_scan) = samples
+            .iter()
+            .find(|(scan, _, _)| complete_events_in_scan(scan, &events) > 0)
+            .unwrap_or(&samples[0]);
+        let events_within_scan = complete_events_in_scan(measured, &events);
         let checker_blocked = checked
             .map_err(|e| format!("checker with {workers} workers: {e}"))?
             .is_err();
@@ -312,11 +385,6 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
             .notes()
             .iter()
             .any(|note| note.starts_with("process scan unsettled:"));
-        if unsettled && !blocked {
-            return Err(format!(
-                "{workers}-worker scan was unsettled but cleared the candidate"
-            ));
-        }
         if checker_unsettled && !checker_blocked {
             return Err(format!(
                 "{workers}-worker checker ended unsettled but cleared the candidate"
@@ -328,7 +396,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         let completed_during_check = after_check.1.saturating_sub(before_check.1);
         overlapped_scan |= workers > 0 && events_within_scan > 0;
         println!(
-            "workers={workers} launched={} completed={} events_within_scan={events_within_scan} launched_during_scan={launched_during_scan} completed_during_scan={completed_during_scan} launched_during_check={launched_during_check} completed_during_check={completed_during_check} listings={} took_ms={} unsettled={unsettled} blocked={blocked} checker_retried={retried} checker_unsettled={checker_unsettled} checker_blocked={checker_blocked}",
+            "workers={workers} samples={sample_count} launched={} completed={} events_within_scan={events_within_scan} launched_during_scan={launched_during_scan} completed_during_scan={completed_during_scan} launched_during_check={launched_during_check} completed_during_check={completed_during_check} listings={} took_ms={} unsettled={unsettled} blocked={blocked} checker_retried={retried} checker_unsettled={checker_unsettled} checker_blocked={checker_blocked}",
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
             measured.listings(),

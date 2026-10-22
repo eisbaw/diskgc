@@ -45,6 +45,7 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
 
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: check _gcroot-dev
@@ -59,6 +60,7 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.

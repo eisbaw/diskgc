@@ -3,6 +3,8 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Test-only NixOS package set for the pinned Linux 5.15 VM.
+    nixpkgs515.url = "github:NixOS/nixpkgs/6f3b13fcf904691a274955cc80c9f2ed655ff6a9";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -19,6 +21,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs515,
       crane,
       rust-overlay,
       zephyr-src,
@@ -33,6 +36,7 @@
         inherit system;
         overlays = [ (import rust-overlay) ];
       };
+      pkgs515 = import nixpkgs515 { inherit system; };
       inherit (pkgs) lib;
 
       # The product toolchain, pinned by rust-toolchain.toml (single source).
@@ -644,15 +648,17 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
-      mkVmPidfd = kernelPackages: expectedKernel: expectPollHup:
+      mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores:
         import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
-          inherit pkgs kernelPackages expectedKernel expectPollHup;
+          pkgs = vmPkgs;
+          inherit kernelPackages expectedKernel expectPollHup cores;
           image = e2eVmImage;
           underTest = e2eUnderTest;
         };
-      vmOldKernelPidfd = mkVmPidfd pkgs.linuxPackages_6_6 "6.6.158" false;
-      vmPidfdLinux61 = mkVmPidfd pkgs.linuxPackages_6_1 "6.1.189" false;
-      vmPidfdLinux612 = mkVmPidfd pkgs.linuxPackages_6_12 "6.12.112" true;
+      vmOldKernelPidfd = mkVmPidfd pkgs pkgs.linuxPackages_6_6 "6.6.158" false 2;
+      vmPidfdLinux61 = mkVmPidfd pkgs pkgs.linuxPackages_6_1 "6.1.189" false 2;
+      vmPidfdLinux612 = mkVmPidfd pkgs pkgs.linuxPackages_6_12 "6.12.112" true 2;
+      vmPidfdLinux515 = mkVmPidfd pkgs515 pkgs515.linuxPackages_5_15 "5.15.221" false 4;
     in
     {
       packages.${system} = {
@@ -664,6 +670,7 @@
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
+        vm-pidfd-linux-5-15 = vmPidfdLinux515;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
@@ -772,6 +779,7 @@
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
+        vm-pidfd-linux-5-15 = vmPidfdLinux515;
       };
 
       # The toolchain from rust-toolchain.toml (host target by default) plus

@@ -5,6 +5,7 @@
   kernelPackages,
   expectedKernel,
   expectPollHup,
+  cores,
 }:
 
 let
@@ -71,7 +72,7 @@ pkgs.testers.nixosTest {
     boot.kernelPackages = kernelPackages;
     virtualisation.podman.enable = true;
     # The scan and fork workers need separate vCPUs to overlap reliably.
-    virtualisation.cores = 2;
+    virtualisation.cores = cores;
     virtualisation.diskSize = 4096;
     virtualisation.memorySize = 4096;
     environment.systemPackages = [ pkgs.python3 ];
@@ -84,6 +85,9 @@ pkgs.testers.nixosTest {
     kernel = machine.succeed("uname -r").strip()
     assert kernel == "${expectedKernel}", kernel
     print(f"guest kernel: {kernel}")
+    online_cores = int(machine.succeed("nproc").strip())
+    assert online_cores == ${toString cores}, online_cores
+    print(f"guest vCPUs: {online_cores}")
     print("guest pidfd: " + machine.succeed("python3 ${pidfdProbe}").strip())
 
     # Podman's graph root is on the VM's private ext4 disk. The Nix store
