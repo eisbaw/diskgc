@@ -400,6 +400,18 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::edge_browser_vector,
     },
     Test {
+        name: "pytest_unsafe_unrelated_fd_matches_linux",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::pytest_unsafe_unrelated_fd_matches_linux,
+    },
+    Test {
+        name: "process_reference_negative_checks_bite",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::process_reference_negative_checks_bite,
+    },
+    Test {
         name: "python_in_use_vector_matches_linux",
         tier: Tier::Fast,
         expect: Expect::Pass,

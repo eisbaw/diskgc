@@ -2,6 +2,7 @@
 //! container's scratch tmpfs. Validation runs before any fixture write, so
 //! model-only fields cannot silently change the meaning of a replay.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -9,8 +10,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use diskgc_model::host::CACHEDIR_TAG_CONTENT;
 use diskgc_model::spec::{
-    FileSpec, GateSpec, HostModel, LockModeSpec, NodeSpec, ProcAccess, ProcessSpec, Special,
-    WallTime,
+    Bytes, FileSpec, GateSpec, HostModel, LockModeSpec, Mode, NodeSpec, ProcAccess, ProcessSpec,
+    Special, WallTime,
 };
 
 use crate::holder::Holder;
@@ -19,6 +20,11 @@ use crate::suite::Ctx;
 use crate::{Owner, TESTER};
 
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const SCRATCH_PROBE_EXE: &str = "/home/tester/differential-process-probe";
+
+fn mapped_path(line: &str) -> Option<&Path> {
+    line.split_whitespace().nth(5).map(Path::new)
+}
 
 /// Fixture helpers stay alive until both LinuxHost runs and the deletion
 /// oracle finish. Dropping this guard closes their stdin and waits for them.
@@ -31,6 +37,7 @@ struct HeldProcess {
     holder: Holder,
     path: PathBuf,
     lock_mode: Option<LockModeSpec>,
+    exe: Option<PathBuf>,
 }
 
 /// A second open file description must see the kernel conflict appropriate
@@ -105,6 +112,46 @@ impl Materialized {
                 verify_lock_mode(&held.path, mode)
                     .map_err(|error| format!("helper pid {}: {error}", held.holder.pid()))?;
             }
+            if let Some(exe) = &held.exe {
+                let link =
+                    fs::read_link(format!("/proc/{}/exe", held.holder.pid())).map_err(|error| {
+                        format!("read helper pid {} exe: {error}", held.holder.pid())
+                    })?;
+                if &link != exe {
+                    return Err(format!(
+                        "helper pid {} exe {} differs from model {}",
+                        held.holder.pid(),
+                        link.display(),
+                        exe.display()
+                    ));
+                }
+                let maps = fs::read_to_string(format!("/proc/{}/maps", held.holder.pid()))
+                    .map_err(|error| {
+                        format!("read helper pid {} maps: {error}", held.holder.pid())
+                    })?;
+                let file_maps: BTreeSet<_> = maps
+                    .lines()
+                    .filter_map(mapped_path)
+                    .filter(|path| path.is_absolute())
+                    .collect();
+                if file_maps != BTreeSet::from([exe.as_path()]) {
+                    return Err(format!(
+                        "helper pid {} file-backed maps {:?} differ from model executable {}",
+                        held.holder.pid(),
+                        file_maps,
+                        exe.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Negative evidence for an active directory: every visible process
+    /// reference must stay outside it before and after each diskgc run.
+    pub fn assert_no_reference_to(&self, candidate: &Path) -> Result<(), String> {
+        for held in &self.holders {
+            assert_process_no_reference_to(held.holder.pid(), candidate)?;
         }
         Ok(())
     }
@@ -120,6 +167,63 @@ impl Materialized {
         }
         Ok(())
     }
+}
+
+/// Inspect one real helper so a negative-process fixture cannot pass by
+/// silently losing its intended absence of candidate references.
+pub(crate) fn assert_process_no_reference_to(pid: u32, candidate: &Path) -> Result<(), String> {
+    let fd_dir = format!("/proc/{pid}/fd");
+    for entry in fs::read_dir(&fd_dir).map_err(|error| format!("list {fd_dir}: {error}"))? {
+        let entry = entry.map_err(|error| format!("read {fd_dir}: {error}"))?;
+        let path = fs::read_link(entry.path())
+            .map_err(|error| format!("read {}: {error}", entry.path().display()))?;
+        if path.starts_with(candidate) {
+            return Err(format!(
+                "helper pid {pid} fd {} references {} inside {}",
+                entry.file_name().to_string_lossy(),
+                path.display(),
+                candidate.display()
+            ));
+        }
+    }
+    for name in ["cwd", "root", "exe"] {
+        let path = fs::read_link(format!("/proc/{pid}/{name}"))
+            .map_err(|error| format!("read helper pid {pid} {name}: {error}"))?;
+        if path.starts_with(candidate) {
+            return Err(format!(
+                "helper pid {pid} {name} {} references {}",
+                path.display(),
+                candidate.display()
+            ));
+        }
+    }
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))
+        .map_err(|error| format!("read helper pid {pid} maps: {error}"))?;
+    for line in maps.lines() {
+        if mapped_path(line).is_some_and(|path| path.starts_with(candidate)) {
+            return Err(format!(
+                "helper pid {pid} maps entry names {}: {line}",
+                candidate.display()
+            ));
+        }
+    }
+    let environ = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| format!("read helper pid {pid} environ: {error}"))?;
+    let candidate_text = candidate
+        .to_str()
+        .ok_or("non-UTF-8 candidate in process reference check")?;
+    for entry in environ.split(|byte| *byte == 0) {
+        if entry
+            .windows(candidate_text.len())
+            .any(|window| window == candidate_text.as_bytes())
+        {
+            return Err(format!(
+                "helper pid {pid} initial environment names {}",
+                candidate.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Materialized {
@@ -194,6 +298,29 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
     for (index, process) in model.processes.iter().enumerate() {
         let lock = model.locks.iter().find(|lock| lock.holder == process.pid);
         validate_process(index, process, lock.is_some())?;
+        if process.exe.as_deref() == Some(Path::new(SCRATCH_PROBE_EXE)) {
+            if model.processes.len() != 1 {
+                return unsupported("processes", "the copied probe shape requires one process");
+            }
+            let Some(NodeSpec::File(file)) = model.tree.get(Path::new(SCRATCH_PROBE_EXE)) else {
+                return unsupported(
+                    "processes[0].exe",
+                    "the copied probe executable must be a modelled scratch file",
+                );
+            };
+            if file.symlink.is_some() || file.link.is_some() || file.special.is_some() {
+                return unsupported(
+                    "processes[0].exe",
+                    "the copied probe executable must be a regular file",
+                );
+            }
+            if file.content.is_some() || file.mode != Some(Mode(0o755)) {
+                return unsupported(
+                    "processes[0].exe",
+                    "the copied probe needs an executable file model with mode 0755 and no synthetic content",
+                );
+            }
+        }
     }
     if let Some(lock) = model.locks.first() {
         destination(&lock.path).map_err(|_| {
@@ -396,10 +523,18 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
     if process.proc != ProcAccess::Readable {
         return unsupported("proc", "the ready helper must be inspectable");
     }
-    if process.exe.is_some() || !process.maps.is_empty() || !process.environ.is_empty() {
+    let copied_probe = process.exe.as_deref() == Some(Path::new(SCRATCH_PROBE_EXE))
+        && !locked
+        && process.maps == [PathBuf::from(SCRATCH_PROBE_EXE)]
+        && process.environ.len() == 1
+        && process.environ[0] == "PATH=/bin"
+        && process.cwd.is_none();
+    if !copied_probe
+        && (process.exe.is_some() || !process.maps.is_empty() || !process.environ.is_empty())
+    {
         return unsupported(
             "exe/maps/environ",
-            "the harness probe has its own executable, mappings and environment",
+            "only the copied scratch probe with one executable mapping and PATH=/bin is supported",
         );
     }
     if process.root.is_some()
@@ -560,6 +695,33 @@ fn destination(path: &Path) -> Result<(&'static str, &Path), String> {
 /// differential callers must compare outcomes that do not depend on them.
 pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String> {
     validate(model)?;
+    let probe_bytes = if model
+        .processes
+        .iter()
+        .any(|process| process.exe.as_deref() == Some(Path::new(SCRATCH_PROBE_EXE)))
+    {
+        let bytes = fs::read(&ctx.self_exe).map_err(|error| {
+            format!(
+                "read copied fixture probe {}: {error}",
+                ctx.self_exe.display()
+            )
+        })?;
+        let Some(NodeSpec::File(file)) = model.tree.get(Path::new(SCRATCH_PROBE_EXE)) else {
+            return Err(
+                "materialize(model): copied probe file disappeared after validation".into(),
+            );
+        };
+        if file.size != Some(Bytes(bytes.len() as u64)) {
+            return Err(format!(
+                "materialize(model): copied probe model size {:?} differs from binary size {}",
+                file.size,
+                bytes.len()
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
     let inner_at = model
         .mounts
         .iter()
@@ -577,7 +739,9 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
     };
     // Populate the parent scratch mounts before covering the mount point.
     for (path, node) in &model.tree {
-        if path == Path::new("/run/diskgc/lock") || inner_at.is_some_and(|at| path.starts_with(at))
+        if path == Path::new("/run/diskgc/lock")
+            || (probe_bytes.is_some() && path == Path::new(SCRATCH_PROBE_EXE))
+            || inner_at.is_some_and(|at| path.starts_with(at))
         {
             continue;
         }
@@ -588,6 +752,10 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             &ctx.home
         };
         create_node(scratch, relative, node)?;
+    }
+    if let Some(bytes) = probe_bytes {
+        ctx.home
+            .write_file("differential-process-probe", &bytes, 0o755, TESTER)?;
     }
     let mut inner_scratch = None;
     if let Some(at) = inner_at {
@@ -706,7 +874,12 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             Some(LockModeSpec::Exclusive) => vec!["flock-hold-existing", path_text],
             None => vec!["hold", path_text, cwd_text],
         };
-        let holder = Holder::tester(ctx, &args, &[]).map_err(|error| {
+        let holder = if let Some(exe) = &process.exe {
+            Holder::tester_program(ctx, exe, &args)
+        } else {
+            Holder::tester(ctx, &args, &[])
+        }
+        .map_err(|error| {
             format!(
                 "materialize(model): helper for pid {}: {error}",
                 process.pid
@@ -716,6 +889,7 @@ pub fn materialize(ctx: &Ctx, model: &HostModel) -> Result<Materialized, String>
             holder,
             path: path.clone(),
             lock_mode: lock.map(|lock| lock.mode),
+            exe: process.exe.clone(),
         });
     }
     materialized.assert_holding()?;
@@ -975,6 +1149,14 @@ mod tests {
             validate(&vector.host)
                 .unwrap_err()
                 .contains("proc is model-only")
+        );
+        vector.host.processes[0].proc = ProcAccess::Readable;
+        vector.host.processes[0].root = Some("/home/tester/project".into());
+        assert!(
+            validate(&vector.host)
+                .unwrap_err()
+                .contains("root/name/ids/dumpability/uid_map/privileged is model-only"),
+            "custom process root must fail before fixture writes"
         );
     }
 }

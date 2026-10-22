@@ -9,13 +9,14 @@ use std::{fs, io};
 
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::{Base, Dev, Errno, Host};
-use diskgc_core::profile::Library;
+use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::resolve::{ResolveError, Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
 use diskgc_model::profile_vector::{PlanVerdict, ProfileVector, SkipVerdict};
 use diskgc_model::spec::{
-    Bytes, DevSpec, DirSpec, FileSpec, LockModeSpec, LockSpec, MountSpec, NodeSpec, ProcessSpec,
+    Bytes, DevSpec, DirSpec, FileSpec, LockModeSpec, LockSpec, Mode, MountSpec, NodeSpec,
+    ProcessSpec,
 };
 use diskgc_model::state::Fault;
 use serde_json::Value;
@@ -45,6 +46,17 @@ const CHROMIUM_BROWSER_VECTOR: &str = include_str!(
 );
 const EDGE_BROWSER_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/edge-browser-cache-lock.yaml");
+const PYTEST_UNSAFE_VECTOR: &str = include_str!(
+    "../../crates/diskgc-model/tests/models/profiles/pytest-tmp-unsafe-live-no-fd.yaml"
+);
+const PYTEST_UNSAFE_PROFILE: &str = "- name: pytest-tmp-unsafe-probe
+  find: {roots: [/tmp], paths: [\"pytest-of-*/pytest-*/*\"], type: dir}
+  action: delete
+  examples: {match: [/tmp/pytest-of-tester/pytest-0/test_active0]}
+";
+const PYTEST_ACTIVE: &str = "/tmp/pytest-of-tester/pytest-0/test_active0";
+const PYTEST_UNRELATED: &str = "/home/tester/pytest-unrelated-open-file";
+const PYTEST_RETAINED: &str = "/tmp/differential-persistent/payload";
 #[cfg(test)]
 const BROWSER_VECTORS: &[&str] = &[
     BRAVE_BROWSER_VECTOR,
@@ -112,6 +124,138 @@ browser_replay!(brave_browser_vector, BRAVE_BROWSER_VECTOR);
 browser_replay!(chrome_browser_vector, CHROME_BROWSER_VECTOR);
 browser_replay!(chromium_browser_vector, CHROMIUM_BROWSER_VECTOR);
 browser_replay!(edge_browser_vector, EDGE_BROWSER_VECTOR);
+
+/// A live process whose executable, mapping, descriptor and initial
+/// environment stay outside pytest's active tmp_path cannot protect it.
+pub fn pytest_unsafe_unrelated_fd_matches_linux(ctx: &Ctx) -> TestResult {
+    let original = ProfileVector::parse(PYTEST_UNSAFE_VECTOR)?;
+    original.check(&Library::builtin().map_err(|error| error.to_string())?)?;
+    let probe_size = fs::metadata(&ctx.self_exe)
+        .map_err(|error| format!("stat fixture probe {}: {error}", ctx.self_exe.display()))?
+        .len();
+    let vector = project_pytest_unrelated_process(original, probe_size)?;
+    replay_model_with_profile(
+        ctx,
+        vector,
+        false,
+        Some(PYTEST_UNSAFE_PROFILE),
+        Some(Path::new(PYTEST_ACTIVE)),
+    )
+}
+
+/// Deliberately place each supported process reference inside a candidate
+/// and prove the negative-evidence check rejects it on the real kernel.
+/// Custom process roots are rejected by materializer preflight.
+pub fn process_reference_negative_checks_bite(ctx: &Ctx) -> TestResult {
+    let candidate = ctx
+        .scratch
+        .mkdir("process-reference-active", 0o700, TESTER)?;
+    let held = ctx
+        .scratch
+        .write_file("process-reference-active/held", b"mapped", 0o600, TESTER)?;
+    let unrelated =
+        ctx.scratch
+            .write_file("process-reference-unrelated", b"unrelated", 0o600, TESTER)?;
+    let probe_bytes = fs::read(&ctx.self_exe)
+        .map_err(|error| format!("read executable for negative probe: {error}"))?;
+    let candidate_exe = ctx.scratch.write_file(
+        "process-reference-active/probe",
+        &probe_bytes,
+        0o755,
+        TESTER,
+    )?;
+    let held_text = held.to_str().ok_or("non-UTF-8 process reference file")?;
+    let unrelated_text = unrelated.to_str().ok_or("non-UTF-8 unrelated file")?;
+    let candidate_text = candidate.to_str().ok_or("non-UTF-8 candidate")?;
+    for (args, env, expected) in [
+        (vec!["hold", held_text, "/"], vec![], " fd "),
+        (
+            vec!["hold", unrelated_text, candidate_text],
+            vec![],
+            " cwd ",
+        ),
+        (vec!["hold-map", held_text], vec![], "maps entry"),
+        (
+            vec!["hold", unrelated_text, "/"],
+            vec![("TMPDIR", candidate_text)],
+            "initial environment",
+        ),
+    ] {
+        let holder = Holder::tester(ctx, &args, &env)?;
+        let error = model_materialize::assert_process_no_reference_to(holder.pid(), &candidate)
+            .expect_err("candidate reference must fail the kernel evidence check");
+        ensure!(
+            error.contains(expected),
+            "expected {expected:?} evidence, got {error}"
+        );
+        holder.finish()?;
+    }
+    let holder = Holder::tester_program(ctx, &candidate_exe, &["hold", unrelated_text, "/"])?;
+    let error = model_materialize::assert_process_no_reference_to(holder.pid(), &candidate)
+        .expect_err("candidate executable must fail the kernel evidence check");
+    ensure!(
+        error.contains(" exe "),
+        "expected exe evidence, got {error}"
+    );
+    holder.finish()?;
+    Ok(())
+}
+
+fn project_pytest_unrelated_process(
+    mut vector: ProfileVector,
+    probe_size: u64,
+) -> Result<ProfileVector, String> {
+    let [process] = vector.host.processes.as_mut_slice() else {
+        return Err("pytest unsafe vector must have exactly one process".into());
+    };
+    if vector.profile != "pytest-tmp-unsafe-probe"
+        || vector.path != Path::new("/tmp")
+        || process.exe.as_deref() != Some(Path::new("/usr/bin/python"))
+        || process.maps != [PathBuf::from("/usr/bin/python")]
+        || process.cwd.as_deref() != Some(Path::new("/"))
+        || process.environ != ["PATH=/usr/bin"]
+        || process.fds.len() != 1
+        || process.fds[0].path != Path::new("/usr/bin/python")
+        || vector.host.tree.remove(Path::new("/usr/bin/python"))
+            != Some(NodeSpec::File(FileSpec::default()))
+        || vector.expect.preserved != [PathBuf::from("/usr/bin/python")]
+    {
+        return Err("pytest process projection requires the checked-in Python shape".into());
+    }
+    let probe = PathBuf::from(model_materialize::SCRATCH_PROBE_EXE);
+    process.exe = Some(probe.clone());
+    process.maps = vec![probe.clone()];
+    process.cwd = None;
+    process.environ = vec!["PATH=/bin".into()];
+    process.fds[0].path = PYTEST_UNRELATED.into();
+    vector.host.tree.insert(
+        probe.clone(),
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(probe_size)),
+            mode: Some(Mode(0o755)),
+            ..FileSpec::default()
+        }),
+    );
+    vector.host.tree.insert(
+        PYTEST_UNRELATED.into(),
+        NodeSpec::File(FileSpec {
+            content: Some("unrelated live descriptor".into()),
+            ..FileSpec::default()
+        }),
+    );
+    // The checked-in model has an unreachable 100% free-space goal. Keep
+    // one allocated file outside the candidate so the fresh kernel tmpfs
+    // has the same pressure after reclaim.
+    vector.host.tree.insert(
+        PYTEST_RETAINED.into(),
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(8192)),
+            ..FileSpec::default()
+        }),
+    );
+    vector.expect.preserved = vec![probe, PYTEST_UNRELATED.into(), PYTEST_RETAINED.into()];
+    Ok(vector)
+}
 
 /// Project only the two source homes in a checked-in Chromium-family
 /// fixture onto the container's scratch home. The profile, relative lock
@@ -629,7 +773,45 @@ fn replay_vector(ctx: &Ctx, yaml: &str, with_dangling_link: bool) -> TestResult 
     replay_model(ctx, ProfileVector::parse(yaml)?, with_dangling_link)
 }
 
-fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) -> TestResult {
+fn replay_model(ctx: &Ctx, vector: ProfileVector, with_dangling_link: bool) -> TestResult {
+    replay_model_with_profile(ctx, vector, with_dangling_link, None, None)
+}
+
+fn replay_model_with_profile(
+    ctx: &Ctx,
+    mut vector: ProfileVector,
+    with_dangling_link: bool,
+    profile_yaml: Option<&str>,
+    unrelated_to: Option<&Path>,
+) -> TestResult {
+    let config_path = match profile_yaml {
+        Some(profile_yaml) => {
+            ensure!(
+                parse_profiles(profile_yaml)? == vector.user_profiles,
+                "real CLI profile differs from the model vector's typed profile"
+            );
+            let config = format!(
+                "version: 1\nprofiles:\n{}",
+                profile_yaml
+                    .lines()
+                    .map(|line| format!("  {line}\n"))
+                    .collect::<String>()
+            );
+            Some(ctx.home.write_file(
+                "differential-user-profile.yaml",
+                config.as_bytes(),
+                0o644,
+                TESTER,
+            )?)
+        }
+        None => {
+            ensure!(
+                vector.user_profiles.is_empty(),
+                "a differential user profile requires a real CLI config"
+            );
+            None
+        }
+    };
     // The checked-in model's `/home` ext4 is not a rootless-container mount.
     // Place the same tree on the harness's `/home/tester` tmpfs. This changes
     // no candidate pathname or selection expectation.
@@ -648,6 +830,9 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
     vector.check(&Library::builtin().map_err(|e| e.to_string())?)?;
     let model = model_outcome(&vector)?;
     let materialized = model_materialize::materialize(ctx, &vector.host)?;
+    if let Some(candidate) = unrelated_to {
+        materialized.assert_no_reference_to(candidate)?;
+    }
     if with_dangling_link {
         require_present(&[DANGLING_LINK.into()])?;
     }
@@ -671,6 +856,14 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
         "--select",
         &select,
     ];
+    if let Some(config_path) = &config_path {
+        args.push("--config");
+        args.push(
+            config_path
+                .to_str()
+                .ok_or("non-UTF-8 user profile config path")?,
+        );
+    }
     for root in &vector.roots {
         args.push("--roots");
         args.push(root);
@@ -680,8 +873,14 @@ fn replay_model(ctx: &Ctx, mut vector: ProfileVector, with_dangling_link: bool) 
     dry_args.extend(&args);
     let dry = ensure_run(ctx, &dry_args)?;
     materialized.assert_holding()?;
+    if let Some(candidate) = unrelated_to {
+        materialized.assert_no_reference_to(candidate)?;
+    }
     let reclaim = ensure_run(ctx, &args)?;
     materialized.assert_holding()?;
+    if let Some(candidate) = unrelated_to {
+        materialized.assert_no_reference_to(candidate)?;
+    }
     oracle.judge_runs(&[&dry, &reclaim])?.assert_clean()?;
     dry.expect_code(0)?;
     let linux = linux_outcome(
@@ -1119,6 +1318,79 @@ mod tests {
         );
         let error = project_browser_vector(vector).expect_err("absolute link must fail");
         assert!(error.contains("absolute-link"), "{error}");
+    }
+
+    #[test]
+    fn pytest_process_projection_keeps_the_unsafe_action_and_unrelated_evidence() {
+        let original = ProfileVector::parse(PYTEST_UNSAFE_VECTOR).expect("pytest vector");
+        original
+            .check(&Library::builtin().expect("built-in library"))
+            .expect("original independent expectation");
+        let mut vector =
+            project_pytest_unrelated_process(original, 4096).expect("narrow process projection");
+        assert_eq!(
+            parse_profiles(PYTEST_UNSAFE_PROFILE).expect("CLI profile"),
+            vector.user_profiles,
+            "the real CLI config must select the same typed user profile"
+        );
+        vector
+            .check(&Library::builtin().expect("built-in library"))
+            .expect("projected unsafe action expectation");
+        model_materialize::validate(&vector.host).expect("copied probe preflight");
+        assert_eq!(vector.expect.actions, [PathBuf::from(PYTEST_ACTIVE)]);
+        assert!(
+            vector
+                .expect
+                .preserved
+                .contains(&PathBuf::from(PYTEST_RETAINED))
+        );
+        assert!(
+            !Path::new(PYTEST_RETAINED).starts_with("/tmp/pytest-of-tester"),
+            "retained pressure file must be outside the pytest profile roots"
+        );
+        assert!(matches!(
+            vector.host.tree.get(Path::new(PYTEST_RETAINED)),
+            Some(NodeSpec::File(FileSpec {
+                size: Some(Bytes(8192)),
+                ..
+            }))
+        ));
+        let process = &vector.host.processes[0];
+        assert!(
+            process
+                .exe
+                .as_deref()
+                .is_some_and(|path| !path.starts_with(PYTEST_ACTIVE))
+        );
+        assert!(
+            process
+                .maps
+                .iter()
+                .all(|path| !path.starts_with(PYTEST_ACTIVE))
+        );
+        assert!(
+            process
+                .fds
+                .iter()
+                .all(|fd| !fd.path.starts_with(PYTEST_ACTIVE))
+        );
+        assert!(
+            process
+                .cwd
+                .as_deref()
+                .is_none_or(|path| !path.starts_with(PYTEST_ACTIVE))
+        );
+        assert!(
+            process
+                .environ
+                .iter()
+                .all(|entry| !entry.contains(PYTEST_ACTIVE))
+        );
+
+        vector.host.processes[0].maps = vec![PYTEST_ACTIVE.into()];
+        let error = model_materialize::validate(&vector.host)
+            .expect_err("a mapping inside the active candidate must fail preflight");
+        assert!(error.contains("exe/maps/environ is model-only"), "{error}");
     }
 
     #[test]
