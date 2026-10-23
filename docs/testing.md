@@ -758,19 +758,28 @@ measuring an old session by the session directory alone;
 climbing past a bind-mounted subdirectory; matching a nested dependency directory; measuring the
 candidate instead of the project.
 
-**Container tests** (the kernel's view matters):
+**Container tests** (the kernel's view matters). The two lifecycle tests
+have landed (`diskgc-e2e/src/lifecycle_suite.rs`, tier `full`, Nix image
+only); they run the pinned producers, never diskgc, from scenario scripts
+that print one fact per line, and require exactly the expected set. Nix
+runs against a chroot store in the tester's home, since the image's store
+is read-only and has no database: legacy `nix-shell` of a derivation
+without inputs, and `nix develop` of a ready dev environment, build
+nothing. The others land with the steps that use them.
 `nix_shell_rc_lifecycle_is_pinned` (pinned Nix: the directory's pid equals
 the shell's for legacy `nix-shell` and `nix develop`, interactive and
-`-c`; what remains after a normal exit and after `SIGKILL`; whether the
-shell or a `setsid` child reads the directory after start),
+`-c`; what remains after a normal exit, `SIGHUP` and `SIGKILL`; whether
+the shell or a `setsid` child holds or names the directory after start),
 `nix_shell_rc_shell_in_private_pid_namespace_is_kept` (a shell under
 `unshare --pid` sharing `/tmp`: kept while it lives, reclaimed with the
 deletion oracle after it is killed),
 `owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`,
 `owner_pid_is_unknown_under_hidepid` (a `/proc` with `hidepid=invisible`
 and a `newgrp` shell owning a directory: kept),
-`pytest_lifecycle_is_pinned` (pinned pytest: the lock by `keep`, the exit
-cleanup by rank, a `keep` 0 session deleting a concurrent lockless one,
+`pytest_lifecycle_is_pinned` (pinned pytest: the lock by `keep`, holding
+the pid as text, removed at exit; the exit cleanup by rank; a killed
+session's lock below the rank kept while young and removed after three
+days; a `keep` 0 session deleting a concurrent lockless one,
 `--basetemp` making no lock, and pytest's own cleanup deleting a lockless
 `--basetemp` directory shaped like a session with `N ≤ M − 3`, the fact
 row 7's invariant rests on),

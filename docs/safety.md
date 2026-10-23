@@ -989,16 +989,33 @@ file's link text is translated through mount tables, not resolved. So:
 candidate's own name is `nix-shell-<pid>-<suffix>` or
 `nix-develop-<pid>-<suffix>`; Owner PID on `<pid>`; no process carries it:
 reclaimable. A name of another shape is `filtered`. Facts from Nix
-2.34.8 (2026-10-23): `nix develop` names its directory after its own pid
-and execs the shell, which keeps that pid; the directory is empty once the
-rc script has run, and it is left behind after a normal exit. Legacy
-`nix-shell` leftovers hold `env-vars` and `rc`. To verify before the
-profile ships: legacy `nix-shell` keeps the pid through exec, and no live
-shell or child of it reads the directory after the shell's start. A
-detached child (`setsid`, `nohup`) that outlives the shell and uses the
-directory through a remembered path is Owner PID's scope limit; the
-verification states whether Nix gives children any reason to. The bytes
-are small (about 350 MiB in 65,000 directories in TASK-68's dry run); the
+2.34.8 on the host (2026-10-23) and pinned by the container test
+`nix_shell_rc_lifecycle_is_pinned` on the image's Nix 2.34.9 (2026-10-24),
+for both commands, interactive and `-c` / `--run`:
+
+- the pid in the name is the shell's own: Nix makes the directory and
+  execs the shell, which keeps that pid;
+- `nix develop`'s directory is empty once the rc script has run; no shell
+  or child of it holds anything in it or names it in its environment (the
+  rc file is a separate temporary file the rc script removes, and
+  `TMPDIR` points at a separate `nix-shell.XXXXXX`); it is left behind
+  after a normal exit, `SIGHUP` and `SIGKILL`;
+- legacy `nix-shell`'s directory holds `rc` (and `env-vars` when a
+  `stdenv` setup runs) and is the `TMPDIR` and `NIX_BUILD_TOP` of the
+  shell and so of every child, which can write temporary files there at
+  any time and names it in its initial environment; the rc script's
+  `EXIT` trap removes it at a normal exit or `SIGHUP`, even while a
+  `setsid` child that inherited it still runs; only a `SIGKILL` (or any
+  death that skips the trap) leaves it behind.
+
+So for legacy directories Nix does give children a reason to use the
+directory after the shell's start, and every such child carries it in its
+initial environment, which the in-use scan reads (`environment`); and the
+producer itself deletes the directory under such a child when it exits
+normally. A detached child (`setsid`, `nohup`) that outlives the shell
+and uses the directory through a remembered path without it in its
+initial environment (started with a cleared environment) is Owner PID's
+scope limit. The bytes are small (about 350 MiB in 65,000 directories in TASK-68's dry run); the
 value is the directory count, and proving Owner PID on the simplest
 producer first.
 
@@ -1009,7 +1026,8 @@ the session, and pytest's own cleanup removes whole sessions; with
 `checkouts: allow` decided, the reason for the finer unit is gone, and a
 session is about a tenth as many candidates). Facts from the pytest 9.1.1
 sources pinned in the Nix test image (`_pytest/pathlib.py`,
-`_pytest/tmpdir.py`):
+`_pytest/tmpdir.py`), each observed by the container test
+`pytest_lifecycle_is_pinned` (2026-10-24):
 
 - Without `--basetemp`, a session directory is
   `<temp root>/pytest-of-<user>/pytest-<N>`, with `N` one more than the

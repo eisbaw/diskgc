@@ -41,9 +41,9 @@ use crate::{
     agent_journey, autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
-    fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey, meson_suite,
-    packaging_suite, profile_vector_suite, project_cache_suite, release_suite, scale_suite,
-    signal_suite, stdout_suite, temp_safety_suite,
+    fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
+    lifecycle_suite, meson_suite, packaging_suite, profile_vector_suite, project_cache_suite,
+    release_suite, scale_suite, signal_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -154,6 +154,14 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     ),
     (
         "live_pytest_without_session_lock_is_unsafe_to_reclaim",
+        "needs pinned pytest in the Nix image",
+    ),
+    (
+        "nix_shell_rc_lifecycle_is_pinned",
+        "needs the pinned Nix and bash from the Nix image",
+    ),
+    (
+        "pytest_lifecycle_is_pinned",
         "needs pinned pytest in the Nix image",
     ),
     (
@@ -384,6 +392,18 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: temp_safety_suite::live_pytest_without_session_lock_is_unsafe_to_reclaim,
+    },
+    Test {
+        name: "nix_shell_rc_lifecycle_is_pinned",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: lifecycle_suite::nix_shell_rc_lifecycle_is_pinned,
+    },
+    Test {
+        name: "pytest_lifecycle_is_pinned",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: lifecycle_suite::pytest_lifecycle_is_pinned,
     },
     Test {
         name: "nested_claude_shell_cache_reclaims_only_its_exact_entry",

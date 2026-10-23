@@ -129,6 +129,8 @@
         fileset = lib.fileset.unions [
           workspaceFiles
           (craneLib.fileset.commonCargoSources ./diskgc-e2e)
+          # Producer lifecycle scenarios, embedded by lifecycle_suite.rs.
+          ./diskgc-e2e/src/lifecycle
           ./docs/ci-pre-job.sh
           ./docs/agent-pre-job.py
         ];
@@ -545,6 +547,10 @@
           mkdir -p opt/cargo-under-test
           mkdir -p opt/nix-eval
           ln -s ${pkgs.nix}/bin/nix opt/nix-eval/nix
+          # The shell nix-shell and nix develop start in the lifecycle
+          # tests (diskgc-e2e/src/lifecycle_suite.rs); offline, nix develop
+          # cannot fetch bashInteractive.
+          ln -s ${pkgs.bash}/bin/bash opt/nix-eval/bash
           ln -s ${pkgs.python3Packages.pytest}/bin/pytest opt/pytest-under-test
           ln -s ${nixEvalFixture} opt/nix-eval/flake
           ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
