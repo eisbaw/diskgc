@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-22 22:33'
+updated_date: '2026-10-23 08:46'
 labels:
   - wave-2
   - irreversible
@@ -127,6 +127,10 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-22 generated marker-age reference extension: independent finite-path oracle now combines source has/has_not, two known markers, whole-tree idle, complemented mixed filters and two-term unions; plan equality and reclaim subset/equality for non-overlap. Focused selection_reference 1024-case suite passed 9/9 in 953.55s under host load. QA targeted fmt, Clippy deny-warnings and diff check passed; MPED review GO for bounded diff. Optional broad soak was interrupted exit 130 after 5/6 unchanged safety properties. Required exact nix develop -c just e2e remains red from prior 218/219 fast Nix cases at 301.7s over the 300s suite budget; Docker and VM stages not reached. No commit or AC3/DoD check until a clean exact full gate; AC1 remains open for broader random-profile contract.
 
 2026-10-23 final integrated checkpoint: exact nix develop -c just e2e exited 0 on stable main tree after new fixtures were staged for Nix source. Fmt, Python 4/4, Clippy, workspace/doctests and selection_reference 10/10 passed; fast Nix containers 219/219 in 87.3s, Docker 7/7, and five VM checks passed. Fresh parallel QA and MPED reviews GO for this bounded diff; QA also ran 1024 cases for all ten selection_reference tests, 10/10 in 454.65s. Saved user-profile Claude fixture proves profile:tmp-entry && !profile:claude-code-tmp excludes the whole /tmp/claude-1000 container in plan and reclaim, so AC3 is checked. AC1 and DoD remain open: the finite oracle does not cover arbitrary profile shapes/predicates/roots/other actions/races, as Compass and MPED noted. Earlier external busy-loop load ended; no host deletion.
+
+2026-10-23 oracle extension pending integrated gate: restacked on 8f0ba7d in branch task16-oracle-complete. Independent randomized finite-path oracle now covers two marker files with tri-state statx evidence, random source where predicates and conjunctions, mixed positive/negated filters, YAML config protect binding, and saved mixed-complement/raw-outer protection regressions. Focused Nix test passed 9/9 at 1024 deterministic generated cases in 16.09 s; Clippy test target with deny warnings, rustfmt and diff check passed. AC1 remains unchecked: generated cases still bound roots, depth, source count, patterns, excludes and union terms; no arbitrary root alias/nesting, retention/link guards in this oracle family, non-fs actions or randomized races. DoD open pending exact E2E and broader proof. No host deletion.
+
+2026-10-23 integrated gate for the preceding bounded oracle extension: parallel QA and MPED reviews found no commit blocker; focused 1024-case run passed 9/9 with Clippy and formatting. Exact nix develop -c just e2e exited 0 on this staged code tree, including native Docker 7/7 and existing kernel VMs. AC1 and DoD remain open for the breadth gaps listed above; this increment is not a TASK-16 completion claim.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
