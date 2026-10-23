@@ -73,6 +73,7 @@ pub mod inuse_probe;
 pub mod inuse_suite;
 pub mod journey_suite;
 pub mod laptop_tmp_journey;
+pub mod lock_release;
 pub mod meson_suite;
 pub mod model_materialize;
 pub mod oracle;

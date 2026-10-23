@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-23 15:24'
+updated_date: '2026-10-23 21:15'
 labels:
   - wave-1
   - hardening
@@ -59,6 +59,10 @@ From task-11 r2 review (mped NITs, commit 75c89c1): H18 the clean test declares 
 From task-71 review round 1 (2026-10-18), on the task-11 follow-up: (mped) race test 8 still passes with only a WARNING when no late round is ever exercised on a toolchain (every round wrote into the profile and was changed, or the driver paused past REUSE_LIMIT): the scan-under-the-locks claim can go unexercised on a toolchain without failing. Decide whether that should fail, or count rounds across runs. (QA F4) race 2's clean case: 'ran to its end without waiting' rests on a single /proc/locks sample; a short wait between samples could be missed.
 
 From the task-63 follow-up review (commit 19fc56e): H22 race 7's has_build_lock branches and the blocked-build lock check in cargo_suite.rs accept a missing .cargo-build-lock from ANY toolchain; tie the absence to the measured release (1.90.0), as IGNORES_BUILD_DIR does for the build dir, so a regression cannot pass vacuously. H23 the NIX_ONLY_TESTS lookup (split('@') + list search) is written in both suite.rs::run and Image::runs; one Image::excluded() returning the reason would remove the copy. H24 testing.md suggests 'nix store gc' without saying it is machine-wide; justfile gcroots-drop/e2e-one comments read backwards; the justfile header's 'only call Nix, Cargo and Podman' now has rm. H25 .gcroots does not keep the flake checks' vendored crates, so after a GC the first gate re-fetches them (documented scope is image inputs + dev shell).
+
+Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is released when the LAST reference to its open file goes, which can be after close()/exit returned: any /proc/<pid>/fd reader (an in-use scan, diskgc's own included, lsof) holds a transient reference for the length of its syscall (measured up to 0.5 ms on 7.2; about 1 in 60 immediate retries busy under four readers). Never assert a release with one attempt right after a close; wait with a bound (RELEASE_BOUND, docs/testing.md Negative feedback). A held-lock assertion needs no wait. Mutation testing: the unsettled-scan mutants M1 (Checker::reusable_at reuse), M2 (Checker::rescan no retry) and M3' (Scan::blocked ignoring unsettled) are killed by the profile vectors python-pycache-fork-*; Scan::blocks_all without unsettled is an equivalent mutant (reusable_at returns first) and will survive cargo-mutants.
+
+Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

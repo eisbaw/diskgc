@@ -20,6 +20,7 @@ use serde_json::Value;
 use crate::cargo_harness::{deletable, lock_inodes, objects_below, profile_dirs, reclaimable};
 use crate::cargo_under_test::{Cargo, SMOKE, Toolchain};
 use crate::holder::Holder;
+use crate::lock_release::{flock_free_within_release_bound, flock_held};
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, HOST_LOCK, TestResult};
 use crate::under_test::Run;
@@ -1597,7 +1598,10 @@ pub fn ensure_host_lock_is_inherited_by_children_and_released_only_by_close(
 ) -> TestResult {
     let gate = ctx.scratch.path("go");
     let gate_text = gate.to_str().ok_or("gate path")?.to_owned();
-    ensure!(!held_by_someone()?, "the host lock is held before the test");
+    ensure!(
+        free_within_release_bound()?,
+        "the host lock is held before the test"
+    );
     let oracle = Oracle::arm(Fixture::new())?;
     let mut spawned = ctx.spawn_as_tester(&ctx.driver(), &["host-lock", &gate_text])?;
     let child = spawned.next_line("child pid=")?;
@@ -1622,7 +1626,7 @@ pub fn ensure_host_lock_is_inherited_by_children_and_released_only_by_close(
         "the host lock was free once the driver closed its copy: the child did not inherit it"
     );
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "the host lock is still held after the child exited"
     );
     judged.assert_clean()
@@ -1700,7 +1704,7 @@ pub fn command_action_child_holds_host_lock_after_parent_is_killed(ctx: &Ctx) ->
         run.signal
     );
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after command exit"
     );
     judged.assert_clean()
@@ -1783,7 +1787,7 @@ pub fn command_action_never_changes_inherited_stderr_flags(ctx: &Ctx) -> TestRes
         "command parent was not killed by SIGKILL"
     );
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after command exit"
     );
     judged.assert_clean()
@@ -1838,7 +1842,10 @@ pub fn command_action_timeout_kills_descendant_after_leader_exits(ctx: &Ctx) -> 
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    ensure!(!held_by_someone()?, "host lock remained held after timeout");
+    ensure!(
+        free_within_release_bound()?,
+        "host lock remained held after timeout"
+    );
     judged.assert_clean()
 }
 
@@ -1919,7 +1926,7 @@ pub fn command_action_orphaned_output_is_killed_before_reap(ctx: &Ctx) -> TestRe
         "orphaned descendant {descendant} survived group SIGKILL"
     );
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after orphan cleanup"
     );
     judged.assert_clean()
@@ -1953,7 +1960,7 @@ pub fn command_action_stalled_stderr_fails_without_hanging(ctx: &Ctx) -> TestRes
     ensure_command_duration_below(&run.stdout, 700)?;
     ensure_command_descendant_exited(&pid_file)?;
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after forwarding failed"
     );
     judged.assert_clean()
@@ -1984,7 +1991,7 @@ pub fn command_action_leader_exit_drain_obeys_tier_deadline(ctx: &Ctx) -> TestRe
     ensure_command_duration_below(&run.stdout, 11_000)?;
     ensure_command_descendant_exited(&pid_file)?;
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after drain timeout"
     );
     judged.assert_clean()
@@ -2014,7 +2021,7 @@ pub fn command_action_closed_pipe_descendant_is_killed(ctx: &Ctx) -> TestResult 
     );
     ensure_command_descendant_exited(&pid_file)?;
     ensure!(
-        !held_by_someone()?,
+        free_within_release_bound()?,
         "host lock remained held after leader exit"
     );
     judged.assert_clean()
@@ -2065,20 +2072,14 @@ fn process_exited(pid: u32) -> Result<bool, String> {
     }
 }
 
-/// Whether someone holds the host lock: a non-blocking exclusive `flock`
-/// by the harness (as root, on its own open file description) is refused.
+/// Whether someone holds the host lock.
 fn held_by_someone() -> Result<bool, String> {
-    let fd = rustix::fs::open(
-        HOST_LOCK,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|e| format!("open {HOST_LOCK}: {e}"))?;
-    match rustix::fs::flock(&fd, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(false),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
-        Err(e) => Err(format!("flock {HOST_LOCK}: {e}")),
-    }
+    flock_held(Path::new(HOST_LOCK))
+}
+
+/// Whether the host lock is free, or becomes free within the release bound.
+fn free_within_release_bound() -> Result<bool, String> {
+    flock_free_within_release_bound(Path::new(HOST_LOCK))
 }
 
 fn build(ctx: &Ctx, toolchain: &Toolchain, project: &Path) -> TestResult {

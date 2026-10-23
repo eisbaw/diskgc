@@ -2,10 +2,19 @@
   pkgs,
   image,
   underTest,
+  # The diskgc-linux unit-test executable; its *_kernel_fact tests run here.
+  kernelFactTests,
   kernelPackages,
   expectedKernel,
   expectPollHup,
   cores,
+  nixosTest ? pkgs.testers.nixosTest,
+  probePython ? pkgs.python3,
+  probePythonCommand ? "${probePython}/bin/python3",
+  # Extra attributes for the test driver (e.g. an old driver's lint switch).
+  driverAttrs ? { },
+  # Extra `podman run` options for the guest's runtime.
+  podmanRunOptions ? "",
 }:
 
 let
@@ -65,7 +74,7 @@ in
 # TASK-64 G: a pinned kernel guest, with any destructive diskgc work
 # confined to its disposable Podman container and private ext4 disk.
 assert kernelPackages.kernel.version == expectedKernel;
-pkgs.testers.nixosTest {
+nixosTest ({
   name = "diskgc-pidfd-${expectedKernel}";
 
   nodes.machine = { ... }: {
@@ -75,7 +84,7 @@ pkgs.testers.nixosTest {
     virtualisation.cores = cores;
     virtualisation.diskSize = 4096;
     virtualisation.memorySize = 4096;
-    environment.systemPackages = [ pkgs.python3 ];
+    environment.systemPackages = [ probePython ];
   };
 
   testScript = ''
@@ -88,20 +97,34 @@ pkgs.testers.nixosTest {
     online_cores = int(machine.succeed("nproc").strip())
     assert online_cores == ${toString cores}, online_cores
     print(f"guest vCPUs: {online_cores}")
-    print("guest pidfd: " + machine.succeed("python3 ${pidfdProbe}").strip())
+    print("guest pidfd: " + machine.succeed("${probePythonCommand} ${pidfdProbe}").strip())
 
     # Podman's graph root is on the VM's private ext4 disk. The Nix store
     # and binaries are mounted read-only from the VM test driver/store.
-    assert machine.succeed("findmnt -n -o FSTYPE -T /var/lib/containers").strip() == "ext4"
+    # podman info first: older Podman (2.1, the 5.8 guest's) creates its
+    # graph root on first use.
     assert machine.succeed("podman info --format '{{.Store.GraphDriverName}}'").strip() == "overlay"
+    assert machine.succeed("findmnt -n -o FSTYPE -T /var/lib/containers").strip() == "ext4"
     assert "mount_program" not in machine.succeed("podman info --format '{{.Store.GraphOptions}}'")
     assert machine.execute("${underTest}/bin/diskgc-e2e-canary")[0] == 86
+
+    # The kernel facts the host tests pin (diskgc-linux *_kernel_fact) must
+    # hold on this kernel too: which /proc reads delay a lock's release
+    # differs by version (docs/safety.md, Host lock). Both must run and pass:
+    # the exact count also catches a test renamed off the suffix, or a filter
+    # that matches nothing.
+    facts = machine.succeed(
+      "cd /tmp && ${kernelFactTests}/bin/diskgc-linux-tests kernel_fact "
+      "--nocapture --test-threads 1 2>&1"
+    )
+    print(facts)
+    assert "test result: ok. 2 passed; 0 failed" in facts, facts
 
     machine.succeed("${image} | podman load")
     for case in ["host_pidfd_release_after_reap", "host_inuse_scan_settles_after_fork_churn"]:
       machine.succeed(
         "podman run --rm --pull=never --network=none "
-        "--cap-add SYS_ADMIN --cap-add SYS_PTRACE "
+        "--cap-add SYS_ADMIN --cap-add SYS_PTRACE ${podmanRunOptions} "
         "--volume /nix/store:/nix/store:ro "
         "--volume ${underTest}/bin:/opt/diskgc-e2e/bin:ro "
         "${image.imageName}:${image.imageTag} "
@@ -109,4 +132,4 @@ pkgs.testers.nixosTest {
         f"{case}"
       )
   '';
-}
+} // driverAttrs)

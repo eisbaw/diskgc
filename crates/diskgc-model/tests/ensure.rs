@@ -16,6 +16,7 @@ use diskgc_core::hostlock::TMPFILES_LINES;
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::{ErrorCause, Report, Status};
 use diskgc_core::units::{Size, format_bytes, parse_size};
+use diskgc_model::harness::{self, Outcome, fixture_path, load_fixture};
 use diskgc_model::spec::Op;
 use diskgc_model::{Call, Holder, ModelHost};
 
@@ -909,6 +910,74 @@ fn the_host_lock_held_until_the_deadline_is_75_unless_space_appeared() {
     assert_eq!(report.status, Status::Met, "{report:#?}");
     assert_eq!(report.exit_code(), 0);
     assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+/// `tests/models/hostlock/<case>.yaml` run by `ensure --min-free 30G
+/// --select profile:cargo-target --roots SRC SRC --timeout 2s`, its `expect`
+/// and fired events checked by the harness.
+fn host_lock_case(case: &str) -> (ModelHost, Outcome) {
+    let model = load_fixture(&fixture_path(env!("CARGO_MANIFEST_DIR"), "hostlock", case))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let mut outcome = None;
+    let host = harness::run(&model, |host| {
+        let mut req = cargo("30G", None);
+        req.timeout = Some(Duration::from_secs(2));
+        let report = ensure(host, &req);
+        let got = Outcome {
+            exit: i32::from(report.exit_code()),
+            skipped: Vec::new(),
+        };
+        outcome = Some(got.clone());
+        got
+    });
+    (host, outcome.expect("the scenario ran"))
+}
+
+fn host_lock_acquired(host: &ModelHost) -> bool {
+    host.trace()
+        .iter()
+        .any(|c| c.op == Op::Flock && touches(c, HOST_LOCK) && c.result == "acquired")
+}
+
+/// task-64 #37: a host lock is free only when the last reference to its
+/// open file goes, not when its holder exits. A child sharing it (an
+/// inherited lock fd, or the kernel-side reference of a `/proc` reader)
+/// keeps it held: `ensure` waits to its deadline (75), reaching no target.
+#[test]
+fn a_host_lock_stays_held_while_another_reference_to_its_file_remains() {
+    let (host, _) = host_lock_case("held-by-a-remaining-reference");
+    assert!(
+        !host_lock_acquired(&host),
+        "the lock was taken while 4243 held it"
+    );
+    assert!(
+        host.trace().iter().all(|c| !touches(c, OLD)),
+        "no target was reached"
+    );
+    assert_eq!(
+        host.locks_on(Path::new(HOST_LOCK)),
+        vec![(
+            Holder::Process(4243),
+            diskgc_core::host::LockMode::Exclusive
+        )]
+    );
+}
+
+/// The same, with the last reference closed at 1.5 s: `ensure` keeps
+/// polling past the holder's exit at 1 s and takes the lock then.
+#[test]
+fn a_host_lock_is_taken_once_its_last_reference_closes() {
+    let (host, _) = host_lock_case("released-by-the-last-reference");
+    assert!(host_lock_acquired(&host), "the lock was never taken");
+    assert!(
+        host.elapsed() >= Duration::from_millis(1500),
+        "ensure ended at {:?}, before the last reference closed",
+        host.elapsed()
+    );
+    assert!(
+        calls(&host, Op::Unlinkat).iter().any(|c| touches(c, OLD)),
+        "the target was reclaimed after the lock was taken"
+    );
 }
 
 /// Space that appears while waiting for the lock (the other reclaim freed

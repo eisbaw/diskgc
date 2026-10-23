@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../../../host-model.schema.json
+# A host lock outlives its holder while another reference to the same open
+# file description remains (docs/safety.md, Host lock; task-64 #37). The
+# other diskgc (4242) holds /run/diskgc/lock, forks 4243 at 500 ms (the
+# child shares the locked open file, as an inherited lock fd does; a /proc
+# reader's transient reference is the same kernel relation, only shorter)
+# and exits at 1 s; 4243 exits at 1.5 s, closing the last reference. Run by
+# tests/ensure.rs with a 2 s timeout, ensure must keep polling past the
+# holder's exit, take the lock after 1.5 s, reclaim the 8G target and still
+# end below --min-free 30G: exit 1.
+host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+  - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 100G, other_used: 80G, parent: 1}
+  - {id: 3, at: /run, fs: tmpfs, dev: "0:30", size: 1G, parent: 1}
+tree:
+  /run/diskgc/lock: {uid: 0, gid: 0}
+  /usr/bin/diskgc: {}
+  /home/mark/src/old/Cargo.toml: {}
+  /home/mark/src/old/target:
+    CACHEDIR.TAG: {cachedir_tag: true}
+    debug:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      .cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+      .fingerprint:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        p-1: {.: {mtime: 2026-10-01T00:00:00Z}, bin-p: {mtime: 2026-10-01T00:00:00Z}}
+      deps:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        p-1: {size: 8G, mtime: 2026-10-01T00:00:00Z}
+processes:
+  - {pid: 4242, exe: /usr/bin/diskgc, cwd: /, maps: [/usr/bin/diskgc], environ: [PATH=/usr/bin]}
+locks:
+  - {path: /run/diskgc/lock, holder: 4242, mode: exclusive}
+events:
+  - {at: {elapsed: 500ms}, fork: {pid: 4242, child: 4243}}
+  - {at: {elapsed: 1s}, exit: 4242}
+  - {at: {elapsed: 1500ms}, exit: 4243}
+expect:
+  exit: 1

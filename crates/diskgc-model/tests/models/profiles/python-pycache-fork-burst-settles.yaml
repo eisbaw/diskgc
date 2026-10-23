@@ -1,0 +1,53 @@
+# TASK-64 G (docs/safety.md, In use: "Every process, and only once
+# settled"): a fork burst that ends within the checker's retry. Python 42
+# forks a child after each of the first 16 process listings, so the first
+# scan reaches the 16-growth-listing bound (unsettled); after the 20 ms
+# pause the one retry settles and the unused cache is deleted. Mutation
+# that turns this red: judging on the first unsettled scan without the
+# retry (Checker::rescan).
+profile_vector: 1
+profile: python-pycache
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python: {}
+    /home/tester/project/run.log: {size: 1K}
+    /home/tester/project/app/__pycache__:
+      main.pyc: {size: 8K}
+  processes:
+    - {pid: 42, exe: /usr/bin/python, cwd: /home/tester/project,
+       maps: [/usr/bin/python], fds: [{path: /home/tester/project/run.log}],
+       environ: [PATH=/usr/bin]}
+  events:
+    - {at: {op: pids, nth: 1, when: after}, fork: {pid: 42, child: 101}}
+    - {at: {op: pids, nth: 2, when: after}, fork: {pid: 42, child: 102}}
+    - {at: {op: pids, nth: 3, when: after}, fork: {pid: 42, child: 103}}
+    - {at: {op: pids, nth: 4, when: after}, fork: {pid: 42, child: 104}}
+    - {at: {op: pids, nth: 5, when: after}, fork: {pid: 42, child: 105}}
+    - {at: {op: pids, nth: 6, when: after}, fork: {pid: 42, child: 106}}
+    - {at: {op: pids, nth: 7, when: after}, fork: {pid: 42, child: 107}}
+    - {at: {op: pids, nth: 8, when: after}, fork: {pid: 42, child: 108}}
+    - {at: {op: pids, nth: 9, when: after}, fork: {pid: 42, child: 109}}
+    - {at: {op: pids, nth: 10, when: after}, fork: {pid: 42, child: 110}}
+    - {at: {op: pids, nth: 11, when: after}, fork: {pid: 42, child: 111}}
+    - {at: {op: pids, nth: 12, when: after}, fork: {pid: 42, child: 112}}
+    - {at: {op: pids, nth: 13, when: after}, fork: {pid: 42, child: 113}}
+    - {at: {op: pids, nth: 14, when: after}, fork: {pid: 42, child: 114}}
+    - {at: {op: pids, nth: 15, when: after}, fork: {pid: 42, child: 115}}
+    - {at: {op: pids, nth: 16, when: after}, fork: {pid: 42, child: 116}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/app/__pycache__}
+  reclaim_exit: 1
+  actions: [/home/tester/project/app/__pycache__]
+  removed: [/home/tester/project/app/__pycache__]
+  skipped: []
+  preserved: []

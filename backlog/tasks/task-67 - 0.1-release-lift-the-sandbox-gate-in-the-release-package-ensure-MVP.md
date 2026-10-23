@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 01:26'
+updated_date: '2026-10-23 17:13'
 labels:
   - wave-2
   - release
@@ -74,6 +74,8 @@ Forward-carried from TASK-106: the e2e harness now has a feature-built proposed 
 2026-10-22 Compass TASK-65 review: the current proposed 0.1 catalog admits no /tmp profile. Of the six TASK-65 proposals, only containers-image-tmp is implemented; its existing held-spool test uses a one-second user profile, not the exact three-day built-in or gate-lifted artifact, and dormant-spool reuse is unproved. The other five broad profiles have checked-in live no-fd/no-lock, post-exec TMPDIR, or PID-namespace counterexamples and remain unshipped. Do not lift the sandbox gate or claim AC5 until the signed-off /tmp subset and release scope are explicit, and the actual release binary proves admitted and excluded behavior in disposable real-kernel fixtures. No developer-host diskgc run.
 
 2026-10-23 dependency reconciliation: TASK-66 AC1/AC2 packaging is implemented. TASK-66 AC3/DoD depends on verifying the actual gate-lifted artifact from TASK-67, so TASK-66 is removed from TASK-67 formal dependencies to break the cycle. Verify TASK-66 AC3/DoD after this artifact exists and before TASK-67 closes; do not mark TASK-66 complete based on the gated development package.
+
+Forward-carried from TASK-64 (2026-10-23): the kernel matrix now covers Linux 5.8.16 (the PRD floor), 5.15, 6.1, 6.6, 6.8.12 (no pidfd HUP; signal-0 fallback bites) and 6.12 (HUP control). Release-relevant finding: inside a Podman 2.1.1 container (2020 default seccomp profile) pidfd_open is EPERM and diskgc refuses to start, fail-closed. CI fleets that run ensure inside a container need a runtime/profile that allows pidfd_open and pidfd_send_signal; measured scope and remedy text are TASK-126. The 5.8 VM runs its containers with seccomp=unconfined for that reason.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

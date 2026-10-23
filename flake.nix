@@ -5,6 +5,12 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # Test-only NixOS package set for the pinned Linux 5.15 VM.
     nixpkgs515.url = "github:NixOS/nixpkgs/6f3b13fcf904691a274955cc80c9f2ed655ff6a9";
+    # Historical test-only package sets for the Linux 5.8 and 6.8 VM points.
+    nixpkgs58 = {
+      url = "github:NixOS/nixpkgs/cd63096d6d887d689543a0b97743d28995bc9bc3";
+      flake = false;
+    };
+    nixpkgs68.url = "github:NixOS/nixpkgs/63dacb46bf939521bdc93981b4cbb7ecb58427a0";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -22,6 +28,8 @@
       self,
       nixpkgs,
       nixpkgs515,
+      nixpkgs58,
+      nixpkgs68,
       crane,
       rust-overlay,
       zephyr-src,
@@ -37,6 +45,8 @@
         overlays = [ (import rust-overlay) ];
       };
       pkgs515 = import nixpkgs515 { inherit system; };
+      pkgs58 = import nixpkgs58 { inherit system; };
+      pkgs68 = import nixpkgs68 { inherit system; };
       inherit (pkgs) lib;
 
       # The product toolchain, pinned by rust-toolchain.toml (single source).
@@ -257,6 +267,34 @@
       # The binaries under test, as real files (not symlinks into the store):
       # the runner bind-mounts $out/bin read-only at /opt/diskgc-e2e/bin. A
       # code change rebuilds this directory, never the base image.
+      # The diskgc-linux unit-test executable (static, like every target
+      # here), for the kernel VMs: its *_kernel_fact tests pin kernel
+      # behaviour that docs/safety.md states per kernel version, so they run
+      # on each pinned guest kernel, not only on the build host's.
+      diskgcLinuxTests = craneLib.mkCargoDerivation (
+        workspaceArgs
+        // {
+          src = workspaceTestSrc;
+          pname = "diskgc-linux-tests";
+          cargoArtifacts = workspaceDeps;
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.jq ];
+          buildPhaseCargoCommand = ''
+            cargo test --locked --profile release --package diskgc-linux --lib --no-run \
+              --message-format json-render-diagnostics > cargo-test.json
+          '';
+          installPhaseCommand = ''
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test
+              and .target.name == "diskgc_linux") | .executable' cargo-test.json > exes
+            count=$(grep -c . exes || true)
+            if [ "$count" -ne 1 ]; then
+              echo "error: expected one diskgc-linux lib test executable, got $count" >&2
+              exit 1
+            fi
+            install -Dm0755 "$(cat exes)" $out/bin/diskgc-linux-tests
+          '';
+        }
+      );
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
         cp ${lib.getExe diskgc} $out/bin/diskgc
@@ -726,17 +764,54 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
-      mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores:
-        import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
+      mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores: extra:
+        import ./diskgc-e2e/vm-old-kernel-pidfd.nix ({
           pkgs = vmPkgs;
           inherit kernelPackages expectedKernel expectPollHup cores;
+          kernelFactTests = diskgcLinuxTests;
           image = e2eVmImage;
           underTest = e2eUnderTest;
-        };
-      vmOldKernelPidfd = mkVmPidfd pkgs pkgs.linuxPackages_6_6 "6.6.158" false 2;
-      vmPidfdLinux61 = mkVmPidfd pkgs pkgs.linuxPackages_6_1 "6.1.189" false 2;
-      vmPidfdLinux612 = mkVmPidfd pkgs pkgs.linuxPackages_6_12 "6.12.112" true 2;
-      vmPidfdLinux515 = mkVmPidfd pkgs515 pkgs515.linuxPackages_5_15 "5.15.221" false 4;
+        } // extra);
+      # Nixpkgs 20.09 predates pkgs.testers.nixosTest. Keep its VM driver
+      # and guest together so the test module API matches the guest release.
+      nixosTest58 = (import "${nixpkgs58.outPath}/nixos/lib/testing-python.nix" {
+        inherit system;
+        pkgs = pkgs58;
+      }).makeTest;
+      vmOldKernelPidfd = mkVmPidfd pkgs pkgs.linuxPackages_6_6 "6.6.158" false 2 { };
+      vmPidfdLinux61 = mkVmPidfd pkgs pkgs.linuxPackages_6_1 "6.1.189" false 2 { };
+      vmPidfdLinux612 = mkVmPidfd pkgs pkgs.linuxPackages_6_12 "6.12.112" true 2 { };
+      vmPidfdLinux515 = mkVmPidfd pkgs515 pkgs515.linuxPackages_5_15 "5.15.221" false 4 { };
+      vmPidfdLinux58 = mkVmPidfd pkgs58 pkgs58.linuxPackages_5_8 "5.8.16" false 4 {
+        nixosTest = nixosTest58;
+        probePython = pkgs58.python39;
+        probePythonCommand = "${pkgs58.python39}/bin/python3.9";
+        # The 20.09 driver runs black --check over the generated test
+        # script; its formatting differs from the current driver's, and the
+        # lint checks no behaviour.
+        driverAttrs.skipLint = true;
+        # Podman 2.1.1's built-in seccomp profile (2020) answers pidfd_open
+        # with EPERM, and diskgc refuses to start without it (measured in
+        # this guest; docs/safety.md, In use). The current Podman of the
+        # other kernel points allows it. This point tests the kernel, so its
+        # containers run without seccomp; their isolation (namespaces,
+        # read-only binds, the VM's private disk, the sandbox gate) does not
+        # rest on seccomp.
+        podmanRunOptions = "--security-opt seccomp=unconfined";
+      };
+      vmPidfdLinux68 = mkVmPidfd pkgs68 pkgs68.linuxPackages_6_8 "6.8.12" false 2 { };
+      # The NixOS VM checks, one list: they are packages and checks, and the
+      # dev shell leaves them out.
+      vmChecks = {
+        vm-historical-ctime = vmHistoricalCtime;
+        vm-cold-scale = vmColdScale;
+        vm-old-kernel-pidfd = vmOldKernelPidfd;
+        vm-pidfd-linux-6-1 = vmPidfdLinux61;
+        vm-pidfd-linux-6-12 = vmPidfdLinux612;
+        vm-pidfd-linux-5-15 = vmPidfdLinux515;
+        vm-pidfd-linux-5-8 = vmPidfdLinux58;
+        vm-pidfd-linux-6-8 = vmPidfdLinux68;
+      };
     in
     {
       packages.${system} = {
@@ -747,19 +822,14 @@
         e2e-runner-docker = e2eRunnerDocker;
         e2e-runner-release-01 = e2eRunnerRelease;
         e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
-        vm-historical-ctime = vmHistoricalCtime;
-        vm-cold-scale = vmColdScale;
-        vm-old-kernel-pidfd = vmOldKernelPidfd;
-        vm-pidfd-linux-6-1 = vmPidfdLinux61;
-        vm-pidfd-linux-6-12 = vmPidfdLinux612;
-        vm-pidfd-linux-5-15 = vmPidfdLinux515;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
         e2e-docker-image = e2eDockerImage;
         e2e-under-test = e2eUnderTest;
         e2e-release-under-test = e2eReleaseUnderTest;
-      };
+      }
+      // vmChecks;
 
       checks.${system} = {
         inherit diskgc;
@@ -890,19 +960,17 @@
         e2e-runner-docker = e2eRunnerDocker;
         e2e-runner-release-01 = e2eRunnerRelease;
         e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
-        vm-historical-ctime = vmHistoricalCtime;
-        vm-cold-scale = vmColdScale;
-        vm-old-kernel-pidfd = vmOldKernelPidfd;
-        vm-pidfd-linux-6-1 = vmPidfdLinux61;
-        vm-pidfd-linux-6-12 = vmPidfdLinux612;
-        vm-pidfd-linux-5-15 = vmPidfdLinux515;
-      };
+      }
+      // vmChecks;
 
       # The toolchain from rust-toolchain.toml (host target by default) plus
-      # the inputs of every check. Run recipes as `nix develop -c just <recipe>`.
+      # the inputs of every check except the NixOS VM checks, which run only
+      # through `nix build` and whose guests (one per kernel point) would be
+      # evaluated by every `nix develop`. Run recipes as
+      # `nix develop -c just <recipe>`.
       devShells.${system} = {
         default = craneLib.devShell {
-          checks = self.checks.${system};
+          checks = removeAttrs self.checks.${system} (builtins.attrNames vmChecks);
           packages = [ pkgs.just pkgs.python3 pkgs.coreutils pkgs.cargo-mutants ];
           shellHook = devShellHook;
         };

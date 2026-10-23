@@ -447,6 +447,17 @@ pub fn candidate_cargo_busy_then_reclaims_real_target(ctx: &Ctx) -> TestResult {
         "busy target or source was touched"
     );
     holder.finish()?;
+    // diskgc tries the lock once. A tester-held probe waits out a release
+    // lagging the close (flock-hold retries a busy lock up to
+    // RELEASE_BOUND). Its own release is by TESTER, a host subuid under
+    // rootless Podman whose /proc fd table host-user readers cannot open;
+    // a harness probe runs as container root, the host uid, so they can.
+    let lock_str = lock
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 path {}", lock.display()))?;
+    Holder::tester(ctx, &["flock-hold", lock_str], &[])
+        .map_err(|e| format!("{lock_str} stayed locked after its holder exited: {e}"))?
+        .finish()?;
 
     let reclaimed = run_binary_with(
         ctx,

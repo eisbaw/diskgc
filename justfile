@@ -62,6 +62,8 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
 
 # Cold guest-cache 40k dry plan on the VM's private ext4 disk; no deletion.
 e2e-vm-cold-scale: _gcroot-dev
@@ -86,6 +88,8 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
+    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
     just e2e-vm-cold-scale
 
 # The static binary, no Nix inside (docs/testing.md, Images).

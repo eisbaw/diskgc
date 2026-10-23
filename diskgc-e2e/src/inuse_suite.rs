@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::controlled::ControlLine;
 use crate::holder::Holder;
+use crate::lock_release::RELEASE_BOUND;
 use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
 use crate::under_test::Run;
@@ -143,9 +144,23 @@ pub fn inuse_a_flocked_directory_is_locked(ctx: &Ctx) -> TestResult {
     let locked = reclaim(ctx, &[], "lk")?;
     let still_there = exists(&s.path("lk/file"));
     drop(dir);
+    // diskgc tries the lock once, so wait out a release lagging the close.
+    // The wait runs as TESTER: its own lock's release is then by a host
+    // subuid whose /proc fd table host-user readers cannot open, unlike a
+    // harness probe (container root, the host uid, under rootless Podman).
+    let lk = s.path("lk");
+    let bound_ms = RELEASE_BOUND.as_millis().to_string();
+    let lk = lk.to_str().ok_or("non-UTF-8 path")?;
+    let waited = ctx.probe_as_tester(&["host-lock", "wait", lk, &bound_ms])?;
+    waited.expect_code(0)?;
+    ensure!(
+        waited.stdout.trim().starts_with("Acquired "),
+        "lk stayed locked {RELEASE_BOUND:?} after its fd closed: {:?}",
+        waited.stdout
+    );
     let freed = reclaim(ctx, &[], "lk")?;
     let noread = reclaim(ctx, &[], "noread")?;
-    let verdict = oracle.judge_runs(&[&locked, &freed, &noread])?;
+    let verdict = oracle.judge_runs(&[&locked, &waited, &freed, &noread])?;
     expect_line(&noread, "0 skip unreadable \"/tmp/noread\" -- ")?;
     expect_line(&locked, "0 skip locked \"/tmp/lk\" -- ")?;
     ensure!(

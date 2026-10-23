@@ -494,7 +494,9 @@ exec shows `Z` only while the exec'ing thread is still counted (2 or more).
 The poll only decides whether that read is made: the read alone shows that
 no task of the process is live, given a `/proc` of diskgc's own pid
 namespace and that the number still names the process. On Linux 5.8 to 6.8
-polling never reports a hang-up. When it reports readable, diskgc checks
+polling never reports a hang-up (measured on 5.8.16, 5.15, 6.1, 6.6 and
+6.8.12 guests, with 6.12 reporting it: docs/testing.md). When it reports
+readable, diskgc checks
 the held pidfd with `pidfd_send_signal(..., 0)`: `ESRCH` confirms release;
 success or `EPERM` does not. Signal 0 delivers no signal. A seccomp filter
 that returns `EPERM` also leaves this check inconclusive; an unreadable
@@ -507,7 +509,9 @@ unreadable, never gone. diskgc refuses to start when the held `/proc`
 directory is not a procfs mount (`fstatfs`), when `/proc` is not that of
 its own pid namespace, or when `pidfd_open` is unavailable (blocked by
 seccomp or a sandbox), since without it no process could ever be confirmed
-gone. The namespace check reads the `NSpid` line of `/proc/self/status`,
+gone. Podman 2.1.1's built-in seccomp profile (NixOS 20.09) does this:
+inside its containers `pidfd_open` fails with `EPERM` and diskgc refuses
+to start; other runtimes and versions are not checked yet (TASK-126). The namespace check reads the `NSpid` line of `/proc/self/status`,
 which lists diskgc's pid in every namespace from the one of the mounted
 `/proc` down to its own: it must hold exactly one pid, diskgc's own. More
 than one means the `/proc` of an ancestor namespace, even when diskgc has
@@ -1797,6 +1801,29 @@ these features backported, and an unparseable release is refused too.
   running after its client dies; overlapping prunes waste work but do no
   harm. (`PR_SET_PDEATHSIG` was rejected: it fires on parent *thread* death
   and does not reach grandchildren.)
+- A lock goes when the last reference to its open file goes, which can be
+  after the holder's `close()` or exit has returned: a reader of
+  `/proc/<pid>/fd` or `fdinfo` (an in-use scan, `lsof`) holds a reference
+  to the file for the length of its syscall, and when its reference is
+  the last, the lock is released as that syscall returns. Which reads
+  take one (kernel `fs/proc/fd.c`): reading `fdinfo` on every supported
+  kernel; statting or reading an fd link from 5.11 (`fget_task` in
+  `proc_fd_link`; 5.8 to 5.10 take only a path reference); listing the
+  fd directory from 6.7. diskgc's scan lists and stats fd links, so it
+  does this from 5.11 on. Measured on Linux 7.2, where listing counts
+  too: up to 0.5 ms, and a single `flock` tried right after the close
+  found the lock busy in about 1 of 60 attempts under four concurrent
+  readers; that rate was not measured on older kernels, where fewer reads
+  take a reference. On 5.8.16, listing and statting fd links gave no late
+  release in about 1.7 million attempts, as the source predicts; adding
+  `fdinfo` reads gave one (in one run, after 772 attempts; the
+  kernel-fact test, docs/testing.md). A waiter's next poll takes it;
+  tests wait for a release with a bound instead of trying once
+  (docs/testing.md). The same holds the other way: while diskgc scans
+  (5.11 on), any program on the machine whose lock's last fd closes can
+  see that lock outlive the close by one such syscall, so a `flock -n` retried at
+  once (a cron job, a single-instance check) can briefly find it busy, as
+  under `lsof`. diskgc's correctness does not depend on it.
 - Waiting for the lock (until the deadline) retries a non-blocking
   `flock` every 10 to 100 ms rather than blocking in the kernel, so the
   deadline holds without signals. Limits: after the holder releases, the

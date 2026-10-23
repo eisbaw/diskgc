@@ -2824,7 +2824,39 @@ mod tests {
     /// before the fd is opened to after the assertion. Both sides must take
     /// it: it excludes nothing for a test that does not. (The holder's own
     /// `unshare` happens in its process.)
+    ///
+    /// The guard does not make a release synchronous with `close`: any
+    /// reader of `/proc/<pid>/fd` or `fdinfo` (an in-use scan in this or
+    /// another process, `lsof`) can hold a short reference to the file
+    /// (docs/safety.md, Host lock, says on which kernels), and when its
+    /// `fput` is the last one, the lock or socket goes
+    /// only as that reader's syscall returns (task-64 #37, pinned by
+    /// `a_flock_can_outlive_its_close_while_a_proc_reader_holds_the_file_kernel_fact`).
+    /// So a test asserts a release by waiting up to [`RELEASE_BOUND`],
+    /// never with one attempt right after the close.
     static FD_TABLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// How long a test waits for a lock or a bound socket to go after its
+    /// last fd was closed. The measured lag is one `/proc` reader's
+    /// syscall (docs/safety.md, Host lock); the bound is for a reader
+    /// preempted on a loaded machine, and a release that never happens
+    /// still fails.
+    const RELEASE_BOUND: Duration = Duration::from_secs(2);
+
+    /// Polls `released` every millisecond until it holds or
+    /// [`RELEASE_BOUND`] has passed; whether it held.
+    fn released_within_bound(mut released: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + RELEASE_BOUND;
+        loop {
+            if released() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     fn fd_table_guard() -> std::sync::MutexGuard<'static, ()> {
         // A panicking test poisons the mutex; the next one may still run.
@@ -2907,11 +2939,18 @@ mod tests {
     }
 
     impl GuardedChild {
-        fn spawn(command: &mut Command, _fd_table: &std::sync::MutexGuard<'_, ()>) -> Self {
-            Self {
-                child: command.spawn().expect("spawn test child"),
+        fn spawn(command: &mut Command, fd_table: &std::sync::MutexGuard<'_, ()>) -> Self {
+            Self::try_spawn(command, fd_table).expect("spawn test child")
+        }
+
+        fn try_spawn(
+            command: &mut Command,
+            _fd_table: &std::sync::MutexGuard<'_, ()>,
+        ) -> std::io::Result<Self> {
+            Ok(Self {
+                child: command.spawn()?,
                 reaped: false,
-            }
+            })
         }
 
         fn wait(&mut self) -> std::io::Result<ExitStatus> {
@@ -3887,10 +3926,17 @@ mod tests {
         );
         drop(listener);
         assert!(path.exists(), "closing a socket leaves its file");
-        let bound = host.bound_unix_sockets().expect("sock_diag dump");
+        // A `/proc` reader's reference can keep the socket bound briefly
+        // after `drop` (see `fd_table_guard`).
         assert!(
-            !bound.iter().any(|s| s.is(id)),
-            "{id} is still reported after the socket closed"
+            released_within_bound(|| {
+                !host
+                    .bound_unix_sockets()
+                    .expect("sock_diag dump")
+                    .iter()
+                    .any(|s| s.is(id))
+            }),
+            "{id} is still reported {RELEASE_BOUND:?} after the socket closed"
         );
     }
 
@@ -4246,18 +4292,28 @@ mod tests {
                 Ok(())
             });
         }
-        let out = {
+        // Its stdout goes to a file, not a pipe: the wait below is bounded
+        // (GuardedChild, task-64 H10) and no descendant holding a pipe can
+        // stretch it.
+        let dir = TempDir::new();
+        let stdout_path = dir.0.join("said");
+        parent.stdout(std::fs::File::create(&stdout_path).expect("helper stdout file"));
+        // The user namespace is made in `pre_exec`, so a missing one fails
+        // the spawn (`unshare` gives EPERM in a sandbox).
+        let mut child = {
             let _fd_table = fd_table_guard();
-            parent.output().unwrap_or_else(|e| {
+            GuardedChild::try_spawn(&mut parent, &_fd_table).unwrap_or_else(|e| {
                 panic!("start a process in a new user namespace: {e}; {USERNS_NEEDED}")
             })
         };
-        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        let status = child
+            .wait()
+            .unwrap_or_else(|e| panic!("wait for the namespace helper: {e}"));
+        let said = std::fs::read_to_string(&stdout_path).expect("read helper stdout");
         assert!(
-            out.status.success(),
-            "the namespace helper failed ({}; its own panic message is above); \
-             {USERNS_NEEDED}. It printed: {said}",
-            out.status
+            status.success(),
+            "the namespace helper failed ({status}; its own panic message is above); \
+             {USERNS_NEEDED}. It printed: {said}"
         );
         said
     }
@@ -4682,10 +4738,8 @@ mod tests {
     fn a_lock_conflicts_until_its_fd_is_closed() {
         let host = LinuxHost::new().expect("host setup");
         let dir = TempDir::new();
-        // The holder takes its lock only after exec, in its own fd table.
-        // A parallel test's fork cannot inherit this fd and keep it alive
-        // after the holder exits. This removes one possible cause of the
-        // rare failure recorded in task-64 #37; its cause was not observed.
+        // The holder takes its lock only after exec, in its own fd table,
+        // so no fork of a parallel test can inherit it.
         let holder = Holder::spawn("flock", &dir.0, &dir.0);
         let second = match host.flock_try(open_dir(&host, &dir.0), LockMode::Shared) {
             Ok(TryLock::Busy(fd)) => fd,
@@ -4699,12 +4753,111 @@ mod tests {
         };
         assert!(host.now().saturating_since(started) >= Duration::from_millis(50));
         drop(holder);
+        // Not one attempt with the passed deadline: a `/proc` reader can
+        // make the release lag the holder's exit (task-64 #37).
+        let bound = host.now().checked_add(RELEASE_BOUND);
         assert!(
             matches!(
-                host.flock_wait(second, LockMode::Exclusive, deadline),
+                host.flock_wait(second, LockMode::Exclusive, bound),
                 Ok(WaitLock::Acquired(_))
             ),
-            "closing the holder's fd released the lock"
+            "closing the holder's fd released the lock within {RELEASE_BOUND:?}"
+        );
+    }
+
+    /// task-64 #37's cause, pinned: a `/proc` reader takes a short
+    /// reference to the open file (kernel fs/proc/fd.c): reading
+    /// `/proc/<pid>/fdinfo/<fd>` on every supported kernel, statting or
+    /// reading a `/proc/<pid>/fd` link from 5.11, listing that directory
+    /// from 6.7. The readers here do all three, so the test holds on every
+    /// supported kernel. When the owner's `close` drops
+    /// its last fd while a reader holds one, the reader's `fput` is the last
+    /// one: the lock goes with `__fput` as the reader's syscall returns,
+    /// after `close` has returned. Any in-use scan does this, including
+    /// diskgc's own and another test's. So a `flock` tried once right after
+    /// `close` can be busy; [`LinuxHost::flock_wait`]'s polling takes it.
+    /// If the kernel ever releases synchronously, this test fails and the
+    /// bounded waits after a close in these tests can go.
+    #[test]
+    // The kernel VMs run every `*_kernel_fact` test and assert how many
+    // passed (diskgc-e2e/vm-old-kernel-pidfd.nix): adding or renaming one
+    // means updating that count.
+    fn a_flock_can_outlive_its_close_while_a_proc_reader_holds_the_file_kernel_fact() {
+        // The readers hold references to every fd of this process: keep
+        // them away from the tests that judge what a close releases.
+        let _fd_table = fd_table_guard();
+        const READERS: usize = 4;
+        // The wait for the first late release is roughly exponential: on
+        // one CPU its mean was about 0.6 s and its longest of 30 runs 1.6 s
+        // (task-64 notes). A passing run stops at the first late release,
+        // so the long bound costs only a run that is about to fail.
+        const PROVOKE_FOR: Duration = Duration::from_secs(30);
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        // Fds whose link stat and fdinfo read both succeeded: a reader that
+        // never read would make a false kernel claim below.
+        let stats = std::sync::atomic::AtomicU64::new(0);
+        let (attempts, late) = std::thread::scope(|scope| {
+            for _ in 0..READERS {
+                scope.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Errors are fds closing under the reader; counted
+                        // out by `stats`.
+                        let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+                            continue;
+                        };
+                        for entry in entries.flatten() {
+                            let fdinfo = Path::new("/proc/self/fdinfo").join(entry.file_name());
+                            if std::fs::metadata(entry.path()).is_ok()
+                                && std::fs::read(fdinfo).is_ok()
+                            {
+                                stats.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+            let started = Instant::now();
+            let (mut attempts, mut late) = (0_u64, 0_u64);
+            while late == 0 && started.elapsed() < PROVOKE_FOR {
+                attempts += 1;
+                // The previous round's lock can itself still be releasing.
+                let bound = host.now().checked_add(RELEASE_BOUND);
+                let first =
+                    match host.flock_wait(open_dir(&host, &dir.0), LockMode::Exclusive, bound) {
+                        Ok(WaitLock::Acquired(locked)) => locked,
+                        other => panic!("first lock within {RELEASE_BOUND:?}: {other:?}"),
+                    };
+                let second = open_dir(&host, &dir.0);
+                drop(first);
+                match host.flock_try(second, LockMode::Exclusive).expect("flock") {
+                    TryLock::Acquired(_) => {}
+                    TryLock::Busy(second) => {
+                        late += 1;
+                        let bound = host.now().checked_add(RELEASE_BOUND);
+                        assert!(
+                            matches!(
+                                host.flock_wait(second, LockMode::Exclusive, bound),
+                                Ok(WaitLock::Acquired(_))
+                            ),
+                            "a lock released late was not acquired within {RELEASE_BOUND:?}"
+                        );
+                    }
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            (attempts, late)
+        });
+        let stats = stats.load(Ordering::Relaxed);
+        println!(
+            "close then flock: {late} late release(s) in {attempts} attempt(s), {stats} stats"
+        );
+        assert!(stats > 0, "the /proc readers never read an fd");
+        assert!(
+            late > 0,
+            "no close in {attempts} attempts with {READERS} /proc readers left the lock busy for \
+             an immediate flock: the kernel released synchronously"
         );
     }
 
@@ -4723,9 +4876,12 @@ mod tests {
         rustix::fs::flock(&b, Op::NonBlockingLockShared).expect("b shared");
         assert!(rustix::fs::flock(&a, Op::NonBlockingLockExclusive).is_err());
         drop(b);
-        // a's shared lock is gone: an exclusive lock from elsewhere succeeds.
+        // a's shared lock is gone: an exclusive lock from elsewhere succeeds
+        // once b's release is through (it can lag the close, task-64 #37).
         assert!(
-            rustix::fs::flock(&probe, Op::NonBlockingLockExclusive).is_ok(),
+            released_within_bound(|| {
+                rustix::fs::flock(&probe, Op::NonBlockingLockExclusive).is_ok()
+            }),
             "the kernel kept the shared lock; the hazard the port guards against is gone"
         );
     }
@@ -4754,7 +4910,12 @@ mod tests {
             "a's shared lock must still be held"
         );
         drop(a);
-        assert!(matches!(lock(LockMode::Exclusive), TryLock::Acquired(_)));
+        // The release can lag the close (task-64 #37).
+        let bound = host.now().checked_add(RELEASE_BOUND);
+        assert!(matches!(
+            host.flock_wait(open_dir(&host, &dir.0), LockMode::Exclusive, bound),
+            Ok(WaitLock::Acquired(_))
+        ));
     }
 
     /// The readers on a real process larger than every first buffer: an

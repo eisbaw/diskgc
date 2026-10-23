@@ -17,6 +17,7 @@ use diskgc_core::docker_backend::{DockerInfo, ImageStore};
 use serde_json::Value;
 
 use crate::ensure_suite::report;
+use crate::lock_release::{RELEASE_BOUND, flock_free_within_release_bound, flock_held};
 use crate::oracle::{Fixture, Oracle};
 use crate::scratch;
 use crate::suite::{Ctx, HOST_LOCK, TestResult};
@@ -856,7 +857,7 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
         gate_started.elapsed()
     );
     ensure!(
-        docker_lock_held()?,
+        flock_held(Path::new(HOST_LOCK))?,
         "host lock was free while Docker prune child waited"
     );
     let parent = rustix::process::Pid::from_raw(parent_pid.cast_signed())
@@ -871,7 +872,7 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let child_held_lock = docker_lock_held()?;
+    let child_held_lock = flock_held(Path::new(HOST_LOCK))?;
     // Replace the public socket after diskgc pinned it and its prune child
     // reached the gate. A path-based client would now reach this decoy.
     std::fs::remove_file(SOCKET)
@@ -914,8 +915,8 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
         "Docker prune child lost the host lock after diskgc died"
     );
     ensure!(
-        !docker_lock_held()?,
-        "host lock remains held after Docker client exited"
+        flock_free_within_release_bound(Path::new(HOST_LOCK))?,
+        "host lock remains held {RELEASE_BOUND:?} after Docker client exited"
     );
     ensure!(
         !decoy_contacted,
@@ -1404,20 +1405,6 @@ fn docker_process_exited(pid: u32) -> Result<bool, String> {
             .lines()
             .any(|line| line.starts_with("State:\tZ") || line.starts_with("State:\tX"))),
         Err(error) => Err(format!("read process {pid} status: {error}")),
-    }
-}
-
-fn docker_lock_held() -> Result<bool, String> {
-    let fd = rustix::fs::open(
-        HOST_LOCK,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|error| format!("open {HOST_LOCK}: {error}"))?;
-    match rustix::fs::flock(&fd, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(false),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
-        Err(error) => Err(format!("flock {HOST_LOCK}: {error}")),
     }
 }
 

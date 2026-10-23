@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use crate::ensure_suite::{ensure_run, report};
 use crate::holder::Holder;
+use crate::lock_release::{RELEASE_BOUND, flock_free_within_release_bound};
 use crate::model_materialize;
 use crate::oracle::{Fixture, Oracle};
 use crate::scratch::Scratch;
@@ -80,6 +81,24 @@ const NON_PROFILE_MODELS: &[(&str, &str, &str, Option<&str>)] = &[
         "command/docker is model-only",
         None,
     ),
+    // The real-kernel counterpart is host_flock_release_only_by_close
+    // (`held_after_parent_close`, `released_after_last_close`).
+    (
+        "hostlock/held-by-a-remaining-reference.yaml",
+        include_str!(
+            "../../crates/diskgc-model/tests/models/hostlock/held-by-a-remaining-reference.yaml"
+        ),
+        "events is model-only",
+        None,
+    ),
+    (
+        "hostlock/released-by-the-last-reference.yaml",
+        include_str!(
+            "../../crates/diskgc-model/tests/models/hostlock/released-by-the-last-reference.yaml"
+        ),
+        "events is model-only",
+        None,
+    ),
     (
         "sketch/locked-cargo-target.yaml",
         include_str!("../../crates/diskgc-model/tests/models/sketch/locked-cargo-target.yaml"),
@@ -120,6 +139,17 @@ enum FixtureReplay {
         reason: &'static str,
         yaml: &'static str,
         test: &'static str,
+        run: fn(&Ctx) -> TestResult,
+    },
+    /// The vector's exact interleaving (process events timed to diskgc's own
+    /// operations) cannot be staged on a real kernel. The named container
+    /// test pins only the kernel-side invariant named in `reason`; the
+    /// rest of the vector's decision (retry, scan reuse) is model-only and
+    /// rests on the vector alone.
+    KernelCounterpart {
+        reason: &'static str,
+        test: &'static str,
+        tier: crate::suite::Tier,
         run: fn(&Ctx) -> TestResult,
     },
 }
@@ -165,6 +195,20 @@ macro_rules! vm_replay {
                     $file
                 )),
                 test: $test,
+                run: $run,
+            },
+        }
+    };
+}
+
+macro_rules! kernel_counterpart {
+    ($file:literal, $reason:literal, $test:literal, $tier:ident, $run:path) => {
+        FixtureClassification {
+            file: $file,
+            replay: FixtureReplay::KernelCounterpart {
+                reason: $reason,
+                test: $test,
+                tier: crate::suite::Tier::$tier,
                 run: $run,
             },
         }
@@ -306,6 +350,24 @@ const PROFILE_FIXTURES: &[FixtureClassification] = &[
         "python_vector_matches_linux_outcomes_and_deletion_diff",
         python_vector_matches_linux_outcomes_and_deletion_diff
     ),
+    kernel_counterpart!(
+        "python-pycache-fork-burst-settles.yaml",
+        "forks timed to diskgc's listings and the retry are model-only; \
+         the kernel case pins that churn that ends clears; an unsettled scan, \
+         if one occurs, must block (not required to occur)",
+        "host_inuse_scan_settles_after_fork_churn",
+        Fast,
+        crate::host_suite::host_inuse_scan_settles_after_fork_churn
+    ),
+    kernel_counterpart!(
+        "python-pycache-fork-storm-unsettled.yaml",
+        "forks timed to diskgc's listings and scan reuse are model-only; \
+         the kernel case pins that under sustained churn no unsettled scan clears \
+         and the candidate clears after it",
+        "host_inuse_scan_under_sustained_fork_churn",
+        Full,
+        crate::host_suite::host_inuse_scan_under_sustained_fork_churn
+    ),
     projected!(
         "python-pycache-in-use.yaml",
         "the original executable and maps are /usr/bin/python outside scratch",
@@ -356,6 +418,20 @@ fn verify_registered_replays() -> Result<(), String> {
                     return Err(format!("{}: VM reason is incomplete", classification.file));
                 }
                 (test, run, crate::suite::Tier::Vm)
+            }
+            FixtureReplay::KernelCounterpart {
+                reason,
+                test,
+                tier,
+                run,
+            } => {
+                if !reason.contains("model-only") {
+                    return Err(format!(
+                        "{}: kernel counterpart needs its model-only reason",
+                        classification.file
+                    ));
+                }
+                (test, run, tier)
             }
         };
         let registered = crate::suite::TESTS
@@ -1614,16 +1690,11 @@ pub fn materialized_lock_releases_on_finish(ctx: &Ctx) -> TestResult {
     materialized.assert_holding()?;
     materialized.finish()?;
     let path = Path::new(CARGO_LOCK_PATH);
-    let file = fs::File::open(path)
-        .map_err(|error| format!("open released lock {}: {error}", path.display()))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-        |error| {
-            format!(
-                "lock {} remained held after helper exit: {error}",
-                path.display()
-            )
-        },
-    )?;
+    ensure!(
+        flock_free_within_release_bound(path)?,
+        "lock {} remained held {RELEASE_BOUND:?} after helper exit",
+        path.display()
+    );
     Ok(())
 }
 
@@ -3008,6 +3079,26 @@ mod tests {
                     assert!(
                         std::ptr::fn_addr_eq(registered.run, run),
                         "{name}: wrong VM runner"
+                    );
+                }
+                FixtureReplay::KernelCounterpart {
+                    reason,
+                    test,
+                    tier,
+                    run,
+                } => {
+                    assert!(reason.contains("model-only"), "{name}: {reason}");
+                    let error = preflight_vector(&vector, false)
+                        .expect_err("a model-only interleaving must refuse materialization");
+                    assert!(error.contains("events is model-only"), "{name}: {error}");
+                    let registered = crate::suite::TESTS
+                        .iter()
+                        .find(|entry| entry.name == test)
+                        .unwrap_or_else(|| panic!("{name}: missing kernel counterpart {test}"));
+                    assert_eq!(registered.tier, tier, "{name}");
+                    assert!(
+                        std::ptr::fn_addr_eq(registered.run, run),
+                        "{name}: wrong kernel counterpart runner"
                     );
                 }
             }

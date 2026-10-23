@@ -27,6 +27,8 @@ use diskgc_core::host::{
 use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
 use diskgc_linux::{LinuxFd, LinuxHost};
 
+use crate::lock_release::within_release_bound;
+
 /// Runs host probe `cmd` with `args`.
 pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
     let host = LinuxHost::new().map_err(|e| format!("host setup: {e}"))?;
@@ -916,6 +918,12 @@ fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
+/// Whether `/proc/locks` stops listing the lock on `stat` within the
+/// release bound.
+fn flock_released(stat: &Stat) -> Result<bool, String> {
+    within_release_bound(|| flock_listed(stat).map(|listed| !listed))
+}
+
 /// The host lock's rule (docs/safety.md, Host lock): a lock is released
 /// only by closing its fd, so a child that inherited the fd keeps the lock
 /// after diskgc closes its own copy, and it goes when the last copy closes.
@@ -935,7 +943,7 @@ fn close_semantics(host: &LinuxHost, path: &str) -> Result<(), String> {
     };
     println!("held_while_open={}", yes(flock_listed(&stat)?));
     drop(fd);
-    println!("released_on_close={}", yes(!flock_listed(&stat)?));
+    println!("released_on_close={}", yes(flock_released(&stat)?));
 
     // Inherited case: a child gets the fd (close-on-exec cleared on this
     // one fd, as diskgc will do for the host lock) and outlives our copy.
@@ -957,7 +965,7 @@ fn close_semantics(host: &LinuxHost, path: &str) -> Result<(), String> {
     println!("held_after_parent_close={}", yes(flock_listed(&stat)?));
     drop(child.stdin.take());
     child.wait().map_err(|e| format!("wait for cat: {e}"))?;
-    println!("released_after_last_close={}", yes(!flock_listed(&stat)?));
+    println!("released_after_last_close={}", yes(flock_released(&stat)?));
     Ok(())
 }
 

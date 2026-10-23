@@ -3,7 +3,8 @@
 //! Cargo race deterministic by stopping Cargo at a known point:
 //!
 //! - `flock-hold [--shared] FILE...`: takes an exclusive (or shared) `flock`
-//!   on each FILE without waiting (fails if it cannot), prints `ready` and
+//!   on each FILE without blocking, retrying a busy lock until
+//!   `RELEASE_BOUND` (fails if it stays busy), prints `ready` and
 //!   holds them until its stdin closes. Holding `<profile>/.cargo-lock`
 //!   makes a Cargo build block there; a Cargo that takes
 //!   `.cargo-build-lock` first blocks holding it.
@@ -34,6 +35,7 @@ use rustix::fs::FlockOperation;
 
 use crate::cargo_under_test::{RUNNER_GATE_ENV, wait_at_gate};
 use crate::exit;
+use crate::lock_release::{RELEASE_BOUND, within_release_bound};
 
 /// The probe names this module handles.
 pub const PROBES: &[&str] = &[
@@ -82,9 +84,20 @@ pub fn main(cmd: &str, args: &[String]) -> i32 {
     }
 }
 
-/// Locks every file without waiting, says `ready`, holds until stdin closes.
+/// Locks every file without blocking, says `ready`, holds until stdin
+/// closes. A lock still busy is retried up to [`RELEASE_BOUND`]: the
+/// previous holder's release can lag its close (docs/testing.md, Negative
+/// feedback); a lock held for real still fails.
 /// `create` is only for the original Cargo race fixture probe.
 fn flock_hold(files: &[String], op: FlockOperation, create: bool) -> Result<(), String> {
+    // A blocking operation would wait without the bound.
+    assert!(
+        matches!(
+            op,
+            FlockOperation::NonBlockingLockShared | FlockOperation::NonBlockingLockExclusive
+        ),
+        "flock_hold needs a non-blocking lock operation, got {op:?}"
+    );
     let mut held = Vec::new();
     for file in files.iter().map(PathBuf::from) {
         let f = std::fs::OpenOptions::new()
@@ -94,8 +107,17 @@ fn flock_hold(files: &[String], op: FlockOperation, create: bool) -> Result<(), 
             .truncate(false)
             .open(&file)
             .map_err(|e| format!("open {}: {e}", file.display()))?;
-        rustix::fs::flock(&f, op)
-            .map_err(|e| format!("flock {op:?} {} without waiting: {e}", file.display()))?;
+        let taken = within_release_bound(|| match rustix::fs::flock(&f, op) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+            Err(e) => Err(format!("flock {op:?} {}: {e}", file.display())),
+        })?;
+        if !taken {
+            return Err(format!(
+                "flock {op:?} {}: still busy after {RELEASE_BOUND:?}",
+                file.display()
+            ));
+        }
         held.push(f);
     }
     let mut out = std::io::stdout();

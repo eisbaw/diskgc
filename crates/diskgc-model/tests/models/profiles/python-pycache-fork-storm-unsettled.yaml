@@ -1,0 +1,78 @@
+# TASK-64 G (docs/safety.md, In use: "Every process, and only once
+# settled"): a fork storm that outlasts the checker's one retry. Python 42
+# forks a child after each of the first 32 process listings, so the first
+# candidate's scan and its retry both reach the 16-growth-listing bound:
+# unsettled twice, in_use. The second candidate must not reuse that
+# unsettled scan (even inside the 500 ms blocked-reuse window): it scans
+# again, the storm is over, and it is deleted. No process uses either
+# cache. Mutations that turn this red: reusing an unsettled scan
+# (Checker::reusable_at), letting an unsettled scan clear (Scan::blocked).
+profile_vector: 1
+profile: python-pycache
+path: /home/tester/project
+roots: [/home/tester/project]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python: {}
+    /home/tester/project/run.log: {size: 1K}
+    /home/tester/project/a/__pycache__:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      a.pyc: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+    /home/tester/project/b/__pycache__:
+      .: {mtime: 2026-10-12T00:00:00Z}
+      b.pyc: {size: 8K, mtime: 2026-10-12T00:00:00Z}
+  processes:
+    - {pid: 42, exe: /usr/bin/python, cwd: /home/tester/project,
+       maps: [/usr/bin/python], fds: [{path: /home/tester/project/run.log}],
+       environ: [PATH=/usr/bin]}
+  events:
+    - {at: {op: pids, nth: 1, when: after}, fork: {pid: 42, child: 101}}
+    - {at: {op: pids, nth: 2, when: after}, fork: {pid: 42, child: 102}}
+    - {at: {op: pids, nth: 3, when: after}, fork: {pid: 42, child: 103}}
+    - {at: {op: pids, nth: 4, when: after}, fork: {pid: 42, child: 104}}
+    - {at: {op: pids, nth: 5, when: after}, fork: {pid: 42, child: 105}}
+    - {at: {op: pids, nth: 6, when: after}, fork: {pid: 42, child: 106}}
+    - {at: {op: pids, nth: 7, when: after}, fork: {pid: 42, child: 107}}
+    - {at: {op: pids, nth: 8, when: after}, fork: {pid: 42, child: 108}}
+    - {at: {op: pids, nth: 9, when: after}, fork: {pid: 42, child: 109}}
+    - {at: {op: pids, nth: 10, when: after}, fork: {pid: 42, child: 110}}
+    - {at: {op: pids, nth: 11, when: after}, fork: {pid: 42, child: 111}}
+    - {at: {op: pids, nth: 12, when: after}, fork: {pid: 42, child: 112}}
+    - {at: {op: pids, nth: 13, when: after}, fork: {pid: 42, child: 113}}
+    - {at: {op: pids, nth: 14, when: after}, fork: {pid: 42, child: 114}}
+    - {at: {op: pids, nth: 15, when: after}, fork: {pid: 42, child: 115}}
+    - {at: {op: pids, nth: 16, when: after}, fork: {pid: 42, child: 116}}
+    - {at: {op: pids, nth: 17, when: after}, fork: {pid: 42, child: 117}}
+    - {at: {op: pids, nth: 18, when: after}, fork: {pid: 42, child: 118}}
+    - {at: {op: pids, nth: 19, when: after}, fork: {pid: 42, child: 119}}
+    - {at: {op: pids, nth: 20, when: after}, fork: {pid: 42, child: 120}}
+    - {at: {op: pids, nth: 21, when: after}, fork: {pid: 42, child: 121}}
+    - {at: {op: pids, nth: 22, when: after}, fork: {pid: 42, child: 122}}
+    - {at: {op: pids, nth: 23, when: after}, fork: {pid: 42, child: 123}}
+    - {at: {op: pids, nth: 24, when: after}, fork: {pid: 42, child: 124}}
+    - {at: {op: pids, nth: 25, when: after}, fork: {pid: 42, child: 125}}
+    - {at: {op: pids, nth: 26, when: after}, fork: {pid: 42, child: 126}}
+    - {at: {op: pids, nth: 27, when: after}, fork: {pid: 42, child: 127}}
+    - {at: {op: pids, nth: 28, when: after}, fork: {pid: 42, child: 128}}
+    - {at: {op: pids, nth: 29, when: after}, fork: {pid: 42, child: 129}}
+    - {at: {op: pids, nth: 30, when: after}, fork: {pid: 42, child: 130}}
+    - {at: {op: pids, nth: 31, when: after}, fork: {pid: 42, child: 131}}
+    - {at: {op: pids, nth: 32, when: after}, fork: {pid: 42, child: 132}}
+expect:
+  plan:
+    - {candidate: /home/tester/project/a/__pycache__, reason: in_use}
+    - {candidate: /home/tester/project/b/__pycache__}
+  reclaim_exit: 1
+  actions: [/home/tester/project/b/__pycache__]
+  removed: [/home/tester/project/b/__pycache__]
+  skipped:
+    - {candidate: /home/tester/project/a/__pycache__, reason: in_use}
+  preserved:
+    - /home/tester/project/a/__pycache__/a.pyc

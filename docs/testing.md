@@ -103,6 +103,23 @@ implements it. A bullet without a test is a gap, filed as a task.
   to pass inside. A container test also proves the per-operation check
   aborts (absolute path, `..`, a symlink out of the scratch mount, a bind
   mount of the scratch filesystem itself).
+- **A release is awaited, never tried once.** A test that closes the last
+  fd of a lock or a bound socket and then asserts it is gone waits for that
+  with a bound (`RELEASE_BOUND`, 2 s, defined once for the `diskgc-linux`
+  host tests and once in `diskgc-e2e/src/lock_release.rs` for every E2E
+  check): a `/proc/<pid>/fd` or `fdinfo` reader on the machine can make
+  the release lag the close (docs/safety.md, Host lock). This was the cause
+  of TASK-64 #37's one-in-600 failure of
+  `a_lock_conflicts_until_its_fd_is_closed`; the kernel fact is pinned by
+  `a_flock_can_outlive_its_close_while_a_proc_reader_holds_the_file_kernel_fact`,
+  which fails if the kernel ever releases synchronously. Each kernel VM
+  (below) runs the `diskgc-linux` unit tests whose names end in
+  `_kernel_fact` directly in its guest (`diskgcLinuxTests` in `flake.nix`),
+  so the claim is checked on each pinned kernel, not only the build host's.
+  Its readers read `fdinfo` because on 5.8 fd listing and link stats take
+  no file reference: without that read, the 5.8.16 guest saw no late
+  release in about 1.7 million attempts and the test failed. A held-lock
+  assertion needs no wait: a lagging release only keeps a lock longer.
 
 ### Definition of Done (every task)
 
@@ -497,9 +514,18 @@ delayed freeing) are marked *model-only*; tests that use them say so.
 The checked-in profile-vector inventory in
 `diskgc-e2e/src/differential_suite.rs` classifies each original YAML by
 filename and reason: 18 direct replays, four browser-home projections, two
-process projections, two single-age clock projections, and four mixed-age
-originals requiring the QEMU guest. Every direct or projected
-entry names its registered container case. Here “direct” means no
+process projections, two single-age clock projections, four mixed-age
+originals requiring the QEMU guest, and kernel counterparts. Every direct or projected
+entry names its registered container case. A kernel counterpart is a
+vector whose exact interleaving (process events timed to diskgc's own
+operations, such as forks after each process listing) cannot be staged on
+a real kernel: it must fail preflight on its events and names the
+registered container case that pins the kernel-side invariant
+(`python-pycache-fork-*.yaml`: the fork-churn host tests, that the
+candidate clears once the churn ends; that no unsettled scan clears a
+candidate, which the sustained-churn case requires to occur and the burst
+case checks only if one occurs). The checker's retry and its refusal to reuse an unsettled scan
+for the next candidate are model-only: they rest on the vectors alone. Here “direct” means no
 fixture-specific transformation; every outcome replay still uses the common
 typed projection of nominal clock and mount geometry. The projections keep the
 original expectations and check them before the transformed replay. West and
@@ -538,10 +564,12 @@ projected away in this outcome-only
 path; literal replay is not claimed. Adding a checked-in vector requires a
 new classification and parity evidence.
 
-The two other checked-in host-model YAMLs are classified separately:
+The other checked-in host-model YAMLs are classified separately:
 `sketch/locked-cargo-target.yaml` uses a call-time event and exact external
-space accounting, while `docker-bundled.yaml` supplies scripted Docker
-responses. Both fail materializer preflight with a named model-only field.
+space accounting, `docker-bundled.yaml` supplies scripted Docker
+responses, and `hostlock/*.yaml` time a fork and an exit of the lock
+holder (their kernel counterpart is `host_flock_release_only_by_close`).
+Each fails materializer preflight with a named model-only field.
 A disposable-container bite table mutates each supported refusal family
 (kernel and identity, sandbox and command responses, events, process and
 lock shapes, mount capabilities and types, and nonrepresentable nodes and
@@ -668,23 +696,33 @@ filesystem, processes and mounts from the developer's system.
   clearing. It reports process-list rounds, duration, whether the 16-listing bound
   was hit, and whether the checker retried. After reaping every worker,
   it requires the unused candidate to clear. This exercises the
-  current host kernel. Four Nix QEMU checks run the same case in disposable
-  Podman containers on pinned Linux 5.15.221, 6.1.189, 6.6.158, and 6.12.112
-  guests. The 5.15 guest has four vCPUs; the others have two. The guest
-  asserts its online vCPU count before testing, so the scanner and fork
-  workers can overlap. The 5.15 VM uses a separate exact Nixpkgs pin
-  (`6f3b13fcf904691a274955cc80c9f2ed655ff6a9`) for the whole test
-  driver and NixOS guest; its image and static binaries still come from the
-  primary project pin. A direct guest probe holds a pidfd across child
-  release and reap: the live child has no poll event and accepts signal 0;
-  the released pidfd polls readable without HUP on 5.15, 6.1 and 6.6,
-  with HUP on 6.12, while
-  `pidfd_send_signal(pidfd, 0)` returns ESRCH on all four. In each guest,
+  current host kernel. Six Nix QEMU checks (`vm-pidfd-linux-*`,
+  `vm-old-kernel-pidfd`) run the same case in disposable Podman containers
+  on pinned Linux 5.8.16 (the PRD floor), 5.15.221, 6.1.189, 6.6.158,
+  6.8.12 and 6.12.112 guests. The 5.8 and 5.15 guests have four vCPUs; the
+  others have two. The guest asserts its online vCPU count before testing,
+  so the scanner and fork workers can overlap. The 5.8, 5.15 and 6.8 VMs
+  each use a separate exact Nixpkgs pin for the whole test driver and NixOS
+  guest (20.09 `cd63096d6d887d689543a0b97743d28995bc9bc3`,
+  `6f3b13fcf904691a274955cc80c9f2ed655ff6a9`, 24.05
+  `63dacb46bf939521bdc93981b4cbb7ecb58427a0`); their image and static
+  binaries still come from the primary project pin. The 20.09 guest needs
+  three adjustments: Python 3.9 for the probe (3.8 has no pidfd API), the
+  driver's `black` lint of the generated script switched off, and
+  `--security-opt seccomp=unconfined` for its containers, because Podman
+  2.1.1's built-in seccomp profile answers `pidfd_open` with `EPERM` and
+  diskgc then refuses to start (docs/safety.md, In use). A direct guest
+  probe holds a pidfd across child release and reap: the live child has no
+  poll event and accepts signal 0; the released pidfd polls readable
+  without HUP on 5.8, 5.15, 6.1, 6.6 and 6.8, with HUP on 6.12, while
+  `pidfd_send_signal(pidfd, 0)` returns ESRCH on all six. In each guest,
   `host_pidfd_release_after_reap` pins a live child with
   `LinuxHost::proc_identity`, checks that it is not released, reaps it while
   retaining the pidfd, then requires `LinuxHost::proc_identity_released` to
-  return true. The 5.15, 6.1 and 6.6 cases directly bite the no-HUP fallback;
-  6.12 is a HUP control. Podman's graph root is on each guest's private ext4
+  return true. The 5.8, 5.15, 6.1, 6.6 and 6.8 cases directly bite the no-HUP
+  fallback; 6.12 is a HUP control. On 5.8 and 6.8 no measured scan reached
+  the 16-listing bound, so those points check release detection and
+  settling, not the bound. Podman's graph root is on each guest's private ext4
   disk; its only bind mounts are read-only Nix store and test binaries.
   `host_inuse_scan_under_sustained_fork_churn` is a full-tier, 30-second
   disposable-container measurement with eight continuous fork workers. It
@@ -701,9 +739,9 @@ filesystem, processes and mounts from the developer's system.
   limit, the highest raw listing count was 16, and the candidate cleared
   after the storm. This is a current-kernel
   sample under synthetic load, not evidence about an actual loaded CI host.
-  The VM checks cover four kernel points, not every kernel in the supported
-  5.8–6.8 range. Linux 5.8 and 6.8 and a loaded-CI host remain to be
-  measured for TASK-64 G.
+  The VM checks cover six kernel points, not every kernel in the supported
+  range; distribution kernels with backports are not covered. A loaded CI
+  host has not been measured.
 - **Root-mode owner resolution:** the static binary runs under container
   root with a protected config that names a numeric UID absent from
   `/etc/passwd`; an oracle-checked reclaim proves the UID owns every removed
@@ -885,7 +923,7 @@ itself (task-13 H13).
   `CARGO_NET_OFFLINE=true` in a container with `--network=none`.
 - **Helpers** (fixtures, not code under test; `diskgc-e2e probe ...`):
   the lock holder `flock-hold FILE...` (exclusive, or `--shared`; fails
-  rather than wait); the race fixture's `build.rs`, which waits at the gate
+  when a lock stays busy for the release bound instead of blocking); the race fixture's `build.rs`, which waits at the gate
   named by `DISKGC_E2E_BUILD_GATE`; the runner wrapper `cargo-runner`, set
   as the host target's runner, which waits at the gate named by
   `DISKGC_E2E_RUNNER_GATE` and then execs the binary; the race fixture's
