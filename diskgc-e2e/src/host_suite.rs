@@ -469,6 +469,34 @@ pub fn host_inuse_scan_settles_after_fork_churn(ctx: &Ctx) -> TestResult {
     verdict.assert_clean()
 }
 
+/// TASK-64 G: a 30-second load measurement of the actual Linux checker.
+/// The probe is read-only and untraced to keep 8 workers' fork logs out of
+/// the harness record store. It runs only inside the disposable container.
+pub fn host_inuse_scan_under_sustained_fork_churn(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("sustained-churn-free", 0o755, ROOT)?;
+    let file = s.write_file("sustained-churn-free/file", b"unused", 0o644, ROOT)?;
+    let run = ctx.probe_as_root(&["host-inuse-sustained-churn", "/tmp/sustained-churn-free"])?;
+    ensure!(
+        run.status.success(),
+        "sustained fork churn failed: status={} stdout={} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report = String::from_utf8(run.stdout).map_err(|e| format!("probe output UTF-8: {e}"))?;
+    ensure!(
+        report.starts_with("elapsed_ms=") && report.trim_end().ends_with("post_load_clear=true"),
+        "missing sustained load measurement: {report:?}"
+    );
+    ensure!(
+        std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))? == b"unused",
+        "read-only load probe changed its candidate fixture"
+    );
+    info!("sustained fork churn: {}", report.trim());
+    Ok(())
+}
+
 /// Pin a live child through LinuxHost, then prove that LinuxHost recognizes
 /// its release after reap. In the pinned 6.6 VM, the independent syscall
 /// probe establishes POLLIN without HUP, so the final answer bites the

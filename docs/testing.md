@@ -649,9 +649,24 @@ filesystem, processes and mounts from the developer's system.
   return true. The 5.15, 6.1 and 6.6 cases directly bite the no-HUP fallback;
   6.12 is a HUP control. Podman's graph root is on each guest's private ext4
   disk; its only bind mounts are read-only Nix store and test binaries.
-  These checks cover four kernel points, not every kernel in the supported
-  5.8–6.8 range. Linux 5.8 and 6.8, plus a prolonged loaded-CI
-  sample, remain to be measured for TASK-64 G.
+  `host_inuse_scan_under_sustained_fork_churn` is a full-tier, 30-second
+  disposable-container measurement with eight continuous fork workers. It
+  records completed children, checker samples, unsettled and blocked results,
+  explicit growth-limit reasons, the highest raw PID listing count and scan
+  latency, and requires the unused fixture to clear after every worker exits.
+  The raw listing count includes re-reads and is diagnostic; reaching the
+  growth-listing limit is checked against the scanner's reason and
+  `MAX_LISTINGS`. The sustained worker probe is untraced
+  to avoid filling the E2E record store with child process logs; it checks
+  that its candidate fixture was not changed. A focused run on the current
+  7.2.9 host kernel completed 108,221 children and 263 checker samples:
+  261 scans were unsettled, all 261 blocked and reported the 16-growth-listing
+  limit, the highest raw listing count was 16, and the candidate cleared
+  after the storm. This is a current-kernel
+  sample under synthetic load, not evidence about an actual loaded CI host.
+  The VM checks cover four kernel points, not every kernel in the supported
+  5.8–6.8 range. Linux 5.8 and 6.8 and a loaded-CI host remain to be
+  measured for TASK-64 G.
 - **Root-mode owner resolution:** the static binary runs under container
   root with a protected config that names a numeric UID absent from
   `/etc/passwd`; an oracle-checked reclaim proves the UID owns every removed

@@ -582,7 +582,13 @@ which costs candidates. A live task that cannot be read is treated like an
 unreadable process, and so is a process that keeps creating and ending
 threads faster than a round completes (each round needs its listing to
 hold still from the first listing to the second); while that lasts it
-costs every candidate it could be using. Accepted limits (each needs an
+costs every candidate it could be using. A 30-second, eight-worker fork
+storm in a disposable container produced 261 unsettled checker samples;
+all 261 blocked the unused fixture and explicitly reached the 16-growth-listing
+limit. A scan after the storm cleared the fixture.
+This measures conservative behavior on one 7.2.9 kernel under synthetic
+load. A sustained busy host can still make no progress until its process
+list settles. Accepted limits (each needs an
 event outside diskgc's control at an unlucky moment, often several at
 once; none of them makes diskgc take a live process for gone):
 

@@ -46,6 +46,7 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-proc-replaced", []) => proc_replaced_after_startup(&host),
         ("host-pidfd-release", []) => pidfd_release(&host),
         ("host-inuse-fork-churn", [candidate]) => inuse_fork_churn(&host, candidate),
+        ("host-inuse-sustained-churn", [candidate]) => inuse_sustained_churn(&host, candidate),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
         ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
@@ -418,6 +419,144 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         result.is_ok()
     );
     result.map_err(|e| format!("unused candidate remained blocked after fork storm: {e:?}"))
+}
+
+/// Run a continuous, bounded fork storm while repeatedly asking the real
+/// checker about one unused candidate. This is a load measurement, so exact
+/// counts are reported rather than assumed; an unsettled scan must always
+/// block, and the candidate must clear when the storm ends.
+fn inuse_sustained_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    use diskgc_core::engine::{Candidate, Rules, walk};
+    use diskgc_core::inuse::{Checker, MAX_LISTINGS, Options, scan};
+    use diskgc_core::resolve::{Want, resolve};
+
+    const WORKERS: usize = 8;
+    const WINDOW: Duration = Duration::from_secs(30);
+
+    let path = Path::new(candidate);
+    let parent_path = path.parent().ok_or("candidate has no parent")?;
+    let parent = resolve(host, parent_path, Want::Directory).map_err(|e| e.to_string())?;
+    let candidate = Candidate::new(&parent, path).ok_or("candidate is not beneath its parent")?;
+    let users = [rustix::process::geteuid().as_raw()];
+    let rules = Rules::new(&users);
+    let record = walk(host, &candidate, &rules, None)
+        .map_err(|e| format!("walk unused candidate: {e:?}"))?;
+    let options = Options::from_rules(&rules);
+    let baseline = scan(host, &options).map_err(|e| format!("baseline scan: {e}"))?;
+    baseline
+        .check(&candidate, &record)
+        .map_err(|e| format!("unused candidate blocked before load: {e:?}"))?;
+
+    let start = Arc::new(Barrier::new(WORKERS + 1));
+    let stop = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..WORKERS {
+        let start = Arc::clone(&start);
+        let stop = Arc::clone(&stop);
+        let completed = Arc::clone(&completed);
+        threads.push(std::thread::spawn(move || -> Result<(), String> {
+            start.wait();
+            while !stop.load(Ordering::Relaxed) {
+                let status = Command::new("/bin/true")
+                    .status()
+                    .map_err(|e| format!("spawn/wait /bin/true: {e}"))?;
+                if !status.success() {
+                    return Err(format!("/bin/true exited with {status}"));
+                }
+                completed.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }));
+    }
+    let started = Instant::now();
+    let until = started + WINDOW;
+    start.wait();
+    let mut checker = Checker::new(&rules, Duration::ZERO);
+    let mut samples = 0usize;
+    let mut unsettled = 0usize;
+    let mut blocked = 0usize;
+    let mut progressed = 0usize;
+    let mut growth_limited = 0usize;
+    let mut max_listings = 0usize;
+    let mut max_ms = 0u128;
+    let mut scan_error = None;
+    let growth_limit_reason =
+        format!("after {MAX_LISTINGS} listings that brought new process incarnations");
+    while Instant::now() < until {
+        let before = completed.load(Ordering::Relaxed);
+        let result = checker.check(host, &candidate, &record);
+        let after = completed.load(Ordering::Relaxed);
+        match result {
+            Ok(judgement) => {
+                let latest = checker.latest().expect("checker made a scan");
+                let notes = latest.notes();
+                let incomplete = notes
+                    .iter()
+                    .any(|note| note.starts_with("process scan unsettled:"));
+                if incomplete && judgement.is_ok() {
+                    scan_error = Some("unsettled loaded scan cleared a candidate".to_owned());
+                    break;
+                }
+                samples += 1;
+                unsettled += usize::from(incomplete);
+                blocked += usize::from(judgement.is_err());
+                growth_limited += usize::from(notes.iter().any(|note| {
+                    note.starts_with("process scan unsettled:")
+                        && note.contains(&growth_limit_reason)
+                }));
+                max_listings = max_listings.max(latest.listings());
+                max_ms = max_ms.max(latest.took().as_millis());
+                // Diagnostic only: completion can race the check's return.
+                progressed += after.saturating_sub(before);
+            }
+            Err(e) => {
+                scan_error = Some(format!("checker under load: {e}"));
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let mut worker_error = None;
+    for thread in threads {
+        match thread.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                worker_error.get_or_insert(error);
+            }
+            Err(_) => {
+                worker_error.get_or_insert("fork worker panicked".to_owned());
+            }
+        }
+    }
+    if let Some(error) = worker_error.or(scan_error) {
+        return Err(error);
+    }
+    let elapsed = started.elapsed();
+    let children = completed.load(Ordering::Relaxed);
+    if elapsed < WINDOW || samples == 0 || children < WORKERS || unsettled == 0 {
+        return Err(format!(
+            "load was not sustained or never unsettled: elapsed={elapsed:?} samples={samples} children={children} unsettled={unsettled}"
+        ));
+    }
+    if growth_limited == 0 {
+        return Err(format!(
+            "loaded scanner did not exercise the {MAX_LISTINGS}-growth-listing limit: max_listings={max_listings}"
+        ));
+    }
+    let after = scan(host, &options).map_err(|e| format!("post-load scan: {e}"))?;
+    after
+        .check(&candidate, &record)
+        .map_err(|e| format!("unused candidate remained blocked after load: {e:?}"))?;
+    println!(
+        "elapsed_ms={} workers={WORKERS} children={children} samples={samples} unsettled={unsettled} blocked={blocked} growth_limited={growth_limited} completed_during_checks={progressed} max_listings={max_listings} max_scan_ms={max_ms} post_load_clear=true",
+        elapsed.as_millis()
+    );
+    Ok(())
 }
 
 /// In a disposable container subprocess, replace the pathname after the

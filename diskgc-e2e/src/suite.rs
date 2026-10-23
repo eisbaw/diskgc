@@ -1026,6 +1026,12 @@ pub static TESTS: &[Test] = &[
         run: host_suite::host_inuse_scan_settles_after_fork_churn,
     },
     Test {
+        name: "host_inuse_scan_under_sustained_fork_churn",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: host_suite::host_inuse_scan_under_sustained_fork_churn,
+    },
+    Test {
         name: "host_pidfd_release_after_reap",
         tier: Tier::Fast,
         expect: Expect::Pass,
