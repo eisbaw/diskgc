@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 12. The human decides when this is done.
+Status: draft, round 13. The human decides when this is done.
 
 This file is the product contract: purpose, users, behaviour, safety
 boundaries, acceptance criteria, scope and decisions. Each detailed rule
@@ -93,9 +93,20 @@ kinds), and where those guarantees end. The protocols are in
   configurable policy may block only live ones instead (a FIFO some
   visible process holds open, a socket bound in diskgc's network
   namespace), so stale test fixtures do not block forever.
+- Nor, for a source with a liveness contract, unless that contract
+  permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
+  cache built-in ships only with a contract whose class admits it, and
+  the rule applies to every built-in.
 - Cargo targets only inside profile directories whose locks diskgc holds;
   no Cargo lock file is ever deleted or moved.
-- No symlink followed, no mount crossed.
+- No symlink followed, no mount crossed when finding, walking and
+  deleting candidates. (Liveness evidence matches what a process holds
+  by device and inode, climbing held directories with `..` and reading
+  only the device and inode of ancestors; translates a held file's link
+  text through mount tables and resolves only its suffix beneath the tree
+  being judged, without crossing a mount or following a symlink; and
+  resolves by name only the temp-directory and `--basetemp` values pytest
+  itself uses, read-only, in that process's own root.)
 - The index never decides safety; every check runs at deletion time.
 - Development builds refuse to delete anything outside the test
   containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)), so
@@ -112,7 +123,12 @@ entry replaced between diskgc's identity check and its unlink can be
 deleted (diskgc is not a defence against a hostile local user racing it);
 a `command` action can delete whatever its author wrote, so command actions
 are trusted code and never run as root; deadlines are cooperative, and a
-filesystem operation blocked in the kernel can overrun them.
+filesystem operation blocked in the kernel can overrun them. Liveness
+contracts that look up process ids permit nothing outside the initial PID
+namespace, under `hidepid`, or on a filesystem off their local list, and
+assume such a filesystem is written by this kernel only; heuristic
+contracts name their residual cases in the liveness table
+([reference.md](docs/reference.md#liveness-contracts)).
 
 ## What good looks like (observable)
 
@@ -182,7 +198,8 @@ Releases. **0.1, the `ensure` MVP**, is the first build that may delete on
 a real machine: `ensure` (with `--select`, `--roots`, `--dry-run`, `--json`,
 the exit codes, host lock, deadlines and signals), `check`, the config file
 (schema `version: 1`, frozen by the contract review before 0.1), kinds `fs`
-and `cargo-target`, and the verified `/tmp` and Cargo built-ins, as a
+and `cargo-target`, and the verified `/tmp` and Cargo built-ins (verified:
+with an admissible liveness contract), as a
 static binary with a tmpfiles drop-in and an example config. It ships only
 with the Cargo race tests, the journeys for its users and the contract
 review green; `watch`, the index, `survey`, Docker, Nix and command actions
@@ -193,7 +210,8 @@ In scope (v1): `ensure`, `watch` (including `--tally-only`), `check`,
 `survey`, `profiles`; profiles with `find` / `where` / `action`, the
 qualified selection grammar, `protect`, user profiles and overrides; kinds
 `fs`, `cargo-target`, `docker-build-cache`, `docker-images`, `nix-store`;
-the verified part of the initial built-in library; the index, background
+the verified part of the initial built-in library (each with an admissible
+liveness contract); the index, background
 and synchronous tally, snapshot; `--json`; generic-Linux deployment
 (static binary, systemd unit, tmpfiles drop-in), a NixOS module, and plain
 binary + YAML for CI.
