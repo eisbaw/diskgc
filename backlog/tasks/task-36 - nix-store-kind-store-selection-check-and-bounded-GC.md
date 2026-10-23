@@ -4,13 +4,14 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 10:08'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-4
   - irreversible
   - safety
 dependencies:
   - TASK-34
+  - TASK-118
 references:
   - docs/safety.md#nix-store
 priority: medium
@@ -46,6 +47,8 @@ From task-50 round 3 (mped): the query run takes a closed enum of queries that d
 2026-10-20 disposable Nix 2.34.8 container: an explicit direct-local store URL with store=/nix/store, real=/tmp/real and state=/tmp/state-a overrode conflicting NIX_REMOTE and NIX_CONFIG for root query and bounded GC. A root in state A survived its GC; registering the same path in state B on the same physical real directory and collecting through B deleted the path still rooted in A. The child URL pins only its selected database, not the daemon database or exclusive ownership of the physical store. No nix-garbage profile shipped. A safe implementation needs a pinned daemon connection with independently verified physical-store and root-database identity held through GC, or a proven exclusive direct-local deployment, plus ModelHost and disposable-container tests. No host GC was run.
 
 Clarification of the preceding state-A/state-B experiment: state B recorded the same physical store path as a valid store path, without adding a GC root in B. The GC root for that path existed only in state A. GC through B therefore removed it despite the root in A; no claim is made that GC removed a path rooted in B.
+
+Orchestrator 2026-10-23 (design audit): now depends on TASK-118 (store/root-db binding protocol design).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

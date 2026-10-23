@@ -4,7 +4,7 @@ title: 'Release review and final hardening: v1 freeze'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 15:57'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-5
   - review
@@ -44,6 +44,8 @@ From task-50: the v1 release package, and only it, enables the cargo feature rel
 CORRECTION (2026-10-18): AC #4's 'v1 package' predates the 0.1 release (task-67), which already lifts the sandbox gate in the release package; task-49 builds on 0.1 and re-reviews for v1.
 
 Forward-carried from TASK-35/TASK-16 close-out (2026-10-23): (1) the flake check e2e-clippy was red at HEAD for days because only just ci ran it; it is now in just e2e/e2e-full. Before the release review, list every flake check and confirm a per-commit or batch recipe runs it. (2) Generated selection properties use a fixed seed and 32 cases in just check; just soak (1024) is in no gate (TASK-114).
+
+Orchestrator 2026-10-23 (design audit): verified_with is a required profile field with no defined format; golden-set layout and rename detection are undocumented (code in crates/diskgc-core/src/profile/golden.rs). Settle before the v1 freeze. Also: ensure every flake check runs in some recipe (forward-carried from the close-out sweep).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

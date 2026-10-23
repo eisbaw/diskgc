@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 10:59'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-3
   - architecture
@@ -41,6 +41,8 @@ From task-50 round 3 (mped), pinning the state-write signature (docs/architectur
 - The rename targets only index-<fs>. ModelHost checks the same shape.
 - Decide who creates index-<fs>.lock: the same state operation, or a second GATED_ALLOWED entry (Gate::Ungated with its reason, exact match count).
 - Remember the scan forbids CREATE, WRONLY, TRUNC, renameat etc. outside allowlisted wrappers, and core may not touch std::fs at all.
+
+Orchestrator 2026-10-23 (design audit): design gaps: snapshot file format (only a version field is specified); hash input says 'profiles and roots, not tiers' but required roots come from tiers; lock-file creation deferred to this task (architecture.md ~L297); whether --no-index bypasses only the snapshot or also the live index; no scenarios for corrupt/mismatched/other-user snapshots. Decide and document; add ModelHost YAML cases.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

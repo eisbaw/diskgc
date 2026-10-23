@@ -3,9 +3,11 @@ id: TASK-112
 title: >-
   Producer liveness contracts: decide when a /tmp or cache tree is provably
   unused
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-10-23 15:24'
+updated_date: '2026-10-23 16:15'
 labels:
   - irreversible
 dependencies: []

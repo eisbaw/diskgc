@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:51'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-3
   - irreversible
@@ -33,6 +33,12 @@ Why: the index must change speed, never safety. Integrate the index into the rec
 - [ ] #4 A bucket member opened by a process after an earlier member was deleted is skipped as in_use
 - [ ] #5 With an index present, new stale cruft created after the snapshot is deleted before any pressure tier runs
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Orchestrator 2026-10-23 (design audit): time-to-first-deletion (PRD: 10 s on a warm 100k-entry /tmp) has no defined start/stop events, clock, or JSON report field; define them here and add the measurement to the report. The index-authority property (testing.md ~L471) is deferred to this task.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

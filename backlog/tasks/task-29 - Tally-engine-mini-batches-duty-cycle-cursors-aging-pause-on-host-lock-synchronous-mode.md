@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 08:25'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-3
   - architecture
@@ -34,6 +34,8 @@ Why: the index must stay fresh without pounding the disk. Implement the tally pe
 
 <!-- SECTION:NOTES:BEGIN -->
 From task-10 (mped): the pre-index tally treats a refusal as final for the run (missed reclaim, never unsafe). The index must never carry a stored refusal across runs as final, or 'never fake exhaustion' breaks; a stored refusal is a hint, re-judged at reclaim.
+
+Orchestrator 2026-10-23 (design audit): design gaps: 'aging' and 're-tallies scheduled by age' have no policy or constants; no re-check cadence; cursor encoding unspecified; the contention test referenced as 'measured separately' is not specified in docs/testing.md. Decide and document in this task.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

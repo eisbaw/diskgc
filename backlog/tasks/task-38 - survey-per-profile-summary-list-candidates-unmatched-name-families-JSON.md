@@ -4,12 +4,13 @@ title: 'survey: per-profile summary, --list candidates, unmatched name families,
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:54'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-4
   - cli
 dependencies:
   - TASK-34
+  - TASK-116
 references:
   - docs/reference.md#survey
 priority: medium
@@ -28,6 +29,12 @@ Why: categorising cruft and reviewing AI-drafted profiles both need it. Implemen
 - [ ] #3 survey never deletes and takes no lock (oracle + lock probe)
 - [ ] #4 survey works outside a container (the sandbox gate only guards deletion)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Orchestrator 2026-10-23 (design audit): now depends on TASK-116 (survey --json schema design) - do not implement against the planned/intended syntax.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

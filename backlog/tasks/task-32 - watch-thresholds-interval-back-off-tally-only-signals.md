@@ -4,12 +4,13 @@ title: 'watch: thresholds, interval, back-off, --tally-only, signals'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-16 22:55'
+updated_date: '2026-10-23 16:19'
 labels:
   - wave-3
   - cli
 dependencies:
   - TASK-31
+  - TASK-117
 references:
   - docs/reference.md#watch
 priority: high
@@ -27,6 +28,12 @@ Why: the laptop use case is a long-running service. Implement watch per docs/ref
 - [ ] #2 Back-off timings follow the documented rules (model tests)
 - [ ] #3 --tally-only never deletes (deletion oracle) and keeps the snapshot fresh
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Orchestrator 2026-10-23 (design audit): now depends on TASK-117 (watch machine interface design).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

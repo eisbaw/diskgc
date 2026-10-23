@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 15:48'
+updated_date: '2026-10-23 16:19'
 labels:
   - safety
   - docker
@@ -27,3 +28,9 @@ Found by TASK-35's read-only host dry run (2026-10-23): on this laptop `docker` 
 - [ ] #2 ModelHost cases (YAML fixture variants of models/docker-bundled.yaml) pin each classification and turn red when the identification is removed
 - [ ] #3 A read-only dry run on a Podman-shim host is recorded with command, exit code and report status
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Orchestrator 2026-10-23 (design audit): TASK-120 (Docker contract leftovers design) resolves the skip-vs-error split together with the Buildx sizing conflict; coordinate.
+<!-- SECTION:NOTES:END -->

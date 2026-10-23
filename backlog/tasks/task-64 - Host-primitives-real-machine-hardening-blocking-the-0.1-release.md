@@ -2,9 +2,10 @@
 id: TASK-64
 title: 'Host primitives: real-machine hardening blocking the 0.1 release'
 status: In Progress
-assignee: []
+assignee:
+  - '@claude'
 created_date: '2026-10-17 23:54'
-updated_date: '2026-10-23 00:46'
+updated_date: '2026-10-23 16:09'
 labels:
   - wave-1
   - hardening
@@ -79,6 +80,17 @@ K. Gate flag test coverage (the 0.1 release task relies on it):
 - [x] #10 J (side effects and reporting: #19 O_NOATIME, held_by_deleted_files on btrfs): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 - [x] #11 K (gate flag test scans nested .cargo/config files): each item fixed with a biting test or explicitly documented as a limit in docs/safety.md
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Remaining AC7/AC8 (2026-10-23 session):
+1. AC8 #37: root-cause the 1-in-600 lock-test failure with a reproducer; fix the class (every test that asserts a flock release right after close), document the release semantics in docs/safety.md (Host lock), add a biting regression and a ModelHost YAML case.
+2. AC8 H10/D7: audit; bound the remaining unbounded spawn wait in host.rs tests; D7 is checked by the E2E busy marker.
+3. AC7: checked-in ModelHost YAML vectors for unsettled-scan retry, no reuse of an unsettled scan, persistent fork storm; prove each bites by mutation.
+4. AC7 kernel floor: port the uncommitted 5.8/6.8 VM registration from the task64-kernels worktree, estimate the build cost, and run the 5.8 (then 6.8) VM one at a time only if the cost is acceptable; otherwise file a prerequisite task and leave the item precisely open.
+5. Fast gate (just check), git notes, parallel QA and MPED review; e2e deferred to batch end per Mark, so DoD stays open.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
