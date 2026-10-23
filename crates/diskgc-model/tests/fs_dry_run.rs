@@ -2437,18 +2437,14 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
         "{:#?}",
         report.plan
     );
-    assert_eq!(allows(&lines), 1, "{lines:#?}");
+    // The executor applies the policy; config loading emits the operator
+    // warning once, before any tier runs.
+    assert_eq!(allows(&lines), 0, "{lines:#?}");
     // And in the plan (`--json`): every entry was judged under `allow`.
     assert!(
         report.plan.iter().all(|p| p.checkouts == Checkouts::Allow),
         "{:#?}",
         report.plan
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("profile `tmp-entry-checkouts` says `checkouts: allow`")),
-        "{lines:#?}"
     );
     nothing_locked_or_deleted(&allowing);
 }

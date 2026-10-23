@@ -891,7 +891,7 @@ fn ensure(args: &EnsureArgs) -> Report {
         tally_budget: args.tally_budget,
         tier,
     };
-    let mut progress = |line: &str| log(line);
+    let mut progress = |line: &str| log(&operator_progress(line));
     let mut report = if let Some((tiers, timeouts, _)) = &configured {
         if args.dry_run {
             executor::dry_run_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
@@ -1086,6 +1086,18 @@ fn log(line: &str) {
     eprintln!("diskgc: {line}");
 }
 
+/// The JSON tier key stays `--select`; stderr names the work, so an operator
+/// does not read every line as a complaint about the command-line flag.
+fn operator_progress(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("--select")
+        && (rest.starts_with(':') || rest.starts_with(' '))
+    {
+        format!("selection{rest}")
+    } else {
+        line.to_owned()
+    }
+}
+
 /// Write the entire result, including any trailing newline. A failed write
 /// or flush overrides the operation's exit code because its report is lost.
 /// Reporting the failure to stderr is best effort: that stream can fail too.
@@ -1235,6 +1247,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_tier_has_a_readable_progress_label() {
+        assert_eq!(
+            operator_progress("--select: skip in_use /tmp/target"),
+            "selection: skip in_use /tmp/target"
+        );
+        assert_eq!(
+            operator_progress("--select /tmp: checking"),
+            "selection /tmp: checking"
+        );
+        assert_eq!(
+            operator_progress("builds: checking /tmp/target"),
+            "builds: checking /tmp/target"
+        );
+    }
 
     #[test]
     fn startup_classifies_kernel_io_separately_from_unsupported_versions() {

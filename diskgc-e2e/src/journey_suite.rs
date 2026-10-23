@@ -282,6 +282,22 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     oracle.judge(&a.run)?.assert_clean()?;
     expect_space_agrees(&a.run, BUILDS, &min_free)?;
     a.run.expect_code(0)?;
+    let checking = a
+        .run
+        .stderr
+        .lines()
+        .find(|line| line.contains(": checking ") && line.contains("last build "))
+        .ok_or_else(|| {
+            format!(
+                "the job log has no candidate check with an age: {}",
+                a.run.stderr
+            )
+        })?;
+    ensure!(
+        checking.contains(" ago") && !a.run.stderr.contains(": reclaiming "),
+        "the job log must describe a pending check with relative age: {}",
+        a.run.stderr
+    );
     let r = a.report?;
     ensure!(r["status"] == "met" && r["target_met"] == true, "{r}");
     ensure!(r["mount"] == "/tmp" && r["path"] == BUILDS, "{r}");

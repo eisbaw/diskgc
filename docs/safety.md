@@ -166,9 +166,9 @@ Immediately before acting, diskgc walks the candidate's whole tree
     `checkouts: allow | refuse` for a named built-in source without changing
     its matcher or action. An omitted entry preserves the built-in value;
     `cargo-target` explicitly allows checkouts. Nothing else turns the guard
-    off: no tier, `protect` entry, `!profile:` or flag. A run whose profile
-    allows checkouts says so in its log (one line per tier, before the
-    candidates), and a dry run's
+    off: no tier, `protect` entry, `!profile:` or flag. The config loader
+    warns once per operator-authored checkout allowance in `check` and
+    `ensure`; the built-in Cargo default is documented here. A dry run's
     plan entries carry the setting (`checkouts` in the JSON,
     [reference.md](reference.md#output)). **The risk:** a broad user
     pattern with `checkouts: allow` (`paths: ["*"]` under a project root)

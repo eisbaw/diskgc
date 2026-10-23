@@ -88,7 +88,9 @@ impl Size {
         };
         if bytes > fs_size {
             return Err(format!(
-                "{bytes} bytes is more than the filesystem's size ({fs_size} bytes)"
+                "{} ({bytes} bytes) is more than the filesystem's size ({}; {fs_size} bytes)",
+                format_bytes(bytes),
+                format_bytes(fs_size)
             ));
         }
         Ok(bytes)
@@ -289,7 +291,11 @@ mod tests {
         assert_eq!(Size::Percent(33).bytes(10), Ok(3));
         assert_eq!(Size::Percent(50).bytes(u64::MAX), Ok(u64::MAX / 2));
         assert_eq!(Size::Bytes(1000).bytes(fs), Ok(1000));
-        assert!(Size::Bytes(1001).bytes(fs).is_err());
+        let too_large = Size::Bytes(16 << 30).bytes(15 << 30).unwrap_err();
+        assert!(
+            too_large.contains("16.0 GiB") && too_large.contains("15.0 GiB"),
+            "{too_large}"
+        );
         assert!(Size::Percent(101).bytes(fs).is_err());
     }
 

@@ -382,6 +382,41 @@ fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {
         "{stderr}"
     );
     assert!(stderr.contains("allows VCS checkouts"), "{stderr}");
+    assert_eq!(
+        stderr.matches("allows VCS checkouts").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        !text(&out.stdout).contains("warning:"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[test]
+fn check_warns_once_for_explicit_builtin_checkout_allowance() {
+    let tmp = TempDir::new("check-builtin-allow-warning");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(
+        &path,
+        "version: 1\nprofile_policies:\n  - profile: cargo-target\n    checkouts: allow\n",
+    )
+    .expect("write");
+    let out = diskgc(&["check", "--config", path.to_str().expect("UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stderr.matches("allows VCS checkouts").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        !text(&out.stdout).contains("warning:"),
+        "{}",
+        text(&out.stdout)
+    );
 }
 
 #[test]

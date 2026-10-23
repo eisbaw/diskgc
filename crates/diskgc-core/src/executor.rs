@@ -103,6 +103,25 @@ fn age_seconds(now: Timestamp, newest: Option<Timestamp>) -> Option<u64> {
         .flatten()
 }
 
+fn observed_age(now: Timestamp, newest: Option<Timestamp>) -> String {
+    let Some(newest) = newest else {
+        return "unknown".to_owned();
+    };
+    let Some(seconds) = age_seconds(now, Some(newest)) else {
+        return "in the future".to_owned();
+    };
+    let (amount, unit) = if seconds >= 86_400 {
+        (seconds / 86_400, "d")
+    } else if seconds >= 3_600 {
+        (seconds / 3_600, "h")
+    } else if seconds >= 60 {
+        (seconds / 60, "m")
+    } else {
+        (seconds, "s")
+    };
+    format!("{amount} {unit} ago")
+}
+
 /// Record the stage that was in progress when a cooperative deadline was
 /// crossed. Its caller decides whether a final space sample is still needed.
 fn record_deadline_overrun<H: Host>(
@@ -346,9 +365,14 @@ impl Tier {
     ) -> Result<(Tier, Vec<String>), SelectionFailure> {
         let checked = select::compile(expr, library)
             .map_err(|error| SelectionFailure::Parse(error.to_string()))?;
-        let bound = library
-            .bind_roots(&checked, roots)
-            .map_err(|error| SelectionFailure::Usage(format!("--select {expr:?}: {error}")))?;
+        let bound = library.bind_roots(&checked, roots).map_err(|error| {
+            let hint = if matches!(&error, crate::profile::RootsError::Missing { .. }) {
+                "; add --roots DIR"
+            } else {
+                ""
+            };
+            SelectionFailure::Usage(format!("--select {expr:?}: {error}{hint}"))
+        })?;
         let tier = Self::from_checked(expr, &checked, library, &bound, uid)
             .map_err(SelectionFailure::Usage)?;
         Ok((tier, checked.warnings().to_vec()))
@@ -3273,8 +3297,8 @@ fn plan_fs_union<H: Host>(
 /// The one set of walk rules of `tier`'s run: every entry one of
 /// `owners`', any socket or FIFO refuses (the default policy), the default
 /// entry budget ([`Rules::new`]), and the source profile's `checkouts`
-/// setting. An `allow` is logged, so a run that may delete a checkout says
-/// so where it runs (docs/safety.md, No source checkout).
+/// setting. Operator checkout allowances are warned about by config loading;
+/// a union logs its additional policy interaction here.
 fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules<'o> {
     if !tier.fs_union.is_empty() {
         for source in tier
@@ -3287,12 +3311,6 @@ fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules
                 tier.name, source.profile
             ));
         }
-    } else if tier.checkouts == Checkouts::Allow {
-        log(&format!(
-            "{}: profile `{}` says `checkouts: allow`: a candidate holding .git, .hg or .svn, or \
-             inside a checkout's metadata, is not refused for that",
-            tier.name, tier.profile
-        ));
     }
     Rules {
         checkouts: tier.checkouts,
@@ -3484,7 +3502,27 @@ fn other_fs(target: &Target, dev: Dev) -> Option<Skip> {
 }
 
 fn log_skip(log: &mut dyn FnMut(&str), tier: &Tier, skip: &Skip) {
-    log(&format!("{}: skip {skip}", tier.name));
+    if skip.reason == Reason::InUse {
+        // The detail is human text, not a list format: process arguments can
+        // themselves contain `; `. Bound the line without guessing a count.
+        let mut chars = skip.detail.chars();
+        let preview: String = chars.by_ref().take(240).collect();
+        let suffix = if chars.next().is_some() {
+            "… (more detail omitted)"
+        } else {
+            ""
+        };
+        log(&format!(
+            "{}: skip {}: {}: {}{}",
+            tier.name,
+            skip.reason,
+            skip.path.display(),
+            preview,
+            suffix
+        ));
+    } else {
+        log(&format!("{}: skip {skip}", tier.name));
+    }
 }
 
 /// An error of the tier or the run (no one candidate).
@@ -4234,17 +4272,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
-                    "{}: reclaiming {} (est. {}, {} entries, last build {})",
+                    "{}: checking {} (est. {}, {} entries, last build {})",
                     self.tier.name,
                     target.path.display(),
                     format_bytes(tally.bytes),
                     tally.entries,
-                    tally
-                        .last_build
-                        .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
+                    observed_age(self.host.wall_clock(), tally.last_build)
                 ),
                 None => format!(
-                    "{}: reclaiming {} (not tallied)",
+                    "{}: checking {} (not tallied)",
                     self.tier.name,
                     target.path.display()
                 ),
@@ -4454,17 +4490,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
-                    "{}: reclaiming {} (est. {}, {} entries, newest change {})",
+                    "{}: checking {} (est. {}, {} entries, newest change {})",
                     self.tier.name,
                     found.path.display(),
                     format_bytes(tally.bytes),
                     tally.entries,
-                    tally
-                        .newest_change
-                        .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
+                    observed_age(self.host.wall_clock(), tally.newest_change)
                 ),
                 None => format!(
-                    "{}: reclaiming {} (not tallied)",
+                    "{}: checking {} (not tallied)",
                     self.tier.name,
                     found.path.display()
                 ),
@@ -4826,7 +4860,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
             (self.log)(&format!(
-                "{}: reclaiming {} ({}), found by {} source term(s)",
+                "{}: checking {} ({}), found by {} source term(s)",
                 self.tier.name,
                 path.display(),
                 tally
@@ -5145,6 +5179,102 @@ struct Outcome {
     end: ReclaimEnd,
     /// Appended to the action's log line.
     note: String,
+}
+
+#[cfg(test)]
+mod operator_message_tests {
+    use super::{Reason, Skip, Tier, Timestamp, log_skip, observed_age, rules};
+    use crate::profile::Library;
+    use std::path::PathBuf;
+
+    #[test]
+    fn age_is_relative_and_future_time_is_explicit() {
+        let now = Timestamp {
+            secs: 200_000,
+            nanos: 0,
+        };
+        assert_eq!(observed_age(now, None), "unknown");
+        assert_eq!(
+            observed_age(
+                now,
+                Some(Timestamp {
+                    secs: 113_600,
+                    nanos: 0
+                })
+            ),
+            "1 d ago"
+        );
+        assert_eq!(
+            observed_age(
+                now,
+                Some(Timestamp {
+                    secs: 200_001,
+                    nanos: 0
+                })
+            ),
+            "in the future"
+        );
+    }
+
+    #[test]
+    fn in_use_log_is_bounded_without_guessing_evidence_count() {
+        let library = Library::builtin().expect("built-ins");
+        let tier = Tier::select(
+            "profile:cargo-target",
+            &library,
+            Some(&["/tmp".to_owned()]),
+            1000,
+        )
+        .expect("selection");
+        let detail = format!(
+            "pid 1 (foo; bar): {}; pid 2 has a target fd",
+            "x".repeat(300)
+        );
+        let skip = Skip::new(Reason::InUse, PathBuf::from("/tmp/target"), detail.clone());
+        let mut messages = Vec::new();
+        log_skip(
+            &mut |message| messages.push(message.to_owned()),
+            &tier,
+            &skip,
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("pid 1 (foo; bar): "));
+        assert!(messages[0].ends_with("… (more detail omitted)"));
+        assert!(!messages[0].contains("pid 2 has a target fd"));
+        assert_eq!(
+            skip.detail, detail,
+            "log shortening preserves source evidence"
+        );
+    }
+
+    #[test]
+    fn missing_roots_names_the_cli_remedy() {
+        let library = Library::builtin().expect("built-ins");
+        let error = Tier::select("profile:cargo-target", &library, None, 1000)
+            .expect_err("cargo target requires roots");
+        assert!(
+            error.contains("no roots were given; add --roots DIR"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn builtin_cargo_checkout_default_does_not_warn_on_every_run() {
+        let library = Library::builtin().expect("built-ins");
+        let tier = Tier::select(
+            "profile:cargo-target",
+            &library,
+            Some(&["/tmp".to_owned()]),
+            1000,
+        )
+        .expect("selection");
+        let owners = [1000];
+        let mut messages = Vec::new();
+        let _rules = rules(&tier, &owners, &mut |message| {
+            messages.push(message.to_owned())
+        });
+        assert!(messages.is_empty(), "{messages:?}");
+    }
 }
 
 #[cfg(test)]

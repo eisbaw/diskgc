@@ -2184,8 +2184,8 @@ fn plan_reason<'r>(report: &'r Report, candidate: &str) -> Option<Option<&'r str
 
 /// task-80: the built-in `cargo-target` says `checkouts: allow` (the code
 /// has no Cargo exemption): a target holding a vendored checkout, and one
-/// found inside a checkout's metadata, are eligible, and the log says the
-/// profile allows checkouts. A user profile of the same kind without the
+/// found inside a checkout's metadata, are eligible. The documented built-in
+/// default is not repeated in every run's log. A user profile of the same kind without the
 /// field refuses both (`contains_checkout`), the first by the walk, the
 /// second by its path, and logs nothing about checkouts.
 #[test]
@@ -2197,12 +2197,7 @@ fn a_cargo_target_tier_takes_its_checkout_setting_from_its_profile() {
     let (report, lines) = dry_run_logged(&host, &cargo("1G", None));
     assert_eq!(plan_reason(&report, OLD), Some(None), "{report:#?}");
     assert_eq!(plan_reason(&report, meta), Some(None), "{report:#?}");
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("profile `cargo-target` says `checkouts: allow`")),
-        "{lines:#?}"
-    );
+    assert!(allow_lines(&lines).is_empty(), "{lines:#?}");
 
     let host = common::host(&fixture);
     let (report, lines) = dry_run_logged(&host, &my_targets("1G"));
@@ -2229,21 +2224,15 @@ fn a_cargo_target_tier_takes_its_checkout_setting_from_its_profile() {
 /// path (refused by the tally, or, untallied, by the protocol's walk under
 /// its locks), the target inside a checkout's metadata is refused by its
 /// path before any lock (by the tally, or by the protocol), and only `new`
-/// is reclaimed: the goal is not met. Only the reclaim under the allowing
-/// profile logs that it allows checkouts.
+/// is reclaimed: the goal is not met. The built-in default does not add a
+/// repeated checkout warning to either run log.
 #[test]
 fn a_cargo_target_tier_reclaims_checkouts_only_when_its_profile_allows() {
     let vendor = "/home/mark/src/old/target/debug/build/p-2/out/vendor/.git";
     let host = common::host(&yaml(true, VENDORED));
     let (report, lines) = ensure_logged(&host, &cargo("11G", None));
     assert_eq!(report.status, Status::Met, "{report:#?}");
-    // The reclaim says it runs with checkouts allowed, once, by profile.
-    let allowed = allow_lines(&lines);
-    assert!(
-        matches!(allowed.as_slice(), [line]
-            if line.contains("profile `cargo-target` says `checkouts: allow`")),
-        "{lines:#?}"
-    );
+    assert!(allow_lines(&lines).is_empty(), "{lines:#?}");
     assert_eq!(report.actions[0].candidate, Path::new(OLD), "{report:#?}");
     assert!(!exists(&host, vendor));
 

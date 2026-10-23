@@ -1704,6 +1704,51 @@ fn filesystem_union_dedupes_identity_and_refusal_wins_in_both_orders() {
 }
 
 #[test]
+fn fs_and_union_progress_say_checking_before_the_outcome() {
+    for (selection, candidate, progress) in [
+        (
+            "profile:pytest-of-dir",
+            "/tmp/pytest-of-one",
+            "newest change",
+        ),
+        (
+            "profile:union-allow || profile:union-refuse",
+            "/tmp/union-shared-clear",
+            "found by 2 source term(s)",
+        ),
+    ] {
+        let tree = format!("  {candidate}: {}\n", old_dir("1M"));
+        let host = host(&yaml("", &tree, ""));
+        let request = tmp(selection);
+        let uid = executor::privileges(&host, false).expect("fixture user");
+        let mut lines = Vec::new();
+        let report = executor::ensure(&host, &request, &[uid], &mut |line| {
+            lines.push(line.to_owned())
+        });
+        assert!(
+            actions(&report)
+                .iter()
+                .any(|path| path.as_str() == candidate),
+            "{report:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line.contains(&format!(": checking {candidate} "))
+                    && line.contains(progress)
+                    && (progress != "newest change" || line.contains(" ago"))
+            }),
+            "{selection}: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains(&format!(": reclaiming {candidate} "))),
+            "{selection}: {lines:#?}"
+        );
+    }
+}
+
+#[test]
 fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
     let tree = "  /tmp/union-a: {.: {}}\n  /tmp/untrusted: {symlink: /home}\n";
     let selection = "profile:union-allow || profile:union-bad-root";
