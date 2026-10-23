@@ -859,35 +859,64 @@ carries a `process_blockers` entry (evidence `unreadable`) only when one
 process caused it ([reference.md](reference.md#liveness-contract-predicate-planned)).
 
 **A process's paths.** The pytest and project contracts ask whether a
-process uses a path. The kernel renders the link text of
-`/proc/<pid>/{cwd,root,fd/*}` and the paths in `/proc/<pid>/maps` with
-`d_path` relative to the *reader's* root, not the target's (a process in
-a `chroot` or another mount namespace shows host paths to diskgc). Only
-the environment and the command line are strings in the process's own
-view. So:
+process uses a path inside a *sought tree* (a pytest session, a project).
+The kernel renders the link text of `/proc/<pid>/{cwd,root,fd/*}` and the
+paths in `/proc/<pid>/maps` with `d_path` relative to the *reader's*
+root, not the target's (a process in a `chroot` or another mount
+namespace shows host paths to diskgc). Only the environment and the
+command line are strings in the process's own view. Nothing outside the
+sought tree is ever walked or resolved, except the temp-directory and
+`--basetemp` values pytest itself resolves (below). So:
 
 - *The process set* of a contract is the processes with any of their four
   uids equal to the owner of the directory the contract judges (pytest
   itself refuses a `pytest-of-<user>` not owned by its uid), plus every
   process whose uids cannot be read. Other users' processes cannot use
   that directory's producer state and are not consulted, so a root
-  daemon's unreadable environment blocks nothing.
+  daemon's unreadable environment blocks nothing. A magic link or entry
+  that cannot be opened or read is treated exactly as In use treats it:
+  excused at a privilege boundary (a non-dumpable `ssh-agent` or
+  `gpg-agent` of the user), re-read, or, if it stays unreadable without
+  that excuse, the answer of that scan is `producer_unknown` with
+  evidence `unreadable`.
+- *The tree's devices and directories.* The walks of the sought tree
+  record every directory's device and inode, and the set of devices seen.
+  Mounts whose mount point lies under the tree (from `mountinfo`) add
+  their devices; their content is not walked.
 - *Directories a process holds* (its `cwd`, its `root`, an fd on a
   directory) are opened through the magic link, which reaches the object
-  whatever the text says, and climbed with `..` by fd, comparing device
-  and inode with the directory sought at each step, up to diskgc's root
-  or a fixed bound of 4096 levels; a climb cut short by the bound or an
-  error retains.
+  whatever the text says, and climbed with `..` by fd. Each step's device
+  and inode are looked up in the set of the tree's directories, so a bind
+  mount of a subdirectory of the tree is caught too. The climb ends as
+  *not under* at its fixpoint: when `..` returns the same device and
+  inode, every ancestor in the process's view has been visited (this
+  covers `pivot_root` containers and Flatpak). Each held directory's
+  ancestor chain is computed once per scan and every candidate is looked
+  up in it, so the cost is one climb per held directory, not one per
+  candidate. A defensive bound of 4096 levels without a fixpoint is an
+  error that retains.
 - *Files a process holds* (an fd on a non-directory, a mapping) are
-  matched first by device and inode, as In use does. For the path test,
-  the link text (a ` (deleted)` suffix removed) is resolved in diskgc's
-  root with `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` and
-  accepted only if the object reached has the device and inode of the
-  magic link (for a mapping: of its `maps` line); then its lexical prefix
-  is compared with the directory sought. If that fails, the text is
-  resolved the same way in the process's root (`/proc/<pid>/root` opened
-  as a directory, `RESOLVE_IN_ROOT`) and accepted by the same identity
-  test. If neither is accepted the entry is unresolvable and retains.
+  matched first by device and inode against the inodes the walk saw, as
+  In use does. For the path test, the object's device comes from a
+  `statx` of the magic link with `AT_STATX_DONT_SYNC` (for a mapping, the
+  device of its `maps` line). A device that is not one of the tree's
+  devices cannot be inside the tree, and the entry is not inside. On one
+  of them, the link text (a ` (deleted)` suffix removed) is compared
+  lexically with the tree's path: when the process's mount namespace
+  (`/proc/<pid>/ns/mnt`) is diskgc's, with the tree's path in diskgc's
+  view; otherwise with the tree's path as seen under the process's root
+  (diskgc's path of the process's root directory, found by the climb
+  above, as a prefix). If the text has the tree's path as a prefix, only
+  the *suffix* is resolved, from the tree's directory fd with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS |
+  RESOLVE_NO_MAGICLINKS)`, and the entry is inside when the object
+  reached has the magic link's device and inode. Text that does not have
+  the prefix, or a suffix whose resolution fails or reaches another
+  object, while on one of the tree's devices, is unresolvable and
+  retains (`in_use`). A mapping whose `maps` pair is an overlay layer's
+  (the device and inode of the lower filesystem, as some kernels report
+  for overlayfs) has no match and is retained: an availability cost with
+  rootless containers whose files are mapped from the tree.
 - *Strings* (environment values, command-line elements) are compared as
   bytes, after lexical normalisation as Python's `os.path.abspath` does
   (`.`, `..` and repeated `/` folded; a relative string is not made
@@ -909,6 +938,12 @@ view. So:
   process may have changed directory since. It makes the verdict
   `producer_unknown` with `process_blockers` evidence `relative_path`
   where the contract says so.
+- *Several causes.* `process_blockers` is an array: when several
+  processes each make an answer undecidable or block it, each has one
+  entry, sorted by pid.
+- *Hangs.* The climbs and `statx` calls inherit In use's limit for a
+  process using a dead network mount: they can block in the kernel and
+  overrun the deadline, never cause a deletion.
 
 **nix-shell rc directories** (`liveness_contract: nix-shell`). The
 candidate's own name is `nix-shell-<pid>-<suffix>` or
@@ -987,14 +1022,22 @@ root (the parent of `P`):
   covers coarse filesystem timestamps and a new session's clock being a
   little behind diskgc's.
 - *Old lock*: a `.lock` that is a regular file whose mtime is older than
-  the dead-lock age. *Old session*: `S`'s own mtime and ctime are older
-  than the dead-lock age.
+  the dead-lock age. *Old session*: the newest mtime or ctime anywhere in
+  `S`'s tree, as the mandatory eligibility walk measures it, is older than
+  the dead-lock age. Row 7's age condition is therefore evaluated after
+  the walk; the other rows can be decided before it.
 - *The user's processes* and the path tests: A process's paths, above,
   with `U` as the owner.
 - *A pytest is running*: one of the user's processes has an element of
-  its command line containing `pytest` or `py.test`, or a variable named
-  `PYTEST_ADDOPTS` or beginning `PYTEST_XDIST_` in its environment; a
-  command line or environment that cannot be read counts as running.
+  its command line containing `pytest` or `py.test`; or has the command
+  line of an execnet worker bootstrap (`python -c` with
+  `import sys;exec(eval(sys.stdin.readline()))`, which pytest-xdist's
+  workers run; they set their `PYTEST_XDIST_*` variables inside the
+  process, never in their own initial environment); or has
+  `PYTEST_ADDOPTS`, `PYTEST_CURRENT_TEST`, `PYTEST_VERSION` or a variable
+  beginning `PYTEST_XDIST_` in its initial environment (the middle two
+  are inherited by a test's subprocesses). A command line or environment
+  that cannot be read counts as running.
 - *Named*: one of the user's processes names `S`: a string test (above)
   finds `S`'s path in its command line or environment, or a `--basetemp`
   value resolved by identity is `S` or lies in it (found by climbing
@@ -1085,18 +1128,28 @@ again):
 - a session below the rank in a `P` whose project configures
   `tmp_path_retention_count` above 3: pytest would keep it, row 7 removes
   it. Accepted by Mark (2026-10-23); diskgc cannot read the setting;
-- a live session without a lock above the rank (row 11), whose pytest
-  process did not take its temp root from its initial environment
-  (`os.environ` or `tempfile.tempdir` changed inside a long-lived Python
-  program that then calls `pytest.main()`), whose `--basetemp` comes from
-  a configuration file, or that is not visible to diskgc or is excused by
-  a privilege boundary. A configuration file would have to hard-code a
+- a live session without a lock at any rank that row 11 reaches, whose
+  pytest process did not take its temp root from its initial environment:
+  `TMPDIR`, `tempfile.tempdir` or `PYTEST_DEBUG_TEMPROOT` changed inside
+  the process by a `conftest.py`, a plugin, or a long-lived Python program
+  that then calls `pytest.main()`; or whose `--basetemp` comes from a
+  configuration file (`addopts` in `pytest.ini`, `pyproject.toml`,
+  `tox.ini` or `setup.cfg`); or that is not visible to diskgc or is
+  excused by a privilege boundary. A configuration file would have to hard-code a
   path below a temp root that none of the user's processes uses: the
   shared roots in the matching set are in use (`/tmp`,
   `/tmp/claude-{uid}`), and the others have random names (`nix-shell.*`,
   `tmp.*`);
 - a detached child of an ended session that keeps writing in `S` above the
-  rank, with a temp root other than `R` in its initial environment.
+  rank, with a temp root other than `R` in its initial environment;
+- a lockless session below the rank whose live pytest has no `pytest` on
+  its command line and none of the variables above (`pytest.main()`
+  embedded in a Bazel `py_test`, a custom runner, a frozen binary): row 7
+  does not see it running and removes the session if it is otherwise
+  below the rank. This is bounded by producer-equivalence: pytest's own
+  next cleanup with the default retention deletes that session too
+  (orchestrator decision, 2026-10-23, within Mark's "producer-equivalent
+  or stricter" ruling); diskgc may act sooner.
 
 Not matched: `garbage-<uuid>` directories that a pytest killed during its
 own cleanup leaves in `P`; a known gap of the matching set.
@@ -1241,11 +1294,13 @@ schema only with its first producer.
   temp-root `statx` on a dead mount can block like the scan's other
   `statx` calls (In use, A process using a dead mount).
 - *Cost.* Only when a selected source has a contract: one more read of
-  each listed process's `status` and `cmdline`, a few path resolutions
-  per command-line element and environment value that looks like a path, a few `statx` per process
-  for temp roots (deduplicated), one listing of each `pytest-of-<user>`
-  per scan, and for project contracts a walk of each project, bounded by
-  the entry budget.
+  each listed process's `status` and `cmdline`; one climb per directory a
+  process holds, once per scan; one `statx` per held file, and a suffix
+  resolution beneath the sought tree only for files on one of its
+  devices; at most one `openat2` per temp-directory or `--basetemp` value
+  pytest itself resolves (deduplicated); byte comparison for every other
+  string; one listing of each `pytest-of-<user>` per scan; and for
+  project contracts a walk of each project, bounded by the entry budget.
 
 **Limits, stated plainly.**
 

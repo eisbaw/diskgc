@@ -443,6 +443,11 @@ Of the host model (the test-model schema, tentative):
   by temp-root lookups, which follow symlinks inside that view;
 - a tree entry's `ctime:` and `atime:` (default: its mtime; today mtime
   stands for all three times), and a mount's `noatime: true`;
+- `processes[].fds[].link_text` and `maps[]` entries with `link_text` or
+  `dev_ino`: what diskgc reads when it differs from the object (another
+  root's or mount namespace's rendering, a file renamed after open, an
+  overlay layer's pair); default the object's own path and identity;
+- `processes[].mnt_ns`: a mount namespace label (default diskgc's);
 - a mount's `bind_of` extended to a subdirectory (`bind_of: {mount: 2,
   path: /w/packages/a}`); today only whole-filesystem binds exist;
 - a file's `content:` (exists) for pytest's `.lock`.
@@ -488,12 +493,15 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-live-lock-refused` | A `{0}`, `pytest-0/.lock` holds `42`; process 42 | 0 `in_use`, `owner_pid` 42 (row 4) |
 | `pytest-tmp-killed-newest-session-refused` | A `{0}`, lock `42`; no process 42; *proc* | 0 `in_use`, `temp_root` (row 10): an ended owner alone never permits |
 | `pytest-tmp-killed-session-dead-root-eligible` | B `{0}`, lock `42`; no process 42; *proc* | 0 eligible (row 11) |
-| `pytest-tmp-orphan-xdist-worker-refused` | B `{0}`, lock `42` one day old; no process 42; worker 43 with `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/nix-shell.AB` | 0 `in_use`, `temp_root` (row 10) |
-| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; worker 43 with `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/other`; *proc* | 0 `in_use`, `temp_root` (the young lock fails row 7; row 10); 1 eligible (row 7: a pytest runs, the session is old); 2, 3, 4 `in_use`, `temp_root` |
+| `pytest-tmp-orphan-xdist-worker-refused` | B `{0}`, lock `42` one day old; no process 42; worker 43 with `cmdline: [python, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/nix-shell.AB` | 0 `in_use`, `temp_root` (row 10) |
+| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; worker 43 with `cmdline: [python, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/other`; *proc* | 0 `in_use`, `temp_root` (the young lock fails row 7; row 10); 1 eligible (row 7: the bootstrap counts as a running pytest, the session is old); 2, 3, 4 `in_use`, `temp_root` |
 | `pytest-tmp-stale-lock-within-rank-eligible` | as above, the lock four days old, no worker | 0, 1 eligible (row 7; pytest's own dead-lock rule); 2, 3, 4 `in_use` |
 | `pytest-tmp-lock-not-regular-within-rank-unknown` | A `{0..4}`, `pytest-0/.lock` a symlink to a four-day-old file; *proc* | 0 `producer_unknown` (row 3); 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-beyond-rank-eligible` | A `{0..4}`; *proc* | 0, 1 eligible (row 7); 2, 3, 4 `in_use`, `temp_root` |
 | `pytest-tmp-live-lockless-below-rank-young-kept` | A `{0..4}`, `pytest-0` one day old; *py* alive | 0 `in_use`, `temp_root` (row 7 needs an old session while a pytest runs; row 10); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-old-dir-young-tree-kept` | A `{0..4}`; `pytest-0` itself ten days old but `pytest-0/test_x0/out` changed one day ago; *py* alive | 0 `in_use`, `temp_root` (old session is measured over the whole tree; row 10); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-test-subprocess-counts-as-running` | A `{0..4}`, `pytest-0` one day old; the only pytest sign is a child with `PYTEST_CURRENT_TEST=t.py::test_a (call)` in its environment | 0 `in_use`, `temp_root` (row 7 sees a pytest running); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-embedded-pytest-residual` | A `{0..4}`, `pytest-0` one day old, no lock; a live `bazel-bin/t` process with none of the signs | 0 eligible (row 7, the stated residual; pytest's own next cleanup deletes it too); 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-young-below-rank-unused-root-eligible` | B `{0..4}`, `pytest-0` one day old; *py* alive with `TMPDIR=/tmp/other` | 0 eligible (row 11, the stated residual); 1 eligible (row 7); 2, 3, 4 eligible (row 11) |
 | `pytest-tmp-rank-ignores-other-names` | A `{0..4}` plus `pytest-current` (symlink), `garbage-x`, `pytest-9x`, `pytest-05` (a directory); *proc* | `M` is 5 (`pytest-05` counts, as for pytest): 0, 1, 2 eligible; 3, 4 `in_use`; `pytest-05`, `pytest-9x` `filtered`; the symlink and `garbage-x` never candidates |
 | `pytest-tmp-session-number-overflow-filtered` | A `{0..4}` plus `pytest-99999999999999999999`; *proc* | that entry `filtered` and not counted in `M`; 0, 1 eligible; 2, 3, 4 `in_use` |
@@ -518,6 +526,7 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-basetemp-config-within-rank-old-eligible` | as above, `pytest-0` four days old | 0, 1 eligible (row 7: pytest's own cleanup would delete 0 too; the producer-equivalence case); 2, 3, 4 `in_use` |
 | `pytest-tmp-basetemp-config-above-rank-residual` | B `{0}` two hours old; *py* with `TMPDIR=/tmp/other`, its `--basetemp` into `pytest-0` from a configuration file | 0 eligible (row 11, the stated residual) |
 | `pytest-tmp-cmdline-unreadable-unknown` | B `{0..4}`; a uid 1000 process with `cmdline: unreadable` | 0, 1 eligible (row 7: a pytest counts as running, the sessions are old); 2, 3, 4 `producer_unknown`, `unreadable` (row 8) |
+| `pytest-tmp-two-causes-sorted` | B `{0..4}`; processes 91 and 90 of the user, each with a relative `TMPDIR` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `process_blockers` `[{pid: 90, evidence: relative_path}, {pid: 91, evidence: relative_path}]` |
 | `pytest-tmp-environ-unreadable-unknown` | B `{0..4}`; a uid 1000 process whose environment reads `Failed`, not excused | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `unreadable` |
 | `pytest-tmp-other-user-environ-unreadable-ignored` | B `{0..4}`; a uid 0 daemon whose environment is unreadable (`proc: denied`); no other process | 0, 1 eligible (row 7); 2, 3, 4 eligible (row 11): not in the process set |
 | `pytest-tmp-excused-process-ignored` | B `{0..4}`; the only other process is the user's `non_dumpable` agent | 0 to 4 eligible (the stated residual) |
@@ -556,6 +565,12 @@ the counterexample these turn into cases):
 | `node-project-symlinked-node-modules-not-candidate` | `p/node_modules` a symlink to `/home/tester/shared/node_modules` | no candidate; the target preserved |
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
 | `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory, `mountinfo` root `/w/packages/a`) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
+| `node-project-held-file-other-device-not-inside` | all old; a process holds `/home/tester/elsewhere/z` on another filesystem; its link text spoofed in the model to `/home/tester/p/z` | eligible: a device not in the tree is never inside, and nothing outside the tree is resolved |
+| `node-project-held-file-suffix-mismatch-retained` | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
+| `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_of` subdirectory); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
+| `node-project-pivot-root-process-not-under` | all old; a process whose `root` is `/srv/c` and cwd `/srv/c/work`, outside the project | eligible: its climb reaches the fixpoint without meeting the tree |
+| `node-project-ssh-agent-excused` | all old; the user's `non_dumpable` `ssh-agent` whose magic links cannot be opened | eligible: excused as In use excuses it |
+| `node-project-overlay-mapping-retained` | all old; a mapping whose `maps` device and inode are a lower layer's, of a file in the project | `in_use` (the stated availability cost) |
 | `node-project-chrooted-process-kept` | all old; a process with `root: /home/tester`, cwd `/home/tester/p/.git`, and `p/other/node_modules/y.js` open (link text is diskgc's view) | `in_use`, `cwd` and `fd`: matched by climbing and by identity, not by the process's own path text |
 | `node-project-no-manifest-filtered` | no `package.json` in `p` | `filtered` |
 | `node-project-over-budget` | a project tree above the entry budget | `too_many_entries` |
@@ -630,6 +645,12 @@ ignoring atime or ctime; counting directory atimes; counting VCS metadata
 as project change; measuring the candidate's parent instead of its
 workspace; deciding "inside the project" by the walk's inode set instead
 of by path, or by the process's link text without an identity check;
+resolving link text outside the tree, or across a device the tree does
+not have; ending a climb at a level bound instead of the fixpoint;
+comparing a climb with the sought directory only, not every directory of
+the tree; climbing once per candidate; treating an unopenable magic link
+of an excused process as unreadable; not matching the execnet bootstrap;
+measuring an old session by the session directory alone;
 climbing past a bind-mounted subdirectory; matching a nested dependency directory; measuring the
 candidate instead of the project.
 
@@ -654,8 +675,9 @@ row 7's invariant rests on),
 root: kept; reclaimed after the run ends),
 `pytest_live_basetemp_session_is_kept` (a sleeping run with `--basetemp`
 shaped like a session in a dead shell root: kept),
-`pytest_orphan_xdist_worker_keeps_session` (the controller killed, a
-worker alive: kept), `node_and_python_project_read_keeps_dependencies`
+`pytest_orphan_xdist_worker_keeps_session` (pinned pytest-xdist: the
+controller killed, a real worker alive; the test asserts the deciding row
+of the pure verdict, row 10, not only the outcome), `node_and_python_project_read_keeps_dependencies`
 (TASK-79's probe on a `relatime` tmpfs: a run that only reads keeps the
 dependency directory; on a `noatime` mount the residual is shown),
 `npm_install_leaves_old_mtimes_and_new_ctimes` (the pinned npm: after an

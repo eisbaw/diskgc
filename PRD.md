@@ -101,7 +101,9 @@ kinds), and where those guarantees end. The protocols are in
   no Cargo lock file is ever deleted or moved.
 - No symlink followed, no mount crossed when finding, walking and
   deleting candidates. (Liveness evidence matches what a process holds
-  by device and inode, and resolves only the temp-directory and
+  by device and inode, climbing held directories with `..`; resolves a
+  held file's path only beneath the tree being judged, without crossing a
+  mount or following a symlink; and resolves only the temp-directory and
   `--basetemp` values pytest itself uses, read-only, in that process's
   own root.)
 - The index never decides safety; every check runs at deletion time.
