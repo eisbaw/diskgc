@@ -72,6 +72,15 @@ const MESON_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/meson-source-anchor.yaml");
 const CONTAINERS_IMAGE_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/containers-image-age.yaml");
+/// The withdrawn `containers-image-tmp` matching set as a user profile
+/// (TASK-112 D2); it must equal the vector's `user_profiles`.
+const CONTAINERS_IMAGE_PROFILE: &str = "- name: containers-image-probe
+  find: {roots: [/var/tmp], paths: [\"buildah*\", \"container_images_storage*\"], type: any}
+  min_idle_for: 3d
+  action: delete
+  examples: {match: [/var/tmp/buildah3558241755, /var/tmp/container_images_storage528829445]}
+";
+const CONTAINERS_IMAGE_PROBE: &str = "containers-image-probe";
 // The sketch has several nonrepresentable fields. Isolate its mount accounting
 // in a second probe so both event and exact-space refusals are demonstrated.
 const NON_PROFILE_MODELS: &[(&str, &str, &str, Option<&str>)] = &[
@@ -898,15 +907,20 @@ fn minimal_process() -> ProcessSpec {
 /// cohort when it is actually created. The VM kernel command-line token is
 /// checked before any clock change, in addition to the ordinary E2E interlock.
 pub fn vm_cmake_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
-    replay_historical_vector(ctx, CMAKE_VECTOR, materialize_historical_cmake)
+    replay_historical_vector(ctx, CMAKE_VECTOR, None, materialize_historical_cmake)
 }
 
 pub fn vm_autotools_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
-    replay_historical_vector(ctx, AUTOTOOLS_VECTOR, materialize_historical_autotools)
+    replay_historical_vector(
+        ctx,
+        AUTOTOOLS_VECTOR,
+        None,
+        materialize_historical_autotools,
+    )
 }
 
 pub fn vm_meson_original_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
-    replay_historical_vector(ctx, MESON_VECTOR, materialize_historical_meson)
+    replay_historical_vector(ctx, MESON_VECTOR, None, materialize_historical_meson)
 }
 
 pub fn vm_containers_image_original_matches_linux_outcomes_and_deletion_diff(
@@ -915,25 +929,51 @@ pub fn vm_containers_image_original_matches_linux_outcomes_and_deletion_diff(
     replay_historical_vector(
         ctx,
         CONTAINERS_IMAGE_VECTOR,
+        Some(CONTAINERS_IMAGE_PROFILE),
         materialize_historical_containers_image,
     )
 }
 
 /// A live producer can close its spool and remain ready to use it again.
-/// With genuine five-day kernel ctimes, the exact embedded source sees the
-/// open-fd case but cannot distinguish the dormant spool from abandoned data.
-/// Keep this as a dry-run counterexample: reclaiming the dormant fixture
-/// would intentionally destroy live work.
+/// With genuine five-day kernel ctimes, the withdrawn source's matching set
+/// and 3-day floor (now a user profile, TASK-112 D2) see the open-fd case
+/// but cannot distinguish the dormant spool from abandoned data. This is
+/// the counterexample that withdrew `containers-image-tmp`. Keep it as a
+/// dry-run counterexample: reclaiming the dormant fixture would
+/// intentionally destroy live work.
 pub fn vm_containers_image_dormant_spool_exposes_liveness_gap(ctx: &Ctx) -> TestResult {
     let mut clock = GuestClock::begin()?;
     let result = (|| {
-        let library = Library::builtin().map_err(|error| error.to_string())?;
-        let tier = Tier::select("profile:containers-image-tmp", &library, None, TESTER.uid)?;
+        ensure!(
+            Library::builtin()
+                .map_err(|error| error.to_string())?
+                .get("containers-image-tmp")
+                .is_none(),
+            "withdrawn containers-image-tmp is shipped again"
+        );
+        let user = parse_profiles(CONTAINERS_IMAGE_PROFILE)?;
+        let library = Library::with_user_profiles(&user).map_err(|error| error.to_string())?;
+        let selection = format!("profile:{CONTAINERS_IMAGE_PROBE}");
+        let tier = Tier::select(&selection, &library, None, TESTER.uid)?;
         ensure!(
             tier.idle_for
                 .is_some_and(|floor| floor.0 == Duration::from_secs(3 * 86_400)),
-            "containers-image-tmp no longer has its exact three-day source floor"
+            "the containers-image probe no longer has its exact three-day source floor"
         );
+        let config = format!(
+            "version: 1\nprofiles:\n{}",
+            CONTAINERS_IMAGE_PROFILE
+                .lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        );
+        let config_path = ctx.home.write_file(
+            "containers-image-probe.yaml",
+            config.as_bytes(),
+            0o644,
+            TESTER,
+        )?;
+        let config_path = config_path.to_str().ok_or("non-UTF-8 config path")?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1005,7 +1045,9 @@ pub fn vm_containers_image_dormant_spool_exposes_liveness_gap(ctx: &Ctx) -> Test
                 "--min-free",
                 "100%",
                 "--select",
-                "profile:containers-image-tmp",
+                &selection,
+                "--config",
+                config_path,
                 "/var/tmp",
             ],
         )?;
@@ -1025,10 +1067,7 @@ pub fn vm_containers_image_dormant_spool_exposes_liveness_gap(ctx: &Ctx) -> Test
                 .iter()
                 .find(|entry| entry["candidate"].as_str() == path.to_str())
                 .ok_or_else(|| {
-                    format!(
-                        "{} missing from exact built-in plan: {report}",
-                        path.display()
-                    )
+                    format!("{} missing from the probe's plan: {report}", path.display())
                 })?;
             ensure!(
                 entry["reason"].as_str() == reason,
@@ -1051,12 +1090,14 @@ pub fn vm_containers_image_dormant_spool_exposes_liveness_gap(ctx: &Ctx) -> Test
 fn replay_historical_vector(
     ctx: &Ctx,
     source: &str,
+    profile_yaml: Option<&str>,
     materialize: fn(&Ctx, &ProfileVector) -> Result<model_materialize::Materialized, String>,
 ) -> TestResult {
     let vector = ProfileVector::parse(source)?;
     vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
     let mut clock = GuestClock::begin()?;
-    let result = replay_model_with_profile(ctx, vector, false, None, None, true, materialize);
+    let result =
+        replay_model_with_profile(ctx, vector, false, profile_yaml, None, true, materialize);
     let restored = clock.restore();
     result?;
     restored
@@ -1221,10 +1262,13 @@ fn materialize_historical_containers_image(
     set_guest_clock(model.clock.0.as_nanosecond())?;
     let materialized =
         model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?;
+    let library =
+        Library::with_user_profiles(&vector.user_profiles).map_err(|error| error.to_string())?;
     assert_kernel_ctimes(
+        &library,
         model,
         old,
-        "containers-image-tmp",
+        CONTAINERS_IMAGE_PROBE,
         "/var/tmp/buildah-fresh",
         &old_paths.into_iter().collect(),
         ctx.var_tmp.mnt_id(),
@@ -1273,6 +1317,7 @@ fn materialize_historical_source(
     let materialized =
         model_materialize::materialize_outcome_projection(ctx, stages.next_stage()?)?;
     assert_kernel_ctimes(
+        &Library::builtin().map_err(|error| error.to_string())?,
         model,
         old,
         profile,
@@ -1306,6 +1351,7 @@ fn statx_ctime_seconds(path: &Path, mount_id: u64) -> Result<i64, String> {
 }
 
 fn assert_kernel_ctimes(
+    library: &Library,
     model: &diskgc_model::spec::HostModel,
     old: WallTime,
     profile: &str,
@@ -1332,12 +1378,11 @@ fn assert_kernel_ctimes(
         (now_seconds..=now_seconds + 120).contains(&fresh_ctime),
         "fresh {profile} kernel ctime {fresh_ctime} differs from staged {now_seconds}"
     );
-    let library = Library::builtin().map_err(|error| error.to_string())?;
     let roots =
-        (profile != "containers-image-tmp").then(|| vec!["/home/tester/project".to_owned()]);
+        (profile != CONTAINERS_IMAGE_PROBE).then(|| vec!["/home/tester/project".to_owned()]);
     let tier = Tier::select(
         &format!("profile:{profile}"),
-        &library,
+        library,
         roots.as_deref(),
         TESTER.uid,
     )?;
@@ -2314,7 +2359,7 @@ fn replay_model_with_profile(
     // Preflight the semantic contract before even writing the CLI config.
     // The model's old clock and ctime cannot be installed on a fresh tmpfs.
     adapt_home_mount(&mut vector);
-    if vector.profile.as_deref() == Some("containers-image-tmp") {
+    if vector.profile.as_deref() == Some(CONTAINERS_IMAGE_PROBE) {
         adapt_var_tmp_mount(&mut vector)?;
     }
     preflight_vector(&vector, sandbox_clock_offset)?;

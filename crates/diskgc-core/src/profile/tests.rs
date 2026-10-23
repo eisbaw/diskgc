@@ -223,7 +223,6 @@ fn the_built_in_library_loads() {
         "autotools-build-anchored",
         "cmake-build-anchored",
         "meson-build-anchored",
-        "containers-image-tmp",
         "chrome-browser-cache",
         "chromium-browser-cache",
         "edge-browser-cache",
@@ -300,6 +299,24 @@ fn retired_marker_only_build_profiles_fail_selection() {
             "{expression}: {error}"
         );
     }
+}
+
+/// Withdrawn by Mark (2026-10-23, TASK-112 D2): its 3-day floor judged a
+/// dormant but reused spool eligible (VM test
+/// `vm_containers_image_dormant_spool_exposes_liveness_gap`). A config that
+/// still names it fails before anything is scanned; re-admission is
+/// TASK-125, under a new name.
+#[test]
+fn withdrawn_containers_image_tmp_fails_selection() {
+    let library = Library::builtin().expect("built-ins");
+    assert!(library.get("containers-image-tmp").is_none());
+    let error = compile("profile:containers-image-tmp", &library)
+        .expect_err("a withdrawn profile must fail before scanning")
+        .to_string();
+    assert!(
+        error.contains("no profile or filter is named `containers-image-tmp`"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1433,40 +1450,6 @@ fn source_minimum_idle_is_a_floor_for_every_term() {
         "`min_idle_for` must be greater than zero",
     );
     assert!(yaml_error("- name: x\n  min_idle_for: null\n  find: {roots: [/tmp], paths: [\"x-*\"], type: any}\n").contains("invalid type"));
-}
-
-#[test]
-fn containers_image_tmp_has_an_immutable_minimum_age_and_exact_scope() {
-    let library = Library::builtin().unwrap();
-    let profile = library.get("containers-image-tmp").unwrap();
-    let Body::Source(source) = &profile.body else {
-        panic!("not a source");
-    };
-    assert_eq!(source.roots, Roots::Fixed(vec!["/var/tmp".into()]));
-    assert_eq!(
-        source.finds,
-        Finds::Paths {
-            patterns: vec!["buildah*".into(), "container_images_storage*".into()],
-            exclude: Vec::new(),
-            entry_type: EntryType::Any,
-        }
-    );
-    assert_eq!(
-        source.min_idle_for,
-        Some(IdleFor(Duration::from_secs(3 * DAY)))
-    );
-    assert_eq!(
-        source.action,
-        Action::Delete {
-            make_writable: false
-        }
-    );
-    assert_eq!(source.checkouts, Checkouts::Refuse);
-    let checked = checked(&library, "profile:containers-image-tmp");
-    assert_eq!(
-        library.idle_for(&checked.expr().terms[0]).unwrap(),
-        source.min_idle_for,
-    );
 }
 
 /// S1: the verdict is three-way, and an unknown age passes neither

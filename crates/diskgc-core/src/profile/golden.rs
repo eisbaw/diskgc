@@ -582,14 +582,10 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
                 .then_some(profile.name.as_str())
         })
         .collect();
-    assert_eq!(
-        shipped,
-        TEMP_PROFILE_NAMES
-            .iter()
-            .copied()
-            .chain(std::iter::once("containers-image-tmp"))
-            .collect()
-    );
+    // containers-image-tmp, the one /var/tmp source, was withdrawn (Mark,
+    // 2026-10-23; TASK-112): a 3-day floor cannot show that Buildah is done
+    // with a spool it may reopen. Re-admission is TASK-125, under a new name.
+    assert_eq!(shipped, TEMP_PROFILE_NAMES.iter().copied().collect());
 
     for name in TEMP_PROFILE_NAMES {
         let profile = library.get(name).expect("shipped profile");
@@ -702,52 +698,6 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         };
         assert_eq!(source.action, expected_action, "{name} action");
     }
-}
-
-#[test]
-fn containers_image_tmp_has_a_frozen_idle_gated_golden_set() {
-    let library = Library::builtin().expect("built-ins");
-    let Body::Source(source) = &library.get("containers-image-tmp").expect("built-in").body else {
-        panic!("containers-image-tmp is a source");
-    };
-    assert_eq!(source.roots, Roots::Fixed(vec!["/var/tmp".into()]));
-    assert_eq!(
-        source.finds,
-        Finds::Paths {
-            patterns: vec!["buildah*".into(), "container_images_storage*".into()],
-            exclude: Vec::new(),
-            entry_type: EntryType::Any,
-        }
-    );
-    assert!(source.where_.is_empty());
-    assert_eq!(
-        source.min_idle_for,
-        Some(super::IdleFor(Duration::from_secs(3 * 24 * 60 * 60)))
-    );
-    assert_eq!(source.checkouts, Checkouts::Refuse);
-    assert_eq!(
-        source.action,
-        Action::Delete {
-            make_writable: false
-        }
-    );
-    assert_eq!(
-        matches(source),
-        [
-            "/var/tmp/buildah3558241755",
-            "/var/tmp/container_images_storage528829445"
-        ]
-    );
-    let mut changed = source.clone();
-    let Finds::Paths { entry_type, .. } = &mut changed.finds else {
-        unreachable!()
-    };
-    *entry_type = EntryType::Dir;
-    assert_ne!(
-        matches(&changed),
-        matches(source),
-        "type mutation must change the golden set"
-    );
 }
 
 #[test]

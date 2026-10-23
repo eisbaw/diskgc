@@ -330,8 +330,9 @@ selects named entries inside that directory, never the outer shell itself.
 The withdrawn `containers-image-tmp` source had a fixed three-day idle floor,
 but that floor cannot prove a producer has finished with its spool. A
 disposable VM test gives an old `/var/tmp/buildah*` directory genuine old
-kernel ctime, then parks a live producer after it closes the spool. The
-exact built-in judges the directory eligible while the producer still
+kernel ctime, then parks a live producer after it closes the spool. Its
+matching set and floor (now a user profile) judge the directory eligible
+while the producer still
 needs it on resume. The test only dry-runs that live directory. The
 producer is a fixture; whether real Buildah or Podman ever reuses a dormant
 spool with this lifetime remains unverified. No liveness contract for such

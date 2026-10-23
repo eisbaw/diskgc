@@ -1,7 +1,17 @@
-# Real Buildah uses these two name families under /var/tmp. An old free
-# spool is eligible; a fresh one and a live one remain.
+# Unsafe user-probe vector. containers-image-tmp was withdrawn from the
+# built-in library (Mark, 2026-10-23, TASK-112 D2): a 3-day floor cannot
+# show that a producer is done with a /var/tmp spool it may reopen (VM test
+# vm_containers_image_dormant_spool_exposes_liveness_gap). This user profile
+# keeps the withdrawn matching set: an old free spool is eligible; a fresh
+# one and an open one remain. Re-admission is TASK-125, under a new name.
 profile_vector: 1
-profile: containers-image-tmp
+profile: containers-image-probe
+user_profiles:
+  - name: containers-image-probe
+    find: {roots: [/var/tmp], paths: ["buildah*", "container_images_storage*"], type: any}
+    min_idle_for: 3d
+    action: delete
+    examples: {match: [/var/tmp/buildah3558241755, /var/tmp/container_images_storage528829445]}
 path: /var/tmp
 min_free: 100%
 host:

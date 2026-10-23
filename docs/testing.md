@@ -685,10 +685,10 @@ the counterexample these turn into cases):
 
 **Excluded and withdrawn profiles** keep their unsafe user-probe vectors
 (`pytest-tmp-unsafe-live-no-fd` and its successors for a plain path
-matcher; `containers-image-age` becomes a user-probe vector when the
-built-in is removed) and the container tests that require `mktemp-dir`,
-`nix-shell-tmpdir`, `tmp-entry` and, once removed,
-`containers-image-tmp` to stay absent from the built-in library.
+matcher; `containers-image-age`, the withdrawn built-in's matching set
+as a user profile) and the container tests that require `mktemp-dir`,
+`nix-shell-tmpdir`, `tmp-entry` and `containers-image-tmp` to stay absent
+from the built-in library.
 
 **Load-time cases** (Rust unit tests, one per rule of reference.md's
 validation list): `liveness_contract_rejects_null_and_blank`,
@@ -1534,14 +1534,16 @@ users, mount points and descriptor. It contains BusyBox, strace and the
 named `/usr/bin/buildah` process probe, and mounts the guest's Nix store and
 test binaries read-only. `nix build .#checks.x86_64-linux.vm-historical-ctime`
 boots its disposable QEMU/Podman host and runs the four `Tier::Vm` replays.
-It also runs a separate exact `containers-image-tmp` dry run with genuine
+It also runs a separate dry run of the withdrawn `containers-image-tmp`
+matching set and 3-day floor, as a user profile, with genuine
 five-day kernel ctimes: a held spool is `in_use`, a free spool is eligible,
 a fresh spool is `not_idle`, and a live producer's dormant spool is eligible.
 The producer reads and closes its spool before going idle, has no candidate
 reference in `/proc`, and reopens the same bytes when resumed. This is a
 counterexample to general dormant-spool protection, not evidence that
-Buildah itself reuses such a spool. The original vector independently
-verifies free deletion and held preservation with the exact built-in.
+Buildah itself reuses such a spool; it is why the built-in was withdrawn
+(TASK-112). The original vector, now that user profile, independently
+verifies free deletion and held preservation.
 The VM check is part of `just e2e` and `just e2e-full`.
 
 - **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned

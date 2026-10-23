@@ -179,11 +179,13 @@ fn built_in_request(select: &str, root: &str) -> Request {
     }
 }
 
-/// The built-in's floor is applied by the real dry-run executor without a
-/// tier filter. The model clock makes 3-day-old, new and future entries
-/// deterministic while a process holds one old file open.
+/// A source's `min_idle_for` floor is applied by the real dry-run executor
+/// without a tier filter. The model clock makes 3-day-old, new and future
+/// entries deterministic while a process holds one old file open. The
+/// profile is a user profile with the matching set of the withdrawn
+/// `containers-image-tmp` (TASK-112 D2), which is not shipped.
 #[test]
-fn containers_image_tmp_requires_its_source_age_and_refuses_open_files() {
+fn a_source_floor_requires_its_age_and_refuses_open_files() {
     let model = yaml(
         r#"  /var/tmp/buildah-old: {.: {mtime: 2026-10-01T00:00:00Z}, image: {size: 1K, mtime: 2026-10-01T00:00:00Z}}
   /var/tmp/container_images_storage-old: {size: 2K, mtime: 2026-10-01T00:00:00Z}
@@ -195,8 +197,18 @@ processes:
 "#,
     );
     let host = host(&model);
-    let library = Library::builtin().unwrap();
-    let tier = Tier::select("profile:containers-image-tmp", &library, None, 1000).unwrap();
+    let user = parse_profiles(
+        "- name: spool-probe\n  find: {roots: [/var/tmp], paths: [\"buildah*\", \"container_images_storage*\"], type: any}\n  min_idle_for: 3d\n  action: delete\n  examples: {match: [/var/tmp/buildah1]}\n",
+    )
+    .unwrap();
+    let library = Library::with_user_profiles(&user).unwrap();
+    assert!(
+        Library::builtin()
+            .unwrap()
+            .get("containers-image-tmp")
+            .is_none()
+    );
+    let tier = Tier::select("profile:spool-probe", &library, None, 1000).unwrap();
     assert_eq!(
         tier.idle_for,
         Some(diskgc_core::profile::IdleFor(Duration::from_secs(
@@ -2516,6 +2528,7 @@ fn dormant_post_exec_tmpdir_is_a_known_process_scan_false_negative() {
         "nix-shell-tmpdir",
         "nix-shell-rc",
         "tmp-entry",
+        "containers-image-tmp",
     ] {
         assert!(shipped.get(name).is_none(), "{name} must not ship");
     }

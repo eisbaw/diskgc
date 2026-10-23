@@ -244,6 +244,8 @@ pub fn dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent(ctx: &
         "nix-shell-tmpdir",
         "nix-shell-rc",
         "tmp-entry",
+        // Withdrawn (Mark, 2026-10-23, TASK-112 D2); TASK-125 re-admits.
+        "containers-image-tmp",
     ] {
         ensure!(
             !names.contains(&unsafe_name),

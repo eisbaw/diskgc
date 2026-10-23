@@ -55,7 +55,6 @@ const EXCLUDED: &[&str] = &[
     "playwright-tmp",
     "zephyr-tmp",
     "renode-tmp",
-    "containers-image-tmp",
     "xdg-cache-entry-v2",
     "brave-browser-cache",
     "chrome-browser-cache",

@@ -359,20 +359,6 @@
     no_match: [/tmp/renode, /tmp/a/renode-1]
   verified_with: Renode 1.17.0 (installed TemporaryFilesManager source; host dry-run 2026-10-18)
 
-- name: containers-image-tmp
-  category: containers
-  description: Podman and Buildah temporary image storage left in /var/tmp
-  find:
-    roots: [/var/tmp]
-    paths: ["buildah*", "container_images_storage*"]
-    type: any
-  min_idle_for: 3d
-  action: delete
-  examples:
-    match: [/var/tmp/buildah3558241755, /var/tmp/container_images_storage528829445]
-    no_match: [/tmp/buildah3558241755, /var/tmp/buildah3558241755/content, /var/tmp/containers/storage]
-  verified_with: Podman 5.8.7 observed temporary directories 2026-10-20
-
 - name: xdg-cache-entry-v2
   category: generic
   description: Top-level entries of a supplied XDG_CACHE_HOME, excluding known state and dedicated caches
