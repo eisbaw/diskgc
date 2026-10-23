@@ -1,0 +1,39 @@
+# The walk's entry budget is run-wide: with configured groups (no
+# --select) every tier walks under it, the later group's too. Test-only
+# `entry_budget` seam, as walk/too-many-entries.yaml.
+profile_vector: 1
+entry_budget: 5
+config: |
+  version: 1
+  groups:
+    - name: stale
+      tiers:
+        - {name: renode, select: profile:renode-tmp}
+    - name: pressure
+      tiers:
+        - {name: zephyr, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/renode-big: {a: {}, b: {}, c: {}, d: {}, e: {}}
+    /tmp/zephyr-big: {a: {}, b: {}, c: {}, d: {}, e: {}}
+    /tmp/zephyr-small: {a: {}}
+expect:
+  plan:
+    - {candidate: /tmp/renode-big, reason: too_many_entries}
+    - {candidate: /tmp/zephyr-big, reason: too_many_entries}
+    - {candidate: /tmp/zephyr-small}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-small]
+  removed: [/tmp/zephyr-small]
+  skipped:
+    - {candidate: /tmp/renode-big, reason: too_many_entries}
+    - {candidate: /tmp/zephyr-big, reason: too_many_entries}
+  preserved: [/tmp/renode-big/e, /tmp/zephyr-big/e]

@@ -1404,9 +1404,11 @@ mod tests {
         }
     }
 
-    /// The entry budget's test seam (`EnsureOptions::test_entry_budget`)
-    /// cannot be reached from the binary: no flag sets it, whatever the
-    /// command line, and the configuration schema has no such key.
+    /// The entry budget's test seam (`EnsureOptions::test_entry_budget`).
+    /// The guarantee is structural: `EnsureOptions` is built only here
+    /// (with `None`) and by the model's vector runner. This test catches
+    /// the obvious ways to break that: a parse that sets it, an
+    /// `--entry-budget` flag or an `entry_budget:` configuration key.
     #[test]
     fn the_binary_never_sets_the_test_entry_budget() {
         for line in [

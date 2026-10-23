@@ -149,9 +149,19 @@ fn run<H: Delete>(
     } else {
         None
     };
+    // The walk's entry budget is run-wide, set beside the protections on
+    // every tier: the product's constant unless a model test lowers it.
+    let max_entries = options
+        .test_entry_budget
+        .unwrap_or(crate::engine::DEFAULT_MAX_ENTRIES);
+    assert!(
+        max_entries >= 1,
+        "an entry budget of 0 would refuse every candidate"
+    );
     if let Some((tiers, _, _)) = &mut configured {
         for tier in tiers {
             tier.protections = protections.clone();
+            tier.max_entries = max_entries;
         }
     }
     let mut tier = if let Some((tiers, _, _)) = &configured {
@@ -171,14 +181,7 @@ fn run<H: Delete>(
         tier
     };
     tier.protections = protections;
-    if let Some(budget) = options.test_entry_budget {
-        tier.max_entries = budget;
-        if let Some((tiers, _, _)) = &mut configured {
-            for tier in tiers {
-                tier.max_entries = budget;
-            }
-        }
-    }
+    tier.max_entries = max_entries;
     let request = Request {
         path: options.path.clone(),
         min_free: options.min_free,

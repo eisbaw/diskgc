@@ -114,8 +114,8 @@ const REASONS_WITHOUT_PRODUCER: [(&str, &str); 3] = [
 
 /// diskgc-core's non-test sources that may produce `reason` outside the
 /// `Reason` enum: report skip reasons are `&'static str`, and the only
-/// other producer is a backend's skip (docker_backend.rs today). A file
-/// counts when it is docker_backend.rs and quotes the reason, or when one
+/// other producers are backend skips (docker_backend.rs, executor.rs). A
+/// file counts when it is one of those and quotes the reason, or when one
 /// of its lines quotes it next to the word `reason` (a predicate or group
 /// named `has_not` or `stale` elsewhere is not a skip reason).
 fn core_sources_quoting(reason: &str) -> Vec<PathBuf> {
@@ -132,7 +132,13 @@ fn core_sources_quoting(reason: &str) -> Vec<PathBuf> {
                 && path.file_name().is_some_and(|name| name != "tests.rs")
             {
                 let text = fs::read_to_string(&path).expect("readable source");
-                let backend = path.file_name().is_some_and(|n| n == "docker_backend.rs");
+                // The report's reason is a free `&'static str`; these files
+                // pass literals to it on lines that need not say `reason`
+                // (`skip_docker(.., "changed", ..)`). A closed report
+                // enum would make this scan unnecessary (TASK-127).
+                let backend = path
+                    .file_name()
+                    .is_some_and(|n| n == "docker_backend.rs" || n == "executor.rs");
                 let produces = if backend {
                     text.contains(&quoted)
                 } else {
