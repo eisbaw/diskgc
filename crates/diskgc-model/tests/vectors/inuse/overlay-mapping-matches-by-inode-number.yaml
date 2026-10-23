@@ -1,0 +1,34 @@
+# On overlayfs a memory map shows the layer's device, not the one statx
+# shows, so a mapping matches by inode number alone (inode_map). Modelled
+# as in inuse.rs: a second filesystem built the same way, so its lib.so
+# has the candidate's lib.so inode number. A tmpfs candidate would not
+# match (inuse.rs a_mapping_on_overlay_matches_by_inode_number_alone).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
+    - {id: 30, at: /tmp, fs: overlay, dev: "0:50", size: 1G, parent: 1}
+    - {id: 31, at: /layer, fs: tmpfs, dev: "0:51", size: 1G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-c:
+      lib.so: {}
+    /layer/zephyr-c:
+      lib.so: {}
+  processes:
+    - {pid: 10, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool, /layer/zephyr-c/lib.so], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-c, reason: in_use}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-c, reason: in_use, process_blockers: [{pid: 10, evidence: inode_map}]}
+  preserved: [/tmp/zephyr-c/lib.so]

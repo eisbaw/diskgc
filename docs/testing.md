@@ -267,7 +267,13 @@ configuration file's text; absent: none was found), `user_profiles`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
 `tally_budget`, `allow_root`, `users` (the account resolver for `owners:`
 names) and `seed` (`DISKGC_SEED`). A configuration that does not parse
-gives the binary's exit-2 report before the host is touched.
+gives an exit-2 config report before the host model is touched (the
+runner parses the text with `config::parse`, as `main.rs` does after its
+startup checks; the proposed 0.1 catalog's narrowing is not applied:
+TASK-130). Two keys are harness seams the binary does not have:
+`user_profiles` without a `config` (how a mutated built-in is tried
+against an unchanged vector) and `users` (the account resolver, which is
+not on the `Host` port yet).
 
 `expect` holds: `plan` (the complete dry-run plan: `candidate`, `reason`,
 `source`), `dry_run_exit` (default 0), `dry_run_errors` and `errors`
@@ -275,7 +281,8 @@ gives the binary's exit-2 report before the host is touched.
 complete set), `removed` (paths that existed and must be gone; Cargo keeps
 its tagged root while its contents go), `skipped` (complete:
 `candidate`, `reason`, and optionally `process_blockers` as `{pid,
-evidence}`, `[]` meaning the report's `null`), `preserved` (paths that
+evidence}`, `[]` meaning the report's `null`; an empty list in the report
+itself is a runner error), `preserved` (paths that
 must survive: they existed before reclaim or an event makes them),
 `commands` (optional: every command or Docker run in order, `{cwd,
 argv}`), and `report` / `dry_run_report` (optional subsets of the JSON
@@ -284,8 +291,11 @@ report, e.g. `{status: met, seed: 42}`).
 Every vector is also held to invariants it does not state: the dry run
 never calls `unlinkat` or `fchmod` and runs no command; every `unlinkat`
 lies inside an expected action; every deleting action has a `removed`
-postcondition; a command action runs only in its checked candidate or
-that candidate's parent; no event is left unfired.
+postcondition; every command run pairs with exactly one action (a
+command action's run in its checked candidate or that candidate's parent,
+a Docker action's run of the `docker` client), every command action has
+its run, and no run is left over; no event is left unfired.
+`runner_invariants_reject_perturbed_vectors` shows these checks fail.
 
 Completeness is enforced by the results, not by tags in the files:
 `every_skip_reason_has_a_vector` needs, for each reason in `Reason::ALL`
@@ -296,7 +306,9 @@ test, and an exemption a vector covers fails it);
 for each built-in source run unchanged, an action of it, an `in_use` or
 `locked` skip, a `protected` or `excluded` skip, and a nested-guard skip
 (`kept`, `contains_checkout` or `contains_special`); Docker prunes need
-only the action. `wrong_python_matcher_is_rejected_by_the_checked_in_vector`
+only the action; `every_blocker_evidence_has_a_vector` needs every
+`ProcessEvidence` value in some vector's matched `process_blockers`.
+`wrong_python_matcher_is_rejected_by_the_checked_in_vector`
 proves one vector bites a matcher mutation; TASK-121's notes record which
 vectors kill which mutation of each safety guard.
 
@@ -365,7 +377,9 @@ How the format reads (the schema documents every key):
   observed space change. The model records argv, environment and checked
   cwd but starts no real child. The modelled command path is `/usr/bin:/bin`:
   a `docker:` answer is given only while an executable `docker` is there
-  (otherwise ENOENT, as `LinuxHost`'s spawn: no client installed).
+  (otherwise ENOENT, as `LinuxHost`'s spawn: no client installed). It
+  must be a regular file with an execute bit; a symlinked client (normal
+  on NixOS) is not followed and reads as absent.
   `locks` give their holder an fd of its own. As on
   `LinuxHost`, an empty fd table, map or environment, or no `exe`, reads
   as `Failed` (an

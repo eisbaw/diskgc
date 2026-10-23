@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use diskgc_core::engine::Reason;
+use diskgc_core::engine::{ProcessEvidence, Reason};
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_model::profile_vector::{Checked, ProfileVector, corpus_files};
 
@@ -286,4 +286,92 @@ fn expected_filesystem_postconditions_must_exist_before_reclaim() {
         .check(&library)
         .expect_err("an absent path cannot count as preserved");
     assert!(error.contains("was absent before reclaim"), "{error}");
+}
+
+/// The runner's own checks can fail: each perturbation of a passing
+/// vector's expectations or events is rejected with its own message.
+#[test]
+fn runner_invariants_reject_perturbed_vectors() {
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    let text =
+        |rel: &str| fs::read_to_string(vectors.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let fails = |vector: ProfileVector, wanted: &str| {
+        let error = vector
+            .check_builtin()
+            .err()
+            .unwrap_or_else(|| panic!("perturbed vector passed; wanted {wanted:?}"));
+        assert!(error.contains(wanted), "wanted {wanted:?} in: {error}");
+    };
+    let walk =
+        || ProfileVector::parse(&text("walk/empty-and-zero-size-candidates.yaml")).expect("parses");
+    walk()
+        .check_builtin()
+        .expect("the unperturbed vector passes");
+
+    let mut missing_action = walk();
+    missing_action.expect.actions.pop();
+    fails(missing_action, "reclaim actions");
+
+    let mut no_postcondition = walk();
+    let kept = no_postcondition.expect.removed.remove(0);
+    let others = no_postcondition.expect.removed.clone();
+    no_postcondition.expect.removed = others;
+    fails(
+        no_postcondition,
+        &format!("action {} has no explicit", kept.display()),
+    );
+
+    let mut wrong_exit = walk();
+    wrong_exit.expect.reclaim_exit = 0;
+    fails(wrong_exit, "reclaim exit 1, expected 0");
+
+    let unfired = text("races/new-keep-marker-after-planning.yaml").replace("nth: 1", "nth: 99");
+    let mut never = ProfileVector::parse(&unfired).expect("parses");
+    // Without its race the candidate is deleted; expect that, so only the
+    // unfired event is wrong.
+    never.expect.actions = vec!["/tmp/zephyr-a".into()];
+    never.expect.removed = vec!["/tmp/zephyr-a".into()];
+    never.expect.skipped.clear();
+    never.expect.preserved.clear();
+    fails(never, "unfired events");
+
+    let mut wrong_command = ProfileVector::parse(&text("builtins/pip-cache.yaml")).expect("parses");
+    wrong_command.expect.commands.as_mut().expect("commands")[0].cwd = "/".into();
+    fails(wrong_command, "commands");
+
+    let mut wrong_blocker =
+        ProfileVector::parse(&text("inuse/each-kind-of-use-blocks-its-candidate.yaml"))
+            .expect("parses");
+    wrong_blocker.expect.skipped[0]
+        .process_blockers
+        .as_mut()
+        .expect("blockers")[0]
+        .evidence = "cwd".into();
+    fails(wrong_blocker, "reclaim skipped");
+}
+
+/// Every `process_blockers` evidence value of the contract
+/// (`ProcessEvidence::ALL`, the same set as reference.md's enum) is shown
+/// by a vector whose expectations matched.
+#[test]
+fn every_blocker_evidence_has_a_vector() {
+    let mut shown = BTreeSet::new();
+    for (_, result) in corpus() {
+        if let Ok(checked) = result {
+            for skip in &checked.reclaim.skipped {
+                for blocker in skip.process_blockers.iter().flatten() {
+                    shown.insert(blocker.evidence.as_str());
+                }
+            }
+        }
+    }
+    let missing: Vec<_> = ProcessEvidence::ALL
+        .iter()
+        .map(|e| e.as_str())
+        .filter(|e| !shown.contains(e))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "blocker evidence without a vector: {missing:?}"
+    );
 }

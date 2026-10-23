@@ -494,33 +494,54 @@ impl ProfileVector {
             .into_iter()
             .filter(|call| call.op == Op::RunCommand)
             .collect();
-        let mut command_actions = 0;
+        // Pair every run with exactly one action it may belong to: a
+        // command action's run in its candidate or that candidate's
+        // parent, a Docker action's run of the docker client. An action
+        // runs at most once; a run left over is a command diskgc had no
+        // checked candidate for.
+        let mut unpaired: Vec<(&PathBuf, bool)> = Vec::new();
         for entry in &reclaim.actions {
             match action_of(library, &entry.profile)? {
-                Action::Command { .. } => {
-                    command_actions += 1;
-                    let checked = [Some(entry.candidate.as_path()), entry.candidate.parent()];
-                    if !runs
-                        .iter()
-                        .any(|call| call.path.is_some() && checked.contains(&call.path.as_deref()))
-                    {
-                        return Err(format!(
-                            "command action {} ran in neither it nor its parent: {:?}",
-                            entry.candidate.display(),
-                            runs.iter().map(|call| &call.path).collect::<Vec<_>>()
-                        ));
-                    }
-                }
+                Action::Command { .. } => unpaired.push((&entry.candidate, true)),
                 Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
-                    command_actions += 1;
+                    unpaired.push((&entry.candidate, false));
                 }
                 Action::Delete { .. } | Action::CargoLockProtocol => {}
             }
         }
-        if runs.len() > command_actions {
+        for call in &runs {
+            let run = call
+                .command
+                .as_ref()
+                .ok_or_else(|| format!("run_command without its request: {call}"))?;
+            let docker = run
+                .executable
+                .file_name()
+                .is_some_and(|name| name == "docker");
+            let cwd = call.path.as_deref();
+            let pair = unpaired.iter().position(|(candidate, command)| {
+                if *command {
+                    cwd.is_some() && (cwd == Some(candidate.as_path()) || cwd == candidate.parent())
+                } else {
+                    docker
+                }
+            });
+            match pair {
+                Some(index) => {
+                    unpaired.remove(index);
+                }
+                None => {
+                    return Err(format!(
+                        "command run {call} ({:?}) belongs to no command or Docker action",
+                        run.executable
+                    ));
+                }
+            }
+        }
+        if let Some((candidate, _)) = unpaired.iter().find(|(_, command)| *command) {
             return Err(format!(
-                "{} command runs for {command_actions} command and Docker actions",
-                runs.len()
+                "command action {} has no run in it or its parent",
+                candidate.display()
             ));
         }
         if let Some(expected) = &self.expect.commands {
@@ -649,14 +670,24 @@ fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String
         .map(|entry| SkipVerdict {
             candidate: entry.candidate.clone(),
             reason: entry.reason.to_owned(),
-            process_blockers: Some(sorted(entry.process_blockers.iter().flatten().map(
-                |blocker| BlockerVerdict {
+            process_blockers: entry.process_blockers.as_ref().map(|blockers| {
+                sorted(blockers.iter().map(|blocker| BlockerVerdict {
                     pid: blocker.pid,
                     evidence: blocker.evidence.as_str().to_owned(),
-                },
-            ))),
+                }))
+            }),
         })
         .collect();
+    // The contract has `null` or a nonempty list, never `[]`.
+    if let Some(empty) = actual
+        .iter()
+        .find(|skip| skip.process_blockers.as_ref().is_some_and(Vec::is_empty))
+    {
+        return Err(format!(
+            "{}: process_blockers is an empty list, not null",
+            empty.candidate.display()
+        ));
+    }
     actual.sort_by(|a, b| a.candidate.cmp(&b.candidate));
     let mut expected = expected.to_vec();
     expected.sort_by(|a, b| a.candidate.cmp(&b.candidate));
@@ -665,7 +696,8 @@ fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String
             got.candidate == want.candidate
                 && got.reason == want.reason
                 && want.process_blockers.as_ref().is_none_or(|blockers| {
-                    Some(sorted(blockers.iter().cloned())) == got.process_blockers
+                    sorted(blockers.iter().cloned())
+                        == got.process_blockers.clone().unwrap_or_default()
                 })
         });
     if !same {
