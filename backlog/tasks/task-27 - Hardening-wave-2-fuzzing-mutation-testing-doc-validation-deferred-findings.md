@@ -1,10 +1,10 @@
 ---
 id: TASK-27
 title: 'Hardening wave 2: fuzzing, mutation testing, doc validation, deferred findings'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-17 23:57'
+updated_date: '2026-10-23 08:15'
 labels:
   - wave-2
   - hardening
@@ -25,7 +25,7 @@ Why: wave-2 surfaces are frozen; harden them once. cargo-fuzz on the grammar par
 <!-- AC:BEGIN -->
 - [ ] #1 No surviving mutants in selection semantics, or each justified
 - [ ] #2 Each fuzzer (grammar, YAML loader, mountinfo, maps, environ parsers) runs 30 minutes without crashes; crashes found become regression tests
-- [ ] #3 fuzz and mutants recipes exist in the justfile
+- [x] #3 fuzz and mutants recipes exist in the justfile
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -36,6 +36,8 @@ Forward-carried from task-1: The musl target is set only in flake.nix (CARGO_BUI
 Forward-carried from task-1 review (mped): doc validation needs docs/ as a build input, which conflicts with crane's source filter that keeps docs out (task-1 AC4); run doc checks outside the package build (a separate check or recipe) so docs edits still do not rebuild the binary.
 
 For the 0.1 ensure MVP (2026-10-18): only this task's mutation-testing slice on selection and the executor (AC #1, and the executor part of the description) is needed before 0.1 (task-67); fuzzing, doc validation and the other deferred findings are not. task-67 names the slice in its description rather than depending on this whole task.
+
+2026-10-23 integration: commit 8f0ba7d added five fuzz targets, corpus seeds, docs checks, and a bounded five-source mutation sweep. Parallel QA/MPED reviews found no source blocker; nix develop -c just check and exact nix develop -c just e2e passed on the committed tree, including Docker 7/7 and VMs. Scope inventory lists 850 mutants across five files. The preflight nix develop -c tools/mutants_container_smoke.sh --check-shard parse 0/16 exited 2: MemAvailable was about 10 GiB, below its 12 GiB guard for a 10 GiB capped container. No mutation shard or 30-minute fuzzer has run, so AC1/AC2/DoD remain open. No host files deleted.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
