@@ -83,6 +83,7 @@ pub mod profile_vector_suite;
 pub mod project_cache_suite;
 pub mod release_check;
 pub mod runner;
+pub mod scale_suite;
 pub mod scratch;
 pub mod signal_suite;
 pub mod snapshot;

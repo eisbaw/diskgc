@@ -47,11 +47,61 @@ pub fn main(cmd: &str, args: &[String]) -> Result<(), String> {
         ("host-pidfd-release", []) => pidfd_release(&host),
         ("host-inuse-fork-churn", [candidate]) => inuse_fork_churn(&host, candidate),
         ("host-inuse-sustained-churn", [candidate]) => inuse_sustained_churn(&host, candidate),
+        ("host-inuse-index-memory", []) => inuse_index_memory(&host),
         ("host-kernel", []) => kernel(&host),
         ("host-maps-watch", [pid, want, millis]) => maps_watch(&host, pid, want, millis),
         ("host-unlink", [dir, entries @ ..]) => unlink(&host, dir, entries),
         _ => Err(format!("bad host probe arguments: {cmd} {args:?}")),
     }
+}
+
+/// Measures the retained scan while a path-heavy process is alive in this
+/// disposable container. The index figure is a lower bound; VmRSS includes
+/// all of the scan and the probe process.
+fn inuse_index_memory(host: &LinuxHost) -> Result<(), String> {
+    use diskgc_core::inuse::{Options, scan};
+
+    let before_kib = self_status_kib("VmRSS:")?;
+    let started = Instant::now();
+    let scan = scan(
+        host,
+        &Options {
+            users: &[1000],
+            sockets: false,
+        },
+    )
+    .map_err(|e| format!("scan for index memory: {e}"))?;
+    let during_kib = self_status_kib("VmRSS:")?;
+    let peak_kib = self_status_kib("VmHWM:")?;
+    let scan_ms = started.elapsed().as_millis();
+    let gather_ms = scan.took().as_millis();
+    println!(
+        "paths={} index_minimum_bytes={} rss_before_kib={} rss_with_scan_kib={} peak_rss_kib={} scan_ms={} gather_ms={} post_gather_ms={}",
+        scan.environ_paths().len(),
+        scan.environ_index_minimum_bytes(),
+        before_kib,
+        during_kib,
+        peak_kib,
+        scan_ms,
+        gather_ms,
+        scan_ms.saturating_sub(gather_ms)
+    );
+    Ok(())
+}
+
+fn self_status_kib(key: &str) -> Result<usize, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("read own status: {e}"))?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .ok_or_else(|| format!("missing {key} in own status"))?;
+    value
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("empty {key}"))?
+        .parse()
+        .map_err(|e| format!("parse {key}: {e}"))
 }
 
 /// Pin a child while it blocks on a pipe, then reap it and check the same

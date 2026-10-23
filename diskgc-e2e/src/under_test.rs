@@ -540,7 +540,7 @@ impl Spawned {
     }
 
     /// The pid of strace, the parent of the code under test.
-    fn strace_pid(&self) -> u32 {
+    pub(crate) fn strace_pid(&self) -> u32 {
         self.strace.id()
     }
 

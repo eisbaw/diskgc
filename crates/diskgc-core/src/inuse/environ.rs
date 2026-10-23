@@ -40,6 +40,17 @@ impl EnvPathIndex {
     pub(super) fn first_inside(&self, candidate: &Path) -> Option<usize> {
         self.0.get(candidate).copied()
     }
+
+    /// A conservative allocation lower bound for diagnostics. HashMap's
+    /// control bytes and the spare capacity of path buffers are omitted.
+    pub(super) fn minimum_bytes(&self) -> usize {
+        self.0.capacity() * std::mem::size_of::<(PathBuf, usize)>()
+            + self
+                .0
+                .keys()
+                .map(|path| path.as_os_str().len())
+                .sum::<usize>()
+    }
 }
 
 /// The absolute paths named by `env`: every variable's value split at `:`

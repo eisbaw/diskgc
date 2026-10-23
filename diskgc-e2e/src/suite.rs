@@ -42,8 +42,8 @@ use crate::{
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey, meson_suite,
-    packaging_suite, profile_vector_suite, project_cache_suite, signal_suite, stdout_suite,
-    temp_safety_suite,
+    packaging_suite, profile_vector_suite, project_cache_suite, scale_suite, signal_suite,
+    stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -112,6 +112,10 @@ const UNJUDGED_MESSAGE: &str = "never judged by the deletion oracle";
 /// left out silently. Plain tests by name, Cargo tests by their name before
 /// `@TOOLCHAIN`.
 pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        "fs_40k_small_candidates_plan_and_reclaim_scale",
+        "scale measurements use the Nix-image development binary as their baseline",
+    ),
     (
         "vm_cmake_original_matches_linux_outcomes_and_deletion_diff",
         "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
@@ -1232,6 +1236,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: fs_reclaim_suite::fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_else,
+    },
+    Test {
+        name: "fs_40k_small_candidates_plan_and_reclaim_scale",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: scale_suite::fs_40k_small_candidates_plan_and_reclaim_scale,
     },
     Test {
         name: "fs_reclaim_never_deletes_a_socket_or_fifo",

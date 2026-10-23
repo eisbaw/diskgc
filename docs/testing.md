@@ -622,6 +622,18 @@ filesystem, processes and mounts from the developer's system.
   12,000 entries in the fast tier and 100,000 in the full tier, judged by
   the oracle; stale sockets and FIFOs; and a FUSE mount whose server
   never answers (below).
+  The full-tier `fs_40k_small_candidates_plan_and_reclaim_scale` builds
+  40,000 distinct small directories on the disposable container's `/tmp`
+  tmpfs. Its first diskgc process dry-plans all of them; its second process
+  deletes them under strace. The independent deletion oracle checks the
+  entire container filesystem. The case logs both durations, deletion rate,
+  and the diskgc processes' `VmHWM`. A path-heavy fixture process exercises
+  the environment ancestor index; a separate read-only host probe reports a
+  lower bound for the index's retained heap allocation and the scan
+  process's RSS while the scan is alive. The first plan has no warmed diskgc
+  process state, but fixture construction has warmed kernel dentries, so it
+  does not measure a cold Linux page cache. `VmHWM` includes all diskgc
+  allocations, not only the ancestor index.
 - **Fork churn during the in-use scan:**
   `host_inuse_scan_settles_after_fork_churn` runs the real Linux scanner in
   a disposable container with 0, 1, 4 and 8 bounded child-spawning workers.

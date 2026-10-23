@@ -43,7 +43,7 @@
 //! [`Host::proc_views`], which `LinuxHost` runs on several processes at
 //! once.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -289,8 +289,12 @@ impl Read {
         self.uses.extend(other.uses);
         self.uses.sort_unstable();
         self.uses.dedup();
+        // One environment can name thousands of paths. `Vec::contains` here
+        // made even the first process read quadratic in that path count and
+        // could exhaust the one-second deletion scan freshness window.
+        let mut seen: HashSet<_> = self.environ.iter().cloned().collect();
         for e in other.environ {
-            if !self.environ.contains(&e) {
+            if seen.insert(e.clone()) {
                 self.environ.push(e);
             }
         }
@@ -788,6 +792,41 @@ mod tests {
 
     const INIT: &str = "         0          0 4294967295\n";
     const SIBLING: &str = "      1000       1000          1\n";
+
+    #[test]
+    fn merging_many_environment_paths_keeps_first_seen_order_and_deduplicates() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        let mut merged = Read::default();
+        let mut first = Read {
+            environ: (0..4_500)
+                .map(|i| ("TMPDIR".into(), format!("/tmp/branch-{i}/leaf").into()))
+                .collect(),
+            ..Read::default()
+        };
+        first.environ.push(first.environ[17].clone());
+        merged.add(first);
+        assert_eq!(merged.environ.len(), 4_500);
+
+        let raw = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        let second = Read {
+            environ: vec![
+                ("TMPDIR".into(), "/tmp/branch-17/leaf".into()),
+                ("TMPDIR".into(), "/tmp/new/leaf".into()),
+                ("OTHER".into(), "/tmp/branch-17/leaf".into()),
+                ("RAW".into(), raw.clone()),
+                ("RAW".into(), raw.clone()),
+            ],
+            ..Read::default()
+        };
+        merged.add(second);
+        assert_eq!(merged.environ.len(), 4_503);
+        assert_eq!(merged.environ[17].1, Path::new("/tmp/branch-17/leaf"));
+        assert_eq!(merged.environ[4_500].1, Path::new("/tmp/new/leaf"));
+        assert_eq!(merged.environ[4_501].0, "OTHER");
+        assert_eq!(merged.environ[4_502], ("RAW".into(), raw));
+    }
 
     fn status(uid: u32, euid: u32, caps: u64, map: &str, owner: Option<u32>) -> ProcStatus {
         ProcStatus {

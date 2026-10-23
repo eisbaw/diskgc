@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 11:06'
-updated_date: '2026-10-20 01:10'
+updated_date: '2026-10-23 02:04'
 labels:
   - wave-2
   - spike
@@ -51,4 +51,8 @@ From task-68's review (mped S4): there are now two scan-reuse policies. inuse::C
 2026-10-20 indexed process environment paths in the in-use scan (integrated profile worktree): a warm-cache read-only host plan judged all 361,495 pytest candidates in 350.56 s with no errors; 361,358 eligible, 137 contains_ipc. Three sampled eligible size estimates exactly matched du -x -B1 -s. Earlier 300 s indexed run judged 203,667 candidates, versus 22,126 in an earlier unindexed run; these are not controlled cold-cache comparisons. The full run followed warm-up scans, so cold-cache completion inside the default 10-minute timeout and 40k real deletion throughput remain unproven. No live host deletion.
 
 Environment-path index integrated; post-fix nix develop -c just e2e passed 93/93 on 2026-10-20 and QA/MPED reviews GO. TASK-70 remains To Do for cold-cache plan timing, peak RSS of ancestor index, and real-host 40k deletion throughput; no live host deletion was attempted.
+
+2026-10-23 disposable-container scale proof: an initial 4,500-path live-process workload made Read::add environment deduplication quadratic (Vec::contains); an in-use scan took 1.655s and reclaim stopped at candidate 6,998 on the one-second freshness bound. Replaced deduplication with a first-seen-order-preserving HashSet and added duplicate/non-UTF8 regression coverage. In the integrated container fixture, a fresh-process dry plan judged 40,000 tiny /tmp directories in 29.061s with 51,864 KiB product VmHWM; real reclaim deleted all 40,000 in 34.490s (1,159.7/s) with 32,204 KiB VmHWM. Independent deletion oracle found zero violations over 80,000 traced removal calls. With 4,503 live environment paths, the retained ancestor-index allocation lower bound was 904,314 bytes, probe RSS rose 1,700 to 4,932 KiB, and the scan took 44ms (14ms gathering, 30ms afterward). This is disposable tmpfs throughput with fixture-warmed kernel dentries and shared host activity; it does not measure cold Linux page-cache behavior, real-host deletion throughput, or complete index heap/RSS. TASK-70 remains open for those limits; no developer-host diskgc run or host deletion.
+
+Clarification: The preceding no developer-host diskgc run statement applies to the 2026-10-23 disposable scale probe. Earlier notes record a read-only developer-host plan; no developer-host deletion has been attempted.
 <!-- SECTION:NOTES:END -->

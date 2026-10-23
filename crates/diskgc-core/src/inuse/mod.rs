@@ -356,6 +356,13 @@ impl Scan {
         &self.environ
     }
 
+    /// Lower bound on the environment ancestor index's heap allocation.
+    /// This omits HashMap control bytes and PathBuf spare capacity, so it is
+    /// useful for scale diagnostics, not a full heap or RSS accounting.
+    pub fn environ_index_minimum_bytes(&self) -> usize {
+        self.environ_index.minimum_bytes()
+    }
+
     /// Why this scan cannot clear anything: it is unsettled, or a process
     /// that blocks could not be read (docs/safety.md, In use). `None`: it
     /// can judge candidates.
