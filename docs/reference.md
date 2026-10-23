@@ -1007,31 +1007,32 @@ same evidence.
 Report additions, made together with the implementation (they extend the
 JSON enums of Output):
 
-- skip reason `producer_unknown`: no verdict could be reached. It is one
-  reason; its one `process_blockers` entry says which side failed, with
-  evidence `producer_identity` (the producer could not be identified or
-  looked up: a malformed pid or marker, the PID namespace, `hidepid`, the
-  filesystem list, an unreadable process, a relative temp-root or
-  `--basetemp` value; `pid` names the process when one is the cause, else
-  it is `null`) or `producer_eligibility` (the candidate is not a
-  recognised instance: no pid in the name, not a numbered session, a
-  missing manifest, a failed listing, a project over the entry budget;
-  `pid` is `null`). This makes `pid` nullable for these two evidence
-  values only. Its detail names the failed rule: no pid in the name, a malformed marker, a
-  filesystem not on the local list, not the initial PID namespace,
-  `hidepid` on the held `/proc`, a process that stayed unreadable, a
-  failed listing of a pytest directory, a name that is not a numbered
-  pytest session, a missing project manifest, a project over the entry
-  budget;
+- skip reason `producer_unknown`, used only for a recognised instance of
+  a contract whose producer state cannot be determined. Its detail names
+  the failed rule: a malformed marker, a filesystem not on the local list,
+  not the initial PID namespace, `hidepid` on the held `/proc`, a process
+  that stayed unreadable, a relative or unresolvable temp-root or
+  `--basetemp` value, an unreadable command line or environment, an
+  oversized or unparsable workspace `package.json`, a project climb that
+  reached a bind-mounted subdirectory. Its `process_blockers` is `null`
+  unless one process caused it; then it holds that process's ordinary
+  entry (a pid, as every entry has) with evidence `unreadable` (existing)
+  or `relative_path` (new: the process has a relative or unresolvable
+  value of a variable pytest resolves).
+- what is not a recognised instance is `filtered` (a name without a valid
+  pid, a name that is not a session name, a missing manifest, a nested
+  dependency directory); a failed listing or project walk is
+  `unreadable`; a project tree over the entry budget is
+  `too_many_entries` (all existing reasons);
 - `process_blockers` evidence `owner_pid` (a listed process carries the
-  recorded pid number; a number match, not proof that it is the same
-  process), `temp_root` (a process could use the session's temp root) and
+  recorded pid number, a number match, not proof that it is the same
+  process; the entry's pid is that process's pid in diskgc's namespace),
+  `temp_root` (a process could use the session's temp root) and
   `command_line` (an element of a process's command line names the
   session; a value in its environment that names it is the existing
   `environment`). A pid that may be in use is `in_use`, as for
   `app_not_running`; a project that changed or was read within the idle
-  bound is `not_idle`; a candidate inside another dependency directory is
-  `filtered`.
+  bound is `not_idle`.
 
 `profiles show` prints the value. `app_not_running` is the shipped
 presence-marker contract and stays as it is.
@@ -1470,8 +1471,8 @@ designed but not implemented.
 | Profile | Producer (verified) | Contract | Class | Verdict |
 |---|---|---|---|---|
 | `nix-shell-rc` | legacy `nix-shell` and `nix develop` of Nix 2.34.8: the directory's pid is the shell's own (`nix` execs the shell; observed for `nix develop -c`); whether a live shell reads the directory after its start is part of the verification | planned: `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | Admit after the lifecycle verification (both commands, interactive and `-c`, normal exit and `SIGKILL`, a shell in a private PID namespace sharing `/tmp`, a detached child outliving the shell), with its vectors. Matching set as in the library row. Small in bytes (about 350 MiB in 65,000 directories, TASK-68), large in count. |
-| `pytest-tmp` | pytest 9.1.1 (source read; container tests planned) | planned: `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rule sound, rank rule producer-equivalent (never removes a session pytest's own next cleanup would keep, under the default retention), unused-root rule heuristic | Admitted by Mark, 2026-10-23, with the residuals in safety.md (pytest sessions); ships when implemented with its vectors and container tests. |
-| `node-modules`, `python-venv` | npm: to be verified by the planned container test (an install from an offline tarball, a read-only run); pnpm, Yarn, Bun, venv, virtualenv and uv: planned, not verified; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Admitted by Mark, 2026-10-23, with the residuals in safety.md (Project dependency directories); the loss in a residual is a reinstall. Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Ships when implemented with its vectors and container tests. |
+| `pytest-tmp` | pytest 9.1.1 (source read; container tests planned) | planned: `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Admitted by Mark, 2026-10-23, with the residuals in safety.md (pytest sessions); ships when implemented with its vectors and container tests. |
+| `node-modules`, `python-venv` | npm: to be verified by the planned container test (an install from an offline tarball, a read-only run); pnpm, Yarn, Bun, venv, virtualenv and uv: planned, not verified; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Admitted by Mark, 2026-10-23, with the residuals in safety.md (Project dependency directories); the loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Ships when implemented with its vectors and container tests. |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |
 | `tmp-entry` | any program | none | none | Excluded for good: there is no one producer, and every counterexample above applies. |

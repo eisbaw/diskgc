@@ -445,7 +445,6 @@ Of the host model (the test-model schema, tentative):
   stands for all three times), and a mount's `noatime: true`;
 - a mount's `bind_of` extended to a subdirectory (`bind_of: {mount: 2,
   path: /w/packages/a}`); today only whole-filesystem binds exist;
-- `events[].chdir: {pid, to}`: a process changes its working directory.
 - a file's `content:` (exists) for pytest's `.lock`.
 
 **Owner PID** (`nix-shell-rc`):
@@ -463,62 +462,72 @@ Of the host model (the test-model schema, tentative):
 | `nix-shell-rc-hidepid-unknown` | `proc_hidepid: true`; no process 4242 | `producer_unknown` (a hidden `newgrp` shell would be unlisted) |
 | `nix-shell-rc-hidepid-root-unknown` | as above with `own_uid: 0` | `producer_unknown` (root does not lift the precondition) |
 | `nix-shell-rc-unlisted-filesystem-unknown` | one candidate each on mounts of type `virtiofs`, `9p`, `overlay`, `zfs`; no owners | `producer_unknown` each (one file per type, so dropping one bites) |
-| `nix-shell-rc-unreadable-status-unknown` | owner gone; another process of the user has `nspid: unreadable` | `producer_unknown` |
-| `nix-shell-rc-other-user-unreadable-status-unknown` | owner gone; a uid 2000 process has `nspid: unreadable` | `producer_unknown` (its user is no excuse) |
+| `nix-shell-rc-unreadable-status-unknown` | owner gone; process 77 of the user has `nspid: unreadable` | `producer_unknown`, `unreadable` 77 |
+| `nix-shell-rc-other-user-unreadable-status-unknown` | owner gone; a uid 2000 process 78 has `nspid: unreadable` | `producer_unknown`, `unreadable` 78 (Owner PID's set is every user's processes) |
 | `nix-shell-rc-process-exits-mid-scan-eligible` | owner gone; another process becomes `Gone` between its listing and its status read | eligible: a confirmed exit does not make the answer unknown |
-| `nix-shell-rc-malformed-pid-unknown` | `nix-shell-0042-1`, `nix-shell-4194305-1`, `nix-shell-abc-1` | `producer_unknown` each, all preserved |
+| `nix-shell-rc-malformed-pid-filtered` | `nix-shell-0042-1`, `nix-shell-4194305-1`, `nix-shell-abc-1` | `filtered` each (not an instance), all preserved |
 | `nix-shell-rc-orphan-consumer-environ-refused` | owner gone; a `setsid` child (process 99, parent 1) has `TMPDIR=/tmp/nix-shell-4242-17` in its environment | `in_use`, `environment`: the contract does not bypass the in-use scan |
 | `nix-shell-rc-detached-child-without-reference-eligible` | owner gone; a `nohup` child of the shell lives on with no fd, cwd or environment path in the candidate | eligible: Owner PID's scope limit, pinned so it is visible |
 | `nix-shell-rc-owner-exit-after-read-stays-refused` | an `exit` event for 4242 after its status read | `in_use` for that scan (a read only adds) |
 | `nix-shell-rc-fresh-not-idle` | owner gone; the directory changed 10 minutes before the clock | `not_idle` (below the built-in's floor) |
 | `nix-shell-rc-replaced-before-unlink-changed` | owner gone; a `replace` event on the candidate after its verdict | `changed`; the replacement preserved |
 
-**pytest sessions** (`pytest-tmp`; each candidate is a session
-`pytest-of-<user>/pytest-<N>`; *within the rank* means `N ≤ M − 3`, rule
-3; *above the rank* means `N > M − 3`):
+**pytest sessions** (`pytest-tmp`; each candidate is a session; rows are
+those of safety.md's verdict table). Layouts: **A** is
+`/tmp/pytest-of-tester` (owner 1000), whose temp root `/tmp` is always
+used; **B** is `/tmp/nix-shell.AB/pytest-of-tester` (owner 1000). `{0..4}`
+means sessions `pytest-0` to `pytest-4`, with no `.lock` and mtime and
+ctime ten days before the clock unless stated; then `M` is 4, sessions 0
+and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
+`TMPDIR`; *py*: a uid 1000 process with `cmdline: [python, -m, pytest]`.
+"Expected" lists every session of `P`.
 
 | Vector | Setup | Expected |
 |---|---|---|
-| `pytest-tmp-live-no-lock-newest-refused` | the TASK-65 counterexample with the built-in: `/tmp/pytest-of-tester/pytest-0` holding `test_active0`, no `.lock`, a live `python` with no `TMPDIR` | `in_use`, `temp_root` |
-| `pytest-tmp-live-lock-refused` | `.lock` holds `42`; process 42 | `in_use`, `owner_pid` |
-| `pytest-tmp-killed-newest-session-refused` | `.lock` holds `42`; no process 42; the only session in `/tmp/pytest-of-tester`; a live process without `TMPDIR` | `in_use`, `temp_root`: an ended lock owner alone does not permit |
-| `pytest-tmp-killed-session-dead-root-eligible` | `.lock` holds `42`; no process 42; the only session in `/tmp/nix-shell.AB/pytest-of-tester`; no process names that root | eligible |
-| `pytest-tmp-orphan-xdist-worker-refused` | `.lock` holds `42`; no process 42; a worker (process 43, `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/nix-shell.AB`) lives on with no fd in the session | `in_use`, `temp_root` |
-| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | `/tmp/pytest-of-tester` with sessions 0 to 4; `pytest-0/.lock` holds `42`, its mtime one day before the clock; no process 42; a worker alive with `TMPDIR` elsewhere; another process without `TMPDIR` | `pytest-0` `in_use`, `temp_root`: the young lock bars rule 3, and `/tmp` is in use |
-| `pytest-tmp-stale-lock-within-rank-eligible` | as above, the lock's mtime four days before the clock | `pytest-0` eligible: pytest's own three-day dead-lock rule, the producer-equivalence case |
-| `pytest-tmp-lock-not-regular-within-rank-unknown` | `pytest-0/.lock` is a symlink to a four-day-old file | `producer_unknown` (stricter than pytest's `is_file()`) |
-| `pytest-tmp-beyond-rank-eligible` | sessions 0 to 4 without locks; a live process without `TMPDIR` | 0 and 1 eligible; 2 to 4 `in_use`, `temp_root` |
-| `pytest-tmp-rank-ignores-other-names` | as above plus `pytest-current` (symlink), `garbage-x` and a directory `pytest-9x` | the same verdicts; `pytest-9x` `producer_unknown`; the symlink never a candidate |
-| `pytest-tmp-dead-shell-root-eligible` | `/tmp/nix-shell.AB/pytest-of-tester/pytest-0` to `2`, no locks; live processes, none naming that root | all eligible |
-| `pytest-tmp-live-shell-root-refused` | as above with sessions 0 to 4 and a process with `TMPDIR=/tmp/nix-shell.AB` | 0 and 1 eligible; 2 to 4 `in_use`, `temp_root` |
-| `pytest-tmp-root-named-by-temp-refused`, `-by-tmp-refused`, `-by-debug-temproot-refused` | the root named only by `TEMP`, `TMP`, or `PYTEST_DEBUG_TEMPROOT` | sessions above the rank `in_use` (one file per variable, so dropping one bites) |
-| `pytest-tmp-relative-tmpdir-unknown` | a process with cwd `/tmp` and `TMPDIR=nix-shell.AB` | every session above the rank `producer_unknown`, `producer_identity`: a relative value is never resolved |
-| `pytest-tmp-relative-tmpdir-after-chdir-unknown` | as above, then a `chdir` event moves the process to `/home/tester` before the scan (its current cwd no longer leads to the root it used) | `producer_unknown`, never eligible |
-| `pytest-tmp-relative-escape-unknown` | a process whose `TMPDIR=../../..` climbs out of its root | `producer_unknown` |
-| `pytest-tmp-cwd-fallback-refused` | a process whose cwd is `/tmp/nix-shell.AB` | sessions above the rank `in_use` |
-| `pytest-tmp-root-via-mount-view-refused` | a process without `TMPDIR`, `view: {/tmp: /tmp/nix-shell.AB}` | sessions above the rank `in_use` |
-| `pytest-tmp-root-via-symlink-refused` | `TMPDIR=/tmp/ab-link`, a symlink to `/tmp/nix-shell.AB` | sessions above the rank `in_use` |
-| `pytest-tmp-root-via-symlink-in-view-refused` | a process with `view: {/tmp: /tmp/nix-shell.AB, /x: /var/x}` and `TMPDIR=/x/link`, where `/var/x/link` is the absolute symlink `/tmp` (its own `/tmp`, the shell root) | sessions above the rank `in_use`: the symlink resolves in the process's root, not diskgc's |
-| `pytest-tmp-basetemp-argv-refused` | a live pytest with `cmdline: [python, -m, pytest, --basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-1]`, `TMPDIR` elsewhere; no `.lock` | `pytest-1` `in_use`, `command_line` |
-| `pytest-tmp-basetemp-via-symlink-refused` | as above with `--basetemp=/tmp/ab-link/pytest-of-tester/pytest-1`, `/tmp/ab-link` a symlink to `/tmp/nix-shell.AB` | `pytest-1` `in_use`, `command_line` (identity, not bytes) |
-| `pytest-tmp-cmdline-unreadable-refused` | a process with `cmdline: unreadable` | every session above the rank `in_use` |
-| `pytest-tmp-basetemp-separate-relative-unknown` | `cmdline: [pytest, --basetemp, pytest-of-tester/pytest-1]` with cwd `/tmp/nix-shell.AB` | every session above the rank `producer_unknown` |
-| `pytest-tmp-basetemp-not-session-shaped-not-matched` | a live run with `--basetemp=/tmp/nix-shell.AB/mytmp` | `mytmp` is no candidate; not in the plan |
-| `pytest-tmp-basetemp-addopts-refused` | `PYTEST_ADDOPTS=--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-1` in its environment | `pytest-1` `in_use`, `environment` |
-| `pytest-tmp-basetemp-config-within-rank-producer-equivalent` | a live pytest whose `--basetemp` comes from a configuration file (nothing in argv or environment) into `pytest-0` of a `P` with sessions 0 to 4, no lock | `pytest-0` eligible: pytest's own next cleanup deletes it too (rule 3's invariant), pinned as the producer-equivalence case |
-| `pytest-tmp-basetemp-config-above-rank-residual` | the same into the newest session of a dead `nix-shell.*` root | eligible: rule 4's stated residual, pinned |
-| `pytest-tmp-basetemp-within-rank-refused` | a live `--basetemp` run named on its command line into `pytest-0` of a `P` with sessions 0 to 4 | `pytest-0` `in_use`, `command_line`: the naming veto comes before the rank |
-| `pytest-tmp-environ-unreadable-refused` | a process of the user whose environment reads `Failed`, not excused | sessions above the rank in the nested root `in_use` |
-| `pytest-tmp-other-user-unreadable-refused` | as above for a uid 2000 process | the same |
-| `pytest-tmp-excused-process-ignored` | the only other process is the user's `non_dumpable` agent, environment unreadable | eligible (the stated residual) |
-| `pytest-tmp-lock-namespace-pid-refused` | `.lock` holds `9`; a process with `nspid: [5000, 9]` | `in_use`, `owner_pid` |
-| `pytest-tmp-lock-malformed-unknown` | `.lock` empty, `0042`, `42 43`, 17 bytes, `abc`, a directory, a symlink (one session each, all within the rank) | `producer_unknown` each: a lock entry decides first |
-| `pytest-tmp-nested-namespace` | `pid_namespace: nested`; a locked session, a lockless session within the rank, a lockless newest session in a dead shell root | `producer_unknown`, eligible, `producer_unknown` |
-| `pytest-tmp-hidepid-unknown` | `proc_hidepid: true`; a lockless newest session in a dead shell root | `producer_unknown` |
-| `pytest-tmp-fresh-session-not-idle` | a session made 10 minutes before the clock, no lock, no processes | `not_idle` |
-| `pytest-tmp-rank-listing-refused-unknown` | a `fail: EACCES` event on listing `pytest-of-tester` | `producer_unknown` |
-| `pytest-tmp-kept-on-purpose-within-rank` | a finished session with no lock and `N = M − 3` in a project that keeps ten | eligible (the stated policy loss) |
-| `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester/pytest-0` to `4`; a live process with `TMPDIR=/tmp/claude-1000` | 0 and 1 eligible; 2 to 4 `in_use` |
+| `pytest-tmp-live-no-lock-newest-refused` | the TASK-65 counterexample with the built-in: A `{0}` holding `test_active0`; *py* alive, no fd in it | 0 `in_use`, `temp_root` (row 10) |
+| `pytest-tmp-live-lock-refused` | A `{0}`, `pytest-0/.lock` holds `42`; process 42 | 0 `in_use`, `owner_pid` 42 (row 4) |
+| `pytest-tmp-killed-newest-session-refused` | A `{0}`, lock `42`; no process 42; *proc* | 0 `in_use`, `temp_root` (row 10): an ended owner alone never permits |
+| `pytest-tmp-killed-session-dead-root-eligible` | B `{0}`, lock `42`; no process 42; *proc* | 0 eligible (row 11) |
+| `pytest-tmp-orphan-xdist-worker-refused` | B `{0}`, lock `42` one day old; no process 42; worker 43 with `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/nix-shell.AB` | 0 `in_use`, `temp_root` (row 10) |
+| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; worker 43 with `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/other`; *proc* | 0 `in_use`, `temp_root` (the young lock fails row 7; row 10); 1 eligible (row 7: a pytest runs, the session is old); 2, 3, 4 `in_use`, `temp_root` |
+| `pytest-tmp-stale-lock-within-rank-eligible` | as above, the lock four days old, no worker | 0, 1 eligible (row 7; pytest's own dead-lock rule); 2, 3, 4 `in_use` |
+| `pytest-tmp-lock-not-regular-within-rank-unknown` | A `{0..4}`, `pytest-0/.lock` a symlink to a four-day-old file; *proc* | 0 `producer_unknown` (row 3); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-beyond-rank-eligible` | A `{0..4}`; *proc* | 0, 1 eligible (row 7); 2, 3, 4 `in_use`, `temp_root` |
+| `pytest-tmp-live-lockless-below-rank-young-kept` | A `{0..4}`, `pytest-0` one day old; *py* alive | 0 `in_use`, `temp_root` (row 7 needs an old session while a pytest runs; row 10); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-young-below-rank-unused-root-eligible` | B `{0..4}`, `pytest-0` one day old; *py* alive with `TMPDIR=/tmp/other` | 0 eligible (row 11, the stated residual); 1 eligible (row 7); 2, 3, 4 eligible (row 11) |
+| `pytest-tmp-rank-ignores-other-names` | A `{0..4}` plus `pytest-current` (symlink), `garbage-x`, `pytest-9x`, `pytest-05` (a directory); *proc* | `M` is 5 (`pytest-05` counts, as for pytest): 0, 1, 2 eligible; 3, 4 `in_use`; `pytest-05`, `pytest-9x` `filtered`; the symlink and `garbage-x` never candidates |
+| `pytest-tmp-session-number-overflow-filtered` | A `{0..4}` plus `pytest-99999999999999999999`; *proc* | that entry `filtered` and not counted in `M`; 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-dead-shell-root-eligible` | B `{0..2}`; *proc* | 0, 1, 2 eligible (row 11) |
+| `pytest-tmp-live-shell-root-refused` | B `{0..4}`; a uid 1000 process with `TMPDIR=/tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root` |
+| `pytest-tmp-root-named-by-temp-refused`, `-by-tmp-refused`, `-by-debug-temproot-refused` | as above, the root named only by `TEMP`, `TMP`, or `PYTEST_DEBUG_TEMPROOT` (one file each) | 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-empty-tmpdir-ignored` | B `{0..2}`; a process with `TMPDIR=` (empty) | 0, 1, 2 eligible |
+| `pytest-tmp-relative-tmpdir-unknown` | B `{0..4}`; a process with cwd `/tmp` and `TMPDIR=nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `relative_path` (row 9) |
+| `pytest-tmp-relative-tmpdir-cwd-elsewhere-unknown` | as above with cwd `/home/tester` (where the process may have moved since it read the value) | the same: a relative value is never resolved |
+| `pytest-tmp-tmpdir-dotdot-clamped-refused` | B `{0..4}`; `TMPDIR=/../tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root` (`..` clamps at the root) |
+| `pytest-tmp-cwd-is-root-refused` | B `{0..4}`; a process whose cwd is `/tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-root-via-mount-view-refused` | B `{0..4}`; a process without `TMPDIR`, `view: {/tmp: /tmp/nix-shell.AB}` | 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-root-via-symlink-refused` | B `{0..4}`; `TMPDIR=/tmp/ab-link`, a symlink to `/tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-root-via-symlink-in-view-refused` | B `{0..4}`; `view: {/tmp: /tmp/nix-shell.AB, /x: /var/x}`, `TMPDIR=/x/link`, `/var/x/link` the absolute symlink `/tmp` | 0, 1 eligible; 2, 3, 4 `in_use` (resolved in the process's root) |
+| `pytest-tmp-basetemp-argv-refused` | B `{0..4}`; *py* with `--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-3` and `TMPDIR=/tmp/other` | 3 `in_use`, `command_line` (row 6); 0, 1 eligible (row 7); 2, 4 eligible (row 11) |
+| `pytest-tmp-basetemp-via-symlink-refused` | as above with `--basetemp=/tmp/ab-link/pytest-of-tester/pytest-3` | the same (identity, not bytes) |
+| `pytest-tmp-basetemp-within-rank-refused` | as above with `--basetemp=` `pytest-0` | 0 `in_use`, `command_line` (row 6 before row 7); 1 eligible; 2, 3, 4 eligible |
+| `pytest-tmp-basetemp-addopts-refused` | B `{0..4}`; a process with `PYTEST_ADDOPTS=--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-3`, `TMPDIR=/tmp/other` | 3 `in_use`, `environment`; 0, 1 eligible; 2, 4 eligible |
+| `pytest-tmp-basetemp-separate-relative-unknown` | B `{0..4}`; `cmdline: [pytest, --basetemp, pytest-of-tester/pytest-3]`, cwd `/tmp/nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `relative_path` (row 8) |
+| `pytest-tmp-basetemp-not-session-shaped-not-matched` | B `{0}` plus `mytmp`; *py* with `--basetemp=/tmp/nix-shell.AB/mytmp` | `mytmp` no candidate; 0 eligible |
+| `pytest-tmp-basetemp-config-within-rank-kept-while-pytest-runs` | A `{0..4}`, `pytest-0` two hours old; *py* alive (its `--basetemp` into `pytest-0` comes from a configuration file) | 0 `in_use`, `temp_root` (Mark's fail-closed condition on row 7); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-basetemp-config-within-rank-old-eligible` | as above, `pytest-0` four days old | 0, 1 eligible (row 7: pytest's own cleanup would delete 0 too; the producer-equivalence case); 2, 3, 4 `in_use` |
+| `pytest-tmp-basetemp-config-above-rank-residual` | B `{0}` two hours old; *py* with `TMPDIR=/tmp/other`, its `--basetemp` into `pytest-0` from a configuration file | 0 eligible (row 11, the stated residual) |
+| `pytest-tmp-cmdline-unreadable-unknown` | B `{0..4}`; a uid 1000 process with `cmdline: unreadable` | 0, 1 eligible (row 7: a pytest counts as running, the sessions are old); 2, 3, 4 `producer_unknown`, `unreadable` (row 8) |
+| `pytest-tmp-environ-unreadable-unknown` | B `{0..4}`; a uid 1000 process whose environment reads `Failed`, not excused | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `unreadable` |
+| `pytest-tmp-other-user-environ-unreadable-ignored` | B `{0..4}`; a uid 0 daemon whose environment is unreadable (`proc: denied`); no other process | 0, 1 eligible (row 7); 2, 3, 4 eligible (row 11): not in the process set |
+| `pytest-tmp-excused-process-ignored` | B `{0..4}`; the only other process is the user's `non_dumpable` agent | 0 to 4 eligible (the stated residual) |
+| `pytest-tmp-lock-namespace-pid-refused` | A `{0}`, lock `9`; a process with `pid: 5000`, `nspid: [5000, 9]` | 0 `in_use`, `owner_pid` 5000 |
+| `pytest-tmp-lock-malformed-unknown` | A `{0..6}` whose `.lock` is: empty; `0042`; `42 43`; 17 bytes; `abc`; a directory; a symlink | 0 to 6 `producer_unknown` (row 3) |
+| `pytest-tmp-nested-namespace` | `pid_namespace: nested`; B `{0..4}`, `pytest-0/.lock` holds `42` | 0 `producer_unknown` (row 5); 1 eligible (row 7: a pytest counts as running, the session is old); 2, 3, 4 `producer_unknown` (row 8) |
+| `pytest-tmp-hidepid-unknown` | `proc_hidepid: true`; otherwise as above | the same |
+| `pytest-tmp-fresh-session-not-idle` | B `{0}` made 10 minutes before the clock; no processes | 0 `not_idle` (below the built-in's floor) |
+| `pytest-tmp-listing-unreadable` | B `{0..4}`; a `fail: EACCES` event on the second listing of `pytest-of-tester` | 0 to 4 `unreadable` (row 2) |
+| `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester` `{0..4}`; a process with `TMPDIR=/tmp/claude-1000` | 0, 1 eligible; 2, 3, 4 `in_use` |
 
 **Project dependency directories** (`node-modules`, `python-venv`; the
 project is the candidate's parent; idle bound 30 days; TASK-79's container
@@ -546,13 +555,16 @@ the counterexample these turn into cases):
 | `node-project-keep-marker-kept` | all old; `p/node_modules/.diskgc-keep` | `kept`: the operator's remedy for hand-edited dependencies |
 | `node-project-symlinked-node-modules-not-candidate` | `p/node_modules` a symlink to `/home/tester/shared/node_modules` | no candidate; the target preserved |
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
-| `node-project-bind-mounted-member-residual` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` eligible: the stated residual, pinned |
-| `node-project-no-manifest-unknown` | no `package.json` in `p` | `producer_unknown` |
-| `node-project-over-budget-unknown` | a project tree above the entry budget | `producer_unknown` |
+| `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory, `mountinfo` root `/w/packages/a`) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
+| `node-project-chrooted-process-kept` | all old; a process with `root: /home/tester`, cwd `/home/tester/p/.git`, and `p/other/node_modules/y.js` open (link text is diskgc's view) | `in_use`, `cwd` and `fd`: matched by climbing and by identity, not by the process's own path text |
+| `node-project-no-manifest-filtered` | no `package.json` in `p` | `filtered` |
+| `node-project-over-budget` | a project tree above the entry budget | `too_many_entries` |
+| `node-project-workspace-manifest-oversized-unknown` | `w/package.json` over 1 MiB above a member | `producer_unknown` |
+| `node-project-environ-other-view-residual` | all old; a process with `view: {/src: /home/tester/p}` and `NODE_PATH=/src/node_modules` | eligible: environment strings are bytes in the process's view (the stated residual) |
 | `node-project-fresh-floor` | everything changed 20 days ago | `not_idle` (below the built-in's floor) |
 | `python-project-idle-eligible` | `/home/tester/q/{pyproject.toml,pkg/m.py,.venv/pyvenv.cfg,.venv/lib/x.py}`, all 60 days old | eligible |
 | `python-project-read-only-use-kept` | TASK-79's case: `.venv/lib/x.py` read yesterday, nothing changed | `not_idle` |
-| `python-project-no-pyvenv-cfg-unknown` | `.venv` without `pyvenv.cfg` | `producer_unknown` |
+| `python-project-no-pyvenv-cfg-filtered` | `.venv` without `pyvenv.cfg` | `filtered` |
 | `python-project-editable-checkout-refused` | `.venv/src/pkg/.git/HEAD` | `contains_checkout` |
 | `python-project-requirements-manifest` | only `requirements-dev.txt` as manifest, all old | eligible |
 
@@ -574,28 +586,41 @@ validation list): `liveness_contract_rejects_null_and_blank`,
 
 **Properties.** The pid parser: every value from 1 to 4194304 formatted
 in decimal parses back; leading zeros, signs, values above the limit and
-non-digits never parse. The rc-name split: a name built from either shape
-and a valid pid yields exactly that pid. The Owner PID answer: over
-generated process tables (`nspid` lists, unreadable and gone entries of
-any user) and host facts (namespace, `hidepid`, filesystem type), *no
-process carries the pid* holds exactly when every precondition holds, no
-listed process carries the pid at any level, and no process stayed
-unreadable. The pytest verdict: over generated session sets, locks and
-process tables, a session is eligible only if rules 1 and 2 pass and rule
-3 or 4 holds, so never while a listed process names it; and rule 3 never
-permits a session whose lock is younger than three days. Rule 3's
-invariant against a model of pytest 9.1.1's cleanup (`int()` suffixes,
-case-insensitive prefix, `M` including the new session, lock age from the
-new session, `keep` 3): over generated `P` contents, every session diskgc
-judges eligible by rule 3 is one that model deletes.
+non-digits never parse. The session-number grammar: canonical digits
+fitting 64 bits parse; leading zeros are rejected as candidates but
+counted in `M`; values over 64 bits are rejected and not counted. The
+rc-name split: a name built from either shape and a valid pid yields
+exactly that pid. The Owner PID answer: over generated process tables
+(`nspid` lists, unreadable and gone entries of any user) and host facts
+(namespace, `hidepid`, filesystem type), *no process carries the pid*
+holds exactly when every precondition holds, no listed process carries
+the pid at any level, and no process stayed unreadable. The pytest
+verdict is a pure function of the facts of safety.md's verdict table
+(session names, locks with their ages, session ages, `M`, and per process
+its uids, command line, environment, cwd and resolution results); it
+returns the verdict and the row that decided it, so tests assert which
+rule permitted. Over generated inputs: every session gets exactly one
+row; no session that a process names is eligible; row 7 never permits a
+session with a lock younger than the dead-lock age, nor, while a pytest
+of the user runs, a session younger than it. Row 7's invariant: against a
+model of pytest 9.1.1's cleanup run by a session with the default
+retention created at a time `t_new` at or after the check, on the same
+snapshot of `P` (`int()` suffixes and a case-insensitive prefix, `M`
+counting the new session, lock age measured from the new session's
+mtime), every session row 7 permits is one that model deletes. Row 11 is
+excluded from the invariant by design.
 
 **Mutations that must bite** (the implementing task records each one and
 the vector that went red): dropping `liveness_contract` from a built-in;
 matching only the innermost `NSpid` level; skipping the namespace,
 `hidepid` or filesystem precondition; ignoring another user's unreadable
 process; letting an ended lock owner permit on its own; ignoring the lock's age in
-the rank rule; putting the naming veto after the rank; matching names by
-bytes only; keeping two sessions instead of three; dropping one temp-root variable; resolving a
+the rank rule; dropping the dead-lock margin; letting row 7 permit a young
+session while a pytest runs; letting an undecidable naming test block row
+7; letting an undecidable test fall through to eligible; counting other
+users' processes in a contract's process set; putting the naming veto after the rank; matching names by
+bytes only; resolving strings other than the variables pytest uses;
+counting an empty value; keeping two sessions instead of three; dropping one temp-root variable; resolving a
 relative value from the current working directory instead of failing
 closed; ignoring `view`; not following a
 temp-root symlink, or following it in diskgc's root; skipping the
@@ -604,7 +629,8 @@ environment as harmless; not excusing a privilege-boundary process;
 ignoring atime or ctime; counting directory atimes; counting VCS metadata
 as project change; measuring the candidate's parent instead of its
 workspace; deciding "inside the project" by the walk's inode set instead
-of by path; matching a nested dependency directory; measuring the
+of by path, or by the process's link text without an identity check;
+climbing past a bind-mounted subdirectory; matching a nested dependency directory; measuring the
 candidate instead of the project.
 
 **Container tests** (the kernel's view matters):
@@ -622,7 +648,7 @@ and a `newgrp` shell owning a directory: kept),
 cleanup by rank, a `keep` 0 session deleting a concurrent lockless one,
 `--basetemp` making no lock, and pytest's own cleanup deleting a lockless
 `--basetemp` directory shaped like a session with `N ≤ M − 3`, the fact
-rule 3's invariant rests on),
+row 7's invariant rests on),
 `pytest_live_policy_none_session_in_shell_root_is_kept` (a sleeping
 `tmp_path_retention_policy=none` test with `TMPDIR` in a `nix-shell.*`
 root: kept; reclaimed after the run ends),
