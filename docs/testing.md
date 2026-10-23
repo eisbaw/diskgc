@@ -266,14 +266,18 @@ configuration file's text; absent: none was found), `user_profiles`
 (without a `config`: added to the built-ins), `roots` (`--roots`), `path`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
 `tally_budget`, `allow_root`, `users` (the account resolver for `owners:`
-names) and `seed` (`DISKGC_SEED`). A configuration that does not parse
+names), `seed` (`DISKGC_SEED`) and `entry_budget` (the walk's entry
+budget in place of the product's 2,000,000, so `too_many_entries` fits a
+small model: `EnsureOptions::test_entry_budget`, which the binary always
+leaves unset; `the_binary_never_sets_the_test_entry_budget` pins that no
+flag or configuration key reaches it). A configuration that does not parse
 gives an exit-2 config report before the host model is touched (the
 runner parses the text with `config::parse`, as `main.rs` does after its
 startup checks; the proposed 0.1 catalog's narrowing is not applied:
-TASK-130). Two keys are harness seams the binary does not have:
+TASK-130). Three keys are harness seams the binary does not have:
 `user_profiles` without a `config` (how a mutated built-in is tried
 against an unchanged vector) and `users` (the account resolver, which is
-not on the `Host` port yet).
+not on the `Host` port yet) and `entry_budget`.
 
 `expect` holds: `plan` (the complete dry-run plan: `candidate`, `reason`,
 `source`), `dry_run_exit` (default 0), `dry_run_errors` and `errors`
@@ -300,8 +304,11 @@ its run, and no run is left over; no event is left unfired.
 Completeness is enforced by the results, not by tags in the files:
 `every_skip_reason_has_a_vector` needs, for each reason in `Reason::ALL`
 and in reference.md's JSON enum, a vector whose dry-run plan or reclaim
-skips show it (the few exemptions are listed with their reason in the
-test, and an exemption a vector covers fails it);
+skips show it. The only exemptions are documented reasons nothing
+produces yet, each naming the task that decides it (TASK-127); the test
+fails once such a reason enters `Reason::ALL`, is quoted as a reason in
+diskgc-core's sources, or is shown by a vector, so an exemption cannot
+outlive its fix;
 `every_builtin_source_has_match_in_use_guarded_and_nested_vectors` needs,
 for each built-in source run unchanged, an action of it, an `in_use` or
 `locked` skip, a `protected` or `excluded` skip, and a nested-guard skip

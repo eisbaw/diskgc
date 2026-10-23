@@ -1,0 +1,32 @@
+# A candidate with more entries than the walk's budget is skipped
+# (too_many_entries) as soon as a listing would exceed what is left, so
+# no record or listing can exhaust memory (docs/safety.md, Bounded). The
+# product budget is 2,000,000 entries; this vector lowers it to 5 through
+# the test-only `entry_budget` seam (the binary cannot set it). A
+# candidate of exactly 5 entries (its own directory included) is deleted;
+# one of 6 is refused whole.
+profile_vector: 1
+profile: zephyr-tmp
+entry_budget: 5
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-fits: {a: {}, b: {}, c: {}, d: {}}
+    /tmp/zephyr-too-big: {a: {}, b: {}, c: {}, d: {}, e: {}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-fits}
+    - {candidate: /tmp/zephyr-too-big, reason: too_many_entries}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-fits]
+  removed: [/tmp/zephyr-fits]
+  skipped:
+    - {candidate: /tmp/zephyr-too-big, reason: too_many_entries}
+  preserved: [/tmp/zephyr-too-big/a, /tmp/zephyr-too-big/e]

@@ -372,6 +372,8 @@ fn parse_ensure(args: &[OsString]) -> Result<EnsureArgs, String> {
             dry_run,
             allow_root,
             path,
+            // A model-test seam: never set from the command line or config.
+            test_entry_budget: None,
         },
         config,
     })
@@ -1400,6 +1402,45 @@ mod tests {
             assert!(error.starts_with("profiles: "), "{error}");
             assert!(error.contains(needle), "{list:?}: {error}");
         }
+    }
+
+    /// The entry budget's test seam (`EnsureOptions::test_entry_budget`)
+    /// cannot be reached from the binary: no flag sets it, whatever the
+    /// command line, and the configuration schema has no such key.
+    #[test]
+    fn the_binary_never_sets_the_test_entry_budget() {
+        for line in [
+            &["--min-free", "1G", "/b"][..],
+            &[
+                "--min-free",
+                "1G",
+                "--target-free",
+                "2G",
+                "--timeout",
+                "0",
+                "--tally-budget",
+                "5s",
+                "--select",
+                "profile:cargo-target",
+                "--roots",
+                "/b",
+                "--dry-run",
+                "--json",
+                "--config",
+                "/etc/x.yaml",
+                "--allow-root",
+                "--no-index",
+                "/b",
+            ][..],
+        ] {
+            let parsed = ensure_args(line).expect("valid ensure command line");
+            assert_eq!(parsed.options.test_entry_budget, None, "{line:?}");
+        }
+        assert!(ensure_args(&["--min-free", "1G", "--entry-budget", "5", "/b"]).is_err());
+        let config = "version: 1\nentry_budget: 5\ngroups: []\n";
+        let error = config::parse(Path::new("/etc/diskgc/config.yaml"), config.as_bytes())
+            .expect_err("no configuration key sets the entry budget");
+        assert!(error.to_string().contains("entry_budget"), "{error}");
     }
 
     #[test]

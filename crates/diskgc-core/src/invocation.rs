@@ -35,6 +35,12 @@ pub struct EnsureOptions {
     pub dry_run: bool,
     pub allow_root: bool,
     pub path: PathBuf,
+    /// A test seam, not an option: the eligibility walk's entry budget in
+    /// place of [`crate::engine::DEFAULT_MAX_ENTRIES`], so a model vector
+    /// can reach `too_many_entries` with a small tree. The binary always
+    /// passes `None`; no flag or configuration key sets it (pinned by
+    /// `the_binary_never_sets_the_test_entry_budget` in `main.rs`).
+    pub test_entry_budget: Option<usize>,
 }
 
 /// What `ensure` needs from the machine besides the `Host` port. Each is
@@ -165,6 +171,14 @@ fn run<H: Delete>(
         tier
     };
     tier.protections = protections;
+    if let Some(budget) = options.test_entry_budget {
+        tier.max_entries = budget;
+        if let Some((tiers, _, _)) = &mut configured {
+            for tier in tiers {
+                tier.max_entries = budget;
+            }
+        }
+    }
     let request = Request {
         path: options.path.clone(),
         min_free: options.min_free,

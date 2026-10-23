@@ -78,6 +78,11 @@ pub struct ProfileVector {
     /// `DISKGC_SEED` for `ranking: random`; absent: drawing one fails.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// The walk's entry budget per candidate, in place of the product's
+    /// 2,000,000: a test seam (`EnsureOptions::test_entry_budget`) the
+    /// binary cannot set, so `too_many_entries` fits in a small model.
+    #[serde(default)]
+    pub entry_budget: Option<usize>,
     pub host: HostModel,
     pub expect: Expected,
 }
@@ -241,6 +246,7 @@ impl ProfileVector {
             dry_run,
             allow_root: self.allow_root,
             path: self.path.clone(),
+            test_entry_budget: self.entry_budget,
         })
     }
 

@@ -191,6 +191,12 @@ pub struct Tier {
     pub protections: Vec<ProtectedSource>,
     /// Raw source matches excluded from this term by overlap.
     pub negated: Vec<NegatedSource>,
+    /// The eligibility walk's entry budget per candidate (`too_many_entries`
+    /// beyond it): always [`crate::engine::DEFAULT_MAX_ENTRIES`] in the
+    /// binary. Only the model tests lower it, through
+    /// [`crate::invocation::EnsureOptions::test_entry_budget`], so a vector
+    /// can show the refusal with a small tree.
+    pub max_entries: usize,
 }
 
 /// A protected source's raw find, with its own `where` deliberately omitted.
@@ -656,6 +662,7 @@ impl Tier {
             fs_union: Vec::new(),
             protections: Vec::new(),
             negated,
+            max_entries: crate::engine::DEFAULT_MAX_ENTRIES,
         })
     }
 }
@@ -3296,7 +3303,7 @@ fn plan_fs_union<H: Host>(
 
 /// The one set of walk rules of `tier`'s run: every entry one of
 /// `owners`', any socket or FIFO refuses (the default policy), the default
-/// entry budget ([`Rules::new`]), and the source profile's `checkouts`
+/// entry budget (the tier's `max_entries`), and the source profile's `checkouts`
 /// setting. Operator checkout allowances are warned about by config loading;
 /// a union logs its additional policy interaction here.
 fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules<'o> {
@@ -3314,6 +3321,7 @@ fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules
     }
     Rules {
         checkouts: tier.checkouts,
+        max_entries: tier.max_entries,
         ..Rules::new(owners)
     }
 }
