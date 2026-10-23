@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-23 21:15'
+updated_date: '2026-10-23 22:33'
 labels:
   - wave-1
   - hardening
@@ -63,6 +63,8 @@ From the task-63 follow-up review (commit 19fc56e): H22 race 7's has_build_lock 
 Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is released when the LAST reference to its open file goes, which can be after close()/exit returned: any /proc/<pid>/fd reader (an in-use scan, diskgc's own included, lsof) holds a transient reference for the length of its syscall (measured up to 0.5 ms on 7.2; about 1 in 60 immediate retries busy under four readers). Never assert a release with one attempt right after a close; wait with a bound (RELEASE_BOUND, docs/testing.md Negative feedback). A held-lock assertion needs no wait. Mutation testing: the unsettled-scan mutants M1 (Checker::reusable_at reuse), M2 (Checker::rescan no retry) and M3' (Scan::blocked ignoring unsettled) are killed by the profile vectors python-pycache-fork-*; Scan::blocks_all without unsettled is an equivalent mutant (reusable_at returns first) and will survive cargo-mutants.
 
 Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
+
+From TASK-121 (2026-10-24): express deletion-path hardening as vectors in crates/diskgc-model/tests/vectors/ (walk, races, inuse areas) and use TASK-121's mutation table (its notes) as the baseline: 21 of 23 guard mutations are killed; M7 (walk per-entry mount id) and M17 (judge other_fs) survive (TASK-129). The manual harness can become cargo-mutants on diskgc-core with the corpus test as the oracle. Gaps: non-UTF-8 names (YAML keys), too_many_entries at the real 2M budget, file bind mounts.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
