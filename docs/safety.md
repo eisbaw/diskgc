@@ -902,15 +902,20 @@ file's link text is translated through mount tables, not resolved. So:
   In use does (including its inode-only match for mappings on overlayfs
   and btrfs). For the path test, the object's device and mount id come
   from a `statx` of the magic link with `STATX_MNT_ID` and
-  `AT_STATX_DONT_SYNC` (for a mapping, the device of its `maps` line and
-  the mount id from `/proc/<pid>/map_files/<range>` where readable). A
+  `AT_STATX_DONT_SYNC` (for a mapping, a `statx` of
+  `/proc/<pid>/map_files/<range>` with `STATX_MNT_ID`; when that link
+  cannot be read, the mapping has no device or mount id for the path
+  test: it is matched only by In use's identity rules, including the
+  inode-only rule, and otherwise is untranslatable and retains). A
   device that is not one of the tree's devices cannot be inside the tree,
   and the entry is not inside. On one of them, the link text (a
   ` (deleted)` suffix removed) is turned into the object's *path within
   its filesystem*, with no name resolved:
   - when the process's mount namespace (`/proc/<pid>/ns/mnt`) is diskgc's,
-    the text is a path in diskgc's view, and diskgc's own `mountinfo`
-    gives the mount and its root field;
+    the text is a path in diskgc's view and no root is stripped; the line
+    of diskgc's own `mountinfo` whose id is the object's mount id gives
+    the mount point and root field, and the same conditions as below make
+    it untranslatable;
   - otherwise the text is *translated* through the process's mount table:
     the text and the `/proc/<pid>/root` link text are rendered in the same
     frame (the reader's), while the mount points in `/proc/<pid>/mountinfo`
@@ -926,7 +931,13 @@ file's link text is translated through mount tables, not resolved. So:
     equalled the `mountinfo` id (TASK-112 notes). A mount id missing from
     the table, an unreadable `mountinfo`, a different filesystem (its
     `major:minor`) than the tree's, or text that does not start with the
-    root link text and then the mount point, cannot be translated.
+    root link text and then the mount point, cannot be translated. Mount
+    points and root fields are unescaped (`\040`, `\011`, `\012`,
+    `\134`) before any comparison, as Path traversal (step 1) does for a
+    configured path: `mountinfo` escapes a space as `\040`, link text does
+    not (probed: a directory `my proj` bound at `work dir` shows
+    `my\040proj` and `work\040dir` in `mountinfo`, and `work dir/src/a.js`
+    as link text).
 
   The tree's own path within its filesystem comes from diskgc's
   `mountinfo` the same way (its mount's root field and the tree's path
@@ -936,13 +947,11 @@ file's link text is translated through mount tables, not resolved. So:
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS |
   RESOLVE_NO_MAGICLINKS)`, and the entry is inside when the object
   reached has the magic link's device and inode. A suffix whose
-  resolution fails or reaches another object, or text from another mount
-  namespace that cannot be translated, is unresolvable and retains
-  (`in_use`). A mapping whose `maps` pair is an overlay layer's is
-  matched by In use's inode-only rule when the walk saw that inode;
-  otherwise, if its text cannot be translated, it retains: an
-  availability cost with rootless containers whose files are mapped from
-  the tree.
+  resolution fails or reaches another object, or text that cannot be
+  translated, in either namespace, is unresolvable and retains
+  (`in_use`). This makes a mapping whose `map_files` link cannot be read,
+  and that In use's identity rules do not match, an availability cost
+  with rootless containers whose files are mapped from the tree.
 - *Strings* (environment values, command-line elements) are compared as
   bytes, after lexical normalisation as Python's `os.path.abspath` does
   (`.`, `..` and repeated `/` folded; a relative string is not made
@@ -1325,8 +1334,8 @@ schema only with its first producer.
   each listed process's `status` and `cmdline`; one climb per directory a
   process holds, once per scan; one `statx` per held file, and, only for
   files on one of the tree's devices, a lexical translation (one read of
-  `/proc/<pid>/mountinfo` per mount namespace and scan) and a suffix
-  resolution beneath the tree; at most one `openat2` per temp-directory or `--basetemp` value
+  `/proc/<pid>/mountinfo` per (mount namespace, root device and inode)
+  and scan) and a suffix resolution beneath the tree; at most one `openat2` per temp-directory or `--basetemp` value
   pytest itself resolves (deduplicated); byte comparison for every other
   string; one listing of each `pytest-of-<user>` per scan; and for
   project contracts a walk of each project, bounded by the entry budget.

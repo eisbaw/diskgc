@@ -571,6 +571,10 @@ the counterexample these turn into cases):
 | `node-project-held-file-same-device-outside-eligible` | all old; a process holds `/home/tester/notes.txt` on the project's device | eligible: text outside the tree's path is not inside |
 | `node-project-container-bind-work-kept` | all old; a process with `mnt_ns: c1`, `root: /`, its mount table binding `/home/tester/p` at `/work` (mount id 968, root field `/home/tester/p`), holding `/work/src/a.js` (link text `/work/src/a.js`) | `in_use`, `fd`: translated through its mount table |
 | `node-project-container-chroot-bind-kept` | as above plus a `chroot` to `/jail` (root link text `/jail`, link text `/jail/work/src/a.js`, mount point `/work`) | `in_use`, `fd` |
+| `node-project-container-chroot-outside-eligible` | all old; the chroot process of `node-project-container-chroot-bind-kept` instead holds `/jail/notes/n.txt` (link text `/jail/notes/n.txt`), its mount table binding `/home/tester/notes` at `/notes` on the project's device | eligible: translated and outside the project |
+| `node-project-space-in-path-container-kept` | the project at `/home/tester/my proj`, all old; a container process binding it at `/work dir` (its `mountinfo` holds `/home/tester/my\040proj` and `/work\040dir`), holding `/work dir/src/a.js` | `in_use`, `fd`: mount points and root fields are unescaped first |
+| `node-project-detached-mount-retained` | all old; a process in diskgc's namespace holds a file on the project's device through a lazily detached mount whose id is absent from `mountinfo` | `in_use` (untranslatable in the same namespace) |
+| `node-project-map-files-unreadable-retained` | all old; a mapping of a project file on the project's device whose `map_files` link cannot be read and whose `maps` pair the walk did not see | `in_use` (untranslatable) |
 | `node-project-untranslatable-retained` | all old; a process in another mount namespace holding a file on the project's device whose mount id is missing from its `mountinfo` | `in_use` (cannot be translated) |
 | `node-project-held-file-suffix-mismatch-retained` | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
 | `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_of` subdirectory); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
@@ -653,7 +657,10 @@ workspace; deciding "inside the project" by the walk's inode set instead
 of by path, or by the process's link text without an identity check;
 resolving link text outside the tree, or across a device the tree does
 not have; retaining for a held file whose text lies outside the tree;
-skipping the root-link strip or the mount-table translation; ending a climb at a level bound instead of the fixpoint;
+skipping the root-link strip (killed by
+`node-project-container-chroot-outside-eligible`, which the unstripped
+text would wrongly retain, and by `node-project-container-chroot-bind-kept`)
+or the mount-table translation; comparing escaped `mountinfo` fields; ending a climb at a level bound instead of the fixpoint;
 comparing a climb with the sought directory only, not every directory of
 the tree; climbing once per candidate; treating an unopenable magic link
 of an excused process as unreadable; not matching the execnet bootstrap;
