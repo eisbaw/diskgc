@@ -947,54 +947,62 @@ passes neither polarity.
 
 The report always names the measure used.
 
-### Producer liveness predicate (planned)
+### Liveness contract predicate (planned)
 
 Status: designed (TASK-112), not implemented. Until it ships the loader
-rejects `producer_gone` as an unknown key. What each protocol proves, and
-when it cannot decide, is in [safety.md](safety.md#producer-liveness);
-which built-in uses which protocol is in
-[Liveness contracts](#liveness-contracts).
+rejects `liveness_contract` as an unknown key. What each contract shows,
+and when it cannot decide, is in
+[safety.md](safety.md#producer-liveness); which built-in uses which
+contract is in [Liveness contracts](#liveness-contracts).
 
-`producer_gone` is a source `where` predicate of kind `fs` whose value
-names one code-backed protocol, as `source_anchor` does. It holds only
-when that protocol proves the candidate's producer gone.
+`liveness_contract` is a source `where` predicate of kind `fs` whose value
+names one code-backed contract, as `source_anchor` names a build system.
+It holds only when that contract permits reclaiming the candidate. The
+name says which evidence was checked, not that the producer is proved
+gone: how much a contract proves is its class.
 
 ```yaml
 where:
-  producer_gone: pytest
+  liveness_contract: pytest
 ```
 
-| Value | Candidates it accepts | Protocol (safety.md) |
+| Value | Candidates it accepts | Contract (safety.md) |
 |---|---|---|
-| `nix-shell` | directories named `nix-shell-<pid>-<suffix>` or `nix-develop-<pid>-<suffix>` | nix-shell rc directories, Owner PID |
-| `pytest` | a pytest session `pytest-of-*/pytest-*`, or a test directory inside one, judged by its session | pytest sessions |
+| `nix-shell` | directories named `nix-shell-<pid>-<suffix>` or `nix-develop-<pid>-<suffix>` | nix-shell rc directories (Owner PID) |
+| `pytest` | a pytest session directory `pytest-of-*/pytest-*` | pytest sessions |
+| `node-project` | a `node_modules` directory whose parent holds `package.json` and that lies in no other dependency directory | project dependency directories |
+| `python-project` | a virtual environment (holding `pyvenv.cfg`) whose parent holds a Python project manifest and that lies in no other dependency directory | project dependency directories |
 
-There is no default: without the key no producer verdict is required.
-`min_idle_for` is independent; the built-ins that use `producer_gone` set
-`min_idle_for: 1h` (the startup window in safety.md).
+There is no default: without the key no contract is required.
+`min_idle_for` stays a separate field; each built-in's value is in
+[Liveness contracts](#liveness-contracts). The project contracts measure
+the project against the term's idle bound, of which `min_idle_for` is a
+part.
 
 Validation (load-time errors, exit 2; `check` reports them without
 touching the machine):
 
 - a present null or a blank value (a written null must not remove a
   guard);
-- a value that is not one of the protocol names, the message naming them
-  (`producer_gone: pytset`); a mapping or a list;
-- `producer_gone` on a filter profile: it is a source predicate, since the
-  producer belongs to what the source finds; on a kind other than `fs`:
-  the existing "predicate on a kind that does not support it" error;
+- a value that is not one of the contract names, the message naming them
+  (`liveness_contract: pytset`); a mapping or a list;
+- `liveness_contract` on a filter profile: it is a source predicate, since
+  the producer belongs to what the source finds; on a kind other than
+  `fs`: the existing "predicate on a kind that does not support it" error;
 - a source whose `find.type` is not `dir`, or whose `find.paths` patterns
-  do not have the protocol's shape: for `nix-shell`, a last segment
-  `nix-shell-*-*` or `nix-develop-*-*`; for `pytest`, last segments
-  `pytest-of-*/pytest-*` or `pytest-of-*/pytest-*/*`.
+  do not end in the contract's shape: `nix-shell-*-*` or
+  `nix-develop-*-*` for `nix-shell`; `pytest-of-*/pytest-*` for `pytest`;
+  `node_modules` for `node-project`; any name for `python-project`,
+  whose contract itself requires `pyvenv.cfg` in the candidate;
+- a project contract on a source that says `checkouts: allow`.
 
 Each predicate appears at most once per profile, so a source has at most
-one producer protocol; `producer_gone` combines by `&&` with the source's
-other predicates (`app_not_running` included). `profile_policies` cannot
-change it. A user profile may use it like any predicate. A new protocol
-is a new value, added with the producer it was verified for; a generic
-form (a pid pattern, a producer lock) is added only when a second
-producer needs the same evidence.
+one contract; `liveness_contract` combines by `&&` with the source's other
+predicates (`app_not_running` included). `profile_policies` cannot change
+it. A user profile may use it like any predicate. A new contract is a new
+value, added with the producer it was verified for; a generic form (a pid
+pattern, a producer lock) is added only when a second producer needs the
+same evidence.
 
 Report additions, made together with the implementation (they extend the
 JSON enums of Output):
@@ -1002,12 +1010,19 @@ JSON enums of Output):
 - skip reason `producer_unknown`: no verdict could be reached. Its detail
   names the failed rule: no pid in the name, a malformed marker, a
   filesystem not on the local list, not the initial PID namespace,
-  `hidepid` on the held `/proc`, a process of the user that stayed
-  unreadable, a failed listing of a pytest directory, a name that is not
-  a numbered pytest session;
+  `hidepid` on the held `/proc`, a process that stayed unreadable, a
+  failed listing of a pytest directory, a name that is not a numbered
+  pytest session, a missing project manifest, a project over the entry
+  budget;
 - `process_blockers` evidence `owner_pid` (a listed process carries the
-  recorded pid) and `temp_root` (a process could use the session's temp
-  root). A maybe-alive producer is `in_use`, as for `app_not_running`.
+  recorded pid number; a number match, not proof that it is the same
+  process), `temp_root` (a process could use the session's temp root) and
+  `command_line` (an element of a process's command line names the
+  session; a value in its environment that names it is the existing
+  `environment`). A pid that may be in use is `in_use`, as for
+  `app_not_running`; a project that changed or was read within the idle
+  bound is `not_idle`; a candidate inside another dependency directory is
+  `filtered`.
 
 `profiles show` prints the value. `app_not_running` is the shipped
 presence-marker contract and stays as it is.
@@ -1225,7 +1240,7 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
-| test | `pytest-tmp` | planned: pytest's test directories `pytest-of-*/pytest-*/*`; a live pytest session can have no open descriptor in its test directory, and `tmp_path_retention_policy=none` omits the numbered session `.lock`; contract designed, see [Liveness contracts](#liveness-contracts) | no safe action yet |
+| test | `pytest-tmp` | planned: pytest session directories `pytest-of-*/pytest-*`, one candidate per session (Mark, 2026-10-23), under `/tmp`'s temp-prefix v1 preset; a live pytest session can have no open descriptor in it, and `tmp_path_retention_policy=none` or `--basetemp` omits the session `.lock`; contract designed, see [Liveness contracts](#liveness-contracts) | no safe action yet |
 | test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | planned: `/tmp/nix-shell-*-*`, `/tmp/nix-develop-*-*`; a live shell in a private PID namespace can have a namespace PID absent from host `/proc`; contract designed, see [Liveness contracts](#liveness-contracts) | no safe action yet |
@@ -1235,7 +1250,7 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
-| containers | `containers-image-tmp` | top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` files or directories; `min_idle_for: 3d` is mandatory | `delete` |
+| containers | `containers-image-tmp` | withdrawn (Mark, 2026-10-23): matched top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` with a mandatory `min_idle_for: 3d`, which cannot show that a producer is done with a spool it may reopen; the code still carries it until TASK-112's first step removes it; re-admission only under a new name after TASK-125 | none |
 | agents | `cursor-agent-versions`, `codex-releases`, `claude-code-versions` | versions under a supplied home root; keep the two newest per sibling set and the installed symlink targets. `claude-code-versions` matches native installer version files only, not `~/bin/claude-*` | `delete` |
 | editors | `cursor-extensions` | version directories under `.cursor/extensions` of a supplied home root; keep the two newest of each extension id and every installed directory in `extensions.json` | `delete` |
 | ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
@@ -1247,7 +1262,7 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `python-pycache` | `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
 | python / js | `mypy-cache` | `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
-| python / js | `node-modules`, `python-venv` | planned: project dependency directories; no project activity evidence is available in the current profile schema | no safe action yet |
+| python / js | `node-modules`, `python-venv` | planned: `node_modules` directories, and `.venv` directories holding `pyvenv.cfg`, at relative depths 1 through 5 below a supplied project or workspace root and inside no other dependency directory, judged by their project's activity; `checkouts: refuse` | no safe action yet; contract designed, see [Liveness contracts](#liveness-contracts) |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
@@ -1335,8 +1350,8 @@ needs a different guard and is outside this Chromium-family set.
   while the test slept, it held no descriptor in that directory. The
   process scan would mark this live directory eligible. An idle filter
   cannot prove the session has ended, and a lock-only guard misses this
-  supported pytest configuration. A future profile needs a reliable
-  session-liveness signal checked immediately before deletion.
+  supported pytest configuration. Its planned return takes one session per
+  candidate and the `pytest` liveness contract.
 - `claude-code-tmp` sees a live session as `in_use` when a process holds a
   file or directory in its candidate. An active session can hold no scratch
   file descriptor; use a tier idle filter and `protect` for sessions that
@@ -1344,11 +1359,11 @@ needs a different guard and is outside this Chromium-family set.
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs
   a server-aware protocol first.
-- `containers-image-tmp` keeps entries changed in the last 3 days even
-  when selected without a filter. The `fs` idle measure is the newest
-  mtime or ctime anywhere inside a directory; an open file is still
-  refused as `in_use`. It matches only the two observed temporary name
-  prefixes at the top of `/var/tmp`, not Podman's persistent storage.
+- `containers-image-tmp` is withdrawn (Mark, 2026-10-23). Its 3-day floor
+  measured changes, not whether a producer would reopen a spool; a VM test
+  with a fixture producer showed a dormant, reused spool judged eligible
+  ([safety.md](safety.md#in-use)). Whether real Podman or Buildah does
+  that is verified first (TASK-125).
 - Gradle and Maven cache profiles remain planned. A Gradle daemon that is
   idle may hold no files open, so the generic in-use check alone has not
   established a safe reclaim policy for them.
@@ -1417,9 +1432,11 @@ needs a different guard and is outside this Chromium-family set.
   above many projects may take time to discover and walk every cache.
 - A `node_modules` or `.venv` directory can be unchanged while its owning
   project is used. The current `idle_for` measure sees only changes inside
-  the candidate, so it cannot establish project inactivity. The required
-  [project activity protocol](safety.md#project-dependency-directories-planned)
-  is unimplemented; neither profile ships.
+  the candidate, so it cannot establish project inactivity. The planned
+  profiles judge the parent project instead, a verified heuristic Mark
+  accepted on 2026-10-23
+  ([safety.md](safety.md#producer-liveness), Project dependency
+  directories); neither ships before it is implemented.
 
 **A built-in profile's matching set never changes under its name.** Any
 change to what a built-in matches, narrower or broader, ships under a new
@@ -1431,24 +1448,25 @@ profile was renamed.
 
 ### Liveness contracts
 
-Which producer-liveness contract each decided profile has, and its
-verdict under the admission rule of
-[safety.md](safety.md#producer-liveness): a built-in source without a
-sound, producer-equivalent, verified-heuristic, tolerant or delegated
-contract is not admissible. This table is the single home for those
-decisions (TASK-112, 2026-10-23). Rows marked *planned* name a contract
-that is designed but not implemented. Shipped built-ins not listed here
-are classified by TASK-122.
+Which liveness contract each decided profile has, and its verdict under
+the admission rule of [safety.md](safety.md#producer-liveness): a built-in
+source without a sound, producer-equivalent, verified-heuristic, tolerant
+or delegated contract is not admissible. The rule applies to every
+built-in, shipped ones included (Mark, 2026-10-23); TASK-122 classifies
+those not listed here, and a built-in still of class *none* at a release
+is withdrawn or given a contract first. This table is the single home for
+these decisions (TASK-112). Rows marked *planned* name a contract that is
+designed but not implemented.
 
 | Profile | Producer (verified) | Contract | Class | Verdict |
 |---|---|---|---|---|
-| `nix-shell-rc` | legacy `nix-shell` and `nix develop` of Nix 2.34.8: the directory's pid is the shell's own (`nix` execs the shell; observed for `nix develop -c`); whether a live shell reads the directory after its start is part of the verification | planned: `producer_gone: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | Admit after the lifecycle verification (both commands, interactive and `-c`, normal exit and `SIGKILL`, a shell in a private PID namespace sharing `/tmp`), with its vectors. Matching set as in the library row. Small in bytes (about 350 MiB in 65,000 directories, TASK-68), large in count. |
-| `pytest-tmp` | pytest 9.1.1 | planned: `producer_gone: pytest`, `min_idle_for: 1h`, `checkouts: allow` | verified heuristic: lock rule sound, rank rule producer-equivalent, temp-root rule heuristic | Admissible only by Mark's recorded decision; residuals in safety.md (pytest sessions). The unit is the test directory (Mark, 2026-10-18); judging by session works for either unit. Whether to switch to one candidate per session (pytest's own unit, about a tenth as many candidates) is an open question in TASK-112, decided before the name ships. |
+| `nix-shell-rc` | legacy `nix-shell` and `nix develop` of Nix 2.34.8: the directory's pid is the shell's own (`nix` execs the shell; observed for `nix develop -c`); whether a live shell reads the directory after its start is part of the verification | planned: `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | Admit after the lifecycle verification (both commands, interactive and `-c`, normal exit and `SIGKILL`, a shell in a private PID namespace sharing `/tmp`, a detached child outliving the shell), with its vectors. Matching set as in the library row. Small in bytes (about 350 MiB in 65,000 directories, TASK-68), large in count. |
+| `pytest-tmp` | pytest 9.1.1 | planned: `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rule sound, rank rule producer-equivalent, unused-root rule heuristic | Admitted by Mark, 2026-10-23, with the residuals in safety.md (pytest sessions); ships when implemented with its vectors and container tests. |
+| `node-modules`, `python-venv` | npm, pnpm, Yarn, Bun; venv, virtualenv, uv; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Admitted by Mark, 2026-10-23, with the residuals in safety.md (Project dependency directories); the loss in a residual is a reinstall. Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Ships when implemented with its vectors and container tests. |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |
 | `tmp-entry` | any program | none | none | Excluded for good: there is no one producer, and every counterexample above applies. |
-| `containers-image-tmp` | containers/image and Buildah spools in `/var/tmp`; the real producers' lifecycle is unverified | `min_idle_for: 3d` only: a bounded-operation heuristic at best | none until verified | Excluded from every release catalog; still in the development library. Either verify the real lifecycle and admit it as a verified heuristic by Mark's decision, or withdraw it (TASK-65). Counterexample: `vm_containers_image_dormant_spool_exposes_liveness_gap`. |
-| `node-modules`, `python-venv` | package managers; consumers are `node`, `python` and editors | none: read-mostly trees change nothing while used; no producer takes the cooperative project lock (safety.md, Project dependency directories) | none | Excluded. |
+| `containers-image-tmp` | containers/image and Buildah spools in `/var/tmp`; the real producers' lifecycle is unverified | `min_idle_for: 3d` only | none | Withdrawn (Mark, 2026-10-23). Counterexample: `vm_containers_image_dormant_spool_exposes_liveness_gap`. Re-admitted only under a new name after TASK-125 verifies the real lifecycle in a container test. |
 | `gradle-caches` | Gradle; its daemons lock cache entries only on demand | none for diskgc: Gradle's own retention-based cleanup owns the directory, but there is no cleaner diskgc could invoke on a measured directory, so it is not *delegated* | none | Excluded; tune Gradle's cache retention instead. |
 | `maven-repo` | Maven, `mvnd`, IDEs | none: a JVM holds a jar open only while it is loaded; the repository has no lock by default | none | Excluded. |
 | `nix-garbage` | the Nix store's own garbage collector | Nix's GC roots and lock (kind `nix-store`), not a `where` predicate | delegated | Governed by the `nix-store` protocol (TASK-36, TASK-118). |

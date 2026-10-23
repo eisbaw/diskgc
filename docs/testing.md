@@ -410,27 +410,39 @@ Model scenarios required by [safety.md](safety.md) and
 
 Status: specified by TASK-112's design; they land with its implementation.
 The contracts are in [safety.md](safety.md#producer-liveness), the schema
-in [reference.md](reference.md#producer-liveness-predicate-planned). Every
+in [reference.md](reference.md#liveness-contract-predicate-planned). Every
 case below is a checked-in profile vector
-(`crates/diskgc-model/tests/models/profiles/<name>.yaml`) run by
-`tests/profile_vectors.rs`, dry run and reclaim, with candidates older
-than the source's `min_idle_for` unless the case says otherwise. Each
-counterexample that kept a profile unshipped is a vector here or, for an
-excluded profile, stays as its unsafe user-probe vector.
+(`crates/diskgc-model/tests/models/profiles/<name>.yaml`, `profile_vector:
+1`) run by `tests/profile_vectors.rs`, dry run and reclaim, with candidates
+older than the source's `min_idle_for` unless the case says otherwise. A
+case's "Expected" column gives the plan reason (none: eligible and
+removed in reclaim) and, after a comma, the `process_blockers` evidence.
+Each counterexample that kept a profile unshipped is a vector here or, for
+an excluded or withdrawn profile, stays as its unsafe user-probe vector.
+TASK-121's corner-case corpus takes these as its liveness part.
 
-Host-model keys these need (the test-model schema, tentative):
+Extensions they need. Of the profile-vector file:
+
+- `expect.plan[].evidence` and `expect.skipped[].evidence`, optional
+  lists of `process_blockers` evidence values, compared as sets.
+
+Of the host model (the test-model schema, tentative):
 
 - top level `pid_namespace: initial | nested` (default `initial`): the
   answer of diskgc's held `/proc` to the initial-namespace check;
-- top level `proc_hidepid: true`: the held `/proc` is mounted with
-  `hidepid` (default false); the mounts' existing `fs:` types serve the
-  local-filesystem list;
+- top level `proc_hidepid: true` (default false): the held `/proc` is
+  mounted with `hidepid`; the mounts' existing `fs:` names the type the
+  local-filesystem list is checked against;
 - `processes[].nspid`: its pids from diskgc's namespace down to its own
   (default `[pid]`; the first must equal `pid`), or `unreadable`;
 - `processes[].zombie: true`: listed, state `Z`, nothing else readable;
-- `processes[].view`: path prefixes as its mount namespace sees them
-  (`{/tmp: /tmp/nix-shell.AB}`; default: the model's own paths), used by
-  temp-root lookups, which follow symlinks;
+- `processes[].cmdline`: its argument vector (default `[exe]`), or
+  `unreadable`;
+- `processes[].view`: path prefixes as its root and mount namespace see
+  them (`{/tmp: /tmp/nix-shell.AB}`; default: the model's own paths), used
+  by temp-root lookups, which follow symlinks inside that view;
+- a tree entry's `ctime:` and `atime:` (default: its mtime; today mtime
+  stands for all three times), and a mount's `noatime: true`;
 - a file's `content:` (exists) for pytest's `.lock`.
 
 **Owner PID** (`nix-shell-rc`):
@@ -438,87 +450,149 @@ Host-model keys these need (the test-model schema, tentative):
 | Vector | Setup | Expected |
 |---|---|---|
 | `nix-shell-rc-dead-owner-eligible` | `/tmp/nix-shell-4242-17/{env-vars,rc}` and an empty `/tmp/nix-develop-4243-18`; no process 4242 or 4243; a neighbouring `/tmp/nix-shell.AB` | both eligible and removed; the neighbour preserved (not matched) |
-| `nix-shell-rc-live-owner-no-fd-refused` | process 4242 (a shell) with no fd, cwd or environment path in the candidate | `in_use`, evidence `owner_pid`: the TASK-68 counterexample, refused |
+| `nix-shell-rc-live-owner-no-fd-refused` | process 4242 (a shell) with no fd, cwd or environment path in the candidate | `in_use`, `owner_pid`: the TASK-68 counterexample, refused |
 | `nix-develop-rc-live-owner-no-fd-refused` | the same for `nix-develop-4242-9` | `in_use`, `owner_pid` |
-| `nix-shell-rc-namespace-local-pid-refused` | `nix-develop-9-77`; process 3025375 with `nspid: [3025375, 9]`; no host pid 9 | `in_use`: the TASK-39 PID-namespace counterexample, refused |
+| `nix-shell-rc-namespace-local-pid-refused` | `nix-develop-9-77`; process 3025375 with `nspid: [3025375, 9]`; no host pid 9 | `in_use`, `owner_pid`: the TASK-39 PID-namespace counterexample, refused |
 | `nix-shell-rc-outer-level-pid-refused` | `nix-develop-3025375-1`; process with `nspid: [3025375, 9]` | `in_use` (any level counts) |
 | `nix-shell-rc-reused-pid-refused` | the shell is gone; an unrelated `sleep` now has pid 4242 | `in_use` (reuse retains, never deletes) |
 | `nix-shell-rc-zombie-owner-refused` | process 4242 `zombie: true` | `in_use` |
 | `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: nested`; no process 4242 | `producer_unknown` |
-| `nix-shell-rc-unreadable-status-unknown` | owner gone; another process of the user has `nspid: unreadable` | `producer_unknown` |
-| `nix-shell-rc-other-user-unreadable-status-ignored` | owner gone; a uid 2000 process has `nspid: unreadable` | eligible, removed |
-| `nix-shell-rc-malformed-pid-unknown` | `nix-shell-0042-1`, `nix-shell-4194305-1`, `nix-shell-abc-1` | `producer_unknown` each, all preserved |
-| `nix-shell-rc-orphan-consumer-environ-refused` | owner gone; process 99 has `TMPDIR=/tmp/nix-shell-4242-17` in its environment | `in_use`, evidence `environment`: the contract does not bypass the in-use scan |
-| `nix-shell-rc-owner-exit-after-read-stays-refused` | an `exit` event for 4242 after its status read | `in_use` for that scan (a read only adds) |
-| `nix-shell-rc-fresh-not-idle` | owner gone; the directory changed 10 minutes before the clock | `not_idle` (`min_idle_for: 1h`) |
 | `nix-shell-rc-hidepid-unknown` | `proc_hidepid: true`; no process 4242 | `producer_unknown` (a hidden `newgrp` shell would be unlisted) |
-| `nix-shell-rc-shared-filesystem-unknown` | the candidate on a `virtiofs` mount; no process 4242 | `producer_unknown` (a pid from another kernel) |
-| `nix-shell-rc-process-exits-mid-scan-not-unknown` | owner gone; another process of the user becomes `Gone` between its listing and its status read | eligible: a confirmed exit does not make the verdict unknown |
+| `nix-shell-rc-hidepid-root-unknown` | as above with `own_uid: 0` | `producer_unknown` (root does not lift the precondition) |
+| `nix-shell-rc-unlisted-filesystem-unknown` | one candidate each on mounts of type `virtiofs`, `9p`, `overlay`, `zfs`; no owners | `producer_unknown` each (one file per type, so dropping one bites) |
+| `nix-shell-rc-unreadable-status-unknown` | owner gone; another process of the user has `nspid: unreadable` | `producer_unknown` |
+| `nix-shell-rc-other-user-unreadable-status-unknown` | owner gone; a uid 2000 process has `nspid: unreadable` | `producer_unknown` (its user is no excuse) |
+| `nix-shell-rc-process-exits-mid-scan-eligible` | owner gone; another process becomes `Gone` between its listing and its status read | eligible: a confirmed exit does not make the answer unknown |
+| `nix-shell-rc-malformed-pid-unknown` | `nix-shell-0042-1`, `nix-shell-4194305-1`, `nix-shell-abc-1` | `producer_unknown` each, all preserved |
+| `nix-shell-rc-orphan-consumer-environ-refused` | owner gone; a `setsid` child (process 99, parent 1) has `TMPDIR=/tmp/nix-shell-4242-17` in its environment | `in_use`, `environment`: the contract does not bypass the in-use scan |
+| `nix-shell-rc-detached-child-without-reference-eligible` | owner gone; a `nohup` child of the shell lives on with no fd, cwd or environment path in the candidate | eligible: Owner PID's scope limit, pinned so it is visible |
+| `nix-shell-rc-owner-exit-after-read-stays-refused` | an `exit` event for 4242 after its status read | `in_use` for that scan (a read only adds) |
+| `nix-shell-rc-fresh-not-idle` | owner gone; the directory changed 10 minutes before the clock | `not_idle` (below the built-in's floor) |
 | `nix-shell-rc-replaced-before-unlink-changed` | owner gone; a `replace` event on the candidate after its verdict | `changed`; the replacement preserved |
 
-**pytest sessions** (`pytest-tmp`; the candidate is the test directory or
-the session, per its matching set):
+**pytest sessions** (`pytest-tmp`; each candidate is a session
+`pytest-of-<user>/pytest-<N>`; *within the rank* means `N ≤ M − 3`, rule
+3; *above the rank* means `N > M − 3`):
 
 | Vector | Setup | Expected |
 |---|---|---|
-| `pytest-tmp-live-no-lock-newest-refused` | the TASK-65 counterexample with the built-in: `/tmp/pytest-of-tester/pytest-0/test_active0`, no `.lock`, a live `python` with no `TMPDIR` | `in_use`, evidence `temp_root` |
+| `pytest-tmp-live-no-lock-newest-refused` | the TASK-65 counterexample with the built-in: `/tmp/pytest-of-tester/pytest-0` holding `test_active0`, no `.lock`, a live `python` with no `TMPDIR` | `in_use`, `temp_root` |
 | `pytest-tmp-live-lock-refused` | `.lock` holds `42`; process 42 | `in_use`, `owner_pid` |
-| `pytest-tmp-killed-session-eligible` | `.lock` holds `42`; no process 42; the only session | eligible, removed |
-| `pytest-tmp-beyond-newest-three-eligible` | sessions 0 to 4 without locks; a live process without `TMPDIR` | 0 and 1 eligible; 2 to 4 `in_use`, `temp_root` |
+| `pytest-tmp-killed-newest-session-refused` | `.lock` holds `42`; no process 42; the only session in `/tmp/pytest-of-tester`; a live process without `TMPDIR` | `in_use`, `temp_root`: an ended lock owner alone does not permit |
+| `pytest-tmp-killed-session-dead-root-eligible` | `.lock` holds `42`; no process 42; the only session in `/tmp/nix-shell.AB/pytest-of-tester`; no process names that root | eligible |
+| `pytest-tmp-orphan-xdist-worker-refused` | `.lock` holds `42`; no process 42; a worker (process 43, `PYTEST_XDIST_WORKER=gw0`, `TMPDIR=/tmp/nix-shell.AB`) lives on with no fd in the session | `in_use`, `temp_root` |
+| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | `/tmp/pytest-of-tester` with sessions 0 to 4; `pytest-0/.lock` holds `42`, its mtime one day before the clock; no process 42; a worker alive with `TMPDIR` elsewhere; another process without `TMPDIR` | `pytest-0` `in_use`, `temp_root`: the young lock bars rule 3, and `/tmp` is in use |
+| `pytest-tmp-stale-lock-within-rank-eligible` | as above, the lock's mtime four days before the clock | `pytest-0` eligible (the stated residual for a detached child) |
+| `pytest-tmp-beyond-rank-eligible` | sessions 0 to 4 without locks; a live process without `TMPDIR` | 0 and 1 eligible; 2 to 4 `in_use`, `temp_root` |
 | `pytest-tmp-rank-ignores-other-names` | as above plus `pytest-current` (symlink), `garbage-x` and a directory `pytest-9x` | the same verdicts; `pytest-9x` `producer_unknown`; the symlink never a candidate |
 | `pytest-tmp-dead-shell-root-eligible` | `/tmp/nix-shell.AB/pytest-of-tester/pytest-0` to `2`, no locks; live processes, none naming that root | all eligible |
 | `pytest-tmp-live-shell-root-refused` | as above with sessions 0 to 4 and a process with `TMPDIR=/tmp/nix-shell.AB` | 0 and 1 eligible; 2 to 4 `in_use`, `temp_root` |
-| `pytest-tmp-root-named-by-temp-refused`, `-by-tmp-refused`, `-by-debug-temproot-refused` | the root named only by `TEMP`, `TMP`, or `PYTEST_DEBUG_TEMPROOT` | newest three `in_use` (one file per variable, so dropping one bites) |
-| `pytest-tmp-root-via-mount-view-refused` | a process without `TMPDIR`, `view: {/tmp: /tmp/nix-shell.AB}` | newest three `in_use` |
-| `pytest-tmp-root-via-symlink-refused` | `TMPDIR=/tmp/ab-link`, a symlink to `/tmp/nix-shell.AB` | newest three `in_use` |
-| `pytest-tmp-root-via-symlink-in-view-refused` | a process with `view: {/tmp: /tmp/nix-shell.AB, /x: /var/x}` and `TMPDIR=/x/link`, where `/var/x/link` is the absolute symlink `/tmp` (its own `/tmp`, the shell root) | newest three `in_use`: the symlink resolves in the process's root, not diskgc's |
-| `pytest-tmp-kept-on-purpose-beyond-rank` | a finished session with no lock at `M − 3` in a project that keeps ten | eligible (the stated policy loss) |
-| `pytest-tmp-environ-unreadable-refused` | a process of the user whose environment reads `Failed`, not excused | newest three in the nested root `in_use` |
+| `pytest-tmp-root-named-by-temp-refused`, `-by-tmp-refused`, `-by-debug-temproot-refused` | the root named only by `TEMP`, `TMP`, or `PYTEST_DEBUG_TEMPROOT` | sessions above the rank `in_use` (one file per variable, so dropping one bites) |
+| `pytest-tmp-relative-tmpdir-refused` | a process with cwd `/tmp` and `TMPDIR=nix-shell.AB` | sessions above the rank `in_use`: resolved against its cwd |
+| `pytest-tmp-relative-escape-refused` | a process whose `TMPDIR=../../..` climbs out of its root | sessions above the rank `in_use` (unresolvable counts as the root) |
+| `pytest-tmp-cwd-fallback-refused` | a process whose cwd is `/tmp/nix-shell.AB` | sessions above the rank `in_use` |
+| `pytest-tmp-root-via-mount-view-refused` | a process without `TMPDIR`, `view: {/tmp: /tmp/nix-shell.AB}` | sessions above the rank `in_use` |
+| `pytest-tmp-root-via-symlink-refused` | `TMPDIR=/tmp/ab-link`, a symlink to `/tmp/nix-shell.AB` | sessions above the rank `in_use` |
+| `pytest-tmp-root-via-symlink-in-view-refused` | a process with `view: {/tmp: /tmp/nix-shell.AB, /x: /var/x}` and `TMPDIR=/x/link`, where `/var/x/link` is the absolute symlink `/tmp` (its own `/tmp`, the shell root) | sessions above the rank `in_use`: the symlink resolves in the process's root, not diskgc's |
+| `pytest-tmp-basetemp-argv-refused` | a live pytest with `cmdline: [python, -m, pytest, --basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-1]`, `TMPDIR` elsewhere; no `.lock` | `pytest-1` `in_use`, `command_line` |
+| `pytest-tmp-basetemp-via-symlink-refused` | as above with `--basetemp=/tmp/ab-link/pytest-of-tester/pytest-1`, `/tmp/ab-link` a symlink to `/tmp/nix-shell.AB` | `pytest-1` `in_use`, `command_line` (identity, not bytes) |
+| `pytest-tmp-cmdline-unreadable-refused` | a process with `cmdline: unreadable` | every session above the rank `in_use` |
+| `pytest-tmp-basetemp-separate-relative-refused` | `cmdline: [pytest, --basetemp, pytest-of-tester/pytest-1]` with cwd `/tmp/nix-shell.AB` | `pytest-1` `in_use` |
+| `pytest-tmp-basetemp-addopts-refused` | `PYTEST_ADDOPTS=--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-1` in its environment | `pytest-1` `in_use`, `environment` |
+| `pytest-tmp-basetemp-config-residual-eligible` | a live pytest whose `--basetemp` comes from a configuration file (nothing in argv or environment) into the newest session of a dead root | eligible: the stated residual, pinned |
+| `pytest-tmp-basetemp-within-rank-refused` | a live `--basetemp` run named on its command line into `pytest-0` of a `P` with sessions 0 to 4 | `pytest-0` `in_use`, `command_line`: the naming veto comes before the rank |
+| `pytest-tmp-environ-unreadable-refused` | a process of the user whose environment reads `Failed`, not excused | sessions above the rank in the nested root `in_use` |
+| `pytest-tmp-other-user-unreadable-refused` | as above for a uid 2000 process | the same |
 | `pytest-tmp-excused-process-ignored` | the only other process is the user's `non_dumpable` agent, environment unreadable | eligible (the stated residual) |
 | `pytest-tmp-lock-namespace-pid-refused` | `.lock` holds `9`; a process with `nspid: [5000, 9]` | `in_use`, `owner_pid` |
-| `pytest-tmp-lock-malformed-unknown` | `.lock` empty, `0042`, `42 43`, 17 bytes, `abc`, a directory, a symlink (one session each, all beyond the newest three) | `producer_unknown` each: a lock entry decides even beyond the rank |
-| `pytest-tmp-nested-namespace` | `pid_namespace: nested`; a locked session, a lockless session beyond the newest three, a lockless newest session in a dead shell root | `producer_unknown`, eligible, `producer_unknown` |
+| `pytest-tmp-lock-malformed-unknown` | `.lock` empty, `0042`, `42 43`, 17 bytes, `abc`, a directory, a symlink (one session each, all within the rank) | `producer_unknown` each: a lock entry decides first |
+| `pytest-tmp-nested-namespace` | `pid_namespace: nested`; a locked session, a lockless session within the rank, a lockless newest session in a dead shell root | `producer_unknown`, eligible, `producer_unknown` |
+| `pytest-tmp-hidepid-unknown` | `proc_hidepid: true`; a lockless newest session in a dead shell root | `producer_unknown` |
 | `pytest-tmp-fresh-session-not-idle` | a session made 10 minutes before the clock, no lock, no processes | `not_idle` |
-| `pytest-tmp-xdist-worker-judged-by-session` | `pytest-0/popen-gw0` with `pytest-0/.lock` held by a live process | `in_use`, `owner_pid` |
 | `pytest-tmp-rank-listing-refused-unknown` | a `fail: EACCES` event on listing `pytest-of-tester` | `producer_unknown` |
+| `pytest-tmp-kept-on-purpose-within-rank` | a finished session with no lock and `N = M − 3` in a project that keeps ten | eligible (the stated policy loss) |
 | `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester/pytest-0` to `4`; a live process with `TMPDIR=/tmp/claude-1000` | 0 and 1 eligible; 2 to 4 `in_use` |
 
-**Excluded profiles** keep their unsafe user-probe vectors
+**Project dependency directories** (`node-modules`, `python-venv`; the
+project is the candidate's parent; idle bound 30 days; TASK-79's container
+probe, where reading the dependencies changed neither mtime nor ctime, is
+the counterexample these turn into cases):
+
+| Vector | Setup | Expected |
+|---|---|---|
+| `node-project-idle-eligible` | `/home/tester/p/{package.json,src/a.js,node_modules/x/i.js}`, all changed and read 60 days before the clock; no processes in it | eligible, removed; `package.json` and `src` preserved |
+| `node-project-recent-edit-kept` | as above, `src/a.js` changed 2 days ago | `not_idle` |
+| `node-project-recent-install-kept` | only `node_modules/x/i.js` changed 2 days ago | `not_idle` (the candidate's own walk counts) |
+| `node-project-install-old-mtimes-new-ctime-kept` | every mtime 60 days old (the normalised dates an install extracts); `node_modules/x/i.js` with `ctime` 2 days ago | `not_idle` |
+| `node-project-dir-atime-only-eligible` | all old; only directory atimes in the project recent (a lister) | eligible: directory atimes do not count |
+| `node-project-nested-node-modules-filtered` | `p/node_modules/a/{package.json,node_modules/b/i.js}` as well as `p/node_modules`; the project active | the nested one `filtered`, never deleted, also when the outer one is kept |
+| `node-project-workspace-member-root-active-kept` | `w/{package.json (with workspaces),src/x.js changed yesterday,packages/a/{package.json,node_modules}}`, `packages/a` itself 60 days old | `w/packages/a/node_modules` `not_idle`: judged by the workspace |
+| `node-project-vcs-top-level-is-the-project` | as above, `w` without `workspaces` but holding `.git`; `w/src` changed yesterday | `not_idle` |
+| `node-project-read-only-use-kept` | TASK-79's case: nothing changed for 60 days, `node_modules/x/i.js` read (`atime`) yesterday | `not_idle` |
+| `node-project-read-only-use-noatime-residual-eligible` | the same on a `noatime` mount | eligible: the stated residual, pinned |
+| `node-project-cwd-in-project-kept` | all old; a process with cwd `/home/tester/p/src` | `in_use`, `cwd` |
+| `node-project-fd-in-project-kept` | all old; a process with `src/a.js` open | `in_use`, `fd` |
+| `node-project-environ-names-project-kept` | all old; a process with `NODE_PATH=/home/tester/p/node_modules` | `in_use`, `environment` |
+| `node-project-vcs-only-change-eligible` | all old except `.git/FETCH_HEAD` changed yesterday | eligible |
+| `node-project-no-manifest-unknown` | no `package.json` in `p` | `producer_unknown` |
+| `node-project-over-budget-unknown` | a project tree above the entry budget | `producer_unknown` |
+| `node-project-fresh-floor` | everything changed 20 days ago | `not_idle` (below the built-in's floor) |
+| `python-project-idle-eligible` | `/home/tester/q/{pyproject.toml,pkg/m.py,.venv/pyvenv.cfg,.venv/lib/x.py}`, all 60 days old | eligible |
+| `python-project-read-only-use-kept` | TASK-79's case: `.venv/lib/x.py` read yesterday, nothing changed | `not_idle` |
+| `python-project-no-pyvenv-cfg-unknown` | `.venv` without `pyvenv.cfg` | `producer_unknown` |
+| `python-project-editable-checkout-refused` | `.venv/src/pkg/.git/HEAD` | `contains_checkout` |
+| `python-project-requirements-manifest` | only `requirements-dev.txt` as manifest, all old | eligible |
+
+**Excluded and withdrawn profiles** keep their unsafe user-probe vectors
 (`pytest-tmp-unsafe-live-no-fd` and its successors for a plain path
-matcher) and the container tests that require `mktemp-dir`,
-`nix-shell-tmpdir` and `tmp-entry` to stay absent from the built-in
-library.
+matcher; `containers-image-age` becomes a user-probe vector when the
+built-in is removed) and the container tests that require `mktemp-dir`,
+`nix-shell-tmpdir`, `tmp-entry` and, once removed,
+`containers-image-tmp` to stay absent from the built-in library.
 
 **Load-time cases** (Rust unit tests, one per rule of reference.md's
-validation list): `producer_gone_rejects_null_and_blank`,
-`producer_gone_rejects_unknown_values_mappings_and_lists`,
-`producer_gone_is_source_and_fs_only`,
-`nix_shell_protocol_requires_the_rc_name_shape`,
-`pytest_protocol_requires_the_session_layout`.
+validation list): `liveness_contract_rejects_null_and_blank`,
+`liveness_contract_rejects_unknown_values_mappings_and_lists`,
+`liveness_contract_is_source_and_fs_only`,
+`nix_shell_contract_requires_the_rc_name_shape`,
+`pytest_contract_requires_the_session_layout`,
+`node_project_contract_requires_node_modules`,
+`project_contracts_refuse_checkouts_allow`.
 
 **Properties.** The pid parser: every value from 1 to 4194304 formatted
 in decimal parses back; leading zeros, signs, values above the limit and
 non-digits never parse. The rc-name split: a name built from either shape
-and a valid pid yields exactly that pid. The owner verdict: over
-generated process tables (`nspid` lists, unreadable and gone entries,
-other users) and host facts (namespace, `hidepid`, filesystem type),
-*gone* holds exactly when every precondition holds, no listed process
-carries the pid at any level, and no process of the user stayed
-unreadable.
+and a valid pid yields exactly that pid. The Owner PID answer: over
+generated process tables (`nspid` lists, unreadable and gone entries of
+any user) and host facts (namespace, `hidepid`, filesystem type), *no
+process carries the pid* holds exactly when every precondition holds, no
+listed process carries the pid at any level, and no process stayed
+unreadable. The pytest verdict: over generated session sets, locks and
+process tables, a session is eligible only if rules 1 and 2 pass and rule
+3 or 4 holds, so never while a listed process names it; and rule 3 never
+permits a session whose lock is younger than three days.
 
 **Mutations that must bite** (the implementing task records each one and
-the vector that went red): dropping `producer_gone` from a built-in;
+the vector that went red): dropping `liveness_contract` from a built-in;
 matching only the innermost `NSpid` level; skipping the namespace,
-`hidepid` or filesystem precondition; ignoring an unreadable status; keeping two sessions instead
-of three; dropping one temp-root variable; ignoring `view`; not following a
-temp-root symlink, or following it in diskgc's root; treating an unreadable environment as harmless; not
-excusing a privilege-boundary process.
+`hidepid` or filesystem precondition; ignoring another user's unreadable
+process; letting an ended lock owner permit on its own; ignoring the lock's age in
+the rank rule; putting the naming veto after the rank; matching names by
+bytes only; keeping two sessions instead of three; dropping one temp-root variable, the cwd
+fallback or relative resolution; ignoring `view`; not following a
+temp-root symlink, or following it in diskgc's root; skipping the
+command-line and environment check for `S`; treating an unreadable
+environment as harmless; not excusing a privilege-boundary process;
+ignoring atime or ctime; counting directory atimes; counting VCS metadata
+as project change; measuring the candidate's parent instead of its
+workspace; matching a nested dependency directory; measuring the
+candidate instead of the project.
 
 **Container tests** (the kernel's view matters):
 `nix_shell_rc_lifecycle_is_pinned` (pinned Nix: the directory's pid equals
 the shell's for legacy `nix-shell` and `nix develop`, interactive and
 `-c`; what remains after a normal exit and after `SIGKILL`; whether the
-shell reads the directory after start),
+shell or a `setsid` child reads the directory after start),
 `nix_shell_rc_shell_in_private_pid_namespace_is_kept` (a shell under
 `unshare --pid` sharing `/tmp`: kept while it lives, reclaimed with the
 deletion oracle after it is killed),
@@ -526,10 +600,21 @@ deletion oracle after it is killed),
 `owner_pid_is_unknown_under_hidepid` (a `/proc` with `hidepid=invisible`
 and a `newgrp` shell owning a directory: kept),
 `pytest_lifecycle_is_pinned` (pinned pytest: the lock by `keep`, the exit
-cleanup by rank, a `keep` 0 session deleting a concurrent lockless one),
-and `pytest_live_policy_none_session_in_shell_root_is_kept` (a sleeping
+cleanup by rank, a `keep` 0 session deleting a concurrent lockless one,
+`--basetemp` making no lock),
+`pytest_live_policy_none_session_in_shell_root_is_kept` (a sleeping
 `tmp_path_retention_policy=none` test with `TMPDIR` in a `nix-shell.*`
-root: kept; reclaimed after the run ends).
+root: kept; reclaimed after the run ends),
+`pytest_live_basetemp_session_is_kept` (a sleeping run with `--basetemp`
+shaped like a session in a dead shell root: kept),
+`pytest_orphan_xdist_worker_keeps_session` (the controller killed, a
+worker alive: kept), `node_and_python_project_read_keeps_dependencies`
+(TASK-79's probe on a `relatime` tmpfs: a run that only reads keeps the
+dependency directory; on a `noatime` mount the residual is shown),
+`npm_install_leaves_old_mtimes_and_new_ctimes` (the pinned npm: after an
+install from an offline tarball, the project is `not_idle` by ctime), and
+`dry_run_leaves_file_atimes_unchanged` (a `relatime` mount: diskgc's dry
+run over a project changes no regular file's atime).
 
 ## 3. Property tests
 
