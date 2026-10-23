@@ -245,6 +245,13 @@ is accepted until measured otherwise.
     module), and the container images for the e2e tests.
 - **Cargo workspace:**
 
+  The product workspace and the separate `diskgc-e2e` workspace both set
+  `overflow-checks = true` in their release profiles. The flake builds the
+  shipped binary and runs its Rust tests with release optimizations; checked
+  arithmetic there must panic on overflow rather than silently wrap while
+  deciding whether to delete. This can cost some throughput, which the
+  container scale tests measure on the same release builds.
+
 | Crate | Role |
 |---|---|
 | `diskgc-core` | Config schema and grammar; the index types and queue derivation; the **planner** (pure: index in, plan, skip reasons, exit-code precedence and report out); the **tally** and the **executor** (re-check → walk → checks → act → re-sample), both over the `Host` port; the `Host` trait. No syscalls of its own. |

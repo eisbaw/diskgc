@@ -22,8 +22,11 @@ default:
 # left to the flake (e2e-clippy, e2e-tests, e2e-runner; docs/testing.md,
 # Safety interlock).
 #
-# Fast gate: formatting, clippy (warnings are errors), workspace tests.
+# Cargo metadata resolves the separate E2E project without compiling or
+# running its destructive harness.
+# Check E2E lockfile freshness, formatting, clippy and workspace tests.
 check:
+    cargo metadata --locked --manifest-path diskgc-e2e/Cargo.toml --format-version 1 > /dev/null
     cargo fmt --all --check
     cargo fmt --manifest-path diskgc-e2e/Cargo.toml --check
     python3 -m unittest discover -s tools -p 'test_*.py'
@@ -41,6 +44,7 @@ check:
 # `check`, sandboxed config and release checks, and fast Nix and Docker container tests.
 e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
@@ -62,6 +66,7 @@ e2e-vm-cold-scale: _gcroot-dev
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset

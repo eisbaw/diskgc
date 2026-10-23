@@ -128,6 +128,34 @@
         install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
         install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
       '';
+      # Capture complete readelf output before looking for dynamic-linker
+      # records. A readelf | grep -q pipeline can make grep stop early and
+      # report a misleading result when readelf receives SIGPIPE.
+      checkStaticElf = ''
+        check_static_elf() {
+          local bin="$1"
+          if ! program_headers="$(readelf --wide --program-headers "$bin")"; then
+            echo "error: cannot inspect ELF program headers: $bin" >&2
+            return 1
+          fi
+          if ! dynamic_section="$(readelf --wide --dynamic "$bin")"; then
+            echo "error: cannot inspect ELF dynamic section: $bin" >&2
+            return 1
+          fi
+          case "$program_headers" in
+            *INTERP*)
+              echo "error: $bin requests a program interpreter; it is not statically linked" >&2
+              return 1
+              ;;
+          esac
+          case "$dynamic_section" in
+            *NEEDED*)
+              echo "error: $bin needs shared libraries" >&2
+              return 1
+              ;;
+          esac
+        }
+      '';
 
       diskgc = craneLib.buildPackage (
         workspaceArgs
@@ -731,16 +759,26 @@
         # Guards acceptance criterion "statically linked": no program
         # interpreter and no shared-library dependencies, and it runs.
         diskgc-static =
-          pkgs.runCommand "diskgc-static-check" { nativeBuildInputs = [ pkgs.binutils ]; }
+          pkgs.runCommand "diskgc-static-check" { nativeBuildInputs = [ pkgs.binutils pkgs.stdenv.cc ]; }
             ''
+              ${checkStaticElf}
               bin=${lib.getExe diskgc}
-              if readelf --program-headers "$bin" | grep -q INTERP; then
-                echo "error: $bin requests a program interpreter; it is not statically linked" >&2
-                exit 1
-              fi
-              if readelf --dynamic "$bin" | grep -q NEEDED; then
-                echo "error: $bin needs shared libraries:" >&2
-                readelf --dynamic "$bin" | grep NEEDED >&2
+              check_static_elf "$bin"
+
+              # A locally compiled glibc-linked executable is the negative
+              # control. Assert its dynamic records first, so this proof
+              # cannot pass if the compiler ever changes its link defaults.
+              cat > "$TMPDIR/dynamic-control.c" <<'C'
+              #include <stdio.h>
+              int main(void) { return puts("dynamic control") < 0; }
+              C
+              cc "$TMPDIR/dynamic-control.c" -o "$TMPDIR/dynamic-control"
+              program_headers="$(readelf --wide --program-headers "$TMPDIR/dynamic-control")"
+              dynamic_section="$(readelf --wide --dynamic "$TMPDIR/dynamic-control")"
+              case "$program_headers" in *INTERP*) ;; *) echo "negative control has no interpreter" >&2; exit 1 ;; esac
+              case "$dynamic_section" in *NEEDED*) ;; *) echo "negative control has no shared-library dependency" >&2; exit 1 ;; esac
+              if check_static_elf "$TMPDIR/dynamic-control"; then
+                echo "error: static-binary check accepted a dynamically linked ELF" >&2
                 exit 1
               fi
               got=$("$bin" --version)
@@ -775,15 +813,9 @@
         release-01-package = pkgs.runCommand "diskgc-release-01-package-check"
           { nativeBuildInputs = [ pkgs.binutils ]; }
           ''
+            ${checkStaticElf}
             bin=${lib.getExe diskgcRelease01}
-            if readelf --program-headers "$bin" | grep -q INTERP; then
-              echo "candidate release binary requests a program interpreter" >&2
-              exit 1
-            fi
-            if readelf --dynamic "$bin" | grep -q NEEDED; then
-              echo "candidate release binary has shared-library dependencies" >&2
-              exit 1
-            fi
+            check_static_elf "$bin"
             if grep -aFq '/.diskgc-test-sandbox' "$bin"; then
               echo "candidate release binary still contains the sandbox marker" >&2
               exit 1

@@ -6,6 +6,11 @@
 # read-only under-test mount of the e2e image.
 [workspace]
 
+# This is a separate workspace. Its release-built container harness must
+# retain overflow checks independently of the product workspace.
+[profile.release]
+overflow-checks = true
+
 [package]
 name = "diskgc-e2e"
 version = "0.0.0"

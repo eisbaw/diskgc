@@ -51,3 +51,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# The flake builds the shipped binary and runs workspace tests with the
+# release profile. A deletion tool must detect integer overflow there too.
+[profile.release]
+overflow-checks = true
