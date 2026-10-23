@@ -465,9 +465,11 @@ pub struct EventSpec {
     /// The call the event is addressed to fails with this errno, given by
     /// name (e.g. `EIO`, `EACCES`), without acting.
     /// Only with an `op` trigger, `when: before`, and an op that can fail
-    /// this way: `openat2`, `statx`, `read_dir`, `read_head`, `unlinkat`, `fchmod`,
-    /// `bound_unix_sockets`, `proc_identity`, or
-    /// `proc_identity_released`.
+    /// this way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,
+    /// `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
+    /// `proc_identity`, `proc_identity_released`, `docker_query` (e.g.
+    /// `ENOENT`: no Docker client installed) or `run_command` (the child
+    /// does not start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,
     /// A new filesystem is mounted on an existing directory (a user's

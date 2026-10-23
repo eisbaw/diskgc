@@ -1,0 +1,51 @@
+# protect: excludes by overlap (docs/reference.md, protect): a candidate
+# that is a protected match, lies inside one, or contains one is skipped
+# as `protected`; a disjoint candidate of the same tier is deleted. The
+# protected profile's own where is ignored.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: mine
+      find: {roots: [/tmp], paths: [nix-shell.Mine, nix-shell.Eq/node-compile-cache, node-compile-cache/v22/held], type: any}
+      where: {has: NEVER-PRESENT}
+      action: delete
+      examples: {match: [/tmp/nix-shell.Mine]}
+  protect: [mine]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:node-compile-cache}
+select: profile:node-compile-cache
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/nix-shell.Mine/node-compile-cache: {blob: {size: 4K}}
+    /tmp/nix-shell.Eq/node-compile-cache: {blob: {size: 4K}}
+    /tmp/node-compile-cache/v22: {held: {size: 4K}, other: {size: 4K}}
+    /tmp/nix-shell.Free/node-compile-cache: {blob: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.Mine/node-compile-cache, reason: protected}
+    - {candidate: /tmp/nix-shell.Eq/node-compile-cache, reason: protected}
+    - {candidate: /tmp/node-compile-cache, reason: protected}
+    - {candidate: /tmp/nix-shell.Free/node-compile-cache}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.Free/node-compile-cache]
+  removed: [/tmp/nix-shell.Free/node-compile-cache]
+  skipped:
+    - {candidate: /tmp/nix-shell.Mine/node-compile-cache, reason: protected}
+    - {candidate: /tmp/nix-shell.Eq/node-compile-cache, reason: protected}
+    - {candidate: /tmp/node-compile-cache, reason: protected}
+  preserved:
+    - /tmp/nix-shell.Mine/node-compile-cache/blob
+    - /tmp/nix-shell.Eq/node-compile-cache/blob
+    - /tmp/node-compile-cache/v22/held
+    - /tmp/node-compile-cache/v22/other

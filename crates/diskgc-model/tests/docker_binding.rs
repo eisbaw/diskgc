@@ -267,3 +267,18 @@ fn podman_compatibility_server_at_the_system_socket_is_unsupported() {
         assert_eq!(host.trace_count(Op::DockerQuery), 3);
     }
 }
+
+/// A Docker client that is not installed (no `docker` on the command
+/// path): the first query fails ENOENT, as LinuxHost's spawn does, and the
+/// backend is `missing` without a further query.
+#[test]
+fn a_missing_docker_client_is_missing_after_one_query() {
+    let model = BUNDLED.replace("  /usr/bin/docker: {mode: \"0755\"}\n", "");
+    assert_ne!(model, BUNDLED, "fixture client line moved");
+    let (binding, host) = bind(&model, DOCKER_FS);
+    assert!(
+        matches!(binding, Binding::Skipped(ref s) if s.reason == "missing"),
+        "{binding:?}"
+    );
+    assert_eq!(host.trace_count(Op::DockerQuery), 1);
+}

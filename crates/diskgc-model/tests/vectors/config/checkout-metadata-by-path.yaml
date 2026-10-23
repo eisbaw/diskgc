@@ -1,0 +1,37 @@
+# Fail closed: a broad pattern finding `proj/.git/objects` (inside a
+# checkout's metadata, by path) or a directory holding a .git is
+# contains_checkout when the profile does not allow checkouts. (Depth 3
+# only: a match nested in another match belongs to the outer candidate.)
+profile_vector: 1
+user_profiles:
+  - name: project-any
+    find: {roots: required, paths: ["*/*/*"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/app/build]}
+profile: project-any
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/app/.git/objects: {pack: {size: 4K}}
+    /home/tester/src/app/lib/vendored: {.git: {HEAD: {}}, lib.c: {}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/app/.git/objects, reason: contains_checkout}
+    - {candidate: /home/tester/src/app/lib/vendored, reason: contains_checkout}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/app/.git/objects, reason: contains_checkout}
+    - {candidate: /home/tester/src/app/lib/vendored, reason: contains_checkout}
+  preserved:
+    - /home/tester/src/app/.git/objects/pack
+    - /home/tester/src/app/lib/vendored/lib.c

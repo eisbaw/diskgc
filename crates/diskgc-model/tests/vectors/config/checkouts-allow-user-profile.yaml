@@ -1,0 +1,34 @@
+# The documented risk of `checkouts: allow` (docs/safety.md): a profile
+# that allows checkouts deletes a candidate holding a .git, and also one
+# inside a checkout's metadata, by path. The same broad pattern without
+# the setting refuses both (checkout-metadata-by-path.yaml).
+profile_vector: 1
+user_profiles:
+  - name: project-any
+    find: {roots: required, paths: ["*/*"], type: dir}
+    checkouts: allow
+    action: delete
+    examples: {match: [/home/tester/src/app/build]}
+profile: project-any
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/app/vendored: {.git: {HEAD: {}}, lib.c: {}}
+    /home/tester/src/app/.git: {objects: {pack: {size: 4K}}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/app/vendored}
+    - {candidate: /home/tester/src/app/.git}
+  reclaim_exit: 1
+  actions: [/home/tester/src/app/vendored, /home/tester/src/app/.git]
+  removed: [/home/tester/src/app/vendored, /home/tester/src/app/.git]
+  skipped: []
+  preserved: []

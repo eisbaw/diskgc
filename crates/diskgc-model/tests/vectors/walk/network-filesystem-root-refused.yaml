@@ -1,0 +1,35 @@
+# A root on a network filesystem is refused by its mountinfo line before it
+# is opened (docs/safety.md, No network filesystems): a misconfigured root
+# excludes the whole tier as a safety error (exit 3), so not even the
+# local root's candidate is deleted, and nothing on the nfs or FUSE mount.
+profile_vector: 1
+profile: pytest-cache
+path: /home
+roots: [/home/tester/nfs-project, /home/tester/local]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /home/tester/nfs-project, fs: nfs4, dev: "0:50", size: 100G, parent: 2}
+    - {id: 4, at: /home/tester/local/remote, fs: fuse.sshfs, dev: "0:51", size: 100G, parent: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/nfs-project/.pytest_cache: {v: {size: 4K}}
+    /home/tester/local/remote/.pytest_cache: {v: {size: 4K}}
+    /home/tester/local/app/.pytest_cache: {v: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: safety, contains: "nfs4"}]
+  reclaim_exit: 3
+  errors: [{cause: safety, contains: "nfs4"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved:
+    - /home/tester/nfs-project/.pytest_cache/v
+    - /home/tester/local/remote/.pytest_cache/v
+    - /home/tester/local/app/.pytest_cache/v

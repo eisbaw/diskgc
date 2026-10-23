@@ -1,0 +1,38 @@
+# A .diskgc-keep in a directory between the profile root (/tmp) and the
+# candidate keeps it (docs/reference.md, Protection marker), as does one in
+# the candidate itself; a marker beside, not above, keeps nothing.
+profile_vector: 1
+profile: node-compile-cache
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/nix-shell.Above:
+      .diskgc-keep: {}
+      node-compile-cache: {v22: {blob: {size: 4K}}}
+    /tmp/nix-shell.Inside:
+      node-compile-cache: {.diskgc-keep: {}, v22: {blob: {size: 4K}}}
+    /tmp/nix-shell.Beside:
+      node-compile-cache: {v22: {blob: {size: 4K}}}
+      sibling: {.diskgc-keep: {}}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: kept}
+    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: kept}
+    - {candidate: /tmp/nix-shell.Beside/node-compile-cache}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.Beside/node-compile-cache]
+  removed: [/tmp/nix-shell.Beside/node-compile-cache]
+  skipped:
+    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: kept}
+    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: kept}
+  preserved:
+    - /tmp/nix-shell.Above/node-compile-cache/v22/blob
+    - /tmp/nix-shell.Inside/node-compile-cache/v22/blob
+    - /tmp/nix-shell.Beside/sibling/.diskgc-keep

@@ -1,0 +1,30 @@
+# `!filter:idle-7d` keeps only candidates younger than seven days; older
+# ones are too_idle (the exclusive upper bound of a negated idle filter).
+profile_vector: 1
+select: profile:zephyr-tmp && !filter:idle-7d
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-ancient:
+      .: {mtime: 2026-09-01T00:00:00Z}
+      f: {mtime: 2026-09-01T00:00:00Z}
+    /tmp/zephyr-recent:
+      .: {mtime: 2026-10-14T00:00:00Z}
+      f: {mtime: 2026-10-14T00:00:00Z}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-ancient, reason: too_idle}
+    - {candidate: /tmp/zephyr-recent}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-recent]
+  removed: [/tmp/zephyr-recent]
+  skipped:
+    - {candidate: /tmp/zephyr-ancient, reason: too_idle}
+  preserved: [/tmp/zephyr-ancient/f]

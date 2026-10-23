@@ -1,0 +1,35 @@
+# With a seed, a random group runs and the report carries the seed so the
+# order can be reproduced (docs/reference.md, seed).
+profile_vector: 1
+seed: 42
+config: |
+  version: 1
+  groups:
+    - name: g
+      ranking: random
+      tiers:
+        - {name: a, select: profile:zephyr-tmp}
+        - {name: b, select: profile:renode-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /tmp/renode-1: {f: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+    - {candidate: /tmp/renode-1}
+  dry_run_report: {seed: 42}
+  reclaim_exit: 1
+  report: {seed: 42, status: exhausted}
+  actions: [/tmp/zephyr-a, /tmp/renode-1]
+  removed: [/tmp/zephyr-a, /tmp/renode-1]
+  skipped: []
+  preserved: []

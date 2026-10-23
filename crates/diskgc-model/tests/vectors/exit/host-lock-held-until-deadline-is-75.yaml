@@ -1,0 +1,31 @@
+# Another reclaim holds the host lock for the whole --timeout: exit 75
+# (lock_timeout), nothing deleted, retry later. The holder is a modelled
+# process; the virtual clock jumps to the deadline.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+timeout: 2s
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/diskgc: {}
+    /tmp/zephyr-a: {f: {size: 4K}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/diskgc, cwd: /, maps: [/usr/bin/diskgc], environ: [PATH=/usr/bin]}
+  locks:
+    - {path: /run/diskgc/lock, holder: 4242, mode: exclusive}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 75
+  report: {status: lock_timeout}
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

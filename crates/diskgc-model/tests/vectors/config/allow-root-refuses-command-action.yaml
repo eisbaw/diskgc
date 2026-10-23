@@ -1,0 +1,37 @@
+# Command actions never run as root: selecting one under --allow-root is
+# refused before planning (exit 2, safety).
+profile_vector: 1
+allow_root: true
+users: {tester: 1000}
+config: |
+  version: 1
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp}
+select: profile:pip-cache
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /home/tester/.cache/pip: {http: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: command}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: command}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/.cache/pip/http]
+  commands: []

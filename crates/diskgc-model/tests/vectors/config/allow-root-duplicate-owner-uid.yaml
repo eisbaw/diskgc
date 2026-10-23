@@ -1,0 +1,33 @@
+# Two owners: entries that resolve to the same uid hide a policy error:
+# exit 2.
+profile_vector: 1
+allow_root: true
+users: {tester: 2001}
+config: |
+  version: 1
+  owners: [tester, {uid: 2001}]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: duplicate}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: duplicate}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

@@ -1,0 +1,33 @@
+# DOCKER_HOST naming a TCP daemon is another machine's store: the backend
+# is refused as remote_backend before any query, and nothing is pruned.
+profile_vector: 1
+profile: docker-unreferenced
+path: /var/lib/docker
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /var/lib/docker, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/docker: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /var/lib/docker/containerd/daemon: {.: {}, io.containerd.content.v1.content: {.: {}}}
+  docker:
+    host: tcp://build-server:2375
+    version: '{"Platform":{"Name":"Docker Engine - Community"},"Version":"29.8.2"}'
+    client_version: '{"Version":"29.8.2"}'
+    context_show: "default\n"
+    context_endpoint: '"unix:///var/run/docker.sock"'
+    info: '{"ID":"fake-daemon-1","DockerRootDir":"/var/lib/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}'
+expect:
+  plan:
+    - {candidate: "", reason: remote_backend}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: "", reason: remote_backend}
+  preserved: [/var/lib/docker/containerd/daemon/io.containerd.content.v1.content]
+  commands: []

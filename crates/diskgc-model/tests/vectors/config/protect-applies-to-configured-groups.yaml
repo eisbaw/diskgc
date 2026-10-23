@@ -1,0 +1,42 @@
+# The same protection holds when the configured groups run (no --select):
+# protect is bound once and given to every tier.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: mine
+      find: {roots: [/tmp], paths: [zephyr-mine], type: dir}
+      action: delete
+      examples: {match: [/tmp/zephyr-mine]}
+  protect: [mine]
+  groups:
+    - name: stale
+      tiers:
+        - {name: renode, select: profile:renode-tmp}
+    - name: pressure
+      tiers:
+        - {name: zephyr, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-mine: {f: {size: 4K}}
+    /tmp/zephyr-other: {f: {size: 4K}}
+    /tmp/renode-1: {f: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/renode-1}
+    - {candidate: /tmp/zephyr-mine, reason: protected}
+    - {candidate: /tmp/zephyr-other}
+  reclaim_exit: 1
+  actions: [/tmp/renode-1, /tmp/zephyr-other]
+  removed: [/tmp/renode-1, /tmp/zephyr-other]
+  skipped:
+    - {candidate: /tmp/zephyr-mine, reason: protected}
+  preserved: [/tmp/zephyr-mine/f]

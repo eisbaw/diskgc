@@ -1,0 +1,30 @@
+# The candidate directory is renamed elsewhere while it is being deleted:
+# deletion continues on the checked object only (by fd), so what remains
+# of it under the new name is the checked content, and nothing at the old
+# name is created or touched.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f1: {size: 4K}, f2: {size: 4K}}
+    /tmp/elsewhere: {.: {}}
+  events:
+    - at: {op: unlinkat, path: /tmp/zephyr-a/f1, nth: 1, when: after}
+      rename: {from: /tmp/zephyr-a, to: /tmp/elsewhere/moved}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a/f1]
+  skipped:
+    - {candidate: /tmp/zephyr-a, reason: changed}
+  preserved: [/tmp/elsewhere/moved]

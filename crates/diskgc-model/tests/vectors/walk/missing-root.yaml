@@ -1,0 +1,26 @@
+# A supplied root that does not exist is reported, not an error of the
+# run: `missing`, and the other root is still searched.
+profile_vector: 1
+profile: pytest-cache
+path: /home
+roots: [/home/tester/gone, /home/tester/here]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/here/.pytest_cache: {v: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /home/tester/gone, reason: missing}
+    - {candidate: /home/tester/here/.pytest_cache}
+  reclaim_exit: 1
+  actions: [/home/tester/here/.pytest_cache]
+  removed: [/home/tester/here/.pytest_cache]
+  skipped:
+    - {candidate: /home/tester/gone, reason: missing}
+  preserved: []

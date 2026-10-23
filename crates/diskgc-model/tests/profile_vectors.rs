@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use diskgc_core::engine::Reason;
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_model::profile_vector::{Checked, ProfileVector, corpus_files};
 
@@ -55,9 +56,18 @@ fn corpus() -> &'static [(PathBuf, Result<Checked, String>)] {
     })
 }
 
-/// Every failing file is named, not only the first.
+/// Every failing file is named, not only the first. `VECTOR_TRACE=<part
+/// of a file name>` prints the matching vectors' reclaim call traces.
 #[test]
 fn every_vector_in_the_corpus_passes() {
+    if let Ok(wanted) = std::env::var("VECTOR_TRACE") {
+        for (path, _) in corpus() {
+            if path.to_string_lossy().contains(&wanted) {
+                let trace = read(path).reclaim_trace().unwrap_or_else(|e| vec![e]);
+                eprintln!("{}:\n  {}", path.display(), trace.join("\n  "));
+            }
+        }
+    }
     let failures: Vec<String> = corpus()
         .iter()
         .filter_map(|(path, result)| {
@@ -72,6 +82,73 @@ fn every_vector_in_the_corpus_passes() {
         failures.len(),
         corpus().len(),
         failures.join("\n\n")
+    );
+}
+
+/// The skip reasons of the JSON contract (docs/reference.md, Output): the
+/// one `json` block's `skipped[0].reason` alternatives.
+fn documented_skip_reasons() -> BTreeSet<String> {
+    let reference = include_str!("../../../docs/reference.md");
+    let output = &reference[reference.find("\n## Output").expect("Output section")..];
+    let start = output.find("```json\n").expect("json block") + "```json\n".len();
+    let end = start + output[start..].find("\n```").expect("end of json block");
+    let doc: serde_json::Value = serde_json::from_str(&output[start..end]).expect("JSON parses");
+    doc["skipped"][0]["reason"]
+        .as_str()
+        .expect("reason enum")
+        .split('|')
+        .map(|reason| reason.trim().to_owned())
+        .collect()
+}
+
+/// Skip reasons no vector can show, each with why and where it is covered
+/// instead. A reason listed here that a vector does show fails the test:
+/// the exemption is then stale.
+const REASONS_WITHOUT_VECTOR: [(&str, &str); 4] = [
+    (
+        "too_many_entries",
+        "the budget is the product constant DEFAULT_MAX_ENTRIES (2,000,000) and ModelHost \
+         lookups are linear; engine.rs more_entries_than_the_budget_is_too_many_entries and \
+         cargo_reclaim.rs cover it with a test budget",
+    ),
+    (
+        "unsupported_store",
+        "documented, but no code path produces it (TASK-127)",
+    ),
+    (
+        "has_not",
+        "documented, but no code path produces it (TASK-127)",
+    ),
+    (
+        "stale",
+        "an index reason (docs/architecture.md); no index exists yet (TASK-127)",
+    ),
+];
+
+/// AC 2: every skip reason the code can report (`Reason::ALL`) and every
+/// one the JSON contract documents is shown by at least one vector, as a
+/// dry-run plan reason or a reclaim skip that matched its expectation.
+#[test]
+fn every_skip_reason_has_a_vector() {
+    let mut shown = BTreeSet::new();
+    for (_, result) in corpus() {
+        if let Ok(checked) = result {
+            shown.extend(checked.dry_run.plan.iter().filter_map(|row| row.reason));
+            shown.extend(checked.reclaim.skipped.iter().map(|row| row.reason));
+        }
+    }
+    let mut required = documented_skip_reasons();
+    required.extend(Reason::ALL.iter().map(|reason| reason.as_str().to_owned()));
+    let exempt: BTreeSet<&str> = REASONS_WITHOUT_VECTOR.iter().map(|(r, _)| *r).collect();
+    let stale: Vec<_> = exempt.iter().filter(|r| shown.contains(*r)).collect();
+    assert!(stale.is_empty(), "exempt but shown by a vector: {stale:?}");
+    let missing: Vec<_> = required
+        .iter()
+        .filter(|reason| !shown.contains(reason.as_str()) && !exempt.contains(reason.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "skip reasons without a vector: {missing:?}"
     );
 }
 

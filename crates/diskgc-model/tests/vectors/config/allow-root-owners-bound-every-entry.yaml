@@ -1,0 +1,47 @@
+# Under --allow-root every entry must belong to an owners: entry (a name
+# resolved by the account resolver, or an explicit uid): mixed owners from
+# the list are fine, one entry of anyone else (root included) is not_owner.
+profile_vector: 1
+allow_root: true
+users: {tester: 1000}
+config: |
+  version: 1
+  owners: [tester, {uid: 2001}]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-tester: {f: {size: 4K}}
+    /tmp/zephyr-mixed-listed: {.: {uid: 2001}, a: {size: 4K}, b: {size: 4K, uid: 2001}}
+    /tmp/zephyr-unlisted: {.: {uid: 1001}, f: {size: 4K, uid: 1001}}
+    /tmp/zephyr-root-inside: {f: {size: 4K}, r: {uid: 0}}
+    /tmp/zephyr-all-root: {.: {uid: 0}, f: {size: 4K, uid: 0}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-tester}
+    - {candidate: /tmp/zephyr-mixed-listed}
+    - {candidate: /tmp/zephyr-unlisted, reason: not_owner}
+    - {candidate: /tmp/zephyr-root-inside, reason: not_owner}
+    - {candidate: /tmp/zephyr-all-root, reason: not_owner}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-tester, /tmp/zephyr-mixed-listed]
+  removed: [/tmp/zephyr-tester, /tmp/zephyr-mixed-listed]
+  skipped:
+    - {candidate: /tmp/zephyr-unlisted, reason: not_owner}
+    - {candidate: /tmp/zephyr-root-inside, reason: not_owner}
+    - {candidate: /tmp/zephyr-all-root, reason: not_owner}
+  preserved:
+    - /tmp/zephyr-unlisted/f
+    - /tmp/zephyr-root-inside/r
+    - /tmp/zephyr-all-root/f

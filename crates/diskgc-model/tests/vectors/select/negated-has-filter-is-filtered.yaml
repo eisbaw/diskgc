@@ -1,0 +1,29 @@
+# A negated entry filter: `!filter:tagged` (has CACHEDIR.TAG) refuses the
+# tagged candidate as `filtered` and admits the untagged one.
+profile_vector: 1
+user_profiles:
+  - name: tagged
+    where: {has: CACHEDIR.TAG}
+select: profile:zephyr-tmp && !filter:tagged
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-tagged: {CACHEDIR.TAG: {cachedir_tag: true}, f: {size: 4K}}
+    /tmp/zephyr-plain: {f: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-tagged, reason: filtered}
+    - {candidate: /tmp/zephyr-plain}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-plain]
+  removed: [/tmp/zephyr-plain]
+  skipped:
+    - {candidate: /tmp/zephyr-tagged, reason: filtered}
+  preserved: [/tmp/zephyr-tagged/f]

@@ -1,0 +1,24 @@
+# A roots: required profile selected without --roots is a usage error
+# (exit 2) before anything is read: a selection can never be left unbound.
+profile_vector: 1
+profile: pytest-cache
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/app/.pytest_cache: {v: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: usage, contains: "--roots"}]
+  reclaim_exit: 2
+  errors: [{cause: usage, contains: "--roots"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/app/.pytest_cache/v]

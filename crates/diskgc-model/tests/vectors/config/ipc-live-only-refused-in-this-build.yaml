@@ -1,0 +1,30 @@
+# ipc: live-only is statically valid but cannot be enforced yet (task-21):
+# ensure refuses it (exit 2, safety) rather than run a weaker policy.
+profile_vector: 1
+config: |
+  version: 1
+  ipc: live-only
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {stale.fifo: {type: fifo}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: live-only}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: live-only}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/stale.fifo]

@@ -1,0 +1,29 @@
+# The candidate is removed by someone else between planning and its
+# lock: nothing to do, nothing else touched; the run goes on.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /tmp/zephyr-b: {f: {size: 4K}}
+  events:
+    - at: {op: flock, path: /tmp/zephyr-a, nth: 1, when: before}
+      remove: /tmp/zephyr-b
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+    - {candidate: /tmp/zephyr-b}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a]
+  skipped:
+    - {candidate: /tmp/zephyr-b, reason: missing}
+  preserved: []

@@ -1,0 +1,38 @@
+# One entry owned by another user, root included, makes the whole
+# candidate not_owner: a user-owned directory can hold someone else's file
+# and unlink permission belongs to the directory (docs/safety.md, Ownership
+# of every entry). A foreign directory owner deep down counts the same.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-root-file/a/b: {core: {size: 4K, uid: 0, gid: 0}, mine: {}}
+    /tmp/zephyr-foreign-dir/a: {b: {.: {uid: 1002}, x: {}}}
+    /tmp/zephyr-foreign-top: {.: {uid: 1003}, x: {}}
+    /tmp/zephyr-mine/a: {x: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-root-file, reason: not_owner}
+    - {candidate: /tmp/zephyr-foreign-dir, reason: not_owner}
+    - {candidate: /tmp/zephyr-foreign-top, reason: not_owner}
+    - {candidate: /tmp/zephyr-mine}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-mine]
+  removed: [/tmp/zephyr-mine]
+  skipped:
+    - {candidate: /tmp/zephyr-root-file, reason: not_owner}
+    - {candidate: /tmp/zephyr-foreign-dir, reason: not_owner}
+    - {candidate: /tmp/zephyr-foreign-top, reason: not_owner}
+  preserved:
+    - /tmp/zephyr-root-file/a/b/core
+    - /tmp/zephyr-root-file/a/b/mine
+    - /tmp/zephyr-foreign-dir/a/b/x
+    - /tmp/zephyr-foreign-top/x

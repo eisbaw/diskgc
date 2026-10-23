@@ -1,0 +1,43 @@
+# Every checkout marker the walk recognises (docs/safety.md, No source
+# checkout): a .git directory, a worktree's .git file, a .git symlink (never
+# followed), .hg and .svn, each deep inside its candidate. zephyr-tmp says
+# nothing about checkouts, so it refuses them (fail closed).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-git-dir/a/b: {.git: {HEAD: {}}, work.c: {}}
+    /tmp/zephyr-git-file/wt: {.git: {}, work.c: {}}
+    /tmp/zephyr-git-link/x: {.git: {symlink: /nowhere}, work.c: {}}
+    /tmp/zephyr-hg/r: {.hg: {store: {.: {}}}, work.c: {}}
+    /tmp/zephyr-svn/r: {.svn: {wc.db: {}}, work.c: {}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-git-dir, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-git-file, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-git-link, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-hg, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-svn, reason: contains_checkout}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-git-dir, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-git-file, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-git-link, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-hg, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-svn, reason: contains_checkout}
+  preserved:
+    - /tmp/zephyr-git-dir/a/b/work.c
+    - /tmp/zephyr-git-file/wt/work.c
+    - /tmp/zephyr-git-link/x/work.c
+    - /tmp/zephyr-hg/r/work.c
+    - /tmp/zephyr-svn/r/work.c

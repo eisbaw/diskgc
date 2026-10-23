@@ -1,0 +1,34 @@
+# A non-default Docker context (rootless Docker, Podman's socket, another
+# daemon) is unsupported_backend: Tally, preflight and prune must act on
+# one bound backend (PRD, Key decisions).
+profile_vector: 1
+profile: docker-build-cache
+path: /var/lib/docker
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /var/lib/docker, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/docker: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /var/lib/docker/buildkit: {.: {}}
+  docker:
+    context: rootless
+    version: '{"Platform":{"Name":"Docker Engine - Community"},"Version":"29.8.2"}'
+    client_version: '{"Version":"29.8.2"}'
+    context_show: "rootless\n"
+    context_endpoint: '"unix:///run/user/1000/docker.sock"'
+    info: '{"ID":"fake-daemon-1","DockerRootDir":"/var/lib/docker","Driver":"overlayfs","DriverStatus":[],"Containerd":{"Address":""}}'
+expect:
+  plan:
+    - {candidate: "", reason: unsupported_backend}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: "", reason: unsupported_backend}
+  preserved: [/var/lib/docker/buildkit]
+  commands: []

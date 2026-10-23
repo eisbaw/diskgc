@@ -1,0 +1,31 @@
+# SIGTERM during the first candidate's deletion: no other candidate is
+# started, the interrupted candidate's own directory is left (an error of
+# that candidate), and the exit is 143 (interrupted).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /tmp/zephyr-b: {f: {size: 4K}}
+  events:
+    - at: {op: unlinkat, path: /tmp/zephyr-a/f, nth: 1, when: after}
+      signal: term
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+    - {candidate: /tmp/zephyr-b}
+  reclaim_exit: 143
+  report: {status: interrupted}
+  errors: [{cause: operation, contains: interrupted}]
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a/f]
+  skipped: []
+  preserved: [/tmp/zephyr-b/f]

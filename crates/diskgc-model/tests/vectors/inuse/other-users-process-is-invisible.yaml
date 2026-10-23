@@ -1,0 +1,28 @@
+# Without root, diskgc sees only the user's own processes (PRD, Limits): a
+# process of another user that cannot be read and holds the candidate open
+# does not block it. Pinned as the stated limit, not a guarantee.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-shared: {data: {size: 4K}}
+  processes:
+    - {pid: 401, uid: 1001, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/other],
+       fds: [{path: /tmp/zephyr-shared/data}], proc: denied}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-shared}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-shared]
+  removed: [/tmp/zephyr-shared]
+  skipped: []
+  preserved: []

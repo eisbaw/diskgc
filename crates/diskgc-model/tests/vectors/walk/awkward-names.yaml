@@ -1,0 +1,28 @@
+# Names with spaces, a newline, a leading dash, unicode and dots are
+# compared and unlinked byte for byte. (Non-UTF-8 names cannot be written
+# as YAML keys: TASK-121 notes.)
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    "/tmp/zephyr-with space": {"a b": {size: 4K}, "-dash": {}, "line\nbreak": {}}
+    "/tmp/zephyr-ünïcødé": {"ファイル": {size: 4K}}
+    /tmp/zephyr-dots: {"..x": {}, "...": {}}
+expect:
+  plan:
+    - {candidate: "/tmp/zephyr-with space"}
+    - {candidate: "/tmp/zephyr-ünïcødé"}
+    - {candidate: /tmp/zephyr-dots}
+  reclaim_exit: 1
+  actions: ["/tmp/zephyr-with space", "/tmp/zephyr-ünïcødé", /tmp/zephyr-dots]
+  removed: ["/tmp/zephyr-with space", "/tmp/zephyr-ünïcødé", /tmp/zephyr-dots]
+  skipped: []
+  preserved: []

@@ -1,0 +1,29 @@
+# A supplied root reached through a symlink is unsafe_path: no symlink on
+# the way to a root is followed (docs/safety.md, Path traversal). A
+# misconfigured root excludes the tier as a safety error (exit 3); the real
+# directory behind the link is not searched.
+profile_vector: 1
+profile: pytest-cache
+path: /home
+roots: [/home/tester/via-link]
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/via-link: {symlink: /home/tester/real}
+    /home/tester/real/.pytest_cache: {v: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: safety, contains: "unsafe_path"}]
+  reclaim_exit: 3
+  errors: [{cause: safety, contains: "unsafe_path"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/real/.pytest_cache/v, /home/tester/via-link]

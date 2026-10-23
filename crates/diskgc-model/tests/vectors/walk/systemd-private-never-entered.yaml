@@ -1,0 +1,36 @@
+# systemd PrivateTmp entries are never candidates (a matching name is
+# passed over) and an entry of that name inside a candidate refuses it
+# before it is statted (docs/safety.md, Before the walk; No special
+# content). A broad user profile matches every directory in /tmp.
+profile_vector: 1
+user_profiles:
+  - name: tmp-star
+    find: {roots: [/tmp], paths: ["*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/anything]}
+profile: tmp-star
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/systemd-private-abc-colord.service-X: {tmp: {state: {size: 4K}}}
+    /tmp/holder/systemd-private-def-x: {tmp: {.: {}}}
+    /tmp/plain: {file: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/holder, reason: contains_special}
+    - {candidate: /tmp/plain}
+  reclaim_exit: 1
+  actions: [/tmp/plain]
+  removed: [/tmp/plain]
+  skipped:
+    - {candidate: /tmp/holder, reason: contains_special}
+  preserved:
+    - /tmp/systemd-private-abc-colord.service-X/tmp/state
+    - /tmp/holder/systemd-private-def-x/tmp

@@ -1,0 +1,34 @@
+# A static error in the last group's tier (a roots: required profile
+# without roots) is found at load: exit 2 with the first group's eligible
+# candidate untouched (PRD, What bad looks like: a static config error
+# discovered only after something was deleted).
+profile_vector: 1
+config: |
+  version: 1
+  groups:
+    - name: stale
+      tiers:
+        - {name: first, select: profile:zephyr-tmp}
+    - name: pressure
+      tiers:
+        - {name: unbound, select: profile:pytest-cache}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: pytest-cache}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: pytest-cache}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

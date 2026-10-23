@@ -1,0 +1,34 @@
+# Under --allow-root `{uid}` would expand to root's 0, not an owner:
+# claude-code-tmp (roots /tmp/claude-{uid}) is refused before planning.
+profile_vector: 1
+allow_root: true
+users: {tester: 1000}
+config: |
+  version: 1
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp}
+select: profile:claude-code-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/claude-0/-proj/1: {f: {uid: 0}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "{uid}"}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: "{uid}"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/claude-0/-proj/1/f]

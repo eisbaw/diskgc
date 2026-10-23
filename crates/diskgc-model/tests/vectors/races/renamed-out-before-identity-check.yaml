@@ -1,0 +1,30 @@
+# An entry renamed out of the candidate after the walk: its new path is
+# never deleted, the candidate is `changed`.
+# The entry's third statx in reclaim is the delete's identity check (the
+# first two are the tally's and the locked walk's): VECTOR_TRACE shows it.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /tmp/safe: {.: {}}
+  events:
+    - at: {op: statx, path: /tmp/zephyr-a/f, nth: 3, when: before}
+      rename: {from: /tmp/zephyr-a/f, to: /tmp/safe/f}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-a, reason: changed}
+  preserved: [/tmp/safe/f, /tmp/zephyr-a]

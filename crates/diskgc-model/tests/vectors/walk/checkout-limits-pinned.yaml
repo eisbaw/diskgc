@@ -1,0 +1,29 @@
+# Documented limits of the checkout guard (docs/safety.md, Not recognised):
+# a bare repository (no .git name inside), another case (.GIT) and another
+# VCS (.jj without .git) are not checkouts, so their candidates are
+# deleted. Pinned so a change to the recogniser is a visible decision.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-bare/repo.git: {HEAD: {}, objects: {.: {}}, refs: {.: {}}}
+    /tmp/zephyr-upper/r: {.GIT: {HEAD: {}}}
+    /tmp/zephyr-jj/r: {.jj: {repo: {.: {}}}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-bare}
+    - {candidate: /tmp/zephyr-upper}
+    - {candidate: /tmp/zephyr-jj}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-bare, /tmp/zephyr-upper, /tmp/zephyr-jj]
+  removed: [/tmp/zephyr-bare, /tmp/zephyr-upper, /tmp/zephyr-jj]
+  skipped: []
+  preserved: []

@@ -1,0 +1,24 @@
+# Positive only: with no match, nothing is deleted however short of space
+# the filesystem is (exit 1, an empty plan).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, other_used: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr: {f: {size: 4K}}
+    /tmp/a/zephyr-nested: {f: {size: 4K}}
+    /tmp/xzephyr-x: {f: {size: 4K}}
+expect:
+  plan: []
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr/f, /tmp/a/zephyr-nested/f, /tmp/xzephyr-x/f]

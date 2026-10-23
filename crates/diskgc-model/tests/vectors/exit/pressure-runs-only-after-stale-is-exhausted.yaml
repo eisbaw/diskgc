@@ -1,0 +1,35 @@
+# When the stale group cannot meet the goal, the pressure group runs next,
+# and only then: both go, stale first.
+profile_vector: 1
+config: |
+  version: 1
+  groups:
+    - name: stale
+      tiers:
+        - {name: renode, select: profile:renode-tmp}
+    - name: pressure
+      tiers:
+        - {name: zephyr, select: profile:zephyr-tmp}
+path: /tmp
+min_free: 5G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 8G, other_used: 2G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-older: {blob: {size: 3G}}
+    /tmp/renode-1: {blob: {size: 3G}}
+expect:
+  plan:
+    - {candidate: /tmp/renode-1}
+    - {candidate: /tmp/zephyr-older}
+  reclaim_exit: 0
+  report:
+    actions: [{tier: renode, candidate: /tmp/renode-1}, {tier: zephyr, candidate: /tmp/zephyr-older}]
+  actions: [/tmp/renode-1, /tmp/zephyr-older]
+  removed: [/tmp/renode-1, /tmp/zephyr-older]
+  skipped: []
+  preserved: []

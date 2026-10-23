@@ -1,0 +1,25 @@
+# Corner cases of size: an empty directory and a tree of zero-byte files
+# are ordinary candidates (only Cargo has an `empty` reason).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-empty: {.: {}}
+    /tmp/zephyr-zero: {a: {}, b: {c: {}}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-empty}
+    - {candidate: /tmp/zephyr-zero}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-empty, /tmp/zephyr-zero]
+  removed: [/tmp/zephyr-empty, /tmp/zephyr-zero]
+  skipped: []
+  preserved: []

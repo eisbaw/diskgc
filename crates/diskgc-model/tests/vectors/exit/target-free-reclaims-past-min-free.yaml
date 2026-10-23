@@ -1,0 +1,31 @@
+# --target-free: once below --min-free, reclaim continues to the higher
+# target (hysteresis); both candidates go although one met --min-free.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 2G
+target_free: 5G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 8G, other_used: 2G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-newer:
+      .: {mtime: 2026-10-14T00:00:00Z}
+      blob: {size: 3G, mtime: 2026-10-14T00:00:00Z}
+    /tmp/zephyr-older:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      blob: {size: 3G, mtime: 2026-10-01T00:00:00Z}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-newer}
+    - {candidate: /tmp/zephyr-older}
+  reclaim_exit: 0
+  report: {status: met, target_met: true}
+  actions: [/tmp/zephyr-older, /tmp/zephyr-newer]
+  removed: [/tmp/zephyr-older, /tmp/zephyr-newer]
+  skipped: []
+  preserved: []

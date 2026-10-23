@@ -1,0 +1,26 @@
+# No Docker client on the command path (its first query fails ENOENT):
+# the backend is `missing`, nothing to prune. Backend skips name no
+# candidate path.
+profile_vector: 1
+profile: docker-dangling
+path: /var/lib/docker
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /var/lib/docker, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /var/lib/docker/containerd/daemon: {.: {}}
+expect:
+  plan:
+    - {candidate: "", reason: missing}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: "", reason: missing}
+  preserved: [/var/lib/docker/containerd/daemon]
+  commands: []

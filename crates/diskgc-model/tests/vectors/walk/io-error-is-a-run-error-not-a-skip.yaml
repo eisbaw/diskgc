@@ -1,0 +1,29 @@
+# EIO while listing says nothing about this candidate and would hit the
+# next one too: an error of the run (exit 3), never a quiet skip
+# (docs/safety.md, Fail closed). Nothing of it is deleted.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-failing: {sub: {data: {size: 4K}}}
+  events:
+    - at: {op: read_dir, path: /tmp/zephyr-failing/sub, nth: 1, when: before}
+      fail: EIO
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: host}]
+  reclaim_exit: 3
+  errors: [{cause: host}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-failing/sub/data]

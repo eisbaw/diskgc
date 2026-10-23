@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use diskgc_core::config::{self, Config};
 use diskgc_core::invocation::{self, EnsureOptions, Platform};
-use diskgc_core::profile::{Action, Body, Library, ProfileSpec};
+use diskgc_core::profile::{Action, Body, Library, Origin, ProfileSpec};
 use diskgc_core::report::{ErrorCause, Report, Status};
 use diskgc_core::units::{parse_duration, parse_size};
 use serde::Deserialize;
@@ -175,6 +175,9 @@ pub struct CommandVerdict {
 pub struct Checked {
     pub dry_run: Report,
     pub reclaim: Report,
+    /// Names the run's library took unchanged from the built-ins (not
+    /// overridden by the vector's own profiles).
+    pub builtin: BTreeSet<String>,
 }
 
 impl ProfileVector {
@@ -326,7 +329,13 @@ impl ProfileVector {
     fn check_with(&self, library: &Library) -> Result<Checked, String> {
         let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
         let dry_run = self.run(&planning, true, library)?;
-        compare_plan(&dry_run, &self.expect.plan)?;
+        compare_plan(&dry_run, &self.expect.plan).map_err(|e| {
+            format!(
+                "{e}\n(dry-run exit {}, errors {:?})",
+                dry_run.exit_code(),
+                dry_run.errors
+            )
+        })?;
         compare_exit("dry-run", &dry_run, self.expect.dry_run_exit)?;
         compare_errors("dry-run", &dry_run, &self.expect.dry_run_errors)?;
         if let Some(subset) = &self.expect.dry_run_report {
@@ -339,14 +348,19 @@ impl ProfileVector {
         }
 
         let reclaiming = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        // Both lists name paths that existed before reclaim, so a typo is
+        // an error, not a vacuous postcondition. A preserved path may also
+        // be one an event makes (a race's replacement or new marker).
+        let made = self.paths_events_make();
         for (what, paths) in [
             ("removed", &self.expect.removed),
             ("preserved", &self.expect.preserved),
         ] {
             for path in paths {
-                if reclaiming.stat_path(path).is_none() {
+                let by_event = what == "preserved" && made.iter().any(|m| path.starts_with(m));
+                if reclaiming.stat_path(path).is_none() && !by_event {
                     return Err(format!(
-                        "{what} path {} was absent before reclaim",
+                        "{what} path {} was absent before reclaim (and no event makes it)",
                         path.display()
                     ));
                 }
@@ -371,7 +385,45 @@ impl ProfileVector {
         if !reclaiming.unfired_events().is_empty() {
             return Err(format!("unfired events: {:?}", reclaiming.unfired_events()));
         }
-        Ok(Checked { dry_run, reclaim })
+        let builtin = library
+            .profiles()
+            .filter(|profile| profile.origin == Origin::BuiltIn)
+            .map(|profile| profile.name.clone())
+            .collect();
+        Ok(Checked {
+            dry_run,
+            reclaim,
+            builtin,
+        })
+    }
+
+    /// Paths an event creates, renames to, replaces or mounts on.
+    fn paths_events_make(&self) -> Vec<PathBuf> {
+        self.host
+            .events
+            .iter()
+            .flat_map(|event| {
+                [
+                    event.create.clone(),
+                    event.mkdir.clone(),
+                    event.rename.as_ref().map(|r| r.to.clone()),
+                    event.replace.clone(),
+                    event.replace_reusing_inode.clone(),
+                    event.mount.as_ref().map(|m| m.at.clone()),
+                ]
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The reclaim run's call trace, one line per host call: for writing
+    /// and debugging a vector's events (`VECTOR_TRACE`, docs/testing.md).
+    pub fn reclaim_trace(&self) -> Result<Vec<String>, String> {
+        let config = self.configuration().ok().flatten();
+        let library = self.library(config.as_ref())?;
+        let host = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        self.run(&host, false, &library)?;
+        Ok(host.trace().iter().map(ToString::to_string).collect())
     }
 
     /// `removed` and `preserved` against the model after reclaim; every

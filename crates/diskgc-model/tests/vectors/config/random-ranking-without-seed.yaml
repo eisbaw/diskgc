@@ -1,0 +1,32 @@
+# ranking: random needs a seed before any tier is compiled; a failure to
+# draw one is exit 2 with nothing touched (the binary draws from
+# DISKGC_SEED or the OS; this vector has neither).
+profile_vector: 1
+config: |
+  version: 1
+  groups:
+    - name: g
+      ranking: random
+      tiers:
+        - {name: a, select: profile:zephyr-tmp}
+        - {name: b, select: profile:renode-tmp}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: DISKGC_SEED}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: DISKGC_SEED}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

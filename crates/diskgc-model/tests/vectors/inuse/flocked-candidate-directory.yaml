@@ -1,0 +1,46 @@
+# A candidate directory flock'ed by someone else, shared or exclusive, is
+# `locked` (the systemd-tmpfiles convention, docs/safety.md, In use); no
+# process evidence is attributed (process_blockers null). A lock on a file
+# inside is only seen as that holder's open fd: in_use with fd evidence.
+# The dry run takes no candidate lock, so it sees each holder's fd on the
+# directory and plans in_use; only reclaim's flock attempt says `locked`.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-exclusive: {data: {size: 4K}}
+    /tmp/zephyr-shared: {data: {size: 4K}}
+    /tmp/zephyr-file-lock: {lockfile: {}, data: {size: 4K}}
+  processes:
+    - {pid: 501, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+    - {pid: 502, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+    - {pid: 503, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+  locks:
+    - {path: /tmp/zephyr-exclusive, holder: 501, mode: exclusive}
+    - {path: /tmp/zephyr-shared, holder: 502, mode: shared}
+    - {path: /tmp/zephyr-file-lock/lockfile, holder: 503, mode: exclusive}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-exclusive, reason: in_use}
+    - {candidate: /tmp/zephyr-shared, reason: in_use}
+    - {candidate: /tmp/zephyr-file-lock, reason: in_use}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-exclusive, reason: locked, process_blockers: []}
+    - {candidate: /tmp/zephyr-shared, reason: locked, process_blockers: []}
+    - {candidate: /tmp/zephyr-file-lock, reason: in_use, process_blockers: [{pid: 503, evidence: fd}]}
+  preserved:
+    - /tmp/zephyr-exclusive/data
+    - /tmp/zephyr-shared/data
+    - /tmp/zephyr-file-lock/data

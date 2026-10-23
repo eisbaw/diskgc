@@ -1,0 +1,43 @@
+# A roots: required profile is protected with its own roots ({profile,
+# roots}); a Cargo target under the protected root is skipped as
+# protected, one under another root is reclaimed (contents, not the root).
+profile_vector: 1
+config: |
+  version: 1
+  protect:
+    - {profile: cargo-target, roots: [/home/tester/src/important]}
+  groups:
+    - name: g
+      tiers:
+        - {name: cargo, select: profile:cargo-target, roots: [/home/tester/src]}
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/important/Cargo.toml: {}
+    /home/tester/src/important/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+    /home/tester/src/scratch/Cargo.toml: {}
+    /home/tester/src/scratch/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/important/target, reason: protected}
+    - {candidate: /home/tester/src/scratch/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/scratch/target]
+  removed: [/home/tester/src/scratch/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/src/important/target, reason: protected}
+  preserved:
+    - /home/tester/src/important/target/debug/deps/app
+    - /home/tester/src/scratch/target/debug/.cargo-lock
+    - /home/tester/src/scratch/target/CACHEDIR.TAG

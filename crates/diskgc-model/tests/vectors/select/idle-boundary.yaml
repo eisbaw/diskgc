@@ -1,0 +1,42 @@
+# `filter:idle-3d` on kind fs: the newest mtime/ctime in the tree must be
+# at least three days old. Exactly three days, one second short, and one
+# nested young file in an old tree (the newest entry decides, not the top).
+profile_vector: 1
+select: profile:zephyr-tmp && filter:idle-3d
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-exactly:
+      .: {mtime: 2026-10-12T03:00:00Z}
+      f: {mtime: 2026-10-12T03:00:00Z}
+    /tmp/zephyr-one-second-short:
+      .: {mtime: 2026-10-12T03:00:00Z}
+      f: {mtime: 2026-10-12T03:00:01Z}
+    /tmp/zephyr-young-deep:
+      .: {mtime: 2026-09-01T00:00:00Z}
+      a: {.: {mtime: 2026-09-01T00:00:00Z}, b: {.: {mtime: 2026-09-01T00:00:00Z}, f: {mtime: 2026-10-15T02:59:00Z}}}
+    /tmp/zephyr-old:
+      .: {mtime: 2026-09-01T00:00:00Z}
+      f: {mtime: 2026-09-01T00:00:00Z}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-exactly}
+    - {candidate: /tmp/zephyr-one-second-short, reason: not_idle}
+    - {candidate: /tmp/zephyr-young-deep, reason: not_idle}
+    - {candidate: /tmp/zephyr-old}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-exactly, /tmp/zephyr-old]
+  removed: [/tmp/zephyr-exactly, /tmp/zephyr-old]
+  skipped:
+    - {candidate: /tmp/zephyr-one-second-short, reason: not_idle}
+    - {candidate: /tmp/zephyr-young-deep, reason: not_idle}
+  preserved:
+    - /tmp/zephyr-one-second-short/f
+    - /tmp/zephyr-young-deep/a/b/f

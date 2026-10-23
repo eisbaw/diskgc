@@ -72,6 +72,10 @@ use crate::state::{Fault, Kind, Loc, Ref, State, WalkRules};
 /// so code that subtracts from `now()` is not hidden by a zero origin.
 pub const UPTIME_AT_START: Duration = Duration::from_secs(3600);
 
+/// The modelled `PATH` of commands (diskgc's own, as `command_path`):
+/// where a command action's program and the Docker client are found.
+const COMMAND_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
+
 /// One port call on the trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
@@ -235,10 +239,11 @@ impl ModelHost {
     }
 
     /// The stat of an absolute path, if it exists (through mounts, not
-    /// following symlinks).
+    /// following symlinks: a trailing symlink is the link itself, as
+    /// `lstat` says; one on the way is no path).
     pub fn stat_path(&self, path: &Path) -> Option<Stat> {
         let inner = self.inner.borrow();
-        let loc = inner.state.lookup(path).ok()?;
+        let loc = inner.state.lookup_link(path).ok()?;
         Some(inner.state.stat(loc))
     }
 
@@ -901,7 +906,7 @@ impl Host for ModelHost {
     }
 
     fn command_path(&self) -> OsString {
-        OsString::from("/usr/bin:/bin")
+        OsString::from(COMMAND_DIRS.join(":"))
     }
 
     fn docker_environment(&self) -> DockerEnvironment {
@@ -928,6 +933,25 @@ impl Host for ModelHost {
                     Err(HostError::errno("query Docker", name, errno)),
                     None,
                     errno.to_string(),
+                );
+            }
+            // As on LinuxHost, the query runs `docker` from the command
+            // path: no executable there is ENOENT (no client installed).
+            let installed = COMMAND_DIRS.iter().any(|dir| {
+                inner
+                    .state
+                    .lookup(&Path::new(dir).join("docker"))
+                    .is_ok_and(|loc| {
+                        let stat = inner.state.stat(loc);
+                        stat.file_type == Some(FileType::Regular)
+                            && stat.perm.is_some_and(|perm| perm & 0o111 != 0)
+                    })
+            });
+            if !installed {
+                return (
+                    Err(HostError::errno("query Docker", name, Errno::ENOENT)),
+                    None,
+                    errno_text(Errno::ENOENT),
                 );
             }
             let docker = &inner.state.docker;

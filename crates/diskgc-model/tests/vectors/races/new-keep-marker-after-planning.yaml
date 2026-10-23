@@ -1,0 +1,27 @@
+# A .diskgc-keep created after the plan (a stale index) is seen by the
+# deletion-time walk under the candidate lock: kept.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+  events:
+    - at: {op: flock, path: /tmp/zephyr-a, nth: 1, when: before}
+      create: /tmp/zephyr-a/.diskgc-keep
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-a, reason: kept}
+  preserved: [/tmp/zephyr-a/f, /tmp/zephyr-a/.diskgc-keep]

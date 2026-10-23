@@ -1,0 +1,31 @@
+# Below --min-free, candidates go oldest first and reclaim stops as soon as
+# a fresh sample meets the goal: the older candidate is enough, the newer
+# one survives, exit 0 (ensure exits 0 only when the space is there).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 2G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 8G, other_used: 2G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-newer:
+      .: {mtime: 2026-10-14T00:00:00Z}
+      blob: {size: 3G, mtime: 2026-10-14T00:00:00Z}
+    /tmp/zephyr-older:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      blob: {size: 3G, mtime: 2026-10-01T00:00:00Z}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-newer}
+    - {candidate: /tmp/zephyr-older}
+  reclaim_exit: 0
+  report: {status: met, target_met: true}
+  actions: [/tmp/zephyr-older]
+  removed: [/tmp/zephyr-older]
+  skipped: []
+  preserved: [/tmp/zephyr-newer/blob]

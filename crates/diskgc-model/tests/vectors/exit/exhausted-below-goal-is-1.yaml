@@ -1,0 +1,25 @@
+# Every eligible candidate processed, still below --min-free: exit 1
+# (exhausted), never 0 (PRD, What bad looks like: ensure exiting 0 when
+# the space is not there).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 7G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 8G, other_used: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {blob: {size: 2G}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 1
+  report: {status: exhausted, target_met: false}
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a]
+  skipped: []
+  preserved: []

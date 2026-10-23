@@ -1,0 +1,30 @@
+# A file created in the candidate after the walk was recorded is not
+# deleted: it was never checked (PRD: any entry the eligibility walk did
+# not check). The directory cannot be removed around it: ENOTEMPTY is an
+# error for the candidate, never retried silently (docs/safety.md,
+# Deletion), so the run exits 3.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+  events:
+    - at: {op: unlinkat, path: /tmp/zephyr-a/f, nth: 1, when: after}
+      create: /tmp/zephyr-a/newcomer
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: ENOTEMPTY}]
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a/f]
+  skipped: []
+  preserved: [/tmp/zephyr-a/newcomer]

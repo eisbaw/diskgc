@@ -1,0 +1,29 @@
+# A browser's lock directory that cannot be reached safely (here .config
+# is a symlink) retains the cache as unsafe_path: an absent lock proves
+# nothing when diskgc did not look in the real directory
+# (docs/safety.md, Browser caches).
+profile_vector: 1
+profile: chromium-browser-cache
+roots: [/home/linked]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/linked/.cache/chromium/Default/Cache: {payload: {size: 8K}}
+    /home/linked/.config: {symlink: /home/linked/dotfiles/config}
+    /home/linked/dotfiles/config/chromium: {.: {}}
+expect:
+  plan:
+    - {candidate: /home/linked/.cache/chromium/Default/Cache, reason: unsafe_path}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/linked/.cache/chromium/Default/Cache, reason: unsafe_path}
+  preserved: [/home/linked/.cache/chromium/Default/Cache/payload]

@@ -1,0 +1,31 @@
+# A listing refused with EACCES (the user's own mode-000 directory) skips
+# the candidate as unreadable, never treating it as empty (docs/safety.md,
+# Fail closed on anything unreadable). The fault is injected on the first
+# listing of that directory in each run.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-locked-down: {sub: {secret: {size: 4K}}, top: {size: 4K}}
+  events:
+    - at: {op: read_dir, path: /tmp/zephyr-locked-down/sub, nth: 1, when: before}
+      fail: EACCES
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-locked-down, reason: unreadable}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/zephyr-locked-down, reason: unreadable}
+  preserved:
+    - /tmp/zephyr-locked-down/sub/secret
+    - /tmp/zephyr-locked-down/top

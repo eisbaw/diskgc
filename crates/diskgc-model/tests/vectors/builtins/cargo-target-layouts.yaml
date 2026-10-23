@@ -1,0 +1,47 @@
+# Cargo targets diskgc does not know how to reclaim are left whole: an
+# unknown Cargo lock file name (a Cargo whose locks were not measured) is
+# unsupported_layout; a target whose profile directories hold only lock
+# files is `empty` (a dry-run plan row; omitted from reclaim's skipped
+# list, docs/reference.md, Output). A known layout is reclaimed, keeping
+# the tagged root and the lock files.
+profile_vector: 1
+profile: cargo-target
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/future/Cargo.toml: {}
+    /home/tester/src/future/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, .cargo-new-lock: {}, deps: {app: {size: 1M}}}
+    /home/tester/src/locks-only/Cargo.toml: {}
+    /home/tester/src/locks-only/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}}
+    /home/tester/src/plain/Cargo.toml: {}
+    /home/tester/src/plain/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, .fingerprint: {app-1: {bin-app: {}}}, deps: {app: {size: 1M}}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/future/target, reason: unsupported_layout}
+    - {candidate: /home/tester/src/locks-only/target, reason: empty}
+    - {candidate: /home/tester/src/plain/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/plain/target]
+  removed: [/home/tester/src/plain/target/debug/deps, /home/tester/src/plain/target/debug/.fingerprint]
+  skipped:
+    - {candidate: /home/tester/src/future/target, reason: unsupported_layout}
+  preserved:
+    - /home/tester/src/future/target/debug/deps/app
+    - /home/tester/src/future/target/debug/.cargo-new-lock
+    - /home/tester/src/locks-only/target/debug/.cargo-lock
+    - /home/tester/src/plain/target/debug/.cargo-lock
+    - /home/tester/src/plain/target/CACHEDIR.TAG

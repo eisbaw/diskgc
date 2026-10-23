@@ -1,0 +1,27 @@
+# A root on another filesystem than the one PATH names frees nothing
+# there: the root is skipped whole as other_fs before discovery, and
+# nothing below it is touched (docs/architecture.md, Filesystem matching).
+profile_vector: 1
+profile: zephyr-tmp
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+    - {id: 3, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester: {.: {}}
+    /tmp/zephyr-elsewhere: {data: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp, reason: other_fs}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp, reason: other_fs}
+  preserved: [/tmp/zephyr-elsewhere/data]

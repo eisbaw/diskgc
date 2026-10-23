@@ -1,0 +1,70 @@
+# Each way a visible process can use a candidate (docs/safety.md, In use)
+# blocks exactly that candidate, reported with its evidence: an open fd,
+# a working directory, a root, an executable, a memory map, a path in the
+# initial environment, and a `:` list (PATH) component. One unused
+# candidate is deleted, so the scan does not block wholesale.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-fd: {log: {size: 4K}}
+    /tmp/zephyr-cwd: {sub: {.: {}}}
+    /tmp/zephyr-root: {sysroot: {.: {}}}
+    /tmp/zephyr-exe: {bin: {qemu: {size: 4K}}}
+    /tmp/zephyr-map: {lib: {libfoo.so: {size: 4K}}}
+    /tmp/zephyr-env: {.: {}}
+    /tmp/zephyr-path: {bin: {.: {}}}
+    /tmp/zephyr-unused: {data: {size: 4K}}
+  processes:
+    - {pid: 101, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester],
+       fds: [{path: /tmp/zephyr-fd/log}]}
+    - {pid: 102, exe: /usr/bin/tool, cwd: /tmp/zephyr-cwd/sub, maps: [/usr/bin/tool], environ: [HOME=/home/tester],
+       fds: [{path: /usr/bin/tool}]}
+    - {pid: 103, exe: /usr/bin/tool, cwd: /, root: /tmp/zephyr-root/sysroot, maps: [/usr/bin/tool], environ: [HOME=/home/tester],
+       fds: [{path: /usr/bin/tool}]}
+    - {pid: 104, exe: /tmp/zephyr-exe/bin/qemu, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester],
+       fds: [{path: /usr/bin/tool}]}
+    - {pid: 105, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool, /tmp/zephyr-map/lib/libfoo.so], environ: [HOME=/home/tester],
+       fds: [{path: /usr/bin/tool}]}
+    - {pid: 106, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [TMPDIR=/tmp/zephyr-env],
+       fds: [{path: /usr/bin/tool}]}
+    - {pid: 107, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: ["PATH=/usr/bin:/tmp/zephyr-path/bin:/bin"],
+       fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-fd, reason: in_use}
+    - {candidate: /tmp/zephyr-cwd, reason: in_use}
+    - {candidate: /tmp/zephyr-root, reason: in_use}
+    - {candidate: /tmp/zephyr-exe, reason: in_use}
+    - {candidate: /tmp/zephyr-map, reason: in_use}
+    - {candidate: /tmp/zephyr-env, reason: in_use}
+    - {candidate: /tmp/zephyr-path, reason: in_use}
+    - {candidate: /tmp/zephyr-unused}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-unused]
+  removed: [/tmp/zephyr-unused]
+  skipped:
+    - {candidate: /tmp/zephyr-fd, reason: in_use, process_blockers: [{pid: 101, evidence: fd}]}
+    - {candidate: /tmp/zephyr-cwd, reason: in_use, process_blockers: [{pid: 102, evidence: cwd}]}
+    - {candidate: /tmp/zephyr-root, reason: in_use, process_blockers: [{pid: 103, evidence: root}]}
+    - {candidate: /tmp/zephyr-exe, reason: in_use, process_blockers: [{pid: 104, evidence: exe}]}
+    - {candidate: /tmp/zephyr-map, reason: in_use, process_blockers: [{pid: 105, evidence: map}]}
+    - {candidate: /tmp/zephyr-env, reason: in_use, process_blockers: [{pid: 106, evidence: environment}]}
+    - {candidate: /tmp/zephyr-path, reason: in_use, process_blockers: [{pid: 107, evidence: environment}]}
+  preserved:
+    - /tmp/zephyr-fd/log
+    - /tmp/zephyr-cwd/sub
+    - /tmp/zephyr-root/sysroot
+    - /tmp/zephyr-exe/bin/qemu
+    - /tmp/zephyr-map/lib/libfoo.so
+    - /tmp/zephyr-env
+    - /tmp/zephyr-path/bin

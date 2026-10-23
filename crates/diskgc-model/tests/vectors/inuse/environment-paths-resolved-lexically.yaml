@@ -1,0 +1,34 @@
+# Environment values are compared component by component with `.` and `..`
+# resolved lexically; a relative value names nothing (docs/safety.md, In
+# use). /tmp/x/../zephyr-dotdot names the candidate; `zephyr-relative` does
+# not, so that candidate is deleted (the heuristic's stated limit).
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-dotdot: {deep: {.: {}}}
+    /tmp/zephyr-relative: {.: {}}
+    /tmp/zephyr-prefix-only: {.: {}}
+  processes:
+    - {pid: 201, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], fds: [{path: /usr/bin/tool}],
+       environ: [WORK=/tmp/x/../zephyr-dotdot/./deep, REL=zephyr-relative, NEAR=/tmp/zephyr-prefix-only-not]}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-dotdot, reason: in_use}
+    - {candidate: /tmp/zephyr-relative}
+    - {candidate: /tmp/zephyr-prefix-only}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-relative, /tmp/zephyr-prefix-only]
+  removed: [/tmp/zephyr-relative, /tmp/zephyr-prefix-only]
+  skipped:
+    - {candidate: /tmp/zephyr-dotdot, reason: in_use, process_blockers: [{pid: 201, evidence: environment}]}
+  preserved: [/tmp/zephyr-dotdot/deep]

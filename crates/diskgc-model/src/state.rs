@@ -545,6 +545,21 @@ impl State {
         )
     }
 
+    /// [`State::lookup`], except that a trailing symlink is the object
+    /// named (`lstat`): how fixtures check that a link itself survived.
+    pub fn lookup_link(&self, path: &Path) -> Result<Loc, Fault> {
+        let (root, _) = self.through_mounts(self.mount_root(self.root_mount().id));
+        self.walk(
+            root,
+            path,
+            WalkRules {
+                no_symlinks: true,
+                open_trailing_symlink: true,
+                ..WalkRules::default()
+            },
+        )
+    }
+
     /// The single entry `name` of directory `dir`, through mounts on it, not
     /// following a symlink.
     pub fn child(&self, dir: Loc, name: &OsStr) -> Result<Loc, Errno> {
