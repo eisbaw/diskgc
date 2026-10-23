@@ -1,10 +1,11 @@
 ---
 id: TASK-35
 title: 'Docker kinds with one bound backend: build cache and images'
-status: In Progress
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 15:24'
+updated_date: '2026-10-23 15:57'
 labels:
   - wave-4
   - irreversible
@@ -59,9 +60,17 @@ From task-50 round 3 (mped): the query run takes a closed enum of queries that d
 2026-10-20 combined gate on aab98ce: nix develop -c just e2e passed fmt, clippy, workspace tests, Nix checks, 129/129 Nix container E2E and 5/5 native Docker dind E2E. QA and MPED GO on the restacked staged diff. TASK35 remains In Progress solely because its docs/testing.md real-machine dry-run DoD is prohibited by the user host-testing constraint; no host diskgc run was done.
 
 Orchestrator 2026-10-23 (COMPASS consult): dropped the TASK-34 edge (a built feature must not depend on a later hardening wave). Mark ruled 2026-10-23 that read-only diskgc (--dry-run/check/survey/profiles) MAY run on the developer host, so the DoD real-machine dry run is permitted.
+
+2026-10-23 DoD close-out. (1) Daemon-backed dry run: docs/testing.md (DoD, daemon-backed profiles) puts it on the real daemon in a disposable container. Native dind tests in diskgc-e2e/src/docker_suite.rs run `ensure --dry-run --json --no-index --min-free 100% --select profile:P /var/lib/docker` for P = docker-unreferenced (native_docker_image_prune_preserves_containers_volumes), docker-dangling and docker-build-cache (native_docker_dangling_and_build_cache_prune): each exit 0, plan of exactly one whole-backend entry with reason null, oracle 0 traced deleting calls. Latest pass: today's Docker stage (tmp/e2e-logs-docker, 2026-10-23 15:11, 7/7) on code identical to HEAD. Sizes are not reported: the plan entry is a whole-backend action. (2) Real-host read-only dry run (Mark's 2026-10-23 ruling), GNU debug build of HEAD source: `nice -n 19 ionice -c3 tmp/target/debug/diskgc ensure --dry-run --json --no-index --timeout 10m --min-free 100% --select profile:P /var/lib/docker` for all three: exit 3, status error, 0 plan, 0 actions, 20 ms: 'query Docker docker ["context", "show"]: exited exit status: 125: unrecognized command'. This host's docker is Podman 5.8.7's CLI shim, no /var/run/docker.sock. Fails closed; client query failures other than ENOENT are errors by design. Documented in docs/safety.md (Docker kinds); classification filed as TASK-113. (3) New ModelHost case podman_compatibility_server_at_the_system_socket_is_unsupported (docker-bundled.yaml with Platform.Name Podman Engine): unsupported_backend 'not Docker Engine' after exactly 3 queries, both storages. Mutation: disabling the starts_with("Docker Engine") check turned it red (1 failed of 8); reverted, 8/8. Earlier this check had no product-side test. (4) Deep review: QA/MPED GO 2026-10-20 at aab98ce; MPED GO today on the close-out diff. verified_with is set for all three profiles. Gate: just check exit 0 (952 passed, 1 ignored). Remaining limit: Docker kinds untested on a real non-dind Docker host.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+docker-build-cache, docker-dangling and docker-unreferenced bind one local system Docker Engine (default context, system socket pinned by fd, server identity, storage roots incl. the bundled containerd root) and prune it via fixed Engine commands, with containers and volumes preserved, proven in a digest-pinned dind fixture and in ModelHost. The real-host dry run on a Podman-shim laptop fails closed with exit 3 (TASK-113 classifies such client failures).
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

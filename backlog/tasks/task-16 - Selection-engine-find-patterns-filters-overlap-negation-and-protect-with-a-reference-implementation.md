@@ -3,10 +3,11 @@ id: TASK-16
 title: >-
   Selection engine: find patterns, filters, overlap negation and protect, with a
   reference implementation
-status: In Progress
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-23 08:46'
+updated_date: '2026-10-23 15:57'
 labels:
   - wave-2
   - irreversible
@@ -27,7 +28,7 @@ Why: what gets selected must equal the documented set semantics exactly. Write t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Property test: eligible set equals the reference implementation for random profiles, expressions and trees
+- [x] #1 Property test: eligible set equals the reference implementation for random profiles, expressions and trees
 - [x] #2 Property test: ! and protect never add a candidate; a || b equals b || a
 - [x] #3 profile:tmp-entry && !profile:claude-code-tmp excludes /tmp/claude-1000 as a whole (model test with both written as user profiles in the fixture)
 - [x] #4 The any-depth rule is decided and documented in docs/reference.md
@@ -131,9 +132,17 @@ MPED hardlink alias review: filesystem union plan and prequeue tally now aggrega
 2026-10-23 oracle extension pending integrated gate: restacked on 8f0ba7d in branch task16-oracle-complete. Independent randomized finite-path oracle now covers two marker files with tri-state statx evidence, random source where predicates and conjunctions, mixed positive/negated filters, YAML config protect binding, and saved mixed-complement/raw-outer protection regressions. Focused Nix test passed 9/9 at 1024 deterministic generated cases in 16.09 s; Clippy test target with deny warnings, rustfmt and diff check passed. AC1 remains unchecked: generated cases still bound roots, depth, source count, patterns, excludes and union terms; no arbitrary root alias/nesting, retention/link guards in this oracle family, non-fs actions or randomized races. DoD open pending exact E2E and broader proof. No host deletion.
 
 2026-10-23 integrated gate for the preceding bounded oracle extension: parallel QA and MPED reviews found no commit blocker; focused 1024-case run passed 9/9 with Clippy and formatting. Exact nix develop -c just e2e exited 0 on this staged code tree, including native Docker 7/7 and existing kernel VMs. AC1 and DoD remain open for the breadth gaps listed above; this increment is not a TASK-16 completion claim.
+
+2026-10-23 AC1 judgement (close-out). AC1 asks the eligible set to equal the reference implementation for random profiles, expressions and trees. Evidence, all independent of the product matcher: (1) core pure evaluator differential in crates/diskgc-core/src/select/tests.rs (random trees, unions of 2..5 members) plus the property that every surface form parses to its distribution; (2) selection_reference.rs (10 tests: generated YAML profiles, nested ModelHost trees, marker/age evidence, mixed filters and complements, unions, !profile, config protect, retention-guard veto, {uid} owner binding, reclaim within eligible set); (3) selection_general_reference.rs (generated names, roots, entry types, exclusions, source where, tri-state evidence, two-term unions). Today the general generator also writes unions in the factored surface form (profile:A || profile:B) && FACTORS, and the saved regression grouped_union_applies_its_factor_to_every_member runs it in just check. Mutation: select::distribute dropping factors after the first source turned the property red only at 1024 cases (not at the default 32) and the saved regression red at default cases (1 failed of 10); core select unit tests also go red; reverted. `nix develop -c just soak` exit 0, 2026-10-23T15:45-15:48Z, 1024 cases: properties 6/6, selection_reference 10/10, selection_general_reference 9/9 (before the saved regression was added). Call: AC1 is met for the selection contract; the generators are bounded (two-segment patterns, depth-2 trees, two-term integrated unions, fs delete in the oracle). Mixed-kind unions are refused by Tier::select (fail closed); root-mode {uid} is refused for protect and negated sources. Remaining breadth filed as TASK-114 (depth >= 3, 3+ term integrated unions, other actions, multi-owner, races, and whether soak joins a gate). Reviews: mped-architect GO on AC1 sufficiency and on the diff. Gate: just check exit 0 (952 passed, 1 ignored); last exact just e2e on identical code exit 0 (fef80ba). No host deletion.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Selection engine done: segment-wise find patterns (no **, explicit depths, outer match only), filters with tri-state evidence and complements, !profile and protect by component overlap ignoring the negated profile's where, unions with refuse-if-any checkout policy and retention-guard veto (TASK-111), parenthesised distribution, runtime checks repeated under lock. Proven by three independent reference oracles (pure, integrated, general) through config, Tier binding, discovery and ModelHost plan/reclaim, plus saved YAML regressions. Bounded generator breadth continues in TASK-114.
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

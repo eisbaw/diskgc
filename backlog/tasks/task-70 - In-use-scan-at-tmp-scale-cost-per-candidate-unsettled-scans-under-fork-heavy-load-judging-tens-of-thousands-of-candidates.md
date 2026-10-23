@@ -3,10 +3,11 @@ id: TASK-70
 title: >-
   In-use scan at /tmp scale: cost per candidate, unsettled scans under
   fork-heavy load, judging tens of thousands of candidates
-status: In Progress
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-10-18 11:06'
-updated_date: '2026-10-23 03:44'
+updated_date: '2026-10-23 15:56'
 labels:
   - wave-2
   - spike
@@ -63,4 +64,12 @@ Design correction before VM execution: the development binary requires genuine P
 2026-10-23 focused disposable NixOS VM check passed: guest root ext4 /dev/vda, genuine Podman with read-only ext4 fixture bind and canary; guest-only drop_caches=3 reduced dentries 103209 to 3733 and Cached 502464 to 43848 KiB. Real binary dry plans judged 40000 unique eligible directories with no errors or fixture changes: first cold ext4 plan 11480 ms and 53652 KiB GNU-time max RSS, warm control 13150 ms and 53856 KiB. Both were under the 10-minute default deadline. This measures cold guest VFS/page cache, not host disk cache or deletion throughput. Exact e2e and parallel QA/MPED remain pending before commit.
 
 2026-10-23 final cold VM rerun after safety review passed: Python optimization-proof guest-token/root/ext4 guards, immediate recheck before drop_caches, read-only ext4 bind verification, final 40000 payload checks, and Podman error diagnostics. Guest dentries 103231 to 3863; Cached 502724 to 43544 KiB. Cold dry plan 12930 ms at 53636 KiB max RSS; warm control 10570 ms at 53916 KiB; both 40000 eligible and unchanged. Host python3 -O negative check refused on missing guest token. Exact nix develop -c just e2e exit 0; parallel qa-test-runner and mped-architect re-reviews GO. Still no host deletion or host diskgc. Real-host deletion throughput and complete ancestor-index heap attribution remain unproven, so TASK-70 stays In Progress.
+
+2026-10-23 close-out (read-only host runs authorized by Mark 2026-10-23). AC3 remeasured on this build after the Read::add HashSet change (HEAD d2be098 source; laptop, Linux 7.2.9, 14 CPUs, 581 processes, load 3-7). Probe: user profile scan-probe (roots: required, paths probe-*, dir) over the repo's tmp/host-dryrun-20261023/scanprobe/root with one old candidate, so the run is startup + one in-use process scan: `diskgc ensure --dry-run --json --no-index --min-free 100% --config <probe>/config.yaml --select profile:scan-probe --roots <probe>/root <probe>/root`, all exit 0, status dry_run, 1 eligible. Static musl default package (nix build .#packages.x86_64-linux.default): 2.22/2.86/4.20 s wall, 4.65-8.28 s user, 5.82-10.45 s sys, ~82 MiB maxRSS. cargo --release glibc build: 0.71/0.73/0.72 s wall. GNU debug build: 2.10/2.54/2.49 s. Built-in /tmp dry runs with the debug build (nice 19, ionice idle, --timeout 10m, /tmp has 182,768 top-level entries), all exit 0 with no errors: claude-code-tmp 337 judged (305 eligible 1260.5 MiB; in_use 9, contains_checkout 17, contains_ipc 3, not_owner 1, contains_special 2) 9.5 s; chromium-tmp 320 (303 eligible 37.8 MiB; contains_ipc 17) 3.5 s; node-compile-cache 367 (all eligible 133.3 MiB) 46.2 s; playwright-tmp 1,497 (1,496 eligible 6.1 MiB; in_use 1) 11.7 s; zephyr-tmp 2,802 (2,796 eligible 210.5 MiB; contains_checkout 6) 8.7 s; renode-tmp 1,912 (all eligible 35.7 MiB) 13.9 s; jest-cache 1 (missing). Max RSS 107-120 MiB. Raw outputs in tmp/host-dryrun-20261023/. Finding: the shipped static musl build pays 3-6x the glibc wall time and ~10x the CPU for one scan (task-68's musl malloc lock contention), filed as TASK-115. Not proven and not in AC: real-host deletion throughput (forbidden here), complete ancestor-index heap attribution. All three ACs are met with evidence; DoD: just check exit 0 today (952 passed), last exact just e2e on the TASK-70 code exit 0 (110927a), docs/safety.md holds the retry limit. No host deletion.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+One in-use scan policy for fs and Cargo dry runs (60 s clear reuse, 500 ms blocking reuse), a strict 1 s deletion freshness bound with one 20 ms retry of an unsettled scan, and HashSet deduplication of environment paths. A 40k-candidate model reclaim needs two scans; a 40k cold ext4 dry plan in a disposable VM takes 11-13 s; a 40k disposable-container reclaim took 34.5 s. Real-host remeasurement on 2026-10-23 (read-only) is in the notes. Open, outside the ACs: the static musl scan cost (TASK-115), real-host deletion throughput, and ancestor-index heap attribution.
+<!-- SECTION:FINAL_SUMMARY:END -->
