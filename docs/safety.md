@@ -1437,6 +1437,18 @@ preflight and used for tally, preflight and execution alike:
   frees is not on the requested filesystem, the tier is skipped
   (`other_fs`); if it cannot be determined, or spans several filesystems,
   it is skipped as `unsupported_backend` and reported.
+- **Server identity:** the bound server must report a `Platform.Name`
+  starting with `Docker Engine`. Podman's compatibility socket linked at the
+  system socket path (podman-docker) passes the endpoint rules and is refused
+  here as `unsupported_backend`.
+
+A missing `docker` client skips the profile (`missing`). Any other failing
+client query is a run error (exit 3), not a skip: a daemon that is not
+running, `EACCES` on the socket, or a `docker` command that is not the
+Docker CLI. On a host whose `docker` is Podman's CLI shim, `docker context
+show` exits 125 and every Docker profile reports that error (observed with
+Podman 5.8.7, TASK-35). This fails closed; whether some of these cases
+should be skips is open in TASK-113.
 
 The Docker 29 storage-root spike uses one `docker info --format '{{json .}}'`
 response from the bound server. `DriverStatus` containing
@@ -1801,10 +1813,17 @@ plus one newline, bounded to 366 days; malformed files, symlinks, FIFOs and
 read errors fail host construction. The offset is fixed for the process and
 advances only the wall-clock input used for age and idleness. It cannot
 change `CLOCK_BOOTTIME` deadlines or kernel timestamps. A development build
-outside a marked container ignores the file. The
+outside a marked container ignores the file. The markers are checked once,
+when the host is constructed: removing them later in the same process does
+not drop the offset (the gate likewise checks once, at the first deleting
+operation), so the offset is only as trustworthy as the container that
+passed that check. The
 `release-without-sandbox-gate` feature compiles out the offset; the
 `release-excludes-clock-offset` check tests the separate 0.1 candidate
-package against a development positive control. The default Nix package
+package against a development positive control, for each of four traces:
+the offset path, the reader's error context and parse diagnostic, and the
+wall-clock overflow message. It is a byte-string check: it would not see an
+equivalent offset written without those strings. The default Nix package
 remains gated. The `release-01-candidate` output is test-only and unapproved
 for deployment until TASK-67 closes. Its /tmp catalog, operator policy and
 deployment evidence remain unresolved.

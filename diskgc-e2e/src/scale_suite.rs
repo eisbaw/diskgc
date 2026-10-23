@@ -193,16 +193,15 @@ fn observed_run(ctx: &Ctx, args: &[&str]) -> Result<(Run, usize), String> {
             if comm.trim() != "diskgc" {
                 continue;
             }
-            if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) {
-                if let Some(kib) = status
+            if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status"))
+                && let Some(kib) = status
                     .lines()
                     .find_map(|line| line.strip_prefix("VmHWM:"))
                     .and_then(|value| value.split_whitespace().next())
                     .and_then(|number| number.parse::<usize>().ok())
-                {
-                    peak_kib = peak_kib.max(kib);
-                    observed = true;
-                }
+            {
+                peak_kib = peak_kib.max(kib);
+                observed = true;
             }
         }
         thread::sleep(Duration::from_millis(20));

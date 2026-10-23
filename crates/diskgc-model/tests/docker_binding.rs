@@ -244,3 +244,26 @@ fn each_docker_profile_uses_one_fixed_whole_backend_action() {
         assert_eq!(host.trace_count(Op::Unlinkat), 0);
     }
 }
+
+/// podman-docker links Podman's compatibility socket at the Docker system
+/// socket path, so endpoint checks alone pass. Only the server identity says
+/// it is not Docker Engine; it must be refused before any storage query.
+#[test]
+fn podman_compatibility_server_at_the_system_socket_is_unsupported() {
+    let model = BUNDLED.replace(
+        r#"version: '{"Platform":{"Name":"Docker Engine - Community"},"Version":"29.8.2"}'"#,
+        r#"version: '{"Platform":{"Name":"Podman Engine"},"Version":"5.8.7"}'"#,
+    );
+    assert_ne!(model, BUNDLED, "fixture server identity line moved");
+    for storage in [Storage::Images, Storage::BuildCache] {
+        let host = ModelHost::from_yaml(&model).expect("valid fake host");
+        let binding = docker_backend::inspect_backend(&host, DOCKER_FS, storage).unwrap();
+        assert!(
+            matches!(binding, Binding::Skipped(ref s) if s.reason == "unsupported_backend"
+                && s.detail.contains("not Docker Engine")),
+            "{binding:?}"
+        );
+        // Context show, context inspect and version; no `docker info`.
+        assert_eq!(host.trace_count(Op::DockerQuery), 3);
+    }
+}

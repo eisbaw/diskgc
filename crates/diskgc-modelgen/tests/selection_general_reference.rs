@@ -48,6 +48,9 @@ struct Case {
     exclude_c: bool,
     protect_c: bool,
     union: bool,
+    // A union written in the factored surface form
+    // `(profile:A || profile:B) && FACTOR...`; both terms then share factor[0].
+    grouped: bool,
 }
 
 fn path(case: &Case, root: usize, slot: usize) -> PathBuf {
@@ -462,6 +465,19 @@ fn expression(case: &Case) -> String {
     if !case.union {
         return term(case.first, case.factor[0]);
     }
+    if case.grouped {
+        assert_eq!(case.factor[0], case.factor[1], "a group shares its factors");
+        // The same factors as the distributed form below, so the oracle's
+        // per-term set expression is unchanged: grouping is pure syntax.
+        let factored = term(case.first, case.factor[0]);
+        let factors = factored
+            .strip_prefix(&format!("profile:{}", NAMES[case.first]))
+            .expect("term starts with its profile");
+        return format!(
+            "(profile:{} || profile:{}){factors}",
+            NAMES[case.first], NAMES[case.second]
+        );
+    }
     let member = |text: String| {
         if text.contains(" && ") {
             format!("({text})")
@@ -499,6 +515,7 @@ fn saved_case() -> Case {
         exclude_c: true,
         protect_c: false,
         union: false,
+        grouped: false,
     }
 }
 
@@ -530,6 +547,54 @@ fn excluded_leaf_and_other_root_negation_leave_only_first_root_y_file() {
     let only_y = BTreeSet::from([PathBuf::from("/tmp/sel/a0/y0")]);
     assert_eq!(expected(&case), only_y, "oracle fixture changed");
     assert_eq!(eligible, only_y, "{plan:#?}");
+}
+
+/// Saved boundary for the factored surface form: a group's factors apply to
+/// every source in it, not only the first. Runs in `just check`, where the
+/// generated property's 32 cases do not reliably reach this shape.
+#[test]
+fn grouped_union_applies_its_factor_to_every_member() {
+    let mut case = saved_case();
+    case.present = bit(0, 0) | bit(0, 1);
+    case.files = 0;
+    case.tagged = bit(0, 1);
+    case.patterns = [1, 2, 1]; // a*, b*, a*
+    case.extra_patterns = [14; 3];
+    case.excludes = [0; 3];
+    case.types = [0; 3]; // directories
+    case.roots = [1; 3];
+    case.first = 0;
+    case.second = 1;
+    case.factor = [2, 2]; // !filter:has-tag
+    case.exclude_c = false;
+    case.union = true;
+    case.grouped = true;
+    let selection = expression(&case);
+    assert_eq!(selection, "(profile:a || profile:b) && !filter:has-tag");
+    let specs = parse_profiles(&profiles(&case)).expect("saved profiles");
+    let library = Library::with_user_profiles(&specs).expect("saved profile library");
+    let tier = Tier::select(&selection, &library, None, 1000).expect("saved selection");
+    let request = Request {
+        path: PathBuf::from("/tmp"),
+        min_free: parse_size("100%").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier,
+    };
+    let host = ModelHost::new(&model(&case)).expect("saved model");
+    let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
+    assert!(plan.errors.is_empty(), "{plan:#?}");
+    let eligible = plan
+        .plan
+        .iter()
+        .filter(|entry| entry.reason.is_none())
+        .map(|entry| entry.candidate.clone())
+        .collect::<BTreeSet<_>>();
+    // b0 is tagged, so the shared !filter:has-tag must keep it out.
+    let only_a = BTreeSet::from([PathBuf::from("/tmp/sel/a0")]);
+    assert_eq!(expected(&case), only_a, "oracle fixture changed");
+    assert_eq!(eligible, only_a, "{plan:#?}");
 }
 
 #[test]
@@ -865,7 +930,11 @@ proptest! {
         first in 0usize..2, second in 0usize..2,
         factor in prop::array::uniform2(0u8..7),
         exclude_c in any::<bool>(), protect_c in any::<bool>(), union in any::<bool>(),
+        grouped in any::<bool>(),
     ) {
+        // The grammar requires a factor after a group (no bare parentheses).
+        let grouped = union && grouped && (factor[0] != 0 || exclude_c);
+        let factor = if grouped { [factor[0]; 2] } else { factor };
         // A negated or protected profile treats incomplete discovery as a
         // run error. Saved boundaries check fail-closed behavior separately;
         // this property compares eligible sets only for complete discovery.
@@ -873,7 +942,7 @@ proptest! {
         let unknown_flag = if exclude_c || protect_c { 0 } else { unknown_flag };
         let case = Case { present, files, tagged, flagged, unknown_tag, unknown_flag,
             digits, patterns, extra_patterns, excludes, types,
-            roots, source_where, first, second, factor, exclude_c, protect_c, union };
+            roots, source_where, first, second, factor, exclude_c, protect_c, union, grouped };
         prop_assume!((0..3).all(|source| sample_and_exclusion(&case, source).is_some()));
         let yaml = profiles(&case);
         let expr = expression(&case);

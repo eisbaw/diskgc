@@ -34,23 +34,35 @@ const USAGE: &str = "\
 usage: diskgc-e2e-release-check --shipped BIN --dep-tree FILE --control BIN\n\
        diskgc-e2e-release-check --clock-offset-excluded BIN --clock-offset-control BIN";
 
-/// The complete runtime switch for TASK-89. The positive control is a
-/// development binary built from the same source, while the candidate
-/// package has the release-without-sandbox-gate feature enabled.
-const CLOCK_OFFSET_NEEDLE: &str = "/.diskgc-test-clock-offset";
+/// What the TASK-89 test clock offset compiles to: its file path, the
+/// error context and parse diagnostic of its reader, and the overflow
+/// message of the offset arithmetic in `LinuxHost::wall_clock`. One needle
+/// would show the path is gone, not that the reader and the arithmetic are.
+/// The positive control is a development binary built from the same source
+/// (each needle must be in it, so a reworded message fails loudly instead of
+/// passing vacuously); the candidate package has the
+/// release-without-sandbox-gate feature enabled and must contain none.
+const CLOCK_OFFSET_NEEDLES: [&str; 4] = [
+    "/.diskgc-test-clock-offset",
+    "read clock offset",
+    "must contain decimal seconds and one newline",
+    "test clock offset exceeded timestamp range",
+];
 
 pub fn check_clock_offset(excluded: &[u8], control: &[u8]) -> Vec<String> {
     let mut problems = Vec::new();
-    if contains(excluded, CLOCK_OFFSET_NEEDLE) {
-        problems.push(format!(
-            "release candidate contains test clock offset path {CLOCK_OFFSET_NEEDLE:?}"
-        ));
-    }
-    if !contains(control, CLOCK_OFFSET_NEEDLE) {
-        problems.push(format!(
-            "positive control: development binary lacks test clock offset path \
-             {CLOCK_OFFSET_NEEDLE:?}; the exclusion check would be vacuous"
-        ));
+    for needle in CLOCK_OFFSET_NEEDLES {
+        if contains(excluded, needle) {
+            problems.push(format!(
+                "release candidate contains test clock offset trace {needle:?}"
+            ));
+        }
+        if !contains(control, needle) {
+            problems.push(format!(
+                "positive control: development binary lacks test clock offset trace \
+                 {needle:?}; the exclusion check would be vacuous"
+            ));
+        }
     }
     problems
 }
@@ -213,19 +225,23 @@ mod tests {
 
     #[test]
     fn clock_offset_exclusion_has_a_positive_control() {
-        assert!(check_clock_offset(b"feature build", CLOCK_OFFSET_NEEDLE.as_bytes()).is_empty());
-        assert_eq!(
-            check_clock_offset(
-                CLOCK_OFFSET_NEEDLE.as_bytes(),
-                CLOCK_OFFSET_NEEDLE.as_bytes()
-            )
-            .len(),
-            1
-        );
-        assert_eq!(
-            check_clock_offset(b"feature build", b"development without offset").len(),
-            1
-        );
+        let all = CLOCK_OFFSET_NEEDLES.concat();
+        assert!(check_clock_offset(b"feature build", all.as_bytes()).is_empty());
+        // Each needle is checked on its own in both directions: one leaked
+        // trace fails, and one missing from the control fails.
+        for needle in CLOCK_OFFSET_NEEDLES {
+            assert_eq!(
+                check_clock_offset(needle.as_bytes(), all.as_bytes()).len(),
+                1,
+                "{needle}"
+            );
+            let control = all.replace(needle, "");
+            assert_eq!(
+                check_clock_offset(b"feature build", control.as_bytes()).len(),
+                1,
+                "{needle}"
+            );
+        }
     }
 
     const TREE: &str = "\

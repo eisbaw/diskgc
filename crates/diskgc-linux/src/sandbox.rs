@@ -684,6 +684,11 @@ mod tests {
         let root = TempRoot::new("clock-offset");
         root.write(".diskgc-test-clock-offset", b"172800\n");
         assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
+        // A Podman toolbox or distrobox on a developer host has containerenv
+        // but no image marker: still not a test sandbox.
+        root.write("run/.containerenv", b"");
+        assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
+        std::fs::remove_file(root.0.join("run/.containerenv")).unwrap();
         root.write(".diskgc-test-sandbox", MARKER_CONTENT);
         assert_eq!(clock_offset_under(&root.0).unwrap(), 0);
         root.write("run/.containerenv", b"");

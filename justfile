@@ -48,6 +48,7 @@ check:
 e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
+    nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
@@ -70,6 +71,7 @@ e2e-vm-cold-scale: _gcroot-dev
 e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
+    nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset

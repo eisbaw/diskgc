@@ -1290,8 +1290,7 @@ mod tests {
         let mut changed = model.clone();
         changed.mounts[0].fs = "changed".into();
         let error = validate_stage_partition(&vector.host, &[&changed])
-            .err()
-            .expect("changed mount geometry must fail");
+            .expect_err("changed mount geometry must fail");
         assert!(error.contains("beyond the checked"), "{error}");
 
         let mut added = model;
@@ -1300,8 +1299,7 @@ mod tests {
             NodeSpec::File(FileSpec::default()),
         );
         let error = validate_stage_partition(&vector.host, &[&added])
-            .err()
-            .expect("unlisted stage node must fail");
+            .expect_err("unlisted stage node must fail");
         assert!(error.contains("absent from the checked vector"), "{error}");
 
         let mut paths = vector.host.tree.keys();
@@ -1315,8 +1313,7 @@ mod tests {
         fresh_stage.tree.remove(&first);
         fresh_stage.tree.remove(&missing);
         let error = validate_stage_partition(&vector.host, &[&old_stage, &fresh_stage])
-            .err()
-            .expect("node omitted from both historical stages must fail");
+            .expect_err("node omitted from both historical stages must fail");
         assert!(error.contains("omits checked node"), "{error}");
         assert!(error.contains(&missing.display().to_string()), "{error}");
 
@@ -1324,8 +1321,7 @@ mod tests {
         old.processes.clear();
         old.locks.clear();
         let error = validate_stage_partition(&vector.host, &[&old, &vector.host])
-            .err()
-            .expect("duplicate stage tree must fail");
+            .expect_err("duplicate stage tree must fail");
         assert!(error.contains("duplicates node"), "{error}");
 
         let process_vector = ProfileVector::parse(IN_USE_VECTOR).expect("in-use vector");
@@ -1336,8 +1332,7 @@ mod tests {
         let mut no_process = process_vector.host.clone();
         no_process.processes.clear();
         let error = validate_stage_partition(&process_vector.host, &[&no_process])
-            .err()
-            .expect("missing final process cohort must fail");
+            .expect_err("missing final process cohort must fail");
         assert!(
             error.contains("final stage omits or changes checked processes"),
             "{error}"
@@ -1352,8 +1347,7 @@ mod tests {
         });
         let no_lock = process_vector.host.clone();
         let error = validate_stage_partition(&with_lock, &[&no_lock])
-            .err()
-            .expect("missing final lock cohort must fail");
+            .expect_err("missing final lock cohort must fail");
         assert!(
             error.contains("final stage omits or changes checked locks"),
             "{error}"
