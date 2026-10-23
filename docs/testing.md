@@ -239,31 +239,78 @@ redacted. The sketch above is the fixture
 through the executor (`tests/sketch.rs`: `ensure --min-free 15G --select
 profile:cargo-target --roots /home/mark/src /home/mark/src`).
 
-**Checked-in profile vectors.** `crates/diskgc-model/tests/models/profiles/*.yaml`
-wrap an ordinary `host_model: 1` under `host:` with a selected built-in
-`profile`, `path`, optional `roots`, `min_free`, and explicit `expect` data.
-The shared `tests/profile_vectors.rs` runner loads every YAML file, runs
-`--dry-run` and reclaim on *separate* `ModelHost` copies, and compares the
-complete plan, action, and skip sets. `expect.removed` names paths that
-existed before reclaim and must disappear; `expect.preserved` names paths
-that existed before reclaim and must survive, including missing-source
-outputs that discovery cannot plan. This lets Cargo retain its tagged target
-directory while removing contents. The runner checks that dry-run never
-called `unlinkat`, that each action has a removed-path postcondition, and
-that reclaim unlinked nothing outside the expected actions. The Python
-vector's matcher mutation changes every
-`__pycache__` path pattern to `__wrong_cache__`; the unchanged vector then
-fails at its expected plan, proving the gate bites.
+**Vector corpus.** A *vector* is one reviewable `ensure` scenario as data:
+the invocation, an ordinary `host_model: 1` under `host:`, and the expected
+results, written from the docs and never derived from diskgc's report. The
+format is `profile_vector: 1` (it began as one built-in profile per file;
+every key added since is optional, so those files are unchanged). One
+runner, `crates/diskgc-model/src/profile_vector.rs`, drives
+`diskgc_core::invocation::ensure`, the same composition the binary runs
+(configuration, privileges, owners, protections, tiers in policy order,
+executor), on two fresh `ModelHost`s: one `--dry-run`, one reclaim.
+`tests/profile_vectors.rs` runs every YAML file below the corpus roots and
+names every failing file:
 
-To add a vector, copy a case in that directory, keep `profile_vector: 1`,
-model the candidate and protected neighbors under `host.tree`, and write
-the expected plan and reclaim results independently of diskgc's report.
-Put the candidate's recorded source text in a file's `content:` when the
-profile reads one. Use `processes[].fds` for an in-use file and model
-`mtime` for an age boundary. Then run
-`nix develop -c cargo test -p diskgc-model --test profile_vectors` and
-`nix develop -c just check`. Unknown YAML keys and invalid host references
-fail loading; a new YAML file is picked up without registering a Rust test.
+- `tests/models/profiles/`: one vector per built-in, kept in place because
+  the container replays (diskgc-e2e) embed these files;
+- `tests/vectors/<area>/`: `walk` (the eligibility walk and its corner
+  cases), `inuse`, `select` (filters, negation, unions, selection errors),
+  `config` (protect, groups, owners and `--allow-root`, static errors),
+  `exit` (exit codes and tier order), `races` (events between checks and
+  deletion), `backend` (Docker bindings and prunes) and `builtins` (each
+  built-in source in each role below).
+
+The invocation keys: `profile` (shorthand for `select: profile:NAME`) or
+`select` (`--select`; neither: the configured groups run), `config` (the
+configuration file's text; absent: none was found), `user_profiles`
+(without a `config`: added to the built-ins), `roots` (`--roots`), `path`
+(PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
+`tally_budget`, `allow_root`, `users` (the account resolver for `owners:`
+names) and `seed` (`DISKGC_SEED`). A configuration that does not parse
+gives the binary's exit-2 report before the host is touched.
+
+`expect` holds: `plan` (the complete dry-run plan: `candidate`, `reason`,
+`source`), `dry_run_exit` (default 0), `dry_run_errors` and `errors`
+(complete lists of `{cause, contains}`), `reclaim_exit`, `actions` (the
+complete set), `removed` (paths that existed and must be gone; Cargo keeps
+its tagged root while its contents go), `skipped` (complete:
+`candidate`, `reason`, and optionally `process_blockers` as `{pid,
+evidence}`, `[]` meaning the report's `null`), `preserved` (paths that
+must survive: they existed before reclaim or an event makes them),
+`commands` (optional: every command or Docker run in order, `{cwd,
+argv}`), and `report` / `dry_run_report` (optional subsets of the JSON
+report, e.g. `{status: met, seed: 42}`).
+
+Every vector is also held to invariants it does not state: the dry run
+never calls `unlinkat` or `fchmod` and runs no command; every `unlinkat`
+lies inside an expected action; every deleting action has a `removed`
+postcondition; a command action runs only in its checked candidate or
+that candidate's parent; no event is left unfired.
+
+Completeness is enforced by the results, not by tags in the files:
+`every_skip_reason_has_a_vector` needs, for each reason in `Reason::ALL`
+and in reference.md's JSON enum, a vector whose dry-run plan or reclaim
+skips show it (the few exemptions are listed with their reason in the
+test, and an exemption a vector covers fails it);
+`every_builtin_source_has_match_in_use_guarded_and_nested_vectors` needs,
+for each built-in source run unchanged, an action of it, an `in_use` or
+`locked` skip, a `protected` or `excluded` skip, and a nested-guard skip
+(`kept`, `contains_checkout` or `contains_special`); Docker prunes need
+only the action. `wrong_python_matcher_is_rejected_by_the_checked_in_vector`
+proves one vector bites a matcher mutation; TASK-121's notes record which
+vectors kill which mutation of each safety guard.
+
+To add a vector: copy the nearest one in its area, model the candidate
+and its neighbours under `host.tree` (the schema is
+`host-model.schema.json`), write `expect` from the docs, then run
+`nix develop -c cargo test -p diskgc-model --test profile_vectors`. When
+the first run disagrees, decide from the docs which side is wrong; a
+known product defect is pinned only with a comment naming its task. An
+event addressed by `nth` depends on the call sequence:
+`VECTOR_TRACE=<part of the file name>` prints the reclaim run's call
+trace. Unknown keys and invalid host references fail loading, a new file
+is picked up without registering a Rust test, and any other file type in
+the corpus is an error. Then run `nix develop -c just check`.
 
 `checked_in_python_profile_vector_replays_in_container` embeds the Python
 positive/checkout YAML case into the destructive-test binary, materializes
@@ -316,7 +363,10 @@ How the format reads (the schema documents every key):
   (default 0); `command_error_after_start: true` models a forwarding or
   wait error after spawn, so the executor must still report an action and
   observed space change. The model records argv, environment and checked
-  cwd but starts no real child. `locks` give their holder an fd of its own. As on
+  cwd but starts no real child. The modelled command path is `/usr/bin:/bin`:
+  a `docker:` answer is given only while an executable `docker` is there
+  (otherwise ENOENT, as `LinuxHost`'s spawn: no client installed).
+  `locks` give their holder an fd of its own. As on
   `LinuxHost`, an empty fd table, map or environment, or no `exe`, reads
   as `Failed` (an
   empty read of a live process is never the answer there). diskgc itself
@@ -332,8 +382,10 @@ How the format reads (the schema documents every key):
   its `/proc` reads go from then on), `advance`
   (a clock jump, e.g. a suspend), `fail` (the call fails with the named
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
-  trigger, `when: before`, on `openat2`, `statx`, `read_dir`, `unlinkat`,
-  `fchmod`, `bound_unix_sockets` or `statvfs`), `mount` (`{id, at, fs, dev,
+  trigger, `when: before`, on `openat2`, `statx`, `read_link`, `read_dir`,
+  `read_head`, `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
+  `proc_identity`, `proc_identity_released`, `docker_query` or
+  `run_command`), `mount` (`{id, at, fs, dev,
   size}`: a fresh filesystem mounted on an existing directory, e.g. a FUSE
   mount appearing in a candidate). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the

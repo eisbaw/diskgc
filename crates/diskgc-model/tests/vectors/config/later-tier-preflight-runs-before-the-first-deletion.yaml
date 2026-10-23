@@ -1,0 +1,42 @@
+# Every tier's run-time environment check (a command's program resolved
+# on the command path) finishes before the first deletion (PRD, What bad
+# looks like: a tier's run-time checks run only after other tiers
+# deleted). The program disappears right after the first unlink: a
+# preflight made in time saw it, so the pressure tier's command still
+# runs; one made after the deletion would exclude the tier.
+profile_vector: 1
+config: |
+  version: 1
+  groups:
+    - name: stale
+      tiers:
+        - {name: zephyr, select: profile:zephyr-tmp}
+    - name: pressure
+      tiers:
+        - {name: pip, select: profile:pip-cache, roots: [/home/tester]}
+path: /
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /home/tester/.cache/pip: {http: {size: 4K}}
+  events:
+    - at: {op: unlinkat, path: /tmp/zephyr-a/f, nth: 1, when: after}
+      remove: /usr/bin/pip
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+    - {candidate: /home/tester/.cache/pip}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-a, /home/tester/.cache/pip]
+  removed: [/tmp/zephyr-a]
+  skipped: []
+  preserved: [/home/tester/.cache/pip/http]
+  commands:
+    - {cwd: /home/tester/.cache/pip, argv: [/usr/bin/pip, --cache-dir, /home/tester/.cache/pip, cache, purge]}
