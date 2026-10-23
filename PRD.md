@@ -99,7 +99,9 @@ kinds), and where those guarantees end. The protocols are in
   the rule applies to every built-in.
 - Cargo targets only inside profile directories whose locks diskgc holds;
   no Cargo lock file is ever deleted or moved.
-- No symlink followed, no mount crossed.
+- No symlink followed, no mount crossed when finding, walking and
+  deleting candidates. (Liveness evidence reads paths a process names by
+  resolving them read-only in that process's own root.)
 - The index never decides safety; every check runs at deletion time.
 - Development builds refuse to delete anything outside the test
   containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)), so

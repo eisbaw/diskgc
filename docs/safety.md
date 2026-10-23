@@ -898,7 +898,19 @@ sources pinned in the Nix test image (`_pytest/pathlib.py`,
 - `--basetemp=DIR` (on the command line, in `PYTEST_ADDOPTS`, or in a
   project's `addopts`) uses `DIR` itself: pytest empties and creates it,
   makes no number, no `pytest-current` and no `.lock`. Any path is
-  accepted, including one shaped like a numbered session.
+  accepted. A `DIR` not shaped `pytest-of-<user>/pytest-<N>` is outside
+  the matching set: not a candidate, so not a hole. One shaped like a
+  numbered session is treated below.
+- pytest's own cleanup (`make_numbered_dir_with_cleanup` →
+  `cleanup_numbered_dir` → `try_cleanup` → `ensure_deletable`) runs when a
+  session ends, after that session's own directory exists, so its `M`
+  counts it. It deletes every entry of `P` whose name starts with
+  `pytest-` (case-insensitive) and whose suffix Python's `int()` reads as
+  at most `M − keep`, unless the entry is a symlink, or its `.lock` is a
+  file whose mtime is at most three days older than the new session's
+  directory, or the lock cannot be examined. It does not look at the pid
+  in the lock, and it does not know who made the directory: a lockless
+  `--basetemp` run shaped like a session is deleted like any other.
 
 For a session `S = P/pytest-<N>`, its `pytest-of-<user>` directory `P` and
 its temp root `R` (the parent of `P`), with `M` the largest number among
@@ -916,11 +928,26 @@ short is `producer_unknown`):
    (`in_use`, evidence `command_line` or `environment`). This veto comes
    before rules 3 and 4: a live `--basetemp` run is kept whatever its
    rank.
-3. *Rank.* `N ≤ M − 3`, and `S` has no `.lock` or its `.lock` is more than
-   three days old by mtime: reclaimable. pytest's cleanup at the end of
-   any later session with the default retention would delete `S` by the
-   same rule (it keeps a present lock for three days, whatever its pid),
-   whoever made `S`. *(producer-equivalent)*
+3. *Rank.* `N ≤ M − 3`, and `S` has no `.lock` or its `.lock` is a
+   regular file more than three days old by mtime: reclaimable.
+   *(producer-equivalent)* The invariant, with pytest's default retention
+   (`tmp_path_retention_count` 3): **diskgc never removes a pytest session
+   that pytest's own next cleanup would keep.** Against pytest 9.1.1:
+   pytest's `M` is at least diskgc's (it counts the new session, and its
+   `int()` accepts every name diskgc's strict `pytest-<digits>` accepts);
+   its lock age is measured from the new session, later than diskgc's
+   now; it deletes lockless entries whoever made them; and every case
+   where diskgc keeps more is stricter (rule 1 keeps a lock whose pid may
+   be in use, of any age; rule 2 keeps a named session; a lock that is not
+   a regular file is `producer_unknown`, where pytest's `is_file()` would
+   call it absent). So a lockless `--basetemp` run shaped like a session
+   with `N ≤ M − 3`, live or not, is deleted by pytest's next cleanup too;
+   diskgc may act sooner, which adds no case pytest would not reach. The
+   three-day dead-lock rule is pytest's own; diskgc does not claim to be
+   sounder than pytest about a lock older than that whose owner it
+   cannot see. The one sub-case where the invariant does not hold is a
+   retention above 3 configured in a project: diskgc cannot read it, so
+   it is a stated residual, not a detected one.
 4. *Unused root.* Otherwise reclaimable only when no visible process could
    be using `R` as its temp root (below); else retained (`in_use`,
    evidence `temp_root`, the processes listed). *(heuristic)*
@@ -928,16 +955,17 @@ short is `producer_unknown`):
 *Temp-root users.* A process could use `R` when one of these, looked up in
 its own root and mount namespace, is `R` by device and inode: the values
 of `PYTEST_DEBUG_TEMPROOT`, `TMPDIR`, `TEMP` and `TMP` in its initial
-environment; always `/tmp`, `/var/tmp` and `/usr/tmp`; and its working
-directory (Python's last fallback). The lookup opens `/proc/<pid>/root` as
-a directory and resolves an absolute value below it with
-`openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)`, so an absolute symlink
-resolves in the process's root, as pytest's `resolve()` does there, never
-in diskgc's; a relative value is resolved the same way from
-`/proc/<pid>/cwd`, opened as a directory, because Python makes it absolute
-against the working directory. A value that cannot be resolved this way
-(a `..` that would climb out of the process's root, an unreadable `cwd`)
-counts as `R`. Results are `statx`ed with `AT_NO_AUTOMOUNT |
+environment; always `/tmp`, `/var/tmp` and `/usr/tmp`; and, as an extra
+that can only retain, its current working directory. The lookup opens
+`/proc/<pid>/root` as a directory and resolves an absolute value below it
+with `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)`, so an absolute
+symlink resolves in the process's root, as pytest's `resolve()` does
+there, never in diskgc's. A relative value is not resolved: Python makes
+it absolute against the working directory at the time it looked, and the
+process may have changed directory since, so the current `cwd` proves
+nothing. A process with a relative value, or one that cannot be resolved
+(a `..` that would climb out of its root), makes rules 2 and 4
+`producer_unknown` for every session of that scan. Results are `statx`ed with `AT_NO_AUTOMOUNT |
 AT_STATX_DONT_SYNC` and deduplicated by the identity of the starting
 directory plus the value. A process of any user whose environment, root or
 working directory cannot be read could use every root, unless In use
@@ -947,14 +975,20 @@ excuses it at a privilege boundary.
 and each value in its initial environment, is checked twice. By bytes: it
 contains `S`'s absolute path followed by its end or a `/`. By identity:
 the value itself, the part after its first `=` (`--basetemp=DIR`), and an
-element following a separate `--basetemp` element, when it is a path, is
-resolved like a temp-root value (in the process's root, or from its
-working directory when relative), one component at a time; it names `S`
-when any resolved prefix is `S` by device and inode. This catches a live
-`--basetemp` run shaped like a session, through a symlink or a bind mount
-too, and the `PYTEST_ADDOPTS` form. A command line or environment that
-cannot be read names every session. A `--basetemp` in a project's
-configuration file is on neither and is a residual.
+element following a separate `--basetemp` element, when it is an absolute
+path, is resolved like a temp-root value in the process's root, one
+component at a time; it names `S` when any resolved prefix is `S` by
+device and inode. This catches a live `--basetemp` run shaped like a
+session, through a symlink or a bind mount too, and the `PYTEST_ADDOPTS`
+form. A relative `--basetemp` value, like a relative temp-root value,
+makes rules 2 and 4 `producer_unknown` for every session of the scan. A
+command line or environment that cannot be read names every session. A
+`--basetemp` in a project's configuration file is on neither: with
+`N ≤ M − 3` rule 3's invariant covers it; above the rank it is a residual
+of rule 4. It needs a configuration file that hard-codes a path below a
+temp root no process uses as its temp root; the roots in the matching set
+are either shared and in use (`/tmp`, `/tmp/claude-{uid}`) or have random
+names (`nix-shell.*`, `tmp.*`) that a configuration file cannot know.
 
 Rules 2 and 4 need every Owner PID precondition except the filesystem one
 (they resolve paths, not pids); elsewhere they give `producer_unknown`.
@@ -983,23 +1017,23 @@ microseconds) a live session looks lockless. The built-in's `min_idle_for`
 in each is that run's temporary files, so the run may fail and is run
 again):
 
-- a live session without a lock (`keep` 0) or a live `--basetemp` run
-  from a configuration file, with `N ≤ M − 3`: pytest itself deletes it
-  when any later session with the default retention ends; diskgc may
-  delete it sooner, and does so even when the later sessions keep more
-  than three;
-- a finished session a project keeps on purpose with
-  `tmp_path_retention_count` above 3 (to inspect failures): rule 3 deletes
-  it once `N ≤ M − 3`. A policy loss, not a liveness one;
+- a session with `N ≤ M − 3` in a `P` whose project configures
+  `tmp_path_retention_count` above 3: pytest would keep it, diskgc
+  removes it. Whether it is finished (kept to inspect failures, a policy
+  loss) or live without a lock, diskgc cannot tell the configuration;
+- a live session without a lock, or a `--basetemp` run, with `N ≤ M − 3`
+  under the default retention: not a residual of diskgc's; pytest's next
+  cleanup deletes it as well (rule 3's invariant), diskgc only sooner;
 - a live session without a lock with `N > M − 3`, whose pytest process did
   not take its temp root from its initial environment (`os.environ` or
   `tempfile.tempdir` changed inside a long-lived Python program that then
   calls `pytest.main()`), whose `--basetemp` comes from a configuration
   file, or that is not visible to diskgc or is excused by a privilege
   boundary;
-- a detached child of an ended session, with `N > M − 3` or a lock more
-  than three days old, that keeps writing in `S` with a temp root other
-  than `R` in its initial environment.
+- a detached child of an ended session that keeps writing in `S`, with
+  `N > M − 3` and a temp root other than `R` in its initial environment.
+  (With `N ≤ M − 3` and a lock older than three days it is rule 3's case:
+  pytest's own cleanup would delete `S` too.)
 
 Not matched: `garbage-<uuid>` directories that a pytest killed during its
 own cleanup leaves in `P`; a known gap of the matching set.
@@ -1056,13 +1090,26 @@ longest):
    it reads file content only with `O_NOATIME` (the files are the user's,
    so the flag is permitted) and otherwise only lists and `statx`es.
    Failure: `not_idle`.
-3. *No visible use.* No visible process has an fd, cwd, root or mapping on
-   any inode of the project tree, or a path inside the project in its
-   initial environment, by the same rules as In use, from the same scan.
-   Failure: `in_use`.
+3. *No visible use.* No visible process uses a path inside the project.
+   "Inside" is decided by path, not by the set of inodes the walk saw, so
+   it covers VCS metadata and the other dependency directories the walk
+   leaves out: each of the process's working directory, root, open fds,
+   mapped files and absolute paths in its initial environment is resolved
+   in the process's own root (as for temp-root users, `RESOLVE_IN_ROOT`,
+   one component at a time; a fd's or mapping's link text, with a
+   ` (deleted)` suffix removed), and it is inside when any resolved prefix
+   is the project directory by device and inode. A process whose entries
+   cannot be read is handled as in In use; one that stays unreadable
+   makes the answer `producer_unknown`. From the same scan as the in-use
+   check. Failure: `in_use`.
 
 The checkout guard keeps its default, `checkouts: refuse`: an editable
-install can put a real checkout under `.venv/src`.
+install can put a real checkout under `.venv/src`. A symlinked
+`node_modules` or `.venv` is never a candidate (discovery reports no
+symlink and follows none). In a pnpm layout, `node_modules` holds
+symlinks and hard links into pnpm's store; the walk follows no symlink,
+and removing a hard link leaves the store's copy, so only the project's
+view goes.
 
 *Floor.* The 30-day `min_idle_for` of the built-ins
 ([Liveness contracts](reference.md#liveness-contracts)) is chosen because a reinstall costs minutes
@@ -1072,20 +1119,33 @@ reinstall on return; 30 days is also the floor of `xdg-cache-entry-v2`. A
 tier may demand longer.
 
 *Residuals* (loss: a reinstall from the project's manifest, which can
-resolve different versions where no lockfile pins them):
+resolve different versions where no lockfile pins them; Mark accepted
+this class of loss on 2026-10-23):
 
 - a project used without any change, without an atime update (`noatime`)
   and without a process visible at the check: a tool installed in a
   project directory and run from a timer, a project about to be resumed
   after the floor;
+- the `relatime` boundary: a read updates atime only when the old atime is
+  older than the file's mtime or ctime or more than a day old, so the last
+  read can be up to a day older than the newest atime shows; with a
+  30-day floor this moves the boundary by at most a day;
+- a dependency file edited by hand inside `node_modules` or `.venv`: a
+  reinstall does not recreate the edit. `patch-package` and similar tools
+  keep their patches in the project and reapply them, so that common
+  case is rebuildable; a manual edit is not. The operator's remedy is a
+  `.diskgc-keep` file in the dependency directory or a `protect` entry
+  (Mark's acknowledgement of this residual is requested in TASK-112);
 - use through a path outside the project (a symlink into
   `node_modules`, `NODE_PATH`, a `.venv` activated from elsewhere) by a
   process not running at the check;
 - a change only inside another dependency directory of the same name or
   only in VCS metadata;
 - a workspace that is neither declared (`workspaces`,
-  `pnpm-workspace.yaml`) nor a version-control top level: its members are
-  judged by their own directories only.
+  `pnpm-workspace.yaml`) nor a version-control top level, or whose
+  member is reached through a bind mount or a supplied root that hides the
+  real workspace root: its members are judged by their own directories
+  only.
 
 *Stronger alternative (not designed further).* A cooperative protocol:
 every consumer holds a shared project lock while it uses dependencies;
