@@ -1,10 +1,10 @@
 ---
 id: TASK-40
 title: 'Library: language and package caches, verified'
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 03:37'
+updated_date: '2026-10-23 15:24'
 labels:
   - wave-4
   - config
@@ -45,6 +45,8 @@ Real-host read-only diskgc ensure --dry-run --no-index on 2026-10-20, using the 
 2026-10-20 Jest follow-up in /tmp/diskgc-task40-remaining (uncommitted, pending integration): npm lock pins Jest package 30.2.0; Nix npmDepsHash pins the closure. Pinned CLI showConfig default cache is /tmp/jest_rs. New fixed-root jest-cache uses the temp-prefix v1 preset and passes the exact candidate to jest --config {} --cacheDirectory {path} --clearCache from its parent; the empty CLI config avoids loading project JS config. Core golden and model discovery tests passed. Focused real Nix container test passed 1/1: exact measured cache deleted, available bytes increased, deletion Oracle clean, decoy outside candidate preserved. Full just check passed before the additional model test; that focused model test passed after. Gradle remains planned: official Gradle directory-layout docs describe retention-based automatic cleanup after builds, not an exact whole ~/.gradle/caches command. Maven remains planned: official dependency:purge-local-repository is scoped to a project dependency graph, not the measured whole ~/.m2/repository. Neither has a verified exact-path whole-repository cleaner; no unsafe profile shipped. No host deletion.
 
 2026-10-20 integrated pinned Jest 30.2.0 cleaner in c8ade1b. Focused Jest E2E passed exact measured-cache deletion with positive space delta, deletion oracle clean and decoy preserved; final nix develop -c just e2e passed 119/119; QA and MPED reviews GO. Gradle and Maven remain planned because their documented cleanup does not bind a whole measured cache/repository. No host deletion. Task stays In Progress for those named profiles.
+
+Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Library breadth waits for the producer-liveness cornerstone (D3: 'idle' = newest mtime/ctime cannot tell an active read-mostly tree from an abandoned one).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

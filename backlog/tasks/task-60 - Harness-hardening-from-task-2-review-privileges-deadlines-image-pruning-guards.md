@@ -6,14 +6,14 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-22 19:30'
+updated_date: '2026-10-23 15:24'
 labels:
   - wave-1
   - hardening
   - testing
 dependencies:
   - TASK-2
-priority: low
+priority: high
 ---
 
 ## Description
@@ -39,6 +39,8 @@ From the task-4 review (mped), harness items: H1 mount the Cargo toolchain closu
 H2 (per-image opt-out of the /nix/store bind mount and the toolchain manifest) moved to task-63, the Debian / static-binary e2e variant, for the 0.1 ensure MVP (2026-10-18).
 
 2026-10-22 gate reliability evidence from TASK-16 extension: exact just e2e fast Nix suite ran 219 cases at 14-way concurrency with one global 300s deadline; 218 passed and cargo_race_6_killed_at_seeded_positions_the_next_build_succeeds@1.99.1 was stopped by that global deadline after completing 106/119 successful seeded kill/recovery cycles, with about 60s of suite time remaining when it started. The suite ended at 301.7s; a west source-anchor case took 146.86s. The same Cargo race case passed alone in 42.23s (one-test suite 46.5s). Forty-two unrelated arch-explorer busy-loop shells were consuming host CPU throughout; no diskgc process or host files were touched. This is a capacity/load diagnosis, not a per-test 60s cap or proven product defect. When hardening harness deadlines and CPU reporting, test and explain suite-budget behavior under external contention; require a later exact gate pass on a suitable host before calling the TASK-16 change verified.
+
+Orchestrator 2026-10-23 (COMPASS consult): raised to High: TASK-13 (on the release path) depends on it.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

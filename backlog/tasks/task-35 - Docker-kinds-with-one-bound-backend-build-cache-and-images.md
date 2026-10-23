@@ -4,13 +4,12 @@ title: 'Docker kinds with one bound backend: build cache and images'
 status: In Progress
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-20 07:34'
+updated_date: '2026-10-23 15:24'
 labels:
   - wave-4
   - irreversible
   - safety
 dependencies:
-  - TASK-34
   - TASK-57
   - TASK-104
 references:
@@ -58,6 +57,8 @@ From task-50 round 3 (mped): the query run takes a closed enum of queries that d
 2026-10-20 mutation trial in throwaway /tmp/diskgc-task35-mutant: changed inspect_backend non-system Unix DOCKER_HOST classification to remote_backend; remote_rootless_and_external_store_fail_closed failed (exit 101, expected unsupported_backend). Restored intended code in TASK35 worktree passed docker_binding 7/7. DoD remains open: docs/testing.md requires a real-machine read-only dry run for a changed shipped profile, but the user explicitly prohibits running diskgc on the real host. No such run was performed. TASK35 remains In Progress pending an authorized safe way to satisfy or revise that criterion. Full exact-tree gate is being rerun after formatting.
 
 2026-10-20 combined gate on aab98ce: nix develop -c just e2e passed fmt, clippy, workspace tests, Nix checks, 129/129 Nix container E2E and 5/5 native Docker dind E2E. QA and MPED GO on the restacked staged diff. TASK35 remains In Progress solely because its docs/testing.md real-machine dry-run DoD is prohibited by the user host-testing constraint; no host diskgc run was done.
+
+Orchestrator 2026-10-23 (COMPASS consult): dropped the TASK-34 edge (a built feature must not depend on a later hardening wave). Mark ruled 2026-10-23 that read-only diskgc (--dry-run/check/survey/profiles) MAY run on the developer host, so the DoD real-machine dry run is permitted.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

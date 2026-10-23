@@ -4,12 +4,13 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 01:12'
+updated_date: '2026-10-23 15:24'
 labels:
   - wave-2
   - profiles
 dependencies:
   - TASK-17
+  - TASK-112
 references:
   - docs/reference.md#built-in-profile-library
 ---
@@ -76,6 +77,8 @@ Final integrated nix develop -c just e2e passed 93/93 on 2026-10-20; QA and MPED
 2026-10-23 TASK-65 exact built-in VM proof: the disposable vm-historical-ctime check passed after adding vm_containers_image_dormant_spool_exposes_liveness_gap. The existing exact containers-image-tmp vector proves free deletion and held preservation with the real binary and kernel ctimes; the new dry-run fixture checks the unchanged 3d floor using five-day-old kernel ctime, and gets free eligible, held in_use, fresh not_idle, and a live dormant spool eligible. The dormant fixture process reads and closes its spool at the old guest time, keeps no fd/cwd/mapping/initial environment reference while waiting, and successfully reopens the same bytes on resume. This is a negative liveness proof for a reusable spool, not evidence that actual Buildah or Podman reuses one. No developer-host diskgc run and no live-spool deletion. The real producer lifecycle remains unverified, so do not claim this profile release-safe or check AC1/AC2/DoD; TASK-65 and TASK-67 remain open. Focused command: nix develop -c nix build --no-link .#checks.x86_64-linux.vm-historical-ctime (exit 0); free space remained 29 GiB by df -BG.
 
 2026-10-23 fixture correction after review: the dormant spool path is now fixed inside the VM helper, not passed in argv. The test requires a live /proc/<pid>/cmdline containing hold-reuse but no candidate path, in addition to checking no fd/cwd/root/exe/maps/initial-environment reference. Focused vm-historical-ctime check passed again on this final fixture; exact built-in free/held differential and dormant negative proof both PASS. docs/safety calls the source embedded because the proposed 0.1 catalog excludes it. No change to TASK-65 status or acceptance criteria.
+
+Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). Mark chose the full product over a Cargo-only 0.1, so /tmp built-ins are re-admitted only with a verified liveness contract.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

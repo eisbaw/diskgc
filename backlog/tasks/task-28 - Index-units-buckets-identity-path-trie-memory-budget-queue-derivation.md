@@ -4,12 +4,12 @@ title: 'Index: units, buckets, identity, path trie, memory budget, queue derivat
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-18 12:42'
+updated_date: '2026-10-23 15:24'
 labels:
   - wave-3
   - architecture
 dependencies:
-  - TASK-27
+  - TASK-26
 references:
   - docs/architecture.md
 priority: high
@@ -34,6 +34,8 @@ Why: freeing space must not wait for a survey. Implement the index per docs/arch
 From task-14: ModelHost recomputes derived values (reachability for nlink and space, path_of for mount points and messages) from scratch, so each stat or lookup is linear in the filesystem's size. AC #3's 98,000-dir model test would be quadratic: add indexes to diskgc-model state.rs (e.g. a parent map and cached reachability invalidated on change) before writing it, and measure.
 
 From task-68 (mped S5): the dry run of tmp-entry over this laptop's /tmp (~155,000 top-level entries; stopped by the 20 min deadline at 79,484) printed 79,484 plan entries, 14.6 MB of JSON on stdout. Bucketing (reference.md Output: "a bucket is one plan entry with a member count") is needed for /tmp-scale plans; nix-shell-rc alone has ~105k members of ~3 KiB each.
+
+Orchestrator 2026-10-23 (COMPASS consult): dependency narrowed from TASK-27 (fuzz/doc hardening wave) to TASK-26 (schema freeze); the index cornerstone must not wait on hardening.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
