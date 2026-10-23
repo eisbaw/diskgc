@@ -4,6 +4,7 @@ title: 'Design: nix-store store and root-database binding protocol'
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:19'
+updated_date: '2026-10-23 21:01'
 labels:
   - irreversible
   - design
@@ -24,3 +25,9 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 - [ ] #3 docs/testing.md names the nix-store scenarios
 - [ ] #4 mped-architect design review GO recorded in notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark's design decisions (2026-10-23, binding): (1) Privilege and binding: diskgc runs the Nix GC AS ITS OWN USER VIA THE DAEMON SOCKET (/nix/var/nix/daemon-socket), against /nix/store ONLY; any other store URI, single-user layout, or remote store is refused (unsupported_backend). Multi-user Nix is required for the kind. (2) Variants: ALLOWLIST of verified CppNix versions (same pattern as the Docker client admission); Lix and others refused with unsupported_backend until their own verification task exists.
+<!-- SECTION:NOTES:END -->

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:19'
-updated_date: '2026-10-23 16:19'
+updated_date: '2026-10-23 21:01'
 labels:
   - design
 dependencies:
@@ -26,3 +26,9 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 - [ ] #2 Docker action and schema names are marked final or an explicit list of what TASK-49 may still change
 - [ ] #3 mped-architect design review GO recorded in notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark's design decisions (2026-10-23, binding): Docker client failure before any backend query (Podman CLI shim, daemon down, socket EACCES): SKIP WITH A REASON (unsupported_backend / backend_unavailable), the run continues with other tiers, exit stays 0/1 by the free-space outcome; a host without a working Docker is not an error. Supersedes today's exit 3. Applies to TASK-113 too.
+<!-- SECTION:NOTES:END -->

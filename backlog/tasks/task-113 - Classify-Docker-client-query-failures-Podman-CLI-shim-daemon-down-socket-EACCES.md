@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 15:48'
-updated_date: '2026-10-23 16:19'
+updated_date: '2026-10-23 21:01'
 labels:
   - safety
   - docker
@@ -33,4 +33,6 @@ Found by TASK-35's read-only host dry run (2026-10-23): on this laptop `docker` 
 
 <!-- SECTION:NOTES:BEGIN -->
 Orchestrator 2026-10-23 (design audit): TASK-120 (Docker contract leftovers design) resolves the skip-vs-error split together with the Buildx sizing conflict; coordinate.
+
+Mark's design decisions (2026-10-23, binding): client failures before a backend query become SKIPS with reason, not exit 3 (see TASK-120 notes).
 <!-- SECTION:NOTES:END -->

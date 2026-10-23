@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 15:24'
+updated_date: '2026-10-23 17:15'
 labels:
   - wave-2
   - profiles
@@ -79,6 +79,8 @@ Final integrated nix develop -c just e2e passed 93/93 on 2026-10-20; QA and MPED
 2026-10-23 fixture correction after review: the dormant spool path is now fixed inside the VM helper, not passed in argv. The test requires a live /proc/<pid>/cmdline containing hold-reuse but no candidate path, in addition to checking no fd/cwd/root/exe/maps/initial-environment reference. Focused vm-historical-ctime check passed again on this final fixture; exact built-in free/held differential and dormant negative proof both PASS. docs/safety calls the source embedded because the proposed 0.1 catalog excludes it. No change to TASK-65 status or acceptance criteria.
 
 Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). Mark chose the full product over a Cargo-only 0.1, so /tmp built-ins are re-admitted only with a verified liveness contract.
+
+2026-10-23 Mark (TASK-112 D1): pytest-tmp unit is one candidate per session dir pytest-of-*/pytest-* (under the temp-prefix v1 preset), superseding the 2026-10-18 per-test-dir decision recorded above. Reason: the liveness evidence (session .lock, session number) belongs to the session and pytest's own cleanup removes whole sessions; with checkouts: allow decided, the checkout-guard reason for the finer unit is gone; about a tenth as many candidates. pytest-tmp is admitted as a verified heuristic under liveness_contract: pytest (docs/safety.md Producer liveness). D2: containers-image-tmp withdrawn; re-admission via TASK-125.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

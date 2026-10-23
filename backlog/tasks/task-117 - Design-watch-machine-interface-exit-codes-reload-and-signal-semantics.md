@@ -4,6 +4,7 @@ title: 'Design: watch machine interface, exit codes, reload and signal semantics
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:18'
+updated_date: '2026-10-23 21:01'
 labels:
   - irreversible
   - design
@@ -23,3 +24,9 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 - [ ] #2 docs/testing.md names watch scenarios incl. the PRD 'steady between thresholds => zero deletions, duty cycle kept' test
 - [ ] #3 mped-architect design review GO recorded in notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark's design decisions (2026-10-23, binding): (1) Machine output: with --json, watch emits JSON LINES ON STDOUT, ONE OBJECT PER RECLAIM CYCLE, shaped like the ensure report; the human log stays on stderr. (2) Config reload: RESTART ONLY, NO RELOAD - SIGHUP is not a reload; systemd restart is the mechanism (keep SIGHUP semantics simple: document whether it is ignored or terminates like SIGTERM, pick one). (3) Fatal policy: KEEP RUNNING WITH BACK-OFF for environment errors (backend down, lock held, etc.), logged and emitted in JSON, back-off capped; exit non-zero only for invalid startup config or internal errors.
+<!-- SECTION:NOTES:END -->

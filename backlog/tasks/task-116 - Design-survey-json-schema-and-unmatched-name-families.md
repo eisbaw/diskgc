@@ -4,6 +4,7 @@ title: 'Design: survey --json schema and unmatched name families'
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:18'
+updated_date: '2026-10-23 21:01'
 labels:
   - irreversible
   - design
@@ -23,3 +24,9 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 - [ ] #2 docs/testing.md names the survey scenarios (incl. ModelHost YAML cases)
 - [ ] #3 mped-architect design review GO recorded in notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark's design decisions (2026-10-23, binding): (1) survey --json is VERSIONED, MAY BREAK: a top-level schema version field; fields may change between minor releases; consumers must check the version. Not frozen like ensure's report. (2) Unmatched name families ARE in the JSON, with per family: pattern, count, total size, newest/oldest age, capped example paths. Resolves the reference.md contradiction in favour of inclusion. (3) The in-use scan is OPT-IN via a flag (e.g. --in-use): default survey reports matches/sizes/ages only; with the flag, one scan adds per-profile in-use counts.
+<!-- SECTION:NOTES:END -->
