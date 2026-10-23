@@ -3,11 +3,11 @@ id: TASK-121
 title: >-
   ModelHost YAML corner-case corpus: data-driven vectors for every skip reason
   and safety boundary
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:29'
-updated_date: '2026-10-23 22:44'
+updated_date: '2026-10-23 23:00'
 labels:
   - verification
 dependencies: []
@@ -25,7 +25,7 @@ Build: (1) one generic vector runner (profile_vector-style expect block: plan, r
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A generic YAML vector runner exists and every file in the corpus directory runs under just check
-- [ ] #2 Every skip reason in docs/reference.md has at least one vector; a completeness test enforces it
+- [x] #2 Every skip reason in docs/reference.md has at least one vector; a completeness test enforces it
 - [x] #3 Every built-in source has match + in-use + protected/negated + nested-guard vectors; a completeness test enforces it
 - [x] #4 Every PRD 'What bad looks like' line for diskgc's own actions has a vector that would fail if the guard were removed (bite evidence in notes)
 - [x] #5 docs/testing.md describes the corpus layout and how to add a vector
@@ -93,4 +93,12 @@ Gate: just check green after each commit (957 passed, 1 ignored); e2e deferred t
 
 Review (mped-architect, read-only, 2026-10-24): invocation move behaviour-identical; verdict 'fix first' on the harness. Fixed in 85a79cc: one-to-one pairing of command runs with actions, null vs [] process_blockers, runner_invariants_reject_perturbed_vectors, every_blocker_evidence_has_a_vector (+2 vectors for inode_map, project_cargo, cargo_manifest_dir, detached_cargo), docs. Filed TASK-130 for config parsing/catalog/account lookup through one product path.
 Status: left In Progress. AC #2 is not literally met: four documented reasons have no vector and are exempt by name in REASONS_WITHOUT_VECTOR: unsupported_store, has_not, stale (no code produces them; TASK-127 must decide remove-from-contract or implement) and too_many_entries (needs a 2,000,000-entry model or a product knob; covered by Rust model tests engine.rs/cargo_reclaim.rs). Closing needs TASK-127's decision and a ruling on too_many_entries (accept the Rust-test coverage, or add a test-only budget seam). AC #4 caveats: two Cargo builds in one target belongs to the Cargo race tests, the Nix kind is unbuilt, and two redundant walk mount/device guards survive alone (TASK-129). Final corpus: 125 new vectors + 32 existing; e2e not run (deferred).
+
+Orchestrator ruling on AC #2 implemented (f235eba, b28828b): too_many_entries via a test-only entry budget (EnsureOptions::test_entry_budget -> Tier::max_entries -> executor::rules -> Rules::max_entries; main.rs always None; vector key entry_budget; the_binary_never_sets_the_test_entry_budget). walk/too-many-entries.yaml bites both ways (budget 6 and 4 each red); config/entry-budget-applies-to-configured-groups.yaml red when the per-tier assignment is removed. unsupported_store/has_not/stale stay exempt naming TASK-127, self-shrinking (fails on Reason::ALL, a producer literal in diskgc-core, or a vector; checked by renaming a docker_backend skip). Seam reviewed by mped-architect: ship; its fixes are in b28828b.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+One generic vector runner (profile_vector: 1, superset; crates/diskgc-model/src/profile_vector.rs) drives diskgc_core::invocation::ensure, the composition moved out of main.rs, on separate dry-run and reclaim ModelHosts with corpus-wide invariants (no dry-run mutation, unlinks only inside actions, removed postconditions, one-to-one command runs in candidate or parent, no unfired events). Corpus: 128 new vectors under tests/vectors/{walk,inuse,select,config,exit,races,backend,builtins} plus the 32 in tests/models/profiles, all in just check. Completeness tests: every skip reason (Reason::ALL + reference.md enum; three no-producer reasons exempt, self-shrinking, TASK-127), every built-in source x {match, in_use, protected/negated, nested guard} (Docker: match), every process-blocker evidence value; runner_invariants_reject_perturbed_vectors proves the runner's checks fail. Bite evidence: 23 manual one-at-a-time mutations of diskgc-core guards (table in notes) - 21 killed; M7 (walk per-entry mount id) and M17 (judge other_fs device) survive because another layer catches the same case (TASK-129). Caveat: the bite run was a manual harness, not cargo-mutants, so the table goes stale with refactors (TASK-13 should automate it). Host-model extensions: lstat-like stat_path, event-made preserved paths, Docker client presence on the command path, fail events on docker_query/run_command, test-only entry budget. Follow-ups: TASK-127 (no-producer reasons), TASK-128 (union/negated plans drop build_evidence), TASK-129 (surviving mutants), TASK-130 (config parsing/catalog/account lookup through one product path). Limits: e2e not run (deferred to batch end; diskgc-e2e builds clean under clippy after its type changes); non-UTF-8 names and file bind mounts not expressible; two-Cargo-builds belongs to the Cargo race tests; Nix kind unbuilt.
+<!-- SECTION:FINAL_SUMMARY:END -->
