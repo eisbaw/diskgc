@@ -774,8 +774,11 @@ filesystem, processes and mounts from the developer's system.
   `sd-tools` 0.99.0 crashes when asked to scan a scratch root's tmpfiles.d
   directories without a file argument, so this test does not establish
   automatic rule discovery there. Every container test provisions its
-  per-test host lock from the shipped rule. TASK66 remains open until the
-  release package exists.
+  per-test host lock from the packaged rule. The separately built
+  `release-01-candidate` package installs both files and passes the Nix
+  package comparison check and the Nix/Debian container application checks.
+  This packaging proof does not approve the candidate for distribution;
+  the 0.1 release gate and its profile scope remain open in TASK67.
 
 **Not covered end-to-end (for now):** real block filesystems (ext4 or xfs
 as separate mounts, btrfs) and network filesystems cannot be mounted in a

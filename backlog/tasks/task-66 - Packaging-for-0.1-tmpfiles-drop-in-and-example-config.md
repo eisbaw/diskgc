@@ -1,10 +1,10 @@
 ---
 id: TASK-66
 title: 'Packaging for 0.1: tmpfiles drop-in and example config'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-20 11:36'
+updated_date: '2026-10-23 03:12'
 labels:
   - wave-2
   - deployment
@@ -27,7 +27,7 @@ Carried from task-44's note: the e2e base image bakes /run/diskgc (0755 root) an
 <!-- AC:BEGIN -->
 - [x] #1 The drop-in creates /run/diskgc/lock as PRD.md and docs/safety.md (Host lock) describe (systemd-tmpfiles --root=<scratch> --create, container test)
 - [x] #2 The example config passes diskgc check
-- [ ] #3 Both are installed by the release package
+- [x] #3 Both are installed by the release package
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,9 +50,15 @@ From task-12 round 2: ship docs/ci-pre-job.sh as an example (e.g. share/doc/disk
 Pinned-Alpine candidate inputs (official v3.24 CDN, SHA-256 of downloaded APK): main/acl-libs-2.3.2-r1.apk 3f02851d586c25d97ba8b5b845615aacc209ae7eaeb6f7843eca76d85da2249d; main/libcap2-2.78-r0.apk 42886a7b4bcde26347c712925c8dc7db202b6029ef9b8c7ee81577ab7bdd8fad; community/sd-tools-0.99.0-r3.apk 93cfc77c9c272f7d0d8e7e3879bd221770c3e3f04490cc7fb8080d2cbf5110f3. Extracting these three into a fresh Alpine dind container and using LD_LIBRARY_PATH also passed the --root scratch metadata probe. This is a packaging lead, not a completed Nix build or dind E2E.
 
 2026-10-20 Alpine dind follow-up in disposable worktree: dind now carries SHA-256-pinned Alpine 3.24 sd-tools 0.99.0 plus acl-libs/libcap2, and every harness image requires a real tmpfiles path; the hand-created dind host lock is gone. A Docker-only scratch --root test applies the packaged rule, verifies root-owned 0755 directory and 0644 lock, and checks the packaged example. Focused proofs passed: Docker packaged rule 1/1, native Docker smoke 1/1, Nix packaged rule 1/1, Debian packaged rule 1/1; nix develop -c just check passed. The sd-tools 0.99.0 binary SIGSEGVs when --root scans a scratch root without an explicit rule file, reproduced in a disposable dind shell even with expected config directories and passwd/group. The test therefore names the staged shipped rule explicitly; it proves rule content and per-test lock provisioning, not automatic Alpine tmpfiles.d discovery. AC1/AC2 checked on container evidence; AC3/DoD remain open until TASK67 produces and verifies the ungated release package. No diskgc invocation on developer host or real project paths.
+
+2026-10-23 packaging closure evidence: commit 039e244 adds .#packages.x86_64-linux.release-01-candidate with both lib/tmpfiles.d/diskgc.conf and share/doc/diskgc/examples/example.yaml installed through the shared installShippedFiles hook. .#checks.x86_64-linux.release-01-package compares both installed files byte-for-byte with their source files and verifies the static candidate binary. The release_candidate_files_work_in_container test applies the installed rule and checks the installed example through the candidate binary in disposable Nix and Debian images; TASK67 exact nix develop -c just e2e passed with both candidate runners 8/8. AC3 is checked for package installation. Candidate artifact is not approved for distribution; TASK67 release scope and real-kernel proof remain open. TASK66 DoD and status await this change’s own exact E2E plus parallel QA/MPED review.
+
+2026-10-23 correction to the preceding note: the candidate did pass disposable real-kernel Nix and Debian container tests, including installed-file application and example-config checks. What remains open for TASK67 is representative operator-host deployment-contract evidence and the final 0.1 release decision; do not read this as a missing real-kernel candidate test.
+
+2026-10-23 candidate packaging closure: both installed files are byte-compared in the release-01-package check and exercised by gate-lifted candidate Nix/Debian container tests. The task66-close worktree exact nix develop -c just e2e exited 0 (workspace, Nix fast, release Nix/Debian, Docker and VM checks). This closes packaging implementation only; TASK67 still controls release approval and unresolved deployment scope.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->
