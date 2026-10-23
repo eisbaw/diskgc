@@ -460,7 +460,10 @@ rejected outer `where` match and the whole Claude container exclusion with
 user YAML profiles. A further generated family independently interprets
 single-segment `*` and explicit-depth patterns over variable names in two
 roots, with file, directory and any entry types, `find.exclude` patterns,
-source marker admission, term filters, unions and raw `!profile:` overlap.
+one or two positive patterns per source, source marker admission, term
+filters, unions and raw `!profile:` overlap. A saved case checks that an
+untagged outer match does not stop the second pattern from finding its tagged
+child.
 Its saved boundary case combines file selection, an excluded leaf and a
 negated source directory in the other root. The finite families cover three
 delete-source profiles, known marker names and two ages. They do not cover

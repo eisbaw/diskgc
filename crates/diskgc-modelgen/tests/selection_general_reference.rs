@@ -30,6 +30,8 @@ struct Case {
     tagged: u16,
     digits: [u8; 4],
     patterns: [u8; 3],
+    // 14 means this source has one pattern; otherwise it has two.
+    extra_patterns: [u8; 3],
     excludes: [u8; 3],
     types: [u8; 3],
     roots: [u8; 3], // 1, 2 or 3: bitset of selected roots
@@ -163,17 +165,26 @@ fn path_matches(pattern: &str, relative: &Path) -> bool {
 }
 
 fn sample_and_exclusion(case: &Case, source: usize) -> Option<(String, &'static str)> {
-    let pattern = PATTERNS[case.patterns[source] as usize];
     let exclusion = EXCLUDES[case.excludes[source] as usize];
-    for replacement in ["0", "1", "q", "x", "y", "z"] {
-        let sample = pattern.replace('*', replacement);
-        if exclusion.is_empty() || !path_matches(exclusion, Path::new(&sample)) {
-            return Some((sample, exclusion));
+    for pattern in source_patterns(case, source) {
+        for replacement in ["0", "1", "q", "x", "y", "z"] {
+            let sample = pattern.replace('*', replacement);
+            if exclusion.is_empty() || !path_matches(exclusion, Path::new(&sample)) {
+                return Some((sample, exclusion));
+            }
         }
     }
     // This profile cannot carry a valid `examples.match`. The generator
     // rejects it; callers constructing a fixture directly fail loudly.
     None
+}
+
+fn source_patterns(case: &Case, source: usize) -> Vec<&'static str> {
+    let mut patterns = vec![PATTERNS[case.patterns[source] as usize]];
+    if let Some(extra) = PATTERNS.get(case.extra_patterns[source] as usize) {
+        patterns.push(extra);
+    }
+    patterns
 }
 
 // Marker files are structural entries: a broad file pattern may select one.
@@ -212,7 +223,10 @@ fn found(case: &Case, source: usize, ignore_where: bool) -> BTreeSet<PathBuf> {
             continue;
         }
         let relative = candidate.strip_prefix(ROOTS[root]).unwrap();
-        if !path_matches(PATTERNS[case.patterns[source] as usize], relative) {
+        if !source_patterns(case, source)
+            .iter()
+            .any(|pattern| path_matches(pattern, relative))
+        {
             continue;
         }
         let (_, exclusion) = sample_and_exclusion(case, source)
@@ -283,7 +297,11 @@ fn profiles(case: &Case) -> String {
             .map(|root| ROOTS[root])
             .collect::<Vec<_>>()
             .join(", ");
-        let pattern = PATTERNS[case.patterns[source] as usize];
+        let patterns = source_patterns(case, source)
+            .into_iter()
+            .map(|pattern| format!("'{pattern}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let (sample, exclusion) = sample_and_exclusion(case, source)
             .expect("generated source must admit an examples.match path");
         let exclude = if exclusion.is_empty() {
@@ -292,8 +310,8 @@ fn profiles(case: &Case) -> String {
             format!(", exclude: ['{exclusion}']")
         };
         yaml.push_str(&format!(
-            "- name: {}\n  find: {{roots: [{}], paths: ['{}'], type: {}{}}}\n  action: delete\n  examples: {{match: [{}/{}]}}\n",
-            NAMES[source], roots, pattern, TYPES[case.types[source] as usize], exclude,
+            "- name: {}\n  find: {{roots: [{}], paths: [{}], type: {}{}}}\n  action: delete\n  examples: {{match: [{}/{}]}}\n",
+            NAMES[source], roots, patterns, TYPES[case.types[source] as usize], exclude,
             ROOTS[case.roots[source].trailing_zeros() as usize], sample,
         ));
         if case.source_tagged[source] {
@@ -344,6 +362,7 @@ fn saved_case() -> Case {
         tagged: 0,
         digits: [0; 4],
         patterns: [6, 1, 1],
+        extra_patterns: [14; 3],
         excludes: [2, 0, 0],
         types: [1, 0, 0],
         roots: [3, 3, 2],
@@ -390,9 +409,54 @@ fn excluded_leaf_and_other_root_negation_leave_only_first_root_y_file() {
 fn an_exclusion_covering_every_positive_match_has_no_valid_example() {
     let mut case = saved_case();
     case.patterns[0] = 1; // a*
+    case.extra_patterns[0] = 14;
     case.excludes[0] = 1; // a*
     assert!(sample_and_exclusion(&case, 0).is_none());
+    case.extra_patterns[0] = 2; // b* survives the a* exclusion
+    assert!(sample_and_exclusion(&case, 0).is_some());
     assert!(sample_and_exclusion(&case, 1).is_some());
+}
+
+#[test]
+fn source_where_rejecting_outer_match_allows_its_second_pattern_to_find_child() {
+    let mut case = saved_case();
+    case.present = bit(0, 0) | bit(0, 2);
+    case.files = 0;
+    case.tagged = bit(0, 2);
+    case.patterns[0] = 0; // * matches the untagged outer directory
+    case.extra_patterns[0] = 6; // */* matches its tagged child
+    case.excludes[0] = 0;
+    case.types[0] = 0; // directory
+    case.source_tagged[0] = true;
+    case.first = 0;
+    case.union = false;
+    case.exclude_c = false;
+
+    let yaml = profiles(&case);
+    let specs = parse_profiles(&yaml).expect("saved profiles");
+    let library = Library::with_user_profiles(&specs).expect("saved profile library");
+    let tier = Tier::select(&expression(&case), &library, None, 1000).expect("saved selection");
+    let request = Request {
+        path: PathBuf::from("/tmp"),
+        min_free: parse_size("100%").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier,
+    };
+    let model = model(&case);
+    let host = ModelHost::new(&model).expect("saved model");
+    let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
+    assert!(plan.errors.is_empty(), "{plan:#?}");
+    let actual = plan
+        .plan
+        .iter()
+        .filter(|entry| entry.reason.is_none())
+        .map(|entry| entry.candidate.clone())
+        .collect::<BTreeSet<_>>();
+    let child = BTreeSet::from([PathBuf::from("/tmp/sel/a0/x0")]);
+    assert_eq!(expected(&case), child, "oracle fixture changed");
+    assert_eq!(actual, child, "{plan:#?}");
 }
 
 proptest! {
@@ -406,6 +470,7 @@ proptest! {
         present in 0u16..4096, files in 0u16..4096, tagged in 0u16..4096,
         digits in prop::array::uniform4(0u8..3),
         patterns in prop::array::uniform3(0u8..14),
+        extra_patterns in prop::array::uniform3(0u8..15),
         excludes in prop::array::uniform3(0u8..4),
         types in prop::array::uniform3(0u8..3),
         roots in prop::array::uniform3(1u8..4),
@@ -414,7 +479,7 @@ proptest! {
         factor in prop::array::uniform2(0u8..3),
         exclude_c in any::<bool>(), union in any::<bool>(),
     ) {
-        let case = Case { present, files, tagged, digits, patterns, excludes, types,
+        let case = Case { present, files, tagged, digits, patterns, extra_patterns, excludes, types,
             roots, source_tagged, first, second, factor, exclude_c, union };
         prop_assume!((0..3).all(|source| sample_and_exclusion(&case, source).is_some()));
         let yaml = profiles(&case);
