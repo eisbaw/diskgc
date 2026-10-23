@@ -1,39 +1,78 @@
-//! Every YAML file in models/profiles is run through the same planner and
-//! reclaim contract. Adding a fixture does not require another Rust test.
+//! The vector corpus (docs/testing.md, Vector corpus): every YAML file
+//! below `tests/models/profiles` and `tests/vectors` runs through the one
+//! runner, and the corpus as a whole must cover every skip reason and every
+//! built-in source. Adding a vector does not require another Rust test.
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
-use diskgc_model::profile_vector::ProfileVector;
+use diskgc_model::profile_vector::{Checked, ProfileVector, corpus_files};
 
 fn read(path: &Path) -> ProfileVector {
     let yaml = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     ProfileVector::parse(&yaml).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// The corpus roots. `models/profiles` predates the corpus and is embedded
+/// by the container replays (diskgc-e2e), so it stays where it is.
+fn corpus_roots() -> Vec<PathBuf> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    vec![
+        manifest.join("tests/models/profiles"),
+        manifest.join("tests/vectors"),
+    ]
+}
+
+/// Every vector's result, run once per test binary: `Ok` with what it
+/// produced, or the file's failure.
+fn corpus() -> &'static [(PathBuf, Result<Checked, String>)] {
+    static CORPUS: OnceLock<Vec<(PathBuf, Result<Checked, String>)>> = OnceLock::new();
+    CORPUS.get_or_init(|| {
+        let roots = corpus_roots();
+        let files = corpus_files(&roots).expect("corpus layout");
+        // A root that lost its files (a moved directory) fails here; which
+        // vectors must exist is the completeness tests' question.
+        for root in &roots {
+            assert!(
+                files.iter().any(|file| file.starts_with(root)),
+                "no vectors below {}",
+                root.display()
+            );
+        }
+        files
+            .into_iter()
+            .map(|path| {
+                let result = fs::read_to_string(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|yaml| ProfileVector::parse(&yaml))
+                    .and_then(|vector| vector.check_builtin());
+                (path, result)
+            })
+            .collect()
+    })
+}
+
+/// Every failing file is named, not only the first.
 #[test]
-fn every_checked_in_profile_vector_matches_plan_and_reclaim() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/profiles");
-    let mut paths: Vec<_> = fs::read_dir(&directory)
-        .expect("profile vector directory")
-        .map(|entry| entry.expect("directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+fn every_vector_in_the_corpus_passes() {
+    let failures: Vec<String> = corpus()
+        .iter()
+        .filter_map(|(path, result)| {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let name = path.strip_prefix(root).unwrap_or(path).display();
+            result.as_ref().err().map(|e| format!("{name}: {e}"))
+        })
         .collect();
-    paths.sort();
     assert!(
-        !paths.is_empty(),
-        "no profile vectors in {}",
-        directory.display()
+        failures.is_empty(),
+        "{} of {} vectors failed:\n\n{}",
+        failures.len(),
+        corpus().len(),
+        failures.join("\n\n")
     );
-    let library = Library::builtin().expect("built-in profiles");
-    for path in paths {
-        let vector = read(&path);
-        vector
-            .check(&library)
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    }
 }
 
 #[test]
@@ -48,13 +87,16 @@ fn every_modelable_builtin_source_has_a_checked_in_vector() {
             if !vector.user_profiles.is_empty() {
                 continue;
             }
-            let profile = library.get(vector.profile_name()).expect("shipped profile");
+            let name = vector
+                .profile_name()
+                .expect("a models/profiles vector names its profile");
+            let profile = library.get(name).expect("shipped profile");
             assert!(
                 matches!(&profile.body, Body::Source(source) if !matches!(source.action, Action::Command { .. })),
                 "{} cannot assert a command cleaner's filesystem effect in ModelHost",
                 path.display()
             );
-            covered.insert(vector.profile_name().to_owned());
+            covered.insert(name.to_owned());
         }
     }
     let modelable: BTreeSet<_> = library

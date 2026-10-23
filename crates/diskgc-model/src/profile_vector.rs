@@ -1,51 +1,123 @@
-//! Reviewable profile scenarios backed by a fresh `ModelHost` for planning
-//! and reclaim. This module belongs to the test-only model crate; product
-//! code never reads vector expectations.
+//! The vector format (`profile_vector: 1`) and its one runner: a reviewable
+//! scenario of an `ensure` invocation (a configuration file, `--select`,
+//! `--roots`, `--allow-root`, the request) on a `host_model: 1`, and the
+//! independently written expected plan and reclaim. The runner drives
+//! `diskgc_core::invocation::ensure`, the composition the binary runs, on
+//! two fresh `ModelHost`s (one dry run, one reclaim) and compares the
+//! results with the expectations and with invariants that hold for every
+//! vector (docs/testing.md, Vector corpus). Test-only: product code never
+//! reads vector expectations.
+//!
+//! The format began as one built-in profile per file (`profile:`); every
+//! other key is optional, so those files are unchanged.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::executor::{self, Request, Tier};
-use diskgc_core::profile::{Library, ProfileSpec};
-use diskgc_core::units::parse_size;
+use diskgc_core::config::{self, Config};
+use diskgc_core::invocation::{self, EnsureOptions, Platform};
+use diskgc_core::profile::{Action, Body, Library, ProfileSpec};
+use diskgc_core::report::{ErrorCause, Report, Status};
+use diskgc_core::units::{parse_duration, parse_size};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::ModelHost;
 use crate::spec::{HostModel, Op};
 
+/// Where a vector's `config:` text is said to come from (logs only).
+const CONFIG_PATH: &str = "/etc/diskgc/config.yaml";
+
+/// `--timeout` when a vector gives none: long enough that no modelled
+/// scenario reaches it by accident (the clock is virtual).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Directories below a corpus root a walk descends into: areas, and areas
+/// within areas. A deeper file is an error, not a silently skipped vector.
+const CORPUS_DEPTH_MAX: usize = 3;
+
 /// One versioned test case. The host is the ordinary strict host model.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileVector {
     pub profile_vector: u32,
-    pub profile: String,
-    /// Optional user profiles for counterexamples to proposed built-ins.
+    /// Shorthand for `select: profile:NAME`.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// `--select`. Without it and without `profile`, the configured groups
+    /// run (a `config` is then required, as by the binary).
+    #[serde(default)]
+    pub select: Option<String>,
+    /// The configuration file's text (`--config`); absent: none was found.
+    #[serde(default)]
+    pub config: Option<String>,
+    /// User profiles without a configuration file: the `--select` library
+    /// is the built-ins plus these. Not together with `config`.
     #[serde(default)]
     pub user_profiles: Vec<ProfileSpec>,
     pub path: PathBuf,
     #[serde(default)]
     pub roots: Vec<String>,
     pub min_free: String,
+    #[serde(default)]
+    pub target_free: Option<String>,
+    /// `--timeout` (`0`: none); default [`DEFAULT_TIMEOUT`].
+    #[serde(default)]
+    pub timeout: Option<String>,
+    /// `--tally-budget` (`0`: none); default derived from the timeout.
+    #[serde(default)]
+    pub tally_budget: Option<String>,
+    #[serde(default)]
+    pub allow_root: bool,
+    /// The account resolver for `owners:` names; a name not listed does
+    /// not exist.
+    #[serde(default)]
+    pub users: BTreeMap<String, u32>,
+    /// `DISKGC_SEED` for `ranking: random`; absent: drawing one fails.
+    #[serde(default)]
+    pub seed: Option<u64>,
     pub host: HostModel,
     pub expect: Expected,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expected {
-    /// Complete dry-run plan, including skipped candidates, sorted by path.
+    /// Complete dry-run plan, including skipped candidates.
     pub plan: Vec<PlanVerdict>,
+    /// The dry run's exit code (default 0).
+    #[serde(default)]
+    pub dry_run_exit: i32,
+    /// Complete dry-run error set (default none).
+    #[serde(default)]
+    pub dry_run_errors: Vec<ErrorVerdict>,
     pub reclaim_exit: i32,
-    /// Complete action set, sorted by path.
+    /// Complete reclaim error set (default none).
+    #[serde(default)]
+    pub errors: Vec<ErrorVerdict>,
+    /// Complete action set.
     pub actions: Vec<PathBuf>,
     /// Paths that must be gone after reclaim. Actions can retain their
     /// candidate (for example Cargo keeps the tagged target root).
     pub removed: Vec<PathBuf>,
-    /// Complete reclaim skip set, sorted by path.
+    /// Complete reclaim skip set.
     pub skipped: Vec<SkipVerdict>,
     /// Existing paths that must survive reclaim, including candidates not
     /// discovered because required source evidence is absent.
     pub preserved: Vec<PathBuf>,
+    /// Complete list of command runs (command and Docker actions), in
+    /// order; absent: not compared (the invariants still apply).
+    #[serde(default)]
+    pub commands: Option<Vec<CommandVerdict>>,
+    /// A subset of the reclaim's JSON report: every key given must be
+    /// there with that value (objects recursively, arrays elementwise).
+    #[serde(default)]
+    pub report: Option<Value>,
+    /// The same for the dry run's report.
+    #[serde(default)]
+    pub dry_run_report: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -63,6 +135,46 @@ pub struct PlanVerdict {
 pub struct SkipVerdict {
     pub candidate: PathBuf,
     pub reason: String,
+    /// The complete `process_blockers` (pid and evidence); absent: not
+    /// compared, `[]`: the report's must be `null`.
+    #[serde(default)]
+    pub process_blockers: Option<Vec<BlockerVerdict>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockerVerdict {
+    pub pid: u32,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorVerdict {
+    /// The stable `cause` code.
+    pub cause: String,
+    /// Text the message must contain (messages are for people; keep this
+    /// to the stable part).
+    #[serde(default)]
+    pub contains: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandVerdict {
+    /// The checked working directory.
+    pub cwd: PathBuf,
+    /// The executable followed by its arguments.
+    pub argv: Vec<String>,
+}
+
+/// What a passing vector produced, for coverage questions asked of the
+/// whole corpus (which reasons, which profiles). Every entry here matched
+/// the vector's expectation.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    pub dry_run: Report,
+    pub reclaim: Report,
 }
 
 impl ProfileVector {
@@ -77,172 +189,308 @@ impl ProfileVector {
         if vector.host.expect.is_some() {
             return Err("profile vector host must not contain a second expect block".to_owned());
         }
+        if vector.profile.is_some() && vector.select.is_some() {
+            return Err("give `profile` or `select`, not both".to_owned());
+        }
+        if vector.config.is_some() && !vector.user_profiles.is_empty() {
+            return Err(
+                "user_profiles belong in the config's `profiles:` when a config is given"
+                    .to_owned(),
+            );
+        }
+        if !vector.roots.is_empty() && vector.select_expression().is_none() {
+            return Err("roots are --roots, only valid with profile or select".to_owned());
+        }
         ModelHost::new(&vector.host).map_err(|e| e.to_string())?;
+        vector.options(false)?;
         Ok(vector)
     }
 
-    /// Runs both modes against independent copies of the same inode graph.
-    /// The expectations are independent data: no expected path is derived
-    /// from diskgc's report. A wrong matcher yields a mismatch here.
-    pub fn check(&self, library: &Library) -> Result<(), String> {
-        let user_library = if self.user_profiles.is_empty() {
-            None
-        } else {
-            Some(
-                Library::with_user_profiles(&self.user_profiles)
-                    .map_err(|e| format!("vector user profiles: {e}"))?,
-            )
+    /// `--select` as the binary would get it.
+    pub fn select_expression(&self) -> Option<String> {
+        self.select
+            .clone()
+            .or_else(|| self.profile.as_ref().map(|name| format!("profile:{name}")))
+    }
+
+    fn options(&self, dry_run: bool) -> Result<EnsureOptions, String> {
+        let duration = |text: &str| -> Result<Option<Duration>, String> {
+            if text == "0" {
+                return Ok(None);
+            }
+            parse_duration(text).map(Some)
         };
-        let library = user_library.as_ref().unwrap_or(library);
-        let roots = (!self.roots.is_empty()).then_some(self.roots.as_slice());
-        let tier = Tier::select(
-            &format!("profile:{}", self.profile),
-            library,
-            roots,
-            self.host.own_uid.unwrap_or(1000),
-        )?;
-        let request = Request {
-            path: self.path.clone(),
+        let timeout = match &self.timeout {
+            Some(text) => duration(text)?,
+            None => Some(DEFAULT_TIMEOUT),
+        };
+        let tally_budget = match &self.tally_budget {
+            Some(text) => duration(text)?,
+            None => Some(diskgc_core::executor::default_tally_budget(timeout)),
+        };
+        Ok(EnsureOptions {
             min_free: parse_size(&self.min_free)?,
-            target_free: None,
-            timeout: Some(Duration::from_secs(600)),
-            tally_budget: None,
-            tier,
+            target_free: self.target_free.as_deref().map(parse_size).transpose()?,
+            timeout,
+            tally_budget,
+            select: self.select_expression(),
+            roots: self.roots.clone(),
+            dry_run,
+            allow_root: self.allow_root,
+            path: self.path.clone(),
+        })
+    }
+
+    /// The configuration, or the report the binary gives for one that does
+    /// not load (exit 2 before the host is touched; `main.rs` does the
+    /// same in two lines).
+    fn configuration(&self) -> Result<Option<Config>, Box<Report>> {
+        let Some(text) = &self.config else {
+            return Ok(None);
         };
-        let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
-        let uid = executor::privileges(&planning, false).map_err(|e| e.to_string())?;
-        let report = executor::dry_run(&planning, &request, &[uid], &mut |_| {});
-        if !report.errors.is_empty() {
-            return Err(format!("dry-run errors: {:?}", report.errors));
-        }
-        let mut actual_plan: Vec<_> = report
-            .plan
-            .iter()
-            .map(|entry| PlanVerdict {
-                candidate: entry.candidate.clone(),
-                reason: entry.reason.map(str::to_owned),
-                source: entry.build_evidence.as_ref().map(|e| e.source.clone()),
+        config::parse(Path::new(CONFIG_PATH), text.as_bytes())
+            .map(Some)
+            .map_err(|error| {
+                Box::new(
+                    Report::new(Status::UsageError, Some(&self.path))
+                        .usage_error_with_cause(ErrorCause::Config, error.to_string()),
+                )
             })
-            .collect();
-        actual_plan.sort_by(|a, b| a.candidate.cmp(&b.candidate));
-        let mut expected_plan = self.expect.plan.clone();
-        expected_plan.sort_by(|a, b| a.candidate.cmp(&b.candidate));
-        if actual_plan != expected_plan {
-            return Err(format!(
-                "profile {} dry-run plan\nactual: {actual_plan:#?}\nexpected: {expected_plan:#?}",
-                self.profile
-            ));
+    }
+
+    /// The library the run selects from, for the per-action invariants.
+    fn library(&self, config: Option<&Config>) -> Result<Library, String> {
+        match config {
+            Some(config) => Ok(config.library.clone()),
+            None if self.user_profiles.is_empty() => {
+                Library::builtin().map_err(|e| format!("built-ins: {e}"))
+            }
+            None => Library::with_user_profiles(&self.user_profiles)
+                .map_err(|e| format!("vector user profiles: {e}")),
         }
-        if planning.trace().iter().any(|call| call.op == Op::Unlinkat) {
-            return Err("dry-run called unlinkat".to_owned());
+    }
+
+    fn run(&self, host: &ModelHost, dry_run: bool, library: &Library) -> Result<Report, String> {
+        let config = match self.configuration() {
+            Ok(config) => config,
+            Err(report) => return Ok(*report),
+        };
+        let options = self.options(dry_run)?;
+        let users = &self.users;
+        let resolve_owner = |name: &str| {
+            users
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("owners: user {name:?} does not exist"))
+        };
+        let seed = self.seed;
+        let draw_seed = || seed.ok_or_else(|| "no DISKGC_SEED in this vector".to_owned());
+        let builtin_library = || Ok(library.clone());
+        let platform = Platform {
+            resolve_owner: &resolve_owner,
+            draw_seed: &draw_seed,
+            builtin_library: &builtin_library,
+        };
+        Ok(invocation::ensure(
+            host,
+            &options,
+            config.as_ref(),
+            &platform,
+            &mut |_| {},
+            &mut |_| {},
+        ))
+    }
+
+    /// Runs both modes against independent copies of the same inode graph
+    /// with the built-in library (and the vector's own profiles).
+    pub fn check_builtin(&self) -> Result<Checked, String> {
+        let config = self.configuration().ok().flatten();
+        let library = self.library(config.as_ref())?;
+        self.check_with(&library)
+    }
+
+    /// [`Self::check_builtin`] with `library` in place of the built-ins
+    /// when no configuration is given: how a mutated profile is tried
+    /// against an unchanged vector.
+    pub fn check(&self, library: &Library) -> Result<(), String> {
+        let config = self.configuration().ok().flatten();
+        let library = match (&config, self.user_profiles.is_empty()) {
+            (None, true) => library.clone(),
+            _ => self.library(config.as_ref())?,
+        };
+        self.check_with(&library).map(|_| ())
+    }
+
+    /// The expectations are independent data: no expected path is derived
+    /// from diskgc's report.
+    fn check_with(&self, library: &Library) -> Result<Checked, String> {
+        let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        let dry_run = self.run(&planning, true, library)?;
+        compare_plan(&dry_run, &self.expect.plan)?;
+        compare_exit("dry-run", &dry_run, self.expect.dry_run_exit)?;
+        compare_errors("dry-run", &dry_run, &self.expect.dry_run_errors)?;
+        if let Some(subset) = &self.expect.dry_run_report {
+            json_subset(subset, &json(&dry_run)?, "dry_run_report")?;
+        }
+        for op in [Op::Unlinkat, Op::Fchmod, Op::RunCommand] {
+            if planning.trace().iter().any(|call| call.op == op) {
+                return Err(format!("dry-run called {op}"));
+            }
         }
 
         let reclaiming = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
-        for path in &self.expect.removed {
-            if reclaiming.stat_path(path).is_none() {
-                return Err(format!(
-                    "removed path {} was absent before reclaim",
-                    path.display()
-                ));
+        for (what, paths) in [
+            ("removed", &self.expect.removed),
+            ("preserved", &self.expect.preserved),
+        ] {
+            for path in paths {
+                if reclaiming.stat_path(path).is_none() {
+                    return Err(format!(
+                        "{what} path {} was absent before reclaim",
+                        path.display()
+                    ));
+                }
             }
         }
-        for path in &self.expect.preserved {
-            if reclaiming.stat_path(path).is_none() {
-                return Err(format!(
-                    "preserved path {} was absent before reclaim",
-                    path.display()
-                ));
-            }
-        }
-        let uid = executor::privileges(&reclaiming, false).map_err(|e| e.to_string())?;
-        let report = executor::ensure(&reclaiming, &request, &[uid], &mut |_| {});
-        if !report.errors.is_empty() {
-            return Err(format!("reclaim errors: {:?}", report.errors));
-        }
-        let exit = i32::from(report.exit_code());
-        if exit != self.expect.reclaim_exit {
-            return Err(format!(
-                "profile {} reclaim exit {exit}, expected {}",
-                self.profile, self.expect.reclaim_exit
-            ));
-        }
-        let mut actions: Vec<_> = report.actions.iter().map(|e| e.candidate.clone()).collect();
-        actions.sort();
-        let mut expected_actions = self.expect.actions.clone();
-        expected_actions.sort();
+        let reclaim = self.run(&reclaiming, false, library)?;
+        compare_exit("reclaim", &reclaim, self.expect.reclaim_exit)?;
+        compare_errors("reclaim", &reclaim, &self.expect.errors)?;
+        let actions = sorted(reclaim.actions.iter().map(|e| e.candidate.clone()));
+        let expected_actions = sorted(self.expect.actions.iter().cloned());
         if actions != expected_actions {
             return Err(format!(
-                "profile {} reclaim actions {actions:?}, expected {expected_actions:?}",
-                self.profile
+                "reclaim actions {actions:?}, expected {expected_actions:?}"
             ));
         }
-        let mut skipped: Vec<_> = report
-            .skipped
-            .iter()
-            .map(|entry| SkipVerdict {
-                candidate: entry.candidate.clone(),
-                reason: entry.reason.to_owned(),
-            })
-            .collect();
-        skipped.sort_by(|a, b| a.candidate.cmp(&b.candidate));
-        let mut expected_skipped = self.expect.skipped.clone();
-        expected_skipped.sort_by(|a, b| a.candidate.cmp(&b.candidate));
-        if skipped != expected_skipped {
-            return Err(format!(
-                "profile {} reclaim skipped {skipped:?}, expected {expected_skipped:?}",
-                self.profile
-            ));
+        compare_skips(&reclaim, &self.expect.skipped)?;
+        if let Some(subset) = &self.expect.report {
+            json_subset(subset, &json(&reclaim)?, "report")?;
         }
+        self.check_filesystem(&reclaiming, &reclaim, library)?;
+        self.check_commands(&reclaiming, &reclaim, library)?;
+        if !reclaiming.unfired_events().is_empty() {
+            return Err(format!("unfired events: {:?}", reclaiming.unfired_events()));
+        }
+        Ok(Checked { dry_run, reclaim })
+    }
+
+    /// `removed` and `preserved` against the model after reclaim; every
+    /// unlink inside an action; every deleting action with a postcondition.
+    fn check_filesystem(
+        &self,
+        host: &ModelHost,
+        reclaim: &Report,
+        library: &Library,
+    ) -> Result<(), String> {
+        let actions = &self.expect.actions;
         for path in &self.expect.removed {
-            if !expected_actions
-                .iter()
-                .any(|action| path.starts_with(action))
-            {
+            if !actions.iter().any(|action| path.starts_with(action)) {
                 return Err(format!(
                     "removed path {} is outside every action",
                     path.display()
                 ));
             }
-            if reclaiming.stat_path(path).is_some() {
+            if host.stat_path(path).is_some() {
                 return Err(format!("removed path {} still exists", path.display()));
             }
         }
-        for action in &expected_actions {
-            if !self
-                .expect
-                .removed
-                .iter()
-                .any(|path| path.starts_with(action))
+        for entry in &reclaim.actions {
+            let deletes = matches!(
+                action_of(library, &entry.profile)?,
+                Action::Delete { .. } | Action::CargoLockProtocol
+            );
+            if deletes
+                && !self
+                    .expect
+                    .removed
+                    .iter()
+                    .any(|path| path.starts_with(&entry.candidate))
             {
                 return Err(format!(
                     "action {} has no explicit removed-path postcondition",
-                    action.display()
+                    entry.candidate.display()
                 ));
             }
         }
         for path in &self.expect.preserved {
-            if reclaiming.stat_path(path).is_none() {
-                return Err(format!("protected path {} disappeared", path.display()));
+            if host.stat_path(path).is_none() {
+                return Err(format!("preserved path {} disappeared", path.display()));
             }
         }
-        let expected_paths: Vec<_> = expected_actions.iter().map(PathBuf::as_path).collect();
-        for call in reclaiming
-            .trace()
-            .iter()
-            .filter(|call| call.op == Op::Unlinkat)
-        {
+        for call in host.trace().iter().filter(|call| call.op == Op::Unlinkat) {
             let Some(path) = call.path.as_deref() else {
                 return Err(format!("unlinkat without a path: {call}"));
             };
-            if !expected_paths
-                .iter()
-                .any(|candidate| path.starts_with(candidate))
-            {
+            if !actions.iter().any(|candidate| path.starts_with(candidate)) {
                 return Err(format!("unlinkat outside expected actions: {path:?}"));
             }
         }
-        if !reclaiming.unfired_events().is_empty() {
-            return Err(format!("unfired events: {:?}", reclaiming.unfired_events()));
+        Ok(())
+    }
+
+    /// Every command run belongs to a command or Docker action, a command
+    /// action's in its checked candidate or that candidate's parent (PRD,
+    /// What bad looks like), and `expect.commands` when given.
+    fn check_commands(
+        &self,
+        host: &ModelHost,
+        reclaim: &Report,
+        library: &Library,
+    ) -> Result<(), String> {
+        let runs: Vec<_> = host
+            .trace()
+            .into_iter()
+            .filter(|call| call.op == Op::RunCommand)
+            .collect();
+        let mut command_actions = 0;
+        for entry in &reclaim.actions {
+            match action_of(library, &entry.profile)? {
+                Action::Command { .. } => {
+                    command_actions += 1;
+                    let checked = [Some(entry.candidate.as_path()), entry.candidate.parent()];
+                    if !runs
+                        .iter()
+                        .any(|call| call.path.is_some() && checked.contains(&call.path.as_deref()))
+                    {
+                        return Err(format!(
+                            "command action {} ran in neither it nor its parent: {:?}",
+                            entry.candidate.display(),
+                            runs.iter().map(|call| &call.path).collect::<Vec<_>>()
+                        ));
+                    }
+                }
+                Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
+                    command_actions += 1;
+                }
+                Action::Delete { .. } | Action::CargoLockProtocol => {}
+            }
+        }
+        if runs.len() > command_actions {
+            return Err(format!(
+                "{} command runs for {command_actions} command and Docker actions",
+                runs.len()
+            ));
+        }
+        if let Some(expected) = &self.expect.commands {
+            let actual: Vec<CommandVerdict> = runs
+                .iter()
+                .map(|call| {
+                    let run = call
+                        .command
+                        .as_ref()
+                        .expect("run_command records its request");
+                    CommandVerdict {
+                        cwd: call.path.clone().unwrap_or_default(),
+                        argv: std::iter::once(run.executable.as_os_str().to_owned())
+                            .chain(run.arguments.iter().cloned())
+                            .map(|arg: OsString| arg.to_string_lossy().into_owned())
+                            .collect(),
+                    }
+                })
+                .collect();
+            if &actual != expected {
+                return Err(format!("commands {actual:#?}, expected {expected:#?}"));
+            }
         }
         Ok(())
     }
@@ -255,11 +503,167 @@ impl ProfileVector {
         &self.expect.preserved
     }
 
-    pub fn profile_name(&self) -> &str {
-        &self.profile
+    /// The one profile of a `profile:` vector.
+    pub fn profile_name(&self) -> Option<&str> {
+        self.profile.as_deref()
     }
 
     pub fn root_path(&self) -> &Path {
         &self.path
     }
+}
+
+fn action_of<'l>(library: &'l Library, profile: &str) -> Result<&'l Action, String> {
+    match library.get(profile).map(|p| &p.body) {
+        Some(Body::Source(source)) => Ok(&source.action),
+        _ => Err(format!("action of unknown source profile `{profile}`")),
+    }
+}
+
+fn sorted<T: Ord>(items: impl Iterator<Item = T>) -> Vec<T> {
+    let mut items: Vec<T> = items.collect();
+    items.sort();
+    items
+}
+
+fn compare_exit(mode: &str, report: &Report, expected: i32) -> Result<(), String> {
+    let exit = i32::from(report.exit_code());
+    if exit != expected {
+        return Err(format!(
+            "{mode} exit {exit}, expected {expected}; errors: {:?}",
+            report.errors
+        ));
+    }
+    Ok(())
+}
+
+fn compare_errors(mode: &str, report: &Report, expected: &[ErrorVerdict]) -> Result<(), String> {
+    let matches = report.errors.len() == expected.len()
+        && report.errors.iter().zip(expected).all(|(error, want)| {
+            error.cause.as_str() == want.cause
+                && want
+                    .contains
+                    .as_ref()
+                    .is_none_or(|text| error.message.contains(text.as_str()))
+        });
+    if !matches {
+        return Err(format!(
+            "{mode} errors {:#?}, expected {expected:#?}",
+            report.errors
+        ));
+    }
+    Ok(())
+}
+
+fn compare_plan(report: &Report, expected: &[PlanVerdict]) -> Result<(), String> {
+    let mut actual: Vec<_> = report
+        .plan
+        .iter()
+        .map(|entry| PlanVerdict {
+            candidate: entry.candidate.clone(),
+            reason: entry.reason.map(str::to_owned),
+            source: entry.build_evidence.as_ref().map(|e| e.source.clone()),
+        })
+        .collect();
+    actual.sort_by(|a, b| a.candidate.cmp(&b.candidate));
+    let mut expected = expected.to_vec();
+    expected.sort_by(|a, b| a.candidate.cmp(&b.candidate));
+    if actual != expected {
+        return Err(format!(
+            "dry-run plan\nactual: {actual:#?}\nexpected: {expected:#?}"
+        ));
+    }
+    Ok(())
+}
+
+fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String> {
+    let mut actual: Vec<_> = report
+        .skipped
+        .iter()
+        .map(|entry| SkipVerdict {
+            candidate: entry.candidate.clone(),
+            reason: entry.reason.to_owned(),
+            process_blockers: Some(sorted(entry.process_blockers.iter().flatten().map(
+                |blocker| BlockerVerdict {
+                    pid: blocker.pid,
+                    evidence: blocker.evidence.as_str().to_owned(),
+                },
+            ))),
+        })
+        .collect();
+    actual.sort_by(|a, b| a.candidate.cmp(&b.candidate));
+    let mut expected = expected.to_vec();
+    expected.sort_by(|a, b| a.candidate.cmp(&b.candidate));
+    let same = actual.len() == expected.len()
+        && actual.iter().zip(&expected).all(|(got, want)| {
+            got.candidate == want.candidate
+                && got.reason == want.reason
+                && want.process_blockers.as_ref().is_none_or(|blockers| {
+                    Some(sorted(blockers.iter().cloned())) == got.process_blockers
+                })
+        });
+    if !same {
+        return Err(format!(
+            "reclaim skipped\nactual: {actual:#?}\nexpected: {expected:#?}"
+        ));
+    }
+    Ok(())
+}
+
+fn json(report: &Report) -> Result<Value, String> {
+    serde_json::from_str(&report.to_json()).map_err(|e| format!("report JSON: {e}"))
+}
+
+/// `expected` is contained in `actual`: objects by key, recursively;
+/// arrays of equal length elementwise; scalars equal.
+fn json_subset(expected: &Value, actual: &Value, at: &str) -> Result<(), String> {
+    match (expected, actual) {
+        (Value::Object(want), Value::Object(got)) => {
+            for (key, value) in want {
+                let found = got
+                    .get(key)
+                    .ok_or_else(|| format!("{at}.{key}: missing in {actual}"))?;
+                json_subset(value, found, &format!("{at}.{key}"))?;
+            }
+            Ok(())
+        }
+        (Value::Array(want), Value::Array(got)) if want.len() == got.len() => want
+            .iter()
+            .zip(got)
+            .enumerate()
+            .try_for_each(|(i, (w, g))| json_subset(w, g, &format!("{at}[{i}]"))),
+        _ if expected == actual => Ok(()),
+        _ => Err(format!("{at}: {actual}, expected {expected}")),
+    }
+}
+
+/// Every vector file below `roots`, sorted: `*.yaml` up to
+/// [`CORPUS_DEPTH_MAX`] directories deep. Anything else there is an error,
+/// so a misnamed vector is not silently skipped.
+pub fn corpus_files(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut pending: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    while let Some((directory, depth)) = pending.pop() {
+        let entries =
+            std::fs::read_dir(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("{}: {e}", directory.display()))?
+                .path();
+            if path.is_dir() {
+                if depth + 1 >= CORPUS_DEPTH_MAX {
+                    return Err(format!("{}: corpus nested too deep", path.display()));
+                }
+                pending.push((path, depth + 1));
+            } else if path.extension().is_some_and(|ext| ext == "yaml") {
+                files.push(path);
+            } else if path.file_name().is_some_and(|name| name != "README.md") {
+                return Err(format!("{}: not a .yaml vector", path.display()));
+            }
+        }
+    }
+    files.sort();
+    let unique: BTreeSet<_> = files.iter().collect();
+    assert_eq!(unique.len(), files.len(), "overlapping corpus roots");
+    Ok(files)
 }

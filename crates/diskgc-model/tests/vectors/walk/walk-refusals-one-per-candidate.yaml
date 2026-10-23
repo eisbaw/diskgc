@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=../../../host-model.schema.json
+# The eligibility walk (docs/safety.md) refuses each candidate for its own
+# reason; one eligible neighbour proves the tier still runs. Each refused
+# candidate keeps every entry; nothing outside the eligible one is unlinked.
+profile_vector: 1
+profile: zephyr-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+    - {id: 3, at: /tmp/zephyr-mounted/fuse, fs: fuse.sshfs, dev: "0:41", size: 1G, parent: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-eligible:
+      run.log: {size: 4K}
+    /tmp/zephyr-kept:
+      deep: {.diskgc-keep: {}, payload: {size: 4K}}
+    /tmp/zephyr-checkout:
+      west: {.git: {HEAD: {}}, payload: {size: 4K}}
+    /tmp/zephyr-foreign:
+      mine: {size: 4K}
+      theirs: {size: 4K, uid: 1001}
+    /tmp/zephyr-socket:
+      agent.sock: {type: socket}
+    /tmp/zephyr-fifo:
+      pipe: {type: fifo}
+    /tmp/zephyr-device:
+      tty: {type: char_device}
+    /tmp/zephyr-mounted:
+      fuse: {.: {}}
+    /tmp/zephyr-cargo-lock:
+      .cargo-lock: {}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-eligible}
+    - {candidate: /tmp/zephyr-kept, reason: kept}
+    - {candidate: /tmp/zephyr-checkout, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-foreign, reason: not_owner}
+    - {candidate: /tmp/zephyr-socket, reason: contains_ipc}
+    - {candidate: /tmp/zephyr-fifo, reason: contains_ipc}
+    - {candidate: /tmp/zephyr-device, reason: contains_special}
+    - {candidate: /tmp/zephyr-mounted, reason: contains_mount}
+    - {candidate: /tmp/zephyr-cargo-lock, reason: contains_special}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-eligible]
+  removed: [/tmp/zephyr-eligible]
+  skipped:
+    - {candidate: /tmp/zephyr-kept, reason: kept}
+    - {candidate: /tmp/zephyr-checkout, reason: contains_checkout}
+    - {candidate: /tmp/zephyr-foreign, reason: not_owner}
+    - {candidate: /tmp/zephyr-socket, reason: contains_ipc}
+    - {candidate: /tmp/zephyr-fifo, reason: contains_ipc}
+    - {candidate: /tmp/zephyr-device, reason: contains_special}
+    - {candidate: /tmp/zephyr-mounted, reason: contains_mount}
+    - {candidate: /tmp/zephyr-cargo-lock, reason: contains_special}
+  preserved:
+    - /tmp/zephyr-kept/deep/payload
+    - /tmp/zephyr-checkout/west/payload
+    - /tmp/zephyr-foreign/mine
+    - /tmp/zephyr-socket/agent.sock
+    - /tmp/zephyr-fifo/pipe
+    - /tmp/zephyr-device/tty
+    - /tmp/zephyr-mounted/fuse
+    - /tmp/zephyr-cargo-lock/.cargo-lock

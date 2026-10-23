@@ -30,15 +30,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::config::{self, Config, Env, IpcPolicy, Lookup, MAX_CONFIG_BYTES, Owner, Ranking};
-use diskgc_core::executor::{self, Request, SelectionFailure, Tier};
+use diskgc_core::config::{self, Config, Env, Lookup, MAX_CONFIG_BYTES};
+use diskgc_core::executor;
 use diskgc_core::host::Errno;
+use diskgc_core::invocation::{self, EnsureOptions, Platform};
 use diskgc_core::kernel::KernelError;
-use diskgc_core::profile::{Body, Finds, Library, Roots, Source, describe};
+use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::select;
-use diskgc_core::units::{Size, parse_duration, parse_size};
+use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{read_config_file, read_root_config_file, resolve_owner};
 
@@ -102,22 +103,12 @@ enum Invocation {
     UsageError(String),
 }
 
-/// `ensure`'s arguments, checked for syntax.
+/// `ensure`'s arguments, checked for syntax: the composition's options
+/// plus where the configuration comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EnsureArgs {
-    min_free: Size,
-    target_free: Option<Size>,
-    /// `None`: `--timeout 0`, no deadline.
-    timeout: Option<Duration>,
-    /// `None`: `--tally-budget 0`, no limit (the default is derived from
-    /// the timeout: `executor::default_tally_budget`).
-    tally_budget: Option<Duration>,
-    select: Option<String>,
-    roots: Vec<String>,
-    dry_run: bool,
+    options: EnsureOptions,
     config: Option<OsString>,
-    allow_root: bool,
-    path: PathBuf,
 }
 
 /// `profiles list | show NAME | test`'s arguments. Whether the output is JSON is
@@ -367,20 +358,22 @@ fn parse_ensure(args: &[OsString]) -> Result<EnsureArgs, String> {
         Some(t) => Some(t),
     };
     Ok(EnsureArgs {
-        min_free,
-        target_free,
-        timeout,
-        tally_budget: match tally_budget {
-            None => Some(executor::default_tally_budget(timeout)),
-            Some(Duration::ZERO) => None,
-            Some(t) => Some(t),
+        options: EnsureOptions {
+            min_free,
+            target_free,
+            timeout,
+            tally_budget: match tally_budget {
+                None => Some(executor::default_tally_budget(timeout)),
+                Some(Duration::ZERO) => None,
+                Some(t) => Some(t),
+            },
+            select,
+            roots,
+            dry_run,
+            allow_root,
+            path,
         },
-        select,
-        roots,
-        dry_run,
         config,
-        allow_root,
-        path,
     })
 }
 
@@ -549,12 +542,12 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String>
 /// `ensure`'s configuration: `None` when none is found and `--select`
 /// makes one optional.
 fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
-    match load_config(args.config.as_deref(), false, args.allow_root)? {
+    match load_config(args.config.as_deref(), false, args.options.allow_root)? {
         (_, Some(config)) => Ok(Some(config)),
-        (_, None) if args.allow_root => {
+        (_, None) if args.options.allow_root => {
             Err("--allow-root requires a configuration file with an owners: list".to_owned())
         }
-        (_, None) if args.select.is_some() => Ok(None),
+        (_, None) if args.options.select.is_some() => Ok(None),
         (lookup, None) => Err(format!(
             "no configuration file found (tried {}); ensure without --select needs one",
             lookup
@@ -567,69 +560,10 @@ fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
     }
 }
 
-/// Translate configured owners once before any planning or deletion. Two
-/// names or entries resolving to the same uid hide a policy error.
-fn resolved_owners(config: &Config) -> Result<Vec<u32>, String> {
-    let entries = config
-        .owners
-        .as_ref()
-        .ok_or("--allow-root requires an owners: list")?;
-    let mut ids = Vec::with_capacity(entries.len());
-    for owner in entries {
-        let uid = match owner {
-            Owner::Name(name) => resolve_owner(name)?,
-            Owner::Uid(explicit) => explicit.uid,
-        };
-        if ids.contains(&uid) {
-            return Err(format!("owners: entries resolve to duplicate uid {uid}"));
-        }
-        ids.push(uid);
-    }
-    Ok(ids)
-}
-
 /// A configuration file that is not there (as opposed to one that cannot
 /// be read, which is an error, never a reason to try the next file).
 fn is_absent(e: &diskgc_core::host::HostError) -> bool {
     e.is(Errno::ENOENT) || e.is(Errno::ENOTDIR)
-}
-
-/// The tier `--select` makes, against the configuration's library or the
-/// built-ins alone.
-fn tier(
-    args: &EnsureArgs,
-    config: Option<&Config>,
-    uid: u32,
-    allow_root: bool,
-) -> Result<Tier, (ErrorCause, String)> {
-    let Some(expr) = &args.select else {
-        return Err((
-            ErrorCause::Usage,
-            "an explicit tier requires --select".to_owned(),
-        ));
-    };
-    let builtin;
-    let library = match config {
-        Some(config) => &config.library,
-        None => {
-            builtin = builtin_library().map_err(|message| (ErrorCause::Config, message))?;
-            &builtin
-        }
-    };
-    let roots = (!args.roots.is_empty()).then_some(args.roots.as_slice());
-    let (selected, warnings) =
-        Tier::select_with_warnings(expr, library, roots, uid).map_err(|failure| match failure {
-            SelectionFailure::Parse(message) => (ErrorCause::Parse, message),
-            SelectionFailure::Usage(message) => (ErrorCause::Usage, message),
-        })?;
-    for warning in warnings {
-        log(&format!("warning: --select {expr:?}: {warning}"));
-    }
-    if allow_root {
-        reject_root_uid_selected(&selected, library, &args.roots)
-            .map_err(|message| (ErrorCause::Safety, message))?;
-    }
-    Ok(selected)
 }
 
 /// Parse the operator's reproducible seed without accepting signs or spaces.
@@ -645,169 +579,35 @@ fn parse_configured_seed(value: &OsStr) -> Result<u64, String> {
         .map_err(|_| "DISKGC_SEED is larger than u64".to_owned())
 }
 
-/// Draw one seed for all random groups so the report reproduces their order.
-fn configured_seed(config: &Config) -> Result<Option<u64>, String> {
-    if !config
-        .groups
-        .iter()
-        .any(|group| group.ranking == Ranking::Random)
-    {
-        return Ok(None);
-    }
+/// The seed of a `ranking: random` run: `DISKGC_SEED`, or a fresh random
+/// one. Drawn once per run so the report reproduces every group's order.
+fn draw_seed() -> Result<u64, String> {
     if let Some(value) = std::env::var_os("DISKGC_SEED") {
-        return parse_configured_seed(&value).map(Some);
+        return parse_configured_seed(&value);
     }
     let mut bytes = [0; 8];
     getrandom::fill(&mut bytes).map_err(|error| format!("could not draw random seed: {error}"))?;
-    Ok(Some(u64::from_le_bytes(bytes)))
+    Ok(u64::from_le_bytes(bytes))
 }
 
-/// A stable, small PRNG for Fisher-Yates tier shuffles. The seed is printed
-/// so a run can be reproduced without relying on a library RNG version.
-fn next_shuffle_word(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut word = *state;
-    word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    word ^ (word >> 31)
-}
-
-/// Compile every configured tier before any action. Unsupported execution
-/// options are errors rather than silently changing policy order.
-fn configured_tiers(
-    config: &Config,
-    uid: u32,
-    allow_root: bool,
-    seed: Option<u64>,
-) -> Result<(Vec<Tier>, Vec<Duration>), String> {
-    let mut tiers = Vec::new();
-    let mut timeouts = Vec::new();
-    let mut state = seed.unwrap_or_default();
-    for group in &config.groups {
-        let mut settings = group.tiers.iter().collect::<Vec<_>>();
-        if group.ranking == Ranking::Random {
-            if seed.is_none() {
-                return Err(format!("group `{}` needs a random seed", group.name));
-            }
-            for end in (1..settings.len()).rev() {
-                let pick = (next_shuffle_word(&mut state) % (end as u64 + 1)) as usize;
-                settings.swap(end, pick);
-            }
-        }
-        for setting in settings {
-            let tier = Tier::configured(&group.name, setting, &config.library, uid)?;
-            if allow_root {
-                let supplied: Vec<String> = setting.roots.values().flatten().cloned().collect();
-                reject_root_uid_selected(&tier, &config.library, &supplied)?;
-                validate_selected_root_action(true, &tier)?;
-            }
-            tiers.push(tier);
-            timeouts.push(setting.timeout);
-        }
-    }
-    if tiers.is_empty() {
-        return Err(format!(
-            "config {}: groups contain no tiers",
-            config.path.display()
-        ));
-    }
-    Ok((tiers, timeouts))
-}
-
-/// Root mode must validate every source of a positive union. Checking only
-/// the first would let a later term bind `{uid}` to root's uid 0.
-fn reject_root_uid_selected(
-    selected: &Tier,
-    library: &Library,
-    supplied_roots: &[String],
-) -> Result<(), String> {
-    let profiles: Vec<&str> = std::iter::once(selected.profile.as_str())
-        .chain(
-            selected
-                .negated
-                .iter()
-                .map(|source| source.profile.as_str()),
-        )
-        .chain(selected.fs_union.iter().flat_map(|source| {
-            std::iter::once(source.profile.as_str()).chain(
-                source
-                    .negated
-                    .iter()
-                    .map(|negated| negated.profile.as_str()),
-            )
-        }))
-        .collect();
-    for profile in profiles {
-        let Some(Body::Source(source)) = library.get(profile).map(|p| &p.body) else {
-            return Err(format!(
-                "--select `{}`: selected source `{profile}` is missing",
-                selected.select
-            ));
-        };
-        reject_root_uid_placeholder(profile, source, supplied_roots)?;
-    }
-    Ok(())
-}
-
-/// In root mode `{uid}` expands to uid 0, not to each configured owner. A
-/// root-owned namespace can therefore select a different user's files.
-/// Refuse the source before its substituted find can plan or reclaim.
-fn reject_root_uid_placeholder(
-    profile: &str,
-    source: &Source,
-    supplied_roots: &[String],
-) -> Result<(), String> {
-    let in_field = if supplied_roots.iter().any(|root| root.contains("{uid}")) {
-        Some("--roots")
-    } else if matches!(&source.roots, Roots::Fixed(roots) if roots.iter().any(|root| root.contains("{uid}")))
-    {
-        Some("find.roots")
-    } else if matches!(&source.finds, Finds::Paths { patterns, .. } if patterns.iter().any(|path| path.contains("{uid}")))
-    {
-        Some("find.paths")
-    } else if matches!(&source.finds, Finds::Paths { exclude, .. } if exclude.iter().any(|path| path.contains("{uid}")))
-    {
-        Some("find.exclude")
-    } else if source
-        .where_
-        .app_not_running
-        .as_deref()
-        .is_some_and(|path| path.contains("{uid}"))
-    {
-        Some("where.app_not_running")
-    } else {
-        None
-    };
-    if let Some(field) = in_field {
-        return Err(format!(
-            "--allow-root refuses `{{uid}}` in {field} of selected profile `{profile}`: \
-             it would expand to root (uid 0), not to an owners: entry"
-        ));
-    }
-    Ok(())
-}
-
-/// Check the action that this invocation actually selected. Static config
-/// checks cover configured tiers; `--select` can choose another built-in or
-/// user profile from the same library.
-fn validate_selected_root_action(allow_root: bool, tier: &Tier) -> Result<(), String> {
-    if allow_root && let Some(error) = tier.action.root_mode_error() {
-        return Err(error.to_owned());
-    }
-    Ok(())
-}
-
-/// Runs `ensure`; every error is already in the report.
+/// Runs `ensure`; every error is already in the report. The decisions are
+/// `diskgc_core::invocation::ensure`'s; this wires it to `LinuxHost`, the
+/// configuration file and the account resolver.
 fn ensure(args: &EnsureArgs) -> Report {
     // Every error is logged where it is recorded: here for those found
-    // before the executor runs, by the executor for its own.
+    // before the composition runs, by the composition for its own.
     let fail = |cause: ErrorCause, why: String| {
         log(&format!("error: {why}"));
-        Report::new(Status::UsageError, Some(&args.path)).usage_error_with_cause(cause, why)
+        Report::new(Status::UsageError, Some(&args.options.path)).usage_error_with_cause(cause, why)
     };
     let fail_host = |why: String| {
         log(&format!("error: {why}"));
-        failed_report(Status::Error, ErrorCause::Host, why, Some(&args.path))
+        failed_report(
+            Status::Error,
+            ErrorCause::Host,
+            why,
+            Some(&args.options.path),
+        )
     };
     if let Err(error) = LinuxHost::install_interrupt_handlers() {
         return fail_host(format!("install signal handlers: {error}"));
@@ -821,91 +621,19 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(config) => config,
         Err(why) => return fail(ErrorCause::Config, why),
     };
-    if let Some(config) = &config {
-        log(&format!("config {}", config.path.display()));
-        for warning in &config.warnings {
-            log(&format!("warning: {warning}"));
-        }
-        if let Err(why) = config.validate_mode(args.allow_root) {
-            return fail(ErrorCause::Safety, why);
-        }
-        if config.ipc == IpcPolicy::LiveOnly {
-            return fail(ErrorCause::Safety, "ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)".to_owned());
-        }
-    }
-    let uid = match executor::privileges(&host, args.allow_root) {
-        Ok(uid) => uid,
-        Err(why) => return fail(ErrorCause::Safety, why),
+    let platform = Platform {
+        resolve_owner: &resolve_owner,
+        draw_seed: &draw_seed,
+        builtin_library: &builtin_library,
     };
-    let owners = if args.allow_root {
-        match resolved_owners(config.as_ref().expect("root mode requires config")) {
-            Ok(owners) => owners,
-            Err(why) => return fail(ErrorCause::Config, why),
-        }
-    } else {
-        vec![uid]
-    };
-    let protections = match config.as_ref() {
-        Some(config) => match executor::bind_protections(config, uid, args.allow_root) {
-            Ok(protections) => protections,
-            Err(why) => return fail(ErrorCause::Config, why),
-        },
-        None => Vec::new(),
-    };
-    let mut configured = if args.select.is_none() {
-        let config = config.as_ref().expect("unselected ensure requires config");
-        let seed = match configured_seed(config) {
-            Ok(seed) => seed,
-            Err(why) => return fail(ErrorCause::Config, why),
-        };
-        match configured_tiers(config, uid, args.allow_root, seed) {
-            Ok((tiers, timeouts)) => Some((tiers, timeouts, seed)),
-            Err(why) => return fail(ErrorCause::Config, why),
-        }
-    } else {
-        None
-    };
-    if let Some((tiers, _, _)) = &mut configured {
-        for tier in tiers {
-            tier.protections = protections.clone();
-        }
-    }
-    let mut tier = if let Some((tiers, _, _)) = &configured {
-        tiers[0].clone()
-    } else {
-        let tier = match tier(args, config.as_ref(), uid, args.allow_root) {
-            Ok(tier) => tier,
-            Err((cause, why)) => return fail(cause, why),
-        };
-        if let Err(why) = validate_selected_root_action(args.allow_root, &tier) {
-            return fail(ErrorCause::Safety, why);
-        }
-        tier
-    };
-    tier.protections = protections;
-    let request = Request {
-        path: args.path.clone(),
-        min_free: args.min_free,
-        target_free: args.target_free,
-        timeout: args.timeout,
-        tally_budget: args.tally_budget,
-        tier,
-    };
-    let mut progress = |line: &str| log(&operator_progress(line));
-    let mut report = if let Some((tiers, timeouts, _)) = &configured {
-        if args.dry_run {
-            executor::dry_run_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
-        } else {
-            executor::ensure_grouped(&host, &request, tiers, timeouts, &owners, &mut progress)
-        }
-    } else if args.dry_run {
-        // A plain Host: the dry run has no way to reach a deleting method.
-        executor::dry_run(&host, &request, &owners, &mut progress)
-    } else {
-        executor::ensure(&host, &request, &owners, &mut progress)
-    };
-    report.seed = configured.as_ref().and_then(|(_, _, seed)| *seed);
-    report
+    invocation::ensure(
+        &host,
+        &args.options,
+        config.as_ref(),
+        &platform,
+        &mut log,
+        &mut |line| log(&operator_progress(line)),
+    )
 }
 
 /// The built-in profiles alone; an error is a bug in the shipped YAML
@@ -1247,6 +975,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diskgc_core::executor::Tier;
+    use diskgc_core::units::Size;
 
     #[test]
     fn selected_tier_has_a_readable_progress_label() {
@@ -1358,160 +1088,6 @@ mod tests {
     }
 
     #[test]
-    fn root_mode_checks_the_final_cli_selection() {
-        let library = Library::builtin().expect("built-ins");
-        let roots = ["/home/mark".to_owned()];
-        let command = Tier::select("profile:pip-cache", &library, Some(&roots), 1000)
-            .expect("command source");
-        let deletion = Tier::select("profile:go-mod-cache", &library, Some(&roots), 1000)
-            .expect("deletion source");
-        assert!(validate_selected_root_action(false, &command).is_ok());
-        assert!(validate_selected_root_action(true, &deletion).is_ok());
-        assert!(
-            validate_selected_root_action(true, &command)
-                .unwrap_err()
-                .contains("command actions are refused")
-        );
-        let docker = Tier::select("profile:docker-build-cache", &library, None, 1000)
-            .expect("Docker source");
-        assert!(
-            validate_selected_root_action(true, &docker)
-                .unwrap_err()
-                .contains("owners: cannot bound")
-        );
-    }
-
-    #[test]
-    fn root_mode_refuses_each_uid_placeholder_input() {
-        let library = Library::builtin().expect("built-ins");
-        let Some(Body::Source(source)) = library.get("claude-code-tmp").map(|p| &p.body) else {
-            panic!("missing built-in")
-        };
-        let mut source = (**source).clone();
-        source.roots = Roots::Required;
-        let Finds::Paths {
-            patterns, exclude, ..
-        } = &mut source.finds
-        else {
-            panic!("expected fs source")
-        };
-        *patterns = vec!["cache".to_owned()];
-        exclude.clear();
-        let check = |source: &Source, roots: &[String]| {
-            reject_root_uid_placeholder("fixture", source, roots)
-        };
-        assert!(check(&source, &[]).is_ok());
-        assert!(
-            check(&source, &["/tmp/u-{uid}".to_owned()])
-                .unwrap_err()
-                .contains("--roots")
-        );
-        source.roots = Roots::Fixed(vec!["/tmp/u-{uid}".to_owned()]);
-        assert!(check(&source, &[]).unwrap_err().contains("find.roots"));
-        source.roots = Roots::Required;
-        if let Finds::Paths { patterns, .. } = &mut source.finds {
-            *patterns = vec!["u-{uid}".to_owned()];
-        }
-        assert!(check(&source, &[]).unwrap_err().contains("find.paths"));
-        if let Finds::Paths {
-            patterns, exclude, ..
-        } = &mut source.finds
-        {
-            *patterns = vec!["cache".to_owned()];
-            *exclude = vec!["u-{uid}".to_owned()];
-        }
-        assert!(check(&source, &[]).unwrap_err().contains("find.exclude"));
-        if let Finds::Paths { exclude, .. } = &mut source.finds {
-            exclude.clear();
-        }
-        source.where_.app_not_running = Some("/tmp/u-{uid}/SingletonLock".to_owned());
-        assert!(
-            check(&source, &[])
-                .unwrap_err()
-                .contains("where.app_not_running")
-        );
-    }
-
-    #[test]
-    fn root_mode_checks_uid_placeholder_in_second_union_source() {
-        let specs = diskgc_core::profile::parse_profiles(concat!(
-            "- name: plain-union\n",
-            "  find: {roots: [/tmp], paths: [plain-*], type: dir}\n",
-            "  action: delete\n",
-            "  examples: {match: [/tmp/plain-x]}\n",
-            "- name: uid-union\n",
-            "  find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
-            "  action: delete\n",
-            "  examples: {match: [/tmp/uid-1000]}\n",
-        ))
-        .expect("fixture profiles");
-        let library = Library::with_user_profiles(&specs).expect("fixture library");
-        let selected = Tier::select(
-            "profile:plain-union || profile:uid-union",
-            &library,
-            None,
-            0,
-        )
-        .expect("filesystem union");
-        let error = reject_root_uid_selected(&selected, &library, &[])
-            .expect_err("second source's uid placeholder must be refused");
-        assert!(error.contains("selected profile `uid-union`"), "{error}");
-        assert!(error.contains("find.paths"), "{error}");
-    }
-
-    #[test]
-    fn root_mode_checks_uid_placeholder_in_negated_source() {
-        let specs = diskgc_core::profile::parse_profiles(concat!(
-            "- name: plain-source\n",
-            "  find: {roots: [/tmp], paths: [plain-*], type: dir}\n",
-            "  action: delete\n",
-            "  examples: {match: [/tmp/plain-x]}\n",
-            "- name: uid-exclusion\n",
-            "  find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
-            "  action: delete\n",
-            "  examples: {match: [/tmp/uid-1000]}\n",
-        ))
-        .expect("fixture profiles");
-        let library = Library::with_user_profiles(&specs).expect("fixture library");
-        let selected = Tier::select(
-            "profile:plain-source && !profile:uid-exclusion",
-            &library,
-            None,
-            0,
-        )
-        .expect("negated filesystem source");
-        let error = reject_root_uid_selected(&selected, &library, &[])
-            .expect_err("negated source's uid placeholder must be refused");
-        assert!(
-            error.contains("selected profile `uid-exclusion`"),
-            "{error}"
-        );
-        assert!(error.contains("find.paths"), "{error}");
-    }
-
-    #[test]
-    fn configured_random_ranking_is_reproducible_and_preserves_group_order() {
-        let source = "version: 1\ngroups:\n  - name: stale\n    ranking: random\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/tmp]\n      - name: second\n        select: profile:cargo-target\n        roots: [/tmp]\n      - name: third\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: pressure\n    tiers:\n      - name: last\n        select: profile:cargo-target\n        roots: [/tmp]\n";
-        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("valid static policy");
-        let (first, first_timeouts) = configured_tiers(&config, 1000, false, Some(42)).unwrap();
-        let (again, again_timeouts) = configured_tiers(&config, 1000, false, Some(42)).unwrap();
-        assert_eq!(first, again);
-        assert_eq!(first_timeouts, again_timeouts);
-        assert_eq!(
-            first
-                .iter()
-                .map(|tier| tier.name.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "third", "second", "last"]
-        );
-        assert_eq!(first.last().expect("pressure tier").name, "last");
-        assert!(first.iter().take(3).all(|tier| tier.group == "stale"));
-        let error = configured_tiers(&config, 1000, false, None).expect_err("seed required");
-        assert!(error.contains("needs a random seed"), "{error}");
-    }
-
-    #[test]
     fn configured_seed_rejects_invalid_operator_input() {
         assert_eq!(parse_configured_seed(OsStr::new("0")).unwrap(), 0);
         assert_eq!(
@@ -1525,16 +1101,6 @@ mod tests {
             );
         }
         assert!(parse_configured_seed(OsStr::new("18446744073709551616")).is_err());
-    }
-
-    #[test]
-    fn configured_execution_accepts_best_fit() {
-        let source = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n        order: best-fit\n";
-        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("valid static policy");
-        let (tiers, _) =
-            configured_tiers(&config, 1000, false, None).expect("best-fit is supported");
-        assert_eq!(tiers[0].order, diskgc_core::config::Order::BestFit);
     }
 
     #[test]
@@ -1704,30 +1270,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_root_mode_checks_later_groups_before_execution() {
-        let source = concat!(
-            "version: 1\nprofiles:\n",
-            "  - name: uid-in-later-group\n",
-            "    find: {roots: [/tmp], paths: [\"uid-{uid}\"], type: dir}\n",
-            "    action: delete\n",
-            "    examples: {match: [/tmp/uid-1000]}\n",
-            "groups:\n",
-            "  - name: first\n    tiers:\n",
-            "      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n",
-            "  - name: later\n    tiers:\n",
-            "      - name: uid\n        select: profile:uid-in-later-group\n",
-        );
-        let config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("valid static policy");
-        let error = configured_tiers(&config, 0, true, None)
-            .expect_err("later uid placeholder must be refused");
-        assert!(
-            error.contains("uid-in-later-group") && error.contains("find.paths"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn version_flags_are_recognised() {
         assert_eq!(parse(&args(&["--version"])), Invocation::Version);
         assert_eq!(parse(&args(&["-V"])), Invocation::Version);
@@ -1882,22 +1424,22 @@ mod tests {
             "/b",
         ])
         .expect("parses");
-        assert_eq!(a.min_free, Size::Bytes(50 << 30));
-        assert_eq!(a.target_free, Some(Size::Bytes(80 << 30)));
-        assert_eq!(a.timeout, Some(Duration::from_secs(120)));
-        assert_eq!(a.roots, ["/b", "/c"]);
+        assert_eq!(a.options.min_free, Size::Bytes(50 << 30));
+        assert_eq!(a.options.target_free, Some(Size::Bytes(80 << 30)));
+        assert_eq!(a.options.timeout, Some(Duration::from_secs(120)));
+        assert_eq!(a.options.roots, ["/b", "/c"]);
         assert_eq!(a.config.as_deref(), Some(OsStr::new("/etc/x.yaml")));
-        assert!(a.dry_run && !a.allow_root);
-        assert_eq!(a.path, PathBuf::from("/b"));
+        assert!(a.options.dry_run && !a.options.allow_root);
+        assert_eq!(a.options.path, PathBuf::from("/b"));
         let d = ensure_args(&["--min-free", "10%", "/p"]).expect("parses");
-        assert_eq!(d.timeout, Some(DEFAULT_TIMEOUT));
-        assert_eq!(d.min_free, Size::Percent(10));
+        assert_eq!(d.options.timeout, Some(DEFAULT_TIMEOUT));
+        assert_eq!(d.options.min_free, Size::Percent(10));
         let none = ensure_args(&["--min-free", "1G", "--timeout", "0s", "/p"]).expect("parses");
-        assert_eq!(none.timeout, None);
-        assert_eq!(none.tally_budget, Some(Duration::from_secs(30)));
-        assert_eq!(d.tally_budget, Some(Duration::from_secs(30)));
+        assert_eq!(none.options.timeout, None);
+        assert_eq!(none.options.tally_budget, Some(Duration::from_secs(30)));
+        assert_eq!(d.options.tally_budget, Some(Duration::from_secs(30)));
         let quarter = ensure_args(&["--min-free", "1G", "--timeout", "1m", "/p"]).expect("parses");
-        assert_eq!(quarter.tally_budget, Some(Duration::from_secs(15)));
+        assert_eq!(quarter.options.tally_budget, Some(Duration::from_secs(15)));
     }
 
     /// The doc spells "no deadline" and "no limit" as a bare `0`
@@ -1915,11 +1457,11 @@ mod tests {
             "/p",
         ])
         .expect("the documented spelling parses");
-        assert_eq!(a.timeout, None);
-        assert_eq!(a.tally_budget, None);
+        assert_eq!(a.options.timeout, None);
+        assert_eq!(a.options.tally_budget, None);
         let b = ensure_args(&["--min-free", "1G", "--timeout=0", "--tally-budget=0", "/p"])
             .expect("parses");
-        assert_eq!((b.timeout, b.tally_budget), (None, None));
+        assert_eq!((b.options.timeout, b.options.tally_budget), (None, None));
         for bare in ["00", "5", "0 ", "-0"] {
             let error =
                 ensure_args(&["--min-free", "1G", "--timeout", bare, "/p"]).expect_err(bare);

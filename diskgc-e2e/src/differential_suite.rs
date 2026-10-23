@@ -1495,7 +1495,7 @@ fn project_pytest_unrelated_process(
     let [process] = vector.host.processes.as_mut_slice() else {
         return Err("pytest unsafe vector must have exactly one process".into());
     };
-    if vector.profile != "pytest-tmp-unsafe-probe"
+    if vector.profile.as_deref() != Some("pytest-tmp-unsafe-probe")
         || vector.path != Path::new("/tmp")
         || process.exe.as_deref() != Some(Path::new("/usr/bin/python"))
         || process.maps != [PathBuf::from("/usr/bin/python")]
@@ -1551,11 +1551,13 @@ fn project_browser_vector(mut vector: ProfileVector) -> Result<ProfileVector, St
     const ORIGINAL: &str = "/home";
     const SCRATCH: &str = "/home/tester";
     if !matches!(
-        vector.profile.as_str(),
-        "brave-browser-cache"
-            | "chrome-browser-cache"
-            | "chromium-browser-cache"
-            | "edge-browser-cache"
+        vector.profile.as_deref(),
+        Some(
+            "brave-browser-cache"
+                | "chrome-browser-cache"
+                | "chromium-browser-cache"
+                | "edge-browser-cache"
+        )
     ) || vector.path != Path::new(ORIGINAL)
         || vector.roots != ["/home/clear", "/home/locked"]
         || !vector.host.processes.is_empty()
@@ -1778,6 +1780,7 @@ fn cargo_target_held_lock_vector() -> Result<ProfileVector, String> {
     vector.expect.skipped.push(SkipVerdict {
         candidate: CARGO_TARGET_PATH.into(),
         reason: "locked".into(),
+        process_blockers: None,
     });
     vector.expect.preserved.extend([
         "/home/tester/project/good/target/debug/.fingerprint/good-hash/bin-good".into(),
@@ -1911,6 +1914,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
     vector.expect.skipped.push(SkipVerdict {
         candidate: cache,
         reason: "contains_mount".into(),
+        process_blockers: None,
     });
     vector.expect.preserved.push(at.join("visible"));
     Ok(vector)
@@ -2049,6 +2053,7 @@ fn generated_mypy_vector(index: u32) -> Result<ProfileVector, String> {
                 vector.expect.skipped.push(SkipVerdict {
                     candidate: extra.clone(),
                     reason: "contains_checkout".into(),
+                    process_blockers: None,
                 });
                 vector.expect.preserved.push(extra.join(".git/HEAD"));
             } else {
@@ -2125,6 +2130,7 @@ fn generated_python_vector(index: u32) -> Result<ProfileVector, String> {
             vector.expect.skipped.push(SkipVerdict {
                 candidate: extra.clone(),
                 reason: "contains_checkout".into(),
+                process_blockers: None,
             });
             vector.expect.preserved.push(extra.join(".git/HEAD"));
         }
@@ -2308,7 +2314,7 @@ fn replay_model_with_profile(
     // Preflight the semantic contract before even writing the CLI config.
     // The model's old clock and ctime cannot be installed on a fresh tmpfs.
     adapt_home_mount(&mut vector);
-    if vector.profile == "containers-image-tmp" {
+    if vector.profile.as_deref() == Some("containers-image-tmp") {
         adapt_var_tmp_mount(&mut vector)?;
     }
     preflight_vector(&vector, sandbox_clock_offset)?;
@@ -2370,7 +2376,9 @@ fn replay_model_with_profile(
             fixture.eligible(path.clone())
         });
     let oracle = Oracle::arm(fixture)?;
-    let select = format!("profile:{}", vector.profile_name());
+    let select = vector
+        .select_expression()
+        .ok_or("replay needs a profile or select")?;
     let path = vector.root_path().to_str().ok_or("non-UTF-8 vector path")?;
     let mut args = vec![
         "--json",
@@ -2442,15 +2450,17 @@ fn preflight_vector(vector: &ProfileVector, sandbox_clock_offset: bool) -> Resul
             .map_err(|error| format!("vector user profiles: {error}"))?
     };
     let tier = Tier::select(
-        &format!("profile:{}", vector.profile_name()),
+        &vector
+            .select_expression()
+            .ok_or("replay needs a profile or select")?,
         &library,
         (!vector.roots.is_empty()).then_some(vector.roots.as_slice()),
         vector.host.own_uid.unwrap_or(1000),
     )?;
     if !sandbox_clock_offset && (tier.idle_for.is_some() || tier.idle_before.is_some()) {
         return Err(format!(
-            "materialize(model): profile {} idle_for is model-only: fresh tmpfs ctime cannot reproduce the model clock and historical inode changes",
-            vector.profile_name()
+            "materialize(model): selection {} idle_for is model-only: fresh tmpfs ctime cannot reproduce the model clock and historical inode changes",
+            vector.select_expression().unwrap_or_default()
         ));
     }
     model_materialize::validate(&vector.host)
@@ -2493,7 +2503,9 @@ fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
         Library::with_user_profiles(&vector.user_profiles).map_err(|e| e.to_string())?
     };
     let tier = Tier::select(
-        &format!("profile:{}", vector.profile),
+        &vector
+            .select_expression()
+            .ok_or("replay needs a profile or select")?,
         &library,
         (!vector.roots.is_empty()).then_some(vector.roots.as_slice()),
         vector.host.own_uid.unwrap_or(1000),
@@ -2553,6 +2565,7 @@ fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
             .map(|entry| SkipVerdict {
                 candidate: entry.candidate.clone(),
                 reason: entry.reason.to_owned(),
+                process_blockers: None,
             })
             .collect(),
         removed,
@@ -2631,6 +2644,9 @@ fn linux_outcome(
                         .as_str()
                         .ok_or("skip reason missing")?
                         .to_owned(),
+                    // A Linux replay compares candidates and reasons; vectors it
+                    // replays leave process_blockers unset.
+                    process_blockers: None,
                 })
             })
             .collect::<Result<_, &str>>()?,

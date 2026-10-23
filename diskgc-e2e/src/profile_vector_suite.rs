@@ -53,7 +53,9 @@ pub(crate) fn replay_python_vector(ctx: &Ctx, concurrent_writers: &[&str]) -> Te
         fixture = fixture.concurrent_writer(*path);
     }
     let oracle = Oracle::arm(fixture)?;
-    let select = format!("profile:{}", vector.profile_name());
+    let select = vector
+        .select_expression()
+        .ok_or("replay needs a profile or select")?;
     let path = vector.root_path().to_str().ok_or("non-UTF-8 vector path")?;
     let roots = vector
         .roots
@@ -238,6 +240,9 @@ fn skip_verdicts(report: &Value) -> Result<Vec<SkipVerdict>, String> {
                     .as_str()
                     .ok_or_else(|| format!("skip has no reason: {entry}"))?
                     .to_owned(),
+                // A Linux replay compares candidates and reasons; vectors it
+                // replays leave process_blockers unset.
+                process_blockers: None,
             })
         })
         .collect()

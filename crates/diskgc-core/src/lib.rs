@@ -44,6 +44,7 @@ pub mod fs_kind;
 pub mod host;
 pub mod hostlock;
 pub mod inuse;
+pub mod invocation;
 pub mod kernel;
 pub mod kind;
 pub mod outcome;
