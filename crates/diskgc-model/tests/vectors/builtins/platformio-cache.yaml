@@ -1,0 +1,51 @@
+# platformio-cache at .platformio/.cache below four supplied home roots:
+# one candidate per role (match, in use, protected or negated, nested
+# guard).
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["c/.platformio/.cache"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/c/.platformio/.cache"]}}
+select: "profile:platformio-cache && !profile:pin"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.platformio/.cache": {"payload": {"size": "8K"}}
+    "/home/b/.platformio/.cache": {"payload": {"size": "8K"}}
+    "/home/c/.platformio/.cache": {"payload": {"size": "8K"}}
+    "/home/d/.platformio/.cache": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/b/.platformio/.cache/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.platformio/.cache"}
+    - {candidate: "/home/b/.platformio/.cache", reason: in_use}
+    - {candidate: "/home/c/.platformio/.cache", reason: excluded}
+    - {candidate: "/home/d/.platformio/.cache", reason: kept}
+  reclaim_exit: 1
+  actions: ["/home/a/.platformio/.cache"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.platformio/.cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/c/.platformio/.cache", reason: excluded}
+    - {candidate: "/home/d/.platformio/.cache", reason: kept}
+  preserved: ["/home/b/.platformio/.cache/payload", "/home/c/.platformio/.cache/payload", "/home/d/.platformio/.cache/payload", "/home/a/.platformio/.cache/payload"]
+  commands:
+    - {"cwd": "/home/a/.platformio", "argv": ["/usr/bin/env", "PLATFORMIO_CACHE_DIR=.cache", "/usr/bin/pio", "system", "prune", "--cache", "--force"]}

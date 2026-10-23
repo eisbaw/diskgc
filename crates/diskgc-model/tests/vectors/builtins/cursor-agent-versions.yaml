@@ -1,0 +1,60 @@
+# cursor-agent-versions keeps the two newest versions; of the four older
+# ones, one is deleted, one is in use, one is protected and one holds a
+# keep marker.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: pin
+      find: {roots: [/home/tester], paths: [.local/share/cursor-agent/versions/v3], type: dir}
+      action: delete
+      examples: {match: [/home/tester/.local/share/cursor-agent/versions/v3]}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:cursor-agent-versions, roots: [/home/tester]}
+select: profile:cursor-agent-versions
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.local/share/cursor-agent/versions/v1: {.: {mtime: 2026-10-01T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v2: {.: {mtime: 2026-10-02T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v3: {.: {mtime: 2026-10-03T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v4: {.: {mtime: 2026-10-04T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-04T00:00:00Z}, .diskgc-keep: {mtime: 2026-10-04T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v5: {.: {mtime: 2026-10-05T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-05T00:00:00Z}}
+    /home/tester/.local/share/cursor-agent/versions/v6: {.: {mtime: 2026-10-06T00:00:00Z}, agent: {size: 8K, mtime: 2026-10-06T00:00:00Z}}
+  processes:
+    - {pid: 901, exe: /home/tester/.local/share/cursor-agent/versions/v2/agent, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v1}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v2, reason: in_use}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v3, reason: protected}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v4, reason: kept}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v5, reason: newest_version}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v6, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.local/share/cursor-agent/versions/v1]
+  removed: [/home/tester/.local/share/cursor-agent/versions/v1]
+  skipped:
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v2, reason: in_use, process_blockers: [{pid: 901, evidence: exe}]}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v3, reason: protected}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v4, reason: kept}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v5, reason: newest_version}
+    - {candidate: /home/tester/.local/share/cursor-agent/versions/v6, reason: newest_version}
+  preserved:
+    - /home/tester/.local/share/cursor-agent/versions/v2/agent
+    - /home/tester/.local/share/cursor-agent/versions/v3/agent
+    - /home/tester/.local/share/cursor-agent/versions/v4/agent
+    - /home/tester/.local/share/cursor-agent/versions/v5/agent
+    - /home/tester/.local/share/cursor-agent/versions/v6/agent

@@ -1,0 +1,57 @@
+# npm-cache at .npm below four supplied home roots: one candidate per role
+# (match, in use, protected or negated, nested guard).
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/home"], "paths": ["c/.npm"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/c/.npm"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:npm-cache", "roots": ["/home/a", "/home/b", "/home/c", "/home/d"]}
+select: "profile:npm-cache"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.npm": {"payload": {"size": "8K"}}
+    "/home/b/.npm": {"payload": {"size": "8K"}}
+    "/home/c/.npm": {"payload": {"size": "8K"}}
+    "/home/d/.npm": {"payload": {"size": "8K"}, ".git": {"HEAD": {}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/b/.npm/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.npm"}
+    - {candidate: "/home/b/.npm", reason: in_use}
+    - {candidate: "/home/c/.npm", reason: protected}
+    - {candidate: "/home/d/.npm", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/home/a/.npm"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.npm", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/c/.npm", reason: protected}
+    - {candidate: "/home/d/.npm", reason: contains_checkout}
+  preserved: ["/home/b/.npm/payload", "/home/c/.npm/payload", "/home/d/.npm/payload", "/home/a/.npm/payload"]
+  commands:
+    - {"cwd": "/home/a/.npm", "argv": ["/usr/bin/npm", "cache", "clean", "--force", "--cache", "/home/a/.npm"]}

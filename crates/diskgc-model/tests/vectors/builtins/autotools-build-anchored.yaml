@@ -1,0 +1,48 @@
+# Source-anchored Autoconf output, past the 3-day floor: one deleted, one
+# named in a dormant shell's initial environment, one protected.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: pin
+      find: {roots: [/home/tester/src], paths: [p3/out], type: dir}
+      action: delete
+      examples: {match: [/home/tester/src/p3/out]}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:autotools-build-anchored, roots: [/home/tester/src]}
+select: profile:autotools-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/src/p1/configure.ac: {content: "AC_INIT([p1],[1])\n"}
+    /home/tester/src/p1/out: {.: {mtime: 2026-10-01T00:00:00Z}, config.status: {content: "ac_pwd='/home/tester/src/p1/out'\nsrcdir='..'\n", mtime: 2026-10-01T00:00:00Z}, config.log: {mtime: 2026-10-01T00:00:00Z}, Makefile: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/p2/configure.ac: {content: "AC_INIT([p2],[1])\n"}
+    /home/tester/src/p2/out: {.: {mtime: 2026-10-01T00:00:00Z}, config.status: {content: "ac_pwd='/home/tester/src/p2/out'\nsrcdir='..'\n", mtime: 2026-10-01T00:00:00Z}, config.log: {mtime: 2026-10-01T00:00:00Z}, Makefile: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/p3/configure.ac: {content: "AC_INIT([p3],[1])\n"}
+    /home/tester/src/p3/out: {.: {mtime: 2026-10-01T00:00:00Z}, config.status: {content: "ac_pwd='/home/tester/src/p3/out'\nsrcdir='..'\n", mtime: 2026-10-01T00:00:00Z}, config.log: {mtime: 2026-10-01T00:00:00Z}, Makefile: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [BUILD_DIR=/home/tester/src/p2/out], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p2/out, reason: in_use, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/p3/out, reason: protected, source: /home/tester/src/p3}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/out]
+  removed: [/home/tester/src/p1/out]
+  skipped:
+    - {candidate: /home/tester/src/p2/out, reason: in_use, process_blockers: [{pid: 901, evidence: environment}]}
+    - {candidate: /home/tester/src/p3/out, reason: protected}
+  preserved: [/home/tester/src/p1/configure.ac, /home/tester/src/p2/out/a.o, /home/tester/src/p3/out/a.o]

@@ -1,0 +1,57 @@
+# ccache at both standard locations below two home roots, one candidate
+# per role.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/home"], "paths": ["b/.cache/ccache"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/b/.cache/ccache"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:ccache", "roots": ["/home/a", "/home/b"]}
+select: "profile:ccache"
+roots: ["/home/a", "/home/b"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.cache/ccache": {"payload": {"size": "8K"}}
+    "/home/a/.ccache": {"payload": {"size": "8K"}}
+    "/home/b/.cache/ccache": {"payload": {"size": "8K"}}
+    "/home/b/.ccache": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/a/.ccache/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/ccache"}
+    - {candidate: "/home/a/.ccache", reason: in_use}
+    - {candidate: "/home/b/.cache/ccache", reason: protected}
+    - {candidate: "/home/b/.ccache", reason: kept}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/ccache"]
+  removed: []
+  skipped:
+    - {candidate: "/home/a/.ccache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/b/.cache/ccache", reason: protected}
+    - {candidate: "/home/b/.ccache", reason: kept}
+  preserved: ["/home/a/.ccache/payload", "/home/b/.cache/ccache/payload", "/home/b/.ccache/payload", "/home/a/.cache/ccache/payload"]
+  commands:
+    - {"cwd": "/home/a/.cache/ccache", "argv": ["/usr/bin/env", "CCACHE_DIR=/home/a/.cache/ccache", "/usr/bin/ccache", "--clear"]}

@@ -1,0 +1,50 @@
+# pip-cache at .cache/pip below four supplied home roots: one candidate
+# per role (match, in use, protected or negated, nested guard).
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["c/.cache/pip"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/c/.cache/pip"]}}
+select: "profile:pip-cache && !profile:pin"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.cache/pip": {"payload": {"size": "8K"}}
+    "/home/b/.cache/pip": {"payload": {"size": "8K"}}
+    "/home/c/.cache/pip": {"payload": {"size": "8K"}}
+    "/home/d/.cache/pip": {"payload": {"size": "8K"}, ".git": {"HEAD": {}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/b/.cache/pip/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/pip"}
+    - {candidate: "/home/b/.cache/pip", reason: in_use}
+    - {candidate: "/home/c/.cache/pip", reason: excluded}
+    - {candidate: "/home/d/.cache/pip", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/pip"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.cache/pip", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/c/.cache/pip", reason: excluded}
+    - {candidate: "/home/d/.cache/pip", reason: contains_checkout}
+  preserved: ["/home/b/.cache/pip/payload", "/home/c/.cache/pip/payload", "/home/d/.cache/pip/payload", "/home/a/.cache/pip/payload"]
+  commands:
+    - {"cwd": "/home/a/.cache/pip", "argv": ["/usr/bin/pip", "--cache-dir", "/home/a/.cache/pip", "cache", "purge"]}

@@ -1,0 +1,49 @@
+# Source-anchored Zephyr west builds: one deleted, one a process's
+# working directory, one excluded by a negated profile, one holding a
+# checkout (a west module cloned into the build tree).
+# KNOWN DEFECT (TASK-128): a selection with `!profile:` plans through the
+# union path, which drops build_evidence, so these rows carry no source:
+# although the docs promise one. Add source: when TASK-128 is fixed.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester/src], paths: [p3/build], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/p3/build]}
+select: profile:west-build-anchored && !profile:pin
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/src/p1/CMakeLists.txt: {content: "project(p1)\n"}
+    /home/tester/src/p1/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p1\n", mtime: 2026-10-01T00:00:00Z}, zephyr: {.: {mtime: 2026-10-01T00:00:00Z}, zephyr.elf: {size: 8K, mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/p2/CMakeLists.txt: {content: "project(p2)\n"}
+    /home/tester/src/p2/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p2\n", mtime: 2026-10-01T00:00:00Z}, zephyr: {.: {mtime: 2026-10-01T00:00:00Z}, zephyr.elf: {size: 8K, mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/p3/CMakeLists.txt: {content: "project(p3)\n"}
+    /home/tester/src/p3/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p3\n", mtime: 2026-10-01T00:00:00Z}, zephyr: {.: {mtime: 2026-10-01T00:00:00Z}, zephyr.elf: {size: 8K, mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/p4/CMakeLists.txt: {content: "project(p4)\n"}
+    /home/tester/src/p4/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p4\n", mtime: 2026-10-01T00:00:00Z}, zephyr: {.: {mtime: 2026-10-01T00:00:00Z}, zephyr.elf: {size: 8K, mtime: 2026-10-01T00:00:00Z}}, modules: {.: {mtime: 2026-10-01T00:00:00Z}, hal: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /home/tester/src/p2/build/zephyr, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/build}
+    - {candidate: /home/tester/src/p2/build, reason: in_use}
+    - {candidate: /home/tester/src/p3/build, reason: excluded}
+    - {candidate: /home/tester/src/p4/build, reason: contains_checkout}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/build]
+  removed: [/home/tester/src/p1/build]
+  skipped:
+    - {candidate: /home/tester/src/p2/build, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+    - {candidate: /home/tester/src/p3/build, reason: excluded}
+    - {candidate: /home/tester/src/p4/build, reason: contains_checkout}
+  preserved: [/home/tester/src/p2/build/zephyr/zephyr.elf, /home/tester/src/p3/build/zephyr/zephyr.elf, /home/tester/src/p4/build/modules/hal/.git/HEAD]

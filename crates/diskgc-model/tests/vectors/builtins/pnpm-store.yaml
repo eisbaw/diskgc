@@ -1,0 +1,51 @@
+# pnpm-store at .local/share/pnpm/store below four supplied home roots:
+# one candidate per role (match, in use, protected or negated, nested
+# guard).
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["c/.local/share/pnpm/store"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/c/.local/share/pnpm/store"]}}
+select: "profile:pnpm-store && !profile:pin"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.local/share/pnpm/store": {"payload": {"size": "8K"}}
+    "/home/b/.local/share/pnpm/store": {"payload": {"size": "8K"}}
+    "/home/c/.local/share/pnpm/store": {"payload": {"size": "8K"}}
+    "/home/d/.local/share/pnpm/store": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/b/.local/share/pnpm/store/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.local/share/pnpm/store"}
+    - {candidate: "/home/b/.local/share/pnpm/store", reason: in_use}
+    - {candidate: "/home/c/.local/share/pnpm/store", reason: excluded}
+    - {candidate: "/home/d/.local/share/pnpm/store", reason: kept}
+  reclaim_exit: 1
+  actions: ["/home/a/.local/share/pnpm/store"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.local/share/pnpm/store", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/c/.local/share/pnpm/store", reason: excluded}
+    - {candidate: "/home/d/.local/share/pnpm/store", reason: kept}
+  preserved: ["/home/b/.local/share/pnpm/store/payload", "/home/c/.local/share/pnpm/store/payload", "/home/d/.local/share/pnpm/store/payload", "/home/a/.local/share/pnpm/store/payload"]
+  commands:
+    - {"cwd": "/home/a/.local/share/pnpm/store", "argv": ["/usr/bin/pnpm", "store", "prune", "--store-dir", "/home/a/.local/share/pnpm/store"]}

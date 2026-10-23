@@ -1,0 +1,53 @@
+# codex-releases keeps the two newest releases and the one `current`
+# names (r6, reported as linked_current); of the older ones, one is deleted, one is in use (a running
+# binary), one is excluded by a negated profile and one holds a checkout.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester], paths: [.codex/packages/standalone/releases/r3], type: dir}
+    action: delete
+    examples: {match: [/home/tester/.codex/packages/standalone/releases/r3]}
+select: profile:codex-releases && !profile:pin
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.codex/packages/standalone/releases/r1: {.: {mtime: 2026-10-01T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/r2: {.: {mtime: 2026-10-02T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/r3: {.: {mtime: 2026-10-03T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/r4: {.: {mtime: 2026-10-04T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-04T00:00:00Z}, .git: {.: {mtime: 2026-10-04T00:00:00Z}, HEAD: {mtime: 2026-10-04T00:00:00Z}}}
+    /home/tester/.codex/packages/standalone/releases/r5: {.: {mtime: 2026-10-05T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-05T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/releases/r6: {.: {mtime: 2026-10-06T00:00:00Z}, codex: {size: 8K, mtime: 2026-10-06T00:00:00Z}}
+    /home/tester/.codex/packages/standalone/current: {symlink: releases/r6}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool, /home/tester/.codex/packages/standalone/releases/r2/codex], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r1}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r2, reason: in_use}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r3, reason: excluded}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r4, reason: contains_checkout}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r5, reason: newest_version}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r6, reason: linked_current}
+  reclaim_exit: 1
+  actions: [/home/tester/.codex/packages/standalone/releases/r1]
+  removed: [/home/tester/.codex/packages/standalone/releases/r1]
+  skipped:
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r2, reason: in_use, process_blockers: [{pid: 901, evidence: map}]}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r3, reason: excluded}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r4, reason: contains_checkout}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r5, reason: newest_version}
+    - {candidate: /home/tester/.codex/packages/standalone/releases/r6, reason: linked_current}
+  preserved:
+    - /home/tester/.codex/packages/standalone/releases/r2/codex
+    - /home/tester/.codex/packages/standalone/releases/r3/codex
+    - /home/tester/.codex/packages/standalone/releases/r4/codex
+    - /home/tester/.codex/packages/standalone/current

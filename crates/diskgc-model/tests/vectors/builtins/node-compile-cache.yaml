@@ -1,0 +1,53 @@
+# node-compile-cache below its fixed root, one candidate per role.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["nix-shell.B/node-compile-cache"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/nix-shell.B/node-compile-cache"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:node-compile-cache"}
+select: "profile:node-compile-cache"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/tmp/node-compile-cache": {"payload": {"size": "8K"}}
+    "/tmp/nix-shell.A/node-compile-cache": {"payload": {"size": "8K"}}
+    "/tmp/nix-shell.B/node-compile-cache": {"payload": {"size": "8K"}}
+    "/tmp/nix-shell.C/node-compile-cache": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/tmp/nix-shell.A/node-compile-cache/payload"}]}
+expect:
+  plan:
+    - {candidate: "/tmp/node-compile-cache"}
+    - {candidate: "/tmp/nix-shell.A/node-compile-cache", reason: in_use}
+    - {candidate: "/tmp/nix-shell.B/node-compile-cache", reason: protected}
+    - {candidate: "/tmp/nix-shell.C/node-compile-cache", reason: kept}
+  reclaim_exit: 1
+  actions: ["/tmp/node-compile-cache"]
+  removed: ["/tmp/node-compile-cache"]
+  skipped:
+    - {candidate: "/tmp/nix-shell.A/node-compile-cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/tmp/nix-shell.B/node-compile-cache", reason: protected}
+    - {candidate: "/tmp/nix-shell.C/node-compile-cache", reason: kept}
+  preserved: ["/tmp/nix-shell.A/node-compile-cache/payload", "/tmp/nix-shell.B/node-compile-cache/payload", "/tmp/nix-shell.C/node-compile-cache/payload"]

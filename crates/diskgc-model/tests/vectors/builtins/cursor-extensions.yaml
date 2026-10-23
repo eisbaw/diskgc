@@ -1,0 +1,54 @@
+# cursor-extensions ranks versions per extension id and keeps the two
+# newest and the installed ones (extensions.json); of the older versions
+# of a.ext, one is deleted, one is a process's working directory, one is
+# excluded by a negated profile, one holds a keep marker.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester], paths: [.cursor/extensions/a.ext-3.0.0], type: dir}
+    action: delete
+    examples: {match: [/home/tester/.cursor/extensions/a.ext-3.0.0]}
+select: profile:cursor-extensions && !profile:pin
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.cursor/extensions/a.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-4.0.0: {.: {mtime: 2026-10-04T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-04T00:00:00Z}, .diskgc-keep: {mtime: 2026-10-04T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-5.0.0: {.: {mtime: 2026-10-05T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-05T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-6.0.0: {.: {mtime: 2026-10-06T00:00:00Z}, payload: {size: 8K, mtime: 2026-10-06T00:00:00Z}}
+    /home/tester/.cursor/extensions/extensions.json: {content: '[]'}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /home/tester/.cursor/extensions/a.ext-2.0.0, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-1.0.0}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-2.0.0, reason: in_use}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: excluded}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-4.0.0, reason: kept}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-5.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-6.0.0, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.cursor/extensions/a.ext-1.0.0]
+  removed: [/home/tester/.cursor/extensions/a.ext-1.0.0]
+  skipped:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-2.0.0, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: excluded}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-4.0.0, reason: kept}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-5.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-6.0.0, reason: newest_version}
+  preserved:
+    - /home/tester/.cursor/extensions/a.ext-2.0.0/payload
+    - /home/tester/.cursor/extensions/a.ext-3.0.0/payload
+    - /home/tester/.cursor/extensions/a.ext-4.0.0/payload
+    - /home/tester/.cursor/extensions/extensions.json

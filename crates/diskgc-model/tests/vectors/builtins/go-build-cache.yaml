@@ -1,0 +1,50 @@
+# go-build-cache at .cache/go-build below four supplied home roots: one
+# candidate per role (match, in use, protected or negated, nested guard).
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["c/.cache/go-build"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/c/.cache/go-build"]}}
+select: "profile:go-build-cache && !profile:pin"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.cache/go-build": {"payload": {"size": "8K"}}
+    "/home/b/.cache/go-build": {"payload": {"size": "8K"}}
+    "/home/c/.cache/go-build": {"payload": {"size": "8K"}}
+    "/home/d/.cache/go-build": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/b/.cache/go-build/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/go-build"}
+    - {candidate: "/home/b/.cache/go-build", reason: in_use}
+    - {candidate: "/home/c/.cache/go-build", reason: excluded}
+    - {candidate: "/home/d/.cache/go-build", reason: kept}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/go-build"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.cache/go-build", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/c/.cache/go-build", reason: excluded}
+    - {candidate: "/home/d/.cache/go-build", reason: kept}
+  preserved: ["/home/b/.cache/go-build/payload", "/home/c/.cache/go-build/payload", "/home/d/.cache/go-build/payload", "/home/a/.cache/go-build/payload"]
+  commands:
+    - {"cwd": "/home/a/.cache/go-build", "argv": ["/usr/bin/env", "GOCACHE=/home/a/.cache/go-build", "/usr/bin/go", "clean", "-cache"]}

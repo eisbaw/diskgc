@@ -1,0 +1,48 @@
+# bun-cache at its default and alternate locations below two home roots,
+# one candidate per role.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["b/.bun/install/cache"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/b/.bun/install/cache"]}}
+select: "profile:bun-cache && !profile:pin"
+roots: ["/home/a", "/home/b"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/a/.bun/install/cache": {"payload": {"size": "8K"}}
+    "/home/a/.cache/.bun/install/cache": {"payload": {"size": "8K"}}
+    "/home/b/.bun/install/cache": {"payload": {"size": "8K"}}
+    "/home/b/.cache/.bun/install/cache": {"payload": {"size": "8K"}, ".git": {"HEAD": {}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/a/.cache/.bun/install/cache/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/a/.bun/install/cache"}
+    - {candidate: "/home/a/.cache/.bun/install/cache", reason: in_use}
+    - {candidate: "/home/b/.bun/install/cache", reason: excluded}
+    - {candidate: "/home/b/.cache/.bun/install/cache", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/home/a/.bun/install/cache"]
+  removed: ["/home/a/.bun/install/cache"]
+  skipped:
+    - {candidate: "/home/a/.cache/.bun/install/cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/b/.bun/install/cache", reason: excluded}
+    - {candidate: "/home/b/.cache/.bun/install/cache", reason: contains_checkout}
+  preserved: ["/home/a/.cache/.bun/install/cache/payload", "/home/b/.bun/install/cache/payload", "/home/b/.cache/.bun/install/cache/payload"]

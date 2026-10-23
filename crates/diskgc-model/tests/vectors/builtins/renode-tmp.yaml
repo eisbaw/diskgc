@@ -1,0 +1,46 @@
+# renode-tmp below its fixed root, one candidate per role.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["zephyr-x-run.y/renode-3"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-x-run.y/renode-3"]}}
+select: "profile:renode-tmp && !profile:pin"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/tmp/renode-1": {"payload": {"size": "8K"}}
+    "/tmp/renode-2": {"payload": {"size": "8K"}}
+    "/tmp/zephyr-x-run.y/renode-3": {"payload": {"size": "8K"}}
+    "/tmp/renode-4": {"payload": {"size": "8K"}, ".git": {"HEAD": {}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/tmp/renode-2/payload"}]}
+expect:
+  plan:
+    - {candidate: "/tmp/renode-1"}
+    - {candidate: "/tmp/renode-2", reason: in_use}
+    - {candidate: "/tmp/zephyr-x-run.y/renode-3", reason: excluded}
+    - {candidate: "/tmp/renode-4", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/tmp/renode-1"]
+  removed: ["/tmp/renode-1"]
+  skipped:
+    - {candidate: "/tmp/renode-2", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/tmp/zephyr-x-run.y/renode-3", reason: excluded}
+    - {candidate: "/tmp/renode-4", reason: contains_checkout}
+  preserved: ["/tmp/renode-2/payload", "/tmp/zephyr-x-run.y/renode-3/payload", "/tmp/renode-4/payload"]

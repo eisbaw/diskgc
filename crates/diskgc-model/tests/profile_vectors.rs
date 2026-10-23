@@ -152,45 +152,84 @@ fn every_skip_reason_has_a_vector() {
     );
 }
 
+/// What a built-in source's vectors must show (AC 3), by the result: an
+/// action of that profile; a skip of it as in use (or locked); one as
+/// protected or excluded by a negated profile; one kept by a nested guard
+/// (a keep marker, a checkout, or nested special content).
+const CATEGORIES: [(&str, &[&str]); 4] = [
+    ("match", &[]),
+    ("in_use", &["in_use", "locked"]),
+    ("protected_or_negated", &["protected", "excluded"]),
+    (
+        "nested_guard",
+        &["kept", "contains_checkout", "contains_special"],
+    ),
+];
+
+/// Categories that cannot apply to a source, by its action, and why.
+fn not_applicable(action: &Action) -> &'static [&'static str] {
+    match action {
+        // Docker prunes act on a daemon's own store, whose protections are
+        // Docker's (running containers); protect and !profile take only fs
+        // and cargo-target sources, and no walk runs (docs/safety.md,
+        // Docker kinds).
+        Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
+            &["in_use", "protected_or_negated", "nested_guard"]
+        }
+        Action::Delete { .. } | Action::CargoLockProtocol | Action::Command { .. } => &[],
+    }
+}
+
+/// AC 3: every built-in source has a vector per category, judged from the
+/// results of vectors that ran the unchanged built-in.
 #[test]
-fn every_modelable_builtin_source_has_a_checked_in_vector() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/profiles");
+fn every_builtin_source_has_match_in_use_guarded_and_nested_vectors() {
     let library = Library::builtin().expect("built-in profiles");
-    let mut covered = BTreeSet::new();
-    for path in fs::read_dir(&directory).expect("profile vector directory") {
-        let path = path.expect("directory entry").path();
-        if path.extension().is_some_and(|ext| ext == "yaml") {
-            let vector = read(&path);
-            if !vector.user_profiles.is_empty() {
-                continue;
+    let mut shown: BTreeSet<(String, &str)> = BTreeSet::new();
+    for (_, result) in corpus() {
+        let Ok(checked) = result else { continue };
+        let builtin = |profile: &str| checked.builtin.contains(profile);
+        for action in checked
+            .reclaim
+            .actions
+            .iter()
+            .filter(|a| builtin(&a.profile))
+        {
+            shown.insert((action.profile.clone(), "match"));
+        }
+        for skip in checked
+            .reclaim
+            .skipped
+            .iter()
+            .filter(|s| builtin(&s.profile))
+        {
+            for (category, reasons) in CATEGORIES {
+                if reasons.contains(&skip.reason) {
+                    shown.insert((skip.profile.clone(), category));
+                }
             }
-            let name = vector
-                .profile_name()
-                .expect("a models/profiles vector names its profile");
-            let profile = library.get(name).expect("shipped profile");
-            assert!(
-                matches!(&profile.body, Body::Source(source) if !matches!(source.action, Action::Command { .. })),
-                "{} cannot assert a command cleaner's filesystem effect in ModelHost",
-                path.display()
-            );
-            covered.insert(name.to_owned());
         }
     }
-    let modelable: BTreeSet<_> = library
-        .profiles()
-        .filter_map(|profile| match &profile.body {
-            Body::Source(source)
-                if matches!(
-                    source.action,
-                    Action::Delete { .. } | Action::CargoLockProtocol
-                ) =>
-            {
-                Some(profile.name.clone())
+    let mut missing = Vec::new();
+    for profile in library.profiles() {
+        let Body::Source(source) = &profile.body else {
+            continue;
+        };
+        for (category, _) in CATEGORIES {
+            if not_applicable(&source.action).contains(&category) {
+                continue;
             }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(covered, modelable, "built-in source vector coverage drift");
+            if !shown.contains(&(profile.name.clone(), category)) {
+                missing.push(format!("{} {category}", profile.name));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} built-in source categories without a vector:\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
 }
 
 #[test]

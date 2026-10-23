@@ -1,0 +1,55 @@
+# python-pycache through depth five; protected by a pinned profile and
+# kept by a marker.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/home"], "paths": ["tester/src/app/x/y/__pycache__"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/src/app/x/y/__pycache__"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:python-pycache", "roots": ["/home/tester/src"]}
+select: "profile:python-pycache"
+roots: ["/home/tester/src"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/pip: {mode: "0755"}
+    /usr/bin/uv: {mode: "0755"}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/go: {mode: "0755"}
+    /usr/bin/npm: {mode: "0755"}
+    /usr/bin/pnpm: {mode: "0755"}
+    /usr/bin/yarn: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    /usr/bin/jest: {mode: "0755"}
+    /usr/bin/pio: {mode: "0755"}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/tester/src/app/__pycache__": {"payload": {"size": "8K"}}
+    "/home/tester/src/app/x/__pycache__": {"payload": {"size": "8K"}}
+    "/home/tester/src/app/x/y/__pycache__": {"payload": {"size": "8K"}}
+    "/home/tester/src/app/x/y/z/__pycache__": {"payload": {"size": "8K"}, ".diskgc-keep": {}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/tester/src/app/x/__pycache__/payload"}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/src/app/__pycache__"}
+    - {candidate: "/home/tester/src/app/x/__pycache__", reason: in_use}
+    - {candidate: "/home/tester/src/app/x/y/__pycache__", reason: protected}
+    - {candidate: "/home/tester/src/app/x/y/z/__pycache__", reason: kept}
+  reclaim_exit: 1
+  actions: ["/home/tester/src/app/__pycache__"]
+  removed: ["/home/tester/src/app/__pycache__"]
+  skipped:
+    - {candidate: "/home/tester/src/app/x/__pycache__", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/tester/src/app/x/y/__pycache__", reason: protected}
+    - {candidate: "/home/tester/src/app/x/y/z/__pycache__", reason: kept}
+  preserved: ["/home/tester/src/app/x/__pycache__/payload", "/home/tester/src/app/x/y/__pycache__/payload", "/home/tester/src/app/x/y/z/__pycache__/payload"]

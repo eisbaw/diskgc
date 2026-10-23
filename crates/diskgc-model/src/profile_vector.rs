@@ -621,11 +621,25 @@ fn compare_plan(report: &Report, expected: &[PlanVerdict]) -> Result<(), String>
     let mut expected = expected.to_vec();
     expected.sort_by(|a, b| a.candidate.cmp(&b.candidate));
     if actual != expected {
-        return Err(format!(
-            "dry-run plan\nactual: {actual:#?}\nexpected: {expected:#?}"
-        ));
+        return Err(format!("dry-run plan {}", difference(&actual, &expected)));
     }
     Ok(())
+}
+
+/// What `actual` has that `expected` lacks, and the reverse: the readable
+/// part of a mismatch between two long lists.
+fn difference<T: PartialEq + std::fmt::Debug>(actual: &[T], expected: &[T]) -> String {
+    let only = |a: &[T], b: &[T]| -> Vec<String> {
+        a.iter()
+            .filter(|x| !b.contains(x))
+            .map(|x| format!("{x:?}"))
+            .collect()
+    };
+    format!(
+        "differs\n  only actual:\n    {}\n  only expected:\n    {}",
+        only(actual, expected).join("\n    "),
+        only(expected, actual).join("\n    ")
+    )
 }
 
 fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String> {
@@ -655,9 +669,20 @@ fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String
                 })
         });
     if !same {
-        return Err(format!(
-            "reclaim skipped\nactual: {actual:#?}\nexpected: {expected:#?}"
-        ));
+        // Compare like with like: blockers only where the vector gives them.
+        let shown: Vec<_> = actual
+            .iter()
+            .map(|got| {
+                let compared = expected
+                    .iter()
+                    .any(|want| want.candidate == got.candidate && want.process_blockers.is_some());
+                SkipVerdict {
+                    process_blockers: got.process_blockers.clone().filter(|_| compared),
+                    ..got.clone()
+                }
+            })
+            .collect();
+        return Err(format!("reclaim skipped {}", difference(&shown, &expected)));
     }
     Ok(())
 }
