@@ -165,6 +165,37 @@ pub fn signed_bytes(delta: Option<i64>) -> String {
     }
 }
 
+/// Keep two different byte counts distinguishable when the usual rounded
+/// display would print them identically (notably `available` vs `min-free`).
+pub(crate) fn human_space_values(values: [Option<u64>; 3]) -> [String; 3] {
+    let rounded = values.map(|value| value.map_or_else(|| "unknown".to_owned(), format_bytes));
+    std::array::from_fn(|index| match values[index] {
+        Some(bytes)
+            if values.iter().enumerate().any(|(other_index, other)| {
+                other_index != index
+                    && other.is_some_and(|other_bytes| {
+                        other_bytes != bytes && rounded[other_index] == rounded[index]
+                    })
+            }) =>
+        {
+            format!("{} ({bytes} B)", rounded[index])
+        }
+        _ => rounded[index].clone(),
+    })
+}
+
+fn human_one_line(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control() || ch == '\\' {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// One candidate of a `--dry-run` plan (`plan`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanEntry {
@@ -621,32 +652,50 @@ impl Report {
     /// The human-mode result for stdout (docs/reference.md, Output):
     /// `None` when nothing needed doing (the goal was met and nothing was
     /// deleted, like `cp`'s silence); a dry run always prints its plan;
-    /// otherwise a short summary. Errors are summarised here and logged in
+    /// otherwise a bounded summary. Errors are summarised here and logged in
     /// full on stderr as they happen.
     pub fn summary(&self) -> Option<String> {
         let mount = self
             .mount
             .as_deref()
             .map_or_else(|| "unknown".to_owned(), |m| m.display().to_string());
-        let space = |v: Option<u64>| v.map_or_else(|| "unknown".to_owned(), format_bytes);
+        let [available, min_free, target_free] = human_space_values([
+            self.avail_after_bytes,
+            self.min_free_bytes,
+            self.target_free_bytes,
+        ]);
+        let status = match self.status {
+            Status::Exhausted => "nothing more could be reclaimed",
+            other => other.as_str(),
+        };
         let header = format!(
             "{}: {} available on {mount} (min-free {}, target-free {})",
-            self.status.as_str(),
-            space(self.avail_after_bytes),
-            space(self.min_free_bytes),
-            space(self.target_free_bytes)
+            status, available, min_free, target_free
         );
         match self.status {
-            Status::Met if self.actions.is_empty() && self.errors.is_empty() => None,
+            Status::Met
+                if self.actions.is_empty()
+                    && self.errors.is_empty()
+                    && self.held_by_deleted_files.is_empty()
+                    && self.skipped.iter().all(|skip| skip.reason == "empty") =>
+            {
+                None
+            }
             Status::UsageError => None,
             Status::DryRun => {
+                let [available, min_free, target_free] = human_space_values([
+                    self.avail_before_bytes,
+                    self.min_free_bytes,
+                    self.target_free_bytes,
+                ]);
                 let mut lines = vec![format!(
                     "dry run: {} available on {mount} (min-free {}, target-free {}); {} \
-                     candidate(s), in the order ensure would take them:",
-                    space(self.avail_before_bytes),
-                    space(self.min_free_bytes),
-                    space(self.target_free_bytes),
-                    self.plan.len()
+                     candidate(s), in the order ensure would take them (took {}):",
+                    available,
+                    min_free,
+                    target_free,
+                    self.plan.len(),
+                    self.human_elapsed()
                 )];
                 for p in &self.plan {
                     let verdict = match p.reason {
@@ -677,23 +726,184 @@ impl Report {
                 if !self.errors.is_empty() {
                     lines.push(format!("  {} error(s): see stderr", self.errors.len()));
                 }
+                if let Some(line) = self.human_held_line() {
+                    lines.push(line);
+                }
                 Some(lines.join("\n"))
             }
             _ => {
                 // Unknown if any action's change is unknown.
                 let freed: Option<i64> = self.actions.iter().map(|a| a.avail_delta_bytes).sum();
+                let kept: u64 = self
+                    .skipped
+                    .iter()
+                    .filter(|skip| skip.reason != "empty" && !skip.candidate.as_os_str().is_empty())
+                    .map(|skip| skip.count)
+                    .fold(0, u64::saturating_add);
+                let preflight: u64 = self
+                    .skipped
+                    .iter()
+                    .filter(|skip| skip.reason != "empty" && skip.candidate.as_os_str().is_empty())
+                    .map(|skip| skip.count)
+                    .fold(0, u64::saturating_add);
+                let preflight_text = if preflight == 0 {
+                    String::new()
+                } else {
+                    format!(", {preflight} profile(s) skipped without a candidate")
+                };
                 let mut text = format!(
-                    "{header}; {} action(s) (observed change {}), {} skipped, {} error(s)",
+                    "{header}; {} action(s) (observed change {}), {kept} kept{preflight_text}, {} error(s); took {}",
                     self.actions.len(),
                     signed_bytes(freed),
-                    self.skipped.len(),
-                    self.errors.len()
+                    self.errors.len(),
+                    self.human_elapsed()
                 );
                 if let Some(e) = self.errors.first() {
                     text.push_str(&format!("; first error: {}", e.message));
                 }
+                for line in self.human_kept_lines() {
+                    text.push('\n');
+                    text.push_str(&line);
+                }
+                for line in self.human_preflight_lines() {
+                    text.push('\n');
+                    text.push_str(&line);
+                }
+                if let Some(line) = self.human_held_line() {
+                    text.push('\n');
+                    text.push_str(&line);
+                }
                 Some(text)
             }
         }
+    }
+
+    fn human_elapsed(&self) -> String {
+        self.duration_ms.map_or_else(
+            || "unknown".to_owned(),
+            |ms| {
+                if ms < 1_000 {
+                    format!("{ms} ms")
+                } else {
+                    format!("{}.{:03} s", ms / 1_000, ms % 1_000)
+                }
+            },
+        )
+    }
+
+    fn human_kept_lines(&self) -> Vec<String> {
+        const EXAMPLE_LIMIT: usize = 5;
+        let mut groups: BTreeMap<&str, (u64, Vec<String>)> = BTreeMap::new();
+        for skip in &self.skipped {
+            if skip.reason == "empty" || skip.candidate.as_os_str().is_empty() {
+                continue;
+            }
+            let (count, examples) = groups.entry(skip.reason).or_default();
+            *count = count.saturating_add(skip.count);
+            for path in std::iter::once(&skip.candidate).chain(skip.examples.iter()) {
+                if examples.len() == EXAMPLE_LIMIT {
+                    break;
+                }
+                if !path.as_os_str().is_empty() {
+                    let escaped = human_one_line(&path.display().to_string());
+                    if !examples.contains(&escaped) {
+                        examples.push(escaped);
+                    }
+                }
+            }
+        }
+        let mut lines = Vec::new();
+        for (reason, (count, examples)) in groups {
+            if count <= EXAMPLE_LIMIT as u64 && examples.len() as u64 == count {
+                for path in examples {
+                    lines.push(format!("  kept {path}: {reason}"));
+                }
+            } else {
+                let more = count.saturating_sub(examples.len() as u64);
+                lines.push(format!(
+                    "  {count} kept: {reason}; examples: {}{}",
+                    examples.join(", "),
+                    if more == 0 {
+                        String::new()
+                    } else {
+                        format!(" ({more} more)")
+                    }
+                ));
+            }
+        }
+        lines
+    }
+
+    fn human_preflight_lines(&self) -> Vec<String> {
+        const EXAMPLE_LIMIT: usize = 5;
+        let mut groups: BTreeMap<&str, (u64, Vec<String>)> = BTreeMap::new();
+        for skip in &self.skipped {
+            if skip.reason == "empty" || !skip.candidate.as_os_str().is_empty() {
+                continue;
+            }
+            let (count, examples) = groups.entry(skip.reason).or_default();
+            *count = count.saturating_add(skip.count);
+            if examples.len() < EXAMPLE_LIMIT {
+                let label = format!(
+                    "{} [{}]",
+                    human_one_line(&skip.profile),
+                    human_one_line(&skip.tier)
+                );
+                if !examples.contains(&label) {
+                    examples.push(label);
+                }
+            }
+        }
+        let mut lines = Vec::new();
+        for (reason, (count, examples)) in groups {
+            if count <= EXAMPLE_LIMIT as u64 && examples.len() as u64 == count {
+                for profile in examples {
+                    lines.push(format!("  skipped profile {profile}: {reason}"));
+                }
+            } else {
+                let more = count.saturating_sub(examples.len() as u64);
+                lines.push(format!(
+                    "  {count} profiles skipped without a candidate: {reason}; examples: {}{}",
+                    examples.join(", "),
+                    if more == 0 {
+                        String::new()
+                    } else {
+                        format!(" ({more} more)")
+                    }
+                ));
+            }
+        }
+        lines
+    }
+
+    fn human_held_line(&self) -> Option<String> {
+        if self.held_by_deleted_files.is_empty() {
+            return None;
+        }
+        let bytes: u128 = self
+            .held_by_deleted_files
+            .iter()
+            .map(|entry| u128::from(entry.bytes))
+            .sum();
+        let bytes = u64::try_from(bytes).map_or_else(|_| format!("{bytes} B"), format_bytes);
+        let mut top: Vec<_> = self.held_by_deleted_files.iter().collect();
+        top.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.pid.cmp(&b.pid)));
+        let examples = top
+            .iter()
+            .take(3)
+            .map(|entry| {
+                let command = human_one_line(&entry.command);
+                format!(
+                    "pid {} ({command}, {})",
+                    entry.pid,
+                    format_bytes(entry.bytes)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "  held by deleted files: {} process(es), {bytes}; top: {examples}",
+            self.held_by_deleted_files.len()
+        ))
     }
 }

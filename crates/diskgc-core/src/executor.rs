@@ -58,7 +58,7 @@ use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, Where};
 use crate::report::{
     ActionEntry, BuildEvidence, ErrorCause, ErrorEntry, Final, HeldEntry, OverrunEntry, PlanEntry,
-    Report, SkipEntry, Status, after_lock_timeout, conclude, signed_bytes,
+    Report, SkipEntry, Status, after_lock_timeout, conclude, human_space_values, signed_bytes,
 };
 use crate::resolve::{
     ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
@@ -1470,11 +1470,12 @@ fn ensure_inner<H: Delete>(
         warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
         return report;
     }
+    let [avail_text, min_text, _] = human_space_values([Some(avail), Some(measured.min), None]);
     log(&format!(
         "{} available on {}, below --min-free {}: taking the host lock",
-        format_bytes(avail),
+        avail_text,
         measured.at.mount.mount_point.display(),
-        format_bytes(measured.min)
+        min_text
     ));
     let started = host.now();
     let acquired = hostlock::acquire(host, deadline);

@@ -523,12 +523,180 @@ fn the_summary_is_silent_only_when_nothing_needed_doing() {
         text.contains("skip not_idle  /home/mark/src/app/target"),
         "{text}"
     );
+    assert!(text.contains("took 123 ms"), "{text}");
+    assert!(
+        text.contains("held by deleted files: 1 process(es), 5 B"),
+        "{text}"
+    );
     let mut exhausted = full();
     exhausted.status = Status::Exhausted;
     assert!(
         exhausted
             .summary()
             .expect("prints")
-            .starts_with("exhausted: ")
+            .starts_with("nothing more could be reclaimed: ")
+    );
+}
+
+#[test]
+fn human_failure_names_kept_targets_and_held_deleted_files() {
+    let mut report = full();
+    report.status = Status::Exhausted;
+    report.actions.clear();
+    report.errors.clear();
+    report.duration_ms = Some(1_234);
+    report.skipped.push(SkipEntry {
+        tier: "--select".into(),
+        profile: "cargo-target".into(),
+        candidate: "/busy-build".into(),
+        count: 1,
+        examples: Vec::new(),
+        reason: "locked",
+        detail: None,
+        process_blockers: None,
+        estimated_bytes: None,
+    });
+    report.skipped.push(SkipEntry {
+        tier: "--select".into(),
+        profile: "cargo-target".into(),
+        candidate: "/already-empty".into(),
+        count: 1,
+        examples: Vec::new(),
+        reason: "empty",
+        detail: None,
+        process_blockers: None,
+        estimated_bytes: None,
+    });
+    let text = report.summary().expect("summary");
+    assert!(text.contains("2 kept, 0 error(s); took 1.234 s"), "{text}");
+    assert!(text.contains("kept /u: in_use"), "{text}");
+    assert!(text.contains("kept /busy-build: locked"), "{text}");
+    assert!(!text.contains("/already-empty"), "{text}");
+    assert!(
+        text.contains("held by deleted files: 1 process(es), 5 B; top: pid 42 (cat, 5 B)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    report.mount = Some("/tmp".into());
+    for index in 0..7 {
+        report.skipped.push(SkipEntry {
+            tier: "t".into(),
+            profile: "p".into(),
+            candidate: format!("/tmp/held-{index}").into(),
+            count: 1,
+            examples: Vec::new(),
+            reason: "in_use",
+            detail: None,
+            process_blockers: None,
+            estimated_bytes: None,
+        });
+    }
+    report.skipped[0].candidate = "/tmp/held-0\nspoofed".into();
+    let text = report.summary().expect("summary");
+    assert!(text.contains("7 kept: in_use"), "{text}");
+    assert!(text.contains("(2 more)"), "{text}");
+    assert!(text.contains("held-0\\nspoofed"), "{text}");
+    assert!(!text.lines().any(|line| line == "spoofed"), "{text}");
+    assert!(!text.contains("held-6"), "{text}");
+}
+
+#[test]
+fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    report.skipped.push(SkipEntry {
+        tier: "--select".into(),
+        profile: "cargo-target".into(),
+        candidate: PathBuf::new(),
+        count: 1,
+        examples: Vec::new(),
+        reason: "missing",
+        detail: None,
+        process_blockers: None,
+        estimated_bytes: None,
+    });
+    let text = report.summary().expect("preflight refusal must be visible");
+    assert!(
+        text.contains("0 kept, 1 profile(s) skipped without a candidate"),
+        "{text}"
+    );
+    assert!(
+        text.contains("skipped profile cargo-target [--select]: missing"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("1 kept") && !text.contains("examples: "),
+        "{text}"
+    );
+    report.status = Status::Met;
+    assert!(
+        report.summary().is_some(),
+        "a preflight refusal should not make a met result silent"
+    );
+}
+
+#[test]
+fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    report.held_by_deleted_files = vec![
+        HeldEntry {
+            pid: 10,
+            command: "a".into(),
+            bytes: 0,
+        },
+        HeldEntry {
+            pid: 11,
+            command: "b".into(),
+            bytes: 5,
+        },
+        HeldEntry {
+            pid: 12,
+            command: "c".into(),
+            bytes: 2,
+        },
+        HeldEntry {
+            pid: 13,
+            command: "d".into(),
+            bytes: 7,
+        },
+    ];
+    let text = report.summary().expect("summary");
+    assert!(text.contains("4 process(es), 14 B"), "{text}");
+    assert!(
+        text.contains("pid 13 (d, 7 B), pid 11 (b, 5 B), pid 12 (c, 2 B)"),
+        "{text}"
+    );
+    assert!(!text.contains("pid 10"), "{text}");
+    report.status = Status::Met;
+    assert!(
+        report
+            .summary()
+            .expect("a held deleted file is actionable even when the goal is met")
+            .contains("held by deleted files:")
+    );
+}
+
+#[test]
+fn rounded_space_comparison_includes_exact_bytes_for_both_values() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    report.mount = Some("/tmp".into());
+    report.avail_after_bytes = Some((15 << 30) + (1 << 20));
+    report.min_free_bytes = Some((15 << 30) + (2 << 20));
+    report.target_free_bytes = report.min_free_bytes;
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("15.0 GiB (16107175936 B) available"),
+        "{text}"
+    );
+    assert!(text.contains("min-free 15.0 GiB (16108224512 B)"), "{text}");
+    report.status = Status::DryRun;
+    report.avail_before_bytes = report.avail_after_bytes;
+    let text = report.summary().expect("dry run");
+    assert!(
+        text.contains("15.0 GiB (16107175936 B) available"),
+        "{text}"
     );
 }

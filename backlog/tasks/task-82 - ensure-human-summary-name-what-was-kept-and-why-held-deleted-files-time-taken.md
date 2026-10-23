@@ -3,10 +3,10 @@ id: TASK-82
 title: >-
   ensure human summary: name what was kept and why, held deleted files, time
   taken
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 02:13'
-updated_date: '2026-10-19 02:54'
+updated_date: '2026-10-23 00:25'
 labels:
   - cli
   - ux
@@ -35,20 +35,24 @@ What an operator reading the job log cannot tell from it:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The summary of a run that did not meet --min-free lists each kept candidate with its reason (aggregated per reason beyond a small number), separately from targets an earlier run already emptied
-- [ ] #2 held_by_deleted_files is summarised (count, bytes, top pids) in human mode when non-empty
-- [ ] #3 The run's duration is printed
-- [ ] #4 Two compared sizes that round to the same text are printed with enough precision to differ
-- [ ] #5 Covered by report unit tests and asserted in the CI operator journey
+- [x] #1 The summary of a run that did not meet --min-free lists each kept candidate with its reason (aggregated per reason beyond a small number), separately from targets an earlier run already emptied
+- [x] #2 held_by_deleted_files is summarised (count, bytes, top pids) in human mode when non-empty
+- [x] #3 The run's duration is printed
+- [x] #4 Two compared sizes that round to the same text are printed with enough precision to differ
+- [x] #5 Covered by report unit tests and asserted in the CI operator journey
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Order (task-12 round 2 review): do AC #4 (the rounding contradiction "15.4 GiB available, below --min-free 15.4 GiB") first, together with task-86's "reclaiming X" printed before the target is judged; both make the log say something false.
+
+2026-10-23: Integrated human ensure summary change on main after TASK-16; focused real-binary CI operator journey passed 1/1. Full exact just e2e, parallel QA/MPED reviews, and commit still pending. No host deletion.
+
+2026-10-23: Exact nix develop -c just e2e passed on final code (workspace, Nix fast, Docker, five VMs). Focused CI operator journey passed 1/1; QA and MPED final GO. Human dry-run and normal summaries now cover elapsed time and held deleted files; preflight skips are separate from named kept candidates. No host deletion.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
+- [x] #1 Definition of Done in docs/testing.md
 <!-- DOD:END -->

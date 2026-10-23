@@ -15,7 +15,7 @@ use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::hostlock::TMPFILES_LINES;
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::{ErrorCause, Report, Status};
-use diskgc_core::units::{Size, parse_size};
+use diskgc_core::units::{Size, format_bytes, parse_size};
 use diskgc_model::spec::Op;
 use diskgc_model::{Call, Holder, ModelHost};
 
@@ -715,7 +715,12 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
     assert_eq!(report.held_by_deleted_files.len(), 1, "{report:#?}");
     assert_eq!(report.held_by_deleted_files[0].pid, 4242);
     assert_eq!(report.held_by_deleted_files[0].bytes, GIB);
-    assert!(report.summary().expect("prints").starts_with("exhausted: "));
+    assert!(
+        report
+            .summary()
+            .expect("prints")
+            .starts_with("nothing more could be reclaimed: ")
+    );
 }
 
 /// A completed tally has already measured both targets as younger than the
@@ -1821,6 +1826,37 @@ fn sizes_beyond_the_filesystem_or_target_below_min_are_usage_errors() {
     assert_eq!(report.mount, None);
 }
 
+#[test]
+fn progress_distinguishes_available_space_from_a_close_minimum() {
+    let host = host(&yaml(true, ""));
+    let available = dry_run(&host, &cargo("1G", None))
+        .avail_before_bytes
+        .expect("model measures space");
+    let minimum = available + (1 << 20);
+    assert_eq!(format_bytes(available), format_bytes(minimum));
+    let mut request = cargo("1G", None);
+    request.min_free = Size::Bytes(minimum);
+    let (_, lines) = ensure_logged(&host, &request);
+    let progress = lines
+        .iter()
+        .find(|line| line.contains("below --min-free"))
+        .expect("run logs why it takes the host lock");
+    assert!(
+        progress.contains(&format!(
+            "{} ({available} B) available",
+            format_bytes(available)
+        )),
+        "{progress}"
+    );
+    assert!(
+        progress.contains(&format!(
+            "--min-free {} ({minimum} B)",
+            format_bytes(minimum)
+        )),
+        "{progress}"
+    );
+}
+
 /// What the grammar allows but this build cannot run yet is refused when
 /// the tier is built (exit 2), never approximated.
 #[test]
@@ -2349,7 +2385,7 @@ fn a_reclaimed_cargo_target_is_not_a_skip_on_later_ensures() {
             assert!(later.actions.is_empty(), "{budget:?}: {later:#?}");
             assert!(later.skipped.is_empty(), "{budget:?}: {later:#?}");
             assert!(later.errors.is_empty(), "{budget:?}: {later:#?}");
-            assert!(later.summary().unwrap().contains("0 skipped"));
+            assert!(later.summary().unwrap().contains("0 kept"));
         }
     }
 }

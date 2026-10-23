@@ -411,7 +411,17 @@ development builds, the pre-release sandbox gate,
 ## Output
 
 - stdout carries only the result. Human mode: silent when nothing needed
-  doing (like `cp`); otherwise a short summary. `--json`: one object when
+  doing (like `cp`); otherwise a summary. When the goal remains unmet, it
+  names each kept candidate and its reason (grouped by reason after five),
+  omitting Cargo targets whose previous reclaim left only lock files. The
+  summary lists preflight profile refusals separately from kept candidates.
+  Human results, including dry runs, report elapsed time and, when present,
+  open deleted files by process count, bytes, and the largest three holders.
+  `exhausted` is rendered
+  as “nothing more could be reclaimed” in human mode; the JSON status remains
+  `exhausted`. When two different byte counts would round to the same human
+  size, both also show their exact byte counts in the result and in the
+  below-minimum progress line. `--json`: one object when
   stdout accepts the write. A failed write can leave no result or a partial
   one; exit 3 and a stderr error identify that failure.
 - stderr carries progress logs: one line per action with tier, profile,

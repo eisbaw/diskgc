@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use diskgc_core::units::format_bytes;
 use serde_json::Value;
 
 use crate::cargo_harness::{
@@ -205,7 +206,7 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     )?;
     oracle.judge(&preview)?.assert_clean()?;
     preview.expect_code(0)?;
-    expect_preview(&preview, &idle, &busy_targets)?;
+    expect_preview(&preview, &idle, &busy_targets, busy.holder.pid())?;
 
     // A one-second advance still leaves every target fresh. The file is
     // inside this disposable container and its marker must pass before the
@@ -370,13 +371,40 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
     expect_space_agrees(&human, BUILDS, &unreachable)?;
     human.expect_code(1)?;
     ensure!(
-        human.stdout.starts_with("exhausted: ") && human.stdout.lines().count() == 1,
-        "human mode prints a one-line summary: {:?}",
+        human
+            .stdout
+            .starts_with("nothing more could be reclaimed: "),
+        "human mode explains exhaustion: {:?}",
         human.stdout
     );
     ensure!(
-        human.stdout.contains("2 skipped"),
-        "human summary counts only the busy targets, not reclaimed empty targets: {:?}",
+        human.stdout.contains("2 kept")
+            && human.stdout.contains("took ")
+            && human.stdout.contains("held by deleted files:")
+            && human.stdout.contains("process(es), ")
+            && human.stdout.contains(&format!("pid {}", busy.holder.pid())),
+        "human summary counts busy targets, time and held deleted bytes: {:?}",
+        human.stdout
+    );
+    ensure!(
+        human.stdout.contains(&format_bytes(HELD_LOG_BYTES as u64)),
+        "human summary does not show the persistent deleted log's size: {:?}",
+        human.stdout
+    );
+    for (candidate, reason) in [(&busy_targets[0], "in_use"), (&busy_targets[1], "locked")] {
+        ensure!(
+            human
+                .stdout
+                .contains(&format!("kept {}: {reason}", candidate.display())),
+            "human summary does not name {} and {reason}: {:?}",
+            candidate.display(),
+            human.stdout
+        );
+    }
+    ensure!(
+        idle.iter()
+            .all(|target| !human.stdout.contains(&target.display().to_string())),
+        "the earlier reclaimed empty targets must not appear as kept: {:?}",
         human.stdout
     );
     expect_unchanged(&busy_before, "the human-mode run")?;
@@ -877,11 +905,13 @@ fn expect_held_log(report: &Value, pid: u32) -> TestResult {
 
 /// The dry run's human plan: the three idle targets eligible, oldest
 /// first, and both busy targets skipped (the dry run takes no lock, so the
-/// paused build is kept by its process, not its locks); nothing else.
-fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2]) -> TestResult {
+/// paused build is kept by its process, not its locks), plus held-file evidence.
+fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: u32) -> TestResult {
     let lines: Vec<&str> = run.stdout.lines().collect();
     ensure!(
-        lines.first().is_some_and(|l| l.starts_with("dry run: ")),
+        lines
+            .first()
+            .is_some_and(|l| l.starts_with("dry run: ") && l.contains("(took ")),
         "{:?}",
         run.stdout
     );
@@ -907,7 +937,18 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2]) -> TestResul
             run.stdout
         );
     }
-    ensure!(lines.len() == 1 + idle.len() + busy.len(), "{}", run.stdout);
+    let held_lines: Vec<_> = lines
+        .iter()
+        .filter(|line| line.trim_start().starts_with("held by deleted files:"))
+        .collect();
+    ensure!(
+        held_lines.len() == 1
+            && held_lines[0].contains(&format!("pid {holder_pid}"))
+            && held_lines[0].contains(&format_bytes(HELD_LOG_BYTES as u64)),
+        "dry run did not include the persistent deleted file: {}",
+        run.stdout
+    );
+    ensure!(lines.len() == 2 + idle.len() + busy.len(), "{}", run.stdout);
     Ok(())
 }
 

@@ -714,6 +714,15 @@ filesystem, processes and mounts from the developer's system.
   old targets through the same filter. The oracle and statvfs checks judge
   the resulting deletion and space claim. The offset is uniform within a
   run; it does not solve the mixed historical/fresh ctime vector gap below.
+  The final human-mode run asserts that the output names the two held targets
+  with their distinct `in_use` and `locked` reasons, omits the three targets
+  emptied by earlier runs, and includes elapsed time and the held deleted log's
+  process and its size. Report unit tests cover bounded per-reason examples,
+  preflight refusals separately from kept candidates, control-byte escaping,
+  held bytes and top PID in normal and dry-run output, and exact byte counts
+  when rounded sizes would misleadingly compare equal (including in a dry run). A ModelHost
+  integration test makes the progress line compare near-equal available and
+  minimum values without hiding their one-megabyte difference.
 - **Agent pre-job journey** (`agent_journey.rs`, Nix image): the shipped
   [agent-pre-job.py](agent-pre-job.py) runs real `ensure --json` and decides
   from its exit code and parsed JSON alone. Separate traced runs exercise
