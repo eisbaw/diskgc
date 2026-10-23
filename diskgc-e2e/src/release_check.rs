@@ -35,15 +35,15 @@ usage: diskgc-e2e-release-check --shipped BIN --dep-tree FILE --control BIN\n\
        diskgc-e2e-release-check --clock-offset-excluded BIN --clock-offset-control BIN";
 
 /// The complete runtime switch for TASK-89. The positive control is a
-/// development binary built from the same source, while the excluded binary
-/// has the release-without-sandbox-gate feature enabled.
+/// development binary built from the same source, while the candidate
+/// package has the release-without-sandbox-gate feature enabled.
 const CLOCK_OFFSET_NEEDLE: &str = "/.diskgc-test-clock-offset";
 
 pub fn check_clock_offset(excluded: &[u8], control: &[u8]) -> Vec<String> {
     let mut problems = Vec::new();
     if contains(excluded, CLOCK_OFFSET_NEEDLE) {
         problems.push(format!(
-            "feature-built binary contains test clock offset path {CLOCK_OFFSET_NEEDLE:?}"
+            "release candidate contains test clock offset path {CLOCK_OFFSET_NEEDLE:?}"
         ));
     }
     if !contains(control, CLOCK_OFFSET_NEEDLE) {
@@ -155,7 +155,7 @@ pub fn main(args: &[String]) -> i32 {
         let problems = check_clock_offset(&excluded_bytes, &control_bytes);
         if problems.is_empty() {
             println!(
-                "test clock offset absent from feature-built binary and present in development control"
+                "test clock offset absent from release candidate and present in development control"
             );
             return exit::PASS;
         }

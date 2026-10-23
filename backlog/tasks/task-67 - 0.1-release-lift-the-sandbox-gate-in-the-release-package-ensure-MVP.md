@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 00:33'
+updated_date: '2026-10-23 01:26'
 labels:
   - wave-2
   - release
@@ -18,7 +18,6 @@ dependencies:
   - TASK-11
   - TASK-13
   - TASK-65
-  - TASK-66
   - TASK-63
   - TASK-64
   - TASK-84
@@ -73,6 +72,8 @@ Compass domain review: implementing a v1 built-in does not authorize it in 0.1. 
 Forward-carried from TASK-106: the e2e harness now has a feature-built proposed 0.1 catalog binary under test, but it remains sandbox-gated. Container tests using it prove policy rejection in that provisional build only. TASK-67 still must build and test the actual gate-lifted release artifact before release.
 
 2026-10-22 Compass TASK-65 review: the current proposed 0.1 catalog admits no /tmp profile. Of the six TASK-65 proposals, only containers-image-tmp is implemented; its existing held-spool test uses a one-second user profile, not the exact three-day built-in or gate-lifted artifact, and dormant-spool reuse is unproved. The other five broad profiles have checked-in live no-fd/no-lock, post-exec TMPDIR, or PID-namespace counterexamples and remain unshipped. Do not lift the sandbox gate or claim AC5 until the signed-off /tmp subset and release scope are explicit, and the actual release binary proves admitted and excluded behavior in disposable real-kernel fixtures. No developer-host diskgc run.
+
+2026-10-23 dependency reconciliation: TASK-66 AC1/AC2 packaging is implemented. TASK-66 AC3/DoD depends on verifying the actual gate-lifted artifact from TASK-67, so TASK-66 is removed from TASK-67 formal dependencies to break the cycle. Verify TASK-66 AC3/DoD after this artifact exists and before TASK-67 closes; do not mark TASK-66 complete based on the gated development package.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

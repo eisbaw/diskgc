@@ -38,8 +38,8 @@ usage: diskgc-e2e-runner --image-stream PATH --image-ref REF --under-test DIR
                          [--runtime standard|dind]
                          [--log-dir DIR] COMMAND
 commands:
-  run --suite fast|full [--budget-secs N] [--jobs N]
-      fast: the fast tests (the `just e2e` gate); full: every test
+  run --suite fast|full|release [--budget-secs N] [--jobs N]
+      fast: the fast tests; full: every test; release: candidate and Cargo CLI probes
   one NAME
       one test; its container is kept when it fails";
 
@@ -69,14 +69,50 @@ pub enum Runtime {
 /// Which tests to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
-    /// `fast` tests only, or every test with `full`.
+    /// The named suite of tests.
     Suite {
-        full: bool,
+        suite: SuiteKind,
         budget: Duration,
         jobs: usize,
     },
     /// One test by name, container kept on failure.
     One { name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuiteKind {
+    Fast,
+    Full,
+    Release,
+}
+
+impl SuiteKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Full => "full",
+            Self::Release => "release",
+        }
+    }
+
+    fn includes(self, test: &Listed) -> bool {
+        match self {
+            Self::Fast => test.tier == Tier::Fast,
+            Self::Full => matches!(test.tier, Tier::Fast | Tier::Full),
+            Self::Release => {
+                test.tier == Tier::Fast
+                    && (test.name.starts_with("release_candidate_")
+                        || matches!(
+                            test.name.split_once('@').map(|(name, _)| name),
+                            Some(
+                                "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free"
+                                    | "ensure_exits_1_when_every_candidate_was_processed_below_min_free"
+                                    | "ensure_dry_run_plans_real_targets_and_deletes_nothing"
+                            )
+                        ))
+            }
+        }
+    }
 }
 
 /// Parses the runner's command line (global flags may come first, as the
@@ -113,10 +149,15 @@ pub fn parse_args(args: &[String]) -> Result<(Config, Selection), String> {
     };
     let selection = match words.as_slice() {
         [cmd] if cmd == "run" => {
-            let full = match take("suite").as_deref() {
-                Some("fast") => false,
-                Some("full") => true,
-                other => return Err(format!("--suite must be fast or full, got {other:?}")),
+            let suite = match take("suite").as_deref() {
+                Some("fast") => SuiteKind::Fast,
+                Some("full") => SuiteKind::Full,
+                Some("release") => SuiteKind::Release,
+                other => {
+                    return Err(format!(
+                        "--suite must be fast, full or release, got {other:?}"
+                    ));
+                }
             };
             let budget_secs: u64 = take("budget-secs")
                 .unwrap_or_else(|| "300".to_owned())
@@ -131,7 +172,7 @@ pub fn parse_args(args: &[String]) -> Result<(Config, Selection), String> {
                 None => std::thread::available_parallelism().map_or(4, |n| n.get()),
             };
             Selection::Suite {
-                full,
+                suite,
                 budget: Duration::from_secs(budget_secs),
                 jobs,
             }
@@ -173,15 +214,16 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
     let (listed, image) = list_tests(config)?;
 
     match selection {
-        Selection::Suite { full, budget, jobs } => {
-            let selected: Vec<Listed> = listed
-                .into_iter()
-                .filter(|t| t.tier == Tier::Fast || (*full && t.tier == Tier::Full))
-                .collect();
+        Selection::Suite {
+            suite,
+            budget,
+            jobs,
+        } => {
+            let selected: Vec<Listed> = listed.into_iter().filter(|t| suite.includes(t)).collect();
             if selected.is_empty() {
                 return Err("no tests selected".to_owned());
             }
-            let suite = if *full { "full" } else { "fast" };
+            let suite = suite.name();
             info!(
                 "running {} {suite}-suite tests, {jobs} at a time, budget {budget:?}",
                 selected.len()
@@ -794,11 +836,66 @@ mod tests {
         assert_eq!(
             selection,
             Selection::Suite {
-                full: false,
+                suite: SuiteKind::Fast,
                 budget: Duration::from_secs(300),
                 jobs: 3
             }
         );
+    }
+
+    #[test]
+    fn release_suite_selects_candidate_and_actual_cargo_cli_probes() {
+        let mut a = args(GLOBAL);
+        a.extend(args(&["run", "--suite", "release"]));
+        assert!(matches!(
+            parse_args(&a),
+            Ok((
+                _,
+                Selection::Suite {
+                    suite: SuiteKind::Release,
+                    ..
+                }
+            ))
+        ));
+        let selected: Vec<_> = crate::suite::TESTS
+            .iter()
+            .filter(|test| {
+                SuiteKind::Release.includes(&Listed {
+                    name: test.name.to_owned(),
+                    tier: test.tier,
+                })
+            })
+            .map(|test| test.name)
+            .collect();
+        assert_eq!(
+            selected.len(),
+            5,
+            "candidate suite lost a probe: {selected:?}"
+        );
+        assert!(
+            selected
+                .iter()
+                .all(|name| name.starts_with("release_candidate_"))
+        );
+        for name in [
+            "ensure_reclaims_the_oldest_real_target_and_stops_at_min_free@1.99.1",
+            "ensure_exits_1_when_every_candidate_was_processed_below_min_free@1.99.1",
+            "ensure_dry_run_plans_real_targets_and_deletes_nothing@1.99.1",
+        ] {
+            assert!(SuiteKind::Release.includes(&Listed {
+                name: name.to_owned(),
+                tier: Tier::Fast,
+            }));
+        }
+        for name in [
+            "cargo_targets_discovered_and_judged@1.99.1",
+            "journey_ci_operator_frees_space_with_ensure@1.99.1",
+        ] {
+            assert!(!SuiteKind::Release.includes(&Listed {
+                name: name.to_owned(),
+                tier: Tier::Fast,
+            }));
+        }
     }
 
     #[test]

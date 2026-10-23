@@ -82,6 +82,7 @@ pub mod proc_locks;
 pub mod profile_vector_suite;
 pub mod project_cache_suite;
 pub mod release_check;
+pub mod release_suite;
 pub mod runner;
 pub mod scale_suite;
 pub mod scratch;

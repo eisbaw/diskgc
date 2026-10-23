@@ -15,7 +15,8 @@ diskgc-linux.workspace = true
 getrandom.workspace = true
 
 [features]
-# Catalog preparation only. This never lifts diskgc-linux's sandbox gate.
+# Narrows the catalog. On its own this retains diskgc-linux's sandbox gate;
+# the test-only release-01-candidate derivation enables both required features.
 proposed-release-01-catalog = []
 
 [dev-dependencies]

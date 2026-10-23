@@ -345,10 +345,10 @@ mod tests {
 
     /// AC #3 of task-50, the configuration half: the feature that removes the
     /// gate is defined once, in diskgc-linux's manifest, is not a default
-    /// feature, and only the dedicated feature-built exclusion control in
-    /// the flake enables it. The default package, checks, `just` and plain
-    /// `cargo` all build with the gate. TASK-67 must change this test when
-    /// it enables the feature in the actual release package.
+    /// feature, and only the candidate release package in the flake enables
+    /// it. Its dependency-tree check must use identical features. The default
+    /// package, test binaries and plain `cargo` retain the gate. The scan
+    /// includes nested Cargo config files.
     ///
     /// flake.nix, the justfile and diskgc-e2e's manifest are not part of the
     /// flake's filtered build source, so the flake's workspace-tests cannot
@@ -403,29 +403,49 @@ mod tests {
         scanned.extend(cargo_configs_under(&repo));
 
         let found = gate_enablers(&repo, &scanned);
-        let allowed_control = "cargoExtraArgs = \"--locked --package diskgc --features diskgc-linux/release-without-sandbox-gate\";";
+        let allowed_release = "cargoExtraArgs = \"--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate\";";
+        let allowed_dep_tree =
+            "--features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \\";
         let unexpected: Vec<&String> = found
             .iter()
-            .filter(|line| !line.starts_with("flake.nix:") || !line.ends_with(allowed_control))
+            .filter(|line| {
+                !line.starts_with("flake.nix:")
+                    || !(line.ends_with(allowed_release) || line.ends_with(allowed_dep_tree))
+            })
             .collect();
         assert!(
-            unexpected.is_empty() && found.len() <= 1,
-            "the pre-release sandbox gate has an unexpected build enabler:\n{}",
+            unexpected.is_empty() && found.len() <= 2,
+            "the sandbox gate has an unexpected build enabler:\n{}",
             found.join("\n")
         );
         if checkout {
-            assert_eq!(found.len(), 1, "the feature-built control vanished");
+            assert_eq!(
+                found.len(),
+                2,
+                "the release feature or matching dependency tree vanished"
+            );
             let flake = std::fs::read_to_string(repo.join("flake.nix")).expect("flake");
-            let control = flake
-                .split_once("diskgcWithoutGate = craneLib.buildPackage")
-                .expect("the feature-built control")
+            let release = flake
+                .split_once("diskgcRelease01 = craneLib.buildPackage")
+                .expect("the candidate release package")
                 .1
                 .split_once("      );")
-                .expect("the end of the control build")
+                .expect("the end of the release package build")
                 .0;
             assert!(
-                control.contains(allowed_control),
-                "only the named control may enable the feature"
+                release.contains(allowed_release),
+                "only the candidate release package may enable the feature"
+            );
+            let dep_tree = flake
+                .split_once("releaseDepTree = craneLib.mkCargoDerivation")
+                .expect("the candidate dependency-tree check")
+                .1
+                .split_once("      );")
+                .expect("the end of the dependency-tree check")
+                .0;
+            assert!(
+                dep_tree.contains(allowed_dep_tree),
+                "the dependency tree must use the candidate's features"
             );
         }
         if !not_seen.is_empty() {

@@ -598,6 +598,9 @@ config lives at `docs/example.yaml` in the source tree and at
 `share/doc/diskgc/examples/example.yaml` in the Nix package; it is not
 installed as an active default. Copy it to a config search path or select
 it with `--config` after setting deployment roots.
+The CI pre-job hook at `docs/ci-pre-job.sh` is a source-tree example; the
+package does not install it. Copy it from the source tree if that deployment
+pattern is wanted.
 
 The config holds `version`, optional user `profiles`, optional
 `profile_policies`, optional `protect`, optional `owners` (only with
@@ -1140,18 +1143,20 @@ A built-in profile must satisfy the profile-specific
 Every row below is a v1 *target*; until verified it is
 listed as planned, not shipped.
 
-The optional `proposed-release-01-catalog` build feature is a preparation
-boundary, not a 0.1 release package. It keeps `cargo-target` and the seven
+The optional `proposed-release-01-catalog` build feature narrows the catalog.
+On its own it retains the development sandbox gate. The separate
+`release-01-candidate` package combines that feature with
+`diskgc-linux/release-without-sandbox-gate` for disposable-container testing;
+it is not approved for deployment. The candidate keeps `cargo-target` and the seven
 idle filters, and rejects every operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
 `profiles show`, `check` and help use the same narrowed library.
 `profile_policies` for admitted `cargo-target` works, but policies for
 excluded sources, including `npm-cache` and `uv-cache`, are refused at load
-time. No `/tmp` source is admitted yet: TASK65 has not established safe
-deletion of a live session with no open descriptor. The feature does not lift the pre-release
-sandbox gate. The final 0.1 catalog and operator-authored `fs` policy remain
-release decisions under TASK67.
+time. No `/tmp` source is admitted yet: candidate policy has not established
+which temporary paths are safe for release. The final 0.1 catalog and
+operator-authored `fs` and delete policies remain release decisions under TASK67.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
@@ -1358,6 +1363,30 @@ name (e.g. `claude-code-tmp-2`). An old name is never redefined; a new config
 less where it is used in `!profile:` or `protect`. Each built-in profile has
 a golden match set over fixtures; any change to it fails CI unless the
 profile was renamed.
+
+### Provisional 0.1 candidate release notes
+
+The candidate package ships a static `diskgc` binary, the tmpfiles rule and
+`example.yaml`. Its supported test scope is Cargo target reclaim with the
+seven idle filters and checkout policy narrowing. The default development
+package remains sandbox gated. The candidate's gate lift is tested only in
+disposable containers and does not constitute release approval.
+
+Watch mode, persistent index, broader survey and catalog additions, Docker
+actions, Nix store actions, operator command actions, and operator-authored
+filesystem/delete actions are deferred. `/tmp` admission and operator-authored
+policy rules still require an explicit release decision. The
+`docs/ci-pre-job.sh` example stays in the source tree; it is not installed by
+the package.
+
+| Candidate deployment question | Evidence and current limit |
+|---|---|
+| Package contents | The actual `release-01-candidate` derivation passes the static ELF and installed-file check; its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
+| Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
+| Catalog and excluded actions | The packaged binary exposes only Cargo plus seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
+| Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. No `/tmp` source is admitted; temporary-path liveness and the final release catalog remain unresolved. |
+| Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy this candidate as a 0.1 release. |
 
 ### User profiles
 

@@ -1803,9 +1803,11 @@ advances only the wall-clock input used for age and idleness. It cannot
 change `CLOCK_BOOTTIME` deadlines or kernel timestamps. A development build
 outside a marked container ignores the file. The
 `release-without-sandbox-gate` feature compiles out the offset; the
-`release-excludes-clock-offset` check tests its feature-built binary against
-a development positive control. The default Nix package remains a
-pre-release build until TASK-67 enables the feature in release packaging.
+`release-excludes-clock-offset` check tests the separate 0.1 candidate
+package against a development positive control. The default Nix package
+remains gated. The `release-01-candidate` output is test-only and unapproved
+for deployment until TASK-67 closes. Its /tmp catalog, operator policy and
+deployment evidence remain unresolved.
 
 In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act

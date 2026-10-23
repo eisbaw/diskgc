@@ -765,7 +765,9 @@ filesystem, processes and mounts from the developer's system.
 - **Shipped files:** `shipped_tmpfiles_and_example_work_in_container`
   applies the packaged drop-in with `systemd-tmpfiles --root=<scratch>
   --create` in disposable Nix and Debian containers, checks the resulting
-  lock file, and validates the packaged example config. The Docker dind
+  lock file, and validates the packaged example config.
+  `release_candidate_files_work_in_container` repeats that proof with the
+  separately packaged 0.1 candidate binary and its installed files. The Docker dind
   image runs the same proof as
   `docker_shipped_tmpfiles_and_example_work_in_container` with Alpine
   `sd-tmpfiles`. That proof names the staged rule file explicitly: Alpine
@@ -1141,11 +1143,13 @@ The VM check is part of `just e2e` and `just e2e-full`.
     binaries), and Debian's own rustc package (1.85 in Debian 13) is not
     tested;
   - `/usr` is bind-mounted read-only by the harness, unlike a CI runner's;
-  - reclaim tests use the development build with the pre-release sandbox
-    gate, not the release artifact (task-67). A separate feature-built
-    `diskgc-proposed-01` binary in the read-only under-test mount runs only
-    catalog rejection checks; it retains the same sandbox gate. The release
-    artifact still needs its own container evidence under task-67;
+  - the ordinary fast suite uses the development build with the pre-release
+    sandbox gate. The separate release runner mounts the ungated
+    `release-01-candidate` package and runs catalog, action and package
+    negatives plus real Cargo CLI reclaim, busy-lock and dry-run journeys
+    on both Nix and Debian images. The race tests use the test driver and
+    do not establish race coverage for the packaged binary. The candidate
+    remains unapproved while TASK-67 release policy is unresolved;
   - one Cargo only, so the tests that need two (`NIX_ONLY_TESTS`) run on
     the Nix image only, and the cross-version parts of the others are not
     reached: race test 2's H2 rounds (a target the oldest stable built,
@@ -1228,9 +1232,14 @@ returned by `LinuxHost::wall_clock()`. `CLOCK_BOOTTIME` deadlines and actual
 kernel ctime remain unchanged. The feature
 `diskgc-linux/release-without-sandbox-gate` compiles
 out the offset path and reader. The `release-excludes-clock-offset` flake
-check compares that feature-built binary with a positive development
-control. The default package is still pre-release and carries the gate
-and offset code until TASK-67 changes release packaging.
+check compares the 0.1 candidate binary with a positive development
+control. The default package remains gated. The separate
+`release-01-candidate` output combines the proposed Cargo-only catalog and
+lifted gate solely for testing in disposable containers. It is unapproved
+for deployment until TASK-67 closes; /tmp admission and operator policy
+decisions remain unresolved. The `just e2e` gate runs candidate negatives
+and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
+and Debian images through their candidate under-test runners.
 
 ## Commands
 
@@ -1279,7 +1288,7 @@ snapshot, not proof that a path is safe to move.
 |---|---|---|
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus fast Nix-image tests, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
+| `e2e` | `check` plus fast Nix-image tests, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites and the four-vector QEMU guest check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |

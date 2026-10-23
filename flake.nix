@@ -124,6 +124,10 @@
         inherit version;
       };
       workspaceDeps = craneLib.buildDepsOnly workspaceArgs;
+      installShippedFiles = ''
+        install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
+        install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
+      '';
 
       diskgc = craneLib.buildPackage (
         workspaceArgs
@@ -133,24 +137,24 @@
           cargoExtraArgs = "--locked --package diskgc";
           # Tests run once, in checks.workspace-tests.
           doCheck = false;
-          postInstall = ''
-            install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
-            install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
-          '';
+          postInstall = installShippedFiles;
           meta.mainProgram = "diskgc";
         }
       );
 
-      # A feature-built control for the clock-offset exclusion check. This
-      # is not the default pre-release package; TASK-67 owns the release
-      # packaging transition and its container evidence.
-      diskgcWithoutGate = craneLib.buildPackage (
+      # Candidate 0.1 artifact. Keep the default development package gated;
+      # this is the sole build that removes the gate, and it also narrows the
+      # embedded catalog. Publishing it remains blocked on TASK-67's scope
+      # and real-kernel evidence.
+      diskgcRelease01 = craneLib.buildPackage (
         workspaceArgs
         // {
-          pname = "diskgc-without-gate-control";
+          pname = "diskgc-release-01-candidate";
           cargoArtifacts = workspaceDeps;
-          cargoExtraArgs = "--locked --package diskgc --features diskgc-linux/release-without-sandbox-gate";
+          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate";
           doCheck = false;
+          postInstall = installShippedFiles;
+          meta.mainProgram = "diskgc";
         }
       );
 
@@ -209,13 +213,17 @@
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
         cp ${lib.getExe diskgc} $out/bin/diskgc
+        cp ${lib.getExe diskgc} $out/bin/diskgc-development
         cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
+        cp ${lib.getExe diskgcRelease01} $out/bin/diskgc-release-01
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
         # These copies fail the build if the Nix package omits either
         # shipped file. The test applies the actual drop-in in its container.
         cp ${diskgc}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
         cp ${diskgc}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        cp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-release-tmpfiles.conf
+        cp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-release-example.yaml
         ln -s ${pkgs.systemd}/bin/systemd-tmpfiles $out/bin/systemd-tmpfiles
         # TASK-97's real Buildah operation runs only in its disposable
         # container. Keep these pinned tools outside the large base image;
@@ -255,6 +263,18 @@
         ln -s ${pkgs.gnumake}/bin/make $out/bin/make
       '';
 
+      # Identical harness input with the release candidate as the default
+      # under-test binary. This makes a runner invocation exercise the
+      # package, instead of a separately rebuilt control binary.
+      e2eReleaseUnderTest = pkgs.runCommand "diskgc-e2e-release-under-test" { } ''
+        cp -a ${e2eUnderTest} $out
+        chmod -R u+w $out
+        cp ${lib.getExe diskgcRelease01} $out/bin/diskgc
+        cp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
+        cp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        touch $out/bin/diskgc-release-default
+      '';
+
       # The release package's dependency tree as built (--locked, normal and
       # build edges), one package per line, for the release-excludes-e2e
       # check: the product must never depend on diskgc-e2e.
@@ -265,7 +285,9 @@
           cargoArtifacts = null;
           doInstallCargoArtifacts = false;
           buildPhaseCargoCommand = ''
-            cargo tree --locked --offline --package diskgc --edges normal,build \
+            cargo tree --locked --offline --package diskgc \
+              --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \
+              --edges normal,build \
               --prefix none --format '{p}' > dep-tree.txt
           '';
           installPhaseCommand = "cp dep-tree.txt $out";
@@ -628,7 +650,7 @@
       # arguments: `nix run .#e2e-runner -- run --suite fast`. A compiled
       # wrapper (makeBinaryWrapper), not a shell script.
       mkE2eRunner =
-        name: image: runtime:
+        name: image: runtime: underTest:
         pkgs.runCommand name
           {
             nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
@@ -639,12 +661,14 @@
               --add-flags "--image-stream ${image}" \
               --add-flags "--image-ref ${image.imageName}:${image.imageTag}" \
               --add-flags "--runtime ${runtime}" \
-              --add-flags "--under-test ${e2eUnderTest}"
+              --add-flags "--under-test ${underTest}"
           '';
-      e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage "standard";
+      e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage "standard" e2eUnderTest;
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
-      e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard";
-      e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind";
+      e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard" e2eUnderTest;
+      e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind" e2eUnderTest;
+      e2eRunnerRelease = mkE2eRunner "diskgc-e2e-runner-release-01" e2eBaseImage "standard" e2eReleaseUnderTest;
+      e2eRunnerReleaseDebian = mkE2eRunner "diskgc-e2e-runner-release-01-debian" e2eDebianImage "standard" e2eReleaseUnderTest;
       vmHistoricalCtime = import ./diskgc-e2e/vm-historical-ctime.nix {
         inherit pkgs;
         image = e2eVmImage;
@@ -665,9 +689,12 @@
     {
       packages.${system} = {
         default = diskgc;
+        release-01-candidate = diskgcRelease01;
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        e2e-runner-release-01 = e2eRunnerRelease;
+        e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
         vm-historical-ctime = vmHistoricalCtime;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
@@ -678,6 +705,7 @@
         e2e-debian-image = e2eDebianImage;
         e2e-docker-image = e2eDockerImage;
         e2e-under-test = e2eUnderTest;
+        e2e-release-under-test = e2eReleaseUnderTest;
       };
 
       checks.${system} = {
@@ -725,7 +753,7 @@
         # needles (diskgc-e2e/src/release_check.rs).
         release-excludes-e2e = pkgs.runCommand "diskgc-release-excludes-e2e" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --shipped ${lib.getExe diskgc} \
+            --shipped ${lib.getExe diskgcRelease01} \
             --dep-tree ${releaseDepTree} \
             --control ${e2eBins}/bin/diskgc-e2e-driver
           touch $out
@@ -733,10 +761,36 @@
 
         release-excludes-clock-offset = pkgs.runCommand "diskgc-release-excludes-clock-offset" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --clock-offset-excluded ${diskgcWithoutGate}/bin/diskgc \
+            --clock-offset-excluded ${lib.getExe diskgcRelease01} \
             --clock-offset-control ${lib.getExe diskgc}
           touch $out
         '';
+
+        release-01-package = pkgs.runCommand "diskgc-release-01-package-check"
+          { nativeBuildInputs = [ pkgs.binutils ]; }
+          ''
+            bin=${lib.getExe diskgcRelease01}
+            if readelf --program-headers "$bin" | grep -q INTERP; then
+              echo "candidate release binary requests a program interpreter" >&2
+              exit 1
+            fi
+            if readelf --dynamic "$bin" | grep -q NEEDED; then
+              echo "candidate release binary has shared-library dependencies" >&2
+              exit 1
+            fi
+            if grep -aFq '/.diskgc-test-sandbox' "$bin"; then
+              echo "candidate release binary still contains the sandbox marker" >&2
+              exit 1
+            fi
+            if ! grep -aFq '/.diskgc-test-sandbox' ${lib.getExe diskgc}; then
+              echo "development control binary lacks the sandbox marker" >&2
+              exit 1
+            fi
+            cmp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
+            cmp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
+            test "$("$bin" --version)" = "diskgc ${version}"
+            touch $out
+          '';
 
         workspace-fmt = craneLib.cargoFmt workspaceArgs;
 
@@ -777,6 +831,8 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        e2e-runner-release-01 = e2eRunnerRelease;
+        e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
         vm-historical-ctime = vmHistoricalCtime;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;

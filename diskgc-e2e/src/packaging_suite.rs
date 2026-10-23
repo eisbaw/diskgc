@@ -13,16 +13,44 @@ enum RuleSelection {
 }
 
 pub fn shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
-    verify_shipped_files(ctx, RuleSelection::Discover)
+    verify_shipped_files(
+        ctx,
+        RuleSelection::Discover,
+        "diskgc",
+        "diskgc-tmpfiles.conf",
+        "diskgc-example.yaml",
+    )
 }
 
 pub fn docker_shipped_tmpfiles_and_example_work_in_container(ctx: &Ctx) -> TestResult {
     // sd-tools 0.99.0 crashes when scanning a scratch root's tmpfiles.d
     // directories. Naming the staged file still proves the rule's effect.
-    verify_shipped_files(ctx, RuleSelection::Explicit)
+    verify_shipped_files(
+        ctx,
+        RuleSelection::Explicit,
+        "diskgc",
+        "diskgc-tmpfiles.conf",
+        "diskgc-example.yaml",
+    )
 }
 
-fn verify_shipped_files(ctx: &Ctx, rule_selection: RuleSelection) -> TestResult {
+pub fn release_candidate_files_work_in_container(ctx: &Ctx) -> TestResult {
+    verify_shipped_files(
+        ctx,
+        RuleSelection::Discover,
+        "diskgc-release-01",
+        "diskgc-release-tmpfiles.conf",
+        "diskgc-release-example.yaml",
+    )
+}
+
+fn verify_shipped_files(
+    ctx: &Ctx,
+    rule_selection: RuleSelection,
+    binary: &str,
+    rule_file: &str,
+    example_file: &str,
+) -> TestResult {
     let tmpfiles = &ctx.image.tmpfiles;
     let root = ctx.scratch.mkdirs("package-root", 0o755, ROOT)?;
     ctx.scratch
@@ -36,7 +64,7 @@ fn verify_shipped_files(ctx: &Ctx, rule_selection: RuleSelection) -> TestResult 
         ctx.scratch
             .write_file(&format!("package-root/etc/{file}"), &contents, 0o644, ROOT)?;
     }
-    let rule = std::fs::read(ctx.bin_dir.join("diskgc-tmpfiles.conf"))
+    let rule = std::fs::read(ctx.bin_dir.join(rule_file))
         .map_err(|e| format!("read shipped tmpfiles rule: {e}"))?;
     ctx.scratch.write_file(
         "package-root/usr/lib/tmpfiles.d/diskgc.conf",
@@ -76,9 +104,9 @@ fn verify_shipped_files(ctx: &Ctx, rule_selection: RuleSelection) -> TestResult 
         "shipped drop-in created wrong lock file: {lock:?}"
     );
 
-    let checked = Command::new(ctx.bin_dir.join("diskgc"))
+    let checked = Command::new(ctx.bin_dir.join(binary))
         .args(["check", "--config"])
-        .arg(ctx.bin_dir.join("diskgc-example.yaml"))
+        .arg(ctx.bin_dir.join(example_file))
         .env_clear()
         .env("PATH", ctx.bin_dir.as_os_str())
         .uid(TESTER.uid)

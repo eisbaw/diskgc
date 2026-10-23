@@ -42,8 +42,8 @@ use crate::{
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey, meson_suite,
-    packaging_suite, profile_vector_suite, project_cache_suite, scale_suite, signal_suite,
-    stdout_suite, temp_safety_suite,
+    packaging_suite, profile_vector_suite, project_cache_suite, release_suite, scale_suite,
+    signal_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -366,6 +366,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: packaging_suite::shipped_tmpfiles_and_example_work_in_container,
+    },
+    Test {
+        name: "release_candidate_files_work_in_container",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: packaging_suite::release_candidate_files_work_in_container,
     },
     Test {
         name: "dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent",
@@ -768,6 +774,30 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: cache_suite::named_checkout_policy_cannot_expand_proposed_catalog,
+    },
+    Test {
+        name: "release_candidate_catalog_refuses_every_excluded_builtin",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_catalog_refuses_every_excluded_builtin,
+    },
+    Test {
+        name: "release_candidate_rejects_docker_command_and_arbitrary_delete_policy",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_rejects_docker_command_and_arbitrary_delete_policy,
+    },
+    Test {
+        name: "release_candidate_checkout_policy_accepts_only_admitted_builtin",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_checkout_policy_accepts_only_admitted_builtin,
+    },
+    Test {
+        name: "release_candidate_cargo_busy_then_reclaims_real_target",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_cargo_busy_then_reclaims_real_target,
     },
     Test {
         name: "go_build_cache_cleaner",

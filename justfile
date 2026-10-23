@@ -44,7 +44,10 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
+    nix build -L --no-link .#checks.x86_64-linux.release-01-package
     just _runner e2e-runner run --suite fast --budget-secs 300
+    just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-docker fast 300
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
     nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
@@ -58,7 +61,10 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
+    nix build -L --no-link .#checks.x86_64-linux.release-01-package
     just _runner e2e-runner run --suite full --budget-secs 3600
+    just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
     just _e2e-docker full 900
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
@@ -71,6 +77,7 @@ e2e-full: check _gcroot-dev
 # Every test but the Nix-only ones, on the Debian image.
 e2e-debian: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
 
 # Native Docker Engine tests in a digest-pinned dind image under Podman.
