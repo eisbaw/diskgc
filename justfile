@@ -55,6 +55,10 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
 
+# Cold guest-cache 40k dry plan on the VM's private ext4 disk; no deletion.
+e2e-vm-cold-scale: _gcroot-dev
+    nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
+
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
@@ -72,6 +76,7 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
+    just e2e-vm-cold-scale
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.

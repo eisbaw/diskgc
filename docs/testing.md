@@ -634,6 +634,28 @@ filesystem, processes and mounts from the developer's system.
   process state, but fixture construction has warmed kernel dentries, so it
   does not measure a cold Linux page cache. `VmHWM` includes all diskgc
   allocations, not only the ancestor index.
+  The separate `vm-cold-scale` flake check (`just e2e-vm-cold-scale`, also in
+  `just e2e-full`) builds 40,000 one-file directories on a disposable NixOS
+  guest's private ext4 root disk. It starts a genuine Podman container with
+  that tree bind mounted read-only, verifies ext4 from both the guest and the
+  container, and checks the real sandbox canary. A guest kernel-command-line
+  token guards the cache drop; after container setup, the script syncs and
+  writes `3` to the **guest's** `/proc/sys/vm/drop_caches`. It requires a
+  measured drop of at least 40,000 dentries and 32 MiB of guest page cache
+  before the first diskgc invocation. The first real binary dry-plans all
+  candidates with the default 10-minute product deadline; a second dry plan
+  is the warmed control. Both assert exit 0, `dry_run`, 40,000 unique eligible
+  candidates, no errors, and unchanged fixture count. GNU time runs inside
+  the container around each diskgc process and records elapsed time and peak
+  RSS, excluding Podman startup; the guest records the cache counters. This
+  measures a cold **guest** VFS/page cache on ext4; the QEMU host may still
+  cache the guest disk image, and it does not measure host deletion throughput.
+  On 2026-10-23 the final focused VM check passed: the guest dentry count
+  fell from 103,231 to 3,863 and Cached from 502,724 to 43,544 KiB. The cold
+  dry plan took 12.93 s with 53,636 KiB peak product RSS; the warm control
+  took 10.57 s with 53,916 KiB. Both judged 40,000 eligible candidates
+  without changing the fixture. One warm control is too little evidence to
+  claim a general warm-cache speedup.
 - **Fork churn during the in-use scan:**
   `host_inuse_scan_settles_after_fork_churn` runs the real Linux scanner in
   a disposable container with 0, 1, 4 and 8 bounded child-spawning workers.
@@ -780,11 +802,12 @@ filesystem, processes and mounts from the developer's system.
   This packaging proof does not approve the candidate for distribution;
   the 0.1 release gate and its profile scope remain open in TASK67.
 
-**Not covered end-to-end (for now):** real block filesystems (ext4 or xfs
-as separate mounts, btrfs) and network filesystems cannot be mounted in a
-rootless container; behaviour on specific kernel versions follows the test
-host's kernel; systemd is not run for real. These rest on model tests with
-model-only fields. A VM suite can be added later.
+**Not covered end-to-end (for now):** deletion on real block filesystems
+(ext4 or xfs as separate mounts, btrfs), network filesystems, and live
+systemd. A private ext4 VM disk covers the 40k dry-plan cost only. Rootless
+container behavior follows the test host's kernel; the pinned VM cases above
+cover the listed kernels. Other cases rest on model tests with model-only
+fields.
 
 Why not FUSE (to model hosts): it has its own `flock`, `statx` and mount-id
 semantics, needs privileges, and is a large extra moving part. One
@@ -1292,7 +1315,7 @@ snapshot, not proof that a path is safe to move.
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus fast Nix-image tests, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
-| `e2e-full` | every Nix-image test, then the Debian and native Docker suites and the four-vector QEMU guest check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
+| `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |

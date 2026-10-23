@@ -3,10 +3,10 @@ id: TASK-70
 title: >-
   In-use scan at /tmp scale: cost per candidate, unsettled scans under
   fork-heavy load, judging tens of thousands of candidates
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-18 11:06'
-updated_date: '2026-10-23 02:04'
+updated_date: '2026-10-23 03:44'
 labels:
   - wave-2
   - spike
@@ -55,4 +55,12 @@ Environment-path index integrated; post-fix nix develop -c just e2e passed 93/93
 2026-10-23 disposable-container scale proof: an initial 4,500-path live-process workload made Read::add environment deduplication quadratic (Vec::contains); an in-use scan took 1.655s and reclaim stopped at candidate 6,998 on the one-second freshness bound. Replaced deduplication with a first-seen-order-preserving HashSet and added duplicate/non-UTF8 regression coverage. In the integrated container fixture, a fresh-process dry plan judged 40,000 tiny /tmp directories in 29.061s with 51,864 KiB product VmHWM; real reclaim deleted all 40,000 in 34.490s (1,159.7/s) with 32,204 KiB VmHWM. Independent deletion oracle found zero violations over 80,000 traced removal calls. With 4,503 live environment paths, the retained ancestor-index allocation lower bound was 904,314 bytes, probe RSS rose 1,700 to 4,932 KiB, and the scan took 44ms (14ms gathering, 30ms afterward). This is disposable tmpfs throughput with fixture-warmed kernel dentries and shared host activity; it does not measure cold Linux page-cache behavior, real-host deletion throughput, or complete index heap/RSS. TASK-70 remains open for those limits; no developer-host diskgc run or host deletion.
 
 Clarification: The preceding no developer-host diskgc run statement applies to the 2026-10-23 disposable scale probe. Earlier notes record a read-only developer-host plan; no developer-host deletion has been attempted.
+
+2026-10-23 cold-cache follow-up is source-only in task70-cold-vm, not yet verified: new disposable NixOS VM check builds 40,000 tiny candidates on the guest private ext4 disk; a guest kernel token guards sync plus guest-only drop_caches=3, requires measured dentry and Cached drops, then compares first real-binary dry plan against a warm control under the default 10-minute deadline and records status/count/elapsed/VmHWM. Focused VM run, exact e2e, QA/MPED review, integration and any measured result remain pending. This does not prove developer-host throughput or deletion.
+
+Design correction before VM execution: the development binary requires genuine Podman markers. The check now starts a Podman container inside the disposable guest before the guest-only cache drop, bind mounts the ext4 fixture read-only, verifies the container mount is ext4 and the canary passes, then runs dry plans there. GNU time inside the container records product elapsed and max RSS (not direct VmHWM), excluding Podman startup. Still source-only and unverified.
+
+2026-10-23 focused disposable NixOS VM check passed: guest root ext4 /dev/vda, genuine Podman with read-only ext4 fixture bind and canary; guest-only drop_caches=3 reduced dentries 103209 to 3733 and Cached 502464 to 43848 KiB. Real binary dry plans judged 40000 unique eligible directories with no errors or fixture changes: first cold ext4 plan 11480 ms and 53652 KiB GNU-time max RSS, warm control 13150 ms and 53856 KiB. Both were under the 10-minute default deadline. This measures cold guest VFS/page cache, not host disk cache or deletion throughput. Exact e2e and parallel QA/MPED remain pending before commit.
+
+2026-10-23 final cold VM rerun after safety review passed: Python optimization-proof guest-token/root/ext4 guards, immediate recheck before drop_caches, read-only ext4 bind verification, final 40000 payload checks, and Podman error diagnostics. Guest dentries 103231 to 3863; Cached 502724 to 43544 KiB. Cold dry plan 12930 ms at 53636 KiB max RSS; warm control 10570 ms at 53916 KiB; both 40000 eligible and unchanged. Host python3 -O negative check refused on missing guest token. Exact nix develop -c just e2e exit 0; parallel qa-test-runner and mped-architect re-reviews GO. Still no host deletion or host diskgc. Real-host deletion throughput and complete ancestor-index heap attribution remain unproven, so TASK-70 stays In Progress.
 <!-- SECTION:NOTES:END -->

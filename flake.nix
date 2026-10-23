@@ -674,6 +674,11 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
+      vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
+        inherit pkgs;
+        image = e2eVmImage;
+        underTest = e2eUnderTest;
+      };
       mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores:
         import ./diskgc-e2e/vm-old-kernel-pidfd.nix {
           pkgs = vmPkgs;
@@ -696,6 +701,7 @@
         e2e-runner-release-01 = e2eRunnerRelease;
         e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
         vm-historical-ctime = vmHistoricalCtime;
+        vm-cold-scale = vmColdScale;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
@@ -834,6 +840,7 @@
         e2e-runner-release-01 = e2eRunnerRelease;
         e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
         vm-historical-ctime = vmHistoricalCtime;
+        vm-cold-scale = vmColdScale;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
