@@ -44,6 +44,25 @@
         p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
       );
 
+      # libFuzzer needs nightly and rust-src, but the product remains on the
+      # stable toolchain in rust-toolchain.toml.
+      fuzzToolchain = pkgs.rust-bin.nightly."2026-10-01".minimal.override {
+        extensions = [ "rust-src" ];
+      };
+
+      devShellHook = ''
+        diskgc_worktree_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+        if [ -z "$diskgc_worktree_root" ] || [ ! -f "$diskgc_worktree_root/justfile" ]; then
+          echo "diskgc dev shell must start inside a diskgc worktree" >&2
+          return 1
+        fi
+        mkdir -p "$diskgc_worktree_root/tmp/system"
+        export CARGO_TARGET_DIR="$diskgc_worktree_root/tmp/target"
+        export TMPDIR="$diskgc_worktree_root/tmp/system"
+        export PYTHONPYCACHEPREFIX="$diskgc_worktree_root/tmp/pycache"
+        unset diskgc_worktree_root
+      '';
+
       # Single source of the version: [workspace.package] in Cargo.toml.
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
@@ -881,21 +900,26 @@
 
       # The toolchain from rust-toolchain.toml (host target by default) plus
       # the inputs of every check. Run recipes as `nix develop -c just <recipe>`.
-      devShells.${system}.default = craneLib.devShell {
-        checks = self.checks.${system};
-        packages = [ pkgs.just pkgs.python3 pkgs.coreutils ];
-        shellHook = ''
-          diskgc_worktree_root="$(git rev-parse --show-toplevel 2>/dev/null)"
-          if [ -z "$diskgc_worktree_root" ] || [ ! -f "$diskgc_worktree_root/justfile" ]; then
-            echo "diskgc dev shell must start inside a diskgc worktree" >&2
-            return 1
-          fi
-          mkdir -p "$diskgc_worktree_root/tmp/system"
-          export CARGO_TARGET_DIR="$diskgc_worktree_root/tmp/target"
-          export TMPDIR="$diskgc_worktree_root/tmp/system"
-          export PYTHONPYCACHEPREFIX="$diskgc_worktree_root/tmp/pycache"
-          unset diskgc_worktree_root
-        '';
+      devShells.${system} = {
+        default = craneLib.devShell {
+          checks = self.checks.${system};
+          packages = [ pkgs.just pkgs.python3 pkgs.coreutils pkgs.cargo-mutants ];
+          shellHook = devShellHook;
+        };
+
+        # This shell does not replace the stable release or test toolchain.
+        fuzz = pkgs.mkShell {
+          packages = [
+            fuzzToolchain
+            pkgs.cargo-fuzz
+            pkgs.clang
+            pkgs.just
+            pkgs.python3
+            pkgs.ripgrep
+            pkgs.coreutils
+          ];
+          shellHook = devShellHook;
+        };
       };
     };
 }

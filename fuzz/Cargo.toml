@@ -1,0 +1,51 @@
+[package]
+name = "diskgc-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Fuzzers are built with nightly and stay outside the product workspace.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+diskgc-core = { path = "../crates/diskgc-core" }
+diskgc-linux = { path = "../crates/diskgc-linux" }
+
+[[bin]]
+name = "grammar"
+path = "fuzz_targets/grammar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "yaml_loader"
+path = "fuzz_targets/yaml_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mountinfo"
+path = "fuzz_targets/mountinfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "maps"
+path = "fuzz_targets/maps.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "environ"
+path = "fuzz_targets/environ.rs"
+test = false
+doc = false
+bench = false

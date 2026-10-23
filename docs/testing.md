@@ -1325,9 +1325,89 @@ snapshot, not proof that a path is safe to move.
 | `e2e-debian-one NAME` | the same on the Debian image | while working on one there |
 | `e2e-docker-one NAME` | one native Docker test in a disposable dind container | while working on one there |
 | `soak` | property tests with many cases | before a release, nightly CI |
-| `fuzz` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), in a nightly dev shell | hardening blocks, nightly CI |
-| `mutants` | `cargo-mutants` on the safety-critical modules (workspace tests) | hardening blocks |
+| `fuzz [TARGET] [DURATION]` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), with 1,800 seconds per target by default | hardening blocks, nightly CI |
+| `mutants` | complete selection and executor mutation sweep in bounded Podman shards, with verified outcomes | hardening blocks |
+| `docs-check` | offline local links and heading fragments in `reference.md` and `safety.md`, plus the core's document contract tests | after contract edits |
 | `ci` | `nix flake check -L` plus `just e2e-full` | CI |
+
+`just fuzz` enters the pinned 2026-10-01 nightly shell without changing the
+product toolchain. Its five targets live in `fuzz/fuzz_targets/` and call the
+production parsers directly. Seeds are versioned in `fuzz/seeds/`; evolving
+corpora and crash artifacts stay in the worktree's `tmp/fuzz/`. Run a single
+target with `just fuzz grammar 1800`, or all five with `just fuzz`. A crash is
+not done until its input is reduced, saved as a regression and fixed. The
+runner also keeps full build and run logs in `tmp/fuzz/logs/`. The
+`just mutants` inventories all five named sources, finds complete nonempty
+partitions of at most 16 mutants per shard, then runs each shard through the
+resource-capped Podman runner. It verifies every report before returning
+success. Reports stay in `tmp/mutants-container-smoke/`. Host `cargo-mutants`
+is used only for listing; builds and mutation reports are created in the
+container's 8 GiB tmpfs. The recipe checks that `tmp/system` is Git-ignored,
+and the runner tells `cargo-mutants` to honor Git ignores so its source copy
+cannot include its own scratch tree. Each shard runs an unmutated baseline
+and `cargo test --workspace` for its mutants, including `diskgc-modelgen`'s
+independent selection oracle. `just check` tests the clean workspace
+separately. Surviving mutants fail verification and need a test or an explicit
+justification before the hardening task is done.
+
+To inspect or run a single bounded shard, use
+`nix develop -c tools/mutants_container_smoke.sh --check-shard parse 0/16`
+to check a bounded selection and read-only mounts without compiling. Use
+`nix develop -c tools/mutants_container_smoke.sh --run-shard parse 0/16`
+for one batch only after its disk and RAM guards pass. The source choices are
+`parse`, `check`, `evaluate`, `mod` (the four selection modules), and
+`executor`; choose a shard count that selects at most 16 mutants per shard.
+The full `just mutants` recipe computes a valid count for each source and
+stops if the source cannot fit the 64-shard limit, a resource guard fails, a
+shard fails, or report verification fails.
+First run `nix develop -c python3 tools/verify_mutant_sweep.py scope` to
+compare the five named sources with the complete `just mutants` selection;
+it fails if a new selection module was added without a shard plan. For each
+source, then run
+`nix develop -c python3 tools/verify_mutant_sweep.py plan SOURCE TOTAL`.
+This lists the live unsharded inventory and every shard, failing on an omitted,
+duplicate, extra, empty or oversized selection. It saves the checked partition
+under ignored `tmp/mutants-container-smoke/plans/`; the source/test/fixture
+snapshot, mutation runner procedure, source hash, `cargo-mutants` version, and
+resolved cached container image ID identify it. Every shard preflight compares
+its selected names and pinned image ID with that plan and a fresh unsharded
+inventory. After
+running all shard indexes, run
+`nix develop -c python3 tools/verify_mutant_sweep.py verify SOURCE TOTAL REPORT_DIR ...`
+with exactly one successful report directory per index. Verification rejects
+missing or duplicate indexes, changed source inventories, incomplete outcomes
+and unsuccessful baselines or runs. It checks reported outcome counts and
+rejects every missed, timed-out, or unviable mutant by name. Each report must
+match the complete plan identity, including the runner command, tool version,
+and image ID. Inspect those reports and add a test or record a specific
+justification before considering the hardening task done. Reports from an
+older workspace snapshot must be rerun. Do this for all five sources before
+treating the mutation sweep as done.
+The script keeps the build and target on an 8 GiB tmpfs in a disposable Podman
+container. The source, Cargo registry and Nix store mounts and container root
+are read-only. The runner resolves the cached image tag once and uses that
+immutable image ID for both containers. The cached image and Podman graphroot
+share the host filesystem; the runner requires 16 GiB of host free space plus
+64 MiB to start, then stops if the remaining headroom falls below 32 MiB. It
+checks host disk and RAM before preflight, then checks host disk, runroot tmpfs
+and memory during a two-hour maximum mutation
+run. The host run log is capped at 8 MiB. After the mutation process exits,
+it copies at most 16 MiB of reports, checking the host disk reserve during
+transfer. It verifies the baseline, per-mutant outcomes, and category totals,
+retaining valid survivor reports for diagnosis. It checks that the plan and
+runner identity did not change during the run and removes the container.
+The selected names, run log, exit status and copied reports live in
+`tmp/mutants-container-smoke/`; Podman metadata and container image storage
+also use host disk. On interruption or resource pressure, the container is
+stopped and removed, and incomplete host logs remain. A checked shard
+or a single successful batch is not evidence that the complete mutation
+sweep passed.
+
+For this hardening task, record a separate 1,800-second successful run for
+each target, fix every crash with a saved regression, validate both contract
+documents, and run the mutation recipe. A surviving mutant must be tied to a
+specific reason or a new test. The ordinary `just e2e` gate and parallel QA
+and architecture reviews still apply before its commit.
 
 `nix flake check` can report every check passed while building nothing
 (its outputs are already in the store from an earlier build of the same

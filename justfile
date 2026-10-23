@@ -28,8 +28,11 @@ default:
 check:
     cargo metadata --locked --manifest-path diskgc-e2e/Cargo.toml --format-version 1 > /dev/null
     cargo fmt --all --check
+    cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo fmt --manifest-path diskgc-e2e/Cargo.toml --check
     python3 -m unittest discover -s tools -p 'test_*.py'
+    python3 tools/check_docs.py docs/reference.md docs/safety.md
+    cargo test --manifest-path fuzz/Cargo.toml --test seeds --locked
     cargo clippy --workspace --all-targets --locked -- --deny warnings
     cargo test --workspace --locked
 
@@ -142,13 +145,20 @@ soak:
     DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test selection_reference --locked
     DISKGC_PROPERTY_CASES=1024 cargo test -p diskgc-modelgen --test selection_general_reference --locked
 
-# cargo-fuzz targets, in a nightly dev shell.
-fuzz:
-    @just _not-yet "the fuzz targets" task-27
+# Fuzz one parser or all five for DURATION seconds each in the pinned nightly shell.
+fuzz TARGET="all" DURATION="1800":
+    nix develop .#fuzz -c bash fuzz/run.sh {{TARGET}} {{DURATION}}
 
-# cargo-mutants on the safety-critical modules.
+# Run the complete five-source mutation sweep in resource-capped container shards.
+# The runner stops on resource pressure or any unverified mutant outcome.
 mutants:
-    @just _not-yet "mutation testing" task-13
+    git check-ignore -q tmp/system || { echo 'tmp/system must be Git-ignored before cargo-mutants copies the source tree' >&2; exit 2; }
+    python3 tools/mutation_scope.py run
+
+# Validate local links and anchors in the reference and safety contracts.
+docs-check:
+    python3 tools/check_docs.py docs/reference.md docs/safety.md
+    cargo test -p diskgc-core --lib --locked
 
 # What CI runs: every flake check, then every container test.
 ci:

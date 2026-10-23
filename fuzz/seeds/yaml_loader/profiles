@@ -1,0 +1,4 @@
+- name: fuzz-cache
+  find: {roots: [/tmp], paths: [".cache"], type: dir}
+  action: delete
+  examples: {match: [/tmp/.cache]}
