@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:24'
-updated_date: '2026-10-23 23:01'
+updated_date: '2026-10-23 23:21'
 labels:
   - irreversible
 dependencies: []
@@ -31,7 +31,7 @@ Design and implement per-producer liveness evidence that a profile can require (
 - [ ] #5 nix-shell-rc ships with liveness_contract: nix-shell only after its lifecycle container test; model and container cases cover dead owner (eligible), live owner with no fd, a shell in a private PID namespace (kept), and a detached child (scope limit pinned)
 - [ ] #6 pytest-tmp (admitted by Mark 2026-10-23 as verified heuristic, one candidate per session) ships with liveness_contract: pytest; every pytest vector in docs/testing.md passes and bites, including --basetemp, relative temp roots and the orphan xdist worker
 - [ ] #7 node-modules and python-venv (admitted by Mark 2026-10-23 as verified heuristic on project activity, min_idle_for 30d) ship with liveness_contract: node-project / python-project; TASK-79's read-only-use counterexample is a kept vector and container test, the noatime residual is pinned
-- [ ] #8 containers-image-tmp is removed from builtin.yaml (withdrawn, Mark 2026-10-23) with its golden/vector tests converted; re-admission is TASK-125
+- [x] #8 containers-image-tmp is removed from builtin.yaml (withdrawn, Mark 2026-10-23) with its golden/vector tests converted; re-admission is TASK-125
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -90,4 +90,6 @@ Conclusion written into safety.md: fd and root link texts share the reader-relat
 From TASK-121 (2026-10-24): the vector runner is in place. Liveness vectors plug in without a format change: write them as profile_vector: 1 files under crates/diskgc-model/tests/vectors/<area>/ (or keep tests/models/profiles/ for e2e-replayed ones); expected evidence goes in expect.skipped[].process_blockers as [{pid, evidence}] (complete, [] = report null); plan rows have no evidence in the report, so expect.plan[].evidence needs a report field first. Host-model extensions (pid_namespace, proc_hidepid, nspid, zombie, cmdline, view, atime/noatime, processes[].root binds) go into crates/diskgc-model/src/spec.rs with a loading.rs test and a regenerated host-model.schema.json; the runner needs no change. every_skip_reason_has_a_vector and every_builtin_source_has_match_in_use_guarded_and_nested_vectors will require the new built-ins to show match/in_use/protected-or-negated/nested-guard. VECTOR_TRACE=<file part> prints the reclaim trace for nth-addressed events.
 
 Orchestrator 2026-10-24: design accepted after 7 rounds (2 Codex NO-GO, 4 mped NO-GO/fix-first, each folded in). Round 7 (a3ae0c9) was accepted on an ORCHESTRATOR SPOT-CHECK that the five reviewer-specified sentences and vectors are present verbatim, not on a fresh independent review; kernel facts behind rounds 6-7 were probed on Linux 7.2.9 (unshare -rm; mountinfo escaping). Merged to master with PRD round 13. Implementation starts next; vectors plug into the TASK-121 runner (profile_vector: 1 superset).
+
+2026-10-24 step 0 (e7c0686): containers-image-tmp removed from builtin.yaml; golden/catalog tests updated; withdrawn_containers_image_tmp_fails_selection added; containers-image-age.yaml is now the user-probe vector containers-image-probe (same matching set, 3d floor); builtins-area vector moved to cruft/; VM dormant-spool test and historical replay select the probe via --config. Evidence: just check exit 0 (959 passed, 1 ignored); e2e-clippy, e2e-tests (103) exit 0; e2e-one dormant_exported_tmpdir_is_invisible_and_broad_builtins_are_absent PASS; release runner one release_candidate_catalog_refuses_every_excluded_builtin PASS; nix build vm-historical-ctime exit 0 (5 VM tests PASS).
 <!-- SECTION:NOTES:END -->
