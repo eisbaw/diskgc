@@ -447,7 +447,9 @@ Of the host model (the test-model schema, tentative):
   `dev_ino`: what diskgc reads when it differs from the object (another
   root's or mount namespace's rendering, a file renamed after open, an
   overlay layer's pair); default the object's own path and identity;
-- `processes[].mnt_ns`: a mount namespace label (default diskgc's);
+- `processes[].mnt_ns`: a mount namespace label (default diskgc's), with
+  `processes[].mountinfo` (its mount table lines: id, mount point, root
+  field, device) and per held file a `mnt_id`;
 - a mount's `bind_of` extended to a subdirectory (`bind_of: {mount: 2,
   path: /w/packages/a}`); today only whole-filesystem binds exist;
 - a file's `content:` (exists) for pytest's `.lock`.
@@ -493,8 +495,8 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-live-lock-refused` | A `{0}`, `pytest-0/.lock` holds `42`; process 42 | 0 `in_use`, `owner_pid` 42 (row 4) |
 | `pytest-tmp-killed-newest-session-refused` | A `{0}`, lock `42`; no process 42; *proc* | 0 `in_use`, `temp_root` (row 10): an ended owner alone never permits |
 | `pytest-tmp-killed-session-dead-root-eligible` | B `{0}`, lock `42`; no process 42; *proc* | 0 eligible (row 11) |
-| `pytest-tmp-orphan-xdist-worker-refused` | B `{0}`, lock `42` one day old; no process 42; worker 43 with `cmdline: [python, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/nix-shell.AB` | 0 `in_use`, `temp_root` (row 10) |
-| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; worker 43 with `cmdline: [python, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/other`; *proc* | 0 `in_use`, `temp_root` (the young lock fails row 7; row 10); 1 eligible (row 7: the bootstrap counts as a running pytest, the session is old); 2, 3, 4 `in_use`, `temp_root` |
+| `pytest-tmp-orphan-xdist-worker-refused` | B `{0}`, lock `42` one day old; no process 42; worker 43 with `cmdline: [python, -u, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/nix-shell.AB` | 0 `in_use`, `temp_root` (row 10) |
+| `pytest-tmp-orphan-xdist-worker-within-rank-refused` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; worker 43 with `cmdline: [python, -u, -c, "import sys;exec(eval(sys.stdin.readline()))"]` (the execnet bootstrap; no `PYTEST_XDIST_*` in its initial environment) and `TMPDIR=/tmp/other`; *proc* | 0 `in_use`, `temp_root` (the young lock fails row 7; row 10); 1 eligible (row 7: the bootstrap counts as a running pytest, the session is old); 2, 3, 4 `in_use`, `temp_root` |
 | `pytest-tmp-stale-lock-within-rank-eligible` | as above, the lock four days old, no worker | 0, 1 eligible (row 7; pytest's own dead-lock rule); 2, 3, 4 `in_use` |
 | `pytest-tmp-lock-not-regular-within-rank-unknown` | A `{0..4}`, `pytest-0/.lock` a symlink to a four-day-old file; *proc* | 0 `producer_unknown` (row 3); 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-beyond-rank-eligible` | A `{0..4}`; *proc* | 0, 1 eligible (row 7); 2, 3, 4 `in_use`, `temp_root` |
@@ -545,7 +547,7 @@ the counterexample these turn into cases):
 
 | Vector | Setup | Expected |
 |---|---|---|
-| `node-project-idle-eligible` | `/home/tester/p/{package.json,src/a.js,node_modules/x/i.js}`, all changed and read 60 days before the clock; no processes in it | eligible, removed; `package.json` and `src` preserved |
+| `node-project-idle-eligible` | `/home/tester/p/{package.json,src/a.js,node_modules/x/i.js}`, all changed and read 60 days before the clock; a uid 1000 shell holding `/home/tester/.bash_history` (same filesystem, outside the project) and nothing in `p` | eligible, removed; `package.json` and `src` preserved |
 | `node-project-recent-edit-kept` | as above, `src/a.js` changed 2 days ago | `not_idle` |
 | `node-project-recent-install-kept` | only `node_modules/x/i.js` changed 2 days ago | `not_idle` (the candidate's own walk counts) |
 | `node-project-install-old-mtimes-new-ctime-kept` | every mtime 60 days old (the normalised dates an install extracts); `node_modules/x/i.js` with `ctime` 2 days ago | `not_idle` |
@@ -566,6 +568,10 @@ the counterexample these turn into cases):
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
 | `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory, `mountinfo` root `/w/packages/a`) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
 | `node-project-held-file-other-device-not-inside` | all old; a process holds `/home/tester/elsewhere/z` on another filesystem; its link text spoofed in the model to `/home/tester/p/z` | eligible: a device not in the tree is never inside, and nothing outside the tree is resolved |
+| `node-project-held-file-same-device-outside-eligible` | all old; a process holds `/home/tester/notes.txt` on the project's device | eligible: text outside the tree's path is not inside |
+| `node-project-container-bind-work-kept` | all old; a process with `mnt_ns: c1`, `root: /`, its mount table binding `/home/tester/p` at `/work` (mount id 968, root field `/home/tester/p`), holding `/work/src/a.js` (link text `/work/src/a.js`) | `in_use`, `fd`: translated through its mount table |
+| `node-project-container-chroot-bind-kept` | as above plus a `chroot` to `/jail` (root link text `/jail`, link text `/jail/work/src/a.js`, mount point `/work`) | `in_use`, `fd` |
+| `node-project-untranslatable-retained` | all old; a process in another mount namespace holding a file on the project's device whose mount id is missing from its `mountinfo` | `in_use` (cannot be translated) |
 | `node-project-held-file-suffix-mismatch-retained` | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
 | `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_of` subdirectory); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
 | `node-project-pivot-root-process-not-under` | all old; a process whose `root` is `/srv/c` and cwd `/srv/c/work`, outside the project | eligible: its climb reaches the fixpoint without meeting the tree |
@@ -646,7 +652,8 @@ as project change; measuring the candidate's parent instead of its
 workspace; deciding "inside the project" by the walk's inode set instead
 of by path, or by the process's link text without an identity check;
 resolving link text outside the tree, or across a device the tree does
-not have; ending a climb at a level bound instead of the fixpoint;
+not have; retaining for a held file whose text lies outside the tree;
+skipping the root-link strip or the mount-table translation; ending a climb at a level bound instead of the fixpoint;
 comparing a climb with the sought directory only, not every directory of
 the tree; climbing once per candidate; treating an unopenable magic link
 of an excused process as unreadable; not matching the execnet bootstrap;

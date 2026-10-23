@@ -865,8 +865,10 @@ paths in `/proc/<pid>/maps` with `d_path` relative to the *reader's*
 root, not the target's (a process in a `chroot` or another mount
 namespace shows host paths to diskgc). Only the environment and the
 command line are strings in the process's own view. Nothing outside the
-sought tree is ever walked or resolved, except the temp-directory and
-`--basetemp` values pytest itself resolves (below). So:
+sought tree is walked or resolved by name, except the temp-directory and
+`--basetemp` values pytest itself resolves (below); the `..` climbs of
+held directories read only the device and inode of ancestors, and a held
+file's link text is translated through mount tables, not resolved. So:
 
 - *The process set* of a contract is the processes with any of their four
   uids equal to the owner of the directory the contract judges (pytest
@@ -897,26 +899,50 @@ sought tree is ever walked or resolved, except the temp-directory and
   error that retains.
 - *Files a process holds* (an fd on a non-directory, a mapping) are
   matched first by device and inode against the inodes the walk saw, as
-  In use does. For the path test, the object's device comes from a
-  `statx` of the magic link with `AT_STATX_DONT_SYNC` (for a mapping, the
-  device of its `maps` line). A device that is not one of the tree's
-  devices cannot be inside the tree, and the entry is not inside. On one
-  of them, the link text (a ` (deleted)` suffix removed) is compared
-  lexically with the tree's path: when the process's mount namespace
-  (`/proc/<pid>/ns/mnt`) is diskgc's, with the tree's path in diskgc's
-  view; otherwise with the tree's path as seen under the process's root
-  (diskgc's path of the process's root directory, found by the climb
-  above, as a prefix). If the text has the tree's path as a prefix, only
-  the *suffix* is resolved, from the tree's directory fd with
+  In use does (including its inode-only match for mappings on overlayfs
+  and btrfs). For the path test, the object's device and mount id come
+  from a `statx` of the magic link with `STATX_MNT_ID` and
+  `AT_STATX_DONT_SYNC` (for a mapping, the device of its `maps` line and
+  the mount id from `/proc/<pid>/map_files/<range>` where readable). A
+  device that is not one of the tree's devices cannot be inside the tree,
+  and the entry is not inside. On one of them, the link text (a
+  ` (deleted)` suffix removed) is turned into the object's *path within
+  its filesystem*, with no name resolved:
+  - when the process's mount namespace (`/proc/<pid>/ns/mnt`) is diskgc's,
+    the text is a path in diskgc's view, and diskgc's own `mountinfo`
+    gives the mount and its root field;
+  - otherwise the text is *translated* through the process's mount table:
+    the text and the `/proc/<pid>/root` link text are rendered in the same
+    frame (the reader's), while the mount points in `/proc/<pid>/mountinfo`
+    are relative to the process's root. So, unless the root link text is
+    `/`, it is removed from the front of the text; the line of
+    `/proc/<pid>/mountinfo` whose id is the object's mount id gives that
+    mount's mount point and its root within the filesystem; the rest of
+    the text after the mount point, appended to that root, is the path
+    within the filesystem. This was probed on Linux 7.2.9 for a separate
+    mount namespace with and without `chroot` and `pivot_root`, a
+    container-like `tmpfs` root with the tree bound at `/work`, and a
+    `chroot` inside it; in each case `STATX_MNT_ID` on the magic link
+    equalled the `mountinfo` id (TASK-112 notes). A mount id missing from
+    the table, an unreadable `mountinfo`, a different filesystem (its
+    `major:minor`) than the tree's, or text that does not start with the
+    root link text and then the mount point, cannot be translated.
+
+  The tree's own path within its filesystem comes from diskgc's
+  `mountinfo` the same way (its mount's root field and the tree's path
+  below the mount point). Text whose path within the filesystem does not
+  have the tree's as a prefix is not inside. Otherwise only the *suffix*
+  is resolved, from the tree's directory fd with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS |
   RESOLVE_NO_MAGICLINKS)`, and the entry is inside when the object
-  reached has the magic link's device and inode. Text that does not have
-  the prefix, or a suffix whose resolution fails or reaches another
-  object, while on one of the tree's devices, is unresolvable and
-  retains (`in_use`). A mapping whose `maps` pair is an overlay layer's
-  (the device and inode of the lower filesystem, as some kernels report
-  for overlayfs) has no match and is retained: an availability cost with
-  rootless containers whose files are mapped from the tree.
+  reached has the magic link's device and inode. A suffix whose
+  resolution fails or reaches another object, or text from another mount
+  namespace that cannot be translated, is unresolvable and retains
+  (`in_use`). A mapping whose `maps` pair is an overlay layer's is
+  matched by In use's inode-only rule when the walk saw that inode;
+  otherwise, if its text cannot be translated, it retains: an
+  availability cost with rootless containers whose files are mapped from
+  the tree.
 - *Strings* (environment values, command-line elements) are compared as
   bytes, after lexical normalisation as Python's `os.path.abspath` does
   (`.`, `..` and repeated `/` folded; a relative string is not made
@@ -1030,9 +1056,11 @@ root (the parent of `P`):
   with `U` as the owner.
 - *A pytest is running*: one of the user's processes has an element of
   its command line containing `pytest` or `py.test`; or has the command
-  line of an execnet worker bootstrap (`python -c` with
-  `import sys;exec(eval(sys.stdin.readline()))`, which pytest-xdist's
-  workers run; they set their `PYTEST_XDIST_*` variables inside the
+  line of an execnet worker bootstrap, an element `-c` followed by the
+  element `import sys;exec(eval(sys.stdin.readline()))` exactly
+  (`popen_bootstrapline` in execnet 2.1.2's `gateway_io.py`; its
+  `popen_args` are `[python, -u, (-B,) -c, popen_bootstrapline]`), which
+  pytest-xdist's workers run; they set their `PYTEST_XDIST_*` variables inside the
   process, never in their own initial environment); or has
   `PYTEST_ADDOPTS`, `PYTEST_CURRENT_TEST`, `PYTEST_VERSION` or a variable
   beginning `PYTEST_XDIST_` in its initial environment (the middle two
@@ -1295,9 +1323,10 @@ schema only with its first producer.
   `statx` calls (In use, A process using a dead mount).
 - *Cost.* Only when a selected source has a contract: one more read of
   each listed process's `status` and `cmdline`; one climb per directory a
-  process holds, once per scan; one `statx` per held file, and a suffix
-  resolution beneath the sought tree only for files on one of its
-  devices; at most one `openat2` per temp-directory or `--basetemp` value
+  process holds, once per scan; one `statx` per held file, and, only for
+  files on one of the tree's devices, a lexical translation (one read of
+  `/proc/<pid>/mountinfo` per mount namespace and scan) and a suffix
+  resolution beneath the tree; at most one `openat2` per temp-directory or `--basetemp` value
   pytest itself resolves (deduplicated); byte comparison for every other
   string; one listing of each `pytest-of-<user>` per scan; and for
   project contracts a walk of each project, bounded by the entry budget.
