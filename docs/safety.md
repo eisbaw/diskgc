@@ -341,6 +341,8 @@ An idle-time filter cannot establish liveness. The rc names
 `nix-shell-<pid>-*` and `nix-develop-<pid>-*` also cannot use a host-only
 `/proc/<pid>` check: a shell can share `/tmp` from a different PID namespace
 and put its namespace-local PID in the name. `nix-shell-rc` remains unshipped.
+[Producer liveness](#producer-liveness) designs the evidence these profiles
+need (Owner PID across PID namespaces) and records which of them have none.
 
 Or it is a directory locked with `flock` by someone else (`locked`), the
 convention systemd-tmpfiles also honours: diskgc opens the candidate
@@ -672,6 +674,303 @@ so their use of *your* files is not seen; nor is the use of the user's own
 processes noted above as unreadable (setuid, more capable, non-dumpable).
 Fine for one-user machines and runners; weaker on shared hosts.
 
+### Producer liveness
+
+Status: designed (TASK-112), not implemented. The protocols below are
+normative for the implementation; until it lands, no source can require
+them and the profiles that depend on them stay unshipped.
+
+The in-use scan answers "does a visible process use this candidate now?".
+It cannot answer "has the program that made this candidate finished with
+it?". A producer can be alive and hold nothing diskgc can see: a pytest
+session between two tests, a shell that exported `TMPDIR` after `exec`, an
+image copy between writing a blob and committing it. Age cannot answer it
+either: `idle_for` measures changes, and a dormant producer changes
+nothing; read-mostly trees such as `node_modules` change nothing even
+while in use. This section defines the evidence a source can require for
+that second question, how far each kind of evidence can be trusted, and
+the rule that decides which built-ins may ship. The schema is in
+[reference.md](reference.md#producer-liveness-predicate-planned); which
+built-in has which contract is in
+[reference.md](reference.md#liveness-contracts).
+
+Terms. The **producer** is the process whose life bounds the use of a
+candidate: it made the candidate and may come back to it. A **consumer** is
+any process that reads or writes it. A **contract** is the evidence a
+source requires before its candidate may be judged unused, together with
+the producer versions and configurations it was verified for.
+
+**Kinds of evidence.**
+
+| Evidence | What it can show | Trustworthy when | Examples |
+|---|---|---|---|
+| Kernel use: fd, cwd, root, mapping (In use) | in use | always, for processes visible at scan time; silent on dormant ones | every candidate |
+| A path in a process's initial environment (In use) | in use | heuristic: an `export` after `exec` is invisible | `TMPDIR` of a running child |
+| A `flock` on the candidate directory (Deletion, step 3) | in use | always; its absence says nothing about a producer that never locks | the systemd-tmpfiles convention |
+| Producer lock: a lock the producer holds for as long as it uses the candidate | in use, or gone | the producer takes it for its whole use, in every supported configuration | Cargo's `.cargo-lock` files (kind `cargo-target`) |
+| Presence marker: a file the producer creates at start and removes when it ends cleanly | present: maybe in use; absent: gone | absent means gone only if every supported configuration creates it; a crash leaves it present | Chromium's `SingletonLock`; pytest's session `.lock` (not when its retention keeps 0) |
+| Owner PID: a pid in the candidate's name or in a marker | gone, or maybe alive | diskgc can see every PID namespace (Owner PID, below) and the recorded process lives as long as the producer uses the candidate | `nix-develop-<pid>-<n>`; the text of pytest's `.lock` |
+| Producer retention rule: what the producer's own cleanup removes | gone, relative to the producer | only relative: no safer than the producer's own cleanup | pytest keeps its three newest sessions |
+| Temp-root users: no process could be using the temporary root the candidate lies in | gone | heuristic: a producer that changed its temporary root inside the process is not seen | pytest sessions in a finished shell's `TMPDIR` |
+| Consumer tolerance: every consumer treats a missing entry as a cache miss | no liveness needed | verified per tool | `__pycache__`, `node-compile-cache` |
+| A tool's own cleaner, or a code-backed kind | delegated | per tool or kind | `pip cache purge`; the Cargo lock protocol; Nix GC |
+| Nothing: a dormant consumer that keeps only a path string | nothing | never | a shell's own `TMPDIR`; `mktemp -d` directories |
+
+**Contract classes and the admission rule.** Every built-in source has one
+contract class, recorded in the
+[liveness table](reference.md#liveness-contracts):
+
+- **sound**: a "gone" verdict means the producer can no longer use the
+  candidate, given preconditions diskgc checks on every run and fails closed
+  on. Owner PID, a producer lock, and a presence marker that every supported
+  configuration creates are of this class.
+- **producer-equivalent**: diskgc removes only what the producer's own
+  cleanup, in its default configuration, removes from the same evidence; it
+  may act sooner than the producer would. The claim is relative: no worse
+  than running the producer.
+- **verified heuristic**: the verdict can be wrong in named residual cases.
+  Admissible only when each residual is named in the liveness table; the
+  loss in each is rebuildable data or one failed, retryable producer run,
+  never a user's own work; every known counterexample has a checked-in
+  ModelHost vector and, where the kernel's view matters, a container test
+  with the real pinned producer; and Mark's decision to admit it is recorded
+  in the task.
+- **tolerant** and **delegated**: as in the table above, verified per tool.
+- **none**: no contract. The profile is not admissible as a built-in, and
+  its row in the liveness table records the counterexample. A user profile
+  may still select such paths; its author owns that risk.
+
+A contract only narrows: the eligibility walk, ownership, the in-use scan,
+the directory `flock` and the checkout guard all still apply. Contracts are
+verified against pinned producer versions (`verified_with`); the container
+tests pin the observed lifecycle, so a producer upgrade that changes it
+(a new retention default, a different rc script) turns them red and the
+contract is verified again. The rule applies to every built-in source; the
+shipped built-ins that predate it are classified by TASK-122.
+
+`app_not_running` (above) is a presence-marker contract that refuses on any
+present lock. It does not use Owner PID: Chromium writes the host name as
+well as the pid, and a home directory can be shared between hosts.
+
+**Owner PID.** The engine behind every PID-based verdict. It reverses
+the in-use scan's reading of the process list: there a missing process
+only means "not seen using it"; here a missing pid is taken as proof that
+the owner is gone. So it may conclude *gone* only where the list is
+provably complete, and every precondition below fails closed
+(`producer_unknown`).
+
+1. *The number.* From the candidate's own name (a protocol fixes where in
+   the name) or from a protocol's marker file (pytest's `.lock`). It is
+   decimal ASCII, no sign, no leading zero, from 1 to 4194304 (Linux's
+   `PID_MAX_LIMIT`). A marker is a regular file directly in the checked
+   candidate, opened below its fd without following symlinks, at most 16
+   bytes, holding the number and at most one trailing newline. Anything
+   else is `producer_unknown`.
+2. *Precondition: one kernel.* The candidate's filesystem type (`fstatfs`
+   on its fd) is on a fixed list of local types: tmpfs, ext4, xfs, btrfs,
+   bcachefs, f2fs. A pid from another kernel (an NFS `TMPDIR`, a directory
+   shared with a VM over virtiofs or 9p) names nothing here. Network types
+   are already refused as candidates (No network filesystems); the list
+   also refuses the VM-shared and unknown ones for this purpose.
+3. *Precondition: diskgc runs in the initial PID namespace.* At startup
+   diskgc checks that `self/ns/pid`, read through its held `/proc`, is on
+   nsfs (`fstatfs` gives `NSFS_MAGIC`) and has the kernel's fixed inode of
+   the initial PID namespace (`PROC_PID_INIT_INO`, `0xEFFFFFFC`,
+   4026531836; observed on Linux 7.2.9 on the host, and a different inode
+   inside `unshare --pid`). Every PID namespace descends from the initial
+   one, and startup already requires the held `/proc` to be diskgc's own
+   namespace's, so that `/proc` can list every process of every namespace.
+   In any other PID namespace (a container, a sandbox) a sibling
+   namespace's processes are invisible.
+4. *Precondition: no hidden processes.* The held `/proc` is mounted without
+   `hidepid` (its `mountinfo` super options), or diskgc runs as root with
+   `CAP_SYS_PTRACE`. With `hidepid=2` or `invisible`, the kernel hides
+   every process diskgc may not ptrace-read, the user's own included: a
+   non-dumpable process, or a shell started with `newgrp` or `sg` and every
+   child of it (a `nix-shell`, a `pytest`), since the kernel also compares
+   groups. Such a producer would never be listed.
+5. *Lookup.* The settled in-use scan also reads the `NSpid:` line of each
+   listed process's `/proc/<pid>/status`: its pid in every namespace from
+   diskgc's down to its own. The owner is *maybe alive* when the number
+   appears at **any** level of any listed process's `NSpid`, of any user,
+   zombies included. Any level, not only the innermost that the producer's
+   `getpid()` returns: a supervisor may record a pid as its own namespace
+   sees it, and a coincidence only retains. When no level matches, diskgc
+   also opens a pidfd for the number in its own namespace: only `ESRCH`
+   lets the verdict stand, as In use requires the kernel's word for
+   "gone". The owner is then *gone* when the scan settled and every listed
+   process of the user (as In use defines the user) gave a readable
+   `NSpid` line. A process whose status cannot be read goes through In
+   use's re-reads and pidfd classification: one confirmed gone drops out,
+   so processes exiting during the scan do not block; one of the user that
+   stays unreadable makes every owner verdict of that scan
+   `producer_unknown`. Another user's process is never the owner of a
+   candidate the eligibility walk accepts, so its unreadable status is
+   ignored.
+6. *PID reuse* makes a dead owner look alive: the candidate is retained,
+   never deleted. No start-time comparison is made; it could only turn
+   retained candidates eligible, and it would depend on the wall clock.
+   With `pid_max` at 4194304 and a thousand processes, about one dead
+   owner in four thousand is retained per scan; small namespace-local pids
+   (a container's 9) collide more often.
+7. *Stability.* Once the preconditions hold, a gone owner never comes back, and a later process with
+   the same number is not the owner. Unlike `app_not_running`, where a
+   browser can start after the check, the verdict cannot turn from gone to
+   alive between the check and the deletion; a candidate replaced under the
+   same name is caught by the identity checks of Deletion.
+8. *When.* During planning and tallying, again under the candidate lock,
+   and immediately before deletion or a command action after the process
+   scan, from the same scan as the in-use check, under its Freshness bound.
+   The index may order by an earlier verdict; it never decides.
+9. *Scope.* It proves the owner gone, not every consumer. The in-use scan
+   still runs, but a consumer that outlives the owner and keeps only a path
+   string (an orphaned background job) is not seen. Each built-in's
+   lifecycle verification states whether its candidates have such
+   consumers.
+
+A maybe-alive owner is reported `in_use`; one that cannot be judged is
+`producer_unknown`, its detail naming the failed rule (the names are in
+[reference.md](reference.md#producer-liveness-predicate-planned)).
+
+**nix-shell rc directories.** The protocol behind
+`producer_gone: nix-shell`: the candidate's own name is
+`nix-shell-<pid>-<suffix>` or `nix-develop-<pid>-<suffix>`; Owner PID on
+`<pid>`. A name of another shape is `producer_unknown`. Facts from Nix
+2.34.8 (2026-10-23): `nix develop` names its directory after its own pid
+and execs the shell, which keeps that pid; the directory is empty once the
+rc script has run, and it is left behind after a normal exit. Legacy
+`nix-shell` leftovers hold `env-vars` and `rc`. To verify before the
+profile ships: legacy `nix-shell` keeps the pid through exec, and no live
+shell reads the directory after its start. The bytes are small (about 350
+MiB in 65,000 directories in TASK-68's dry run); the value is the
+directory count, and proving Owner PID on the simplest producer first.
+
+**pytest sessions.** The protocol behind `producer_gone: pytest`. Facts
+from the pytest 9.1.1 sources pinned in the Nix test image
+(`_pytest/pathlib.py`, `_pytest/tmpdir.py`):
+
+- A session directory is `<temp root>/pytest-of-<user>/pytest-<N>`, with
+  `N` one more than the largest existing number; `pytest-current` links to
+  the newest. The temp root is `$PYTEST_DEBUG_TEMPROOT` or Python's
+  `tempfile.gettempdir()` (`TMPDIR`, `TEMP`, `TMP`, then `/tmp`,
+  `/var/tmp`, `/usr/tmp`), resolved. `--basetemp` sessions live elsewhere
+  and are not matched.
+- Right after creating the directory, pytest creates `.lock` in it holding
+  its pid, unless `keep` is 0. `keep` is `tmp_path_retention_count`
+  (default 3); `tmp_path_retention_policy=none` sets it to 0, and then
+  there is no lock. The lock is removed when the session ends; a killed
+  session leaves it.
+- When a session ends, pytest deletes the sessions numbered at most the
+  largest number minus `keep` whose `.lock` is absent or more than three
+  days older than its own session. With `keep` 0 this includes its own
+  session and any concurrently running session without a lock.
+
+For a session `S` (the candidate, or the session holding a test-directory
+candidate), its `pytest-of-<user>` directory `P` and its temp root `R`
+(the parent of `P`):
+
+1. `S` holds a `.lock` entry of any type: Owner PID from its content.
+   Maybe alive: retained (`in_use`, evidence `owner_pid`); unknown:
+   retained (`producer_unknown`); gone: eligible, a killed session.
+   *(sound, under Owner PID's preconditions)*
+2. No `.lock`, and `N` is at most `M − 3`, `M` the largest number among
+   `P`'s `pytest-<digits>` entries: eligible. pytest's cleanup at the end
+   of any later session with the default retention would delete `S`. A
+   listing of `P` that fails or is cut short retains
+   (`producer_unknown`). *(producer-equivalent)*
+3. Otherwise `S` is eligible only when no visible process could be using
+   `R` as its temp root (below); else it is retained (`in_use`, evidence
+   `temp_root`, the processes listed). *(heuristic)*
+
+*Temp-root users.* A process of the user could use `R` when one of these,
+looked up in its own root and mount namespace, is `R` by device and inode.
+The lookup opens `/proc/<pid>/root` as a directory and resolves the path
+below it with `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)`, so an
+absolute symlink resolves in the process's root, as pytest's `resolve()`
+does there, never in diskgc's; the result is `statx`ed with
+`AT_NO_AUTOMOUNT | AT_STATX_DONT_SYNC`. Lookups are deduplicated by the
+identity of that root directory plus the path (two processes of one mount
+namespace can have different roots). The paths: the absolute values of `PYTEST_DEBUG_TEMPROOT`,
+`TMPDIR`, `TEMP` and `TMP` in its initial environment, and always `/tmp`,
+`/var/tmp` and `/usr/tmp`. A process of the user whose environment or root
+cannot be read, and is not excused by a privilege boundary (In use), could
+use every root. Rule 3 needs Owner PID's preconditions on PID namespace and
+`hidepid`; elsewhere it never permits. Python's fallbacks are always included, an
+over-approximation, so a top-level `/tmp/pytest-of-<user>` relies on rules
+1 and 2 alone: on a running system some process always has `/tmp` as a
+possible root. Rule 3 is what reaches the newest sessions in a finished
+shell's `TMPDIR` (`/tmp/nix-shell.*/pytest-of-<user>`), where most leftover
+sessions lie.
+
+*Stability.* Rule 1 is Owner PID. Under rule 2 new sessions only lower
+`S`'s rank; a `keep` 0 session that deletes the newest number can raise
+it again, which only retains, and the rule runs again before deletion.
+Under rule 3 pytest never adopts an existing session; a pytest started
+after the check makes a new number. A verdict can only be wrong because a
+process was invisible to the check, not because of what happens after
+it.
+
+*Startup window.* Between pytest's `mkdir` and its `.lock` (one function,
+microseconds) a live session looks finished. The built-in's `min_idle_for`
+covers this window.
+
+*Residuals* (the heuristic part; the loss in each is that run's temporary
+files, so the run may fail and is run again):
+
+- a live session without a lock (`keep` 0) with at least three newer
+  sessions in the same `P`: pytest itself deletes it when any newer session
+  with the default retention ends; diskgc may delete it sooner, and does so
+  even when the newer sessions keep more than three;
+- a finished session a project keeps on purpose with
+  `tmp_path_retention_count` above 3 (to inspect failures): rule 2 deletes
+  it once three newer sessions exist. A policy loss, not a liveness one;
+- a live session without a lock among the newest three, whose pytest
+  process did not take its temp root from its initial environment
+  (`os.environ` or `tempfile.tempdir` changed inside a long-lived Python
+  program that then calls `pytest.main()`), or is not visible to diskgc,
+  or is excused by a privilege boundary.
+
+Not matched: `garbage-<uuid>` directories that a pytest killed during its
+own cleanup leaves in `P`; a known gap of the matching set.
+
+**With the other checks.**
+
+- *Order.* A producer verdict is a source predicate: it runs where
+  `app_not_running` runs, before the eligibility walk, and again
+  immediately before deletion after the process scan.
+- *PID namespaces* are handled by the precondition and the any-level
+  `NSpid` lookup. Neither the name nor the marker says which namespace the
+  pid belongs to; the lookup does not need to know.
+- *`hidepid`* can hide the user's own processes (precondition 4), so a
+  `/proc` mounted with it gives `producer_unknown`, unless diskgc runs as
+  root with `CAP_SYS_PTRACE`.
+- *Mount namespaces.* Owner PID compares numbers, not paths. Temp-root
+  users are resolved in each process's own namespace, so a container that
+  binds a shell's `TMPDIR` as its `/tmp` counts.
+- *Deadlines.* The reads are part of the in-use scan. A temp-root `statx`
+  on a dead mount can block like the scan's other `statx` calls (In use, A
+  process using a dead mount).
+- *Cost.* Only when a selected source requires a producer verdict: one more
+  read of each listed process's `status`, at most seven `statx` per process
+  for temp roots (deduplicated per mount namespace and path), and one
+  listing of each `pytest-of-<user>` directory per scan.
+
+**Limits, stated plainly.**
+
+- Outside the initial PID namespace, under `hidepid`, or on a filesystem
+  not on the local list, no PID-based verdict permits a deletion; those
+  candidates are kept as `producer_unknown`. diskgc in a container with
+  its own PID namespace reclaims none of them.
+- A reused pid keeps a dead owner's candidate until that pid's holder
+  exits.
+- Owner PID proves the owner gone, not every consumer of the candidate.
+- A contract holds for the producer versions and configurations it was
+  verified for; another version may name, lock or reuse its directories
+  differently.
+- The pytest residuals above.
+- A process can forge a name or a `.lock`; diskgc is not a defence against
+  a hostile local user (Principles).
+
 ### Project dependency directories (planned)
 
 An unchanged `node_modules` or `.venv` can still belong to a project used
@@ -689,7 +988,10 @@ deleting. Missing, unreadable or inconsistent state must retain the
 candidate. An uncooperative consumer means the protocol gives no safety
 claim; therefore a built-in profile cannot assume participation merely
 because a directory has the conventional name. No such source or lock
-protocol is implemented.
+protocol is implemented. In the terms of
+[Producer liveness](#producer-liveness) this is a producer lock held by
+cooperating consumers; the schema gets a producer-lock predicate only with
+its first user.
 
 Any future `.venv` source must retain `checkouts: refuse`. Editable VCS
 installs can place a real checkout under `.venv/src`, which may hold work
