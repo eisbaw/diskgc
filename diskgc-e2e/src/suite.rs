@@ -129,6 +129,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
     ),
     (
+        "vm_containers_image_dormant_spool_exposes_liveness_gap",
+        "requires a Nix-built disposable QEMU guest with a guest-only mutable clock",
+    ),
+    (
         "agent_harness_uses_json_for_all_reclaim_decisions",
         "the shipped Python example needs the pinned Python interpreter in the Nix image",
     ),
@@ -544,6 +548,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Vm,
         expect: Expect::Pass,
         run: differential_suite::vm_containers_image_original_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
+        name: "vm_containers_image_dormant_spool_exposes_liveness_gap",
+        tier: Tier::Vm,
+        expect: Expect::Pass,
+        run: differential_suite::vm_containers_image_dormant_spool_exposes_liveness_gap,
     },
     Test {
         name: "west_vector_matches_linux_under_clock_offset",

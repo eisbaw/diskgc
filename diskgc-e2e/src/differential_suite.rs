@@ -843,6 +843,135 @@ pub fn vm_containers_image_original_matches_linux_outcomes_and_deletion_diff(
     )
 }
 
+/// A live producer can close its spool and remain ready to use it again.
+/// With genuine five-day kernel ctimes, the exact embedded source sees the
+/// open-fd case but cannot distinguish the dormant spool from abandoned data.
+/// Keep this as a dry-run counterexample: reclaiming the dormant fixture
+/// would intentionally destroy live work.
+pub fn vm_containers_image_dormant_spool_exposes_liveness_gap(ctx: &Ctx) -> TestResult {
+    let mut clock = GuestClock::begin()?;
+    let result = (|| {
+        let library = Library::builtin().map_err(|error| error.to_string())?;
+        let tier = Tier::select("profile:containers-image-tmp", &library, None, TESTER.uid)?;
+        ensure!(
+            tier.idle_for
+                .is_some_and(|floor| floor.0 == Duration::from_secs(3 * 86_400)),
+            "containers-image-tmp no longer has its exact three-day source floor"
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("read guest clock: {error}"))?;
+        let old = now
+            .checked_sub(Duration::from_secs(5 * 86_400))
+            .ok_or("guest clock is too early for a five-day fixture")?;
+        set_guest_clock(i128::try_from(old.as_nanos()).map_err(|error| error.to_string())?)?;
+        let spool = &ctx.var_tmp;
+        let free = spool.write_file("container_images_storage-free", b"unused", 0o600, TESTER)?;
+        let held = spool.write_file("container_images_storage-held", b"open", 0o600, TESTER)?;
+        spool.mkdir("buildah-dormant", 0o700, TESTER)?;
+        let dormant = spool.path("buildah-dormant");
+        let dormant_image =
+            spool.write_file("buildah-dormant/image", b"needed on resume", 0o600, TESTER)?;
+        ensure!(
+            dormant_image == Path::new(crate::inuse_probe::DORMANT_IMAGE),
+            "dormant producer fixture path and probe disagree"
+        );
+        // The producer has used this old spool and closed it. On EOF it
+        // resumes and requires the same bytes, so this is live data.
+        let dormant_process = Holder::tester(ctx, &["hold-reuse"], &[])?;
+
+        set_guest_clock(i128::try_from(now.as_nanos()).map_err(|error| error.to_string())?)?;
+        let fresh = spool.write_file("buildah-fresh", b"new", 0o600, TESTER)?;
+        let mount_id = spool.mnt_id();
+        let old_seconds = i64::try_from(old.as_secs()).map_err(|error| error.to_string())?;
+        let now_seconds = i64::try_from(now.as_secs()).map_err(|error| error.to_string())?;
+        for path in [&free, &held, &dormant] {
+            let ctime = statx_ctime_seconds(path, mount_id)?;
+            ensure!(
+                (old_seconds..=old_seconds + 120).contains(&ctime),
+                "{} lacks the old kernel ctime: {ctime}",
+                path.display()
+            );
+        }
+        let fresh_ctime = statx_ctime_seconds(&fresh, mount_id)?;
+        ensure!(
+            (now_seconds..=now_seconds + 120).contains(&fresh_ctime),
+            "fresh spool has unexpected kernel ctime: {fresh_ctime}"
+        );
+
+        let held_text = held.to_str().ok_or("non-UTF-8 held spool")?;
+        let held_process = Holder::tester(ctx, &["hold", held_text, "/"], &[])?;
+        model_materialize::assert_process_no_reference_to(dormant_process.pid(), &dormant)?;
+        let cmdline = fs::read(format!("/proc/{}/cmdline", dormant_process.pid()))
+            .map_err(|error| format!("read dormant producer cmdline: {error}"))?;
+        ensure!(
+            cmdline
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == b"hold-reuse"),
+            "dormant producer command line did not identify the fixture"
+        );
+        let dormant_text = dormant.to_str().ok_or("non-UTF-8 dormant spool")?;
+        ensure!(
+            !cmdline
+                .windows(dormant_text.len())
+                .any(|window| window == dormant_text.as_bytes()),
+            "dormant spool leaked through producer command line"
+        );
+
+        let oracle = Oracle::arm(Fixture::new())?;
+        let dry = ensure_run(
+            ctx,
+            &[
+                "--dry-run",
+                "--json",
+                "--no-index",
+                "--min-free",
+                "100%",
+                "--select",
+                "profile:containers-image-tmp",
+                "/var/tmp",
+            ],
+        )?;
+        oracle.judge(&dry)?.assert_clean()?;
+        dry.expect_code(0)?;
+        let report = report(&dry)?;
+        let plan = report["plan"]
+            .as_array()
+            .ok_or("dry run has no plan array")?;
+        for (path, reason) in [
+            (&free, None),
+            (&held, Some("in_use")),
+            (&dormant, None),
+            (&fresh, Some("not_idle")),
+        ] {
+            let entry = plan
+                .iter()
+                .find(|entry| entry["candidate"].as_str() == path.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "{} missing from exact built-in plan: {report}",
+                        path.display()
+                    )
+                })?;
+            ensure!(
+                entry["reason"].as_str() == reason,
+                "{}: expected {reason:?}, got {entry}",
+                path.display()
+            );
+        }
+        ensure!(
+            dormant.join("image").exists(),
+            "dry run removed dormant data"
+        );
+        held_process.finish()?;
+        dormant_process.finish()
+    })();
+    let restored = clock.restore();
+    result?;
+    restored
+}
+
 fn replay_historical_vector(
     ctx: &Ctx,
     source: &str,

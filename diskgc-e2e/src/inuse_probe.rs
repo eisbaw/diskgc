@@ -81,6 +81,34 @@ pub fn hold_export(var: &str, value: &str) -> Result<(), String> {
     ready_then_wait()
 }
 
+/// The private VM fixture path is deliberately absent from the producer's
+/// argv and initial environment.
+pub(crate) const DORMANT_IMAGE: &str = "/var/tmp/buildah-dormant/image";
+
+/// `hold-reuse`: an image-spool producer closes its file while idle, then
+/// needs the same bytes when resumed. Its post-exec TMPDIR is invisible in
+/// /proc/<pid>/environ, and it keeps no candidate descriptor while idle.
+pub fn hold_reuse() -> Result<(), String> {
+    let file = Path::new(DORMANT_IMAGE);
+    let original =
+        std::fs::read(file).map_err(|e| format!("read producer spool {}: {e}", file.display()))?;
+    let directory = file.parent().ok_or("producer spool has no parent")?;
+    // SAFETY: this fixture is single-threaded and changes its environment
+    // before announcing readiness to the parent.
+    unsafe { std::env::set_var("TMPDIR", directory) };
+    std::env::set_current_dir("/").map_err(|e| format!("chdir /: {e}"))?;
+    ready_then_wait()?;
+    let resumed = std::fs::read(file)
+        .map_err(|e| format!("resume producer spool {}: {e}", file.display()))?;
+    if resumed != original {
+        return Err(format!(
+            "producer spool changed while dormant: {}",
+            file.display()
+        ));
+    }
+    Ok(())
+}
+
 /// `hold-fork FILE`: holds FILE open; on a line from stdin, forks a child
 /// that inherits the fd, closes its own and prints `forked <child pid>`;
 /// both live until stdin closes (the child then exits too).

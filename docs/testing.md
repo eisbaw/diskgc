@@ -1081,7 +1081,15 @@ users, mount points and descriptor. It contains BusyBox, strace and the
 named `/usr/bin/buildah` process probe, and mounts the guest's Nix store and
 test binaries read-only. `nix build .#checks.x86_64-linux.vm-historical-ctime`
 boots its disposable QEMU/Podman host and runs the four `Tier::Vm` replays.
-It is part of the exact `just e2e` and `just e2e-full` recipes.
+It also runs a separate exact `containers-image-tmp` dry run with genuine
+five-day kernel ctimes: a held spool is `in_use`, a free spool is eligible,
+a fresh spool is `not_idle`, and a live producer's dormant spool is eligible.
+The producer reads and closes its spool before going idle, has no candidate
+reference in `/proc`, and reopens the same bytes when resumed. This is a
+counterexample to general dormant-spool protection, not evidence that
+Buildah itself reuses such a spool. The original vector independently
+verifies free deletion and held preservation with the exact built-in.
+The VM check is part of `just e2e` and `just e2e-full`.
 
 - **Nix image** (`localhost/diskgc-e2e-base`): busybox, strace, the pinned
   pip, uv, Go, npm, pnpm, Yarn Classic, ccache, PlatformIO and Jest cleaners, and the Cargo

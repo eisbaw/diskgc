@@ -54,6 +54,7 @@ pub fn main(args: &[String]) -> i32 {
         [cmd, rest @ ..] if cmd.starts_with("host-") => crate::host_probe::main(cmd, rest),
         [cmd, file] if cmd == "hold-map" => crate::inuse_probe::hold_map(Path::new(file)),
         [cmd, var, value] if cmd == "hold-export" => crate::inuse_probe::hold_export(var, value),
+        [cmd] if cmd == "hold-reuse" => crate::inuse_probe::hold_reuse(),
         [cmd, file] if cmd == "hold-fork" => crate::inuse_probe::hold_fork(Path::new(file)),
         [cmd, fifo] if cmd == "hold-fifo" => crate::inuse_probe::hold_fifo(Path::new(fifo)),
         [cmd, path] if cmd == "bind-socket" => crate::inuse_probe::bind_socket(Path::new(path)),

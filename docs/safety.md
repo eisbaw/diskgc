@@ -327,6 +327,16 @@ binary's dry-run; it never performs the unsafe deletion. `mktemp-dir`,
 The same test reproduces the false negative for a live
 `/tmp/claude-{uid}/nix-shell.*` TMPDIR; the frozen prefix preset only
 selects named entries inside that directory, never the outer shell itself.
+The embedded `containers-image-tmp` source has a fixed three-day idle floor,
+but that floor cannot prove a producer has finished with its spool. A
+disposable VM test gives an old `/var/tmp/buildah*` directory genuine old
+kernel ctime, then parks a live producer after it closes the spool. The
+exact built-in judges the directory eligible while the producer still
+needs it on resume. The test only dry-runs that live directory. The
+producer is a fixture; whether real Buildah or Podman ever reuses a dormant
+spool with this lifetime remains unverified. No liveness contract for such
+reuse is currently available, so this profile needs that lifecycle evidence
+before its safety can be claimed for a release.
 An idle-time filter cannot establish liveness. The rc names
 `nix-shell-<pid>-*` and `nix-develop-<pid>-*` also cannot use a host-only
 `/proc/<pid>` check: a shell can share `/tmp` from a different PID namespace

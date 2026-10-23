@@ -67,6 +67,15 @@ pkgs.testers.nixosTest {
         "/opt/diskgc-e2e/bin/diskgc-e2e run "
         f"vm_{profile}_original_matches_linux_outcomes_and_deletion_diff"
       )
+    machine.succeed(
+      "podman run --rm --pull=never --network=none "
+      "--cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add SYS_TIME "
+      "--volume /nix/store:/nix/store:ro "
+      "--volume ${underTest}/bin:/opt/diskgc-e2e/bin:ro "
+      "${image.imageName}:${image.imageTag} "
+      "/opt/diskgc-e2e/bin/diskgc-e2e run "
+      "vm_containers_image_dormant_spool_exposes_liveness_gap"
+    )
     guest_finished = int(machine.succeed("date -u +%s"))
     host_finished = time.time()
     assert 0 <= guest_finished - guest_started < 300, (guest_started, guest_finished)
