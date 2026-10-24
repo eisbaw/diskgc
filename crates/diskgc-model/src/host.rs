@@ -48,8 +48,8 @@ use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, Ids,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
-    OpenHow, Pid, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp, TryLock, Unlink,
-    WaitLock, is_single_name,
+    OpenHow, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp,
+    TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -404,6 +404,9 @@ impl ModelHost {
             let Some(proc) = inner.state.procs.get(&pid.0) else {
                 return (Err(ProcError::Gone), None, "gone".to_owned());
             };
+            if proc.zombie {
+                return (Err(ProcError::Gone), None, "gone (zombie)".to_owned());
+            }
             match proc.access {
                 ProcAccess::Readable => {
                     let answer = read(&inner.state, proc);
@@ -1236,6 +1239,10 @@ impl Host for ModelHost {
                     );
                 }
                 match inner.state.procs.get(&pid.0) {
+                    // A zombie has no live task: the pidfd says gone.
+                    Some(proc) if proc.zombie => {
+                        (Err(ProcError::Gone), None, "gone (zombie)".to_owned())
+                    }
                     Some(proc) => (
                         Ok((pid, proc.generation)),
                         None,
@@ -1423,7 +1430,12 @@ impl Host for ModelHost {
                 cap_permitted: proc.cap_permitted,
                 cap_effective: 0,
                 uid_map: crate::state::uid_map(proc.uid_map.as_deref()),
-                fd_dir_owner: Some(if proc.dumpable { proc.uid.effective } else { 0 }),
+                // A zombie has no live task whose fd directory could be read.
+                fd_dir_owner: (!proc.zombie).then_some(if proc.dumpable {
+                    proc.uid.effective
+                } else {
+                    0
+                }),
             };
             (Ok(status), None, "ok".to_owned())
         })
@@ -1449,6 +1461,98 @@ impl Host for ModelHost {
                 })
                 .collect();
             (Ok(sockets), None, "ok".to_owned())
+        })
+    }
+
+    /// The model's `pid_namespace` and `proc_hidepid`.
+    fn pid_namespace(&self) -> Result<PidNamespace, HostError> {
+        self.call(Op::PidNamespace, None, None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("fstatfs", "/proc/self/ns/pid", e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let facts = PidNamespace {
+                initial: inner.state.pid_namespace_initial,
+                hidepid: inner.state.proc_hidepid,
+            };
+            (Ok(facts), None, format!("{facts:?}"))
+        })
+    }
+
+    /// A process's `nspid` (default `[pid]`); `unreadable` is `Failed`.
+    /// Zombies are readable here, as `status` is on Linux.
+    fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, ProcError> {
+        let path = PathBuf::from(format!("/proc/{pid}/status"));
+        let shown = path.display().to_string();
+        self.call(Op::ProcNspid, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(ProcError::from_host(HostError::errno("read", &shown, e))),
+                    None,
+                    errno_text(e),
+                );
+            }
+            if pid.0 == inner.state.own_pid {
+                return (Ok(vec![pid.0]), None, "ok (own)".to_owned());
+            }
+            match inner.state.procs.get(&pid.0) {
+                None => (Err(ProcError::Gone), None, "gone".to_owned()),
+                Some(proc) => match &proc.nspid {
+                    Some(levels) => (Ok(levels.clone()), None, format!("{levels:?}")),
+                    None => (
+                        Err(ProcError::Failed(HostError::invalid(
+                            "read",
+                            &shown,
+                            "the model says its NSpid is unreadable",
+                        ))),
+                        None,
+                        "failed (unreadable)".to_owned(),
+                    ),
+                },
+            }
+        })
+    }
+
+    /// Whether a process (zombies included) or diskgc itself has `pid`.
+    fn pid_alive(&self, pid: Pid) -> Result<bool, HostError> {
+        self.call(
+            Op::PidAlive,
+            Some(PathBuf::from(format!("/proc/{pid}"))),
+            None,
+            |inner| {
+                if let Some(e) = inner.injected.take() {
+                    return (
+                        Err(HostError::errno("pidfd_open", pid, e)),
+                        None,
+                        errno_text(e),
+                    );
+                }
+                let alive = pid.0 == inner.state.own_pid || inner.state.procs.contains_key(&pid.0);
+                (Ok(alive), None, alive.to_string())
+            },
+        )
+    }
+
+    /// The magic number of the mount's `fs` name ([`crate::state::fs_magic`]).
+    fn fs_magic(&self, fd: &ModelFd) -> Result<u64, HostError> {
+        let ofd = self.fd_ofd(fd);
+        let path = self.base_path(Base::Dir(fd), Path::new(""));
+        let shown = path.display().to_string();
+        self.call(Op::FsMagic, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("fstatfs", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let loc = inner.loc_of(ofd);
+            let fs = inner.state.fs(loc.mnt).fs_type.clone();
+            let magic = crate::state::fs_magic(&fs);
+            (Ok(magic), None, format!("{fs} {magic:#x}"))
         })
     }
 }

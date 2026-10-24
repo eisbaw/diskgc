@@ -379,7 +379,14 @@ How the format reads (the schema documents every key):
   and saved, as after a setuid exec), `gid`, `non_dumpable: true` (its `fd`
   directory owned by root), `privileged: true` (holds a capability diskgc
   lacks), `uid_map` (the text diskgc reads; default the initial
-  namespace's; `none`: absent). The top-level `own_uid_map` is diskgc's
+  namespace's; `none`: absent), `nspid` (its `NSpid:` levels, the first
+  its pid; default `[pid]`; `unreadable`: that read fails), and
+  `zombie: true` (listed, its `status` readable and its pidfd open, every
+  other reader `Gone`; no fds, maps or locks). The top-level
+  `pid_namespace: nested` and `proc_hidepid: true` are the held `/proc`'s
+  answers to Owner PID's preconditions (default: the initial namespace,
+  no `hidepid`); a mount's `fs:` name gives `fstatfs` its magic (unknown
+  names: 0, never on the local list). The top-level `own_uid_map` is diskgc's
   own (same default, `none` too), `own_uid` its user id (default 1000; 0
   models running as root), and `sandbox_gate` the pre-release gate as
   `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
@@ -516,7 +523,10 @@ Extensions they need. Of the profile-vector file:
 - `expect.plan[].evidence` and `expect.skipped[].evidence`, optional
   lists of `process_blockers` evidence values, compared as sets.
 
-Of the host model (the test-model schema, tentative):
+Of the host model (the test-model schema, tentative). `pid_namespace`,
+`proc_hidepid`, `nspid` and `zombie` landed with Owner PID (TASK-112 step
+2); each other extension lands with the contract that reads it (no field
+without a reader):
 
 - top level `pid_namespace: initial | nested` (default `initial`): the
   answer of diskgc's held `/proc` to the initial-namespace check;
@@ -525,7 +535,8 @@ Of the host model (the test-model schema, tentative):
   local-filesystem list is checked against;
 - `processes[].nspid`: its pids from diskgc's namespace down to its own
   (default `[pid]`; the first must equal `pid`), or `unreadable`;
-- `processes[].zombie: true`: listed, state `Z`, nothing else readable;
+- `processes[].zombie: true`: listed, state `Z`, its `status` (`NSpid`)
+  readable and its pidfd open, every other reader `Gone` (landed);
 - `processes[].cmdline`: its argument vector (default `[exe]`), or
   `unreadable`;
 - `processes[].view`: path prefixes as its root and mount namespace see

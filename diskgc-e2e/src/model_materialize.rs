@@ -365,6 +365,12 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             "the traced tester process supplies these values",
         );
     }
+    if model.pid_namespace != diskgc_model::spec::PidNamespaceSpec::Initial || model.proc_hidepid {
+        return unsupported(
+            "pid_namespace/proc_hidepid",
+            "the container's own PID namespace and /proc mount are what they are",
+        );
+    }
     if model.sandbox_gate != GateSpec::Open {
         return unsupported("sandbox_gate", "the container interlock supplies the gate");
     }
@@ -673,6 +679,12 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
         return unsupported(
             "root/name/ids/dumpability/uid_map/privileged",
             "the tester helper has fixed process credentials and namespace",
+        );
+    }
+    if process.nspid.is_some() || process.zombie {
+        return unsupported(
+            "nspid/zombie",
+            "the helper is one live process in the container's PID namespace",
         );
     }
     if (!locked && process.fds.len() != 1)

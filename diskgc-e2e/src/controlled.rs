@@ -575,6 +575,26 @@ impl<H: Host> Host for Controlled<H> {
         self.before("bound_unix_sockets");
         self.host.bound_unix_sockets()
     }
+
+    fn pid_namespace(&self) -> Result<diskgc_core::host::PidNamespace, HostError> {
+        self.before("pid_namespace");
+        self.host.pid_namespace()
+    }
+
+    fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, ProcError> {
+        self.before("proc_nspid");
+        self.host.proc_nspid(pid)
+    }
+
+    fn pid_alive(&self, pid: Pid) -> Result<bool, HostError> {
+        self.before("pid_alive");
+        self.host.pid_alive(pid)
+    }
+
+    fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError> {
+        self.before("fs_magic");
+        self.host.fs_magic(fd)
+    }
 }
 
 impl<H: Delete> Delete for Controlled<H> {

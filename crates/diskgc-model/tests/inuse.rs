@@ -87,6 +87,7 @@ fn options(sockets: bool) -> Options<'static> {
     Options {
         users: &[ME],
         sockets,
+        pid_lookup: false,
     }
 }
 

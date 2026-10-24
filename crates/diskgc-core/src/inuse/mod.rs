@@ -40,6 +40,7 @@ use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
     Locked, MonoTime, Pid, TryLock,
 };
+use crate::liveness::PidTable;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
@@ -89,17 +90,31 @@ pub struct Options<'a> {
     /// Also ask for the sockets bound in diskgc's network namespace (only
     /// needed when the walk records sockets, [`Rules::block_ipc`] off).
     pub sockets: bool,
+    /// Also read every listed process's `NSpid` and the PID namespace
+    /// facts for Owner PID ([`Scan::pid_table`]); only when a selected
+    /// source has a liveness contract (one more `status` read per process).
+    pub pid_lookup: bool,
 }
 
 impl<'a> Options<'a> {
     /// The options matching the walk's `rules`: the users are its owners,
     /// and bound sockets are asked for exactly when the walk records
-    /// sockets (`block_ipc` off).
+    /// sockets (`block_ipc` off). No PID lookup: a caller judging a source
+    /// with a liveness contract asks for it ([`Options::with_pid_lookup`]).
     pub fn from_rules(rules: &Rules<'a>) -> Self {
         Self {
             users: rules.owners,
             sockets: !rules.block_ipc,
+            pid_lookup: false,
         }
+    }
+}
+
+impl Options<'_> {
+    /// These options, also reading what Owner PID needs.
+    #[must_use]
+    pub fn with_pid_lookup(self, pid_lookup: bool) -> Self {
+        Self { pid_lookup, ..self }
     }
 }
 
@@ -126,6 +141,8 @@ pub struct Scan {
     environ_failed: Vec<(Pid, HostError)>,
     held_deleted: Vec<HeldDeleted>,
     sockets: Option<Result<Vec<BoundSocket>, HostError>>,
+    /// Owner PID's lookup table, when the options asked for it.
+    pid_table: Option<PidTable>,
 }
 
 /// Reads every visible process (see [`self::scan`] for the order of
@@ -135,7 +152,14 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
     // The scan is as old as its first read.
     let started = host.now();
     let sockets = options.sockets.then(|| host.bound_unix_sockets());
+    // Owner PID's namespace facts are read before the first listing and
+    // again after the NSpid reads, so they cover the window of the
+    // listings they qualify ([`scan::pid_table`]).
+    let namespace_before = options.pid_lookup.then(|| host.pid_namespace());
     let gathered = scan::gather(host, options.users)?;
+    let pid_table = namespace_before.map(|before| {
+        scan::pid_table(host, before, &gathered.listed, gathered.unsettled.is_none())
+    });
     let mut s = Scan {
         started,
         finished: gathered.finished,
@@ -153,6 +177,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         environ_failed: gathered.environ_failed,
         held_deleted: Vec::new(),
         sockets,
+        pid_table,
     };
     for (pid, read) in gathered.read {
         for (id, how) in read.uses {
@@ -192,6 +217,17 @@ pub struct HeldByDeleted {
 impl Scan {
     fn blocks_all(&self) -> bool {
         self.unsettled.is_some() || self.unreadable.iter().any(|u| u.excuse.is_none())
+    }
+
+    /// Owner PID's lookup table (`None`: not asked for, see
+    /// [`Options::pid_lookup`]).
+    pub fn pid_table(&self) -> Option<&PidTable> {
+        self.pid_table.as_ref()
+    }
+
+    /// Whether the process list settled ([`MAX_LISTINGS`]).
+    pub fn settled(&self) -> bool {
+        self.unsettled.is_none()
     }
 
     /// When the scan started: its age is measured from here.

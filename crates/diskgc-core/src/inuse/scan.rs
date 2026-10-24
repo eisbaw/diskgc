@@ -53,6 +53,8 @@ use crate::host::{
 };
 
 use super::environ;
+use crate::host::PidNamespace;
+use crate::liveness::PidTable;
 
 /// The most listings that bring new process incarnations a scan makes before it gives up
 /// on a process list that keeps growing. Listings that only lead to
@@ -222,6 +224,9 @@ pub(crate) struct Gathered {
     pub environ_failed: Vec<(Pid, HostError)>,
     /// Processes found gone.
     pub gone: usize,
+    /// The pids of the last listing (diskgc's own included): every process
+    /// alive when the scan settled was in it.
+    pub listed: Vec<Pid>,
 }
 
 /// One process during a scan.
@@ -330,6 +335,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
     let mut identities: BTreeMap<Pid, H::ProcIdentity> = BTreeMap::new();
     let mut listings = 0;
     let mut growing = 0;
+    let mut last_listing: Vec<Pid> = Vec::new();
     macro_rules! identity_or_unsettled {
         ($label:lifetime, $answer:expr) => {
             match $answer {
@@ -345,6 +351,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
     }
     let unsettled = 'scan: loop {
         let listing = host.pids()?;
+        last_listing.clone_from(&listing);
         let listed: BTreeSet<Pid> = listing.iter().copied().collect();
         listings += 1;
         let mut batch: Vec<Pid> = Vec::new();
@@ -543,7 +550,68 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
         unreadable,
         environ_failed,
         gone,
+        listed: last_listing,
     })
+}
+
+/// Owner PID's lookup table (docs/safety.md, Producer liveness, Owner PID
+/// step 5) of a scan whose listings ran after `before` was read: the
+/// `NSpid` of every process of its last listing, and the namespace facts,
+/// read again afterwards. Facts that changed between the two reads (a
+/// `/proc` remounted mid-scan) or failed either read are unknown, so the
+/// listings they guard are never taken as complete.
+///
+/// Ordering the caller relies on: a process alive when the last listing
+/// was made is in it; one that ends after it has ended for good; a process
+/// born after it with the same number is a reuse, which only the probe in
+/// diskgc's namespace sees. So the candidate whose owner is looked up must
+/// have been found before the scan's first listing (TASK-112 step 3
+/// asserts it where the table is used).
+///
+/// When the facts already fail a precondition, no `NSpid` is read: every
+/// answer is unknown anyway. Otherwise unreadable processes are read again
+/// in rounds, one pause of [`REREAD_PAUSES`] per round for all of them (at
+/// most 40 ms per scan, whatever their number); one that stays unreadable,
+/// whatever its user, is recorded and makes every answer unknown.
+pub(crate) fn pid_table<H: Host>(
+    host: &H,
+    before: Result<PidNamespace, HostError>,
+    listed: &[Pid],
+    settled: bool,
+) -> PidTable {
+    let mut table = PidTable::new(before.map_err(|e| e.to_string()), settled);
+    if !table.preconditions_hold() {
+        return table;
+    }
+    let mut pending: Vec<Pid> = listed.to_vec();
+    let mut pauses = REREAD_PAUSES.iter();
+    loop {
+        let mut failed = Vec::new();
+        for pid in pending {
+            match host.proc_nspid(pid) {
+                Ok(levels) => table.add_levels(&levels),
+                Err(ProcError::Gone) => {}
+                Err(ProcError::Denied(_) | ProcError::Failed(_)) => failed.push(pid),
+            }
+        }
+        if failed.is_empty() {
+            break;
+        }
+        match pauses.next() {
+            Some(pause) => {
+                host.sleep(*pause);
+                pending = failed;
+            }
+            None => {
+                for pid in failed {
+                    table.add_unreadable(pid);
+                }
+                break;
+            }
+        }
+    }
+    table.confirm_namespace(host.pid_namespace().map_err(|e| e.to_string()));
+    table
 }
 
 fn identity_error(error: ProcError) -> HostError {

@@ -41,17 +41,17 @@ use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DirListing,
     DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, LinkTarget,
     LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow,
-    Pid, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, Timestamp, TryLock,
-    UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
+    PROC_PID_INIT_INO, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space,
+    Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags};
 
-use crate::mountinfo::parse_mountinfo;
+use crate::mountinfo::{hidepid_of, parse_mountinfo};
 use crate::procfs::{
-    StatusFields, list_in_one_call, parse_environ, parse_maps, parse_status, parse_status_ids,
-    read_confirmed, read_in_one_call, read_two_passes,
+    StatusFields, list_in_one_call, parse_environ, parse_maps, parse_nspid, parse_nspid_levels,
+    parse_status, parse_status_ids, read_confirmed, read_in_one_call, read_two_passes,
 };
 use crate::sandbox::{self, Permit};
 use crate::sockdiag;
@@ -548,20 +548,20 @@ fn for_each_name(
 /// later); without it nothing can be confirmed, so that is refused too.
 fn check_proc_namespace(own: u32, status: Result<Vec<u8>, HostError>) -> Result<(), HostError> {
     let why = match status {
-        Ok(text) => {
-            let text = String::from_utf8_lossy(&text);
-            let nspid = text.lines().find_map(|line| line.strip_prefix("NSpid:"));
-            match nspid.map(|line| line.split_whitespace().collect::<Vec<_>>()) {
-                Some(fields) if fields == [own.to_string()] => return Ok(()),
-                Some(fields) => format!(
-                    "its NSpid line is {:?} (pids from the namespace of the mounted /proc down \
-                     to this process's own), but this process is pid {own} in its own \
-                     namespace: /proc belongs to another pid namespace",
-                    fields.join(" ")
-                ),
-                None => "has no NSpid line, so its pid namespace cannot be confirmed".to_owned(),
-            }
-        }
+        Ok(text) => match parse_nspid_levels(&text) {
+            Ok(levels) if levels == [own] => return Ok(()),
+            Ok(levels) => format!(
+                "its NSpid line is {:?} (pids from the namespace of the mounted /proc down \
+                 to this process's own), but this process is pid {own} in its own \
+                 namespace: /proc belongs to another pid namespace",
+                levels
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Err(e) => format!("{e}, so its pid namespace cannot be confirmed"),
+        },
         Err(e) if e.is(Errno::ENOENT) => {
             "does not exist: this process is not visible in the mounted /proc".to_owned()
         }
@@ -1688,7 +1688,105 @@ impl Host for LinuxHost {
     fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError> {
         sockdiag::union_of_two(sock_diag_dump)
     }
+
+    /// `self/ns/pid` and `self/mountinfo`, both through the held `/proc`:
+    /// the namespace file is opened (following the magic link to the nsfs
+    /// inode) and `fstatfs`ed and `fstat`ed; the `hidepid` option is read
+    /// from the held mount's own `mountinfo` line, found by the mount id
+    /// `statx` reports for the held fd.
+    fn pid_namespace(&self) -> Result<PidNamespace, HostError> {
+        let proc = self.root();
+        let ns = proc.open("self/ns/pid", OFlags::RDONLY)?;
+        let shown = ProcRoot::shown("self/ns/pid");
+        let fs = rustix::fs::fstatfs(&ns)
+            .map_err(|e| HostError::errno("fstatfs", &shown, errno_of(e)))?;
+        let st =
+            rustix::fs::fstat(&ns).map_err(|e| HostError::errno("fstat", &shown, errno_of(e)))?;
+        let initial = fs.f_type == NSFS_MAGIC && st.st_ino == PROC_PID_INIT_INO;
+        let held = rustix::fs::statx(
+            &self.proc,
+            "",
+            AtFlags::EMPTY_PATH | AtFlags::NO_AUTOMOUNT,
+            rustix::fs::StatxFlags::MNT_ID,
+        )
+        .map_err(|e| HostError::errno("statx", ProcRoot::shown(""), errno_of(e)))?;
+        if held.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
+            return Err(HostError::invalid(
+                "statx",
+                ProcRoot::shown(""),
+                "the kernel did not report the mount id",
+            ));
+        }
+        let table = proc.read("self/mountinfo")?;
+        let hidepid = hidepid_of(&table, held.stx_mnt_id)
+            .map_err(|why| HostError::invalid("parse", ProcRoot::shown("self/mountinfo"), why))?;
+        Ok(PidNamespace { initial, hidepid })
+    }
+
+    /// One read of `/proc/<pid>/status` under a pidfd taken first, as
+    /// [`Host::proc_status`] does: a read that fails because the entry
+    /// vanished is `Gone` only when the pidfd says the process has no task
+    /// left.
+    fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let path = format!("{pid}/status");
+        let read = || -> Result<Vec<u32>, ProcError> {
+            let text = proc.read(&path).map_err(ProcError::from_host)?;
+            parse_nspid(&text, pid.0).map_err(|e| {
+                ProcError::Failed(HostError::invalid("parse", ProcRoot::shown(&path), e))
+            })
+        };
+        match read() {
+            Ok(levels) => Ok(levels),
+            Err(ProcError::Failed(e)) if is_vanished(&e) => {
+                match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                    PidfdPoll::Hangup => Err(ProcError::Gone),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::Failed(e)),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn pid_alive(&self, pid: Pid) -> Result<bool, HostError> {
+        match open_pidfd(pid) {
+            Ok(_) => Ok(true),
+            Err(ProcError::Gone) => Ok(false),
+            Err(ProcError::Denied(e) | ProcError::Failed(e)) => Err(e),
+        }
+    }
+
+    fn fs_magic(&self, fd: &LinuxFd) -> Result<u64, HostError> {
+        let fs = rustix::fs::fstatfs(fd)
+            .map_err(|e| HostError::errno("fstatfs", format!("{fd:?}"), errno_of(e)))?;
+        fs_magic_of(i128::from(fs.f_type)).ok_or_else(|| {
+            HostError::invalid(
+                "fstatfs",
+                format!("{fd:?}"),
+                format!("f_type {:#x} is no 32-bit filesystem magic", fs.f_type),
+            )
+        })
+    }
 }
+
+/// A `statfs` `f_type` as a 32-bit magic, without folding: a value that
+/// fits in 32 bits as it is, or a negative one that fits in an `i32` (a
+/// 32-bit ABI's signed word holding a magic with the top bit set)
+/// reinterpreted. Anything else is no magic (`None`), so the local list
+/// can never be matched by truncation.
+fn fs_magic_of(f_type: i128) -> Option<u64> {
+    if let Ok(magic) = u32::try_from(f_type) {
+        return Some(u64::from(magic));
+    }
+    i32::try_from(f_type)
+        .ok()
+        .map(|signed| u64::from(signed.cast_unsigned()))
+}
+
+/// `NSFS_MAGIC` (`include/uapi/linux/magic.h`): the filesystem of
+/// `/proc/<pid>/ns/*` once followed.
+const NSFS_MAGIC: rustix::fs::FsWord = 0x6e73_6673;
 
 /// What the socket dumps say in messages.
 const SOCK_DIAG_SUBJECT: &str = "AF_UNIX sockets of this network namespace";
@@ -3843,6 +3941,95 @@ mod tests {
         );
     }
 
+    /// Owner PID's namespace facts agree with what the process sees of
+    /// itself without the held `/proc`: the inode of its own
+    /// `/proc/self/ns/pid`. Whether this runs in the initial namespace
+    /// depends on where the tests run (a Nix build sandbox has its own), so
+    /// only the agreement is asserted.
+    #[test]
+    fn pid_namespace_agrees_with_the_namespace_inode() {
+        let host = LinuxHost::new().expect("host setup");
+        let facts = host.pid_namespace().expect("pid namespace facts");
+        let inode = std::fs::metadata("/proc/self/ns/pid")
+            .expect("stat own pid namespace")
+            .ino();
+        assert_eq!(facts.initial, inode == PROC_PID_INIT_INO, "{facts:?}");
+    }
+
+    /// Our own NSpid starts with our pid; a reaped child's pid is no
+    /// longer alive and its status is `Gone`.
+    #[test]
+    fn nspid_and_pid_alive_follow_the_process() {
+        let host = LinuxHost::new().expect("host setup");
+        let own = host.own_pid();
+        let levels = host.proc_nspid(own).expect("own NSpid");
+        assert_eq!(levels.first(), Some(&own.0), "{levels:?}");
+        assert!(host.pid_alive(own).expect("own pidfd"));
+        let mut child = process::Command::new("true").spawn().expect("spawn true");
+        let pid = Pid(child.id());
+        child.wait().expect("reap");
+        // The number may be reused at once by another process: only a
+        // `false` answer or a live reuse are legitimate, never an error.
+        if !host.pid_alive(pid).expect("probe a reaped pid") {
+            assert_eq!(host.proc_nspid(pid), Err(ProcError::Gone));
+        }
+    }
+
+    /// No value outside 32 bits is folded onto a magic on the local list.
+    #[test]
+    fn an_f_type_outside_32_bits_is_no_magic() {
+        assert_eq!(fs_magic_of(0x0102_1994), Some(0x0102_1994));
+        assert_eq!(fs_magic_of(0xF2F5_2010), Some(0xF2F5_2010));
+        // A 32-bit ABI's signed word for the same f2fs magic.
+        assert_eq!(fs_magic_of(-0x0D0A_DFF0), Some(0xF2F5_2010));
+        assert_eq!(fs_magic_of(0x1_0102_1994), None);
+        assert_eq!(fs_magic_of(-0x1_0000_0000), None);
+    }
+
+    /// A child that exited and is not reaped is a zombie: its pid is still
+    /// taken (the probe says alive) and its `NSpid` is readable, as the
+    /// model says (`processes[].zombie`).
+    #[test]
+    fn a_real_zombie_keeps_its_pid_and_its_nspid() {
+        let host = LinuxHost::new().expect("host setup");
+        let mut child = process::Command::new("true").spawn().expect("spawn true");
+        let pid = Pid(child.id());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let state = loop {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
+            let state = status
+                .lines()
+                .find_map(|line| line.strip_prefix("State:"))
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned();
+            if state.starts_with('Z') || Instant::now() >= deadline {
+                break state;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            state.starts_with('Z'),
+            "child did not become a zombie: {state}"
+        );
+        assert!(host.pid_alive(pid).expect("probe a zombie"));
+        assert_eq!(
+            host.proc_nspid(pid).expect("zombie NSpid").first(),
+            Some(&pid.0)
+        );
+        child.wait().expect("reap");
+    }
+
+    #[test]
+    fn fs_magic_reports_the_filesystem_type() {
+        let host = LinuxHost::new().expect("host setup");
+        let proc = resolve(&host, Path::new("/proc"), Want::Directory).expect("resolve /proc");
+        assert_eq!(
+            host.fs_magic(&proc.fd).expect("fstatfs"),
+            u64::from(PROC_SUPER_MAGIC as u32)
+        );
+    }
+
     /// `proc_status` shows the ids of a process and whether it is dumpable
     /// (the owner of its `fd` directory): the effective uid while it is,
     /// root (or the overflow uid) once it is not, when its fds are `Denied`
@@ -3969,9 +4156,27 @@ mod tests {
             &Options {
                 users: &[uid],
                 sockets: true,
+                pid_lookup: true,
             },
         )
         .expect("scan");
+        // Owner PID's table over the real process list: the holder (a
+        // live child of this test) is carried at its own number, and
+        // `status` is readable for every listed process without hidepid.
+        let table = scan.pid_table().expect("asked for");
+        eprintln!(
+            "pid table: namespace {:?}, {} unreadable",
+            table.namespace(),
+            table.unreadable().len()
+        );
+        assert_eq!(table.carrier(holder.pid().0), Some(holder.pid()));
+        if table.namespace().is_ok_and(|facts| !facts.hidepid) {
+            assert_eq!(
+                table.unreadable(),
+                [],
+                "status is world-readable without hidepid"
+            );
+        }
         eprintln!(
             "live scan: {} processes read, {} gone, {} unreadable ({} blocking), {} listings, \
              took {:?}",

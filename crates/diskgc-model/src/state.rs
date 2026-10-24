@@ -222,6 +222,10 @@ pub struct Proc {
     pub cap_permitted: u64,
     /// `/proc/<pid>/uid_map` as diskgc reads it (`None`: unreadable).
     pub uid_map: Option<String>,
+    /// Its `NSpid:` levels, the first its pid (`None`: unreadable).
+    pub nspid: Option<Vec<u32>>,
+    /// Exited, not reaped (see `ProcessSpec::zombie`).
+    pub zombie: bool,
 }
 
 /// What reading a modelled `uid_map` gives (`None`: it does not exist).
@@ -234,6 +238,27 @@ pub fn uid_map(text: Option<&str>) -> diskgc_core::host::UidMap {
 /// The `uid_map` of the initial user namespace, as `/proc` prints it:
 /// diskgc's own, and every process's unless the model says otherwise.
 pub const INIT_UID_MAP: &str = "         0          0 4294967295\n";
+
+/// The `fstatfs` magic of a modelled filesystem type name, as Linux's
+/// `include/uapi/linux/magic.h` defines it; every other name is 0, which
+/// no check accepts (a model cannot invent a type Owner PID trusts).
+pub fn fs_magic(fs_type: &str) -> u64 {
+    match fs_type {
+        "tmpfs" => 0x0102_1994,
+        "ext2" | "ext3" | "ext4" => 0xEF53,
+        "xfs" => 0x5846_5342,
+        "btrfs" => 0x9123_683E,
+        "bcachefs" => 0xCA45_1A4E,
+        "f2fs" => 0xF2F5_2010,
+        "overlay" => 0x794C_7630,
+        "virtiofs" | "fuse" => 0x6573_5546,
+        "9p" => 0x0102_1997,
+        "zfs" => 0x2FC1_2FC1,
+        "nfs" | "nfs4" => 0x6969,
+        "proc" => 0x9FA0,
+        _ => 0,
+    }
+}
 
 /// diskgc's own pid when the model does not give one.
 pub const DEFAULT_OWN_PID: u32 = 65000;
@@ -282,6 +307,9 @@ pub struct State {
     pub own_uid_map: Option<String>,
     /// diskgc's own (effective) user id.
     pub own_uid: u32,
+    /// Owner PID's preconditions as the held `/proc` answers them.
+    pub pid_namespace_initial: bool,
+    pub proc_hidepid: bool,
     /// The modelled sandbox gate.
     pub sandbox_gate: crate::spec::GateSpec,
     /// Exit code of modelled command actions; a real child is never run.
@@ -311,6 +339,8 @@ impl State {
             own_pid: DEFAULT_OWN_PID,
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
             own_uid: DEFAULT_ID,
+            pid_namespace_initial: true,
+            proc_hidepid: false,
             sandbox_gate: crate::spec::GateSpec::Open,
             command_exit: 0,
             command_error_after_start: false,
@@ -783,8 +813,16 @@ impl State {
             .get(&pid)
             .ok_or_else(|| Fault::Model(format!("fork: no process {pid}")))?
             .clone();
+        // The child's pids in the parent's inner namespaces are not
+        // modelled: refuse rather than diverge from Linux silently.
+        if copy.nspid.as_deref() != Some(&[pid][..]) || copy.zombie {
+            return Err(Fault::Model(format!(
+                "fork: process {pid} has a modelled nspid or is a zombie; forking it is not modelled"
+            )));
+        }
         copy.generation = self.next_process_generation;
         self.next_process_generation += 1;
+        copy.nspid = Some(vec![child]);
         self.procs.insert(child, copy);
         Ok(())
     }

@@ -570,6 +570,7 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
         &Options {
             users: &[owner],
             sockets: false,
+            pid_lookup: false,
         },
     )
     .map_err(|e| format!("scan: {e}"))?;

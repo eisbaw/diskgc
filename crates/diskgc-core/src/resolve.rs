@@ -642,6 +642,22 @@ mod tests {
         fn bound_unix_sockets(&self) -> Result<Vec<crate::host::BoundSocket>, HostError> {
             unreachable!()
         }
+
+        fn pid_namespace(&self) -> Result<crate::host::PidNamespace, HostError> {
+            unreachable!()
+        }
+
+        fn proc_nspid(&self, _: Pid) -> Result<Vec<u32>, ProcError> {
+            unreachable!()
+        }
+
+        fn pid_alive(&self, _: Pid) -> Result<bool, HostError> {
+            unreachable!()
+        }
+
+        fn fs_magic(&self, _: &Self::Fd) -> Result<u64, HostError> {
+            unreachable!()
+        }
     }
 
     /// `/` (id 1) and a tmpfs at `/tmp` (id 30): `/tmp` opens as fd 0, and

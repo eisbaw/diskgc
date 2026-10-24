@@ -1103,6 +1103,22 @@ impl Host for Gated {
     fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError> {
         self.0.bound_unix_sockets()
     }
+
+    fn pid_namespace(&self) -> Result<diskgc_core::host::PidNamespace, HostError> {
+        self.0.pid_namespace()
+    }
+
+    fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, diskgc_core::host::ProcError> {
+        self.0.proc_nspid(pid)
+    }
+
+    fn pid_alive(&self, pid: Pid) -> Result<bool, HostError> {
+        self.0.pid_alive(pid)
+    }
+
+    fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError> {
+        self.0.fs_magic(fd)
+    }
 }
 
 impl Delete for Gated {

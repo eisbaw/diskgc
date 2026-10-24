@@ -169,6 +169,8 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     if let Some(uid) = model.own_uid {
         state.own_uid = uid;
     }
+    state.pid_namespace_initial = model.pid_namespace == crate::spec::PidNamespaceSpec::Initial;
+    state.proc_hidepid = model.proc_hidepid;
     state.sandbox_gate = model.sandbox_gate;
     state.command_exit = model.command_exit;
     state.command_error_after_start = model.command_error_after_start;
@@ -628,6 +630,25 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
             },
             Into::into,
         );
+        let nspid = match &spec.nspid {
+            None => Some(vec![spec.pid]),
+            Some(crate::spec::NspidSpec::Unreadable(_)) => None,
+            Some(crate::spec::NspidSpec::Levels(levels)) => {
+                if levels.first() != Some(&spec.pid) || levels.contains(&0) {
+                    return Err(LoadError::new(
+                        format!("{at}.nspid"),
+                        "must start with the process's pid and hold no 0",
+                    ));
+                }
+                Some(levels.clone())
+            }
+        };
+        if spec.zombie && (!spec.fds.is_empty() || !spec.maps.is_empty()) {
+            return Err(LoadError::new(
+                at,
+                "a zombie has no fds or maps (it has no live task)",
+            ));
+        }
         let generation = state.next_process_generation;
         state.next_process_generation += 1;
         state.procs.insert(
@@ -660,6 +681,8 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
                 } else {
                     0
                 },
+                nspid,
+                zombie: spec.zombie,
             },
         );
         for fd in &spec.fds {
@@ -688,11 +711,17 @@ fn environ(entries: &[String]) -> Environ {
 fn load_locks(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
     for (i, spec) in model.locks.iter().enumerate() {
         let at = format!("locks[{i}]");
-        if !state.procs.contains_key(&spec.holder) {
-            return Err(LoadError::new(
-                at,
-                format!("holder {} is not one of the processes", spec.holder),
-            ));
+        match state.procs.get(&spec.holder) {
+            None => {
+                return Err(LoadError::new(
+                    at,
+                    format!("holder {} is not one of the processes", spec.holder),
+                ));
+            }
+            Some(proc) if proc.zombie => {
+                return Err(LoadError::new(at, "a zombie holds no lock"));
+            }
+            Some(_) => {}
         }
         let r = reference(state, &format!("{at}.path"), &spec.path)?;
         let mode = match spec.mode {

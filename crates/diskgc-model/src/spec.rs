@@ -65,6 +65,14 @@ pub struct HostModel {
     /// default 1000. `0` models diskgc run as root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_uid: Option<u32>,
+    /// The answer of diskgc's held `/proc` to Owner PID's initial-namespace
+    /// check (docs/safety.md, Producer liveness): `initial` (the default)
+    /// or `nested`.
+    #[serde(default, skip_serializing_if = "PidNamespaceSpec::is_initial")]
+    pub pid_namespace: PidNamespaceSpec,
+    /// The held `/proc` is mounted with `hidepid`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proc_hidepid: bool,
     /// The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):
     /// `open` (the default; the model deletes nothing real), `closed`
     /// (outside a test container: `may_delete`, `unlinkat`, `fchmod` and
@@ -363,6 +371,47 @@ pub struct ProcessSpec {
     /// does) that diskgc lacks.
     #[serde(default, skip_serializing_if = "is_false")]
     pub privileged: bool,
+    /// Its `NSpid:` line; default `[pid]` (diskgc's namespace is its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nspid: Option<NspidSpec>,
+    /// Exited but not reaped: listed, its `status` (and `NSpid`) readable,
+    /// its pidfd open, every other reader `Gone` (no live task). Has no
+    /// fds or maps.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub zombie: bool,
+}
+
+/// Which PID namespace diskgc runs in, as Owner PID's precondition sees it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PidNamespaceSpec {
+    /// The initial PID namespace (nsfs inode `0xEFFFFFFC`).
+    #[default]
+    Initial,
+    /// Any other (a container, `unshare --pid`).
+    Nested,
+}
+
+impl PidNamespaceSpec {
+    fn is_initial(&self) -> bool {
+        *self == Self::Initial
+    }
+}
+
+/// A process's `NSpid:` line: its pids from diskgc's namespace down to its
+/// own (the first must be its `pid`), or `unreadable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NspidSpec {
+    Levels(Vec<u32>),
+    Unreadable(UnreadableTag),
+}
+
+/// The word `unreadable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnreadableTag {
+    Unreadable,
 }
 
 /// The outcome of every `/proc/<pid>` read of a process.
@@ -616,6 +665,10 @@ pub enum Op {
     InheritLock,
     ProcStatus,
     BoundUnixSockets,
+    PidNamespace,
+    ProcNspid,
+    PidAlive,
+    FsMagic,
     MayDelete,
     Unlinkat,
     Fchmod,
@@ -653,6 +706,10 @@ impl Op {
             Self::InheritLock => "inherit_lock",
             Self::ProcStatus => "proc_status",
             Self::BoundUnixSockets => "bound_unix_sockets",
+            Self::PidNamespace => "pid_namespace",
+            Self::ProcNspid => "proc_nspid",
+            Self::PidAlive => "pid_alive",
+            Self::FsMagic => "fs_magic",
             Self::MayDelete => "may_delete",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",

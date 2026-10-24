@@ -73,6 +73,37 @@ fn parse_line(line: &[u8]) -> Result<MountEntry, String> {
     })
 }
 
+/// Whether the procfs mount with id `mount_id` hides processes: its
+/// superblock options name a `hidepid` other than `0` / `off`
+/// (`noaccess`, `invisible`, `ptraceable` and their numbers 1, 2, 4).
+/// A table without that mount, or a line for it that is not procfs, is an
+/// error: Owner PID's precondition is then undecided, never assumed.
+pub fn hidepid_of(text: &[u8], mount_id: u64) -> Result<bool, String> {
+    let mounts = text.split(|b| *b == b'\n').filter(|line| !line.is_empty());
+    for line in mounts {
+        let entry = parse_line(line)?;
+        if entry.id != mount_id {
+            continue;
+        }
+        if entry.fs_type != "proc" {
+            return Err(format!("mount {mount_id} is {}, not proc", entry.fs_type));
+        }
+        let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        let sep = fields
+            .iter()
+            .skip(6)
+            .position(|f| *f == b"-")
+            .map(|p| p + 6)
+            .expect("parse_line found the separator");
+        let hidden = fields[sep + 3]
+            .split(|b| *b == b',')
+            .filter_map(|option| option.strip_prefix(b"hidepid="))
+            .any(|value| value != b"0" && value != b"off");
+        return Ok(hidden);
+    }
+    Err(format!("no mount {mount_id} in mountinfo"))
+}
+
 fn utf8<'a>(field: &'a [u8], line: &[u8]) -> Result<&'a str, String> {
     std::str::from_utf8(field).map_err(|_| {
         format!(
@@ -117,6 +148,31 @@ pub fn unescape(field: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn hidepid_is_read_from_the_proc_mounts_superblock_options() {
+        let table = b"\
+22 1 0:21 / /proc rw,nosuid shared:5 - proc proc rw
+23 1 0:22 / /proc2 rw - proc proc rw,hidepid=invisible
+24 1 0:23 / /proc3 rw - proc proc rw,hidepid=2,gid=10
+25 1 0:24 / /proc4 rw - proc proc rw,hidepid=off,subset=pid
+26 1 0:25 / /proc5 rw - proc proc rw,hidepid=0
+27 1 0:26 / /proc6 rw - proc proc rw,hidepid=ptraceable
+28 1 254:1 / / rw - ext4 /dev/root rw
+";
+        for (id, hidden) in [
+            (22, false),
+            (23, true),
+            (24, true),
+            (25, false),
+            (26, false),
+            (27, true),
+        ] {
+            assert_eq!(hidepid_of(table, id), Ok(hidden), "mount {id}");
+        }
+        assert!(hidepid_of(table, 28).is_err(), "not proc");
+        assert!(hidepid_of(table, 99).is_err(), "absent");
+    }
 
     const SAMPLE: &[u8] = b"\
 22 1 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw

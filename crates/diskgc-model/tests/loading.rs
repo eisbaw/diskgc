@@ -153,6 +153,43 @@ fn contradictions_are_load_errors() {
     );
 }
 
+/// Owner PID's model facts (TASK-112): a process's `nspid` starts with
+/// its pid and holds no 0, and a zombie, which has no live task, has no
+/// fds, maps or locks.
+#[test]
+fn owner_pid_facts_are_checked() {
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, nspid: [8, 9]}\n"),
+        &[
+            "processes[pid 7].nspid",
+            "must start with the process's pid",
+        ],
+    );
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, nspid: [7, 0]}\n"),
+        &["processes[pid 7].nspid"],
+    );
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, nspid: maybe}\n"),
+        &["NspidSpec"],
+    );
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, zombie: true, fds: [{path: /tmp/a/f}]}\n"),
+        &["a zombie has no fds or maps"],
+    );
+    assert_error(
+        &tmp_yaml(
+            "processes:\n  - {pid: 7, zombie: true}\nlocks:\n  - {path: /tmp/a/f, holder: 7, mode: exclusive}\n",
+        ),
+        &["locks[0]", "a zombie holds no lock"],
+    );
+    assert_error(&tmp_yaml("pid_namespace: elsewhere\n"), &["pid_namespace"]);
+    ModelHost::from_yaml(&tmp_yaml(
+        "pid_namespace: nested\nproc_hidepid: true\nprocesses:\n  - {pid: 7, nspid: [7, 9], zombie: true}\n  - {pid: 8, nspid: unreadable}\n",
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn root_bind_requires_an_earlier_matching_filesystem() {
     let bind = |extra: &str| {

@@ -717,6 +717,24 @@ impl BoundSocket {
     }
 }
 
+/// What the held `/proc` says about the PID namespace diskgc runs in,
+/// for Owner PID's preconditions (docs/safety.md, Producer liveness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PidNamespace {
+    /// `self/ns/pid`, read through the held `/proc`, is on nsfs and has the
+    /// initial PID namespace's fixed inode ([`PROC_PID_INIT_INO`]).
+    pub initial: bool,
+    /// The held `/proc` is mounted with a `hidepid` other than `off`
+    /// (`noaccess`, `invisible`, `ptraceable`, or their numbers): it may
+    /// hide processes of diskgc's own user.
+    pub hidepid: bool,
+}
+
+/// The inode of the initial PID namespace (`PROC_PID_INIT_INO` in the
+/// kernel's `include/linux/proc_ns.h`; 4026531836). Fixed, unlike every
+/// other namespace's inode.
+pub const PROC_PID_INIT_INO: u64 = 0xEFFF_FFFC;
+
 /// Everything the in-use check reads of one process ([`read_proc_view`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcView {
@@ -1023,6 +1041,27 @@ pub trait Host {
     /// network namespaces are invisible. A dump that fails, is cut short or
     /// holds a truncated datagram is an error, never a shorter list.
     fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError>;
+
+    /// Owner PID's namespace preconditions, read through the held `/proc`
+    /// (docs/safety.md, Producer liveness, Owner PID steps 3 and 4).
+    fn pid_namespace(&self) -> Result<PidNamespace, HostError>;
+
+    /// The `NSpid:` line of `/proc/<pid>/status`: the process's pid in
+    /// every PID namespace from diskgc's down to its own, the first being
+    /// `pid`. Readable for every user's process, zombies included, unless
+    /// `hidepid` hides it. `Gone` only on the kernel's word (as the other
+    /// readers): the process was released.
+    fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, ProcError>;
+
+    /// Whether a process (live or zombie) holds `pid` in diskgc's PID
+    /// namespace now: `pidfd_open(pid)` succeeds (true) or fails with
+    /// `ESRCH` (false). Any other answer is an error: only `ESRCH` is the
+    /// kernel's word that no process carries the number.
+    fn pid_alive(&self, pid: Pid) -> Result<bool, HostError>;
+
+    /// The filesystem type (`fstatfs` `f_type`) of the filesystem holding
+    /// `fd`.
+    fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError>;
 }
 
 /// The result of [`Host::read_dir`].

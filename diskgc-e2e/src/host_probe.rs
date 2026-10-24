@@ -70,6 +70,7 @@ fn inuse_index_memory(host: &LinuxHost) -> Result<(), String> {
         &Options {
             users: &[1000],
             sockets: false,
+            pid_lookup: false,
         },
     )
     .map_err(|e| format!("scan for index memory: {e}"))?;

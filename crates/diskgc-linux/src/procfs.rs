@@ -241,6 +241,44 @@ pub struct StatusIds {
     pub cap_effective: u64,
 }
 
+/// The `NSpid:` line of one read of a `status` file: the pid in every
+/// namespace from the `/proc` mount's down to the process's own. Every
+/// field is a pid (1 or more). A missing, empty or malformed line is an
+/// error, never a shorter list: a level left out could be the one that
+/// matches.
+pub fn parse_nspid_levels(text: &[u8]) -> Result<Vec<u32>, String> {
+    let line = text
+        .split(|b| *b == b'\n')
+        .find_map(|line| line.strip_prefix(b"NSpid:"))
+        .ok_or("has no NSpid line")?;
+    let line = std::str::from_utf8(line).map_err(|_| "non-UTF-8 NSpid line")?;
+    let levels = line
+        .split_ascii_whitespace()
+        .map(|field| match field.parse::<u32>() {
+            Ok(0) | Err(_) => Err(format!("bad NSpid field {field:?}")),
+            Ok(level) => Ok(level),
+        })
+        .collect::<Result<Vec<u32>, String>>()?;
+    if levels.is_empty() {
+        return Err("empty NSpid line".to_owned());
+    }
+    Ok(levels)
+}
+
+/// [`parse_nspid_levels`] of `/proc/<pid>/status` read through the held
+/// `/proc`, which is diskgc's own namespace's (`LinuxHost::new`), so the
+/// first level must be `pid` itself.
+pub fn parse_nspid(text: &[u8], pid: u32) -> Result<Vec<u32>, String> {
+    let levels = parse_nspid_levels(text)?;
+    if levels[0] != pid {
+        return Err(format!(
+            "NSpid starts with {}, not the process's pid {pid}",
+            levels[0]
+        ));
+    }
+    Ok(levels)
+}
+
 /// `Name:`, `Uid:`, `Gid:`, `CapPrm:` and `CapEff:` of one read of
 /// `/proc/<pid>/status` (the owner of its `fd` directory comes from a
 /// `statx`, not from here).
@@ -289,6 +327,35 @@ pub fn parse_status_ids(text: &[u8]) -> Result<StatusIds, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nspid_lists_every_level_from_the_reader_down() {
+        let status = b"Name:\tsh\nNSpid:\t3025375\t9\nNSgid:\t1\n";
+        assert_eq!(parse_nspid(status, 3_025_375), Ok(vec![3_025_375, 9]));
+        assert_eq!(parse_nspid(b"NSpid:\t42\n", 42), Ok(vec![42]));
+    }
+
+    /// A level left out could be the one that matches: every malformed
+    /// line is an error.
+    #[test]
+    fn a_malformed_nspid_line_is_an_error() {
+        for status in [
+            &b"Name:\tsh\n"[..],
+            b"NSpid:\n",
+            b"NSpid:\t42\tx\n",
+            b"NSpid:\t42\t0\n",
+            b"NSpid:\t42\t-9\n",
+            b"NSpid:\t42\t4294967296\n",
+            b"NSpid:\t\xff\n",
+            b"NSpid:\t43\t9\n",
+        ] {
+            assert!(
+                parse_nspid(status, 42).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(status)
+            );
+        }
+    }
 
     #[test]
     fn maps_columns_are_parsed() {

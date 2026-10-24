@@ -47,6 +47,7 @@ pub mod inuse;
 pub mod invocation;
 pub mod kernel;
 pub mod kind;
+pub mod liveness;
 pub mod outcome;
 pub mod profile;
 pub mod report;

@@ -100,6 +100,14 @@
         "null"
       ]
     },
+    "pid_namespace": {
+      "description": "The answer of diskgc's held `/proc` to Owner PID's initial-namespace\ncheck (docs/safety.md, Producer liveness): `initial` (the default)\nor `nested`.",
+      "$ref": "#/$defs/PidNamespaceSpec"
+    },
+    "proc_hidepid": {
+      "description": "The held `/proc` is mounted with `hidepid`.",
+      "type": "boolean"
+    },
     "processes": {
       "description": "The visible processes other than diskgc itself.",
       "type": "array",
@@ -893,6 +901,22 @@
         }
       ]
     },
+    "NspidSpec": {
+      "description": "A process's `NSpid:` line: its pids from diskgc's namespace down to its\nown (the first must be its `pid`), or `unreadable`.",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        {
+          "$ref": "#/$defs/UnreadableTag"
+        }
+      ]
+    },
     "Op": {
       "description": "A `Host` operation, named after its syscall (`flock` covers both lock\ncalls).",
       "type": "string",
@@ -924,11 +948,30 @@
         "inherit_lock",
         "proc_status",
         "bound_unix_sockets",
+        "pid_namespace",
+        "proc_nspid",
+        "pid_alive",
+        "fs_magic",
         "may_delete",
         "unlinkat",
         "fchmod",
         "run_command",
         "docker_query"
+      ]
+    },
+    "PidNamespaceSpec": {
+      "description": "Which PID namespace diskgc runs in, as Owner PID's precondition sees it.",
+      "oneOf": [
+        {
+          "description": "The initial PID namespace (nsfs inode `0xEFFFFFFC`).",
+          "type": "string",
+          "const": "initial"
+        },
+        {
+          "description": "Any other (a container, `unshare --pid`).",
+          "type": "string",
+          "const": "nested"
+        }
       ]
     },
     "ProcAccess": {
@@ -1038,6 +1081,17 @@
           "description": "Not dumpable: its `/proc/<pid>/fd` is owned by root (0) instead of\nits effective uid.",
           "type": "boolean"
         },
+        "nspid": {
+          "description": "Its `NSpid:` line; default `[pid]` (diskgc's namespace is its own).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NspidSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "pid": {
           "type": "integer",
           "format": "uint32",
@@ -1073,6 +1127,10 @@
             "string",
             "null"
           ]
+        },
+        "zombie": {
+          "description": "Exited but not reaped: listed, its `status` (and `NSpid`) readable,\nits pidfd open, every other reader `Gone` (no live task). Has no\nfds or maps.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -1148,6 +1206,13 @@
         "btime",
         "mnt_id",
         "mount_root"
+      ]
+    },
+    "UnreadableTag": {
+      "description": "The word `unreadable`.",
+      "type": "string",
+      "enum": [
+        "unreadable"
       ]
     },
     "WallTime": {
