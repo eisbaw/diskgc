@@ -954,3 +954,17 @@ fn zero_byte_holders_of_deleted_files_are_not_reported() {
     let text = report.summary().expect("a dry run prints");
     assert!(!text.contains("held by deleted files"), "{text}");
 }
+
+#[test]
+fn a_dry_run_with_nothing_eligible_says_the_goal_is_not_reachable() {
+    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")));
+    report.avail_before_bytes = Some(100);
+    report.min_free_bytes = Some(200);
+    report.target_free_bytes = Some(200);
+    report.plan = vec![plan_row("t", "/w/a", Some(Reason::NotIdle), None)];
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.contains("; nothing is eligible, 100 B needed: the goal is not reachable; 1 kept"),
+        "{text}"
+    );
+}

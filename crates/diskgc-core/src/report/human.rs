@@ -206,7 +206,7 @@ fn kept_lines(kept: &[&SkipEntry], tier_label: &dyn Fn(&str) -> String) -> Vec<S
                 } else {
                     format!(" ({more} more)")
                 },
-                skip_diagnostic(group[0]).map_or_else(String::new, |d| format!("; the first: {d}"))
+                skip_diagnostic(group[0]).map_or_else(String::new, |d| format!("; e.g. {d}"))
             ));
         }
     }
@@ -376,6 +376,10 @@ fn dry_run_outcome(rows: &[Planned<'_>], needed: Option<u64>) -> String {
         None => format!("{eligible} eligible, {kept} kept; the space needed is unknown"),
         Some(0) => format!(
             "at least min-free already: a reclaim would take nothing ({eligible} eligible, {kept} kept)"
+        ),
+        Some(needed) if eligible == 0 => format!(
+            "nothing is eligible, {} needed: the goal is not reachable; {kept} kept",
+            format_bytes(needed)
         ),
         Some(needed) => {
             let estimate = if unestimated == 0 {
