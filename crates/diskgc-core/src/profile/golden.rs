@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    Action, Body, Cwd, EntryType, Finds, IdleFor, Library, LivenessContract, Roots, Source,
-    SourceAnchor,
+    Action, Body, Cwd, EntryType, Finds, IdleFor, Library, LivenessClass, LivenessContract, Roots,
+    Source, SourceAnchor,
 };
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
@@ -951,11 +951,50 @@ struct Guard {
     checkouts_allow: Option<bool>,
 }
 
+/// A row's verdict, by the first words of its Verdict cell
+/// (docs/reference.md, Liveness contracts): the first three name a
+/// built-in, every other verdict names none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Shipped,
+    DecisionPending,
+    ProposedWithdrawal,
+    NotBuiltIn,
+}
+
+impl Verdict {
+    fn of(cell: &str) -> Self {
+        if cell.starts_with("Shipped") {
+            Self::Shipped
+        } else if cell.starts_with("Decision pending") {
+            Self::DecisionPending
+        } else if cell.starts_with("Proposed withdrawal") {
+            Self::ProposedWithdrawal
+        } else {
+            Self::NotBuiltIn
+        }
+    }
+}
+
 /// One row of docs/reference.md "Liveness contracts", for one profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LivenessRow {
     guard: Guard,
-    shipped: bool,
+    class: LivenessClass,
+    residuals: String,
+    verdict: Verdict,
+    /// The Verdict cell records a dated decision of Mark's ("Mark, 2026-").
+    decided: bool,
+}
+
+/// One built-in as the library holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Builtin {
+    /// A source (only sources have a liveness row).
+    source: bool,
+    guard: Guard,
+    class: Option<LivenessClass>,
+    released: bool,
 }
 
 /// The code span after `key: ` in `cell` (`` `min_idle_for: 1h` ``).
@@ -966,16 +1005,34 @@ fn cell_value<'a>(cell: &'a str, key: &str) -> Option<&'a str> {
     Some(&cell[start..start + len])
 }
 
+/// The class a Class cell starts with: a class's table name followed by
+/// the end, a space, `,` or `:` (`sound (presence marker)`, `verified
+/// heuristic: ...`).
+fn class_of(cell: &str) -> Option<LivenessClass> {
+    LivenessClass::ALL.into_iter().find(|class| {
+        cell.strip_prefix(class.table_name())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ',', ':']))
+    })
+}
+
 /// The liveness table, one entry per profile named in a row's first cell.
-/// A profile named by two rows is a problem in itself. A Contract cell
-/// that starts with "planned" describes nothing built.
+/// A profile named by two rows, and a Class cell that names no class, are
+/// problems in themselves. A Contract cell that starts with "planned"
+/// describes nothing built.
 fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<String>) {
     let mut out: Vec<(String, LivenessRow)> = Vec::new();
     let mut problems = Vec::new();
     for row in rows {
-        assert_eq!(row.len(), 5, "Liveness contracts row has 5 cells: {row:?}");
+        assert_eq!(row.len(), 6, "Liveness contracts row has 6 cells: {row:?}");
         let cell = &row[2];
         let built = !cell.starts_with("planned");
+        let Some(class) = class_of(&row[3]) else {
+            problems.push(format!(
+                "{}: Class cell names no class: {:?}",
+                row[0], row[3]
+            ));
+            continue;
+        };
         let entry = LivenessRow {
             guard: Guard {
                 contract: cell_value(cell, "liveness_contract")
@@ -989,7 +1046,10 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
                     .filter(|_| built)
                     .map(|text| text == "allow"),
             },
-            shipped: row[4].starts_with("Shipped"),
+            class,
+            residuals: row[4].trim().to_owned(),
+            verdict: Verdict::of(&row[5]),
+            decided: row[5].contains("Mark, 20"),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -1001,90 +1061,166 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
     (out, problems)
 }
 
-/// The sync rule between the liveness table and the built-in library
-/// (TASK-112): every built-in with a liveness guard (`liveness_contract`
-/// or `app_not_running`) has a Shipped row naming that guard; every
-/// Shipped row names a built-in with exactly the row's guard, and the
-/// floor and checkout setting where the row states them (a contract row
-/// must state its floor); a row that is not Shipped (excluded, withdrawn,
-/// planned) names no built-in. Built-ins without a guard and without a row
-/// are TASK-122's to classify.
+/// The rule's verdict-and-class pairs (docs/reference.md, Liveness
+/// contracts): Shipped needs an admissible class, and a verified heuristic
+/// Mark's dated decision; Decision pending is only a verified heuristic;
+/// class none is only a Proposed withdrawal while it is a built-in.
+fn verdict_problem(name: &str, row: &LivenessRow) -> Option<String> {
+    let class = row.class.table_name();
+    match (row.verdict, row.class) {
+        (Verdict::Shipped, LivenessClass::NoContract) => {
+            Some(format!("{name}: Shipped with class none"))
+        }
+        (Verdict::Shipped, LivenessClass::VerifiedHeuristic) if !row.decided => Some(format!(
+            "{name}: a verified heuristic Shipped without Mark's dated decision"
+        )),
+        (Verdict::DecisionPending, c) if c != LivenessClass::VerifiedHeuristic => Some(format!(
+            "{name}: Decision pending is for a verified heuristic, not {class}"
+        )),
+        (Verdict::ProposedWithdrawal, c) if c != LivenessClass::NoContract => Some(format!(
+            "{name}: Proposed withdrawal is for class none, not {class}"
+        )),
+        (Verdict::DecisionPending | Verdict::ProposedWithdrawal, _) if row.decided => {
+            Some(format!("{name}: a decided row cannot be {:?}", row.verdict))
+        }
+        _ => None,
+    }
+}
+
+/// The sync rule between the liveness table, the built-in library and the
+/// proposed 0.1 catalog (TASK-112, TASK-122): every built-in source is
+/// named by exactly one row whose verdict names a built-in (Shipped,
+/// Decision pending, Proposed withdrawal), with builtin.yaml's
+/// `liveness_class`, non-empty residuals, and exactly the row's guard (the
+/// floor and checkout setting where the row states them; a contract row
+/// must state its floor); a built-in with a liveness guard is Shipped; a
+/// built-in in a `release` catalog is Shipped; no row names a filter, and
+/// no verdict that names a built-in is without one.
 fn liveness_sync_problems(
     rows: &[(String, LivenessRow)],
-    builtins: &[(String, Guard)],
+    builtins: &[(String, Builtin)],
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let row_of = |name: &str| rows.iter().find(|(n, _)| n == name).map(|(_, r)| r);
-    for (name, guard) in builtins {
-        if guard.contract.is_none() && !guard.app_not_running {
+    for (name, builtin) in builtins {
+        let row = row_of(name);
+        if !builtin.source {
+            if row.is_some() {
+                problems.push(format!("{name}: a filter has no Liveness contracts row"));
+            }
             continue;
         }
-        match row_of(name) {
-            Some(row) if row.shipped => {}
-            row => problems.push(format!(
-                "built-in {name} has a liveness guard {guard:?}; its row is {row:?}, not Shipped"
-            )),
+        let Some(row) = row else {
+            problems.push(format!("built-in {name} has no Liveness contracts row"));
+            continue;
+        };
+        if row.verdict == Verdict::NotBuiltIn {
+            problems.push(format!(
+                "{name}: row's verdict names no built-in (excluded, withdrawn or planned) but \
+                 it is a built-in"
+            ));
+        }
+        if builtin.class != Some(row.class) {
+            problems.push(format!(
+                "{name}: row's class {:?}, builtin.yaml's liveness_class {:?}",
+                row.class, builtin.class
+            ));
+        }
+        problems.extend(verdict_problem(name, row));
+        if row.residuals.is_empty() {
+            problems.push(format!("{name}: row names no residuals"));
+        }
+        if builtin.released && row.verdict != Verdict::Shipped {
+            problems.push(format!(
+                "{name}: in the 0.1 catalog (release) but its row is {:?}",
+                row.verdict
+            ));
+        }
+        let guard = &builtin.guard;
+        let guarded = guard.contract.is_some() || guard.app_not_running;
+        if guarded && row.verdict != Verdict::Shipped {
+            problems.push(format!(
+                "built-in {name} has a liveness guard {guard:?}; its row is {:?}, not Shipped",
+                row.verdict
+            ));
+        }
+        let documented = &row.guard;
+        if documented.contract != guard.contract
+            || documented.app_not_running != guard.app_not_running
+        {
+            problems.push(format!(
+                "{name}: row's guard {:?}/app_not_running {}, built-in's {:?}/{}",
+                documented.contract,
+                documented.app_not_running,
+                guard.contract,
+                guard.app_not_running
+            ));
+        }
+        if documented.contract.is_some() && documented.min_idle_for.is_none() {
+            problems.push(format!("{name}: contract row states no min_idle_for"));
+        }
+        if documented.min_idle_for.is_some() && documented.min_idle_for != guard.min_idle_for {
+            problems.push(format!(
+                "{name}: row's min_idle_for {:?}, built-in's {:?}",
+                documented.min_idle_for, guard.min_idle_for
+            ));
+        }
+        if documented.checkouts_allow.is_some()
+            && documented.checkouts_allow != guard.checkouts_allow
+        {
+            problems.push(format!(
+                "{name}: row's checkouts allow {:?}, built-in's {:?}",
+                documented.checkouts_allow, guard.checkouts_allow
+            ));
         }
     }
     for (name, row) in rows {
-        let builtin = builtins.iter().find(|(n, _)| n == name).map(|(_, g)| g);
-        match (row.shipped, builtin) {
-            (true, None) => problems.push(format!("{name}: row says Shipped, no such built-in")),
-            (false, Some(_)) => problems.push(format!(
-                "{name}: row is not Shipped (excluded, withdrawn or planned) but it is a built-in"
-            )),
-            (true, Some(guard)) => {
-                let row = &row.guard;
-                if row.contract != guard.contract || row.app_not_running != guard.app_not_running {
-                    problems.push(format!(
-                        "{name}: row's guard {:?}/app_not_running {}, built-in's {:?}/{}",
-                        row.contract, row.app_not_running, guard.contract, guard.app_not_running
-                    ));
-                }
-                if row.contract.is_some() && row.min_idle_for.is_none() {
-                    problems.push(format!("{name}: contract row states no min_idle_for"));
-                }
-                if row.min_idle_for.is_some() && row.min_idle_for != guard.min_idle_for {
-                    problems.push(format!(
-                        "{name}: row's min_idle_for {:?}, built-in's {:?}",
-                        row.min_idle_for, guard.min_idle_for
-                    ));
-                }
-                if row.checkouts_allow.is_some() && row.checkouts_allow != guard.checkouts_allow {
-                    problems.push(format!(
-                        "{name}: row's checkouts allow {:?}, built-in's {:?}",
-                        row.checkouts_allow, guard.checkouts_allow
-                    ));
-                }
-            }
-            (false, None) => {}
+        let builtin = builtins.iter().any(|(n, b)| n == name && b.source);
+        if !builtin && row.verdict != Verdict::NotBuiltIn {
+            problems.push(format!(
+                "{name}: row's verdict is {:?}, no such built-in source",
+                row.verdict
+            ));
         }
     }
     problems
 }
 
-fn builtin_guards() -> Vec<(String, Guard)> {
-    Library::builtin()
-        .expect("built-ins")
+fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
+    library
         .profiles()
         .map(|profile| {
-            let guard = match &profile.body {
-                Body::Source(source) => Guard {
-                    contract: source.where_.liveness_contract.map(|c| c.name().to_owned()),
-                    app_not_running: source.where_.app_not_running.is_some(),
-                    min_idle_for: source.min_idle_for.map(|IdleFor(d)| d),
-                    checkouts_allow: Some(source.checkouts == Checkouts::Allow),
+            let builtin = match &profile.body {
+                Body::Source(source) => Builtin {
+                    source: true,
+                    guard: Guard {
+                        contract: source.where_.liveness_contract.map(|c| c.name().to_owned()),
+                        app_not_running: source.where_.app_not_running.is_some(),
+                        min_idle_for: source.min_idle_for.map(|IdleFor(d)| d),
+                        checkouts_allow: Some(source.checkouts == Checkouts::Allow),
+                    },
+                    class: source.liveness_class,
+                    released: profile.release.is_some(),
                 },
-                _ => Guard {
-                    contract: None,
-                    app_not_running: false,
-                    min_idle_for: None,
-                    checkouts_allow: None,
+                Body::Filter(_) => Builtin {
+                    source: false,
+                    guard: Guard {
+                        contract: None,
+                        app_not_running: false,
+                        min_idle_for: None,
+                        checkouts_allow: None,
+                    },
+                    class: None,
+                    released: profile.release.is_some(),
                 },
             };
-            (profile.name.clone(), guard)
+            (profile.name.clone(), builtin)
         })
         .collect()
+}
+
+fn builtin_facts() -> Vec<(String, Builtin)> {
+    builtins_as_loaded(&Library::builtin().expect("built-ins"))
 }
 
 fn documented_liveness_rows() -> (Vec<(String, LivenessRow)>, Vec<String>) {
@@ -1096,8 +1232,46 @@ fn documented_liveness_rows() -> (Vec<(String, LivenessRow)>, Vec<String>) {
 #[test]
 fn liveness_table_and_builtin_library_agree() {
     let (rows, mut problems) = documented_liveness_rows();
-    problems.extend(liveness_sync_problems(&rows, &builtin_guards()));
+    problems.extend(liveness_sync_problems(&rows, &builtin_facts()));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The proposed 0.1 catalog is exactly the built-ins whose `release` names
+/// it (derived, not listed), and every source in it is Shipped in the
+/// liveness table (the sync rule above).
+#[test]
+fn the_proposed_release_catalog_is_the_release_data() {
+    let catalog = Library::builtin()
+        .expect("built-ins")
+        .proposed_release_01()
+        .expect("proposed catalog");
+    let derived: Vec<&str> = catalog.profiles().map(|p| p.name.as_str()).collect();
+    let released: Vec<String> = builtin_facts()
+        .into_iter()
+        .filter(|(_, b)| b.released)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(derived, released);
+    assert!(
+        catalog
+            .profiles()
+            .any(|p| matches!(&p.body, Body::Source(_))),
+        "the catalog holds a source"
+    );
+}
+
+/// A `release` on a source outside the 0.1 scope (a command action, a
+/// Docker kind) is refused when the catalog is built, not trusted.
+#[test]
+fn the_proposed_release_catalog_refuses_an_out_of_scope_source() {
+    let yaml = "- name: c\n  category: c\n  description: d\n  find: {roots: required, paths: [.cache/c], type: dir}\n  action: {command: [tool, clean, \"{path}\"]}\n  examples: {match: [/home/m/.cache/c]}\n  verified_with: v\n  liveness_class: delegated\n  release: \"0.1\"\n";
+    let library = Library::load(yaml, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let error = library.proposed_release_01().expect_err("a command action");
+    assert!(error.contains("`c` is outside the 0.1 scope"), "{error}");
+    let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  release: \"0.1\"\n";
+    let library = Library::load(filters_only, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let error = library.proposed_release_01().expect_err("no source");
+    assert!(error.contains("has no source"), "{error}");
 }
 
 /// The sync rule bites each way it can drift, on edits of the real table
@@ -1106,8 +1280,8 @@ fn liveness_table_and_builtin_library_agree() {
 #[test]
 fn liveness_sync_rule_catches_each_kind_of_drift() {
     let (rows, _) = documented_liveness_rows();
-    let builtins = builtin_guards();
-    let edit_builtin = |name: &str, edit: &dyn Fn(&mut Guard)| {
+    let builtins = builtin_facts();
+    let edit_builtin = |name: &str, edit: &dyn Fn(&mut Builtin)| {
         let mut b = builtins.clone();
         edit(&mut b.iter_mut().find(|(n, _)| n == name).expect(name).1);
         b
@@ -1123,24 +1297,49 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
     let mut added = builtins.clone();
     added.push((
         "nix-shell-tmpdir".into(),
-        Guard {
-            contract: None,
-            app_not_running: false,
-            min_idle_for: None,
-            checkouts_allow: Some(false),
+        Builtin {
+            source: true,
+            guard: Guard {
+                contract: None,
+                app_not_running: false,
+                min_idle_for: None,
+                checkouts_allow: Some(false),
+            },
+            class: Some(LivenessClass::NoContract),
+            released: false,
+        },
+    ));
+    let mut unrowed = builtins.clone();
+    unrowed.push((
+        "new-cache".into(),
+        Builtin {
+            source: true,
+            guard: Guard {
+                contract: None,
+                app_not_running: false,
+                min_idle_for: None,
+                checkouts_allow: Some(false),
+            },
+            class: Some(LivenessClass::Tolerant),
+            released: false,
         },
     ));
     let cases: Vec<(&str, Vec<String>, &str)> = vec![
         (
             "contract dropped from a built-in",
-            liveness_sync_problems(&rows, &edit_builtin("pytest-tmp", &|g| g.contract = None)),
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("pytest-tmp", &|b| b.guard.contract = None),
+            ),
             "pytest-tmp: row's guard",
         ),
         (
             "contract added to a built-in",
             liveness_sync_problems(
                 &rows,
-                &edit_builtin("chromium-tmp", &|g| g.contract = Some("pytest".into())),
+                &edit_builtin("chromium-tmp", &|b| {
+                    b.guard.contract = Some("pytest".into())
+                }),
             ),
             "built-in chromium-tmp has a liveness guard",
         ),
@@ -1148,7 +1347,7 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "app_not_running dropped from a built-in",
             liveness_sync_problems(
                 &rows,
-                &edit_builtin("brave-browser-cache", &|g| g.app_not_running = false),
+                &edit_builtin("brave-browser-cache", &|b| b.guard.app_not_running = false),
             ),
             "brave-browser-cache: row's guard",
         ),
@@ -1156,8 +1355,8 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "floor changed in a built-in",
             liveness_sync_problems(
                 &rows,
-                &edit_builtin("nix-shell-rc", &|g| {
-                    g.min_idle_for = Some(Duration::from_secs(60));
+                &edit_builtin("nix-shell-rc", &|b| {
+                    b.guard.min_idle_for = Some(Duration::from_secs(60));
                 }),
             ),
             "nix-shell-rc: row's min_idle_for",
@@ -1166,14 +1365,37 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "checkouts changed in a built-in",
             liveness_sync_problems(
                 &rows,
-                &edit_builtin("pytest-tmp", &|g| g.checkouts_allow = Some(false)),
+                &edit_builtin("pytest-tmp", &|b| b.guard.checkouts_allow = Some(false)),
             ),
             "pytest-tmp: row's checkouts",
         ),
         (
+            "class changed in builtin.yaml",
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("python-pycache", &|b| b.class = Some(LivenessClass::Sound)),
+            ),
+            "python-pycache: row's class",
+        ),
+        (
+            "class changed in the table",
+            liveness_sync_problems(
+                &edit_row("node-compile-cache", &|r| {
+                    r.class = LivenessClass::Delegated
+                }),
+                &builtins,
+            ),
+            "node-compile-cache: row's class",
+        ),
+        (
+            "built-in source without a row",
+            liveness_sync_problems(&rows, &unrowed),
+            "built-in new-cache has no Liveness contracts row",
+        ),
+        (
             "row of a contract built-in removed",
             liveness_sync_problems(&without("nix-shell-rc"), &builtins),
-            "built-in nix-shell-rc has a liveness guard",
+            "built-in nix-shell-rc has no Liveness contracts row",
         ),
         (
             "row's contract changed",
@@ -1196,12 +1418,65 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
         (
             "excluded profile shipped",
             liveness_sync_problems(&rows, &added),
-            "nix-shell-tmpdir: row is not Shipped",
+            "nix-shell-tmpdir: row's verdict names no built-in",
         ),
         (
             "Shipped row without a built-in",
-            liveness_sync_problems(&edit_row("mktemp-dir", &|r| r.shipped = true), &builtins),
-            "mktemp-dir: row says Shipped, no such built-in",
+            liveness_sync_problems(
+                &edit_row("mktemp-dir", &|r| r.verdict = Verdict::Shipped),
+                &builtins,
+            ),
+            "mktemp-dir: row's verdict is Shipped, no such built-in source",
+        ),
+        (
+            "class none Shipped",
+            liveness_sync_problems(
+                &edit_row("zephyr-tmp", &|r| r.verdict = Verdict::Shipped),
+                &builtins,
+            ),
+            "zephyr-tmp: Shipped with class none",
+        ),
+        (
+            "verified heuristic Shipped without a decision",
+            liveness_sync_problems(
+                &edit_row("codex-releases", &|r| r.verdict = Verdict::Shipped),
+                &builtins,
+            ),
+            "codex-releases: a verified heuristic Shipped without Mark's dated decision",
+        ),
+        (
+            "Proposed withdrawal of an admissible class",
+            liveness_sync_problems(
+                &edit_row("bun-cache", &|r| r.verdict = Verdict::ProposedWithdrawal),
+                &builtins,
+            ),
+            "bun-cache: Proposed withdrawal is for class none",
+        ),
+        (
+            "Decision pending of a class that needs none",
+            liveness_sync_problems(
+                &edit_row("pytest-cache", &|r| r.verdict = Verdict::DecisionPending),
+                &builtins,
+            ),
+            "pytest-cache: Decision pending is for a verified heuristic",
+        ),
+        (
+            "row without residuals",
+            liveness_sync_problems(
+                &edit_row("go-mod-cache", &|r| r.residuals.clear()),
+                &builtins,
+            ),
+            "go-mod-cache: row names no residuals",
+        ),
+        (
+            "class none in the 0.1 catalog",
+            liveness_sync_problems(&rows, &edit_builtin("renode-tmp", &|b| b.released = true)),
+            "renode-tmp: in the 0.1 catalog (release) but its row is ProposedWithdrawal",
+        ),
+        (
+            "a filter with a row",
+            liveness_sync_problems(&rows, &edit_builtin("pytest-cache", &|b| b.source = false)),
+            "pytest-cache: a filter has no Liveness contracts row",
         ),
     ];
     for (what, problems, expected) in cases {
@@ -1216,6 +1491,7 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "".into(),
             "none".into(),
             "none".into(),
+            "Not a built-in.".into(),
             "Excluded.".into(),
         ],
         vec![
@@ -1223,12 +1499,29 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "".into(),
             "none".into(),
             "none".into(),
+            "Not a built-in.".into(),
+            "Excluded.".into(),
+        ],
+        vec![
+            "`c`".into(),
+            "".into(),
+            "none".into(),
+            "mostly sound".into(),
+            "Not a built-in.".into(),
             "Excluded.".into(),
         ],
     ];
     assert_eq!(
         liveness_rows(&doubled).1,
-        ["a: named by two Liveness contracts rows"]
+        [
+            "a: named by two Liveness contracts rows",
+            "`c`: Class cell names no class: \"mostly sound\""
+        ]
+    );
+    assert_eq!(class_of("soundly"), None);
+    assert_eq!(
+        class_of("verified heuristic: lock rows"),
+        Some(LivenessClass::VerifiedHeuristic)
     );
 }
 

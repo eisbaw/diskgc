@@ -6,6 +6,12 @@
 #
 # diskgc-core's tests load this file (profile::tests), so a broken entry
 # fails `just check` and the flake's workspace-tests check.
+#
+# `liveness_class` (every source) is the admission class of docs/safety.md,
+# Producer liveness; its evidence, residuals and verdict are the source's row
+# in docs/reference.md, Liveness contracts, which a test keeps in sync.
+# `release: "0.1"` puts a built-in in the proposed 0.1 catalog
+# (Library::proposed_release_01); the loader refuses it on class none.
 
 - name: docker-build-cache
   category: containers
@@ -14,6 +20,7 @@
   find: {roots: daemon}
   action: docker-builder-prune
   verified_with: Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind, 2026-10-20
+  liveness_class: delegated
 
 - name: docker-dangling
   category: containers
@@ -22,6 +29,7 @@
   find: {roots: daemon}
   action: docker-image-prune
   verified_with: Docker Engine 29.8.2 in digest-pinned dind, 2026-10-20
+  liveness_class: delegated
 
 - name: docker-unreferenced
   category: containers
@@ -30,6 +38,7 @@
   find: {roots: daemon}
   action: docker-image-prune-all
   verified_with: Docker Engine 29.8.2 in digest-pinned dind, 2026-10-20
+  liveness_class: delegated
 
 - name: cargo-target
   category: rust
@@ -40,6 +49,8 @@
   find: {roots: required}
   checkouts: allow  # why: docs/reference.md, Built-in profile library (cargo-target)
   verified_with: cargo 1.90.0, 1.99.1 and nightly-2026-10-16 (lock files, docs/safety.md)
+  liveness_class: delegated
+  release: "0.1"
 
 - name: pytest-cache
   category: test
@@ -53,6 +64,7 @@
     match: [/home/mark/src/app/.pytest_cache, /home/mark/src/a/b/c/.pytest_cache]
     no_match: [/home/mark/src/app/.pytest_cache/v]
   verified_with: pytest 9.0.3
+  liveness_class: tolerant
 
 - name: nix-user-cache
   category: nix
@@ -66,6 +78,7 @@
     match: [/home/mark/.cache/nix/gitv3, /home/mark/.cache/nix/tarball-cache-v2, /home/mark/.cache/nix/eval-cache-v6]
     no_match: [/home/mark/.cache/nix, /home/mark/.cache/nix/gitv2, /home/mark/.cache/nix/fetcher-cache-v1, /home/mark/.cache/nix/eval-cache]
   verified_with: Nix 2.34.8, observed user cache layout 2026-10-19
+  liveness_class: tolerant
 
 - name: bun-cache
   category: python / js
@@ -79,6 +92,7 @@
     match: [/home/mark/.bun/install/cache, /home/mark/.cache/.bun/install/cache]
     no_match: [/home/mark/.cache/.bun/install, /home/mark/.bun/install, /home/mark/.cache/.bun/install/cache/pkg]
   verified_with: Bun 1.3.3 default and BUN_INSTALL_CACHE_DIR, 2026-10-20
+  liveness_class: tolerant
 
 - name: go-mod-cache
   category: caches
@@ -92,6 +106,7 @@
     match: [/home/mark/go/pkg/mod]
     no_match: [/home/mark/go/pkg, /home/mark/go/pkg/mod/cache]
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20
+  liveness_class: tolerant
 
 # Project roots are supplied by policy. Explicit depths avoid an unbounded
 # recursive walk and let a matching outer cache own any nested cache.
@@ -108,6 +123,7 @@
     match: [/home/mark/src/app/__pycache__, /home/mark/src/app/pkg/sub/__pycache__]
     no_match: [/home/mark/src/app/__pycache__/nested, /home/mark/src/app/a/b/c/d/__pycache__]
   verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20
+  liveness_class: tolerant
 
 - name: mypy-cache
   category: python / js
@@ -123,6 +139,7 @@
     match: [/home/mark/src/app/.mypy_cache, /home/mark/src/app/pkg/.mypy_cache]
     no_match: [/home/mark/src/app/.mypy_cache/3.13, /home/mark/src/app/a/b/c/d/.mypy_cache]
   verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20
+  liveness_class: tolerant
 
 # A narrower source-anchored recognizer for build output of any directory
 # name. It requires the cache's recorded source to be an ancestor outside
@@ -142,6 +159,7 @@
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
   verified_with: CMake 3.30.5, recorded CMAKE_HOME_DIRECTORY and surviving CMakeLists.txt in host tracy builds, 2026-10-20
+  liveness_class: verified-heuristic
 
 # Meson's generated metadata records both source and build paths. Only an
 # output nested beneath its source is accepted; a copied output is refused.
@@ -160,6 +178,7 @@
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
   verified_with: Meson 1.7.0 generated meson-info.json and coredata.dat in disposable Debian 13 container, 2026-10-20
+  liveness_class: verified-heuristic
 
 # GNU Autoconf's generated config.status binds its build path to a source
 # ancestor. Only out-of-source Makefile builds with surviving configure.ac
@@ -179,6 +198,7 @@
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
   verified_with: GNU Autoconf 2.73 generated config.status and Makefile in a disposable Nix test container, 2026-10-20
+  liveness_class: verified-heuristic
 
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
@@ -192,6 +212,7 @@
     match: [/home/mark/.cache/pip]
     no_match: [/home/mark/.cache/pip/http-v2, /home/mark/.cache/uv]
   verified_with: pip 26.1.2, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: uv-cache
   category: python / js
@@ -202,6 +223,7 @@
     match: [/home/mark/.cache/uv]
     no_match: [/home/mark/.cache/uv/archive-v0, /home/mark/.cache/pip]
   verified_with: uv 0.13.0, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: go-build-cache
   category: caches
@@ -212,6 +234,7 @@
     match: [/home/mark/.cache/go-build]
     no_match: [/home/mark/.cache/go-build/00, /home/mark/go/pkg/mod]
   verified_with: Go 1.26.8, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: npm-cache
   category: caches
@@ -222,6 +245,7 @@
     match: [/home/mark/.npm]
     no_match: [/home/mark/.npm/_cacache, /home/mark/.cache/npm]
   verified_with: npm 11.19.0 (Node.js 24.21.0), host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: pnpm-store
   category: python / js
@@ -232,6 +256,7 @@
     match: [/home/mark/.local/share/pnpm/store]
     no_match: [/home/mark/.local/share/pnpm/store/v10, /home/mark/.local/share/pnpm]
   verified_with: pnpm 12.9.0, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: yarn-cache
   category: python / js
@@ -242,6 +267,7 @@
     match: [/home/mark/.cache/yarn]
     no_match: [/home/mark/.cache/yarn/v6, /home/mark/.yarn]
   verified_with: Yarn Classic 1.22.22, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: ccache
   category: caches
@@ -252,6 +278,7 @@
     match: [/home/mark/.cache/ccache, /home/mark/.ccache]
     no_match: [/home/mark/.cache/ccache/tmp, /home/mark/.cache/sccache]
   verified_with: ccache 4.14.1, host dry-run and Nix container cleaner 2026-10-20
+  liveness_class: delegated
 
 - name: jest-cache
   category: python / js
@@ -264,6 +291,7 @@
     match: [/tmp/jest_rs, /var/tmp/jest_project_abc, /tmp/nix-shell.Ab1/jest_app_hash]
     no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
   verified_with: Jest npm package 30.2.0 (pinned lockfile and Nix container cleaner, 2026-10-20)
+  liveness_class: delegated
 
 - name: west-build-anchored
   category: embedded
@@ -281,6 +309,7 @@
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
   verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 compiled build with CMake 4.4.3 in a disposable container; source-anchor ModelHost vector and guarded reclaim 2026-10-20
+  liveness_class: verified-heuristic
 
 - name: platformio-cache
   category: embedded
@@ -297,6 +326,7 @@
     match: [/home/mark/.platformio/.cache]
     no_match: [/home/mark/.platformio/packages, /home/mark/.platformio/cache, /home/mark/project/.pio/build]
   verified_with: PlatformIO Core 6.1.19 (isolated Nix-pinned prune probe, 2026-10-20)
+  liveness_class: delegated
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.
 - name: claude-code-tmp
@@ -308,6 +338,7 @@
     match: [/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a]
     no_match: [/tmp/claude-1000/-home-mark-src-app, /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark, /tmp/claude-1001x/-a/b]
   verified_with: Claude Code 2.1.280 (host layout 2026-10-20; read-only survey 2026-10-18)
+  liveness_class: none
 
 - name: chromium-tmp
   category: browsers
@@ -318,6 +349,7 @@
     match: [/tmp/.org.chromium.Chromium.aB3dEf, /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
     no_match: [/tmp/org.mozilla.firefox.x, /tmp/sub/org.chromium.Chromium.x]
   verified_with: Brave Browser 154.1.96.61 (host layout 2026-10-20; read-only survey 2026-10-18)
+  liveness_class: none
 
 - name: node-compile-cache
   category: python / js
@@ -328,6 +360,7 @@
     match: [/tmp/node-compile-cache, /tmp/nix-shell.AbC/node-compile-cache, /tmp/claude-1000/nix-shell.Ab1/node-compile-cache]
     no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
   verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18)
+  liveness_class: tolerant
 
 - name: playwright-tmp
   category: python / js
@@ -338,6 +371,7 @@
     match: [/tmp/playwright-artifacts-0a3aQN, /tmp/nix-shell.x1/playwright_chromiumdev_profile-Sw4zrD, /tmp/nix-develop-1-2/playwright_abc, /tmp/claude-1000/nix-shell.Ab1/playwright-artifacts]
     no_match: [/tmp/a/playwright-x, /tmp/playwright-artifacts-0a3aQN/log.txt]
   verified_with: Playwright 1.56.1 (controlled browser TMPDIR probe 2026-10-20)
+  liveness_class: none
 
 # Admitted under the Owner PID contract (docs/safety.md, Producer liveness;
 # docs/reference.md, Liveness contracts): the pid in the name is the shell's,
@@ -355,6 +389,7 @@
     match: [/tmp/nix-shell-1144586-3257819220, /tmp/nix-develop-77-123]
     no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586, /tmp/nix-shell.AB/nix-shell-1-2]
   verified_with: Nix 2.34.9 (nix_shell_rc_lifecycle_is_pinned 2026-10-24); Nix 2.34.8 (host dry run 2026-10-24)
+  liveness_class: sound
 
 # Admitted as a verified heuristic (Mark, 2026-10-23) under the pytest
 # contract (docs/safety.md, pytest sessions; docs/reference.md, Liveness
@@ -375,6 +410,7 @@
     match: [/tmp/pytest-of-mark/pytest-3, /tmp/nix-shell.x1/pytest-of-mark/pytest-12, /tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-0]
     no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/c/pytest-of-mark/pytest-1, /var/tmp/pytest-of-ci/pytest-1]
   verified_with: pytest 9.1.1 (pytest_lifecycle_is_pinned 2026-10-24; contract container tests 2026-10-24)
+  liveness_class: verified-heuristic
 
 - name: zephyr-tmp
   category: embedded
@@ -385,6 +421,7 @@
     match: [/tmp/zephyr-h5e5-run.jTm9zGlH, /tmp/zephyr-scratch]
     no_match: [/tmp/zephyr, /tmp/a/zephyr-x]
   verified_with: Zephyr 4.5.0-rc1 (host run log 2026-10-19; read-only survey 2026-10-18)
+  liveness_class: none
 
 - name: renode-tmp
   category: embedded
@@ -395,6 +432,7 @@
     match: [/tmp/renode-1045514-crash, /tmp/nix-shell.Ab1/renode-1000523, /tmp/zephyr-h5e5-run.jTm9zGlH/renode-1]
     no_match: [/tmp/renode, /tmp/a/renode-1]
   verified_with: Renode 1.17.0 (installed TemporaryFilesManager source; host dry-run 2026-10-18)
+  liveness_class: none
 
 - name: xdg-cache-entry-v2
   category: generic
@@ -413,6 +451,7 @@
     match: [/home/mark/.cache/nix-index, /home/mark/.cache/icon-cache.kcache]
     no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv, /home/mark/.cache/BraveSoftware, /home/mark/.cache/google-chrome, /home/mark/.cache/chromium, /home/mark/.cache/microsoft-edge, /home/mark/.cache/mozilla, /home/mark/.cache/yarn, /home/mark/.cache/sccache]
   verified_with: XDG Base Directory Specification 0.8; host XDG_CACHE_HOME layout surveyed 2026-10-20
+  liveness_class: none
 
 # Browser cache paths are below the supplied home root. Each application
 # needs its own source because app_not_running checks one SingletonLock.
@@ -430,6 +469,7 @@
     match: [/home/mark/.cache/BraveSoftware/Brave-Browser/Default/Cache, /home/mark/.cache/BraveSoftware/Brave-Browser/Profile 1/Code Cache]
     no_match: [/home/mark/.cache/BraveSoftware/Brave-Browser/Default, /home/mark/.config/BraveSoftware/Brave-Browser/Default/WebStorage, /home/mark/.config/BraveSoftware/Brave-Browser/Default/Service Worker/CacheStorage]
   verified_with: Brave Browser 154.1.96.61 read-only host layout 2026-10-20
+  liveness_class: sound
 
 - name: chrome-browser-cache
   category: browsers
@@ -444,6 +484,7 @@
     match: [/home/mark/.cache/google-chrome/Default/Cache, /home/mark/.cache/google-chrome/Profile 2/Code Cache]
     no_match: [/home/mark/.config/google-chrome/Default, /home/mark/.config/google-chrome/Default/Service Worker/CacheStorage, /home/mark/.config/google-chrome/Default/WebStorage]
   verified_with: Google Chrome 132.0.6834.110 (host Last Version; 2026-10-20 dry run found no cache candidates)
+  liveness_class: sound
 
 - name: chromium-browser-cache
   category: browsers
@@ -458,6 +499,7 @@
     match: [/home/mark/.cache/chromium/Default/Cache, /home/mark/.cache/chromium/Profile 1/Code Cache]
     no_match: [/home/mark/.config/chromium/Default, /home/mark/.config/chromium/Default/Service Worker/CacheStorage, /home/mark/.config/chromium/Default/WebStorage]
   verified_with: Chromium 145.0.7632.159 (host Last Version; 2026-10-20 dry run found no cache candidates)
+  liveness_class: sound
 
 - name: edge-browser-cache
   category: browsers
@@ -472,6 +514,7 @@
     match: [/home/mark/.cache/microsoft-edge/Default/Cache, /home/mark/.cache/microsoft-edge/Profile 3/Code Cache]
     no_match: [/home/mark/.config/microsoft-edge/Default, /home/mark/.config/microsoft-edge/Default/Service Worker/CacheStorage, /home/mark/.config/microsoft-edge/Default/WebStorage]
   verified_with: Microsoft Edge 132.0.2957.127 (host Last Version and cache layout; 2026-10-20)
+  liveness_class: sound
 - name: cursor-agent-versions
   category: agents
   description: Old Cursor agent CLI version directories below a supplied home root
@@ -487,6 +530,7 @@
     match: [/home/mark/.local/share/cursor-agent/versions/2026.06.24-abc]
     no_match: [/home/mark/.local/share/cursor-agent/versions, /home/mark/.local/bin/agent]
   verified_with: Cursor agent CLI 2026.06.24-00-45-58-9f61de7 and 2026.07.16-899851b installed links, host survey 2026-10-20
+  liveness_class: verified-heuristic
 
 - name: codex-releases
   category: agents
@@ -504,6 +548,7 @@
     match: [/home/mark/.codex/packages/standalone/releases/0.139.0-x86_64-unknown-linux-musl]
     no_match: [/home/mark/.codex/packages/standalone/current, /home/mark/.codex/packages/standalone/releases]
   verified_with: Codex CLI 0.163.0 standalone and 0.158.0 app-server-daemon current release targets, host survey 2026-10-20
+  liveness_class: verified-heuristic
 
 - name: claude-code-versions
   category: agents
@@ -520,6 +565,7 @@
     match: [/home/mark/.local/share/claude/versions/2.1.301]
     no_match: [/home/mark/.local/bin/claude, /home/mark/bin/claude-2.1.301]
   verified_with: Claude Code 2.1.304 native installer current target, host survey 2026-10-20
+  liveness_class: verified-heuristic
 
 - name: cursor-extensions
   category: editors
@@ -538,38 +584,46 @@
     match: [/home/mark/.cursor/extensions/ms-python.python-2025.6.1-linux-x64]
     no_match: [/home/mark/.cursor/extensions, /home/mark/.cursor/extensions/ms-python.python/2025.6.1]
   verified_with: Cursor 3.1.15 extension manifest and directory names, host survey 2026-10-20
+  liveness_class: verified-heuristic
 
 - name: idle-1h
   category: filters
   description: not used or changed for an hour, as the source's kind measures it
   where: {idle_for: 1h}
+  release: "0.1"
 
 - name: idle-1d
   category: filters
   description: not used or changed for a day, as the source's kind measures it
   where: {idle_for: 1d}
+  release: "0.1"
 
 - name: idle-2d
   category: filters
   description: not used or changed for 2 days, as the source's kind measures it
   where: {idle_for: 2d}
+  release: "0.1"
 
 - name: idle-3d
   category: filters
   description: not used or changed for 3 days, as the source's kind measures it
   where: {idle_for: 3d}
+  release: "0.1"
 
 - name: idle-7d
   category: filters
   description: not used or changed for 7 days, as the source's kind measures it
   where: {idle_for: 7d}
+  release: "0.1"
 
 - name: idle-10d
   category: filters
   description: not used or changed for 10 days, as the source's kind measures it
   where: {idle_for: 10d}
+  release: "0.1"
 
 - name: idle-30d
   category: filters
   description: not used or changed for 30 days, as the source's kind measures it
   where: {idle_for: 30d}
+  release: "0.1"

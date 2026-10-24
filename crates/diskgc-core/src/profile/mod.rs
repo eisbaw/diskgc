@@ -44,7 +44,8 @@ pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{
     ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
-    LivenessContract, NewestGroup, ProfileSpec, RootsSpec, SourceAnchor, WhereSpec, parse_profiles,
+    LivenessClass, LivenessContract, NewestGroup, ProfileSpec, Release, RootsSpec, SourceAnchor,
+    WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -58,6 +59,9 @@ pub struct Profile {
     pub description: Option<String>,
     pub origin: Origin,
     pub body: Body,
+    /// Built-ins only: the release catalog that includes it (`release:`);
+    /// `None` for the development library alone and for user profiles.
+    pub release: Option<Release>,
 }
 
 impl Profile {
@@ -123,6 +127,9 @@ pub struct Source {
     pub examples: Examples,
     /// Built-in profiles only: the tool version it was checked against.
     pub verified_with: Option<String>,
+    /// Built-in profiles only (required there): the liveness contract
+    /// class (docs/safety.md, Producer liveness).
+    pub liveness_class: Option<LivenessClass>,
 }
 
 impl Source {
@@ -344,14 +351,20 @@ impl Library {
         Self::load(BUILTIN_YAML, user)
     }
 
-    /// A conservative proposed 0.1 catalog. TASK65 has not signed off a
-    /// deletion-safe `/tmp` source, so this currently admits Cargo and the
-    /// inert idle filters only. A release package must opt into this policy
+    /// The proposed 0.1 catalog: the built-ins whose `release:` names 0.1
+    /// (builtin.yaml is the one place the catalog is decided; TASK-65 signs
+    /// off its `/tmp` part). A release package must opt into this policy
     /// explicitly; the development library still exposes the full catalog.
     ///
     /// Reject all operator-authored profiles, including overrides of an
     /// allowed name. A name-only allowlist would otherwise admit a command
     /// action or an arbitrary filesystem delete under `cargo-target`.
+    ///
+    /// The 0.1 scope (PRD.md, Scope) is checked against the data rather than
+    /// trusted: a released source is of kind `fs` with the `delete` action or
+    /// `cargo-target` with its lock protocol, and of an admissible class (the
+    /// loader already refuses `release` on class none). A violation is a bug
+    /// in builtin.yaml, which the tests load.
     pub fn proposed_release_01(mut self) -> Result<Self, String> {
         if let Some(profile) = self.profiles.values().find(|p| p.origin != Origin::BuiltIn) {
             return Err(format!(
@@ -359,35 +372,35 @@ impl Library {
                 profile.name
             ));
         }
-        const ALLOWED: &[&str] = &[
-            "cargo-target",
-            "idle-1h",
-            "idle-1d",
-            "idle-2d",
-            "idle-3d",
-            "idle-7d",
-            "idle-10d",
-            "idle-30d",
-        ];
-        for name in ALLOWED {
-            let profile = self.profiles.get(*name).ok_or_else(|| {
-                format!("proposed 0.1 catalog is missing required built-in `{name}`")
-            })?;
-            let expected = if *name == "cargo-target" {
-                matches!(&profile.body, Body::Source(source)
-                    if source.kind() == crate::kind::Kind::CargoTarget
-                        && source.action == Action::CargoLockProtocol)
-            } else {
-                matches!(&profile.body, Body::Filter(_))
+        self.profiles
+            .retain(|_, profile| profile.release == Some(Release::V0_1));
+        for profile in self.profiles.values() {
+            let in_scope = match &profile.body {
+                Body::Filter(_) => true,
+                Body::Source(source) => {
+                    let shape = match source.kind() {
+                        Kind::Fs => matches!(source.action, Action::Delete { .. }),
+                        Kind::CargoTarget => source.action == Action::CargoLockProtocol,
+                        _ => false,
+                    };
+                    shape && source.liveness_class.is_some_and(LivenessClass::admissible)
+                }
             };
-            if !expected {
+            if !in_scope {
                 return Err(format!(
-                    "proposed 0.1 catalog built-in `{name}` has an unexpected kind or action"
+                    "proposed 0.1 catalog built-in `{}` is outside the 0.1 scope (kind, action \
+                     or liveness class)",
+                    profile.name
                 ));
             }
         }
-        self.profiles
-            .retain(|name, _| ALLOWED.contains(&name.as_str()));
+        if !self
+            .profiles
+            .values()
+            .any(|p| matches!(&p.body, Body::Source(_)))
+        {
+            return Err("proposed 0.1 catalog has no source".to_owned());
+        }
         Ok(self)
     }
 

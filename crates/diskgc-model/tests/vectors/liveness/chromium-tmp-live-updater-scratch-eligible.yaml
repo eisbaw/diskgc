@@ -1,0 +1,30 @@
+# TASK-122 counterexample (class none): a live Brave (pid 4242) between
+# fetching a component update into its URL fetcher scratch and unpacking
+# it holds nothing there, and no presence marker covers every producer of
+# the shared org.chromium.Chromium prefix. Deleted past a 1-day filter.
+profile_vector: 1
+select: "profile:chromium-tmp && filter:idle-1d"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/brave: {mode: "0755"}
+    /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      update.crx: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+  processes:
+    - {pid: 4242, exe: /usr/bin/brave, cwd: /, maps: [/usr/bin/brave], environ: [HOME=/home/tester], fds: [{path: /usr/bin/brave}]}
+expect:
+  plan:
+    - {candidate: /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3}
+  reclaim_exit: 1
+  actions: [/tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
+  removed: [/tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
+  skipped: []
+  preserved: [/usr/bin/brave]

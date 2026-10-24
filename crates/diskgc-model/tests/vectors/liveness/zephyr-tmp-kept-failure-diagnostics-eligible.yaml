@@ -1,0 +1,35 @@
+# TASK-122 counterexample (class none), from the host 2026-10-24: the
+# producer of zephyr-* is no tool. A project script keeps a failed run's
+# directory and prints its log paths for the user; a hand-made patch work
+# directory has no .git. Past a 1-day filter both are deleted.
+profile_vector: 1
+select: "profile:zephyr-tmp && filter:idle-1d"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {mode: "0755"}
+    /tmp/zephyr-h5e5-run.jTm9zGlH:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      renode.log: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+      usart3.log: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+    /tmp/zephyr-h5-clock-patch:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      new: {.: {mtime: 2026-10-10T00:00:00Z}, clock.c: {size: 8K, mtime: 2026-10-10T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-h5-clock-patch}
+    - {candidate: /tmp/zephyr-h5e5-run.jTm9zGlH}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-h5-clock-patch, /tmp/zephyr-h5e5-run.jTm9zGlH]
+  removed: [/tmp/zephyr-h5-clock-patch, /tmp/zephyr-h5e5-run.jTm9zGlH]
+  skipped: []
+  preserved: [/usr/bin/bash]

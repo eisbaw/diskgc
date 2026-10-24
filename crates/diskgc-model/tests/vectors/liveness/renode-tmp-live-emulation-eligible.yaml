@@ -1,0 +1,35 @@
+# TASK-122 counterexample (class none), from Renode 1.17.0's
+# TemporaryFilesManager: a live Renode (pid 4242) creates its temporary
+# files and closes them, so its renode-4242 holds no descriptor; and a
+# renode-<pid>-crash report, which Renode itself never cleans, matches
+# too. Past a 1-day filter both are deleted while Renode runs.
+profile_vector: 1
+select: "profile:renode-tmp && filter:idle-1d"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/renode: {mode: "0755"}
+    /tmp/renode-4242:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      0b9c6d4e-firmware.elf: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+    /tmp/renode-1045514-crash:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      crash.log: {size: 8K, mtime: 2026-10-10T00:00:00Z}
+  processes:
+    - {pid: 4242, exe: /usr/bin/renode, cwd: /, maps: [/usr/bin/renode], environ: [HOME=/home/tester], fds: [{path: /usr/bin/renode}]}
+expect:
+  plan:
+    - {candidate: /tmp/renode-1045514-crash}
+    - {candidate: /tmp/renode-4242}
+  reclaim_exit: 1
+  actions: [/tmp/renode-1045514-crash, /tmp/renode-4242]
+  removed: [/tmp/renode-1045514-crash, /tmp/renode-4242]
+  skipped: []
+  preserved: [/usr/bin/renode]

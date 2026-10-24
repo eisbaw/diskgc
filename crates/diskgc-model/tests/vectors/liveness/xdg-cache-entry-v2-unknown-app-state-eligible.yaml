@@ -1,0 +1,31 @@
+# TASK-122 counterexample (class none): an application unknown to the
+# exclusion list keeps state that is not a cache (a session store) under
+# XDG_CACHE_HOME and reads it only when it starts; while it runs it holds
+# nothing there. Past the 30-day floor the entry is deleted.
+profile_vector: 1
+select: "profile:xdg-cache-entry-v2"
+roots: ["/home/tester/.cache"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/someapp: {mode: "0755"}
+    /home/tester/.cache/someapp:
+      .: {mtime: 2026-08-01T00:00:00Z}
+      session.db: {size: 8K, mtime: 2026-08-01T00:00:00Z}
+  processes:
+    - {pid: 4242, exe: /usr/bin/someapp, cwd: /, maps: [/usr/bin/someapp], environ: [HOME=/home/tester], fds: [{path: /usr/bin/someapp}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/someapp}
+  reclaim_exit: 1
+  actions: [/home/tester/.cache/someapp]
+  removed: [/home/tester/.cache/someapp]
+  skipped: []
+  preserved: [/usr/bin/someapp]

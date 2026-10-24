@@ -1,0 +1,42 @@
+# TASK-122: the version profiles' class (verified heuristic) rests on the
+# in-use scan seeing a running version through its executable. Of five
+# versions the two newest stay; 2.1.1 is deleted; 2.1.2, older than the
+# two newest, is the executable of a running process and is in_use with
+# evidence exe, though it holds no descriptor on it and maps no file
+# of it (a stand-in library is mapped instead).
+profile_vector: 1
+select: profile:claude-code-versions
+roots: [/home/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/a/.local/share/claude/versions:
+      .: {mtime: 2026-10-05T00:00:00Z}
+      2.1.1: {size: 8K, mode: "0755", mtime: 2026-10-01T00:00:00Z}
+      2.1.2: {size: 8K, mode: "0755", mtime: 2026-10-02T00:00:00Z}
+      2.1.3: {size: 8K, mode: "0755", mtime: 2026-10-03T00:00:00Z}
+      2.1.4: {size: 8K, mode: "0755", mtime: 2026-10-04T00:00:00Z}
+  processes:
+    - {pid: 901, exe: /home/a/.local/share/claude/versions/2.1.2, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/a], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/a/.local/share/claude/versions/2.1.1}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.2, reason: in_use}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.3, reason: newest_version}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.4, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/a/.local/share/claude/versions/2.1.1]
+  removed: [/home/a/.local/share/claude/versions/2.1.1]
+  skipped:
+    - {candidate: /home/a/.local/share/claude/versions/2.1.2, reason: in_use, process_blockers: [{pid: 901, evidence: exe}]}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.3, reason: newest_version}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.4, reason: newest_version}
+  preserved: [/home/a/.local/share/claude/versions/2.1.2, /home/a/.local/share/claude/versions/2.1.3, /home/a/.local/share/claude/versions/2.1.4]

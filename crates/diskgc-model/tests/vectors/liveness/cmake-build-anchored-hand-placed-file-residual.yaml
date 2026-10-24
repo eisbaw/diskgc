@@ -1,0 +1,35 @@
+# TASK-122 residual (2) of the anchored build profiles (verified
+# heuristic, decision pending): a file a user put in a build directory by
+# hand is deleted with it once the directory is past the 3-day floor and
+# no build or built program uses it. Pinned here so the decision is taken
+# on the actual behaviour.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/src/p1/CMakeLists.txt: {content: "project(p1)\n"}
+    /home/tester/src/p1/out:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p1\n", mtime: 2026-10-01T00:00:00Z}
+      CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}
+      bisect-notes.txt: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/out]
+  removed: [/home/tester/src/p1/out]
+  skipped: []
+  preserved: [/home/tester/src/p1/CMakeLists.txt]

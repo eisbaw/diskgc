@@ -359,6 +359,11 @@ pub fn profile_json(p: &Profile) -> Json {
             "verified_with",
             opt_str(source.and_then(|s| s.verified_with.as_deref())),
         ),
+        (
+            "liveness_class",
+            opt_str(source.and_then(|s| s.liveness_class).map(|c| c.name())),
+        ),
+        ("release", opt_str(p.release.map(|r| r.name()))),
     ])
 }
 
@@ -586,7 +591,13 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
             if let Some(verified) = &source.verified_with {
                 out.push_str(&format!("  verified_with: {}\n", yaml_scalar(verified)));
             }
+            if let Some(class) = source.liveness_class {
+                out.push_str(&format!("  liveness_class: {}\n", class.name()));
+            }
         }
+    }
+    if let Some(release) = profile.release {
+        out.push_str(&format!("  release: \"{}\"\n", release.name()));
     }
     out
 }

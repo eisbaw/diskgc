@@ -604,9 +604,67 @@ fn a_broken_built_in_does_not_load() {
             "- name: idle-9d\n  category: c\n  description: d\n  verified_with: v\n  where: {idle_for: 9d}\n",
             "a filter profile has no `verified_with`",
         ),
+        (
+            "- name: c\n  category: c\n  description: d\n  kind: cargo-target\n  find: {roots: required}\n  verified_with: v\n",
+            "a built-in source profile needs `liveness_class`",
+        ),
+        (
+            "- name: idle-9d\n  category: c\n  description: d\n  liveness_class: sound\n  where: {idle_for: 9d}\n",
+            "a filter profile has no `liveness_class`",
+        ),
+        (
+            "- name: c\n  category: c\n  description: d\n  kind: cargo-target\n  find: {roots: required}\n  verified_with: v\n  liveness_class: none\n  release: \"0.1\"\n",
+            "cannot be in a `release` catalog",
+        ),
+        (
+            "- name: c\n  category: c\n  description: d\n  kind: cargo-target\n  find: {roots: required}\n  verified_with: v\n  liveness_class: guessed\n",
+            "unknown variant `guessed`",
+        ),
+        (
+            "- name: c\n  category: c\n  description: d\n  kind: cargo-target\n  find: {roots: required}\n  verified_with: v\n  liveness_class:\n",
+            "liveness_class",
+        ),
+        (
+            "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  release:\n",
+            "release",
+        ),
+        (
+            "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  release: \"1.0\"\n",
+            "unknown variant `1.0`",
+        ),
     ] {
         let errors = Library::load(yaml, &[]).expect_err(yaml).to_string();
         assert!(errors.contains(needle), "{yaml}\n=> {errors}");
+    }
+}
+
+/// `liveness_class` and `release` load where they belong: every built-in
+/// source has a class (the shipped library is the main user, loaded by
+/// every test), a built-in filter or an admissible source may be in a
+/// release, and the loaded values are the written ones.
+#[test]
+fn liveness_class_and_release_load_on_built_ins() {
+    let yaml = "- name: c\n  category: c\n  description: d\n  kind: cargo-target\n  find: {roots: required}\n  verified_with: v\n  liveness_class: delegated\n  release: \"0.1\"\n- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  release: \"0.1\"\n- name: t\n  category: c\n  description: d\n  verified_with: v\n  liveness_class: none\n  find: {roots: [/tmp], paths: [\"t-*\"], type: dir}\n  action: delete\n  examples: {match: [/tmp/t-1]}\n";
+    let library = Library::load(yaml, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let class = |name: &str| match &library.get(name).expect(name).body {
+        Body::Source(source) => source.liveness_class,
+        Body::Filter(_) => None,
+    };
+    assert_eq!(class("c"), Some(LivenessClass::Delegated));
+    assert_eq!(class("t"), Some(LivenessClass::NoContract));
+    assert_eq!(
+        library.get("c").and_then(|p| p.release),
+        Some(Release::V0_1)
+    );
+    assert_eq!(
+        library.get("idle-9d").and_then(|p| p.release),
+        Some(Release::V0_1)
+    );
+    assert_eq!(library.get("t").and_then(|p| p.release), None);
+    for profile in Library::builtin().expect("built-ins").profiles() {
+        if let Body::Source(source) = &profile.body {
+            assert!(source.liveness_class.is_some(), "{}", profile.name);
+        }
     }
 }
 
@@ -793,6 +851,14 @@ fn sources_and_filters_have_their_own_fields() {
         (
             "- name: x\n  verified_with: pytest 8\n  where: {idle_for: 1d}\n",
             "`verified_with` is for built-in profiles only",
+        ),
+        (
+            "- name: x\n  liveness_class: tolerant\n  where: {idle_for: 1d}\n",
+            "`liveness_class` is for built-in profiles only",
+        ),
+        (
+            "- name: x\n  release: \"0.1\"\n  where: {idle_for: 1d}\n",
+            "`release` is for built-in profiles only",
         ),
     ] {
         assert_has(&user_errors(yaml), needle);

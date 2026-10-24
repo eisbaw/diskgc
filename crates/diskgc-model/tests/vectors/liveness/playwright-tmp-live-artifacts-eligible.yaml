@@ -1,0 +1,36 @@
+# TASK-122 counterexample (class none), from the host 2026-10-24: a live
+# Playwright driver (pid 4242) and its headless browser (pid 4343). The
+# browser holds its user-data directory (in_use), but the artifacts
+# directory created with it, where its downloads, traces and videos go,
+# is held by no process and is deleted past a 1-day filter.
+profile_vector: 1
+select: "profile:playwright-tmp && filter:idle-1d"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/node: {mode: "0755"}
+    /usr/bin/chrome-headless-shell: {mode: "0755"}
+    /tmp/playwright-artifacts-qHgpwa: {.: {mtime: 2026-10-10T00:00:00Z}}
+    /tmp/playwright_chromiumdev_profile-8d2Obf:
+      .: {mtime: 2026-10-10T00:00:00Z}
+      Default: {.: {mtime: 2026-10-10T00:00:00Z}, Cookies: {size: 8K, mtime: 2026-10-10T00:00:00Z}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/node, cwd: /, maps: [/usr/bin/node], environ: [HOME=/home/tester], fds: [{path: /usr/bin/node}]}
+    - {pid: 4343, exe: /usr/bin/chrome-headless-shell, cwd: /, maps: [/usr/bin/chrome-headless-shell], environ: [HOME=/home/tester], fds: [{path: /tmp/playwright_chromiumdev_profile-8d2Obf/Default/Cookies}]}
+expect:
+  plan:
+    - {candidate: /tmp/playwright-artifacts-qHgpwa}
+    - {candidate: /tmp/playwright_chromiumdev_profile-8d2Obf, reason: in_use}
+  reclaim_exit: 1
+  actions: [/tmp/playwright-artifacts-qHgpwa]
+  removed: [/tmp/playwright-artifacts-qHgpwa]
+  skipped:
+    - {candidate: /tmp/playwright_chromiumdev_profile-8d2Obf, reason: in_use, process_blockers: [{pid: 4343, evidence: fd}]}
+  preserved: [/tmp/playwright_chromiumdev_profile-8d2Obf/Default/Cookies]

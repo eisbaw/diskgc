@@ -1,0 +1,39 @@
+# TASK-122 counterexample (class none): claude-code-tmp rests on the in-use
+# scan alone. Claude Code 2.1.280 holds its session's `tasks` directory
+# open while it runs (session 2bbb..., in_use), but that is undocumented,
+# version-dependent behaviour: a live session that holds nothing there
+# (pid 4242, as the 2026-10-18 dry run saw idle sessions) has its
+# scratchpad, a patch the agent wrote, deleted even past a 1-day filter.
+profile_vector: 1
+select: "profile:claude-code-tmp && filter:idle-1d"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/claude: {mode: "0755"}
+    /tmp/claude-1000/-home-tester-src/1aaaaaaa-0000-4000-8000-000000000001:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      scratchpad: {.: {mtime: 2026-10-01T00:00:00Z}, fix.patch: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      tasks: {.: {mtime: 2026-10-01T00:00:00Z}, b1.output: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /tmp/claude-1000/-home-tester-src/2bbbbbbb-0000-4000-8000-000000000002:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      tasks: {.: {mtime: 2026-10-01T00:00:00Z}, b2.output: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/claude, cwd: /, maps: [/usr/bin/claude], environ: [HOME=/home/tester], fds: [{path: /usr/bin/claude}]}
+    - {pid: 4343, exe: /usr/bin/claude, cwd: /, maps: [/usr/bin/claude], environ: [HOME=/home/tester], fds: [{path: /tmp/claude-1000/-home-tester-src/2bbbbbbb-0000-4000-8000-000000000002/tasks}]}
+expect:
+  plan:
+    - {candidate: /tmp/claude-1000/-home-tester-src/1aaaaaaa-0000-4000-8000-000000000001}
+    - {candidate: /tmp/claude-1000/-home-tester-src/2bbbbbbb-0000-4000-8000-000000000002, reason: in_use}
+  reclaim_exit: 1
+  actions: [/tmp/claude-1000/-home-tester-src/1aaaaaaa-0000-4000-8000-000000000001]
+  removed: [/tmp/claude-1000/-home-tester-src/1aaaaaaa-0000-4000-8000-000000000001]
+  skipped:
+    - {candidate: /tmp/claude-1000/-home-tester-src/2bbbbbbb-0000-4000-8000-000000000002, reason: in_use, process_blockers: [{pid: 4343, evidence: fd}]}
+  preserved: [/tmp/claude-1000/-home-tester-src/2bbbbbbb-0000-4000-8000-000000000002/tasks/b2.output]

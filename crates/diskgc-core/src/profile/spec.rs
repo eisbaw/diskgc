@@ -56,6 +56,16 @@ pub struct ProfileSpec {
     pub checkouts: Option<CheckoutsSpec>,
     #[serde(default)]
     pub verified_with: Option<String>,
+    /// Built-in sources only, required: the source's liveness contract
+    /// class under the admission rule (docs/safety.md, Producer liveness).
+    /// A present null is a parse error.
+    #[serde(default, deserialize_with = "present_liveness_class")]
+    pub liveness_class: Option<LivenessClass>,
+    /// Built-ins only, optional: the release catalog that includes it
+    /// (docs/reference.md, Liveness contracts). Absent: development
+    /// library only. A present null is a parse error.
+    #[serde(default, deserialize_with = "present_release")]
+    pub release: Option<Release>,
 }
 
 /// `find:`
@@ -155,6 +165,79 @@ pub struct WhereSpec {
 pub enum NewestGroup {
     Siblings,
     CursorExtension,
+}
+
+/// A built-in source's liveness contract class (docs/safety.md, Producer
+/// liveness, Contract classes and the admission rule). Recorded data, not
+/// a run-time check: what it rests on is the liveness table's row
+/// (docs/reference.md, Liveness contracts), kept in sync by a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivenessClass {
+    Sound,
+    ProducerEquivalent,
+    VerifiedHeuristic,
+    Tolerant,
+    Delegated,
+    /// No contract (`none`): not admissible to a release.
+    NoContract,
+}
+
+impl LivenessClass {
+    pub const ALL: [Self; 6] = [
+        Self::Sound,
+        Self::ProducerEquivalent,
+        Self::VerifiedHeuristic,
+        Self::Tolerant,
+        Self::Delegated,
+        Self::NoContract,
+    ];
+
+    /// As the YAML (and the JSON of `profiles`) spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sound => "sound",
+            Self::ProducerEquivalent => "producer-equivalent",
+            Self::VerifiedHeuristic => "verified-heuristic",
+            Self::Tolerant => "tolerant",
+            Self::Delegated => "delegated",
+            Self::NoContract => "none",
+        }
+    }
+
+    /// As the liveness table spells it (prose, with spaces).
+    pub fn table_name(self) -> &'static str {
+        match self {
+            Self::Sound => "sound",
+            Self::ProducerEquivalent => "producer-equivalent",
+            Self::VerifiedHeuristic => "verified heuristic",
+            Self::Tolerant => "tolerant",
+            Self::Delegated => "delegated",
+            Self::NoContract => "none",
+        }
+    }
+
+    /// Whether the admission rule can admit a source of this class. A
+    /// verified heuristic also needs Mark's recorded decision, which lives
+    /// in the table's verdict, not here.
+    pub fn admissible(self) -> bool {
+        self != Self::NoContract
+    }
+}
+
+/// A release catalog a built-in belongs to. One value until v1 has a
+/// catalog of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    V0_1,
+}
+
+impl Release {
+    /// As the YAML (a quoted string) and the JSON of `profiles` spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::V0_1 => "0.1",
+        }
+    }
 }
 
 /// A producer liveness contract (docs/safety.md, Producer liveness): a
@@ -386,6 +469,49 @@ impl<'de> Deserialize<'de> for KindSpec {
 /// this, serde's `Option` would read a present null as absent, which would
 /// silently mean `refuse` on a source and pass the "a filter has no
 /// `checkouts`" rule.
+/// A closed set of YAML names: the value whose `name()` is the string.
+fn by_name<'de, D: Deserializer<'de>, T: Copy>(
+    deserializer: D,
+    all: &[T],
+    name: fn(T) -> &'static str,
+) -> Result<T, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    all.iter()
+        .copied()
+        .find(|v| name(*v) == text)
+        .ok_or_else(|| {
+            let names: Vec<&str> = all.iter().map(|v| name(*v)).collect();
+            de::Error::custom(format!(
+                "unknown variant `{text}`, expected one of {}",
+                names.join(", ")
+            ))
+        })
+}
+
+impl<'de> Deserialize<'de> for LivenessClass {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        by_name(deserializer, &Self::ALL, Self::name)
+    }
+}
+
+impl<'de> Deserialize<'de> for Release {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        by_name(deserializer, &[Self::V0_1], Self::name)
+    }
+}
+
+fn present_liveness_class<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<LivenessClass>, D::Error> {
+    LivenessClass::deserialize(deserializer).map(Some)
+}
+
+fn present_release<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Release>, D::Error> {
+    Release::deserialize(deserializer).map(Some)
+}
+
 fn present_checkouts<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<CheckoutsSpec>, D::Error> {

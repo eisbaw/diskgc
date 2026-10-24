@@ -793,8 +793,13 @@ contract class, recorded in the
 
 The rule applies to every built-in source, including those shipped in the
 development library before it existed (Mark, 2026-10-23). TASK-122
-classifies them; before any release, a built-in of class *none* is either
-given a contract or withdrawn.
+classified them in the liveness table; each built-in source's class is also
+data, its `liveness_class` in builtin.yaml, and a release catalog
+(`release:` there) holds only built-ins whose row is Shipped, which the
+loader (no `release` on class *none*) and a sync test enforce. Before any
+release, a built-in of class *none* is either given a contract or
+withdrawn; until Mark decides, it stays in the development library as a
+proposed withdrawal.
 
 A contract only narrows: the eligibility walk, ownership, the in-use scan,
 the directory `flock` and the checkout guard all still apply. A contract

@@ -509,6 +509,15 @@ Status: the Owner PID (`nix-shell`) and `pytest` vectors and container
 tests below are checked in and run (TASK-112); the project-contract
 vectors and container tests (`node-project`, `python-project`) are
 specified here and land with TASK-79.
+TASK-122's classification adds, in the same directory and against the
+built-ins: one counterexample per built-in of class *none*, named
+`<profile>-...-eligible` (a live or deliberately kept producer's directory
+deleted), the anchored build profiles' residual
+`cmake-build-anchored-hand-placed-file-residual`, and the version
+profiles' executable evidence
+`claude-code-versions-running-old-version-exe-in-use`. A withdrawal moves
+its counterexample to a user probe profile with the withdrawn matching set,
+as `containers-image-age` did.
 The Owner PID cases below are checked-in vectors against the
 `nix-shell-rc` built-in in `crates/diskgc-model/tests/vectors/liveness/`,
 one file per row and named after it (step 3 wrote them against a user

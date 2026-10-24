@@ -9,8 +9,8 @@ use std::fmt;
 
 use super::roots::validate_root_list;
 use super::spec::{
-    ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, LivenessContract, ProfileSpec, RootsSpec,
-    WhereSpec, parse_profiles,
+    ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, LivenessClass, LivenessContract,
+    ProfileSpec, RootsSpec, WhereSpec, parse_profiles,
 };
 use super::temp_roots;
 use super::{Action, Body, Examples, Finds, IdleFor, Origin, Profile, Roots, Source, Where};
@@ -186,10 +186,32 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
                         .to_owned(),
                 );
             }
+            if spec.find.is_none() && spec.liveness_class.is_some() {
+                problems.push(
+                    "a filter profile has no `liveness_class`: it removes nothing, so it has \
+                     no producer"
+                        .to_owned(),
+                );
+            }
+            // The admission rule (docs/safety.md, Producer liveness): class
+            // none is not admissible, so no release catalog may hold it.
+            if spec.release.is_some() && spec.liveness_class == Some(LivenessClass::NoContract) {
+                problems.push(
+                    "a built-in of `liveness_class: none` cannot be in a `release` catalog \
+                     (docs/safety.md, Producer liveness)"
+                        .to_owned(),
+                );
+            }
         }
         Origin::User | Origin::UserOverride => {
-            if spec.verified_with.is_some() {
-                problems.push("`verified_with` is for built-in profiles only".to_owned());
+            for (field, present) in [
+                ("verified_with", spec.verified_with.is_some()),
+                ("liveness_class", spec.liveness_class.is_some()),
+                ("release", spec.release.is_some()),
+            ] {
+                if present {
+                    problems.push(format!("`{field}` is for built-in profiles only"));
+                }
             }
         }
     }
@@ -213,6 +235,7 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
             description: spec.description.clone(),
             origin,
             body,
+            release: spec.release,
         }),
         _ => Err(problems),
     }
@@ -328,6 +351,13 @@ fn source(
                 .to_owned(),
         );
     }
+    if origin == Origin::BuiltIn && spec.liveness_class.is_none() {
+        problems.push(
+            "a built-in source profile needs `liveness_class` (docs/safety.md, Producer \
+             liveness: every built-in source has one contract class)"
+                .to_owned(),
+        );
+    }
     let (mut finds, action, examples) = match kind {
         Kind::Fs => fs(spec, find, problems)?,
         Kind::CargoTarget => {
@@ -432,6 +462,7 @@ fn source(
         checkouts: spec.checkouts.map_or_else(Checkouts::default, |c| c.0),
         examples,
         verified_with: spec.verified_with.clone(),
+        liveness_class: spec.liveness_class,
     })
 }
 

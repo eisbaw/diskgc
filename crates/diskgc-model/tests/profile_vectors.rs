@@ -296,6 +296,7 @@ fn wrong_python_matcher_is_rejected_by_the_checked_in_vector() {
         .expect("python-pycache source");
     source.r#override = Some(true);
     source.verified_with = None;
+    source.liveness_class = None;
     let find = source.find.as_mut().expect("find");
     for pattern in find.paths.as_mut().expect("paths") {
         *pattern = pattern.replace("__pycache__", "__wrong_cache__");
