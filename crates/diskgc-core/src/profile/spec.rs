@@ -61,11 +61,12 @@ pub struct ProfileSpec {
     /// A present null is a parse error.
     #[serde(default, deserialize_with = "present_liveness_class")]
     pub liveness_class: Option<LivenessClass>,
-    /// Built-ins only, optional: the release catalog that includes it
-    /// (docs/reference.md, Liveness contracts). Absent: development
-    /// library only. A present null is a parse error.
-    #[serde(default, deserialize_with = "present_release")]
-    pub release: Option<Release>,
+    /// Built-ins only, optional: every release catalog that includes it,
+    /// listed explicitly (membership, not "since": a later catalog may drop
+    /// a built-in). Absent, null or empty: the development library only,
+    /// which is the fail-safe reading.
+    #[serde(default)]
+    pub releases: Vec<Release>,
 }
 
 /// `find:`
@@ -224,15 +225,16 @@ impl LivenessClass {
     }
 }
 
-/// A release catalog a built-in belongs to. One value until v1 has a
-/// catalog of its own.
+/// A release catalog a built-in can belong to (`releases:`). One value
+/// until v1 has a catalog of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Release {
     V0_1,
 }
 
 impl Release {
-    /// As the YAML (a quoted string) and the JSON of `profiles` spell it.
+    /// As the YAML (a quoted string in `releases:`) and the JSON of
+    /// `profiles` spell it.
     pub fn name(self) -> &'static str {
         match self {
             Self::V0_1 => "0.1",
@@ -465,10 +467,6 @@ impl<'de> Deserialize<'de> for KindSpec {
     }
 }
 
-/// `checkouts:` when the key is present: its value, never `None`. Without
-/// this, serde's `Option` would read a present null as absent, which would
-/// silently mean `refuse` on a source and pass the "a filter has no
-/// `checkouts`" rule.
 /// A closed set of YAML names: the value whose `name()` is the string.
 fn by_name<'de, D: Deserializer<'de>, T: Copy>(
     deserializer: D,
@@ -506,12 +504,10 @@ fn present_liveness_class<'de, D: Deserializer<'de>>(
     LivenessClass::deserialize(deserializer).map(Some)
 }
 
-fn present_release<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Release>, D::Error> {
-    Release::deserialize(deserializer).map(Some)
-}
-
+/// `checkouts:` when the key is present: its value, never `None`. Without
+/// this, serde's `Option` would read a present null as absent, which would
+/// silently mean `refuse` on a source and pass the "a filter has no
+/// `checkouts`" rule.
 fn present_checkouts<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<CheckoutsSpec>, D::Error> {

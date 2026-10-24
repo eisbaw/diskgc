@@ -59,9 +59,9 @@ pub struct Profile {
     pub description: Option<String>,
     pub origin: Origin,
     pub body: Body,
-    /// Built-ins only: the release catalog that includes it (`release:`);
-    /// `None` for the development library alone and for user profiles.
-    pub release: Option<Release>,
+    /// Built-ins only: the release catalogs that include it (`releases:`);
+    /// empty for the development library alone and for user profiles.
+    pub releases: Vec<Release>,
 }
 
 impl Profile {
@@ -351,7 +351,7 @@ impl Library {
         Self::load(BUILTIN_YAML, user)
     }
 
-    /// The proposed 0.1 catalog: the built-ins whose `release:` names 0.1
+    /// The proposed 0.1 catalog: the built-ins whose `releases:` lists 0.1
     /// (builtin.yaml is the one place the catalog is decided; TASK-65 signs
     /// off its `/tmp` part). A release package must opt into this policy
     /// explicitly; the development library still exposes the full catalog.
@@ -363,7 +363,7 @@ impl Library {
     /// The 0.1 scope (PRD.md, Scope) is checked against the data rather than
     /// trusted: a released source is of kind `fs` with the `delete` action or
     /// `cargo-target` with its lock protocol, and of an admissible class (the
-    /// loader already refuses `release` on class none). A violation is a bug
+    /// loader already refuses `releases` on class none). A violation is a bug
     /// in builtin.yaml, which the tests load.
     pub fn proposed_release_01(mut self) -> Result<Self, String> {
         if let Some(profile) = self.profiles.values().find(|p| p.origin != Origin::BuiltIn) {
@@ -373,7 +373,7 @@ impl Library {
             ));
         }
         self.profiles
-            .retain(|_, profile| profile.release == Some(Release::V0_1));
+            .retain(|_, profile| profile.releases.contains(&Release::V0_1));
         for profile in self.profiles.values() {
             let in_scope = match &profile.body {
                 Body::Filter(_) => true,

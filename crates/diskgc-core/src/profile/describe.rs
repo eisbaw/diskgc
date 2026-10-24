@@ -363,7 +363,10 @@ pub fn profile_json(p: &Profile) -> Json {
             "liveness_class",
             opt_str(source.and_then(|s| s.liveness_class).map(|c| c.name())),
         ),
-        ("release", opt_str(p.release.map(|r| r.name()))),
+        (
+            "releases",
+            Json::Arr(p.releases.iter().map(|r| Json::str(r.name())).collect()),
+        ),
     ])
 }
 
@@ -596,8 +599,13 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
             }
         }
     }
-    if let Some(release) = profile.release {
-        out.push_str(&format!("  release: \"{}\"\n", release.name()));
+    if !profile.releases.is_empty() {
+        let names: Vec<String> = profile
+            .releases
+            .iter()
+            .map(|r| format!("\"{}\"", r.name()))
+            .collect();
+        out.push_str(&format!("  releases: [{}]\n", names.join(", ")));
     }
     out
 }

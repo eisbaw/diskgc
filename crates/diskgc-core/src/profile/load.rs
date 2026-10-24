@@ -195,19 +195,28 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
             }
             // The admission rule (docs/safety.md, Producer liveness): class
             // none is not admissible, so no release catalog may hold it.
-            if spec.release.is_some() && spec.liveness_class == Some(LivenessClass::NoContract) {
-                problems.push(
-                    "a built-in of `liveness_class: none` cannot be in a `release` catalog \
-                     (docs/safety.md, Producer liveness)"
-                        .to_owned(),
-                );
+            if !spec.releases.is_empty() {
+                if spec.liveness_class == Some(LivenessClass::NoContract) {
+                    problems.push(
+                        "a built-in of `liveness_class: none` cannot be in a `releases` catalog \
+                         (docs/safety.md, Producer liveness)"
+                            .to_owned(),
+                    );
+                }
+                let mut seen = Vec::new();
+                for release in &spec.releases {
+                    if seen.contains(release) {
+                        problems.push(format!("`releases` names \"{}\" twice", release.name()));
+                    }
+                    seen.push(*release);
+                }
             }
         }
         Origin::User | Origin::UserOverride => {
             for (field, present) in [
                 ("verified_with", spec.verified_with.is_some()),
                 ("liveness_class", spec.liveness_class.is_some()),
-                ("release", spec.release.is_some()),
+                ("releases", !spec.releases.is_empty()),
             ] {
                 if present {
                     problems.push(format!("`{field}` is for built-in profiles only"));
@@ -235,7 +244,7 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
             description: spec.description.clone(),
             origin,
             body,
-            release: spec.release,
+            releases: spec.releases.clone(),
         }),
         _ => Err(problems),
     }

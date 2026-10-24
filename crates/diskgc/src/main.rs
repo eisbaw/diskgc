@@ -1105,6 +1105,10 @@ mod tests {
         assert!(parse_configured_seed(OsStr::new("18446744073709551616")).is_err());
     }
 
+    /// The literal names are deliberate: the catalog is derived from
+    /// builtin.yaml's `releases:` (Library::proposed_release_01), and this
+    /// list is the second key a widening of the 0.1 catalog must turn
+    /// (with TASK-65's sign-off), not a stale copy to derive away.
     #[test]
     fn proposed_catalog_keeps_only_cargo_and_idle_filters_on_every_listing_surface() {
         let library = Library::builtin()

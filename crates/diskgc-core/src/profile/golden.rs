@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    Action, Body, Cwd, EntryType, Finds, IdleFor, Library, LivenessClass, LivenessContract, Roots,
-    Source, SourceAnchor,
+    Action, Body, Cwd, EntryType, Finds, IdleFor, Library, LivenessClass, LivenessContract,
+    Release, Roots, Source, SourceAnchor,
 };
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
@@ -983,7 +983,8 @@ struct LivenessRow {
     class: LivenessClass,
     residuals: String,
     verdict: Verdict,
-    /// The Verdict cell records a dated decision of Mark's ("Mark, 2026-").
+    /// The Verdict cell records Mark's dated admission ("admitted by Mark,
+    /// 2026-..."): a dated Mark decision about something else does not count.
     decided: bool,
 }
 
@@ -1049,7 +1050,7 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             class,
             residuals: row[4].trim().to_owned(),
             verdict: Verdict::of(&row[5]),
-            decided: row[5].contains("Mark, 20"),
+            decided: row[5].contains("dmitted by Mark, 20"),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -1200,7 +1201,7 @@ fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
                         checkouts_allow: Some(source.checkouts == Checkouts::Allow),
                     },
                     class: source.liveness_class,
-                    released: profile.release.is_some(),
+                    released: profile.releases.contains(&Release::V0_1),
                 },
                 Body::Filter(_) => Builtin {
                     source: false,
@@ -1211,7 +1212,7 @@ fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
                         checkouts_allow: None,
                     },
                     class: None,
-                    released: profile.release.is_some(),
+                    released: profile.releases.contains(&Release::V0_1),
                 },
             };
             (profile.name.clone(), builtin)
@@ -1264,11 +1265,11 @@ fn the_proposed_release_catalog_is_the_release_data() {
 /// Docker kind) is refused when the catalog is built, not trusted.
 #[test]
 fn the_proposed_release_catalog_refuses_an_out_of_scope_source() {
-    let yaml = "- name: c\n  category: c\n  description: d\n  find: {roots: required, paths: [.cache/c], type: dir}\n  action: {command: [tool, clean, \"{path}\"]}\n  examples: {match: [/home/m/.cache/c]}\n  verified_with: v\n  liveness_class: delegated\n  release: \"0.1\"\n";
+    let yaml = "- name: c\n  category: c\n  description: d\n  find: {roots: required, paths: [.cache/c], type: dir}\n  action: {command: [tool, clean, \"{path}\"]}\n  examples: {match: [/home/m/.cache/c]}\n  verified_with: v\n  liveness_class: delegated\n  releases: [\"0.1\"]\n";
     let library = Library::load(yaml, &[]).unwrap_or_else(|e| panic!("{e}"));
     let error = library.proposed_release_01().expect_err("a command action");
     assert!(error.contains("`c` is outside the 0.1 scope"), "{error}");
-    let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  release: \"0.1\"\n";
+    let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  releases: [\"0.1\"]\n";
     let library = Library::load(filters_only, &[]).unwrap_or_else(|e| panic!("{e}"));
     let error = library.proposed_release_01().expect_err("no source");
     assert!(error.contains("has no source"), "{error}");
