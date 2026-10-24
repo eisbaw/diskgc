@@ -436,12 +436,22 @@ development builds, the pre-release sandbox gate,
 ## Output
 
 - stdout carries only the result. Human mode: silent when nothing needed
-  doing (like `cp`); otherwise a summary. When the goal remains unmet, it
-  names each kept candidate and its reason (grouped by reason after five),
-  omitting Cargo targets whose previous reclaim left only lock files. The
-  summary lists preflight profile refusals separately from kept candidates.
-  Human results, including dry runs, report elapsed time and, when present,
-  open deleted files by process count, bytes, and the largest three holders.
+  doing (like `cp`); otherwise a summary with one line per candidate and
+  its final outcome over every tier: `reclaimed PATH: CHANGE` (the first
+  ten, then a count), `reclaimed part-way PATH: CHANGE, then kept: ...`, or
+  `kept PATH: REASON, DIAGNOSTIC`, where a candidate no tier reclaimed
+  carries the refusal of the last tier that judged it (grouped by reason
+  after five), and Cargo targets whose previous reclaim left only lock
+  files are omitted. Lines name their tier (`[TIER]`) when the run had
+  more than one. The summary lists preflight profile refusals separately
+  from kept candidates. A dry run lists each candidate once, as `would
+  reclaim`, `eligible, not needed` (the estimates before it already cover
+  the goal) or `kept`, and says what the candidates it would take free by
+  estimate against what the goal needs. Its per-candidate verdicts are not
+  repeated on stderr. Human results, including dry runs, report elapsed
+  time and, when present, open deleted files that hold space by process
+  count, bytes, and the largest three holders (holders of 0 B are left
+  out).
   `exhausted` is rendered
   as “nothing more could be reclaimed” in human mode; the JSON status remains
   `exhausted`. When two different byte counts would round to the same human

@@ -46,6 +46,7 @@ fn full() -> Report {
         operation: "cargo lock protocol".into(),
         checkouts: Checkouts::Allow,
         build_evidence: None,
+        detail: None,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some(Reason::NotIdle), None)];
     r.actions = vec![ActionEntry {
@@ -388,6 +389,7 @@ fn target_met_and_eligible_are_derived() {
     assert!(got["avail_after_bytes"].is_null());
     assert!(got["target_met"].is_null());
     r.status = Status::Error;
+    r.plan.clear();
     let text = r.summary().expect("prints");
     assert!(
         text.starts_with("error: unknown available") && text.contains("observed change unknown"),
@@ -497,18 +499,25 @@ fn the_summary_is_silent_only_when_nothing_needed_doing() {
     assert_eq!(quiet.summary(), None);
     let mut freed = full();
     freed.errors.clear();
+    freed.plan.clear();
     let text = freed.summary().expect("something was done");
     assert!(text.starts_with("met: 90 B available on / "), "{text}");
-    assert!(text.contains("1 action(s)"), "{text}");
+    assert!(
+        text.contains("1 reclaimed (observed change -3 B)"),
+        "{text}"
+    );
+    assert!(text.contains("\n  reclaimed /t: -3 B"), "{text}");
     let mut dry = full();
     dry.status = Status::DryRun;
     let text = dry.summary().expect("a dry run always prints");
     assert!(text.starts_with("dry run: 10 B available on / "), "{text}");
-    assert!(text.contains("eligible"), "{text}");
+    // One candidate, eligible in its row: the not_idle row of the same
+    // candidate does not make it read as kept.
     assert!(
-        text.contains("skip not_idle  /home/mark/src/app/target"),
+        text.contains("would reclaim /home/mark/src/app/target: est. 7 B"),
         "{text}"
     );
+    assert!(!text.contains("kept /home/mark/src/app/target"), "{text}");
     assert!(text.contains("took 123 ms"), "{text}");
     assert!(
         text.contains("held by deleted files: 1 process(es), 5 B"),
@@ -516,6 +525,7 @@ fn the_summary_is_silent_only_when_nothing_needed_doing() {
     );
     let mut exhausted = full();
     exhausted.status = Status::Exhausted;
+    exhausted.plan.clear();
     assert!(
         exhausted
             .summary()
@@ -528,6 +538,7 @@ fn the_summary_is_silent_only_when_nothing_needed_doing() {
 fn human_failure_names_kept_targets_and_held_deleted_files() {
     let mut report = full();
     report.status = Status::Exhausted;
+    report.plan.clear();
     report.actions.clear();
     report.errors.clear();
     report.duration_ms = Some(1_234);
@@ -556,7 +567,7 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
     let text = report.summary().expect("summary");
     assert!(text.contains("2 kept, 0 error(s); took 1.234 s"), "{text}");
     assert!(text.contains("kept /u: in_use"), "{text}");
-    assert!(text.contains("kept /busy-build: locked"), "{text}");
+    assert!(text.contains("kept /busy-build: locked\n"), "{text}");
     assert!(!text.contains("/already-empty"), "{text}");
     assert!(
         text.contains("held by deleted files: 1 process(es), 5 B; top: pid 42 (cat, 5 B)"),
@@ -583,7 +594,7 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
     }
     report.skipped[0].candidate = "/tmp/held-0\nspoofed".into();
     let text = report.summary().expect("summary");
-    assert!(text.contains("7 kept: in_use"), "{text}");
+    assert!(text.contains("7 kept: in_use; examples: "), "{text}");
     assert!(text.contains("(2 more)"), "{text}");
     assert!(text.contains("held-0\\nspoofed"), "{text}");
     assert!(!text.lines().any(|line| line == "spoofed"), "{text}");
@@ -650,7 +661,8 @@ fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
         },
     ];
     let text = report.summary().expect("summary");
-    assert!(text.contains("4 process(es), 14 B"), "{text}");
+    // pid 10 holds 0 B: it pins nothing and is left out.
+    assert!(text.contains("3 process(es), 14 B"), "{text}");
     assert!(
         text.contains("pid 13 (d, 7 B), pid 11 (b, 5 B), pid 12 (c, 2 B)"),
         "{text}"
@@ -711,4 +723,234 @@ fn human_summary_says_a_busy_host_kept_candidates_and_to_run_again() {
         ),
         "{text}"
     );
+}
+
+fn tier_skip(tier: &str, candidate: &str, reason: Reason, detail: &str) -> SkipEntry {
+    SkipEntry {
+        detail: Some(detail.into()),
+        ..skip(candidate, tier, "cargo-target", reason)
+    }
+}
+
+fn tier_action(tier: &str, candidate: &str, delta: i64) -> ActionEntry {
+    ActionEntry {
+        tier: tier.into(),
+        profile: "cargo-target".into(),
+        candidate: candidate.into(),
+        avail_delta_bytes: Some(delta),
+        duration_ms: 1,
+        idle_age_seconds: None,
+        count: 1,
+    }
+}
+
+/// TASK-155 (walk dumps 25, 26): a two-tier policy judges a target once per
+/// tier. The summary has one line per candidate with its final outcome: a
+/// target a later tier reclaimed is not also kept, and a kept one carries
+/// the reason of the last tier that judged it, once.
+#[test]
+fn human_summary_has_one_final_outcome_per_candidate_across_tiers() {
+    let mut report = Report::new(Status::Met, Some(Path::new("/home/t")));
+    report.mount = Some("/home/t".into());
+    report.skipped = vec![
+        tier_skip(
+            "stale",
+            "/s/lib/target",
+            Reason::Protected,
+            "overlaps a protected match",
+        ),
+        tier_skip(
+            "stale",
+            "/s/fw/target",
+            Reason::NotIdle,
+            "last build 1 h ago; idle_for 7d required",
+        ),
+        tier_skip(
+            "stale",
+            "/s/web/target",
+            Reason::NotIdle,
+            "last build 1 h ago; idle_for 7d required",
+        ),
+        tier_skip(
+            "stale",
+            "/s/slow/target",
+            Reason::NotIdle,
+            "last build 1 h ago; idle_for 7d required",
+        ),
+        tier_skip(
+            "recent",
+            "/s/lib/target",
+            Reason::Protected,
+            "overlaps a protected match",
+        ),
+        SkipEntry {
+            process_blockers: Some(vec![
+                crate::engine::ProcessBlocker {
+                    pid: 4269,
+                    command: Some("webapp".into()),
+                    evidence: crate::engine::ProcessEvidence::Exe,
+                },
+                crate::engine::ProcessBlocker {
+                    pid: 4269,
+                    command: Some("webapp".into()),
+                    evidence: crate::engine::ProcessEvidence::TargetExe,
+                },
+            ]),
+            ..tier_skip(
+                "recent",
+                "/s/web/target",
+                Reason::InUse,
+                "a very long evidence list",
+            )
+        },
+    ];
+    report.actions = vec![tier_action("recent", "/s/fw/target", 1 << 20)];
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("1 reclaimed (observed change +1.0 MiB), 3 kept, 0 error(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  reclaimed /s/fw/target: +1.0 MiB [recent]"),
+        "{text}"
+    );
+    assert!(!text.contains("kept /s/fw/target"), "{text}");
+    assert_eq!(text.matches("/s/lib/target").count(), 1, "{text}");
+    assert!(
+        text.contains("kept /s/web/target: in_use, held by pid 4269 (webapp) [recent]"),
+        "{text}"
+    );
+    assert!(!text.contains("web/target: not_idle"), "{text}");
+    assert!(
+        text.contains(
+            "kept /s/slow/target: not_idle, last build 1 h ago; idle_for 7d required [stale]"
+        ),
+        "{text}"
+    );
+}
+
+/// A reclaim that deleted entries and then stopped is an action and a skip
+/// of the same candidate: one line saying both.
+#[test]
+fn a_part_way_reclaim_is_one_line_naming_why_it_stopped() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")));
+    report.actions = vec![tier_action("t", "/w/a/target", 4096)];
+    report.skipped = vec![tier_skip(
+        "t",
+        "/w/a/target",
+        Reason::Changed,
+        "a profile changed",
+    )];
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("1 reclaimed (observed change +4.0 KiB), 0 kept"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "reclaimed part-way /w/a/target: +4.0 KiB, then kept: changed, a profile changed"
+        ),
+        "{text}"
+    );
+}
+
+fn plan_row(tier: &str, candidate: &str, reason: Option<Reason>, bytes: Option<u64>) -> PlanEntry {
+    PlanEntry {
+        group: "g".into(),
+        tier: tier.into(),
+        profile: "cargo-target".into(),
+        candidate: candidate.into(),
+        reason,
+        estimated_bytes: bytes,
+        operation: "cargo lock protocol".into(),
+        checkouts: Checkouts::Allow,
+        build_evidence: None,
+        detail: reason.map(|_| "last build 1 h ago; idle_for 7d required".into()),
+    }
+}
+
+/// TASK-147: a dry run says what a reclaim would take, by the estimates,
+/// and whether that reaches the goal; each candidate once, the earliest
+/// tier that would take it deciding.
+#[test]
+fn a_dry_run_shows_what_would_be_reclaimed_against_the_goal() {
+    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")));
+    report.mount = Some("/w".into());
+    report.duration_ms = Some(5);
+    report.avail_before_bytes = Some(100);
+    report.min_free_bytes = Some(200);
+    report.target_free_bytes = Some(250);
+    report.plan = vec![
+        plan_row("stale", "/w/a", Some(Reason::NotIdle), None),
+        plan_row("stale", "/w/b", Some(Reason::NotIdle), None),
+        plan_row("stale", "/w/c", Some(Reason::NotIdle), None),
+        plan_row("recent", "/w/a", None, Some(100)),
+        plan_row("recent", "/w/b", None, Some(60)),
+        plan_row("recent", "/w/c", Some(Reason::NotIdle), None),
+    ];
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.starts_with(
+            "dry run: 100 B available on /w (min-free 200 B, target-free 250 B); would reclaim 2 \
+             of 2 eligible, est. 160 B of 150 B needed: the goal is reachable by estimate; 1 kept \
+             (took 5 ms):"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  would reclaim /w/a: est. 100 B [recent]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  would reclaim /w/b: est. 60 B [recent]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  kept /w/c: not_idle, last build 1 h ago; idle_for 7d required [recent]"),
+        "{text}"
+    );
+    assert_eq!(text.matches("/w/a").count(), 1, "{text}");
+    assert!(
+        text.contains("operations: cargo-target: cargo lock protocol"),
+        "{text}"
+    );
+
+    // Less needed: the second eligible one is not needed.
+    report.target_free_bytes = Some(200);
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.contains("\n  eligible, not needed /w/b: est. 60 B"),
+        "{text}"
+    );
+    // More needed than all estimates: short, by how much.
+    report.target_free_bytes = Some(400);
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.contains("est. 160 B of 300 B needed: short of the goal by 140 B by estimate"),
+        "{text}"
+    );
+    // Already at min-free: a reclaim takes nothing.
+    report.avail_before_bytes = Some(300);
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.contains("a reclaim would take nothing (2 eligible, 1 kept)"),
+        "{text}"
+    );
+    assert!(text.contains("eligible, not needed /w/a"), "{text}");
+}
+
+/// A deleted file of 0 B pins no space: no held line, and a met run with
+/// nothing else to say stays silent.
+#[test]
+fn zero_byte_holders_of_deleted_files_are_not_reported() {
+    let mut report = Report::new(Status::Met, Some(Path::new("/tmp")));
+    report.held_by_deleted_files = vec![HeldEntry {
+        pid: 4274,
+        command: "python3.14".into(),
+        bytes: 0,
+    }];
+    assert_eq!(report.summary(), None);
+    report.status = Status::DryRun;
+    let text = report.summary().expect("a dry run prints");
+    assert!(!text.contains("held by deleted files"), "{text}");
 }

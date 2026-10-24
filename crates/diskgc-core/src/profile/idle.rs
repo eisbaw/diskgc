@@ -55,6 +55,24 @@ impl IdleFor {
     }
 }
 
+/// Whole seconds from `last` to `now`, for messages only (verdicts use
+/// [`IdleFor::verdict`]): 0 when `last` is unknown or in the future.
+pub fn age_secs(now: Timestamp, last: Option<Timestamp>) -> u64 {
+    last.map_or(0, |last| distance_secs(last, now))
+}
+
+/// Whole seconds `last` lies after `now`, for messages only: 0 when it is
+/// unknown or in the past.
+pub fn future_secs(now: Timestamp, last: Option<Timestamp>) -> u64 {
+    last.map_or(0, |last| distance_secs(now, last))
+}
+
+/// Whole seconds from `earlier` to `later`, 0 when `later` is earlier.
+fn distance_secs(earlier: Timestamp, later: Timestamp) -> u64 {
+    let nanos = |t: Timestamp| i128::from(t.secs) * 1_000_000_000 + i128::from(t.nanos);
+    u64::try_from((nanos(later) - nanos(earlier)) / 1_000_000_000).unwrap_or(0)
+}
+
 /// An [`IdleFor`] verdict. Three-way, so that an age diskgc cannot tell
 /// selects nothing under either polarity: `filter:idle-3d` must not take
 /// it as idle, and `!filter:idle-30d` must not take it as recent.

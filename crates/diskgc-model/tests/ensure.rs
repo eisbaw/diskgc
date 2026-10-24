@@ -1804,7 +1804,10 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     assert!(report.actions.is_empty() && report.skipped.is_empty());
     let text = report.summary().expect("a dry run always prints");
     assert!(
-        text.contains(OLD) && text.contains("skip not_idle"),
+        text.contains(&format!("eligible, not needed {OLD}: est. "))
+            && text.contains(&format!(
+                "kept {NEW}: not_idle, last build 1 d ago; idle_for 7d required"
+            )),
         "{text}"
     );
 

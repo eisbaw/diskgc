@@ -189,9 +189,37 @@ pub fn format_duration(duration: Duration) -> String {
     format!("{}{unit}", secs / per)
 }
 
+/// An age or interval of `seconds` for people, in its largest whole unit
+/// (truncated, so a reader never sees an age larger than the real one):
+/// `56 s`, `59 m`, `1 h`, `6 d`. Never parsed back; config text uses
+/// [`format_duration`].
+pub fn format_age(seconds: u64) -> String {
+    let (amount, unit) = UNITS
+        .iter()
+        .filter(|(unit, _)| *unit != 'w')
+        .find(|(_, per)| seconds >= *per)
+        .map_or((seconds, 's'), |(unit, per)| (seconds / per, *unit));
+    format!("{amount} {unit}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ages_truncate_to_their_largest_whole_unit() {
+        for (seconds, text) in [
+            (0, "0 s"),
+            (56, "56 s"),
+            (60, "1 m"),
+            (3_599, "59 m"),
+            (3_742, "1 h"),
+            (86_399, "23 h"),
+            (604_800, "7 d"),
+        ] {
+            assert_eq!(format_age(seconds), text, "{seconds}");
+        }
+    }
 
     #[test]
     fn durations_are_an_integer_and_a_unit() {

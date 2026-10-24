@@ -931,13 +931,20 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: 
         "{:?}",
         run.stdout
     );
+    // One line per candidate: those a reclaim would take (or that the goal
+    // does not need), in its order, then the kept ones (`VERB PATH: WHY`).
     let eligible: Vec<&str> = lines
         .iter()
-        .filter(|l| l.trim_start().starts_with("eligible"))
+        .filter(|l| {
+            let l = l.trim_start();
+            l.starts_with("would reclaim ") || l.starts_with("eligible, not needed ")
+        })
         .copied()
         .collect();
-    let mentions =
-        |line: &str, target: &Path| line.split_whitespace().any(|w| Path::new(w) == target);
+    let mentions = |line: &str, target: &Path| {
+        line.split_whitespace()
+            .any(|w| Path::new(w.trim_end_matches(':')) == target)
+    };
     ensure!(
         eligible.len() == idle.len() && eligible.iter().zip(idle).all(|(l, t)| mentions(l, t)),
         "eligible, oldest first: {idle:?}; plan:\n{}",
@@ -947,12 +954,22 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: 
         ensure!(
             lines
                 .iter()
-                .any(|l| l.trim_start().starts_with("skip ") && mentions(l, target)),
+                .any(|l| l.trim_start().starts_with("kept ") && mentions(l, target)),
             "{} is not skipped in the plan:\n{}",
             target.display(),
             run.stdout
         );
     }
+    // TASK-147: the plan is the dry run's verdicts; stderr does not repeat
+    // them line by line.
+    ensure!(
+        !run.stderr.lines().any(|l| idle
+            .iter()
+            .chain(busy)
+            .any(|t| l.contains(&t.display().to_string()))),
+        "the dry run repeats per-candidate verdicts on stderr:\n{}",
+        run.stderr
+    );
     let held_lines: Vec<_> = lines
         .iter()
         .filter(|line| line.trim_start().starts_with("held by deleted files:"))

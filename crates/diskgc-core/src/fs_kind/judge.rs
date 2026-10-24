@@ -48,10 +48,11 @@ use crate::host::{
     Timestamp, is_single_name,
 };
 use crate::outcome::{Judged, Stop};
-use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown};
+use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown, age_secs};
 use crate::resolve::{
     MountScreenError, ResolveError, Resolved, Want, open_beneath, resolve_in, screen_mount_chain,
 };
+use crate::units::{format_age, format_duration};
 
 /// What a candidate of one tier is judged by: the source's `find` (its own
 /// `where`), the walk's rules (owners, IPC policy, entry budget, checkout
@@ -613,18 +614,15 @@ pub(crate) fn judge_idle<H: Host>(
     if let Some(idle_for) = idle.at_least {
         match idle_for.verdict(newest, now) {
             Idleness::Idle => Ok(()),
-            Idleness::NotIdle => {
-                let last = newest.map_or(0, |t| t.secs);
-                Err(Skip::new(
-                    Reason::NotIdle,
-                    at.to_owned(),
-                    format!(
-                        "newest change at {last} s, {} s before now; idle_for {} s required",
-                        now.secs - last,
-                        idle_for.0.as_secs()
-                    ),
-                ))
-            }
+            Idleness::NotIdle => Err(Skip::new(
+                Reason::NotIdle,
+                at.to_owned(),
+                format!(
+                    "newest change {} ago; idle_for {} required",
+                    format_age(age_secs(now, newest)),
+                    format_duration(idle_for.0)
+                ),
+            )),
             Idleness::Unknown(unknown) => {
                 let reason = match unknown {
                     Unknown::Unanswered => Reason::UnsupportedFs,
@@ -647,9 +645,10 @@ pub(crate) fn judge_idle<H: Host>(
                 Reason::TooIdle,
                 at.to_owned(),
                 format!(
-                    "newest change is at least {} s old; !filter:idle-{}s excludes it",
-                    bound.0.as_secs(),
-                    bound.0.as_secs()
+                    "newest change {} ago, at least {}; !filter:idle-{} excludes it",
+                    format_age(age_secs(now, newest)),
+                    format_duration(bound.0),
+                    format_duration(bound.0)
                 ),
             )),
             Idleness::Unknown(Unknown::Unanswered) => Err(Skip::new(

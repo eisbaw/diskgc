@@ -14,8 +14,9 @@ use crate::engine::{
 };
 use crate::host::{FileType, Host, MonoTime, Timestamp};
 use crate::inuse::{Checker, Scan};
-use crate::profile::{IdleWindow, Idleness, Unknown};
+use crate::profile::{IdleWindow, Idleness, Unknown, age_secs, future_secs};
 use crate::resolve::Resolved;
+use crate::units::{format_age, format_duration};
 
 /// What a target holds now, walked but not judged for idleness or use: a
 /// tally of one target ([`tally`]), the order key of a tier's `oldest`
@@ -581,10 +582,9 @@ pub(super) fn judge_idle<H: Host>(
             Idleness::NotIdle => skip(
                 Reason::NotIdle,
                 format!(
-                    "last build at {} s, {} s before now; idle_for {} s required",
-                    last.map_or(0, |t| t.secs),
-                    now.secs - last.map_or(0, |t| t.secs),
-                    idle_for.0.as_secs()
+                    "last build {} ago; idle_for {} required",
+                    format_age(age_secs(now, last)),
+                    format_duration(idle_for.0)
                 ),
             ),
             Idleness::Unknown(Unknown::Unanswered) => skip(
@@ -596,9 +596,8 @@ pub(super) fn judge_idle<H: Host>(
             Idleness::Unknown(Unknown::InFuture) => skip(
                 Reason::FutureTime,
                 format!(
-                    "its last build at {} s lies after now ({} s): its age says nothing",
-                    last.map_or(0, |t| t.secs),
-                    now.secs
+                    "its last build lies {} in the future: its age says nothing",
+                    format_age(future_secs(now, last))
                 ),
             ),
         }?;
@@ -609,9 +608,10 @@ pub(super) fn judge_idle<H: Host>(
             Idleness::Idle => skip(
                 Reason::TooIdle,
                 format!(
-                    "last build is at least {} s old; !filter:idle-{}s excludes it",
-                    bound.0.as_secs(),
-                    bound.0.as_secs()
+                    "last build {} ago, at least {}; !filter:idle-{} excludes it",
+                    format_age(age_secs(now, last)),
+                    format_duration(bound.0),
+                    format_duration(bound.0)
                 ),
             ),
             Idleness::Unknown(Unknown::Unanswered) => skip(

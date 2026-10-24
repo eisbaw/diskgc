@@ -64,7 +64,7 @@ use crate::resolve::{
     ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
 };
 use crate::select::{self, Factor};
-use crate::units::{Size, format_bytes};
+use crate::units::{Size, format_age, format_bytes};
 
 fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
     // Usage errors precede a run. Once work has started, interruption wins
@@ -110,16 +110,7 @@ fn observed_age(now: Timestamp, newest: Option<Timestamp>) -> String {
     let Some(seconds) = age_seconds(now, Some(newest)) else {
         return "in the future".to_owned();
     };
-    let (amount, unit) = if seconds >= 86_400 {
-        (seconds / 86_400, "d")
-    } else if seconds >= 3_600 {
-        (seconds / 3_600, "h")
-    } else if seconds >= 60 {
-        (seconds / 60, "m")
-    } else {
-        (seconds, "s")
-    };
-    format!("{amount} {unit} ago")
+    format!("{} ago", format_age(seconds))
 }
 
 /// Record the stage that was in progress when a cooperative deadline was
@@ -2408,14 +2399,10 @@ fn dry_run_inner<H: Host>(
             }
         };
         if protected {
-            log(&format!(
-                "{} {}: skip protected (overlaps a protected source match)",
-                tier.name,
-                candidate.display()
-            ));
             let entry = &mut report.plan[index];
             entry.reason = Some(Reason::Protected);
             entry.estimated_bytes = None;
+            entry.detail = Some("overlaps a protected source match".to_owned());
         }
     }
     report.plan.extend(root_skips);
@@ -2570,6 +2557,16 @@ fn plan_entry(
         operation: tier.operation(),
         checkouts: tier.checkouts,
         build_evidence: None,
+        detail: None,
+    }
+}
+
+/// The plan row of a candidate `skip` refused. A dry run's verdicts are its
+/// plan (stdout), so they are not logged as well.
+fn plan_skip(tier: &Tier, candidate: &Path, skip: &Skip) -> PlanEntry {
+    PlanEntry {
+        detail: Some(skip.detail.clone()),
+        ..plan_entry(tier, candidate, Some(skip.reason), None)
     }
 }
 
@@ -2616,7 +2613,7 @@ fn plan_cargo<H: Host>(
             let misconfigured = misconfigured_roots(tier, &found);
             for skip in &found.refused {
                 if !misconfigured.contains(&skip) {
-                    skipped.push(entry(&skip.path, Some(skip.reason), None));
+                    skipped.push(plan_skip(tier, &skip.path, skip));
                 }
             }
             for skip in &misconfigured {
@@ -2655,17 +2652,16 @@ fn plan_cargo<H: Host>(
                         }
                     };
                 if let Some(profile) = excluded {
-                    skipped.push(entry(&target.path, Some(Reason::Excluded), None));
-                    log(&format!(
-                        "{}: {} overlaps !profile:{profile}",
-                        tier.name,
-                        target.path.display()
-                    ));
+                    let skip = Skip::new(
+                        Reason::Excluded,
+                        target.path.clone(),
+                        format!("overlaps !profile:{profile}"),
+                    );
+                    skipped.push(plan_skip(tier, &target.path, &skip));
                     continue;
                 }
                 if let Some(skip) = other_fs(target, dev) {
-                    log_skip(log, tier, &skip);
-                    skipped.push(entry(&target.path, Some(skip.reason), None));
+                    skipped.push(plan_skip(tier, &target.path, &skip));
                     continue;
                 }
                 match cargo_target::eligibility(
@@ -2680,20 +2676,10 @@ fn plan_cargo<H: Host>(
                     deadline,
                 ) {
                     Ok(Ok(e)) => {
-                        log(&format!(
-                            "{} {}: eligible, {} entries, {} (last build {})",
-                            tier.name,
-                            target.path.display(),
-                            e.entries,
-                            format_bytes(e.bytes),
-                            e.last_build
-                                .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
-                        ));
                         eligible.push((e.last_build, entry(&target.path, None, Some(e.bytes))));
                     }
                     Ok(Err(skip)) => {
-                        log_skip(log, tier, &skip);
-                        skipped.push(entry(&target.path, Some(skip.reason), None));
+                        skipped.push(plan_skip(tier, &target.path, &skip));
                     }
                     Err(stop) => {
                         stopped = Some(stop);
@@ -2774,10 +2760,7 @@ fn plan_fs<H: Host>(
         record_error(report, log, safety_error(tier, excluded(skip)));
     }
     for skip in found.refused.iter().filter(|s| !is_misconfigured(tier, s)) {
-        log_skip(log, tier, skip);
-        planned
-            .skipped
-            .push(plan_entry(tier, &skip.path, Some(skip.reason), None));
+        planned.skipped.push(plan_skip(tier, &skip.path, skip));
     }
     if !misconfigured.is_empty() {
         return planned;
@@ -2785,23 +2768,13 @@ fn plan_fs<H: Host>(
     for (path, source_evidence, verdict) in &found.judged {
         match verdict {
             Ok(e) => {
-                log(&format!(
-                    "{} {}: eligible, {} entries, {} (newest change {})",
-                    tier.name,
-                    path.display(),
-                    e.entries,
-                    format_bytes(e.bytes),
-                    e.newest_change
-                        .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
-                ));
                 let mut entry = plan_entry(tier, path, None, Some(e.bytes));
                 entry.build_evidence =
                     eligible_build_evidence(host, e.source_evidence.as_ref(), e.newest_change);
                 planned.eligible.push((e.newest_change, entry));
             }
             Err(skip) => {
-                log(&format!("{} {}: skip {skip}", tier.name, path.display()));
-                let mut entry = plan_entry(tier, path, Some(skip.reason), None);
+                let mut entry = plan_skip(tier, path, skip);
                 entry.build_evidence = skipped_build_evidence(source_evidence.as_ref());
                 planned.skipped.push(entry);
             }
@@ -3231,7 +3204,7 @@ fn plan_fs_union<H: Host>(
         .iter()
         .filter(|(index, skip)| !is_misconfigured_source(&sources[*index], skip))
     {
-        let mut entry = plan_entry(tier, &skip.path, Some(skip.reason), None);
+        let mut entry = plan_skip(tier, &skip.path, skip);
         entry.profile = sources[*index].profile.to_owned();
         entry.checkouts = sources[*index].checkouts;
         planned.skipped.push(entry);
@@ -3256,8 +3229,7 @@ fn plan_fs_union<H: Host>(
         match union_guard_veto(host, candidate, &sources, rules, dev, deadline) {
             Ok(Some((index, skip))) => {
                 let (source_index, found) = &candidate.guard_by[index];
-                log_skip(log, tier, &skip);
-                let mut entry = plan_entry(tier, &skip.path, Some(skip.reason), None);
+                let mut entry = plan_skip(tier, &skip.path, &skip);
                 entry.profile = sources[*source_index].profile.to_owned();
                 entry.checkouts = sources[*source_index].checkouts;
                 entry.build_evidence = skipped_build_evidence(found.source_evidence.as_ref());
@@ -3347,9 +3319,8 @@ fn plan_fs_union<H: Host>(
             match fs_kind::contract_veto(host, &contracts, &mut checker, deadline, record) {
                 Ok(Ok(())) => {}
                 Ok(Err((veto, skip))) => {
-                    log_skip(log, tier, &skip);
                     let vetoing = claimed.get(veto).map_or(*index, |(source, _)| *source);
-                    let mut entry = plan_entry(tier, path, Some(skip.reason), None);
+                    let mut entry = plan_skip(tier, path, &skip);
                     entry.profile = sources[vetoing].profile.to_owned();
                     entry.checkouts = sources[vetoing].checkouts;
                     entry.build_evidence = skipped_build_evidence(candidate.discovered(vetoing));
@@ -3377,7 +3348,7 @@ fn plan_fs_union<H: Host>(
                         ))
                     })
                 }) {
-                    let mut entry = plan_entry(tier, path, Some(skip.reason), None);
+                    let mut entry = plan_skip(tier, path, &skip);
                     entry.profile = sources[refusing_index].profile.to_owned();
                     entry.checkouts = checkouts;
                     entry.build_evidence =
@@ -3395,19 +3366,11 @@ fn plan_fs_union<H: Host>(
             // row's records discovery, docs/reference.md, Output).
             entry.build_evidence =
                 eligible_build_evidence(host, tally.source_evidence.as_ref(), tally.newest_change);
-            log(&format!(
-                "{}: {}: eligible by `{}` ({} estimated)",
-                tier.name,
-                entry.candidate.display(),
-                source.profile,
-                format_bytes(tally.bytes)
-            ));
             planned.eligible.push((tally.newest_change, entry));
         } else {
             let (index, path, skip) =
                 first_skip.expect("a discovered union candidate has a verdict");
-            log_skip(log, tier, &skip);
-            let mut entry = plan_entry(tier, path, Some(skip.reason), None);
+            let mut entry = plan_skip(tier, path, &skip);
             entry.profile = sources[index].profile.to_owned();
             entry.checkouts = sources[index].checkouts;
             entry.build_evidence = skipped_build_evidence(candidate.discovered(index));

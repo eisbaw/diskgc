@@ -596,7 +596,7 @@ fn the_last_build_is_the_newest_change_anywhere_in_the_profiles_on_both_layouts(
         assert_skip(
             judged(&model, &d.targets[0], Some(1)),
             Reason::NotIdle,
-            "idle_for 86400 s",
+            "idle_for 1d required",
         );
         let e = judged(&model, &d.targets[0], None).unwrap_or_else(|s| panic!("{layout}: {s}"));
         assert_eq!(
@@ -626,7 +626,7 @@ fn an_unknown_age_is_never_idle() {
         "  /tmp/w/p/target/debug/deps/later: {mtime: 2027-01-01T00:00:00Z}",
         "",
     );
-    assert_skip(only_target(&future), Reason::FutureTime, "lies after now");
+    assert_skip(only_target(&future), Reason::FutureTime, "in the future");
 }
 
 // ---- Keep markers, ownership, changes ----
