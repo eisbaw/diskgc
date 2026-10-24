@@ -912,6 +912,24 @@ fn admission_recorded(cell: &str) -> Option<(Decider, &str)> {
     None
 }
 
+/// Whether a Verdict cell records its container tests in one of the two
+/// accepted forms: "Container tests: `a`, `b`" (at least one backticked
+/// test name) or "Container test: pending (TASK-<digits>)".
+fn container_tests_recorded(cell: &str) -> bool {
+    let named = cell
+        .split("Container tests: ")
+        .skip(1)
+        .any(|rest| rest.starts_with('`') && rest[1..].find('`').is_some_and(|end| end > 0));
+    let pending = cell
+        .split("Container test: pending (TASK-")
+        .skip(1)
+        .any(|rest| {
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            digits > 0 && rest[digits..].starts_with(')')
+        });
+    named || pending
+}
+
 /// The class a Class cell starts with: a class's table name followed by
 /// the end, a space, `,` or `:` (`sound (presence marker)`, `verified
 /// heuristic: ...`).
@@ -957,7 +975,7 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             residuals: row[4].trim().to_owned(),
             verdict: Verdict::of(&row[5]),
             decided: admission_recorded(&row[5]).is_some(),
-            container_tested: row[5].contains("Container test"),
+            container_tested: container_tests_recorded(&row[5]),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -1454,6 +1472,21 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
         ]
     );
     assert_eq!(class_of("soundly"), None);
+    for (cell, recorded) in [
+        ("Shipped. Container test: pending (TASK-137).", true),
+        (
+            "Shipped. Container tests: `pytest_lifecycle_is_pinned`.",
+            true,
+        ),
+        ("Shipped. Container test: none.", false),
+        ("Shipped; no Container test yet.", false),
+        ("Shipped. Container test: pending (TASK-).", false),
+        ("Shipped. Container test: pending (later).", false),
+        ("Shipped. Container tests: ``.", false),
+        ("Shipped. Container tests: none yet.", false),
+    ] {
+        assert_eq!(container_tests_recorded(cell), recorded, "{cell}");
+    }
     for (cell, recorded) in [
         (
             "Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23.",
