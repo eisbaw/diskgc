@@ -1212,8 +1212,11 @@ pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> Tes
     let mut runs = Vec::new();
     for (name, owners) in [("one", "[tester]"), ("two", "[tester, {uid: 2001}]")] {
         // A user profile with the withdrawn claude-code-tmp's `{uid}` pattern.
+        // Its example expands `{uid}` to 1000 as every example does
+        // (docs/reference.md), so the file loads and the refusal under
+        // test is root mode's, not a failed example.
         let config = format!(
-            "version: 1\nowners: {owners}\nprofiles:\n  - name: claude-code-tmp-probe\n    find: {{roots: [/tmp], paths: ['claude-{{uid}}/-*/*'], type: dir}}\n    action: delete\n    examples: {{match: [/tmp/claude-0/-project/session]}}\n"
+            "version: 1\nowners: {owners}\nprofiles:\n  - name: claude-code-tmp-probe\n    find: {{roots: [/tmp], paths: ['claude-{{uid}}/-*/*'], type: dir}}\n    action: delete\n    examples: {{match: [/tmp/claude-1000/-project/session]}}\n"
         );
         let file = format!("uid-placeholder-{name}.yaml");
         ctx.run_diskgc
