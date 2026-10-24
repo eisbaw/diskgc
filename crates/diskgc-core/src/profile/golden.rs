@@ -1050,7 +1050,7 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             class,
             residuals: row[4].trim().to_owned(),
             verdict: Verdict::of(&row[5]),
-            decided: row[5].contains("dmitted by Mark, 20"),
+            decided: row[5].to_lowercase().contains("admitted by mark, 20"),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {

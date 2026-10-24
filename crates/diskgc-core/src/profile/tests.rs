@@ -661,6 +661,19 @@ fn liveness_class_and_release_load_on_built_ins() {
         Some(vec![Release::V0_1])
     );
     assert_eq!(library.get("t").map(|p| p.releases.clone()), Some(vec![]));
+    // Absent, null and empty all read as the development library only
+    // (docs/reference.md, the `releases` field): the fail-safe reading.
+    for spelling in ["", "  releases:\n", "  releases: ~\n", "  releases: []\n"] {
+        let yaml = format!(
+            "- name: idle-9d\n  category: c\n  description: d\n  where: {{idle_for: 9d}}\n{spelling}"
+        );
+        let library = Library::load(&yaml, &[]).unwrap_or_else(|e| panic!("{e}\n{yaml}"));
+        assert_eq!(
+            library.get("idle-9d").map(|p| p.releases.clone()),
+            Some(vec![]),
+            "{yaml}"
+        );
+    }
     for profile in Library::builtin().expect("built-ins").profiles() {
         if let Body::Source(source) = &profile.body {
             assert!(source.liveness_class.is_some(), "{}", profile.name);
