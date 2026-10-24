@@ -1,10 +1,10 @@
 ---
 id: TASK-39
 title: 'Library: /tmp and Nix leftovers profiles, verified'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 18:01'
+updated_date: '2026-10-24 18:43'
 labels:
   - wave-4
   - config
@@ -53,6 +53,8 @@ From task-68's dry run on the laptop (2026-10-18; numbers and runtimes in task-6
 Orchestrator 2026-10-24 (COMPASS round 2): dropped the TASK-38 edge. Remaining profiles are already in builtin.yaml; their admission is TASK-122's classification, dormant nix-shell sessions are TASK-112 steps 1 and 4. Shrink to verified_with and golden sets, or close into TASK-122 when it runs.
 
 2026-10-24 TASK-122 (master 808a8e8): every remaining TASK-39 profile is classified in docs/reference.md Liveness contracts: node-compile-cache tolerant (Node 24.21.0 probe), Shipped; nix-user-cache verified heuristic, Decision pending; claude-code-tmp, chromium-tmp and playwright-tmp class none, proposed withdrawals with counterexample vectors. Not closed into TASK-122: its ACs (examples, golden sets and verified_with; the dormant nix-shell TMPDIR container test) are not literally the classification. AC1 is met by the existing built-ins and golden tests, AC2 by TASK-112 (nix-shell-tmpdir excluded, the dormant-temp-users container test). Recommendation: close as superseded once Mark rules on the TASK-122 withdrawals.
+
+2026-10-24 closed as superseded by TASK-122 (master 31d3e9d): its profiles were classified there; node-compile-cache Shipped (tolerant, Node 24.21.0 probe), nix-user-cache Shipped (verified heuristic, admitted by mark-emulator for Mark 2026-10-24), claude-code-tmp, chromium-tmp and playwright-tmp withdrawn (class none) with their matching sets kept as user probe vectors; AC2 (dormant nix-shell TMPDIR) is TASK-112's dormant-temp-users container test with nix-shell-tmpdir excluded. Re-admission: TASK-135 (renode), TASK-136 (Chromium updater).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

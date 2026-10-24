@@ -3,10 +3,10 @@ id: TASK-122
 title: >-
   Classify the liveness contract of every shipped built-in source (TASK-112
   admission rule)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-23 16:33'
-updated_date: '2026-10-24 18:02'
+updated_date: '2026-10-24 18:44'
 labels:
   - profiles
   - design
@@ -25,7 +25,7 @@ Why: TASK-112's design (docs/safety.md Producer liveness) makes a liveness contr
 <!-- AC:BEGIN -->
 - [x] #1 Every built-in source in builtin.yaml has a row in docs/reference.md Liveness contracts with its class and residual
 - [x] #2 A test keeps the liveness table and builtin.yaml in sync (every source has exactly one row)
-- [ ] #3 Every row of class none is withdrawn from the built-in library or explicitly recorded as a Mark decision
+- [x] #3 Every row of class none is withdrawn from the built-in library or explicitly recorded as a Mark decision
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -66,4 +66,12 @@ REVIEWS: mped-architect round 1 NO-GO (four tolerant rows were heuristics; relea
 GATES: just check exit 0, 1043 passed 0 failed 1 ignored, on each of the 3 commits (git notes). e2e NOT run (batch-end policy); architect: not a merge blocker, but blocks closing this task/batch.
 
 Decisions 2026-10-24 by mark-emulator (Mark delegated questions; Mark may veto; listed in the orchestrator's report): (1) WITHDRAW the six class-none built-ins: claude-code-tmp, chromium-tmp, playwright-tmp, zephyr-tmp, renode-tmp, xdg-cache-entry-v2 (move their vectors to user probe profiles as done for containers-image-age; shrink release_suite EXCLUDED). (2) ADMIT the twelve verified heuristics, dated 2026-10-24 'admitted by mark-emulator for Mark': mypy-cache, nix-user-cache, go-mod-cache, bun-cache, cmake/meson/autotools/west build-anchored, cursor-agent-versions, codex-releases, claude-code-versions, cursor-extensions; add each row's missing residual vectors. (3) Hand-placed files in a build directory: same DATED EXCEPTION as hand-edited dependency files (2026-10-24), remedy .diskgc-keep/protect. (4) Do NOT widen 'tolerant'; the four caches stay verified heuristic. (5) File re-admission tasks: renode-<pid> with an owner-pid contract; a narrower Chromium component-updater profile.
+
+2026-10-24 decisions applied (master 31d3e9d = 10e090c + review rounds 7b1036f, 31d3e9d, fast-forwarded from 443ca21).
+- WITHDRAWN: claude-code-tmp, chromium-tmp, playwright-tmp, zephyr-tmp, renode-tmp, xdg-cache-entry-v2 removed from builtin.yaml, golden sets, temp-prefix preset opt-ins, release_suite EXCLUDED; rows Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). 86 vectors that selected one now use a user probe profile <name>-probe with the withdrawn matching set (playwright/renode spelled out over TEMP_PREFIXES_V1); their builtin vectors moved to vectors/withdrawn/. Example config protects user profile claude-sessions; PRD/doc/SVG expressions use node-compile-cache, nix-shell-rc, pytest-tmp. e2e: laptop journey protects laptop-claude-sessions; ensure_suite claude dry run and root {uid} test use claude-code-tmp-probe (the {uid} test also selects built-in node-compile-cache; model vector allow-root-refuses-builtin-uid-placeholder); browser_suite's broad-XDG block removed; differential replays get a CLI config generated from the vector's user profiles (cli_config + harness unit test every_fixture_with_user_profiles_has_a_cli_config).
+- ADMITTED: the 12 verified heuristics, 'admitted by mark-emulator for Mark, 2026-10-24', each row 'Container test: pending (TASK-137)'. 7 residual vectors added (mypy/go/bun/nix in flight, bun symlink backend, cmake configure choices + dormant IDE, launcher by full path, superseded extension lazy load). Sync test: admission_recorded parses an anchored 'admitted by (Mark | mark-emulator for Mark), YYYY-MM-DD' into a decider; container_tests_recorded requires named tests or 'pending (TASK-N)'.
+- safety.md admission rule: dated exceptions now also cover hand-placed files and configure choices in build dirs (also stated under Source-anchored CMake output) and, for nix-user-cache and go-mod-cache only, a cached copy no longer served upstream; delegated admissions recorded as such, Mark may veto; open points named: ratification before a releases catalog (TASK-138), container tests (TASK-137). 'tolerant' unchanged.
+REVIEWS: mped-architect NO-GO on 10e090c (replays would fail; decisions unrecorded in the rule) -> 7b1036f GO; non-blockers fixed in 31d3e9d (strict container-test parse) and filed (TASK-138). qa-test-runner NO-GO on 10e090c (same replay blocker) -> GO on 7b1036f (gate 1040/0/1; container-test mutation caught; six probe configs loaded through the real CLI check and profiles test).
+GATES: just check exit 0, 1040 passed 0 failed 1 ignored on 10e090c, 7b1036f, 31d3e9d (git notes); nix checks e2e-tests (105 passed) and e2e-clippy exit 0 on 7b1036f.
+NOT RUN: container e2e. The edited suites (six differential replays, the uid test, the laptop journey, the release EXCLUDED oracle, browser suite) compile and lint clean but are unexecuted until the batch-end just e2e; this task is closed on its ACs with that gate open.
 <!-- SECTION:NOTES:END -->
