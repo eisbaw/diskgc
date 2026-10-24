@@ -235,7 +235,8 @@ fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
     let error = under_both_catalogs(source.as_bytes(), "valid full catalog override")
         .expect_err("operator override must not impersonate approved Cargo");
     assert!(
-        error.contains("operator-authored") && error.contains("cargo-target"),
+        error.contains("user profiles are not available in diskgc 0.1")
+            && error.contains("`cargo-target`"),
         "{error}"
     );
 }
@@ -282,7 +283,9 @@ fn proposed_catalog_accepts_only_checkout_policy_for_an_admitted_builtin() {
         let error = under_both_catalogs(source.as_bytes(), "full library accepts policy")
             .expect_err("excluded profile policy must not pass release gate");
         assert!(
-            error.contains(excluded) && error.contains("excluded profile"),
+            error.contains(&format!(
+                "`{excluded}` is a built-in that diskgc 0.1 does not ship"
+            )),
             "{error}"
         );
     }
@@ -302,7 +305,107 @@ fn proposed_catalog_refuses_user_command_action_before_selection() {
     let error = under_both_catalogs(source.as_bytes(), "valid full catalog command policy")
         .expect_err("user command action must be refused before any backend");
     assert!(
-        error.contains("operator-authored") && error.contains("custom-cleaner"),
+        error.contains("user profiles are not available in diskgc 0.1")
+            && error.contains("`custom-cleaner`"),
         "{error}"
     );
+}
+
+/// TASK-146: a development-library configuration is refused under the 0.1
+/// catalog with every refusal in one message, each in a user's words (a
+/// built-in "this release does not ship", never "no profile named"), and
+/// with what 0.1 does ship.
+#[test]
+fn proposed_catalog_names_every_refusal_at_once_in_user_words() {
+    let source = concat!(
+        "version: 1\n",
+        "profile_policies:\n  - profile: npm-cache\n    checkouts: allow\n",
+        "protect:\n  - {profile: pytest-cache, roots: [/home/mark/src]}\n",
+        "groups:\n  - name: stale\n    tiers:\n",
+        "      - name: node\n        select: profile:node-compile-cache && filter:idle-3d\n",
+        "      - name: cargo\n        select: profile:cargo-target && filter:idle-7d\n",
+        "        roots: [/home/mark/src]\n",
+        "  - name: pressure\n    tiers:\n",
+        "      - name: docker\n        select: profile:docker-dangling\n",
+    );
+    let error = under_both_catalogs(source.as_bytes(), "the development library loads it")
+        .expect_err("0.1 refuses it");
+    for part in [
+        "4 part(s) are not available in this release",
+        "profile_policies: `npm-cache` is a built-in that diskgc 0.1 does not ship",
+        "group `stale` tier `node`",
+        "`node-compile-cache` is a built-in that diskgc 0.1 does not ship",
+        "group `pressure` tier `docker`",
+        "protect: `pytest-cache` is a built-in that diskgc 0.1 does not ship",
+        "diskgc 0.1 ships the sources cargo-target, nix-shell-rc, pytest-tmp and the filters",
+    ] {
+        assert!(error.contains(part), "{part:?} missing from: {error}");
+    }
+    for jargon in [
+        "proposed",
+        "operator-authored",
+        "no profile or filter is named",
+    ] {
+        assert!(!error.contains(jargon), "{jargon:?} in: {error}");
+    }
+}
+
+/// TASK-139 (the same class as TASK-146): `--select` of a built-in the
+/// 0.1 catalog leaves out says so, not "no profile named".
+#[test]
+fn proposed_catalog_select_of_a_withheld_builtin_names_the_release() {
+    let library = Catalog::ProposedRelease01
+        .library(Library::builtin().expect("built-ins load"))
+        .expect("0.1 catalog");
+    let error = crate::select::compile("profile:pytest-cache && filter:idle-1d", &library)
+        .expect_err("withheld")
+        .to_string();
+    assert!(
+        error.contains("`pytest-cache` is a built-in that diskgc 0.1 does not ship")
+            && !error.contains("no profile or filter is named"),
+        "{error}"
+    );
+    // A name no built-in has stays unknown, with its suggestions.
+    let error = crate::select::compile("profile:pytest-tnp", &library)
+        .expect_err("unknown")
+        .to_string();
+    assert!(
+        error.contains("no profile or filter is named `pytest-tnp`; did you mean `pytest-tmp`?"),
+        "{error}"
+    );
+}
+
+/// TASK-146: every configuration example in docs/reference.md
+/// (Configuration file) and docs/example.yaml loads under the catalog it
+/// claims. One marked "Development build only" loads in development builds
+/// and is refused by 0.1; every other one loads under 0.1.
+#[test]
+fn documented_config_examples_load_under_the_catalog_they_claim() {
+    let doc = crate::doc::reference_md();
+    let section = crate::doc::section(&doc, "## Configuration file");
+    let mut blocks = crate::doc::code_blocks(&section, "yaml");
+    assert!(blocks.len() >= 2, "a 0.1 and a development example");
+    blocks.push(
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/example.yaml"
+        ))
+        .expect("docs/example.yaml (the flake's test source must include it)"),
+    );
+    let path = Path::new("/docs/example.yaml");
+    for block in &blocks {
+        let development = block.starts_with("# Development build only");
+        let release = Catalog::ProposedRelease01.config(path, block.as_bytes(), ConfigUse::Run);
+        if development {
+            Catalog::Development
+                .config(path, block.as_bytes(), ConfigUse::Run)
+                .unwrap_or_else(|e| panic!("development example: {e}\n{block}"));
+            assert!(
+                release.is_err(),
+                "labelled development only, 0.1 loads it:\n{block}"
+            );
+        } else if let Err(e) = release {
+            panic!("unlabelled example refused by 0.1: {e}\n{block}");
+        }
+    }
 }

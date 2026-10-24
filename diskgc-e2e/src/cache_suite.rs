@@ -240,7 +240,9 @@ pub fn named_checkout_policy_cannot_expand_proposed_catalog(ctx: &Ctx) -> TestRe
         let verdict = oracle.judge(&run)?;
         run.expect_code(2)?;
         ensure!(
-            run.stderr.contains("excluded profile") && run.stderr.contains(excluded),
+            run.stderr.contains(&format!(
+                "`{excluded}` is a built-in that diskgc 0.1 does not ship"
+            )),
             "{excluded}: expected catalog refusal, got {}",
             run.stderr
         );

@@ -1,7 +1,7 @@
 # pytest-cache is a development-catalog built-in (no `releases: ["0.1"]` in
 # builtin.yaml): under the proposed 0.1 catalog `--select
-# profile:pytest-cache` names no profile and is refused (exit 2) before
-# anything is read. The same scenario under the development catalog
+# profile:pytest-cache` is refused (exit 2) before anything is read, as a
+# built-in this release does not ship, not as an unknown name (TASK-139). The same scenario under the development catalog
 # reclaims the cache (select/roots-required-without-roots.yaml shows the
 # profile is otherwise selectable).
 profile_vector: 1
@@ -21,9 +21,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: parse, contains: pytest-cache}]
+  dry_run_errors: [{cause: parse, contains: "`pytest-cache` is a built-in that diskgc 0.1 does not ship"}]
   reclaim_exit: 2
-  errors: [{cause: parse, contains: pytest-cache}]
+  errors: [{cause: parse, contains: "`pytest-cache` is a built-in that diskgc 0.1 does not ship"}]
   actions: []
   removed: []
   skipped: []

@@ -221,6 +221,12 @@ fn code_block_expressions(doc: &str) -> Vec<String> {
 const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "profile:cargo-target && filter:idle-1d",
     "profile:cargo-target && filter:idle-7d",
+    // The 0.1 configuration example (TASK-146).
+    "profile:pytest-tmp && filter:idle-1d",
+    "profile:nix-shell-rc && filter:idle-1d",
+    "profile:cargo-target && filter:idle-30d",
+    "profile:cargo-target && filter:idle-1d",
+    // The development configuration example.
     "(profile:node-compile-cache || profile:zephyr-run) && filter:idle-3d",
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",

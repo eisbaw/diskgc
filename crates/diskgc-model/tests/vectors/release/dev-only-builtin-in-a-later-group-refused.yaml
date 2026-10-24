@@ -30,9 +30,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: config, contains: "proposed 0.1 catalog refuses group `pressure` tier `pytest`"}]
+  dry_run_errors: [{cause: config, contains: "group `pressure` tier `pytest`: invalid selection `profile:pytest-cache`: `profile:pytest-cache`: `pytest-cache` is a built-in that diskgc 0.1 does not ship"}]
   reclaim_exit: 2
-  errors: [{cause: config, contains: "proposed 0.1 catalog refuses group `pressure` tier `pytest`"}]
+  errors: [{cause: config, contains: "group `pressure` tier `pytest`: invalid selection `profile:pytest-cache`: `profile:pytest-cache`: `pytest-cache` is a built-in that diskgc 0.1 does not ship"}]
   actions: []
   removed: []
   skipped: []

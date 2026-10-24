@@ -699,7 +699,42 @@ The config holds `version`, optional user `profiles`, optional
 Thresholds, intervals and timeouts are command-line arguments, so the same
 file serves `watch` on a laptop and `ensure` on a runner.
 
+A configuration for diskgc 0.1 uses only the 0.1 built-ins
+(`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters; see
+[Provisional 0.1 candidate release notes](#provisional-01-candidate-release-notes)).
+It extends `docs/example.yaml` (the example the package installs) with a
+laptop's roots, a protected project and a pressure group:
+
 ```yaml
+version: 1
+protect:                           # never deleted by any tier (by overlap)
+  - {profile: cargo-target, roots: [/home/mark/src/important]}
+groups:
+  - name: stale                    # nobody will miss these
+    tiers:
+      - name: tmp-pytest-sessions
+        select: profile:pytest-tmp && filter:idle-1d
+      - name: tmp-nix-shell-rc
+        select: profile:nix-shell-rc && filter:idle-1d
+      - name: cargo-old
+        select: profile:cargo-target && filter:idle-30d
+        roots: [/home/mark/src, /home/mark/topics]
+  - name: pressure                 # costs rebuild time
+    tiers:
+      - name: cargo-recent
+        select: profile:cargo-target && filter:idle-1d
+        roots: [/home/mark/src, /home/mark/topics]
+```
+
+**Development build only.** The example below shows the whole schema
+`version: 1`; diskgc 0.1 refuses it, naming each part it does not ship:
+user `profiles:` (including overrides), `profile_policies` for built-ins
+outside 0.1 (`npm-cache`), `protect` of a user profile, and tiers that
+select built-ins outside 0.1 (`node-compile-cache`, `docker-build-cache`,
+`docker-dangling`). Every key keeps its meaning in a later release.
+
+```yaml
+# Development build only: diskgc 0.1 refuses this configuration.
 version: 1
 ipc: block-any                    # block-any (default) | live-only
 
@@ -878,9 +913,11 @@ which tier happens to supply roots. Only kinds `fs` and `cargo-target` can be
 protected (Docker images and Nix paths are protected by Docker's and Nix's
 own means: running containers, GC roots). Like `!profile:`, a protected
 profile covers everything its `find` finds and ignores its `where`. The
-example config protects `claude-sessions`, a user profile over Claude
-Code's session directories (the matching set of the withdrawn
-`claude-code-tmp`). Filesystem and Cargo reclaim
+development config example protects `claude-sessions`, a user profile over
+Claude Code's session directories (the matching set of the withdrawn
+`claude-code-tmp`); diskgc 0.1 has no user profiles, so it can protect only
+its own built-ins, such as `{profile: cargo-target, roots: [...]}` in the
+0.1 example. The packaged `example.yaml` has no `protect` entry. Filesystem and Cargo reclaim
 re-enumerate matches under candidate locks and just before deletion; Docker
 rechecks protection before invoking prune. An incomplete scan stops the
 run. Concurrent changes in an independently writable protected tree cannot
@@ -900,6 +937,10 @@ or in any directory between a profile root and the candidate, excludes it
 diskgc's knowledge of *what* can be deleted and *how* lives in **profiles**:
 named, composable rules for recognising one kind of cruft. Tiers say which
 profiles apply and when.
+
+The profile below is a built-in's definition; the same schema written in a
+configuration's `profiles:` is a user profile, which only development
+builds accept: diskgc 0.1 runs its built-in profiles alone.
 
 ```yaml
 - name: python-pycache
@@ -1189,6 +1230,9 @@ presence-marker contract and stays as it is.
 
 A tier selects candidates with an expression over **qualified** names:
 `profile:` for a source profile, `filter:` for a filter profile.
+The examples in this section name built-ins of the development library;
+`diskgc profiles list` shows which ones a build ships (diskgc 0.1:
+`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters).
 
 ```
 expr    := term | union

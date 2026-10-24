@@ -35,6 +35,13 @@ pub trait Catalog {
     fn names(&self) -> Vec<&str> {
         Vec::new()
     }
+
+    /// Why a name this catalog does not have is still not unknown: a
+    /// built-in the build's release catalog leaves out (TASK-146), said in
+    /// place of "no profile or filter is named". `None` by default.
+    fn withheld(&self, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// A profile as the checker sees it.
@@ -89,6 +96,9 @@ pub enum CheckError {
         name: String,
         suggestions: Vec<String>,
     },
+    /// A documented built-in that this build's release catalog leaves out:
+    /// `why` says so and what the release ships ([`Catalog::withheld`]).
+    NotInRelease { written: String, why: String },
     /// `profile:NAME` where `NAME` is a filter: a term must start with a
     /// source.
     FilterAsSource { name: String },
@@ -150,6 +160,7 @@ impl fmt::Display for CheckError {
                 }
                 Ok(())
             }
+            Self::NotInRelease { written, why } => write!(f, "`{written}`: {why}"),
             Self::FilterAsSource { name } => write!(
                 f,
                 "`profile:{name}`: `{name}` is a filter, not a source profile; a term starts \
@@ -456,6 +467,9 @@ fn check_factor<C: Catalog>(factor: &Factor, kind: Option<Kind>, catalog: &C, er
 }
 
 fn unknown<C: Catalog>(written: String, name: &str, catalog: &C) -> CheckError {
+    if let Some(why) = catalog.withheld(name) {
+        return CheckError::NotInRelease { written, why };
+    }
     let name_len = name.chars().count();
     if name_len > MAX_SUGGESTION_NAME_CHARS {
         return CheckError::Unknown {

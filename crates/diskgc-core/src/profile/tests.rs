@@ -1306,9 +1306,10 @@ fn the_reference_examples_load() {
         profiles: Vec<ProfileSpec>,
     }
     let config_md = section(&doc, "## Configuration file");
-    let [config] = code_blocks(&config_md, "yaml")
-        .try_into()
-        .expect("one YAML block in Configuration file");
+    let config = code_blocks(&config_md, "yaml")
+        .into_iter()
+        .find(|block| block.contains("\nprofiles:"))
+        .expect("the development YAML block in Configuration file");
     let config: ConfigProfiles = serde_saphyr::from_str(&config).unwrap_or_else(|e| panic!("{e}"));
     let library = Library::with_user_profiles(&config.profiles).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(

@@ -79,42 +79,55 @@ impl Catalog {
 /// directory is its TMPDIR, so a clone made there is what the guard
 /// protects) would widen what the reviewed built-in deletes.
 fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
-    let library = config.library.clone().proposed_release_01()?;
+    let library = config
+        .library
+        .clone()
+        .proposed_release_01()
+        .map_err(|why| format!("invalid config {}: {why}", config.path.display()))?;
     let builtins = Library::builtin().map_err(|e| e.to_string())?;
+    // Every refusal at once (TASK-146): an operator adapting a development
+    // example should not learn them one run at a time.
+    let mut refused = Vec::new();
+    let not_shipped = |name: &str| {
+        library
+            .withheld(name)
+            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog"))
+    };
     for policy in &config.profile_policies {
         if library.get(&policy.profile).is_none() {
-            return Err(format!(
-                "proposed 0.1 catalog refuses checkout policy for excluded profile `{}`",
-                policy.profile
+            refused.push(format!(
+                "profile_policies: {}",
+                not_shipped(&policy.profile)
             ));
-        }
-        if policy.checkouts.0 == Checkouts::Allow
+        } else if policy.checkouts.0 == Checkouts::Allow
             && builtins.checkouts(&policy.profile) == Some(Checkouts::Refuse)
         {
-            return Err(format!(
-                "proposed 0.1 catalog refuses `checkouts: allow` for `{}`: the built-in \
-                 refuses checkouts, and a 0.1 checkout policy may only narrow",
+            refused.push(format!(
+                "profile_policies: `checkouts: allow` for `{}` is refused: the built-in \
+                 refuses checkouts, and a policy may only narrow it in this release",
                 policy.profile
             ));
         }
     }
     for group in &config.groups {
         for tier in &group.tiers {
-            select::check(tier.select.expr().clone(), &library).map_err(|e| {
-                format!(
-                    "proposed 0.1 catalog refuses group `{}` tier `{}`: {e}",
-                    group.name, tier.name
-                )
-            })?;
+            if let Err(e) = select::check(tier.select.expr().clone(), &library) {
+                refused.push(format!("group `{}` tier `{}`: {e}", group.name, tier.name));
+            }
         }
     }
     for protected in &config.protect {
         if library.get(&protected.profile).is_none() {
-            return Err(format!(
-                "proposed 0.1 catalog refuses protect profile `{}`",
-                protected.profile
-            ));
+            refused.push(format!("protect: {}", not_shipped(&protected.profile)));
         }
+    }
+    if !refused.is_empty() {
+        return Err(format!(
+            "invalid config {}: {} part(s) are not available in this release:\n  {}",
+            config.path.display(),
+            refused.len(),
+            refused.join("\n  ")
+        ));
     }
     config.library = library;
     Ok(())

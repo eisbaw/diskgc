@@ -27,9 +27,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: config, contains: "operator-authored profile `cargo-target`"}]
+  dry_run_errors: [{cause: config, contains: "user profiles are not available in diskgc 0.1: the configuration's `profiles:` defines `cargo-target`"}]
   reclaim_exit: 2
-  errors: [{cause: config, contains: "operator-authored profile `cargo-target`"}]
+  errors: [{cause: config, contains: "user profiles are not available in diskgc 0.1: the configuration's `profiles:` defines `cargo-target`"}]
   actions: []
   removed: []
   skipped: []

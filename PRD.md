@@ -296,8 +296,9 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   `chromium-tmp`, `playwright-tmp`, `zephyr-tmp`, `renode-tmp` and
   `xdg-cache-entry-v2` were withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24): their
   producers can use a directory without visible evidence. A user profile
-  may still select such paths at its author's risk; the example config
-  protects Claude Code's session directories with one.
+  may still select such paths at its author's risk; the development config
+  example in [reference.md](docs/reference.md#configuration-file) protects
+  Claude Code's session directories with one (0.1 has no user profiles).
 - **Index coverage and cost.** The index can be partial (memory budget) or
   stale; per-tier discovery and live checks keep that a speed problem. The
   tally's duty cycle bounds the worker, not the disk.

@@ -32,7 +32,7 @@ mod golden;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::engine::Checkouts;
@@ -335,6 +335,11 @@ impl fmt::Display for Action {
 #[derive(Debug, Clone)]
 pub struct Library {
     profiles: BTreeMap<String, Profile>,
+    /// The release catalog this library was narrowed to and the built-ins
+    /// it left out (empty for the development library), so a refusal of
+    /// one says "not in this release" instead of "no such profile"
+    /// (TASK-146): the name is documented and ships in development builds.
+    withheld: Option<(Release, BTreeSet<String>)>,
 }
 
 impl Library {
@@ -366,14 +371,22 @@ impl Library {
     /// loader already refuses `releases` on class none). A violation is a bug
     /// in builtin.yaml, which the tests load.
     pub fn proposed_release_01(mut self) -> Result<Self, String> {
-        if let Some(profile) = self.profiles.values().find(|p| p.origin != Origin::BuiltIn) {
-            return Err(format!(
-                "proposed 0.1 catalog refuses operator-authored profile `{}` (including overrides)",
-                profile.name
-            ));
-        }
-        self.profiles
-            .retain(|_, profile| profile.releases.contains(&Release::V0_1));
+        let release = Release::V0_1;
+        let user: Vec<String> = self
+            .profiles
+            .values()
+            .filter(|p| p.origin != Origin::BuiltIn)
+            .map(|p| format!("`{}`", p.name))
+            .collect();
+        let mut withheld = BTreeSet::new();
+        self.profiles.retain(|name, profile| {
+            let kept = profile.releases.contains(&release);
+            if !kept && profile.origin == Origin::BuiltIn {
+                withheld.insert(name.clone());
+            }
+            kept
+        });
+        self.withheld = Some((release, withheld));
         for profile in self.profiles.values() {
             let in_scope = match &profile.body {
                 Body::Filter(_) => true,
@@ -401,12 +414,68 @@ impl Library {
         {
             return Err("proposed 0.1 catalog has no source".to_owned());
         }
+        if !user.is_empty() {
+            // Overrides too: a name-only allowlist would admit a command
+            // action or an arbitrary delete under `cargo-target`.
+            return Err(format!(
+                "user profiles are not available in diskgc {}: the configuration's \
+                 `profiles:` defines {} (an `override: true` of a built-in counts too); \
+                 remove them. {}",
+                release.name(),
+                user.join(", "),
+                self.release_scope()
+            ));
+        }
         Ok(self)
+    }
+
+    /// Why `name` is not in this library although it is a documented
+    /// built-in: it is one the release catalog leaves out. `None` for a
+    /// name this library has, or one no built-in has, and always for the
+    /// development library.
+    pub fn withheld(&self, name: &str) -> Option<String> {
+        let (release, names) = self.withheld.as_ref()?;
+        names.contains(name).then(|| {
+            format!(
+                "`{name}` is a built-in that diskgc {} does not ship. {}",
+                release.name(),
+                self.release_scope()
+            )
+        })
+    }
+
+    /// What a release library offers, in a user's words: its sources and
+    /// filters by name, and where to read more.
+    fn release_scope(&self) -> String {
+        let (sources, filters): (Vec<&Profile>, Vec<&Profile>) = self
+            .profiles
+            .values()
+            .partition(|p| matches!(&p.body, Body::Source(_)));
+        let names = |profiles: &[&Profile]| {
+            profiles
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let release = self
+            .withheld
+            .as_ref()
+            .map_or("this build", |(release, _)| release.name());
+        format!(
+            "diskgc {release} ships the sources {} and the filters {} (`diskgc profiles \
+             list`; the release notes in docs/reference.md)",
+            names(&sources),
+            names(&filters)
+        )
     }
 
     /// [`Self::with_user_profiles`] over other built-in YAML (tests).
     pub(crate) fn load(builtin_yaml: &str, user: &[ProfileSpec]) -> Result<Self, LoadErrors> {
-        load::library(builtin_yaml, user).map(|profiles| Self { profiles })
+        load::library(builtin_yaml, user).map(|profiles| Self {
+            profiles,
+            withheld: None,
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<&Profile> {
@@ -469,6 +538,10 @@ impl Library {
 
 impl Catalog for Library {
     type Action = Action;
+
+    fn withheld(&self, name: &str) -> Option<String> {
+        Library::withheld(self, name)
+    }
 
     fn names(&self) -> Vec<&str> {
         self.profiles()
