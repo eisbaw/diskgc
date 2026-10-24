@@ -951,6 +951,9 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::ProcIdentityReleased,
             Op::DockerQuery,
             Op::RunCommand,
+            Op::ProcUids,
+            Op::ProcCmdline,
+            Op::ProcRootLookup,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}

@@ -123,6 +123,10 @@ pub enum Lookup {
     /// The object's (device, inode), then (for `--basetemp`) those of its
     /// ancestors by `..`, up to the fixpoint.
     Resolved(Vec<DevIno>),
+    /// The process ended before its value could be looked up in its root:
+    /// the value (normalised) is compared as a path in diskgc's view, the
+    /// only evidence left (a child it forked meanwhile inherited it).
+    Ended(PathBuf),
 }
 
 /// Where a `--basetemp` value came from: it decides the evidence of a
@@ -154,8 +158,13 @@ pub struct ProcessFacts {
     pub temp_roots: Vec<(OsString, Lookup)>,
     /// The (device, inode) of each of [`FALLBACK_ROOTS`] that exists in
     /// its root (a container's `/tmp` can be any directory of diskgc's
-    /// view). One that does not resolve is not a root Python can use.
+    /// view). One that does not exist (`ENOENT`, `ENOTDIR`) is not a root
+    /// Python can use.
     pub fallback_roots: Vec<DevIno>,
+    /// Why a fallback root's lookup failed otherwise (a refusal, `EAGAIN`
+    /// exhausted, an I/O error): whether the process could use `R` through
+    /// it cannot be decided (row 9).
+    pub fallback_unresolved: Vec<String>,
     /// Each non-empty `--basetemp` value it carries, with where it came
     /// from and how it was looked up (climbed).
     pub basetemps: Vec<(BasetempSource, OsString, Lookup)>,
@@ -173,6 +182,7 @@ impl ProcessFacts {
             cwds: Vec::new(),
             temp_roots: Vec::new(),
             fallback_roots: Vec::new(),
+            fallback_unresolved: Vec::new(),
             basetemps: Vec::new(),
         }
     }
@@ -492,8 +502,13 @@ fn naming(process: &ProcessFacts, facts: &Facts<'_>) -> Option<Evidence> {
     let resolved_into = |source: BasetempSource| {
         process.basetemps.iter().any(|(from, _, lookup)| {
             *from == source
-                && matches!(lookup, Lookup::Resolved(chain)
-                    if chain.iter().any(|id| facts.session_tree.contains(id)))
+                && match lookup {
+                    Lookup::Resolved(chain) => {
+                        chain.iter().any(|id| facts.session_tree.contains(id))
+                    }
+                    Lookup::Ended(path) => path.starts_with(facts.session_path),
+                    Lookup::Relative | Lookup::Unresolvable(_) => false,
+                }
         })
     };
     if resolved_into(BasetempSource::CommandLine) {
@@ -521,7 +536,7 @@ fn naming_undecidable(process: &ProcessFacts) -> Option<Evidence> {
     process
         .basetemps
         .iter()
-        .any(|(_, _, lookup)| !matches!(lookup, Lookup::Resolved(_)))
+        .any(|(_, _, lookup)| matches!(lookup, Lookup::Relative | Lookup::Unresolvable(_)))
         .then_some(Evidence::RelativePath)
 }
 
@@ -537,9 +552,11 @@ fn uses_root(process: &ProcessFacts, facts: &Facts<'_>) -> bool {
         || process.fallback_roots.contains(&facts.root_id);
     fallback
         || process.cwds.contains(&facts.root_id)
-        || process.temp_roots.iter().any(
-            |(_, lookup)| matches!(lookup, Lookup::Resolved(chain) if chain.first() == Some(&facts.root_id)),
-        )
+        || process.temp_roots.iter().any(|(_, lookup)| match lookup {
+            Lookup::Resolved(chain) => chain.first() == Some(&facts.root_id),
+            Lookup::Ended(path) => path.as_path() == facts.root_path,
+            Lookup::Relative | Lookup::Unresolvable(_) => false,
+        })
 }
 
 /// Why a process makes the root use undecidable (row 9), if it does.
@@ -547,11 +564,11 @@ fn root_use_undecidable(process: &ProcessFacts) -> Option<Evidence> {
     if process.environ.is_none() {
         return Some(Evidence::Unreadable);
     }
-    process
+    let unresolved = process
         .temp_roots
         .iter()
-        .any(|(_, lookup)| !matches!(lookup, Lookup::Resolved(_)))
-        .then_some(Evidence::RelativePath)
+        .any(|(_, lookup)| matches!(lookup, Lookup::Relative | Lookup::Unresolvable(_)));
+    (unresolved || !process.fallback_unresolved.is_empty()).then_some(Evidence::RelativePath)
 }
 
 /// The pytest contract's ordered decision table (docs/safety.md, pytest

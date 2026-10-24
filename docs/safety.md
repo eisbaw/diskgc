@@ -1130,11 +1130,26 @@ root (the parent of `P`):
   root: one of `TMPDIR`, `TEMP`, `TMP`, `PYTEST_DEBUG_TEMPROOT` in its
   initial environment resolves (by identity) to `R`; or `R` is `/tmp`,
   `/var/tmp` or `/usr/tmp` (Python's fallbacks, always counted, an
-  over-approximation); or its current working directory is `R` (an extra
+  over-approximation), by diskgc's path or as one of them resolves in the
+  process's own root (a container whose `/tmp` is a shell's `TMPDIR`;
+  step 5, 2026-10-24); or its current working directory is `R` (an extra
   that can only retain). *Root use undecidable*: none of those, but one
   of the user's processes has a relative or unresolvable value of those
-  variables, or an environment that cannot be read and is not excused at
-  a privilege boundary (In use).
+  variables, a fallback whose lookup in its root failed for another
+  reason than its absence (`ENOENT`, `ENOTDIR`, or `ESRCH`: the root is a
+  dead process's `/proc` directory, where nothing resolves for the process
+  either; Chromium's sandbox chroots its renderers into one, 66 processes
+  on the development host), or an environment that cannot be read and is
+  not excused at a privilege boundary (In use).
+- *Every read only adds* (as in In use; step 5, 2026-10-24): the facts
+  above are read after the scan's last listing, and a process found gone
+  by one of those reads keeps what was read of it, its initial
+  environment above all, since a child it forked meanwhile inherited that
+  environment and is not listed. Its unread uids are unknown (it counts
+  for every owner); a value it can no longer resolve in its own root is
+  compared as a path in diskgc's view; its unread command line is taken
+  as empty (an ended process runs and names nothing by it; only a fork
+  without `exec` would carry it on, a limit).
 - When an Owner PID precondition other than the filesystem one fails (the
   PID namespace, `hidepid`), the process list is not complete: a pytest
   counts as running, and naming and root use as undecidable.
@@ -1395,8 +1410,13 @@ schema only with its first producer.
   once per scan and after its last listing, for each readable process
   with a uid of the users diskgc judges for: one more `status` read (its
   uids), one `cmdline` read, and one `RESOLVE_IN_ROOT` lookup per
-  temp-directory or `--basetemp` value it carries (per process and value,
-  not shared across processes: two processes' roots can differ); per
+  temp-directory or `--basetemp` value it carries and per Python fallback
+  root (three), each with its own pidfd and open of `/proc/<pid>/root`
+  (per process and value, not shared across processes: two processes'
+  roots can differ). Measured on Linux 7.2.9 with 665 processes, 357 of
+  the user (2026-10-24): some thousands more syscalls per scan (about
+  4,500 `pidfd_open` and 2,200 `openat2`), against about 2.1 million for
+  the scan itself; per
   check, one listing of the session's `pytest-of-<user>` (at most 65,536
   names; more is a listing cut short, row 2), one lookup of `S`'s `.lock`
   and one safe resolution of `R`; byte comparison for every other string.

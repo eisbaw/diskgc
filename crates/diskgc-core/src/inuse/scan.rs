@@ -49,8 +49,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::host::{
-    DevIno, Environ, FileType, Host, HostError, MonoTime, Pid, ProcError, ProcLink, ProcStatus,
-    ProcView,
+    DevIno, Environ, Errno, FileType, Host, HostError, MonoTime, Pid, ProcError, ProcLink,
+    ProcStatus, ProcView,
 };
 
 use std::os::unix::ffi::OsStrExt;
@@ -635,16 +635,26 @@ pub(crate) fn pid_table<H: Host>(
 /// The pytest contract's process facts (docs/safety.md, pytest sessions:
 /// terms; A process's paths) of a gathered scan, read after its last
 /// listing as Owner PID's table is: for every readable process with a uid
-/// among `users`, its uids, command line, initial environment, working
-/// directories, and the temp-directory and `--basetemp` values pytest
-/// resolves, each looked up once in the process's own root
+/// among `users` (or whose uids could not be read), its uids, command
+/// line, initial environment, working directories, and the
+/// temp-directory and `--basetemp` values pytest resolves and Python's
+/// fallback roots, each looked up once in the process's own root
 /// ([`Host::proc_root_lookup`]); and every unreadable process not excused
 /// at a privilege boundary, as [`ProcessFacts::unreadable`] (it already
-/// blocks every candidate in the in-use check). A process found gone by
-/// any of these reads ended: it is left out. Reads that fail are retried
-/// in rounds as [`pid_table`] does (at most 40 ms per scan); one that
-/// stays unreadable is `None` in its facts, which the verdict treats as
-/// undecidable.
+/// blocks every candidate in the in-use check). Reads that fail are
+/// retried in rounds as [`pid_table`] does (at most 40 ms per scan); one
+/// that stays unreadable is `None` in its facts, which the verdict treats
+/// as undecidable.
+///
+/// Every read only adds, as in the in-use scan: a process found gone by
+/// one of these reads (it ended after the last listing) keeps what was
+/// read of it, its initial environment above all, since a child it forked
+/// meanwhile inherited that and the scan did not list the child. Its
+/// unread uids are unknown (it counts for every owner); its unread command
+/// line is taken as empty (it runs and names nothing by it any more; only
+/// a fork without `exec` would carry it on, a limit); a value it could no
+/// longer resolve in its own root is compared as a path in diskgc's view
+/// ([`Lookup::Ended`]).
 pub(crate) fn pytest_facts<H: Host>(
     host: &H,
     gathered: &Gathered,
@@ -660,8 +670,9 @@ pub(crate) fn pytest_facts<H: Host>(
             uids.insert(pid, Some(ids));
             Ok(())
         }
+        // Ended: its uids stay unknown, it counts for every owner.
         Err(ProcError::Gone) => {
-            uids.remove(&pid);
+            uids.insert(pid, None);
             Ok(())
         }
         Err(e) => {
@@ -679,8 +690,9 @@ pub(crate) fn pytest_facts<H: Host>(
             cmdlines.insert(pid, Some(args));
             Ok(())
         }
+        // Ended: it runs and names nothing by its command line any more.
         Err(ProcError::Gone) => {
-            cmdlines.remove(&pid);
+            cmdlines.insert(pid, Some(Vec::new()));
             Ok(())
         }
         Err(e) => {
@@ -688,10 +700,7 @@ pub(crate) fn pytest_facts<H: Host>(
             Err(e)
         }
     });
-    'process: for pid in wanted {
-        let Some(cmdline) = cmdlines.remove(&pid) else {
-            continue;
-        };
+    for pid in wanted {
         let read = &gathered.read[&pid];
         let environ: Option<Environ> = read
             .environ_failed
@@ -707,21 +716,22 @@ pub(crate) fn pytest_facts<H: Host>(
         let mut process = ProcessFacts {
             pid,
             uids: uids[&pid],
-            cmdline,
+            cmdline: cmdlines.remove(&pid).expect("every wanted pid was read"),
             environ,
             cwds,
             temp_roots: Vec::new(),
             fallback_roots: Vec::new(),
+            fallback_unresolved: Vec::new(),
             basetemps: Vec::new(),
         };
-        let lookup = |value: &OsStr, climb: bool| -> Option<Lookup> {
+        let lookup = |value: &OsStr, climb: bool| -> Lookup {
             let Some(path) = pytest::normalize(value.as_bytes()) else {
-                return Some(Lookup::Relative);
+                return Lookup::Relative;
             };
             match host.proc_root_lookup(pid, &path, climb) {
-                Ok(chain) => Some(Lookup::Resolved(chain)),
-                Err(ProcError::Gone) => None,
-                Err(e) => Some(Lookup::Unresolvable(e.to_string())),
+                Ok(chain) => Lookup::Resolved(chain),
+                Err(ProcError::Gone) => Lookup::Ended(path),
+                Err(e) => Lookup::Unresolvable(e.to_string()),
             }
         };
         for value in process
@@ -730,25 +740,31 @@ pub(crate) fn pytest_facts<H: Host>(
             .map(pytest::temp_root_values)
             .unwrap_or_default()
         {
-            let Some(found) = lookup(&value, false) else {
-                continue 'process;
-            };
+            let found = lookup(&value, false);
             process.temp_roots.push((value, found));
         }
         for root in pytest::FALLBACK_ROOTS {
             match host.proc_root_lookup(pid, Path::new(root), false) {
                 Ok(chain) => process.fallback_roots.extend(chain.first()),
-                Err(ProcError::Gone) => continue 'process,
-                // Missing (or refused): not a root Python could use.
-                Err(_) => {}
+                // Ended: R being a fallback by diskgc's path still counts.
+                Err(ProcError::Gone) => {}
+                // Missing: not a root Python could use. ESRCH: the process's
+                // root is a dead process's /proc directory (Chromium's
+                // sandbox chroots its renderers into one, 66 processes on
+                // the development host), where nothing resolves for the
+                // process either.
+                Err(ProcError::Failed(e) | ProcError::Denied(e))
+                    if matches!(
+                        e.kernel_errno(),
+                        Some(Errno::ENOENT | Errno::ENOTDIR | Errno::ESRCH)
+                    ) => {}
+                Err(e) => process.fallback_unresolved.push(format!("{root}: {e}")),
             }
         }
         for (source, value) in
             pytest::basetemp_values(process.cmdline.as_deref(), process.environ.as_ref())
         {
-            let Some(found) = lookup(&value, true) else {
-                continue 'process;
-            };
+            let found = lookup(&value, true);
             process.basetemps.push((source, value, found));
         }
         facts.push(process);

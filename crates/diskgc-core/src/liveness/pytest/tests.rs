@@ -50,6 +50,7 @@ fn proc(pid: u32, cmdline: &[&str], vars: &[(&str, &str)]) -> ProcessFacts {
         cwds: vec![id(1)],
         temp_roots: Vec::new(),
         fallback_roots: Vec::new(),
+        fallback_unresolved: Vec::new(),
         basetemps: Vec::new(),
     }
 }
@@ -526,7 +527,9 @@ fn pytest_cleanup_deletes(entries: &[GenEntry], name: &str, t_new: i64) -> bool 
     // The new session, one above the largest, is made before the cleanup
     // runs, so the cleanup's largest number is its own.
     let max_existing = prefixed.iter().map(|e| parse_num(e)).max().unwrap_or(-1) + 1;
-    let max_delete = max_existing - i128::from(RETENTION);
+    // pytest 9.1.1's default tmp_path_retention_count, written out: the
+    // oracle must not move with the product's own constant.
+    let max_delete = max_existing - 3;
     let Some(entry) = prefixed.iter().find(|e| e.name == name) else {
         return false;
     };
@@ -542,16 +545,16 @@ fn pytest_cleanup_deletes(entries: &[GenEntry], name: &str, t_new: i64) -> bool 
 
 fn gen_suffix() -> impl Strategy<Value = String> {
     prop_oneof![
-        (0u64..12).prop_map(|n| n.to_string()),
-        (0u64..12).prop_map(|n| format!("0{n}")),
-        "[0-9_+ a-z-]{1,4}",
-        Just("99999999999999999999".to_owned()),
+        8 => (0u64..12).prop_map(|n| n.to_string()),
+        1 => (0u64..12).prop_map(|n| format!("0{n}")),
+        1 => "[0-9_+ a-z-]{1,4}",
+        1 => Just("99999999999999999999".to_owned()),
     ]
 }
 
 fn gen_entry() -> impl Strategy<Value = GenEntry> {
     (
-        prop_oneof![Just("pytest-"), Just("PYTEST-"), Just("garbage-")],
+        prop_oneof![8 => Just("pytest-"), 1 => Just("PYTEST-"), 1 => Just("garbage-")],
         gen_suffix(),
         any::<bool>(),
         prop_oneof![
@@ -567,63 +570,103 @@ fn gen_entry() -> impl Strategy<Value = GenEntry> {
         })
 }
 
-fn gen_process() -> impl Strategy<Value = ProcessFacts> {
+/// What the generator put into a process, known independently of the
+/// product's own predicates (`shows_pytest`, the naming tests): the
+/// invariants are checked against these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Signs {
+    /// A pytest runs by the table's terms (a sign or an unreadable line).
+    running: bool,
+    /// It names `S` (by a string or a `--basetemp` resolved into `S`).
+    names_session: bool,
+}
+
+/// A path element standing for `S`'s path, replaced once `S` is picked.
+const SESSION_MARK: &str = "<S>";
+
+fn gen_process() -> impl Strategy<Value = (ProcessFacts, Signs)> {
     (
         1u32..50,
         prop_oneof![
-            Just(None),
-            Just(Some(Ids::same(1000))),
-            Just(Some(Ids::same(0)))
+            1 => Just(None),
+            6 => Just(Some(Ids::same(1000))),
+            2 => Just(Some(Ids::same(0)))
         ],
+        prop_oneof![1 => Just(0usize), 6 => Just(1), 2 => Just(2), 1 => Just(3), 1 => Just(4)],
+        prop_oneof![1 => Just(0usize), 6 => Just(1), 2 => Just(2), 1 => Just(3)],
         prop_oneof![
-            Just(None),
-            Just(Some(vec![OsString::from("sh")])),
-            Just(Some(vec![
-                OsString::from("python"),
-                "-m".into(),
-                "pytest".into()
-            ])),
+            6 => Just(Vec::new()),
+            1 => Just(vec![("rel".into(), Lookup::Relative)]),
+            1 => Just(vec![("/x".into(), Lookup::Resolved(vec![id(ROOT)]))]),
+            1 => Just(vec![("/y".into(), Lookup::Unresolvable("ENOENT".into()))]),
+            1 => Just(vec![("/tmp".into(), Lookup::Ended("/tmp".into()))]),
         ],
-        prop_oneof![
-            Just(None),
-            Just(Some(env(&[("HOME", "/h")]))),
-            Just(Some(env(&[("PYTEST_CURRENT_TEST", "t")]))),
-        ],
-        prop_oneof![
-            Just(Vec::new()),
-            Just(vec![("rel".into(), Lookup::Relative)]),
-            Just(vec![("/x".into(), Lookup::Resolved(vec![id(ROOT)]))]),
-            Just(vec![("/y".into(), Lookup::Unresolvable("ENOENT".into()))]),
-        ],
-        prop_oneof![
-            Just(Vec::new()),
-            Just(vec![(
-                BasetempSource::CommandLine,
-                "/s".into(),
-                Lookup::Resolved(vec![id(SESSION), id(ROOT)])
-            )]),
-            Just(vec![(
-                BasetempSource::Addopts,
-                "r".into(),
-                Lookup::Relative
-            )]),
-        ],
+        prop_oneof![6 => Just(0usize), 1 => Just(1), 1 => Just(2), 1 => Just(3)],
+        prop_oneof![6 => Just(0usize), 1 => Just(1), 1 => Just(2)],
         any::<bool>(),
     )
         .prop_map(
-            |(pid, uids, cmdline, environ, temp_roots, basetemps, cwd_root)| ProcessFacts {
-                pid: Pid(pid),
-                uids,
-                cmdline,
-                environ,
-                cwds: if cwd_root {
-                    vec![id(ROOT)]
-                } else {
-                    vec![id(1)]
-                },
-                temp_roots,
-                fallback_roots: Vec::new(),
-                basetemps,
+            |(pid, uids, cmd, env_kind, temp_roots, basetemp, fallback, cwd_root)| {
+                let cmdline = match cmd {
+                    0 => None,
+                    1 => Some(vec![OsString::from("sh")]),
+                    2 => Some(vec!["python".into(), "-m".into(), "pytest".into()]),
+                    3 => Some(vec![
+                        "python".into(),
+                        "-u".into(),
+                        "-c".into(),
+                        OsString::from_vec(EXECNET_BOOTSTRAP.to_vec()),
+                    ]),
+                    _ => Some(vec!["cat".into(), format!("{SESSION_MARK}/out").into()]),
+                };
+                let environ = match env_kind {
+                    0 => None,
+                    1 => Some(env(&[("HOME", "/h")])),
+                    2 => Some(env(&[("PYTEST_CURRENT_TEST", "t")])),
+                    _ => Some(env(&[("X", &format!("/a:{SESSION_MARK}"))])),
+                };
+                let basetemps = match basetemp {
+                    0 => Vec::new(),
+                    1 => vec![(
+                        BasetempSource::CommandLine,
+                        "/s".into(),
+                        Lookup::Resolved(vec![id(SESSION), id(ROOT)]),
+                    )],
+                    2 => vec![(BasetempSource::Addopts, "r".into(), Lookup::Relative)],
+                    _ => vec![(
+                        BasetempSource::CommandLine,
+                        "/t".into(),
+                        Lookup::Resolved(vec![id(7), id(ROOT)]),
+                    )],
+                };
+                let signs = Signs {
+                    running: matches!(cmd, 0 | 2 | 3) || matches!(env_kind, 0 | 2),
+                    names_session: cmd == 4 || env_kind == 3 || basetemp == 1,
+                };
+                let process = ProcessFacts {
+                    pid: Pid(pid),
+                    uids,
+                    cmdline,
+                    environ,
+                    cwds: if cwd_root {
+                        vec![id(ROOT)]
+                    } else {
+                        vec![id(1)]
+                    },
+                    temp_roots,
+                    fallback_roots: if fallback == 1 {
+                        vec![id(ROOT)]
+                    } else {
+                        Vec::new()
+                    },
+                    fallback_unresolved: if fallback == 2 {
+                        vec!["/tmp: EIO".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    basetemps,
+                };
+                (process, signs)
             },
         )
 }
@@ -635,7 +678,7 @@ struct Generated {
     owner_ended: bool,
     newest_age: i64,
     complete: bool,
-    processes: Vec<ProcessFacts>,
+    processes: Vec<(ProcessFacts, Signs)>,
     fallback_root: bool,
 }
 
@@ -651,9 +694,20 @@ fn gen_case() -> impl Strategy<Value = Generated> {
     )
         .prop_map(
             |(mut entries, pick, owner_ended, newest_age, complete, processes, fallback_root)| {
+                // A directory holds each name once.
+                let mut seen = HashSet::new();
+                entries.retain(|e| seen.insert(e.name.clone()));
                 let pick = pick.index(entries.len());
                 // Discovery never reports a symlink as a session (type: dir).
                 entries[pick].symlink = false;
+                // Most picks are sessions; some stay odd names (row 1).
+                if pick % 8 != 7 && session_number(entries[pick].name.as_bytes()).is_none() {
+                    let n = 50 + pick;
+                    let name = format!("pytest-{n}");
+                    if !entries.iter().any(|e| e.name == name) {
+                        entries[pick].name = name;
+                    }
+                }
                 Generated {
                     entries,
                     pick,
@@ -665,6 +719,11 @@ fn gen_case() -> impl Strategy<Value = Generated> {
                 }
             },
         )
+}
+
+/// Whether a generated process is in the process set of owner 1000.
+fn in_set(p: &ProcessFacts) -> bool {
+    p.uids.is_none_or(|u| u.all().contains(&1000))
 }
 
 /// The verdict on the generated case, for the picked entry as `S`.
@@ -693,6 +752,30 @@ fn judge(g: &Generated) -> (Verdict, bool) {
     };
     let session_path = root_path.join("pytest-of-tester").join(&entry.name);
     let tree: HashSet<DevIno> = [id(SESSION)].into_iter().collect();
+    let mark = |text: &OsStr| {
+        OsString::from(
+            text.to_string_lossy()
+                .replace(SESSION_MARK, &session_path.to_string_lossy()),
+        )
+    };
+    let processes: Vec<ProcessFacts> = g
+        .processes
+        .iter()
+        .map(|(p, _)| {
+            let mut p = p.clone();
+            if let Some(args) = &mut p.cmdline {
+                for arg in args.iter_mut() {
+                    *arg = mark(arg);
+                }
+            }
+            if let Some(e) = &mut p.environ {
+                for (_, value) in &mut e.vars {
+                    *value = mark(value);
+                }
+            }
+            p
+        })
+        .collect();
     let name = OsString::from(&entry.name);
     let facts = Facts {
         session_name: &name,
@@ -711,13 +794,12 @@ fn judge(g: &Generated) -> (Verdict, bool) {
         session_tree: &tree,
         root_path: &root_path,
         root_id: id(ROOT),
-        processes: &g.processes,
+        processes: &processes,
     };
     let running = !g.complete
         || g.processes
             .iter()
-            .filter(|p| p.uids.is_none_or(|u| u.all().contains(&1000)))
-            .any(shows_pytest);
+            .any(|(p, signs)| in_set(p) && signs.running);
     (verdict(&facts), running)
 }
 
@@ -771,10 +853,7 @@ proptest! {
         if matches!(v.row, Row::Rank | Row::UnusedRoot) {
             prop_assert_eq!(&v.outcome, &Outcome::Eligible);
         }
-        let named = g.processes.iter().any(|p| {
-            p.uids.is_none_or(|u| u.all().contains(&1000))
-                && p.basetemps.iter().any(|(_, _, l)| matches!(l, Lookup::Resolved(c) if c.contains(&id(SESSION))))
-        });
+        let named = g.processes.iter().any(|(p, signs)| in_set(p) && signs.names_session);
         if named {
             prop_assert_ne!(&v.outcome, &Outcome::Eligible);
         }
@@ -822,5 +901,38 @@ fn the_cleanup_model_reads_names_as_pytest_does() {
     assert!(pytest_cleanup_deletes(&entries, "pytest-0", NOW));
     assert!(pytest_cleanup_deletes(&entries, "pytest-1", NOW));
     assert!(!pytest_cleanup_deletes(&entries, "pytest-2", NOW));
-    let _ = OsStr::new("");
+}
+
+/// The generator reaches the rows the properties are about: over a fixed
+/// run of cases, row 7 permits some sessions, row 6 keeps some, and rows
+/// 9 to 11 all occur, so the invariants above are not vacuous.
+#[test]
+fn the_generated_cases_reach_the_rows_the_properties_check() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::{Config, TestRunner};
+    let mut runner = TestRunner::new_with_rng(
+        Config::default(),
+        proptest::test_runner::TestRng::deterministic_rng(
+            proptest::test_runner::RngAlgorithm::ChaCha,
+        ),
+    );
+    let strategy = gen_case();
+    let mut rows = std::collections::BTreeMap::new();
+    for _ in 0..4096 {
+        let g = strategy.new_tree(&mut runner).expect("a case").current();
+        *rows.entry(judge(&g).0.row).or_insert(0) += 1;
+    }
+    for row in [
+        Row::Named,
+        Row::Rank,
+        Row::NamingUndecidable,
+        Row::RootUseUndecidable,
+        Row::RootUsed,
+        Row::UnusedRoot,
+    ] {
+        assert!(
+            rows.get(&row).copied().unwrap_or(0) > 10,
+            "{row:?}: {rows:?}"
+        );
+    }
 }
