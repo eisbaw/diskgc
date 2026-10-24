@@ -1894,7 +1894,15 @@ impl Host for LinuxHost {
                 STATX_MASK,
             )
             .map(|x| stat_from_statx(&x))
-            .map_err(|e| ProcError::Failed(HostError::errno("statx", shown(), errno_of(e))))?;
+            // The object was opened: no failure from here on says that the
+            // path is absent, so none carries an errno (unresolvable).
+            .map_err(|e| {
+                ProcError::Failed(HostError::invalid(
+                    "statx",
+                    shown(),
+                    format!("the opened object could not be statted: {}", errno_of(e)),
+                ))
+            })?;
             let id = stat.dev_ino().ok_or_else(|| {
                 ProcError::Failed(HostError::invalid(
                     "statx",
@@ -1917,7 +1925,13 @@ impl Host for LinuxHost {
                 OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|e| ProcError::Failed(HostError::errno("openat", shown(), errno_of(e))))?;
+            .map_err(|e| {
+                ProcError::Failed(HostError::invalid(
+                    "openat",
+                    shown(),
+                    format!("climbing from the opened object failed: {}", errno_of(e)),
+                ))
+            })?;
             let (id, _) = id_of(&up)?;
             if Some(&id) == chain.last() {
                 return Ok(chain);

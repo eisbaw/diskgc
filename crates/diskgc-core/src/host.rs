@@ -1151,7 +1151,11 @@ pub trait Host {
     /// the temp-directory and `--basetemp` values pytest itself resolves
     /// are ever looked up this way (docs/safety.md, A process's paths).
     /// `Gone`: the process ended (the kernel's word, as for the other
-    /// readers); any other error: the value is unresolvable.
+    /// readers); any other error: the value is unresolvable. Only an error
+    /// of the path walk itself carries an errno (`ENOENT`, `ENOTDIR`: the
+    /// path is absent in the process's view; `ESRCH` only below a root on
+    /// procfs); a root that cannot be opened, and any failure after the
+    /// object was opened, carry none, so no caller reads them as absence.
     fn proc_root_lookup(
         &self,
         pid: Pid,
