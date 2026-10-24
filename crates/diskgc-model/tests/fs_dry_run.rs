@@ -1058,7 +1058,6 @@ fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) 
     (report, lines)
 }
 
-/// The plan as (candidate, reason) pairs, in order.
 /// Plan rows in a stable order: candidate, then the reason's name
 /// (`Reason` has no order of its own: its declaration order means nothing).
 fn by_candidate_then_reason(
@@ -1068,6 +1067,7 @@ fn by_candidate_then_reason(
     (&a.0, a.1.map(Reason::as_str)).cmp(&(&b.0, b.1.map(Reason::as_str)))
 }
 
+/// The plan as (candidate, reason) pairs, in order.
 fn plan(report: &Report) -> Vec<(String, Option<Reason>)> {
     report
         .plan

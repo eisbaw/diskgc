@@ -2831,12 +2831,11 @@ struct FsUnionCandidate {
 }
 
 impl FsUnionCandidate {
-    /// The build source established when this candidate was discovered,
-    /// for a skipped plan row's `build_evidence` (docs/reference.md,
-    /// Output: discovery's, which may not have survived later rechecks):
-    /// `source`'s (an index into the tier's sources, the row's profile)
-    /// when it has one, else that of any term that found it, so a plain
-    /// term listed before an anchored one does not hide it.
+    /// The build source `source` (an index into the tier's sources: the
+    /// row's profile) established when it discovered this candidate, for a
+    /// skipped plan row's `build_evidence` (docs/reference.md, Output:
+    /// discovery's, which may not have survived later rechecks). Only the
+    /// row's own term: a row never reports another profile's anchor.
     fn discovered(&self, source: usize) -> Option<&fs_kind::SourceEvidence> {
         fn evidence((_, found): &(usize, fs_kind::Found)) -> Option<&fs_kind::SourceEvidence> {
             found.source_evidence.as_ref()
@@ -2846,7 +2845,6 @@ impl FsUnionCandidate {
             .chain(&self.guard_by)
             .filter(|(index, _)| *index == source)
             .find_map(evidence)
-            .or_else(|| self.found_by.iter().find_map(evidence))
     }
 
     fn contributors(&self) -> Vec<(usize, &fs_kind::Found, bool)> {
