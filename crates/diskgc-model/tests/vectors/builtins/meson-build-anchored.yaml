@@ -1,8 +1,5 @@
 # Source-anchored Meson output, past the 3-day floor: one deleted, one in
 # use, one excluded by a negated profile.
-# KNOWN DEFECT (TASK-128): a selection with `!profile:` plans through the
-# union path, which drops build_evidence, so these rows carry no source:
-# although the docs promise one. Add source: when TASK-128 is fixed.
 profile_vector: 1
 user_profiles:
   - name: pin
@@ -32,9 +29,16 @@ host:
     - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool, /home/tester/src/p2/out/a.o], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
 expect:
   plan:
-    - {candidate: /home/tester/src/p1/out}
-    - {candidate: /home/tester/src/p2/out, reason: in_use}
-    - {candidate: /home/tester/src/p3/out, reason: excluded}
+    - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p2/out, reason: in_use, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/p3/out, reason: excluded, source: /home/tester/src/p3}
+  # build_evidence (docs/reference.md, Output): the eligible row's age is
+  # clock - newest mtime = 14 d 3 h = 1220400 s; a skipped row has none.
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/p1/out, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/p2/out, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p2, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/p3/out, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p3, idle_age_seconds: null}}
   reclaim_exit: 1
   actions: [/home/tester/src/p1/out]
   removed: [/home/tester/src/p1/out]

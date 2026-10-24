@@ -1,0 +1,50 @@
+# A union (`||`) plans through the union path like a negated selection:
+# the source-anchored Meson output keeps its build_evidence (marker,
+# source, idle age), and the plain user profile's candidate has none
+# (docs/reference.md, Output; TASK-128). p2/out is found by a plain term
+# listed first (`outs`, so its row names that profile) and by the Meson
+# term: the evidence belongs to the candidate and is still reported.
+profile_vector: 1
+user_profiles:
+  - name: outs
+    find: {roots: [/home/tester/src], paths: [p2/out], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/p2/out]}
+  - name: scratch
+    find: {roots: [/home/tester/src], paths: [scratch-*], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/scratch-a]}
+select: profile:outs || profile:meson-build-anchored || profile:scratch
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/p1/meson.build: {content: "project('p1')\n"}
+    /home/tester/src/p1/out: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {content: coredata, mtime: 2026-10-01T00:00:00Z}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {content: '{"directories":{"source":"/home/tester/src/p1","build":"/home/tester/src/p1/out","info":"/home/tester/src/p1/out/meson-info"},"error":false}', mtime: 2026-10-01T00:00:00Z}}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/p2/meson.build: {content: "project('p2')\n"}
+    /home/tester/src/p2/out: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {content: coredata, mtime: 2026-10-01T00:00:00Z}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {content: '{"directories":{"source":"/home/tester/src/p2","build":"/home/tester/src/p2/out","info":"/home/tester/src/p2/out/meson-info"},"error":false}', mtime: 2026-10-01T00:00:00Z}}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/scratch-a: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p2/out, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/scratch-a}
+  # In discovery order (the union's terms in turn); clock - newest mtime
+  # = 14 d 3 h = 1220400 s.
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/p2/out, profile: outs, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p2, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/p1/out, profile: meson-build-anchored, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/scratch-a, profile: scratch}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/out, /home/tester/src/p2/out, /home/tester/src/scratch-a]
+  removed: [/home/tester/src/p1/out, /home/tester/src/p2/out, /home/tester/src/scratch-a]
+  skipped: []
+  preserved: [/home/tester/src/p1/meson.build, /home/tester/src/p2/meson.build]

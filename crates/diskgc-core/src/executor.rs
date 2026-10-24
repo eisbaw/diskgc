@@ -2773,36 +2773,50 @@ fn plan_fs<H: Host>(
                         .map_or_else(|| "unknown".to_owned(), |t| t.secs.to_string())
                 ));
                 let mut entry = plan_entry(tier, path, None, Some(e.bytes));
-                if let (Some(source), Some(newest)) = (&e.source_evidence, e.newest_change) {
-                    let now = host.wall_clock();
-                    let age_ns = (i128::from(now.secs) - i128::from(newest.secs)) * 1_000_000_000
-                        + i128::from(now.nanos)
-                        - i128::from(newest.nanos);
-                    entry.build_evidence = Some(BuildEvidence {
-                        marker: source.marker,
-                        source: source.source.clone(),
-                        idle_age_seconds: Some(
-                            u64::try_from(age_ns.max(0) / 1_000_000_000).unwrap_or(u64::MAX),
-                        ),
-                    });
-                }
+                entry.build_evidence =
+                    eligible_build_evidence(host, e.source_evidence.as_ref(), e.newest_change);
                 planned.eligible.push((e.newest_change, entry));
             }
             Err(skip) => {
                 log(&format!("{} {}: skip {skip}", tier.name, path.display()));
                 let mut entry = plan_entry(tier, path, Some(skip.reason), None);
-                if let Some(source) = source_evidence {
-                    entry.build_evidence = Some(BuildEvidence {
-                        marker: source.marker,
-                        source: source.source.clone(),
-                        idle_age_seconds: None,
-                    });
-                }
+                entry.build_evidence = skipped_build_evidence(source_evidence.as_ref());
                 planned.skipped.push(entry);
             }
         }
     }
     planned
+}
+
+/// An eligible plan row's `build_evidence` (docs/reference.md, Output): the
+/// source its judgement verified, with the idle age of the newest change
+/// the eligibility walk measured; none without both.
+fn eligible_build_evidence<H: Host>(
+    host: &H,
+    source: Option<&fs_kind::SourceEvidence>,
+    newest: Option<Timestamp>,
+) -> Option<BuildEvidence> {
+    let (source, newest) = (source?, newest?);
+    let now = host.wall_clock();
+    let age_ns = (i128::from(now.secs) - i128::from(newest.secs)) * 1_000_000_000
+        + i128::from(now.nanos)
+        - i128::from(newest.nanos);
+    Some(BuildEvidence {
+        marker: source.marker,
+        source: source.source.clone(),
+        idle_age_seconds: Some(u64::try_from(age_ns.max(0) / 1_000_000_000).unwrap_or(u64::MAX)),
+    })
+}
+
+/// A skipped plan row's `build_evidence`: the source established at
+/// discovery, with no age (the skip stopped the walk before one was
+/// established).
+fn skipped_build_evidence(source: Option<&fs_kind::SourceEvidence>) -> Option<BuildEvidence> {
+    source.map(|source| BuildEvidence {
+        marker: source.marker,
+        source: source.source.clone(),
+        idle_age_seconds: None,
+    })
 }
 
 /// One inode admitted by at least one filesystem source. `found_by` supplies
@@ -2817,6 +2831,24 @@ struct FsUnionCandidate {
 }
 
 impl FsUnionCandidate {
+    /// The build source established when this candidate was discovered,
+    /// for its plan row's `build_evidence` (docs/reference.md, Output):
+    /// `source`'s (an index into the tier's sources, the row's profile)
+    /// when it has one, else that of any term that found it. The evidence
+    /// belongs to the candidate, not to the term the row names: a plain
+    /// term listed before an anchored one must not hide it.
+    fn discovered(&self, source: usize) -> Option<&fs_kind::SourceEvidence> {
+        fn evidence((_, found): &(usize, fs_kind::Found)) -> Option<&fs_kind::SourceEvidence> {
+            found.source_evidence.as_ref()
+        }
+        self.found_by
+            .iter()
+            .chain(&self.guard_by)
+            .filter(|(index, _)| *index == source)
+            .find_map(evidence)
+            .or_else(|| self.found_by.iter().find_map(evidence))
+    }
+
     fn contributors(&self) -> Vec<(usize, &fs_kind::Found, bool)> {
         let mut contributors: Vec<_> = self
             .found_by
@@ -3203,11 +3235,12 @@ fn plan_fs_union<H: Host>(
         }
         match union_guard_veto(host, candidate, &sources, rules, dev, deadline) {
             Ok(Some((index, skip))) => {
-                let source_index = candidate.guard_by[index].0;
+                let (source_index, found) = &candidate.guard_by[index];
                 log_skip(log, tier, &skip);
                 let mut entry = plan_entry(tier, &skip.path, Some(skip.reason), None);
-                entry.profile = sources[source_index].profile.to_owned();
-                entry.checkouts = sources[source_index].checkouts;
+                entry.profile = sources[*source_index].profile.to_owned();
+                entry.checkouts = sources[*source_index].checkouts;
+                entry.build_evidence = skipped_build_evidence(found.source_evidence.as_ref());
                 planned.skipped.push(entry);
                 continue;
             }
@@ -3299,6 +3332,7 @@ fn plan_fs_union<H: Host>(
                     let mut entry = plan_entry(tier, path, Some(skip.reason), None);
                     entry.profile = sources[vetoing].profile.to_owned();
                     entry.checkouts = sources[vetoing].checkouts;
+                    entry.build_evidence = skipped_build_evidence(candidate.discovered(vetoing));
                     planned.skipped.push(entry);
                     continue;
                 }
@@ -3326,6 +3360,8 @@ fn plan_fs_union<H: Host>(
                     let mut entry = plan_entry(tier, path, Some(skip.reason), None);
                     entry.profile = sources[refusing_index].profile.to_owned();
                     entry.checkouts = checkouts;
+                    entry.build_evidence =
+                        skipped_build_evidence(candidate.discovered(refusing_index));
                     planned.skipped.push(entry);
                     continue;
                 }
@@ -3334,6 +3370,16 @@ fn plan_fs_union<H: Host>(
             let mut entry = plan_entry(tier, path, None, Some(tally.bytes));
             entry.profile = source.profile.to_owned();
             entry.checkouts = checkouts;
+            // The judgement's verified source, else discovery's (another
+            // admitted term's anchor) with this walk's age.
+            entry.build_evidence = eligible_build_evidence(
+                host,
+                tally
+                    .source_evidence
+                    .as_ref()
+                    .or_else(|| candidate.discovered(index)),
+                tally.newest_change,
+            );
             log(&format!(
                 "{}: {}: eligible by `{}` ({} estimated)",
                 tier.name,
@@ -3349,6 +3395,7 @@ fn plan_fs_union<H: Host>(
             let mut entry = plan_entry(tier, path, Some(skip.reason), None);
             entry.profile = sources[index].profile.to_owned();
             entry.checkouts = sources[index].checkouts;
+            entry.build_evidence = skipped_build_evidence(candidate.discovered(index));
             planned.skipped.push(entry);
         }
     }

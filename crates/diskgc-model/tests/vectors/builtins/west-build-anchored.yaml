@@ -1,9 +1,6 @@
 # Source-anchored Zephyr west builds: one deleted, one a process's
 # working directory, one excluded by a negated profile, one holding a
 # checkout (a west module cloned into the build tree).
-# KNOWN DEFECT (TASK-128): a selection with `!profile:` plans through the
-# union path, which drops build_evidence, so these rows carry no source:
-# although the docs promise one. Add source: when TASK-128 is fixed.
 profile_vector: 1
 user_profiles:
   - name: pin
@@ -35,10 +32,18 @@ host:
     - {pid: 901, exe: /usr/bin/tool, cwd: /home/tester/src/p2/build/zephyr, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
 expect:
   plan:
-    - {candidate: /home/tester/src/p1/build}
-    - {candidate: /home/tester/src/p2/build, reason: in_use}
-    - {candidate: /home/tester/src/p3/build, reason: excluded}
-    - {candidate: /home/tester/src/p4/build, reason: contains_checkout}
+    - {candidate: /home/tester/src/p1/build, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p2/build, reason: in_use, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/p3/build, reason: excluded, source: /home/tester/src/p3}
+    - {candidate: /home/tester/src/p4/build, reason: contains_checkout, source: /home/tester/src/p4}
+  # build_evidence (docs/reference.md, Output): the eligible row's age is
+  # clock - newest mtime = 14 d 3 h = 1220400 s; a skipped row has none.
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/p1/build, build_evidence: {marker: CMakeCache.txt, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/p2/build, build_evidence: {marker: CMakeCache.txt, source: /home/tester/src/p2, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/p3/build, build_evidence: {marker: CMakeCache.txt, source: /home/tester/src/p3, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/p4/build, build_evidence: {marker: CMakeCache.txt, source: /home/tester/src/p4, idle_age_seconds: null}}
   reclaim_exit: 1
   actions: [/home/tester/src/p1/build]
   removed: [/home/tester/src/p1/build]
