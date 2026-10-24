@@ -938,3 +938,200 @@ fn every_tmp_builtin_fs_source_has_a_distinguishing_type_mutation() {
         );
     }
 }
+
+/// What docs/reference.md "Liveness contracts" says about one profile: the
+/// contract its row names (`liveness_contract: X` in the Contract cell, not
+/// after "planned:"), and whether its verdict is Shipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LivenessRow {
+    contract: Option<String>,
+    shipped: bool,
+}
+
+/// The liveness table, one entry per profile named in a row's first cell.
+/// A profile named by two rows is a problem in itself.
+fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<String>) {
+    let mut out: Vec<(String, LivenessRow)> = Vec::new();
+    let mut problems = Vec::new();
+    for row in rows {
+        assert_eq!(row.len(), 5, "Liveness contracts row has 5 cells: {row:?}");
+        let contract_cell = &row[2];
+        let contract = (!contract_cell.starts_with("planned"))
+            .then(|| {
+                let start =
+                    contract_cell.find("`liveness_contract: ")? + "`liveness_contract: ".len();
+                let len = contract_cell[start..].find('`')?;
+                Some(contract_cell[start..start + len].to_owned())
+            })
+            .flatten();
+        let entry = LivenessRow {
+            contract,
+            shipped: row[4].starts_with("Shipped"),
+        };
+        for name in row[0].split(", ").map(crate::doc::code) {
+            if out.iter().any(|(seen, _)| seen == name) {
+                problems.push(format!("{name}: named by two Liveness contracts rows"));
+            }
+            out.push((name.to_owned(), entry.clone()));
+        }
+    }
+    (out, problems)
+}
+
+/// The sync rule between the liveness table and the built-in library
+/// (TASK-112): every built-in source with a contract has a Shipped row
+/// naming that contract; every Shipped row names a built-in whose contract
+/// (or absence of one) is the row's; a row that is not Shipped (excluded,
+/// withdrawn, planned, governed elsewhere) names no built-in. Built-ins
+/// without a contract and without a row are TASK-122's to classify.
+fn liveness_sync_problems(
+    rows: &[(String, LivenessRow)],
+    builtins: &[(String, Option<&'static str>)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let row_of = |name: &str| rows.iter().find(|(n, _)| n == name).map(|(_, r)| r);
+    let builtin_of = |name: &str| builtins.iter().find(|(n, _)| n == name).map(|(_, c)| *c);
+    for (name, contract) in builtins {
+        let Some(contract) = contract else { continue };
+        match row_of(name) {
+            Some(row) if row.shipped && row.contract.as_deref() == Some(contract) => {}
+            row => problems.push(format!(
+                "built-in {name} has liveness_contract: {contract}; its Liveness contracts row \
+                 is {row:?}, not Shipped with that contract"
+            )),
+        }
+    }
+    for (name, row) in rows {
+        match (row.shipped, builtin_of(name)) {
+            (true, None) => problems.push(format!("{name}: row says Shipped, no such built-in")),
+            (true, Some(contract)) if row.contract.as_deref() != contract => {
+                problems.push(format!(
+                    "{name}: row names contract {:?}, built-in has {contract:?}",
+                    row.contract
+                ))
+            }
+            (false, Some(_)) => problems.push(format!(
+                "{name}: row is not Shipped (excluded, withdrawn or planned) but it is a built-in"
+            )),
+            _ => {}
+        }
+    }
+    problems
+}
+
+fn builtin_contracts() -> Vec<(String, Option<&'static str>)> {
+    Library::builtin()
+        .expect("built-ins")
+        .profiles()
+        .map(|profile| {
+            let contract = match &profile.body {
+                Body::Source(source) => source.where_.liveness_contract.map(LivenessContract::name),
+                _ => None,
+            };
+            (profile.name.clone(), contract)
+        })
+        .collect()
+}
+
+fn documented_liveness_rows() -> (Vec<(String, LivenessRow)>, Vec<String>) {
+    use crate::doc::{reference_md, section, table};
+    let section = section(&reference_md(), "### Liveness contracts");
+    liveness_rows(&table(&section, "| Profile |"))
+}
+
+#[test]
+fn liveness_table_and_builtin_library_agree() {
+    let (rows, mut problems) = documented_liveness_rows();
+    problems.extend(liveness_sync_problems(&rows, &builtin_contracts()));
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The sync rule bites each way it can drift, on edits of the real table
+/// and library (a manual edit of either file shows the same messages).
+#[test]
+fn liveness_sync_rule_catches_each_kind_of_drift() {
+    let (rows, _) = documented_liveness_rows();
+    let builtins = builtin_contracts();
+    let set = |name: &str, contract: Option<&'static str>| {
+        let mut b = builtins.clone();
+        b.iter_mut().find(|(n, _)| n == name).expect(name).1 = contract;
+        b
+    };
+    let without = |name: &str| -> Vec<(String, LivenessRow)> {
+        rows.iter().filter(|(n, _)| n != name).cloned().collect()
+    };
+    let with_row = |name: &str, row: LivenessRow| {
+        let mut r = rows.clone();
+        r.iter_mut().find(|(n, _)| n == name).expect(name).1 = row;
+        r
+    };
+    let mut added = builtins.clone();
+    added.push(("nix-shell-tmpdir".into(), None));
+    let cases: [(&str, Vec<String>); 6] = [
+        (
+            "contract dropped from a built-in",
+            liveness_sync_problems(&rows, &set("pytest-tmp", None)),
+        ),
+        (
+            "contract added to a built-in",
+            liveness_sync_problems(&rows, &set("chromium-tmp", Some("pytest"))),
+        ),
+        (
+            "row of a contract built-in removed",
+            liveness_sync_problems(&without("nix-shell-rc"), &builtins),
+        ),
+        (
+            "row's contract changed",
+            liveness_sync_problems(
+                &with_row(
+                    "pytest-tmp",
+                    LivenessRow {
+                        contract: Some("nix-shell".into()),
+                        shipped: true,
+                    },
+                ),
+                &builtins,
+            ),
+        ),
+        (
+            "excluded profile shipped",
+            liveness_sync_problems(&rows, &added),
+        ),
+        (
+            "Shipped row without a built-in",
+            liveness_sync_problems(
+                &with_row(
+                    "mktemp-dir",
+                    LivenessRow {
+                        contract: None,
+                        shipped: true,
+                    },
+                ),
+                &builtins,
+            ),
+        ),
+    ];
+    for (what, problems) in cases {
+        assert!(!problems.is_empty(), "{what}: not caught");
+    }
+    let doubled: Vec<Vec<String>> = vec![
+        vec![
+            "`a`".into(),
+            "".into(),
+            "none".into(),
+            "none".into(),
+            "Excluded.".into(),
+        ],
+        vec![
+            "`b`, `a`".into(),
+            "".into(),
+            "none".into(),
+            "none".into(),
+            "Excluded.".into(),
+        ],
+    ];
+    assert!(
+        !liveness_rows(&doubled).1.is_empty(),
+        "a profile in two rows: not caught"
+    );
+}

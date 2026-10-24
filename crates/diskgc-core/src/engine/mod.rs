@@ -655,9 +655,12 @@ pub enum ProcessEvidence {
     /// temp-directory variable resolving to it, Python's fallback roots,
     /// its working directory).
     TempRoot,
-    /// The process has a relative or unresolvable value of a variable or
-    /// option pytest resolves, so the pytest contract cannot decide.
-    RelativePath,
+    /// A path the pytest contract needs for this process did not resolve
+    /// to an answer: a relative value of a variable or option pytest
+    /// resolves, an absolute one whose lookup in the process's root
+    /// failed, or a failed lookup of one of Python's fallback roots. The
+    /// contract cannot decide.
+    UnresolvedPath,
 }
 
 impl ProcessEvidence {
@@ -678,7 +681,7 @@ impl ProcessEvidence {
         Self::OwnerPid,
         Self::CommandLine,
         Self::TempRoot,
-        Self::RelativePath,
+        Self::UnresolvedPath,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -699,7 +702,7 @@ impl ProcessEvidence {
             Self::OwnerPid => "owner_pid",
             Self::CommandLine => "command_line",
             Self::TempRoot => "temp_root",
-            Self::RelativePath => "relative_path",
+            Self::UnresolvedPath => "unresolved_path",
         }
     }
 }

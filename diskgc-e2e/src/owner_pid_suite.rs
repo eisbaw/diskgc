@@ -349,6 +349,164 @@ pub fn owner_pid_is_unknown_under_hidepid(ctx: &Ctx) -> TestResult {
     Ok(())
 }
 
+/// Owner PID's filesystem precondition through the real binary (AC #4 of
+/// TASK-112): a pid written on a filesystem off the local list may name a
+/// process of another kernel, so even an owner no process carries is
+/// `producer_unknown` there, never eligible. The candidate lies on a kernel
+/// overlayfs (upper and lower on the scratch tmpfs) and is judged by a user
+/// profile with `liveness_contract: nix-shell`, since the built-in's root
+/// is `/tmp` itself. Positive control in the same initial PID namespace:
+/// the same dead number's directory on the tmpfs `/tmp` is reclaimed by
+/// the built-in, so the overlay one is kept by the filesystem rule alone.
+pub fn owner_pid_is_unknown_on_an_unlisted_filesystem(ctx: &Ctx) -> TestResult {
+    below_the_goal(ctx)?;
+    let base = free_pid_range()?;
+    let dead = base + PID_RANGE_WIDTH - 1;
+    // The upper directory's mode is the overlay root's: sticky and
+    // world-writable like /tmp, so tester could delete the candidate.
+    for (dir, mode) in [
+        ("ovl-lower", 0o755),
+        ("ovl-upper", 0o1777),
+        ("ovl-work", 0o700),
+        ("ovl", 0o755),
+    ] {
+        ctx.scratch.mkdir(dir, mode, ROOT)?;
+    }
+    let overlay = OverlayMount::mount(ctx.scratch.root())?;
+    let overlay_dir = overlay.at.join(format!("nix-develop-{dead}-1"));
+    std::fs::create_dir(&overlay_dir)
+        .map_err(|e| format!("mkdir {}: {e}", overlay_dir.display()))?;
+    std::fs::write(overlay_dir.join("rc"), b"rc\n")
+        .map_err(|e| format!("write rc in {}: {e}", overlay_dir.display()))?;
+    for path in [overlay_dir.join("rc"), overlay_dir.clone()] {
+        rustix::fs::chown(
+            &path,
+            Some(rustix::fs::Uid::from_raw(TESTER.uid)),
+            Some(rustix::fs::Gid::from_raw(TESTER.gid)),
+        )
+        .map_err(|e| format!("chown {}: {e}", path.display()))?;
+    }
+    let magic = rustix::fs::statfs(&overlay_dir)
+        .map_err(|e| format!("statfs {}: {e}", overlay_dir.display()))?
+        .f_type;
+    ensure!(
+        u64::try_from(magic).ok() == Some(OVERLAYFS_SUPER_MAGIC),
+        "precondition: {} is on filesystem type {magic:#x}, not overlayfs",
+        overlay_dir.display()
+    );
+    let tmpfs_dir = ctx
+        .scratch
+        .mkdir(&format!("nix-develop-{dead}-2"), 0o700, TESTER)?;
+    ctx.scratch
+        .write_file(&format!("nix-develop-{dead}-2/rc"), b"rc\n", 0o600, TESTER)?;
+    carriers_are_only(dead, 0)?;
+    ctx.home.write_file(
+        "overlay-probe.yaml",
+        format!(
+            "version: 1\nprofiles:\n  - name: nix-shell-overlay-probe\n    \
+             find: {{roots: [{at}], paths: [\"nix-develop-*-*\"], type: dir}}\n    \
+             where: {{liveness_contract: nix-shell}}\n    min_idle_for: 1h\n    \
+             action: delete\n    examples: {{match: [{at}/nix-develop-4242-1]}}\n",
+            at = overlay.at.display()
+        )
+        .as_bytes(),
+        0o600,
+        TESTER,
+    )?;
+    let at = overlay
+        .at
+        .to_str()
+        .ok_or("non-UTF-8 overlay path")?
+        .to_owned();
+    let overlay_args = |dry_run: bool| {
+        let mut args = Vec::new();
+        if dry_run {
+            args.push("--dry-run");
+        }
+        args.extend([
+            "--json",
+            "--no-index",
+            "--config",
+            "/home/tester/overlay-probe.yaml",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:nix-shell-overlay-probe",
+            at.as_str(),
+        ]);
+        args
+    };
+
+    let clock = SandboxClockOffset::install(CLOCK_OFFSET_SECONDS)?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let overlay_plan = ensure_run(ctx, &overlay_args(true))?;
+    let overlay_run = ensure_run(ctx, &overlay_args(false))?;
+    oracle
+        .judge_runs(&[&overlay_plan, &overlay_run])?
+        .assert_clean()?;
+    overlay_plan.expect_code(0)?;
+    expect_plan(&overlay_plan, &[(&overlay_dir, Some("producer_unknown"))])?;
+    overlay_run.expect_code(1)?;
+    let rule = format!("filesystem type {OVERLAYFS_SUPER_MAGIC:#x} is not on the local list");
+    expect_skipped(
+        &overlay_run,
+        &overlay_dir,
+        "producer_unknown",
+        &[],
+        Some(&undecidable(dead, &rule)),
+    )?;
+    ensure!(overlay_dir.exists(), "the overlay candidate was deleted");
+
+    let oracle = Oracle::arm(Fixture::new().eligible(&tmpfs_dir))?;
+    let initial_run = ensure_run(ctx, &reclaim_args())?;
+    oracle.judge_runs(&[&initial_run])?.assert_clean()?;
+    initial_run.expect_code(1)?;
+    expect_action(&initial_run, &tmpfs_dir)?;
+    ensure!(!tmpfs_dir.exists(), "the tmpfs control directory remains");
+    ensure!(overlay_dir.exists(), "the overlay candidate was deleted");
+    drop(clock);
+    drop(overlay);
+    Ok(())
+}
+
+/// `OVERLAYFS_SUPER_MAGIC` (linux/magic.h).
+const OVERLAYFS_SUPER_MAGIC: u64 = 0x794c_7630;
+
+/// A kernel overlayfs at `<scratch>/ovl` over `ovl-lower`, `ovl-upper` and
+/// `ovl-work` on the scratch tmpfs (`userxattr`: the container's user
+/// namespace cannot set trusted xattrs). Detached when dropped, so the
+/// scratch tmpfs can be unmounted after the test.
+struct OverlayMount {
+    at: PathBuf,
+}
+
+impl OverlayMount {
+    fn mount(scratch: &Path) -> Result<Self, String> {
+        let at = scratch.join("ovl");
+        let data = format!(
+            "lowerdir={0}/ovl-lower,upperdir={0}/ovl-upper,workdir={0}/ovl-work,userxattr",
+            scratch.display()
+        );
+        let data = std::ffi::CString::new(data).map_err(|e| e.to_string())?;
+        rustix::mount::mount(
+            "diskgc-e2e-overlay",
+            &at,
+            "overlay",
+            rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+            data.as_c_str(),
+        )
+        .map_err(|e| format!("mount overlay at {}: {e}", at.display()))?;
+        info!("overlayfs at {}", at.display());
+        Ok(Self { at })
+    }
+}
+
+impl Drop for OverlayMount {
+    fn drop(&mut self) {
+        let _ = rustix::mount::unmount(&self.at, rustix::mount::UnmountFlags::DETACH);
+    }
+}
+
 fn dry_run_args() -> Vec<&'static str> {
     let mut args = vec!["--dry-run"];
     args.extend(reclaim_args());

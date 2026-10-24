@@ -717,13 +717,14 @@ Fine for one-user machines and runners; weaker on shared hosts.
 
 ### Producer liveness
 
-Status (TASK-112): Owner PID and the `nix-shell` contract are
-implemented (step 3) and any user profile can require them; the
-`nix-shell-rc` built-in uses the `nix-shell` contract (step 4). The pytest
-contract is implemented and the `pytest-tmp` built-in uses it (step 5).
-The project-dependency contracts below are designed, not implemented: the
-loader refuses them until they land (TASK-79). The protocols below are
-normative for the implementation.
+Status (TASK-112): Owner PID and the `nix-shell` and `pytest` contracts
+are implemented; the `nix-shell-rc` and `pytest-tmp` built-ins use them,
+and any user profile can require them. The project-dependency contracts
+(`node-project`, `python-project`) are designed, not implemented, and so
+are the parts of A process's paths only they use (the climbs of held
+directories and the translation of held files): the loader refuses those
+contracts until they land (TASK-79). The protocols below are normative
+for the implementation.
 
 The in-use scan answers "does a visible process use this candidate now?".
 It cannot answer "has the program that made this candidate finished with
@@ -925,7 +926,9 @@ the session bound elsewhere included, since every directory of the walk is
 matched); of the rules below it uses the process set, the strings and
 the values pytest resolves (with a climb from a resolved `--basetemp`
 value). The climbs of held directories and the translation of held files
-serve the project contracts. So:
+serve only the project contracts and land with them (TASK-79): they are
+not implemented, and nothing implemented relies on them (TASK-112 step 5,
+2026-10-24). So:
 
 - *The process set* of a contract is the processes with any of their four
   uids equal to the owner of the directory the contract judges (pytest
@@ -1028,7 +1031,7 @@ serve the project contracts. So:
   one of the variables pytest resolves is never resolved: Python makes it
   absolute against the working directory at the time it looked, and the
   process may have changed directory since. It makes the verdict
-  `producer_unknown` with `process_blockers` evidence `relative_path`
+  `producer_unknown` with `process_blockers` evidence `unresolved_path`
   where the contract says so.
 - *Several causes.* `process_blockers` is an array: when several
   processes each make an answer undecidable or block it, each has one
@@ -1219,8 +1222,8 @@ of `P` gets exactly one row.
 | 5 | the lock's pid cannot be answered (an Owner PID precondition fails, a process stayed unreadable) | `producer_unknown` (evidence `unreadable` when one process caused it) | lock |
 | 6 | `S` is named | `in_use`, evidence `command_line` or `environment` | named |
 | 7 | below the rank, no `.lock` or an old lock, and (no pytest is running, or `S` is an old session) | eligible | rank (producer-equivalent or stricter) |
-| 8 | naming undecidable | `producer_unknown`, evidence `relative_path` or `unreadable` | named |
-| 9 | root use undecidable | `producer_unknown`, evidence `relative_path` or `unreadable` | unused root |
+| 8 | naming undecidable | `producer_unknown`, evidence `unresolved_path` or `unreadable` | named |
+| 9 | root use undecidable | `producer_unknown`, evidence `unresolved_path` or `unreadable` | unused root |
 | 10 | root used | `in_use`, evidence `temp_root` | unused root |
 | 11 | otherwise | eligible | unused root (heuristic) |
 
@@ -1463,7 +1466,12 @@ schema only with its first producer.
   1.59 s without the contract; the scan itself, about 2.1 million
   syscalls, dominates; per
   check, one listing of the session's `pytest-of-<user>` (at most 65,536
-  names; more is a listing cut short, row 2), one lookup of `S`'s `.lock`
+  names; more is a listing cut short, row 2), made afresh for every
+  check and never reused from an earlier one (step 5, 2026-10-24: a
+  reused `M` can be higher than the current one after a `keep` 0 session
+  deleted the newest number, and a higher `M` lowers `S`'s rank; reusing
+  it within the plan alone, which the check before deletion repeats, is a
+  possible optimisation, not done), one lookup of `S`'s `.lock`
   and one safe resolution of `R`; byte comparison for every other string.
   For the project contracts: one climb per directory a process holds,
   once per scan; one `statx` per held file, and, only for files on one of

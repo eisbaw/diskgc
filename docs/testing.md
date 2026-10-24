@@ -505,7 +505,10 @@ Model scenarios required by [safety.md](safety.md) and
 
 ### Producer liveness vectors
 
-Status: specified by TASK-112's design; they land with its implementation.
+Status: the Owner PID (`nix-shell`) and `pytest` vectors and container
+tests below are checked in and run (TASK-112); the project-contract
+vectors and container tests (`node-project`, `python-project`) are
+specified here and land with TASK-79.
 The Owner PID cases below are checked-in vectors against the
 `nix-shell-rc` built-in in `crates/diskgc-model/tests/vectors/liveness/`,
 one file per row and named after it (step 3 wrote them against a user
@@ -560,7 +563,9 @@ fails `nix_shell_rc_shell_in_private_pid_namespace_is_kept` (deletion
 oracle), skipping the namespace fails
 `owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
 (deletion oracle), naming the namespace first fails
-`owner_pid_is_unknown_under_hidepid` (its detail).
+`owner_pid_is_unknown_under_hidepid` (its detail); skipping the
+filesystem rule fails `owner_pid_is_unknown_on_an_unlisted_filesystem`
+(deletion oracle: the overlay candidate deleted; step 7, 2026-10-24).
 Mutation record (step 5, `pytest`; vector corpus, the verdict's unit and
 property tests, profile tests; every vector-level bite below):
 dropping `liveness_contract` from `pytest-tmp` (44 vectors); an ended lock
@@ -718,7 +723,7 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-live-shell-root-refused` | B `{0..4}`; a uid 1000 process with `TMPDIR=/tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root` |
 | `pytest-tmp-root-named-by-temp-refused`, `-by-tmp-refused`, `-by-debug-temproot-refused` | as above, the root named only by `TEMP`, `TMP`, or `PYTEST_DEBUG_TEMPROOT` (one file each) | 0, 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-empty-tmpdir-ignored` | B `{0..2}`; a process with `TMPDIR=` (empty) | 0, 1, 2 eligible |
-| `pytest-tmp-relative-tmpdir-unknown` | B `{0..4}`; a process with cwd `/tmp` and `TMPDIR=nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `relative_path` (row 9) |
+| `pytest-tmp-relative-tmpdir-unknown` | B `{0..4}`; a process with cwd `/tmp` and `TMPDIR=nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `unresolved_path` (row 9) |
 | `pytest-tmp-relative-tmpdir-cwd-elsewhere-unknown` | as above with cwd `/home/tester` (where the process may have moved since it read the value) | the same: a relative value is never resolved |
 | `pytest-tmp-tmpdir-dotdot-clamped-refused` | B `{0..4}`; `TMPDIR=/../tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root` (`..` clamps at the root) |
 | `pytest-tmp-cwd-is-root-refused` | B `{0..4}`; a process whose cwd is `/tmp/nix-shell.AB` | 0, 1 eligible; 2, 3, 4 `in_use` |
@@ -729,13 +734,13 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-basetemp-via-symlink-refused` | as above with `--basetemp=/tmp/ab-link/pytest-of-tester/pytest-3` | the same (identity, not bytes) |
 | `pytest-tmp-basetemp-within-rank-refused` | as above with `--basetemp=` `pytest-0` | 0 `in_use`, `command_line` (row 6 before row 7); 1 eligible; 2, 3, 4 eligible |
 | `pytest-tmp-basetemp-addopts-refused` | B `{0..4}`; a process with `PYTEST_ADDOPTS=--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-3`, `TMPDIR=/tmp/other` | 3 `in_use`, `environment`; 0, 1 eligible; 2, 4 eligible |
-| `pytest-tmp-basetemp-separate-relative-unknown` | B `{0..4}`; `cmdline: [pytest, --basetemp, pytest-of-tester/pytest-3]`, cwd `/tmp/nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `relative_path` (row 8) |
+| `pytest-tmp-basetemp-separate-relative-unknown` | B `{0..4}`; `cmdline: [pytest, --basetemp, pytest-of-tester/pytest-3]`, cwd `/tmp/nix-shell.AB` | 0, 1 eligible (row 7); 2, 3, 4 `producer_unknown`, `unresolved_path` (row 8) |
 | `pytest-tmp-basetemp-not-session-shaped-not-matched` | B `{0}` plus `mytmp`; *py* with `--basetemp=/tmp/nix-shell.AB/mytmp` | `mytmp` no candidate; 0 eligible |
 | `pytest-tmp-basetemp-config-within-rank-kept-while-pytest-runs` | A `{0..4}`, `pytest-0` two hours old; *py* alive (its `--basetemp` into `pytest-0` comes from a configuration file) | 0 `in_use`, `temp_root` (Mark's fail-closed condition on row 7); 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-basetemp-config-within-rank-old-eligible` | as above, `pytest-0` four days old | 0, 1 eligible (row 7: pytest's own cleanup would delete 0 too; the producer-equivalence case); 2, 3, 4 `in_use` |
 | `pytest-tmp-basetemp-config-above-rank-residual` | B `{0}` two hours old; *py* with `TMPDIR=/tmp/other`, its `--basetemp` into `pytest-0` from a configuration file | 0 eligible (row 11, the stated residual) |
 | `pytest-tmp-cmdline-unreadable-unknown` | B `{0..4}`; a uid 1000 process with `cmdline: unreadable` | 0, 1 eligible (row 7: a pytest counts as running, the sessions are old); 2, 3, 4 `producer_unknown`, `unreadable` (row 8) |
-| `pytest-tmp-two-causes-sorted` | B `{0..4}`; processes 91 and 90 of the user, each with a relative `TMPDIR` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `process_blockers` `[{pid: 90, evidence: relative_path}, {pid: 91, evidence: relative_path}]` |
+| `pytest-tmp-two-causes-sorted` | B `{0..4}`; processes 91 and 90 of the user, each with a relative `TMPDIR` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `process_blockers` `[{pid: 90, evidence: unresolved_path}, {pid: 91, evidence: unresolved_path}]` |
 | `pytest-tmp-environ-unreadable-unknown` | B `{0..4}`; a uid 1000 process whose environment reads `Failed`, not excused | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `unreadable` |
 | `pytest-tmp-other-user-environ-unreadable-ignored` | B `{0..4}`; a uid 0 daemon whose environment is unreadable (`proc: denied`); no other process | 0, 1 eligible (row 7); 2, 3, 4 eligible (row 11): not in the process set |
 | `pytest-tmp-excused-process-ignored` | B `{0..4}`; the only other process is the user's `non_dumpable` agent | 0 to 4 eligible (the stated residual) |
@@ -749,15 +754,15 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-other-variable-not-resolved` | B `{0..2}`; a process with `XDG_RUNTIME_DIR=/tmp/nix-shell.AB` and no temp-directory variable | 0, 1, 2 eligible (only pytest's variables are resolved) |
 | `pytest-tmp-young-lock-ended-owner-below-rank-kept` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; *proc* | 0 `in_use`, `temp_root` (a young lock fails row 7 with no pytest running); 1 eligible; 2, 3, 4 `in_use` |
 | `pytest-tmp-lock-within-dead-lock-margin-kept` | as above, the lock three days and 30 s old | the same (pytest's three days passed, diskgc's extra minute not) |
-| `pytest-tmp-xdist-bootstrap-counts-as-running` | B `{0..4}`, `pytest-0` one day old; an execnet worker (bootstrap command line, `TMPDIR=/tmp/other`) and a process 900 with a relative `TMPDIR` | 0 `producer_unknown`, `relative_path` 900 (row 7 refused: a pytest runs; row 9); 1 eligible; 2, 3, 4 `producer_unknown` |
+| `pytest-tmp-xdist-bootstrap-counts-as-running` | B `{0..4}`, `pytest-0` one day old; an execnet worker (bootstrap command line, `TMPDIR=/tmp/other`) and a process 900 with a relative `TMPDIR` | 0 `producer_unknown`, `unresolved_path` 900 (row 7 refused: a pytest runs; row 9); 1 eligible; 2, 3, 4 `producer_unknown` |
 | `pytest-tmp-other-owner-process-not-in-set` | `--allow-root`, owners tester and a uid 2000 user; B `{0..4}` owned by tester; only a uid 2000 process with `TMPDIR=/tmp/nix-shell.AB` | 0 to 4 eligible: another owner's process is not in the session owner's set |
 | `pytest-tmp-fallback-root-counts-for-a-chrooted-process` | A `{0..4}`; a process with `root: /home/tester` (its own `/tmp` does not resolve) | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root`: `R` is `/tmp` by diskgc's path, always counted |
 | `pytest-tmp-pytest-of-owner-not-judged-unknown` | `/tmp/nix-shell.AB/pytest-of-other` owned by uid 2000 holding the user's `pytest-0` | 0 `producer_unknown`: that uid's processes are not read |
 | `pytest-tmp-root-replaced-unknown` | B `{0}`; `/tmp/nix-shell.AB` renamed away just before the contract's listing and a new directory made under its name | 0 `producer_unknown`: `R` by path no longer holds `P` |
-| `pytest-tmp-fallback-root-lookup-error-unknown` | as `pytest-tmp-root-via-mount-view-refused`, the lookup of the process's `/tmp` failing with `EIO` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `relative_path` (row 9: not "no such root") |
+| `pytest-tmp-fallback-root-lookup-error-unknown` | as `pytest-tmp-root-via-mount-view-refused`, the lookup of the process's `/tmp` failing with `EIO` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `unresolved_path` (row 9: not "no such root") |
 | `pytest-tmp-process-ending-during-its-read-is-gone` | B `{0..4}`; the only process, with `TMPDIR` the root, ends during its own read (before its `TMPDIR` lookup) | 0 to 4 eligible: it is gone, as In use takes it |
 | `pytest-tmp-child-forked-during-a-read-is-read` | B `{0..4}`; a pytest with `--basetemp` into `pytest-3` and `TMPDIR` the root forks a child during its read and ends | the child is listed and read: 3 `in_use`, `command_line` 901; 2, 4 `in_use`, `temp_root` 901; 0, 1 eligible (row 7) |
-| `pytest-tmp-missing-absolute-tmpdir-unknown` | B `{0..4}`; a process with `TMPDIR=/tmp/nix-shell.GONE` (absent) | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `relative_path` (row 9) |
+| `pytest-tmp-missing-absolute-tmpdir-unknown` | B `{0..4}`; a process with `TMPDIR=/tmp/nix-shell.GONE` (absent) | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `unresolved_path` (row 9) |
 | `pytest-tmp-dead-procfs-root-not-a-temp-root` | B `{0..2}`; *proc*'s lookups of `/tmp`, `/var/tmp` and `/usr/tmp` in its root fail with `ESRCH` (a sandboxed renderer's dead `/proc` root) | 0, 1, 2 eligible (row 11): not undecidable |
 
 `pytest-tmp-listing-unreadable` fails every listing of `pytest-of-tester`
@@ -900,8 +905,9 @@ runs against a chroot store in the tester's home, since the image's store
 is read-only and has no database: legacy `nix-shell` of a derivation
 without inputs, and `nix develop` of a ready dev environment, build
 nothing. The others land with the steps that use them; the three Owner
-PID tests landed with step 4 (`diskgc-e2e/src/owner_pid_suite.rs`, tier
-`full`, `--pid=host`, Container setup), the three pytest contract tests
+PID tests landed with step 4 and the filesystem-rule one with step 7
+(`diskgc-e2e/src/owner_pid_suite.rs`, tier `full`, `--pid=host`,
+Container setup), the three pytest contract tests
 with step 5 (`diskgc-e2e/src/pytest_contract_suite.rs`, tier `full`,
 `--pid=host`: in a PID namespace of its own diskgc's process list is not
 complete and every session above the rank is `producer_unknown`, row 8).
@@ -935,6 +941,17 @@ initial namespace, so the rule is observed by its detail (safety.md, Owner
 PID). From the initial namespace without
 `hidepid` the shell is listed and its fd table is denied to tester, so In
 use keeps the directory first, evidence `unreadable`),
+`owner_pid_is_unknown_on_an_unlisted_filesystem` (TASK-112 step 7; in the
+initial PID namespace, `--pid=host`: an rc directory whose owner number
+no process carries, on a kernel overlayfs mounted in the container with
+upper and lower on the scratch tmpfs, judged by a user profile with
+`liveness_contract: nix-shell` rooted at the overlay: `producer_unknown`,
+detail naming the filesystem rule, nothing deleted under the oracle;
+control: the same number's directory on the tmpfs `/tmp` is reclaimed by
+the built-in in the same namespace, so the overlay one is kept by the
+filesystem rule alone. `virtiofs`, `9p` and ZFS are not mountable in the
+rootless container; their rows stay model vectors, and `virtiofs` and
+`9p` are refused as filesystems that may block before any contract),
 `pytest_lifecycle_is_pinned` (pinned pytest: the lock by `keep`, holding
 the pid as text, removed at exit; the exit cleanup by rank; a killed
 session's lock below the rank kept while young and removed after three
@@ -962,7 +979,9 @@ outcome. execnet bounds an orphan's life: its receiver thread, seeing the
 controller's pipe close, SIGINTs the worker after 5 s and `_exit`s it 10 s
 later (`WorkerGateway._terminate_execution`), so the test's worker
 ignores SIGINT and the test checks that the worker still lived after
-diskgc's runs; once it has ended the session is reclaimed, row 11), `node_and_python_project_read_keeps_dependencies`
+diskgc's runs; once it has ended the session is reclaimed, row 11).
+Planned with the project contracts (TASK-79), not yet written:
+`node_and_python_project_read_keeps_dependencies`
 (TASK-79's probe on a `relatime` tmpfs: a run that only reads keeps the
 dependency directory; on a `noatime` mount the residual is shown),
 `npm_install_leaves_old_mtimes_and_new_ctimes` (the pinned npm: after an

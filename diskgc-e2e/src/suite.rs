@@ -272,6 +272,7 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
     "owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace",
     "owner_pid_is_unknown_under_hidepid",
+    "owner_pid_is_unknown_on_an_unlisted_filesystem",
     "pytest_live_policy_none_session_in_shell_root_is_kept",
     "pytest_live_basetemp_session_is_kept",
     "pytest_orphan_xdist_worker_keeps_session",
@@ -451,6 +452,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: owner_pid_suite::owner_pid_is_unknown_under_hidepid,
+    },
+    Test {
+        name: "owner_pid_is_unknown_on_an_unlisted_filesystem",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: owner_pid_suite::owner_pid_is_unknown_on_an_unlisted_filesystem,
     },
     Test {
         name: "pytest_live_policy_none_session_in_shell_root_is_kept",

@@ -36,9 +36,9 @@ expect:
   actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
   removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
   skipped:
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: producer_unknown, process_blockers: [{pid: 600, evidence: relative_path}]}
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: producer_unknown, process_blockers: [{pid: 600, evidence: relative_path}]}
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: producer_unknown, process_blockers: [{pid: 600, evidence: relative_path}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: producer_unknown, process_blockers: [{pid: 600, evidence: unresolved_path}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: producer_unknown, process_blockers: [{pid: 600, evidence: unresolved_path}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: producer_unknown, process_blockers: [{pid: 600, evidence: unresolved_path}]}
   preserved:
     - /tmp/nix-shell.AB/pytest-of-tester/pytest-2
     - /tmp/nix-shell.AB/pytest-of-tester/pytest-3

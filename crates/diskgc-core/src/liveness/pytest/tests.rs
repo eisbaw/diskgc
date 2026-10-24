@@ -174,7 +174,7 @@ fn every_row_is_reachable_and_named_by_its_number() {
     c.processes = vec![p];
     assert_eq!(
         c.verdict().outcome,
-        Outcome::ProducerUnknown(vec![(Pid(5), Evidence::RelativePath)])
+        Outcome::ProducerUnknown(vec![(Pid(5), Evidence::UnresolvedPath)])
     );
     // 10
     let mut c = Case::new(3, &FIVE);
@@ -329,8 +329,8 @@ fn several_causes_are_one_entry_each_sorted_by_pid() {
     assert_eq!(
         c.verdict().outcome,
         Outcome::ProducerUnknown(vec![
-            (Pid(90), Evidence::RelativePath),
-            (Pid(91), Evidence::RelativePath)
+            (Pid(90), Evidence::UnresolvedPath),
+            (Pid(91), Evidence::UnresolvedPath)
         ])
     );
 }

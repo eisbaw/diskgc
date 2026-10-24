@@ -227,7 +227,7 @@ pub enum Evidence {
     CommandLine,
     Environment,
     TempRoot,
-    RelativePath,
+    UnresolvedPath,
     Unreadable,
 }
 
@@ -558,7 +558,7 @@ fn naming_undecidable(process: &ProcessFacts) -> Option<Evidence> {
         .basetemps
         .iter()
         .any(|(_, _, lookup)| !matches!(lookup, Lookup::Resolved(_)))
-        .then_some(Evidence::RelativePath)
+        .then_some(Evidence::UnresolvedPath)
 }
 
 /// Whether a process could use `R` as its temp root (row 10): a
@@ -587,7 +587,7 @@ fn root_use_undecidable(process: &ProcessFacts) -> Option<Evidence> {
         .temp_roots
         .iter()
         .any(|(_, lookup)| !matches!(lookup, Lookup::Resolved(_)));
-    (unresolved || !process.fallback_unresolved.is_empty()).then_some(Evidence::RelativePath)
+    (unresolved || !process.fallback_unresolved.is_empty()).then_some(Evidence::UnresolvedPath)
 }
 
 /// The pytest contract's ordered decision table (docs/safety.md, pytest

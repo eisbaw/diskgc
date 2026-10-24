@@ -479,7 +479,7 @@ fn pytest_session<H: Host>(
                     Evidence::CommandLine => ProcessEvidence::CommandLine,
                     Evidence::Environment => ProcessEvidence::Environment,
                     Evidence::TempRoot => ProcessEvidence::TempRoot,
-                    Evidence::RelativePath => ProcessEvidence::RelativePath,
+                    Evidence::UnresolvedPath => ProcessEvidence::UnresolvedPath,
                     Evidence::Unreadable => ProcessEvidence::Unreadable,
                 },
             })
