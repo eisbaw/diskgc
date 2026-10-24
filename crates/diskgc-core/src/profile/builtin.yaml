@@ -358,6 +358,7 @@
     no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586, /tmp/nix-shell.AB/nix-shell-1-2]
   verified_with: Nix 2.34.9 (nix_shell_rc_lifecycle_is_pinned 2026-10-24); Nix 2.34.8 (host dry run 2026-10-24)
   liveness_class: sound
+  releases: ["0.1"]
 
 # Admitted as a verified heuristic (Mark, 2026-10-23) under the pytest
 # contract (docs/safety.md, pytest sessions; docs/reference.md, Liveness
@@ -379,6 +380,7 @@
     no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/c/pytest-of-mark/pytest-1, /var/tmp/pytest-of-ci/pytest-1]
   verified_with: pytest 9.1.1 (pytest_lifecycle_is_pinned 2026-10-24; contract container tests 2026-10-24)
   liveness_class: verified-heuristic
+  releases: ["0.1"]
 
 # Browser cache paths are below the supplied home root. Each application
 # needs its own source because app_not_running checks one SingletonLock.

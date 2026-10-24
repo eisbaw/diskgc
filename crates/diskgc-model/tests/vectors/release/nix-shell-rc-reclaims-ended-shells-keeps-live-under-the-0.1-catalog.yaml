@@ -1,0 +1,39 @@
+# The proposed 0.1 catalog admits nix-shell-rc (TASK-65, Mark 2026-10-24):
+# `--select profile:nix-shell-rc` under it judges rc directories by the
+# Owner PID contract as the development catalog does. The rc directories
+# of ended shells (no process carries the pid in the name; a SIGKILLed
+# legacy nix-shell and an ended nix develop) go
+# (liveness/nix-shell-rc-dead-owner-eligible.yaml); the one whose shell
+# (pid 4242) still runs, holding nothing in it, is kept
+# (liveness/nix-shell-rc-live-owner-no-fd-refused.yaml).
+profile_vector: 1
+catalog: proposed-release-01
+profile: nix-shell-rc
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/nix-shell-4100-17: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-develop-4101-18: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-4242-19: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+    - {pid: 4242, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-develop-4101-18}
+    - {candidate: /tmp/nix-shell-4100-17}
+    - {candidate: /tmp/nix-shell-4242-19, reason: in_use}
+  reclaim_exit: 1
+  actions: [/tmp/nix-develop-4101-18, /tmp/nix-shell-4100-17]
+  removed: [/tmp/nix-develop-4101-18, /tmp/nix-shell-4100-17]
+  skipped:
+    - {candidate: /tmp/nix-shell-4242-19, reason: in_use, process_blockers: [{pid: 4242, evidence: owner_pid}]}
+  preserved: [/tmp/nix-shell-4242-19/rc]

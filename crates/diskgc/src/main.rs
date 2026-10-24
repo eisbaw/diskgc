@@ -1054,7 +1054,7 @@ mod tests {
     /// list is the second key a widening of the 0.1 catalog must turn
     /// (with TASK-65's sign-off), not a stale copy to derive away.
     #[test]
-    fn proposed_catalog_keeps_only_cargo_and_idle_filters_on_every_listing_surface() {
+    fn proposed_catalog_keeps_only_cargo_tmp_contracts_and_idle_filters_on_every_listing_surface() {
         let library = Library::builtin()
             .expect("built-ins")
             .proposed_release_01()
@@ -1073,7 +1073,9 @@ mod tests {
                 "idle-2d",
                 "idle-30d",
                 "idle-3d",
-                "idle-7d"
+                "idle-7d",
+                "nix-shell-rc",
+                "pytest-tmp"
             ]
         );
         for surface in [
@@ -1081,6 +1083,8 @@ mod tests {
             describe::help_section(&library),
         ] {
             assert!(surface.contains("cargo-target"));
+            assert!(surface.contains("nix-shell-rc"));
+            assert!(surface.contains("pytest-tmp"));
             assert!(!surface.contains("docker-build-cache"));
             assert!(!surface.contains("pip-cache"));
             assert!(!surface.contains("pytest-cache"));
@@ -1111,13 +1115,22 @@ mod tests {
             1000,
         )
         .expect("Cargo remains selectable");
+        for name in ["pytest-tmp", "nix-shell-rc"] {
+            Tier::select(
+                &format!("profile:{name} && filter:idle-1d"),
+                &library,
+                None,
+                1000,
+            )
+            .expect(name);
+        }
     }
 
     #[cfg(feature = "proposed-release-01-catalog")]
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 8);
+        assert_eq!(library.profiles().count(), 10);
         assert!(library.get("docker-build-cache").is_none());
         let error = Tier::select("profile:docker-build-cache", &library, None, 1000)
             .expect_err("excluded source");

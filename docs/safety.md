@@ -3001,8 +3001,9 @@ the offset path, the reader's error context and parse diagnostic, and the
 wall-clock overflow message. It is a byte-string check: it would not see an
 equivalent offset written without those strings. The default Nix package
 remains gated. The `release-01-candidate` output is test-only and unapproved
-for deployment until TASK-67 closes. Its /tmp catalog, operator policy and
-deployment evidence remain unresolved.
+for deployment until TASK-67 closes. Its /tmp catalog is `nix-shell-rc` and
+`pytest-tmp` (TASK-65); operator policy and deployment evidence remain
+unresolved.
 
 In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act

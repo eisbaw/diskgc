@@ -1,11 +1,23 @@
 # Example policy. Adjust roots to the directories whose Cargo targets you
 # own. `diskgc check --config /absolute/path/to/example.yaml` validates it
 # without accessing those roots.
+#
+# The stale group runs its tiers in order and stops once the free-space
+# target is met: first what is cheapest to lose, ended pytest sessions and
+# the rc directories of ended nix shells in /tmp (both judged by their
+# producer's liveness contract, never younger than an hour), then Cargo
+# targets untouched for 30 days.
 version: 1
 ipc: block-any
 groups:
   - name: stale
     tiers:
+      - name: tmp-pytest-sessions
+        select: profile:pytest-tmp && filter:idle-1d
+        timeout: 10m
+      - name: tmp-nix-shell-rc
+        select: profile:nix-shell-rc && filter:idle-1d
+        timeout: 10m
       - name: cargo-old
         select: profile:cargo-target && filter:idle-30d
         roots: [/home/example/src]

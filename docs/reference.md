@@ -1375,16 +1375,19 @@ The optional `proposed-release-01-catalog` build feature narrows the catalog.
 On its own it retains the development sandbox gate. The separate
 `release-01-candidate` package combines that feature with
 `diskgc-linux/release-without-sandbox-gate` for disposable-container testing;
-it is not approved for deployment. The candidate keeps `cargo-target` and the seven
-idle filters, and rejects every operator-authored profile, including
+it is not approved for deployment. The candidate keeps `cargo-target`, the
+two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
+TASK-65, Mark 2026-10-24) and the seven idle filters, and rejects every
+operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
 `profiles show`, `check` and help use the same narrowed library.
 `profile_policies` for admitted `cargo-target` works, but policies for
 excluded sources, including `npm-cache` and `uv-cache`, are refused at load
-time. No `/tmp` source is admitted yet: candidate policy has not established
-which temporary paths are safe for release. The final 0.1 catalog and
-operator-authored `fs` and delete policies remain release decisions under TASK67.
+time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
+and `tmp-entry` have no owner evidence ([Liveness
+contracts](#liveness-contracts)). Operator-authored `fs` and delete policies
+remain a release decision under TASK-67.
 
 | Category | Profile | Finds | Action |
 |---|---|---|---|
@@ -1597,8 +1600,8 @@ its task notes.
 
 | Profile | Producer (verified) | Contract (evidence) | Class | Residuals | Verdict |
 |---|---|---|---|---|---|
-| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. |
-| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. |
+| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the proposed 0.1 catalog (TASK-65). |
+| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the proposed 0.1 catalog (TASK-65, Mark 2026-10-24). |
 | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Chromium-family browsers, default user-data directory | `app_not_running` | sound (presence marker) | A browser that starts between the last lock check and the unlink finds its `Cache` or `Code Cache` missing, which Chromium treats as an empty cache. | Shipped (TASK-74). |
 | `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the proposed 0.1 catalog. |
 | `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 (Docker actions are outside its scope). |
@@ -1630,15 +1633,24 @@ its task notes.
 ### Provisional 0.1 candidate release notes
 
 The candidate package ships a static `diskgc` binary, the tmpfiles rule and
-`example.yaml`. Its supported test scope is Cargo target reclaim with the
-seven idle filters and checkout policy narrowing. The default development
+`example.yaml`. Its supported test scope is Cargo target reclaim, the two
+`/tmp` built-ins with a liveness contract, `nix-shell-rc` (rc directories of
+ended `nix-shell` and `nix develop` shells; Owner PID) and `pytest-tmp`
+(pytest sessions the pytest contract permits), the seven idle filters, and
+checkout policy narrowing. Both `/tmp` built-ins keep anything changed in
+the last hour (`min_idle_for: 1h`); their limits are their rows in [Liveness
+contracts](#liveness-contracts). Owner PID needs a complete process list in
+the initial PID namespace: diskgc in its own PID namespace (most
+containers) keeps every `nix-shell-rc` candidate and most `pytest-tmp`
+sessions as `producer_unknown` (safety.md, Producer liveness). The default development
 package remains sandbox gated. The candidate's gate lift is tested only in
 disposable containers and does not constitute release approval.
 
 Watch mode, persistent index, broader survey and catalog additions, Docker
 actions, Nix store actions, operator command actions, and operator-authored
-filesystem/delete actions are deferred. `/tmp` admission and operator-authored
-policy rules still require an explicit release decision. The
+filesystem/delete actions are deferred. Other `/tmp` entries (`nix-shell.*`
+TMPDIRs themselves, `tmp.*`, anything else) are not 0.1 built-ins.
+Operator-authored policy rules still require an explicit release decision. The
 `docs/ci-pre-job.sh` example stays in the source tree; it is not installed by
 the package.
 
@@ -1646,9 +1658,9 @@ the package.
 |---|---|
 | Package contents | The actual `release-01-candidate` derivation passes the static ELF and installed-file check; its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
-| Catalog and excluded actions | The packaged binary exposes only Cargo plus seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
-| Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. No `/tmp` source is admitted; temporary-path liveness and the final release catalog remain unresolved. |
+| Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `/tmp` contracts' container tests run the development binary; the packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
 | Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy this candidate as a 0.1 release. |
 
 ### User profiles

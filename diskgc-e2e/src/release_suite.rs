@@ -13,8 +13,12 @@ use crate::oracle::{Fixture, Oracle};
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
+// The 0.1 catalog signed off by TASK-65 (Mark, 2026-10-24): Cargo, the two
+// /tmp built-ins with a liveness contract, and the idle filters.
 const ADMITTED: &[&str] = &[
     "cargo-target",
+    "nix-shell-rc",
+    "pytest-tmp",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -50,8 +54,6 @@ const EXCLUDED: &[&str] = &[
     "west-build-anchored",
     "platformio-cache",
     "node-compile-cache",
-    "nix-shell-rc",
-    "pytest-tmp",
     "brave-browser-cache",
     "chrome-browser-cache",
     "chromium-browser-cache",
@@ -131,7 +133,7 @@ pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult
     let admitted: BTreeSet<String> = ADMITTED.iter().map(|name| (*name).to_owned()).collect();
     ensure!(
         names == admitted,
-        "candidate catalog differs from the reviewed Cargo-only subset: {names:?}"
+        "candidate catalog differs from the reviewed 0.1 catalog: {names:?}"
     );
     let development = run_binary(
         ctx,
@@ -149,10 +151,14 @@ pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult
     );
 
     let help = run(ctx, &["--help"], 0)?;
-    ensure!(
-        help.stdout.contains("cargo-target"),
-        "help omits cargo-target"
-    );
+    for name in ["cargo-target", "nix-shell-rc", "pytest-tmp"] {
+        ensure!(help.stdout.contains(name), "help omits {name}");
+        let shown = run(ctx, &["profiles", "show", name, "--json"], 0)?;
+        ensure!(
+            shown.stdout.contains(name),
+            "profiles show omits admitted {name}: {shown:?}"
+        );
+    }
     for name in EXCLUDED {
         ensure!(!help.stdout.contains(name), "help exposes excluded {name}");
         let shown = run(ctx, &["profiles", "show", name, "--json"], 2)?;
@@ -286,6 +292,8 @@ pub fn candidate_rejects_docker_command_and_arbitrary_delete_policy(ctx: &Ctx) -
 pub fn candidate_checkout_policy_accepts_only_admitted_builtin(ctx: &Ctx) -> TestResult {
     for (name, expected) in [
         ("cargo-target", 0),
+        ("pytest-tmp", 0),
+        ("nix-shell-rc", 0),
         ("npm-cache", 2),
         ("uv-cache", 2),
         ("docker-build-cache", 2),

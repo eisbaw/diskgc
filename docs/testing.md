@@ -2017,10 +2017,11 @@ kernel ctime remain unchanged. The feature
 out the offset path and reader. The `release-excludes-clock-offset` flake
 check compares the 0.1 candidate binary with a positive development
 control. The default package remains gated. The separate
-`release-01-candidate` output combines the proposed Cargo-only catalog and
+`release-01-candidate` output combines the proposed 0.1 catalog (Cargo,
+`nix-shell-rc`, `pytest-tmp`, the idle filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
-for deployment until TASK-67 closes; /tmp admission and operator policy
-decisions remain unresolved. The `just e2e` gate runs candidate negatives
+for deployment until TASK-67 closes; operator policy decisions remain
+unresolved. The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
 and Debian images through their candidate under-test runners.
 
