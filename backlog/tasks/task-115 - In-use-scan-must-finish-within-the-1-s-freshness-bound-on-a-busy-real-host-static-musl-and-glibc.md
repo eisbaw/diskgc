@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-23 15:53'
-updated_date: '2026-10-24 15:24'
+updated_date: '2026-10-24 16:01'
 labels:
   - performance
   - inuse
@@ -25,10 +25,10 @@ Measured 2026-10-23 for TASK-70 AC3 (read-only, this laptop, 581 processes, load
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 perf profile of the static build's scan on a real host recorded; the dominant cost is named
-- [ ] #2 The static build's one-candidate dry run on a comparable host is within 1.5x of the glibc build, or the remaining gap is explained and accepted by Mark
+- [x] #2 The static build's one-candidate dry run on a comparable host is within 1.5x of the glibc build, or the remaining gap is explained and accepted by Mark
 - [x] #3 Change measured on the real host again (read-only) and recorded with command, exit code, process count and load
-- [ ] #4 A reclaim inside a container with --pid=host on this laptop deletes a disposable candidate with the shipped static binary (no freshness error), repeated 10 times with load recorded; or the freshness design change is decided and implemented with its safety argument in docs/safety.md
-- [x] #5 Per-scan time on this host recorded for static musl and glibc builds before and after, with process count and load
+- [x] #4 Per-scan time on this host recorded for static musl and glibc builds before and after, with process count and load
+- [x] #5 A reclaim of a disposable candidate inside a disposable container with a host-shaped process load (this laptop's measured shape: ~281 user processes, ~2,800 tasks, plus CPU load from another user), with the shipped static binary, deletes it without a freshness error, 10 reclaims per build (static and glibc) with load recorded; or the freshness design change is decided and implemented with its safety argument in docs/safety.md
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -51,4 +51,16 @@ AFTER (host, interleaved, 20 scans each, read-only, 630-642 procs, load 7-16, tm
 OPEN FOR MARK (AC #2, AC #4): the static build is still 1.5-2.5x glibc and misses freshness under CPU oversubscription because musl's mallocng lock serialises the 8 readers; Part 2 = mimalloc 0.1.52 (vendored C, nixpkgs pkgsCross.musl64 gcc as CC) on branch task115-mimalloc, which closes the container gap (10/10). Decide: (1) adopt mimalloc (supply chain: C under every allocation, MIMALLOC_* env affects behaviour; build: cross gcc, reverses 'no C toolchain'); (2) keep musl malloc and cut allocations further (remaining ~180k allocs/scan, mostly environ path pairs and per-read Vecs; uncertain to close the oversubscription tail); (3) freshness-rule design options were NOT written: the bound is met with margin on the host at load <=16 for glibc and with mimalloc in the container, so step 5 was not triggered. AC #4 wording should change to the host-shaped-load container (or the --pid=host shape is meaningless).
 
 Orchestrator 2026-10-24. Decision by mark-emulator (Mark delegated; Mark may veto): first cut the remaining allocations (~180k per scan) and try fewer parallel reader threads, measured under the host-shaped load; only if the static build's high-load tail remains, adopt mimalloc (branch task115-mimalloc, 98952ee) pinned in the flake, with MIMALLOC_* environment variables ignored or cleared at startup so they cannot change behaviour. AC #4 rewording: the --pid=host rootless container cannot see host processes (child user namespace), so the proof is the host-shaped-load container (281 processes, 2810 threads, 10 busy loops of another user), 10 reclaims per build. Evidence from removed worktrees moved to tmp/evidence/task112-step5 and tmp/evidence/task115-baseline.
+
+2026-10-24 AC #4 reworded (coordinator/mark-emulator decision): the old wording (--pid=host container on this laptop) cannot fail. A rootless container runs in a child user namespace; cap_ptrace_access_check refuses every read of the host user's processes, so the 595 host processes were 'other users' (one refused read each) and a static reclaim deleted in 93 ms (exit 1 exhausted). The faithful proof is a host-shaped load inside the container (tmp/t115/load.py + run-container.sh in the task115 worktree).
+
+2026-10-24 implementer, allocator decision carried out (master 8a44b3b). Raw logs: tmp/worktrees/task115-scan/tmp/t115/runs/ (rr1-3, rr-final*, rss.txt, dryrun-final.txt, allocs-a1.txt).
+(1) Allocation cuts: Environ as one byte block with borrowed accessors; proc_fds/proc_links_all dedup without cloned texts; readlink into a stack buffer; preallocation. Allocations/scan (pytest facts) 680k -> 341k (remaining ~155k are environ::paths in the main thread, after the readers are joined, so not contended).
+(2) Fewer readers: PROC_READERS=4 worse than 8 (round-robin, same container load: 6/10 deleted vs 9/10), 8 kept.
+(3) Round-robin container reclaims in one host-shaped load (inload-rr.sh/run-rr.sh, seccomp unconfined), by load at the run, across 3 series: load 13-18: allocs build 26/26, master ebdffae 3/5, mimalloc 25/25; load >18: 13/14, 12/15, 15/15. No freshness error at 13-18 => mimalloc NOT adopted per the ruling; branch task115-mimalloc (98952ee) kept unmerged for reference. The MIMALLOC_* lock-down was therefore not implemented.
+(4) Max RSS (host dry run, ~600 procs): static master 61 MB, 8a44b3b 18 MB, mimalloc build (older code) 159 MB; 30 scans in one process: 102 / 17 / 304 MB. Long-running watch memory -> TASK-134.
+AC #5 (new wording): flake static 8a44b3b (/nix/store/2gq91wyd...-diskgc-0.1.0) and cargo --release glibc, round-robin, 10 reclaims each per series: load 11.4-13.5: static 10/10, glibc 10/10; load 13.4-17.4: static 10/10, glibc 10/10. 
+AC #2: one-candidate dry run interleaved (bench.sh, 6 each, 602 procs, load 11): static mean 476 ms vs glibc 321 ms = 1.48x (master 2.3-3.4 s vs 0.8 s, ~3x); within 1.5x but at the margin. Per-scan (just scan-timing 20, load 12-13, 598-600 procs): pytest facts static median 224 / glibc 147 ms (p95 289/156); plain 197/132 ms (p95 212/147).
+Reviews: mped-architect fix-first (from_entries dropped a trailing empty entry) -> fixed + proptest -> GO; qa-test-runner PASS. Gate just check exit 0, 1035 passed 0 failed 1 ignored; e2e-clippy/e2e-tests exit 0. Not run: just e2e (full fast gate), fuzzing of the environ target (fuzz shell not cached; disk), e2e-full.
+Remaining limits: above load ~18 the static build can still miss freshness occasionally (13/14); glibc and mimalloc did not in these samples. Status left In Progress for the orchestrator (all ACs checked; full just e2e not run).
 <!-- SECTION:NOTES:END -->
