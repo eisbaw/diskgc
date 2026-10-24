@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:24'
-updated_date: '2026-10-24 13:04'
+updated_date: '2026-10-24 15:24'
 labels:
   - irreversible
 dependencies: []
@@ -124,4 +124,6 @@ Follow-ups: TASK-115 (scan freshness; proposed: merge proc_uids into the NSpid s
 AC #3 checked with step 5: TASK-65's pytest counterexample (live tmp_path_retention_policy=none session, no fd, no lock) is now refused by the shipped pytest-tmp (vector pytest-tmp-live-no-lock-newest-refused, row 10; dropping the contract bites 44 vectors and the container test pytest_live_policy_none_session_in_shell_root_is_kept through the real binary); nix-shell-rc and TASK-39's namespace-local pid since step 4; nix-shell-tmpdir, mktemp-dir, tmp-entry excluded and containers-image-tmp withdrawn, each with its counterexample recorded in reference.md Liveness contracts and absence asserted (fs_dry_run.rs, temp_safety_suite.rs). The orchestrator may uncheck if it reads AC #3 as also covering TASK-79's node_modules counterexample (that is AC #7, TASK-79).
 
 Orchestrator 2026-10-24 (decision by mark-emulator, Mark may veto): rename the evidence value relative_path to unresolved_path before any freeze (it also labels absolute values that cannot be resolved); do not split it. Do this in step 7. Step 5 design deviations accepted by the orchestrator: fallback roots resolved per process; three fail-closed pre-table checks; facts read within the scan rounds with disagreement = unknown; held-file translation and directory climbs moved to TASK-79 (pytest's session is the candidate, matched by inode); pytest-of listed on every check. Step 7 is scheduled AFTER TASK-115 (freshness on a real host), which blocks any real reclaim.
+
+Orchestrator 2026-10-24: step-5 raw host dry-run outputs and mutation logs moved to tmp/evidence/task112-step5/ (worktree removed after merge).
 <!-- SECTION:NOTES:END -->
