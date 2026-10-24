@@ -3,10 +3,10 @@ id: TASK-115
 title: >-
   In-use scan must finish within the 1 s freshness bound on a busy real host
   (static musl and glibc)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-23 15:53'
-updated_date: '2026-10-24 16:01'
+updated_date: '2026-10-24 17:11'
 labels:
   - performance
   - inuse
@@ -63,4 +63,6 @@ AC #5 (new wording): flake static 8a44b3b (/nix/store/2gq91wyd...-diskgc-0.1.0) 
 AC #2: one-candidate dry run interleaved (bench.sh, 6 each, 602 procs, load 11): static mean 476 ms vs glibc 321 ms = 1.48x (master 2.3-3.4 s vs 0.8 s, ~3x); within 1.5x but at the margin. Per-scan (just scan-timing 20, load 12-13, 598-600 procs): pytest facts static median 224 / glibc 147 ms (p95 289/156); plain 197/132 ms (p95 212/147).
 Reviews: mped-architect fix-first (from_entries dropped a trailing empty entry) -> fixed + proptest -> GO; qa-test-runner PASS. Gate just check exit 0, 1035 passed 0 failed 1 ignored; e2e-clippy/e2e-tests exit 0. Not run: just e2e (full fast gate), fuzzing of the environ target (fuzz shell not cached; disk), e2e-full.
 Remaining limits: above load ~18 the static build can still miss freshness occasionally (13/14); glibc and mimalloc did not in these samples. Status left In Progress for the orchestrator (all ACs checked; full just e2e not run).
+
+Batch-end gate 2026-10-24: just e2e on fe0ab5f exit 0 in 880 s (1040 workspace tests, 224 Nix-image container tests, release-01 8+8, Docker 7, all 7 kernel VMs, static and release-exclusion checks); log tmp/e2e-logs-batch/e2e-fe0ab5f.log; verification note on fe0ab5f. e2e-clippy/e2e-tests were cached store results for identical inputs, not re-run.
 <!-- SECTION:NOTES:END -->

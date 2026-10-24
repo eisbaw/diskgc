@@ -3,11 +3,11 @@ id: TASK-112
 title: >-
   Producer liveness contracts: decide when a /tmp or cache tree is provably
   unused
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:24'
-updated_date: '2026-10-24 16:54'
+updated_date: '2026-10-24 17:11'
 labels:
   - irreversible
 dependencies: []
@@ -131,6 +131,8 @@ Orchestrator 2026-10-24: step-5 raw host dry-run outputs and mutation logs moved
 2026-10-24 step 7 (a3c69ea, 00d7d10; master 00d7d10, fast-forward from 1fea955). (1) Evidence relative_path renamed unresolved_path everywhere (enum, JSON, reference.md Output, safety.md, 7 vectors), no alias; decision by mark-emulator, Mark may veto, needs Mark's own ack before 0.1 freezes the report (mped). (2) Sync test profile::golden::liveness_table_and_builtin_library_agree (reference.md Liveness contracts vs builtin.yaml: contract, app_not_running, stated min_idle_for (required on contract rows), checkouts; Shipped rows must exist, non-Shipped must not; one row per profile) + liveness_sync_rule_catches_each_kind_of_drift (10 drift cases, each asserting its message). TASK-122 had not added one; its AC #2 (every source exactly one row) widens this. Bites: manual edits of row contract, row verdict, built-in contract, row profile name (round 0) and pytest-tmp floor 2h (round 1) each fail it; QA bit floor/checkouts/app_not_running comparisons in an archive copy. (3) Also new: the_decision_table_in_safety_md_is_row_all (row numbers + rule names; safety.md row 2 rule fixed to 'listing'), no_builtin_candidate_contains_a_contract_builtins_candidate (union-veto ancestor residual, documented in reference.md), PidTable::process_list_complete (one home of the precondition texts), node-project/python-project marked reserved. (4) Container test owner_pid_is_unknown_on_an_unlisted_filesystem (AC #4). (5) Codex round-1 blocker fixed: Read::add kept only the latest read's root lookups, so a --basetemp/temp-root identity match could be lost to a mount-view change between re-reads and row 11 delete a live session; now merge_lookups (disagreeing answers unresolvable, earlier-only kept) and environ_unstable; unit test, 4 mutants killed; no ModelHost vector (no event for a mount-view change between reads). Docs: safety.md status, Every read only adds, climbs/translation not implemented (TASK-79), pytest-of listed afresh with reason, Limits scoped for row 7 in nested ns; reference.md producer_unknown blockers = one per causing process sorted; testing.md status, project container tests marked planned.
 REVIEWS. Round 1 (a3c69ea): mped-architect FIX FIRST (7: AC bookkeeping + just e2e, producer_unknown wording, Limits sentence, row/detail drift, sync test misses floor/checkouts/app_not_running, union ancestor bypass, duplicated precondition texts); qa-test-runner PASS (just check 1037/0/1, e2e-clippy, e2e-tests 104, all 11 liveness container tests incl. lifecycle + release_candidate_catalog_refuses_every_excluded_builtin PASS); Codex NO-GO (lookup evidence lost across reads). Round 2 (00d7d10): mped-architect GO (process condition: keep TASK-112 In Progress until the batch-end just e2e passes on a tree containing 00d7d10); Codex GO (scenario closed, no new path; 293 core unit tests); qa-test-runner PASS (just check 1040/0/1, 8 Owner PID/pytest container tests + release one PASS, new tests bite). Non-blocking for follow-up: merge_lookups' synthetic error drops both original answers (put them in the detail); type RootLookup belongs next to ViewFacts in host.rs; safety.md table test does not check the Verdict column; climb flag in merge_lookups not exercised; two unreachable '|= other.*_unstable' lines; ModelHost event for a view change between reads (TASK-121 area); facts_failed only updated when the later read carries facts (untraced).
 STATUS: every AC checked or moved (AC #7 -> TASK-79 AC #4). Left In Progress on mped's condition and the brief: 'just e2e' NOT run (Mark's ruling: full e2e at batch end); mark Done after the batch-end run passes on master >= 00d7d10.
+
+Batch-end gate 2026-10-24: just e2e on fe0ab5f exit 0 in 880 s (1040 workspace tests, 224 Nix-image container tests, release-01 8+8, Docker 7, all 7 kernel VMs, static and release-exclusion checks); log tmp/e2e-logs-batch/e2e-fe0ab5f.log; verification note on fe0ab5f. e2e-clippy/e2e-tests were cached store results for identical inputs, not re-run. The mped-architect GO condition (batch-end e2e passes on 00d7d10 or later) is met.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
