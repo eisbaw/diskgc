@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-24 08:24'
+updated_date: '2026-10-24 13:02'
 labels:
   - wave-2
   - profiles
@@ -85,6 +85,8 @@ Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). 
 2026-10-24 from TASK-112 steps 0-1: containers-image-tmp withdrawn from the built-in library (e7c0686), its matching set kept as the user-probe vector containers-image-age. Lifecycle facts pinned by container tests (f27e71c, tier full): legacy nix-shell's rc dir IS the TMPDIR of the shell and its children, and its rc EXIT trap removes it on normal exit or SIGHUP, so nix-shell-<pid>-* leftovers come from SIGKILL; nix develop's nix-develop-<pid>-* is empty, referenced by nothing, and always left behind (Nix 2.34.9). pytest 9.1.1 lock/rank/keep0/--basetemp facts confirmed as designed.
 
 2026-10-24 from TASK-112 step 4 (557db0e): nix-shell-rc is now a built-in with liveness_contract: nix-shell (Owner PID) and min_idle_for 1h; its private-PID-namespace counterexample is refused (vector nix-shell-rc-namespace-local-pid-refused; container test nix_shell_rc_shell_in_private_pid_namespace_is_kept), and it is excluded from the release-01 candidate catalog. Host dry run (read-only, 125,215 rc dirs, 29 s): 124,952 eligible, 837.6 MiB; 23 in_use owner_pid; 59 producer_unknown (thread ids, TASK-131). nix-shell-tmpdir, mktemp-dir, tmp-entry stay excluded.
+
+2026-10-24 TASK-112 step 5 (master dcfd410): pytest-tmp is shipped in the development library under liveness_contract: pytest, one candidate per session (temp-prefix v1 preset over pytest-of-*/pytest-*, min_idle_for 1h, checkouts: allow). The TASK-65 counterexample (live policy-none session, no fd, no lock) is refused by it: vector pytest-tmp-live-no-lock-newest-refused and container tests pytest_live_policy_none_session_in_shell_root_is_kept (--pid=host, row 10) and live_pytest_without_session_lock_is_unsafe_to_reclaim (own PID ns, producer_unknown row 8); the unsafe user-probe vector stays. Host dry run: 6401 sessions, 6051 eligible (17.5 GiB). Still excluded: nix-shell-tmpdir, mktemp-dir, tmp-entry, containers-image-tmp. The 0.1 release candidate still excludes pytest-tmp (release_suite EXCLUDED).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
