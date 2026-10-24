@@ -5281,19 +5281,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 count: 1,
             });
         }
-        if matches!(&outcome.end, ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown)
-        {
-            self.in_use_unknown_in_a_row += 1;
-            if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
-                (self.log)(&format!(
-                    "{}: {} candidates in a row could not be checked (the host is too busy): \
-                     the rest of this tier is skipped unchecked",
-                    self.tier.name, self.in_use_unknown_in_a_row
-                ));
-            }
-        } else {
-            self.in_use_unknown_in_a_row = 0;
-        }
+        let in_use_unknown = matches!(
+            &outcome.end,
+            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown
+        );
         match outcome.end {
             ReclaimEnd::Complete => {}
             ReclaimEnd::Skipped(skip) => {
@@ -5319,6 +5310,19 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.stop(&stop);
                 return None;
             }
+        }
+        // After the skip's own log line, so the give-up line follows it.
+        if in_use_unknown {
+            self.in_use_unknown_in_a_row += 1;
+            if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
+                (self.log)(&format!(
+                    "{}: {} candidates in a row could not be checked (the host is too busy): \
+                     the rest of this tier is skipped unchecked",
+                    self.tier.name, self.in_use_unknown_in_a_row
+                ));
+            }
+        } else {
+            self.in_use_unknown_in_a_row = 0;
         }
         if self.run_stopped { None } else { after }
     }
