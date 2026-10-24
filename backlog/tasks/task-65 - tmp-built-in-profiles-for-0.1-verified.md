@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-24 01:04'
+updated_date: '2026-10-24 08:24'
 labels:
   - wave-2
   - profiles
@@ -83,6 +83,8 @@ Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). 
 2026-10-23 Mark (TASK-112 D1): pytest-tmp unit is one candidate per session dir pytest-of-*/pytest-* (under the temp-prefix v1 preset), superseding the 2026-10-18 per-test-dir decision recorded above. Reason: the liveness evidence (session .lock, session number) belongs to the session and pytest's own cleanup removes whole sessions; with checkouts: allow decided, the checkout-guard reason for the finer unit is gone; about a tenth as many candidates. pytest-tmp is admitted as a verified heuristic under liveness_contract: pytest (docs/safety.md Producer liveness). D2: containers-image-tmp withdrawn; re-admission via TASK-125.
 
 2026-10-24 from TASK-112 steps 0-1: containers-image-tmp withdrawn from the built-in library (e7c0686), its matching set kept as the user-probe vector containers-image-age. Lifecycle facts pinned by container tests (f27e71c, tier full): legacy nix-shell's rc dir IS the TMPDIR of the shell and its children, and its rc EXIT trap removes it on normal exit or SIGHUP, so nix-shell-<pid>-* leftovers come from SIGKILL; nix develop's nix-develop-<pid>-* is empty, referenced by nothing, and always left behind (Nix 2.34.9). pytest 9.1.1 lock/rank/keep0/--basetemp facts confirmed as designed.
+
+2026-10-24 from TASK-112 step 4 (557db0e): nix-shell-rc is now a built-in with liveness_contract: nix-shell (Owner PID) and min_idle_for 1h; its private-PID-namespace counterexample is refused (vector nix-shell-rc-namespace-local-pid-refused; container test nix_shell_rc_shell_in_private_pid_namespace_is_kept), and it is excluded from the release-01 candidate catalog. Host dry run (read-only, 125,215 rc dirs, 29 s): 124,952 eligible, 837.6 MiB; 23 in_use owner_pid; 59 producer_unknown (thread ids, TASK-131). nix-shell-tmpdir, mktemp-dir, tmp-entry stay excluded.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
