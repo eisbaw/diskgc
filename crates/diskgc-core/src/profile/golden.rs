@@ -939,33 +939,56 @@ fn every_tmp_builtin_fs_source_has_a_distinguishing_type_mutation() {
     }
 }
 
-/// What docs/reference.md "Liveness contracts" says about one profile: the
-/// contract its row names (`liveness_contract: X` in the Contract cell, not
-/// after "planned:"), and whether its verdict is Shipped.
+/// The liveness guard of a built-in or of a "Liveness contracts" row: the
+/// `liveness_contract`, whether `app_not_running` is required, the source
+/// floor and the checkout setting. A row states the floor and checkouts
+/// only where they matter (`None`: not stated).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Guard {
+    contract: Option<String>,
+    app_not_running: bool,
+    min_idle_for: Option<Duration>,
+    checkouts_allow: Option<bool>,
+}
+
+/// One row of docs/reference.md "Liveness contracts", for one profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LivenessRow {
-    contract: Option<String>,
+    guard: Guard,
     shipped: bool,
 }
 
+/// The code span after `key: ` in `cell` (`` `min_idle_for: 1h` ``).
+fn cell_value<'a>(cell: &'a str, key: &str) -> Option<&'a str> {
+    let open = format!("`{key}: ");
+    let start = cell.find(&open)? + open.len();
+    let len = cell[start..].find('`')?;
+    Some(&cell[start..start + len])
+}
+
 /// The liveness table, one entry per profile named in a row's first cell.
-/// A profile named by two rows is a problem in itself.
+/// A profile named by two rows is a problem in itself. A Contract cell
+/// that starts with "planned" describes nothing built.
 fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<String>) {
     let mut out: Vec<(String, LivenessRow)> = Vec::new();
     let mut problems = Vec::new();
     for row in rows {
         assert_eq!(row.len(), 5, "Liveness contracts row has 5 cells: {row:?}");
-        let contract_cell = &row[2];
-        let contract = (!contract_cell.starts_with("planned"))
-            .then(|| {
-                let start =
-                    contract_cell.find("`liveness_contract: ")? + "`liveness_contract: ".len();
-                let len = contract_cell[start..].find('`')?;
-                Some(contract_cell[start..start + len].to_owned())
-            })
-            .flatten();
+        let cell = &row[2];
+        let built = !cell.starts_with("planned");
         let entry = LivenessRow {
-            contract,
+            guard: Guard {
+                contract: cell_value(cell, "liveness_contract")
+                    .filter(|_| built)
+                    .map(str::to_owned),
+                app_not_running: built && cell.contains("`app_not_running`"),
+                min_idle_for: cell_value(cell, "min_idle_for")
+                    .filter(|_| built)
+                    .map(|text| crate::units::parse_duration(text).expect("a duration")),
+                checkouts_allow: cell_value(cell, "checkouts")
+                    .filter(|_| built)
+                    .map(|text| text == "allow"),
+            },
             shipped: row[4].starts_with("Shipped"),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
@@ -979,56 +1002,87 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
 }
 
 /// The sync rule between the liveness table and the built-in library
-/// (TASK-112): every built-in source with a contract has a Shipped row
-/// naming that contract; every Shipped row names a built-in whose contract
-/// (or absence of one) is the row's; a row that is not Shipped (excluded,
-/// withdrawn, planned, governed elsewhere) names no built-in. Built-ins
-/// without a contract and without a row are TASK-122's to classify.
+/// (TASK-112): every built-in with a liveness guard (`liveness_contract`
+/// or `app_not_running`) has a Shipped row naming that guard; every
+/// Shipped row names a built-in with exactly the row's guard, and the
+/// floor and checkout setting where the row states them (a contract row
+/// must state its floor); a row that is not Shipped (excluded, withdrawn,
+/// planned) names no built-in. Built-ins without a guard and without a row
+/// are TASK-122's to classify.
 fn liveness_sync_problems(
     rows: &[(String, LivenessRow)],
-    builtins: &[(String, Option<&'static str>)],
+    builtins: &[(String, Guard)],
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let row_of = |name: &str| rows.iter().find(|(n, _)| n == name).map(|(_, r)| r);
-    let builtin_of = |name: &str| builtins.iter().find(|(n, _)| n == name).map(|(_, c)| *c);
-    for (name, contract) in builtins {
-        let Some(contract) = contract else { continue };
+    for (name, guard) in builtins {
+        if guard.contract.is_none() && !guard.app_not_running {
+            continue;
+        }
         match row_of(name) {
-            Some(row) if row.shipped && row.contract.as_deref() == Some(contract) => {}
+            Some(row) if row.shipped => {}
             row => problems.push(format!(
-                "built-in {name} has liveness_contract: {contract}; its Liveness contracts row \
-                 is {row:?}, not Shipped with that contract"
+                "built-in {name} has a liveness guard {guard:?}; its row is {row:?}, not Shipped"
             )),
         }
     }
     for (name, row) in rows {
-        match (row.shipped, builtin_of(name)) {
+        let builtin = builtins.iter().find(|(n, _)| n == name).map(|(_, g)| g);
+        match (row.shipped, builtin) {
             (true, None) => problems.push(format!("{name}: row says Shipped, no such built-in")),
-            (true, Some(contract)) if row.contract.as_deref() != contract => {
-                problems.push(format!(
-                    "{name}: row names contract {:?}, built-in has {contract:?}",
-                    row.contract
-                ))
-            }
             (false, Some(_)) => problems.push(format!(
                 "{name}: row is not Shipped (excluded, withdrawn or planned) but it is a built-in"
             )),
-            _ => {}
+            (true, Some(guard)) => {
+                let row = &row.guard;
+                if row.contract != guard.contract || row.app_not_running != guard.app_not_running {
+                    problems.push(format!(
+                        "{name}: row's guard {:?}/app_not_running {}, built-in's {:?}/{}",
+                        row.contract, row.app_not_running, guard.contract, guard.app_not_running
+                    ));
+                }
+                if row.contract.is_some() && row.min_idle_for.is_none() {
+                    problems.push(format!("{name}: contract row states no min_idle_for"));
+                }
+                if row.min_idle_for.is_some() && row.min_idle_for != guard.min_idle_for {
+                    problems.push(format!(
+                        "{name}: row's min_idle_for {:?}, built-in's {:?}",
+                        row.min_idle_for, guard.min_idle_for
+                    ));
+                }
+                if row.checkouts_allow.is_some() && row.checkouts_allow != guard.checkouts_allow {
+                    problems.push(format!(
+                        "{name}: row's checkouts allow {:?}, built-in's {:?}",
+                        row.checkouts_allow, guard.checkouts_allow
+                    ));
+                }
+            }
+            (false, None) => {}
         }
     }
     problems
 }
 
-fn builtin_contracts() -> Vec<(String, Option<&'static str>)> {
+fn builtin_guards() -> Vec<(String, Guard)> {
     Library::builtin()
         .expect("built-ins")
         .profiles()
         .map(|profile| {
-            let contract = match &profile.body {
-                Body::Source(source) => source.where_.liveness_contract.map(LivenessContract::name),
-                _ => None,
+            let guard = match &profile.body {
+                Body::Source(source) => Guard {
+                    contract: source.where_.liveness_contract.map(|c| c.name().to_owned()),
+                    app_not_running: source.where_.app_not_running.is_some(),
+                    min_idle_for: source.min_idle_for.map(|IdleFor(d)| d),
+                    checkouts_allow: Some(source.checkouts == Checkouts::Allow),
+                },
+                _ => Guard {
+                    contract: None,
+                    app_not_running: false,
+                    min_idle_for: None,
+                    checkouts_allow: None,
+                },
             };
-            (profile.name.clone(), contract)
+            (profile.name.clone(), guard)
         })
         .collect()
 }
@@ -1042,77 +1096,119 @@ fn documented_liveness_rows() -> (Vec<(String, LivenessRow)>, Vec<String>) {
 #[test]
 fn liveness_table_and_builtin_library_agree() {
     let (rows, mut problems) = documented_liveness_rows();
-    problems.extend(liveness_sync_problems(&rows, &builtin_contracts()));
+    problems.extend(liveness_sync_problems(&rows, &builtin_guards()));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// The sync rule bites each way it can drift, on edits of the real table
-/// and library (a manual edit of either file shows the same messages).
+/// and library, each with its own message (a manual edit of either file
+/// shows the same).
 #[test]
 fn liveness_sync_rule_catches_each_kind_of_drift() {
     let (rows, _) = documented_liveness_rows();
-    let builtins = builtin_contracts();
-    let set = |name: &str, contract: Option<&'static str>| {
+    let builtins = builtin_guards();
+    let edit_builtin = |name: &str, edit: &dyn Fn(&mut Guard)| {
         let mut b = builtins.clone();
-        b.iter_mut().find(|(n, _)| n == name).expect(name).1 = contract;
+        edit(&mut b.iter_mut().find(|(n, _)| n == name).expect(name).1);
         b
+    };
+    let edit_row = |name: &str, edit: &dyn Fn(&mut LivenessRow)| {
+        let mut r = rows.clone();
+        edit(&mut r.iter_mut().find(|(n, _)| n == name).expect(name).1);
+        r
     };
     let without = |name: &str| -> Vec<(String, LivenessRow)> {
         rows.iter().filter(|(n, _)| n != name).cloned().collect()
     };
-    let with_row = |name: &str, row: LivenessRow| {
-        let mut r = rows.clone();
-        r.iter_mut().find(|(n, _)| n == name).expect(name).1 = row;
-        r
-    };
     let mut added = builtins.clone();
-    added.push(("nix-shell-tmpdir".into(), None));
-    let cases: [(&str, Vec<String>); 6] = [
+    added.push((
+        "nix-shell-tmpdir".into(),
+        Guard {
+            contract: None,
+            app_not_running: false,
+            min_idle_for: None,
+            checkouts_allow: Some(false),
+        },
+    ));
+    let cases: Vec<(&str, Vec<String>, &str)> = vec![
         (
             "contract dropped from a built-in",
-            liveness_sync_problems(&rows, &set("pytest-tmp", None)),
+            liveness_sync_problems(&rows, &edit_builtin("pytest-tmp", &|g| g.contract = None)),
+            "pytest-tmp: row's guard",
         ),
         (
             "contract added to a built-in",
-            liveness_sync_problems(&rows, &set("chromium-tmp", Some("pytest"))),
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("chromium-tmp", &|g| g.contract = Some("pytest".into())),
+            ),
+            "built-in chromium-tmp has a liveness guard",
+        ),
+        (
+            "app_not_running dropped from a built-in",
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("brave-browser-cache", &|g| g.app_not_running = false),
+            ),
+            "brave-browser-cache: row's guard",
+        ),
+        (
+            "floor changed in a built-in",
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("nix-shell-rc", &|g| {
+                    g.min_idle_for = Some(Duration::from_secs(60));
+                }),
+            ),
+            "nix-shell-rc: row's min_idle_for",
+        ),
+        (
+            "checkouts changed in a built-in",
+            liveness_sync_problems(
+                &rows,
+                &edit_builtin("pytest-tmp", &|g| g.checkouts_allow = Some(false)),
+            ),
+            "pytest-tmp: row's checkouts",
         ),
         (
             "row of a contract built-in removed",
             liveness_sync_problems(&without("nix-shell-rc"), &builtins),
+            "built-in nix-shell-rc has a liveness guard",
         ),
         (
             "row's contract changed",
             liveness_sync_problems(
-                &with_row(
-                    "pytest-tmp",
-                    LivenessRow {
-                        contract: Some("nix-shell".into()),
-                        shipped: true,
-                    },
-                ),
+                &edit_row("pytest-tmp", &|r| {
+                    r.guard.contract = Some("nix-shell".into())
+                }),
                 &builtins,
             ),
+            "pytest-tmp: row's guard",
+        ),
+        (
+            "contract row without a floor",
+            liveness_sync_problems(
+                &edit_row("pytest-tmp", &|r| r.guard.min_idle_for = None),
+                &builtins,
+            ),
+            "pytest-tmp: contract row states no min_idle_for",
         ),
         (
             "excluded profile shipped",
             liveness_sync_problems(&rows, &added),
+            "nix-shell-tmpdir: row is not Shipped",
         ),
         (
             "Shipped row without a built-in",
-            liveness_sync_problems(
-                &with_row(
-                    "mktemp-dir",
-                    LivenessRow {
-                        contract: None,
-                        shipped: true,
-                    },
-                ),
-                &builtins,
-            ),
+            liveness_sync_problems(&edit_row("mktemp-dir", &|r| r.shipped = true), &builtins),
+            "mktemp-dir: row says Shipped, no such built-in",
         ),
     ];
-    for (what, problems) in cases {
-        assert!(!problems.is_empty(), "{what}: not caught");
+    for (what, problems, expected) in cases {
+        assert!(
+            problems.iter().any(|p| p.contains(expected)),
+            "{what}: expected a problem containing {expected:?}, got {problems:?}"
+        );
     }
     let doubled: Vec<Vec<String>> = vec![
         vec![
@@ -1130,8 +1226,52 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "Excluded.".into(),
         ],
     ];
-    assert!(
-        !liveness_rows(&doubled).1.is_empty(),
-        "a profile in two rows: not caught"
+    assert_eq!(
+        liveness_rows(&doubled).1,
+        ["a: named by two Liveness contracts rows"]
     );
+}
+
+/// The union veto covers only candidates a contract source found itself
+/// (reference.md, Liveness contract predicate): a source without a
+/// contract whose candidate *contains* an rc directory or a pytest session
+/// would delete it past the contract. No built-in may do that: over the
+/// golden tree, no fixed-root built-in matches a strict ancestor of a
+/// contract built-in's match. (Required-root built-ins match what the
+/// user binds; a user profile is the residual reference.md states.)
+#[test]
+fn no_builtin_candidate_contains_a_contract_builtins_candidate() {
+    let library = Library::builtin().expect("built-ins");
+    let fixed_fs: Vec<(&str, &Source)> = library
+        .profiles()
+        .filter_map(|profile| match &profile.body {
+            Body::Source(source)
+                if matches!(source.roots, Roots::Fixed(_))
+                    && matches!(source.finds, Finds::Paths { .. }) =>
+            {
+                Some((profile.name.as_str(), source.as_ref()))
+            }
+            _ => None,
+        })
+        .collect();
+    let guarded: Vec<(&str, &str)> = fixed_fs
+        .iter()
+        .filter(|(_, source)| source.where_.liveness_contract.is_some())
+        .flat_map(|(name, source)| matches(source).into_iter().map(move |m| (*name, m)))
+        .collect();
+    assert!(
+        guarded.iter().any(|(name, _)| *name == "nix-shell-rc")
+            && guarded.iter().any(|(name, _)| *name == "pytest-tmp"),
+        "the golden tree has candidates of both contract built-ins: {guarded:?}"
+    );
+    for (other, source) in &fixed_fs {
+        for candidate in matches(source) {
+            for (name, inner) in &guarded {
+                assert!(
+                    !Path::new(inner).starts_with(candidate) || inner == &candidate,
+                    "{other}'s candidate {candidate} contains {name}'s candidate {inner}"
+                );
+            }
+        }
+    }
 }

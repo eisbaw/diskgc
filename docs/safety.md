@@ -1189,7 +1189,12 @@ root (the parent of `P`):
   that ends during its own read is gone, as In use takes it; the latest
   read that gave its facts stands, also for a process found gone later,
   but uids or a command line that two reads disagree on (a failed read
-  included) are unknown, never an earlier value. A reader that fails
+  included) are unknown, never an earlier value; so is an initial
+  environment two reads disagree on, and a lookup in the process's root
+  whose answer differs between reads (its mount view changed: an earlier
+  match by identity is never lost to a later miss, nor the reverse) is
+  unresolvable; a lookup only an earlier read made keeps its answer (step
+  7, 2026-10-24, after its Codex review). A reader that fails
   leaves that fact unreadable or unresolvable (rows 8, 9), never
   harmless; a root that cannot be opened at all (a leader that
   called `pthread_exit`) is unresolvable too, never the absence of a path
@@ -1209,6 +1214,9 @@ root (the parent of `P`):
   `ENOENT`, `ENOTDIR`) while `S` or its `.lock` is reopened keeps the
   session (`unreadable`, or row 3 for the lock, as pytest's own cleanup
   keeps a lock it cannot examine); any other error is an error of the run.
+  These checks come before the table, so their detail names no row
+  (`liveness_contract pytest: ...`); every verdict of the table names its
+  row (`liveness_contract pytest row N (rule): ...`).
 
 *The verdict*, ordered: the first row that applies decides. Every session
 of `P` gets exactly one row.
@@ -1216,7 +1224,7 @@ of `P` gets exactly one row.
 | # | Condition | Verdict | Rule |
 |---|---|---|---|
 | 1 | `S`'s name is not a session name | `filtered` | matching |
-| 2 | the listing of `P` failed | `unreadable` | — |
+| 2 | the listing of `P` failed | `unreadable` | listing |
 | 3 | `S` holds a `.lock` that is not a regular file of at most 16 bytes holding a pid (Owner PID, step 1) | `producer_unknown` | lock |
 | 4 | the lock's pid may be in use | `in_use`, evidence `owner_pid` | lock |
 | 5 | the lock's pid cannot be answered (an Owner PID precondition fails, a process stayed unreadable) | `producer_unknown` (evidence `unreadable` when one process caused it) | lock |
@@ -1485,7 +1493,12 @@ schema only with its first producer.
 - Outside the initial PID namespace, under `hidepid`, or on a filesystem
   not on the local list, no PID-based answer permits a deletion; those
   candidates are kept as `producer_unknown`. diskgc in a container with
-  its own PID namespace reclaims none of them.
+  its own PID namespace reclaims no `nix-shell` rc directory and no pytest
+  session that needs the process list (rows 3 to 5 with a lock, rows 8 to
+  11); pytest's row 7 does not use the process list beyond "a pytest is
+  running", which it then assumes, so an old lockless session below the
+  rank is still reclaimed there (producer-equivalent;
+  `pytest-tmp-nested-namespace`).
 - The local-filesystem list rests on a deployment assumption diskgc
   cannot check: no listed filesystem holding candidates is written by
   another kernel.

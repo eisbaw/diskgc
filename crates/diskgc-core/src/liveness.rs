@@ -93,6 +93,21 @@ pub struct PidTable {
 }
 
 impl PidTable {
+    /// Owner PID's preconditions 3 and 4 (docs/safety.md): whether the
+    /// held `/proc` can list every process of this kernel, or the rule that
+    /// fails. `hidepid` is named before the namespace: both fail closed
+    /// alike, and a rootless container can observe `hidepid` only by this
+    /// text (owner_pid_is_unknown_under_hidepid). The one home of these
+    /// texts for Owner PID and the pytest contract.
+    pub fn process_list_complete(&self) -> Result<(), String> {
+        match &self.namespace {
+            Err(why) => Err(format!("PID namespace unreadable: {why}")),
+            Ok(ns) if ns.hidepid => Err("the held /proc is mounted with hidepid".to_owned()),
+            Ok(ns) if !ns.initial => Err("diskgc is not in the initial PID namespace".to_owned()),
+            Ok(_) => Ok(()),
+        }
+    }
+
     /// An empty table of a scan with these namespace facts (read before
     /// its first listing) and whose process list did or did not settle.
     pub fn new(namespace: Result<PidNamespace, String>, settled: bool) -> Self {
@@ -221,16 +236,8 @@ pub fn owner_pid(
         }
         Ok(_) => {}
     }
-    match &table.namespace {
-        Err(why) => return Unknown::rule(format!("PID namespace unreadable: {why}")),
-        // hidepid before the namespace: both fail closed alike, and a
-        // rootless container can observe hidepid only by this detail
-        // (docs/safety.md, Owner PID; owner_pid_is_unknown_under_hidepid).
-        Ok(ns) if ns.hidepid => return Unknown::rule("the held /proc is mounted with hidepid"),
-        Ok(ns) if !ns.initial => {
-            return Unknown::rule("diskgc is not in the initial PID namespace");
-        }
-        Ok(_) => {}
+    if let Err(rule) = table.process_list_complete() {
+        return Unknown::rule(rule);
     }
     if let Some(carrier) = table.carrier(number) {
         return OwnerPid::MayBeInUse(carrier);

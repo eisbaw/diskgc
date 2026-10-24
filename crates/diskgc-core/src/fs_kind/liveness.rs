@@ -402,12 +402,7 @@ fn pytest_session<H: Host>(
         )),
         Err(e) => Err(e.to_string()),
     };
-    let process_list = match table.namespace() {
-        Err(why) => Err(format!("PID namespace unreadable: {why}")),
-        Ok(ns) if ns.hidepid => Err("the held /proc is mounted with hidepid".to_owned()),
-        Ok(ns) if !ns.initial => Err("diskgc is not in the initial PID namespace".to_owned()),
-        Ok(_) => Ok(()),
-    };
+    let process_list = table.process_list_complete();
     // R, the temp root: P's parent, reached again from the root.
     let root_path = found
         .path

@@ -218,6 +218,9 @@ pub(crate) struct Read {
     /// both are unknown (the process changed between the reads; an earlier
     /// value must not hide a later one, nor the reverse).
     pub facts_unstable: bool,
+    /// Two reads gave different initial environments: neither stands, the
+    /// environment is unknown to the pytest contract (as for uids).
+    pub environ_unstable: bool,
 }
 
 /// One process's read.
@@ -335,19 +338,52 @@ impl Read {
             }
         }
         self.environ_failed = other.environ_failed;
-        if other.environ_raw.is_some() {
-            self.environ_raw = other.environ_raw;
+        if let Some(new) = other.environ_raw {
+            if self.environ_raw.as_ref().is_some_and(|old| *old != new) {
+                self.environ_unstable = true;
+            }
+            self.environ_raw = Some(new);
         }
         // The latest read's facts stand; uids or a command line that
-        // differ from an earlier read's (a failure included) are unknown.
-        if let Some(new) = other.facts {
+        // differ from an earlier read's (a failure included) are unknown,
+        // and so is a lookup whose answer differs (the process's mount view
+        // changed between the reads: an earlier match must not be lost to a
+        // later miss, nor the reverse; Codex review of step 7).
+        if let Some(mut new) = other.facts {
             if let Some(old) = &self.facts {
                 self.facts_unstable |= old.uids != new.uids || old.cmdline != new.cmdline;
+                merge_lookups(&old.lookups, &mut new.lookups);
             }
             self.facts = Some(new);
             self.facts_failed = other.facts_failed;
         }
         self.facts_unstable |= other.facts_unstable;
+        self.environ_unstable |= other.environ_unstable;
+    }
+}
+
+/// One lookup of [`crate::host::ViewFacts::lookups`]: the normalised
+/// path, whether it was climbed, the answer.
+type RootLookup = (PathBuf, bool, Result<Vec<DevIno>, ProcError>);
+
+/// Every read only adds, for root lookups: an answer two reads disagree on
+/// becomes unresolvable (the verdict's rows 8 and 9 then fail closed), and
+/// an answer only the earlier read gave is kept.
+fn merge_lookups(old: &[RootLookup], new: &mut Vec<RootLookup>) {
+    for (path, climb, answer) in new.iter_mut() {
+        let earlier = old.iter().find(|(p, c, _)| p == path && c == climb);
+        if earlier.is_some_and(|(_, _, a)| a != answer) {
+            *answer = Err(ProcError::Failed(HostError::invalid(
+                "look up in the process's root",
+                path.display(),
+                "two reads gave different answers",
+            )));
+        }
+    }
+    for entry in old {
+        if !new.iter().any(|(p, c, _)| *p == entry.0 && *c == entry.1) {
+            new.push(entry.clone());
+        }
     }
 }
 
@@ -692,9 +728,7 @@ pub(crate) fn pytest_facts(gathered: &Gathered, users: &[u32]) -> Vec<ProcessFac
         if uids.is_some_and(|ids| !is_users_ids(ids, users)) {
             continue;
         }
-        let environ: Option<Environ> = read
-            .environ_failed
-            .is_none()
+        let environ: Option<Environ> = (read.environ_failed.is_none() && !read.environ_unstable)
             .then(|| read.environ_raw.clone())
             .flatten();
         let cmdline = view.cmdline.as_ref().ok().cloned().filter(|_| stable);
@@ -1284,6 +1318,91 @@ mod tests {
         assert_eq!(facts.len(), 1, "an unstable uid is unknown: in every set");
         assert_eq!(facts[0].uids, None);
         assert_eq!(facts[0].cmdline, None);
+    }
+
+    /// Codex review of step 7: a live `--basetemp` or temp-root match by
+    /// identity in one read must not be lost to a later read in which the
+    /// process's mount view changed (the lookup now misses), nor the
+    /// reverse; nor may an environment that changed between reads stand.
+    /// Both become undecidable (rows 8 and 9 fail closed).
+    #[test]
+    fn lookups_and_environments_that_change_between_reads_are_unknown() {
+        use crate::host::{Dev, DevIno, ViewFacts};
+        use crate::liveness::pytest::Lookup;
+        let root = PathBuf::from("/tmp/nix-shell.AB");
+        let id = DevIno {
+            dev: Dev {
+                major: 0,
+                minor: 40,
+            },
+            ino: 7,
+        };
+        let read = |env: &[u8], answer: Result<Vec<DevIno>, ProcError>| Read {
+            facts: Some(Box::new(ViewFacts {
+                uids: Ok(Ids::same(1000)),
+                cmdline: Ok(vec![OsString::from("pytest")]),
+                lookups: vec![(root.clone(), false, answer)],
+            })),
+            environ_raw: Some(Environ::from_block(env.to_vec())),
+            ..Read::default()
+        };
+        let env = b"TMPDIR=/tmp/nix-shell.AB\0";
+        let missing = || {
+            Err(ProcError::Failed(HostError::invalid(
+                "openat2",
+                "/tmp/nix-shell.AB",
+                "ENOENT",
+            )))
+        };
+        let facts_of = |read: Read| {
+            let gathered = Gathered {
+                finished: MonoTime(Duration::ZERO),
+                listings: 1,
+                unsettled: None,
+                read: [(Pid(7), read)].into_iter().collect(),
+                unreadable: Vec::new(),
+                environ_failed: Vec::new(),
+                gone: 0,
+                listed: vec![Pid(7)],
+            };
+            let facts = pytest_facts(&gathered, &[1000]);
+            assert_eq!(facts.len(), 1);
+            facts.into_iter().next().expect("one process")
+        };
+
+        let mut steady = read(env, Ok(vec![id]));
+        steady.add(read(env, Ok(vec![id])));
+        assert_eq!(
+            facts_of(steady).temp_roots[0].1,
+            Lookup::Resolved(vec![id]),
+            "the same answer twice stands"
+        );
+        for (first, second) in [(Ok(vec![id]), missing()), (missing(), Ok(vec![id]))] {
+            let mut moved = read(env, first);
+            moved.add(read(env, second));
+            assert!(
+                matches!(facts_of(moved).temp_roots[0].1, Lookup::Unresolvable(_)),
+                "a lookup whose answer changed between reads is unresolvable"
+            );
+        }
+        let mut only_earlier = read(env, Ok(vec![id]));
+        let mut later = read(env, Ok(vec![id]));
+        if let Some(facts) = later.facts.as_mut() {
+            facts.lookups.clear();
+        }
+        only_earlier.add(later);
+        assert_eq!(
+            facts_of(only_earlier).temp_roots[0].1,
+            Lookup::Resolved(vec![id]),
+            "an answer only the earlier read gave is kept"
+        );
+        let mut changed_env = read(env, Ok(vec![id]));
+        changed_env.add(read(b"TMPDIR=/tmp/other\0", Ok(vec![id])));
+        assert_eq!(
+            facts_of(changed_env).environ,
+            None,
+            "an environment that changed between reads is unknown"
+        );
     }
 
     /// C1: an excuse stands only if every status read gave it; one read

@@ -1044,7 +1044,10 @@ Status (TASK-112 step 5): `nix-shell` and `pytest` are implemented and
 judged; the `nix-shell-rc` and `pytest-tmp` built-ins use them.
 `node-project` and `python-project` are designed below and refused at
 load ("not supported by this version of diskgc", naming the supported
-ones) until they land (TASK-79), so nothing half-built can be selected. What each contract shows,
+ones) until they land (TASK-79), so nothing half-built can be selected.
+They are reserved, not part of the accepted set: since no valid profile
+can name them today, TASK-79 may still rename or merge them (one
+`project` contract, say) without breaking a configuration. What each contract shows,
 and when it cannot decide, is in
 [safety.md](safety.md#producer-liveness); which built-in uses which
 contract is in [Liveness contracts](#liveness-contracts).
@@ -1064,8 +1067,8 @@ where:
 |---|---|---|
 | `nix-shell` | directories named `nix-shell-<pid>-<suffix>` or `nix-develop-<pid>-<suffix>` | nix-shell rc directories (Owner PID) |
 | `pytest` | a pytest session directory `pytest-of-*/pytest-*` | pytest sessions |
-| `node-project` | a `node_modules` directory whose parent holds `package.json` and that lies in no other dependency directory | project dependency directories |
-| `python-project` | a virtual environment (holding `pyvenv.cfg`) whose parent holds a Python project manifest and that lies in no other dependency directory | project dependency directories |
+| `node-project` (reserved: refused at load, TASK-79) | a `node_modules` directory whose parent holds `package.json` and that lies in no other dependency directory | project dependency directories |
+| `python-project` (reserved: refused at load, TASK-79) | a virtual environment (holding `pyvenv.cfg`) whose parent holds a Python project manifest and that lies in no other dependency directory | project dependency directories |
 
 There is no default: without the key no contract is required.
 `min_idle_for` stays a separate field; each built-in's value is in
@@ -1103,7 +1106,13 @@ selects it: a contract states a fact about the candidate's producer,
 which another term's admission does not change (a veto, as retention
 guards veto). A name the contract does not recognise carries no such
 fact and vetoes nothing; that term alone filters it. The plan and the reclaim
-apply the same rule. `profile_policies` cannot change it. A user profile may use it like any predicate. A new contract is a new
+apply the same rule. The veto covers only a candidate a contract source
+found itself: a source without a contract whose candidate *contains* an
+instance (a user profile over `nix-shell.*` directories holding pytest
+sessions) deletes it with the rest, guarded only by the in-use check; no
+built-in does that (`no_builtin_candidate_contains_a_contract_builtins_candidate`
+over the golden tree), and a user profile that does carries its author's
+risk, as for any contract-less profile. `profile_policies` cannot change it. A user profile may use it like any predicate. A new contract is a new
 value, added with the producer it was verified for; a generic form (a pid
 pattern, a producer lock) is added only when a second producer needs the
 same evidence.
@@ -1112,7 +1121,8 @@ Report additions (they extend the JSON enums of Output). Landed with
 `nix-shell`: `producer_unknown` and `owner_pid`; with `pytest`:
 `temp_root`, `command_line` and `unresolved_path`. A pytest verdict's
 `detail` names the row of the decision table that decided
-(`liveness_contract pytest row 10 (unused root): ...`); programs branch on
+(`liveness_contract pytest row 10 (unused root): ...`), or none for the
+checks before the table (`liveness_contract pytest: ...`); programs branch on
 `reason` and the evidence, not on that text:
 
 - skip reason `producer_unknown`, used only for a recognised instance of
@@ -1123,9 +1133,10 @@ Report additions (they extend the JSON enums of Output). Landed with
   `--basetemp` value, an unreadable command line or environment, an
   oversized or unparsable workspace `package.json`, a project climb that
   reached a bind-mounted subdirectory. Its `process_blockers` is `null`
-  unless one process caused it; then it holds that process's ordinary
-  entry (a pid, as every entry has) with evidence `unreadable` (existing)
-  or `unresolved_path` (new: a path the contract needs for that process
+  when no particular process caused it (a precondition, a marker, a
+  listing); otherwise it holds one ordinary entry (a pid, as every entry
+  has) per process that caused it, sorted by pid, each with evidence
+  `unreadable` (existing) or `unresolved_path` (new: a path the contract needs for that process
   did not resolve: a relative value of a variable or option pytest
   resolves, an absolute one whose lookup in the process's root failed, or
   a failed lookup of one of Python's fallback roots).
@@ -1584,7 +1595,7 @@ designed but not implemented.
 | Profile | Producer (verified) | Contract | Class | Verdict |
 |---|---|---|---|---|
 | `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. Residual: a consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows that residual and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. |
-| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Shipped (TASK-112 step 5) with the residuals in safety.md (pytest sessions), admitted by Mark, 2026-10-23. Matching set as in the library row. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. Every verdict's detail names the row of the decision table that decided. |
+| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Shipped (TASK-112 step 5) with the residuals in safety.md (pytest sessions), admitted by Mark, 2026-10-23. Matching set as in the library row. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. |
 | `node-modules`, `python-venv` | npm: to be verified by the planned container test (an install from an offline tarball, a read-only run); pnpm, Yarn, Bun, venv, virtualenv and uv: planned, not verified; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Admitted by Mark, 2026-10-23, with the residuals in safety.md (Project dependency directories); the loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Not shipped: the loader refuses both contracts until they land with their vectors and container tests (TASK-79, which took over TASK-112 step 6). |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |

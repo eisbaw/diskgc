@@ -938,3 +938,30 @@ fn the_generated_cases_reach_the_rows_the_properties_check() {
         );
     }
 }
+
+/// docs/safety.md's pytest decision table and [`Row`] are one table: the
+/// same rows, in order, with the same rule names (the detail of every
+/// verdict quotes them).
+#[test]
+fn the_decision_table_in_safety_md_is_row_all() {
+    use crate::doc::{safety_md, section, table};
+    let liveness = section(&safety_md(), "### Producer liveness");
+    let documented: Vec<(String, String)> = table(&liveness, "| # | Condition | Verdict | Rule |")
+        .into_iter()
+        .map(|row| (row[0].clone(), row[3].clone()))
+        .collect();
+    let code: Vec<(String, String)> = Row::ALL
+        .iter()
+        .map(|row| (row.number().to_string(), row.rule().to_owned()))
+        .collect();
+    let documented_rules: Vec<(String, String)> = documented
+        .into_iter()
+        .map(|(number, rule)| {
+            // The table qualifies some rules: "rank (producer-equivalent or
+            // stricter)", "unused root (heuristic)".
+            let name = rule.split(" (").next().unwrap_or_default().to_owned();
+            (number, name)
+        })
+        .collect();
+    assert_eq!(documented_rules, code);
+}
