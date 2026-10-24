@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # EIO while listing says nothing about this candidate and would hit the
 # next one too: an error of the run (exit 3), never a quiet skip
 # (docs/safety.md, Fail closed). Nothing of it is deleted.

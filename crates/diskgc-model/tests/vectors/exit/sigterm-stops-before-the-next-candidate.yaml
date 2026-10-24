@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # SIGTERM during the first candidate's deletion: no other candidate is
 # started, the interrupted candidate's own directory is left (an error of
 # that candidate), and the exit is 143 (interrupted).

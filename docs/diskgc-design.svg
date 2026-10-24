@@ -93,7 +93,7 @@
   <text x="820" y="454" class="body"><tspan font-weight="700">rust</tspan>  cargo-target</text>
   <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
   <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-versions, codex-releases</text>
-  <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, playwright</text>
+  <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, node-compile-cache</text>
   <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  cmake-build-anchored, gradle, maven</text>
   <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  west-build-anchored, platformio-cache</text>
   <text x="820" y="562" class="body"><tspan font-weight="700">filters</tspan>  idle-1h … idle-30d</text>

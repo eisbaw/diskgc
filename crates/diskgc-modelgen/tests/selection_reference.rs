@@ -749,7 +749,7 @@ fn user_profiles_keep_the_whole_claude_container_in_plan_and_reclaim() {
     .expect("saved host model");
     let specs = parse_profiles(profiles).expect("user profiles");
     let library = Library::with_user_profiles(&specs).expect("user library");
-    let selection = "profile:tmp-entry && !profile:claude-code-tmp";
+    let selection = "profile:tmp-entry && !profile:claude-sessions";
     let request = Request {
         path: PathBuf::from("/tmp"),
         min_free: parse_size("100%").unwrap(),

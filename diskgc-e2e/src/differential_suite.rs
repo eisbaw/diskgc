@@ -11,7 +11,7 @@ use std::{fs, io};
 
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::{Base, Dev, Errno, Host};
-use diskgc_core::profile::{Library, parse_profiles};
+use diskgc_core::profile::{Library, describe, parse_profiles};
 use diskgc_core::resolve::{ResolveError, Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
@@ -2351,6 +2351,53 @@ fn shift_node_mtime(node: &mut NodeSpec, nanos: i128) -> TestResult {
     Ok(())
 }
 
+/// The CLI config a replay runs with, from the vector's user profiles: none
+/// without them; a hand-written `profile_yaml` must parse to exactly the
+/// vector's typed profiles; otherwise the profiles as `profiles show` prints
+/// them, which must load back to the same profiles (a probe profile of a
+/// withdrawn built-in needs no hand-kept copy).
+fn cli_config(
+    vector: &ProfileVector,
+    profile_yaml: Option<&str>,
+) -> Result<Option<String>, String> {
+    let indent = |yaml: &str| -> String {
+        format!(
+            "version: 1\nprofiles:\n{}",
+            yaml.lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        )
+    };
+    if let Some(profile_yaml) = profile_yaml {
+        ensure!(
+            parse_profiles(profile_yaml)? == vector.user_profiles,
+            "real CLI profile differs from the model vector's typed profile"
+        );
+        return Ok(Some(indent(profile_yaml)));
+    }
+    if vector.user_profiles.is_empty() {
+        return Ok(None);
+    }
+    let library = Library::with_user_profiles(&vector.user_profiles).map_err(|e| e.to_string())?;
+    let mut yaml = String::new();
+    for spec in &vector.user_profiles {
+        let profile = library
+            .get(&spec.name)
+            .ok_or_else(|| format!("user profile `{}` did not load", spec.name))?;
+        yaml.push_str(&describe::show_yaml(profile, None));
+    }
+    let reloaded =
+        Library::with_user_profiles(&parse_profiles(&yaml)?).map_err(|e| e.to_string())?;
+    for spec in &vector.user_profiles {
+        ensure!(
+            reloaded.get(&spec.name) == library.get(&spec.name),
+            "generated CLI profile `{}` does not load back to the vector's profile",
+            spec.name
+        );
+    }
+    Ok(Some(indent(&yaml)))
+}
+
 fn replay_model_with_profile(
     ctx: &Ctx,
     mut vector: ProfileVector,
@@ -2367,33 +2414,14 @@ fn replay_model_with_profile(
         adapt_var_tmp_mount(&mut vector)?;
     }
     preflight_vector(&vector, sandbox_clock_offset)?;
-    let config_path = match profile_yaml {
-        Some(profile_yaml) => {
-            ensure!(
-                parse_profiles(profile_yaml)? == vector.user_profiles,
-                "real CLI profile differs from the model vector's typed profile"
-            );
-            let config = format!(
-                "version: 1\nprofiles:\n{}",
-                profile_yaml
-                    .lines()
-                    .map(|line| format!("  {line}\n"))
-                    .collect::<String>()
-            );
-            Some(ctx.home.write_file(
-                "differential-user-profile.yaml",
-                config.as_bytes(),
-                0o644,
-                TESTER,
-            )?)
-        }
-        None => {
-            ensure!(
-                vector.user_profiles.is_empty(),
-                "a differential user profile requires a real CLI config"
-            );
-            None
-        }
+    let config_path = match cli_config(&vector, profile_yaml)? {
+        Some(config) => Some(ctx.home.write_file(
+            "differential-user-profile.yaml",
+            config.as_bytes(),
+            0o644,
+            TESTER,
+        )?),
+        None => None,
     };
     if with_dangling_link {
         vector.host.tree.insert(
@@ -2797,6 +2825,37 @@ impl Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every checked-in model fixture with user profiles gets a CLI config
+    /// that loads back to the same profiles, so a container replay never
+    /// refuses a probe profile (TASK-122: six fixtures became probes).
+    #[test]
+    fn every_fixture_with_user_profiles_has_a_cli_config() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/diskgc-model/tests/models/profiles");
+        let mut with_profiles = 0;
+        for entry in fs::read_dir(&dir).expect("fixture directory") {
+            let path = entry.expect("fixture entry").path();
+            if path.extension().is_none_or(|ext| ext != "yaml") {
+                continue;
+            }
+            let yaml = fs::read_to_string(&path).expect("fixture");
+            let vector = ProfileVector::parse(&yaml).expect("fixture parses");
+            if vector.user_profiles.is_empty() {
+                assert_eq!(cli_config(&vector, None), Ok(None), "{}", path.display());
+                continue;
+            }
+            with_profiles += 1;
+            let config = cli_config(&vector, None)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .expect("a config");
+            assert!(config.starts_with("version: 1\nprofiles:\n"), "{config}");
+        }
+        assert!(
+            with_profiles >= 6,
+            "the six withdrawn built-ins' probes are fixtures"
+        );
+    }
 
     #[test]
     fn checked_in_expectation_rejects_a_vacuous_model_and_linux_agreement() {

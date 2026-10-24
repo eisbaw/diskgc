@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # Below --min-free, candidates go oldest first and reclaim stops as soon as
 # a fresh sample meets the goal: the older candidate is enough, the newer
 # one survives, exit 0 (ensure exits 0 only when the space is there).

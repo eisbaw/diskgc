@@ -839,9 +839,12 @@ struct LivenessRow {
     class: LivenessClass,
     residuals: String,
     verdict: Verdict,
-    /// The Verdict cell records Mark's dated admission ("admitted by Mark,
-    /// 2026-..."): a dated Mark decision about something else does not count.
+    /// The Verdict cell records a dated admission ([`admission_recorded`]).
     decided: bool,
+    /// The Verdict cell names container tests, or "Container test: pending
+    /// (TASK-N)" (docs/safety.md: a verified heuristic needs them where the
+    /// kernel's view matters).
+    container_tested: bool,
 }
 
 /// One built-in as the library holds it.
@@ -862,20 +865,51 @@ fn cell_value<'a>(cell: &'a str, key: &str) -> Option<&'a str> {
     Some(&cell[start..start + len])
 }
 
-/// Whether a Verdict cell records an admission decision, in one of the two
-/// accepted forms only: Mark's own ("admitted by Mark, DATE") or one made
-/// on his delegation ("admitted by mark-emulator for Mark, DATE",
-/// TASK-122). The sentence may start the cell, so either case of "a".
-fn admission_recorded(cell: &str) -> bool {
-    [
-        "dmitted by Mark, 20",
-        "dmitted by mark-emulator for Mark, 20",
-    ]
-    .iter()
-    .any(|form| {
-        cell.match_indices(form)
-            .any(|(at, _)| at > 0 && matches!(&cell[at - 1..at], "a" | "A"))
-    })
+/// Who decided an admission recorded in a Verdict cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decider {
+    Mark,
+    /// mark-emulator, on Mark's delegation (TASK-122); Mark may veto.
+    MarkEmulator,
+}
+
+/// The admission a Verdict cell records: "admitted by Mark, YYYY-MM-DD" or
+/// "admitted by mark-emulator for Mark, YYYY-MM-DD", either case of "a", at
+/// the start of the cell or right after ", " (so "not admitted by ..." and
+/// "previously admitted by ..." do not count), with an ISO date.
+fn admission_recorded(cell: &str) -> Option<(Decider, &str)> {
+    let forms = [
+        ("admitted by Mark, ", Decider::Mark),
+        (
+            "admitted by mark-emulator for Mark, ",
+            Decider::MarkEmulator,
+        ),
+    ];
+    let starts = std::iter::once(0).chain(cell.match_indices(", ").map(|(at, _)| at + 2));
+    for start in starts {
+        let rest = &cell[start..];
+        for (form, decider) in forms {
+            let Some(tail) = rest
+                .strip_prefix(form)
+                .or_else(|| rest.strip_prefix(&form.replacen('a', "A", 1)))
+            else {
+                continue;
+            };
+            let date = tail.get(..10).unwrap_or("");
+            let iso = date.len() == 10
+                && date.char_indices().all(|(i, c)| {
+                    if i == 4 || i == 7 {
+                        c == '-'
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                });
+            if iso {
+                return Some((decider, date));
+            }
+        }
+    }
+    None
 }
 
 /// The class a Class cell starts with: a class's table name followed by
@@ -922,7 +956,8 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             class,
             residuals: row[4].trim().to_owned(),
             verdict: Verdict::of(&row[5]),
-            decided: admission_recorded(&row[5]),
+            decided: admission_recorded(&row[5]).is_some(),
+            container_tested: row[5].contains("Container test"),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -947,6 +982,12 @@ fn verdict_problem(name: &str, row: &LivenessRow) -> Option<String> {
         (Verdict::Shipped, LivenessClass::VerifiedHeuristic) if !row.decided => Some(format!(
             "{name}: a verified heuristic Shipped without Mark's dated decision"
         )),
+        (Verdict::Shipped, LivenessClass::VerifiedHeuristic) if !row.container_tested => {
+            Some(format!(
+                "{name}: a verified heuristic Shipped without its container tests or \
+                 \"Container test: pending (TASK-N)\""
+            ))
+        }
         (Verdict::DecisionPending, c) if c != LivenessClass::VerifiedHeuristic => Some(format!(
             "{name}: Decision pending is for a verified heuristic, not {class}"
         )),
@@ -1328,6 +1369,14 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "codex-releases: a verified heuristic Shipped without Mark's dated decision",
         ),
         (
+            "verified heuristic Shipped without container tests",
+            liveness_sync_problems(
+                &edit_row("bun-cache", &|r| r.container_tested = false),
+                &builtins,
+            ),
+            "bun-cache: a verified heuristic Shipped without its container tests",
+        ),
+        (
             "Proposed withdrawal of an admissible class",
             liveness_sync_problems(
                 &edit_row("bun-cache", &|r| r.verdict = Verdict::ProposedWithdrawal),
@@ -1406,15 +1455,26 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
     );
     assert_eq!(class_of("soundly"), None);
     for (cell, recorded) in [
-        ("Shipped, admitted by Mark, 2026-10-23.", true),
-        ("Admitted by Mark, 2026-10-23.", true),
         (
-            "Shipped, admitted by mark-emulator for Mark, 2026-10-24.",
-            true,
+            "Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23.",
+            Some((Decider::Mark, "2026-10-23")),
         ),
-        ("Shipped; needs Mark's decision.", false),
-        ("Shipped, admitted by someone for Mark, 2026-10-24.", false),
-        ("Shipped (Mark, 2026-10-23).", false),
+        (
+            "Admitted by Mark, 2026-10-23.",
+            Some((Decider::Mark, "2026-10-23")),
+        ),
+        (
+            "Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122).",
+            Some((Decider::MarkEmulator, "2026-10-24")),
+        ),
+        ("Shipped; needs Mark's decision.", None),
+        ("Shipped, admitted by someone for Mark, 2026-10-24.", None),
+        ("Shipped (Mark, 2026-10-23).", None),
+        ("Withdrawn; not admitted by Mark, 2026-10-23.", None),
+        ("Withdrawn, previously admitted by Mark, 2026-10-23.", None),
+        ("Shipped, admitted by Mark, 20xx-10-23.", None),
+        ("Shipped, admitted by Mark, 2026.", None),
+        ("Shipped \u{2013} \u{ff}admitted by Mark, 2026-10-23.", None),
     ] {
         assert_eq!(admission_recorded(cell), recorded, "{cell}");
     }

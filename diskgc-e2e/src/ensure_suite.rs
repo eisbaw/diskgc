@@ -1219,34 +1219,33 @@ pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> Tes
         ctx.run_diskgc
             .write_file(&file, config.as_bytes(), 0o600, ROOT)?;
         let path = format!("/run/diskgc/{file}");
-        for dry_run in [false, true] {
-            let mut args = vec!["ensure", "--allow-root", "--json", "--min-free", "100%"];
-            if dry_run {
-                args.push("--dry-run");
+        // The user profile, and a built-in whose temp-prefix patterns hold
+        // `claude-{uid}` (node-compile-cache): both refused the same way.
+        for profile in ["claude-code-tmp-probe", "node-compile-cache"] {
+            for dry_run in [false, true] {
+                let mut args = vec!["ensure", "--allow-root", "--json", "--min-free", "100%"];
+                if dry_run {
+                    args.push("--dry-run");
+                }
+                let select = format!("profile:{profile}");
+                args.extend(["--config", &path, "--select", &select, "/tmp"]);
+                let run = ctx.run_as_root(&ctx.diskgc(), &args)?;
+                run.expect_code(2)?;
+                ensure!(
+                    run.stderr.contains("`{uid}`")
+                        && run.stderr.contains("find.paths")
+                        && run.stderr.contains(profile),
+                    "{name}, {profile}, dry_run={dry_run}: {}",
+                    run.stderr
+                );
+                let result = report(&run)?;
+                ensure!(
+                    result["status"] == "usage_error"
+                        && result["plan"].as_array().is_some_and(Vec::is_empty),
+                    "{name}, {profile}, dry_run={dry_run}: {result}"
+                );
+                runs.push(run);
             }
-            args.extend([
-                "--config",
-                &path,
-                "--select",
-                "profile:claude-code-tmp-probe",
-                "/tmp",
-            ]);
-            let run = ctx.run_as_root(&ctx.diskgc(), &args)?;
-            run.expect_code(2)?;
-            ensure!(
-                run.stderr.contains("`{uid}`")
-                    && run.stderr.contains("find.paths")
-                    && run.stderr.contains("claude-code-tmp-probe"),
-                "{name}, dry_run={dry_run}: {}",
-                run.stderr
-            );
-            let result = report(&run)?;
-            ensure!(
-                result["status"] == "usage_error"
-                    && result["plan"].as_array().is_some_and(Vec::is_empty),
-                "{name}, dry_run={dry_run}: {result}"
-            );
-            runs.push(run);
         }
     }
     let judged = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;

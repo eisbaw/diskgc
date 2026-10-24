@@ -1,0 +1,37 @@
+# Under --allow-root `{uid}` would expand to root's 0, not an owner. The
+# built-in node-compile-cache holds `claude-{uid}` in its temp-prefix v1
+# patterns, so selecting it is refused before planning, as a user profile
+# with `{uid}` is (allow-root-refuses-uid-placeholder; TASK-122 kept this
+# built-in path covered after claude-code-tmp was withdrawn).
+profile_vector: 1
+allow_root: true
+users: {tester: 1000}
+config: |
+  version: 1
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:node-compile-cache}
+select: profile:node-compile-cache
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/claude-0/nix-shell.Ab1/node-compile-cache: {f: {uid: 0}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "node-compile-cache"}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: "{uid}"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/claude-0/nix-shell.Ab1/node-compile-cache/f]

@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): renode-tmp is replaced by a user probe profile with its matching set.
+# `renode-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # renode-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 user_profiles:

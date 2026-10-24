@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # Every tier's run-time environment check (a command's program resolved
 # on the command path) finishes before the first deletion (PRD, What bad
 # looks like: a tier's run-time checks run only after other tiers

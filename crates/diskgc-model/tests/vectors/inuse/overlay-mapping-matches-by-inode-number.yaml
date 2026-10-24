@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # On overlayfs a memory map shows the layer's device, not the one statx
 # shows, so a mapping matches by inode number alone (inode_map). Modelled
 # as in inuse.rs: a second filesystem built the same way, so its lib.so

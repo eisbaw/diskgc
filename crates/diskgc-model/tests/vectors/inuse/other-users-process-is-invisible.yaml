@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # Without root, diskgc sees only the user's own processes (PRD, Limits): a
 # process of another user that cannot be read and holds the candidate open
 # does not block it. Pinned as the stated limit, not a guarantee.

@@ -1,4 +1,4 @@
-# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # Documented limits of the checkout guard (docs/safety.md, Not recognised):
 # a bare repository (no .git name inside), another case (.GIT) and another
 # VCS (.jj without .git) are not checkouts, so their candidates are

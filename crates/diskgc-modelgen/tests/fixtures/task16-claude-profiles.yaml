@@ -2,7 +2,7 @@
   find: {roots: [/tmp], paths: ["*"], type: dir}
   action: delete
   examples: {match: [/tmp/outside]}
-- name: claude-code-tmp
+- name: claude-sessions
   find: {roots: [/tmp], paths: ["claude-*/-*/session-*"], type: dir}
   where: {has: deliberately-absent}
   action: delete

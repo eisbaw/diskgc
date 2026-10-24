@@ -775,14 +775,22 @@ contract class, recorded in the
 - **verified heuristic**: the verdict can be wrong in named residual cases.
   Admissible only when each residual is named in the liveness table; the
   loss in each is rebuildable data or one failed, retryable producer run,
-  never a user's own work (two dated exceptions: Mark 2026-10-23,
+  never a user's own work (dated exceptions: Mark 2026-10-23,
   hand-edited files in a dependency directory, under the project
   contracts below; mark-emulator for Mark 2026-10-24, files placed by hand
   in a build directory, under the anchored build profiles, Source-anchored
-  CMake output); every known counterexample has a checked-in
+  CMake output; mark-emulator for Mark 2026-10-24, for `nix-user-cache` and
+  `go-mod-cache` only, a cached copy that its upstream no longer serves,
+  admitted with that residual named in their rows); every known counterexample has a checked-in
   ModelHost vector and, where the kernel's view matters, a container test
   with the real pinned producer; and Mark's decision to admit it is recorded
-  in the task and in the table.
+  in the task and in the table. A decision made on his delegation is
+  recorded as "admitted by mark-emulator for Mark, DATE", and Mark may veto
+  it (TASK-122). Two points are open, not decided here: whether such an
+  admission needs Mark's own ratification before its source enters a
+  `releases:` catalog (none of the twelve admitted on 2026-10-24 is in
+  one), and the container tests of those twelve, each row's "Container
+  test: pending (TASK-137)".
 - **tolerant** and **delegated**: as in the table above, verified per tool.
 - **none**: no contract. The profile is not admissible as a built-in, and
   its row in the liveness table records the counterexample. A user profile
