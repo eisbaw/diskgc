@@ -4,7 +4,7 @@ title: 'Documented skip reasons with no producer: unsupported_store, has_not, st
 status: To Do
 assignee: []
 created_date: '2026-10-23 21:59'
-updated_date: '2026-10-23 23:00'
+updated_date: '2026-10-24 07:45'
 labels:
   - contract
   - verification
@@ -22,4 +22,6 @@ docs/reference.md's skipped[].reason enum lists unsupported_store, has_not and s
 
 <!-- SECTION:NOTES:BEGIN -->
 From TASK-121 (2026-10-24): every_skip_reason_has_a_vector exempts these three by name and fails when one enters Reason::ALL, is quoted as a reason in diskgc-core (docker_backend.rs, executor.rs, or a line with 'reason'), or shows in a vector. Review suggestion: make the report's skip reason a closed enum (Reason plus the backend reasons; JSON unchanged), so 'has a producer' becomes 'is in ALL' and the source scan can go.
+
+Orchestrator 2026-10-24 (COMPASS round 2): 'stale' gets its producer in TASK-31, 'unsupported_store' is settled in TASK-118/36; 'has_not' should be removed from the enum. All must be settled before any release freezes the JSON (0.1 included).
 <!-- SECTION:NOTES:END -->

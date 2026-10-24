@@ -4,14 +4,13 @@ title: 'Journey: one policy across /tmp, Cargo, Docker and Nix'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:47'
-updated_date: '2026-10-23 15:57'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-4
   - journey
 dependencies:
-  - TASK-35
+  - TASK-32
   - TASK-36
-  - TASK-39
 references:
   - PRD.md
 priority: medium
@@ -33,6 +32,8 @@ Why: the core value of diskgc is one ordered policy across ecosystems; nothing e
 
 <!-- SECTION:NOTES:BEGIN -->
 Forward-carried from TASK-35 (2026-10-23): on a host whose docker is Podman's CLI shim (this laptop, Podman 5.8.7), every Docker profile exits 3 (client query 'docker context show' exits 125), so a mixed /tmp+Cargo+Docker policy run on such a host ends in error, not a Docker skip. Classification is open in TASK-113; the journey must state which host it assumes.
+
+Orchestrator 2026-10-24 (COMPASS round 2): dependency changed to TASK-32 + TASK-36 (the journey runs ensure and watch over /tmp, Cargo, Docker and Nix).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

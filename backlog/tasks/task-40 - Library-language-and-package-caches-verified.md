@@ -4,7 +4,7 @@ title: 'Library: language and package caches, verified'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 15:24'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-4
   - config
@@ -47,6 +47,8 @@ Real-host read-only diskgc ensure --dry-run --no-index on 2026-10-20, using the 
 2026-10-20 integrated pinned Jest 30.2.0 cleaner in c8ade1b. Focused Jest E2E passed exact measured-cache deletion with positive space delta, deletion oracle clean and decoy preserved; final nix develop -c just e2e passed 119/119; QA and MPED reviews GO. Gradle and Maven remain planned because their documented cleanup does not bind a whole measured cache/repository. No host deletion. Task stays In Progress for those named profiles.
 
 Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Library breadth waits for the producer-liveness cornerstone (D3: 'idle' = newest mtime/ctime cannot tell an active read-mostly tree from an abandoned one).
+
+Orchestrator 2026-10-24 (COMPASS round 2): only Gradle and Maven remain; split them into a low-priority task when this is next touched and close the rest.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

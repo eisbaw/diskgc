@@ -4,13 +4,12 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 16:19'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-4
   - irreversible
   - safety
 dependencies:
-  - TASK-34
   - TASK-118
 references:
   - docs/safety.md#nix-store
@@ -49,6 +48,8 @@ From task-50 round 3 (mped): the query run takes a closed enum of queries that d
 Clarification of the preceding state-A/state-B experiment: state B recorded the same physical store path as a valid store path, without adding a GC root in B. The GC root for that path existed only in state A. GC through B therefore removed it despite the root in A; no claim is made that GC removed a path rooted in B.
 
 Orchestrator 2026-10-23 (design audit): now depends on TASK-118 (store/root-db binding protocol design).
+
+Orchestrator 2026-10-24 (COMPASS round 2): dropped the TASK-34 edge (nix-store does not depend on index hardening). Naming: settle skip-vs-error and unsupported_store vs unsupported_backend across all backends inside TASK-118 (Mark ruled refuse with unsupported_backend; Docker client failures are skips per TASK-120).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

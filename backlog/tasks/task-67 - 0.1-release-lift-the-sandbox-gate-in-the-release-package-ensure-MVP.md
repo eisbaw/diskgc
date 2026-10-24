@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 17:13'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-2
   - release
@@ -76,6 +76,8 @@ Forward-carried from TASK-106: the e2e harness now has a feature-built proposed 
 2026-10-23 dependency reconciliation: TASK-66 AC1/AC2 packaging is implemented. TASK-66 AC3/DoD depends on verifying the actual gate-lifted artifact from TASK-67, so TASK-66 is removed from TASK-67 formal dependencies to break the cycle. Verify TASK-66 AC3/DoD after this artifact exists and before TASK-67 closes; do not mark TASK-66 complete based on the gated development package.
 
 Forward-carried from TASK-64 (2026-10-23): the kernel matrix now covers Linux 5.8.16 (the PRD floor), 5.15, 6.1, 6.6, 6.8.12 (no pidfd HUP; signal-0 fallback bites) and 6.12 (HUP control). Release-relevant finding: inside a Podman 2.1.1 container (2020 default seccomp profile) pidfd_open is EPERM and diskgc refuses to start, fail-closed. CI fleets that run ensure inside a container need a runtime/profile that allows pidfd_open and pidfd_send_signal; measured scope and remedy text are TASK-126. The 5.8 VM runs its containers with seccomp=unconfined for that reason.
+
+Orchestrator 2026-10-24 (COMPASS round 2): Mark ruled 2026-10-24: cut 0.1 RIGHT AFTER TASK-112 step 5 (pytest-tmp). Sequence: TASK-112 step 5 -> step 7 close-out -> TASK-122 (Mark signs off each withdrawal) -> 0.1 batch: TASK-60 (reconcile worktree), TASK-13 + TASK-27 mutation slice (smaller shards), TASK-130 (vectors on the product path, so the release catalog is testable), TASK-127/128, rewritten TASK-65 (0.1 /tmp catalog sign-off: nix-shell-rc + pytest-tmp + admitted TASK-122 rows), then this task. Consider making admission class and release channel data in builtin.yaml so the 0.1 allowlist cannot drift (Library::proposed_release_01 hard-coded ALLOWED vs reference.md table vs builtin.yaml).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

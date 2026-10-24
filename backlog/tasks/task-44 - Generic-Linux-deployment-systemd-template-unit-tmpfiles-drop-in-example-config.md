@@ -6,12 +6,12 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 16:19'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-5
   - deploy
 dependencies:
-  - TASK-43
+  - TASK-32
   - TASK-119
 references:
   - docs/architecture.md#deployment
@@ -39,6 +39,8 @@ Forward-carried from task-2: the e2e base image currently bakes /run/diskgc (075
 Pulled out into task-66 for the 0.1 ensure MVP (2026-10-18): the tmpfiles drop-in for /run/diskgc/lock and the example config (ACs #1 and #2 here, and the forward-carried harness note above). What stays here: the systemd template unit for watch (user and system variants, AC #3).
 
 Orchestrator 2026-10-23 (design audit): now depends on TASK-119 (unit/module design).
+
+Orchestrator 2026-10-24 (COMPASS round 2): dependency changed from TASK-43 to TASK-32 (the unit needs watch). The tmpfiles drop-in and example config were delivered by TASK-66; those ACs are satisfied there and must not be re-implemented.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

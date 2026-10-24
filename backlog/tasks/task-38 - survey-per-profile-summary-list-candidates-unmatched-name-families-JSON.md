@@ -4,12 +4,12 @@ title: 'survey: per-profile summary, --list candidates, unmatched name families,
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 16:19'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-4
   - cli
 dependencies:
-  - TASK-34
+  - TASK-30
   - TASK-116
 references:
   - docs/reference.md#survey
@@ -34,6 +34,8 @@ Why: categorising cruft and reviewing AI-drafted profiles both need it. Implemen
 
 <!-- SECTION:NOTES:BEGIN -->
 Orchestrator 2026-10-23 (design audit): now depends on TASK-116 (survey --json schema design) - do not implement against the planned/intended syntax.
+
+Orchestrator 2026-10-24 (COMPASS round 2): dependency changed from TASK-34 to TASK-30 (survey needs the snapshot, not hardening wave 3).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

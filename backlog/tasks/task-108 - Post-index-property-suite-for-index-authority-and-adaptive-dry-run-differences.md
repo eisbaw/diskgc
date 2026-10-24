@@ -4,14 +4,12 @@ title: Post-index property suite for index authority and adaptive dry-run differ
 status: To Do
 assignee: []
 created_date: '2026-10-21 21:58'
-updated_date: '2026-10-23 22:33'
+updated_date: '2026-10-24 07:45'
 labels:
   - wave-3
   - testing
 dependencies:
-  - TASK-28
-  - TASK-29
-  - TASK-24
+  - TASK-31
 references:
   - docs/testing.md#3-property-tests
 priority: high
@@ -33,6 +31,8 @@ Once the index exists, generate stale, partial and corrupt index states and comp
 
 <!-- SECTION:NOTES:BEGIN -->
 From TASK-121 (2026-10-24): when the index lands, add its vectors to the corpus (tests/vectors/index/): a stale index must never decide safety (races/new-keep-marker-after-planning and inuse/opened-after-planning-before-delete are the pattern: plan eligible, a change before the lock, reclaim refuses). The documented 'stale' skip reason is exempt in every_skip_reason_has_a_vector until a producer exists (TASK-127); remove the exemption with the first vector that shows it.
+
+Orchestrator 2026-10-24 (COMPASS round 2): the index-is-not-authority property (old AC1) belongs to TASK-31's own lock-in test; keep this task for best-fit and dry-run difference explanations. Dependency changed to TASK-31.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
