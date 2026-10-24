@@ -2832,11 +2832,11 @@ struct FsUnionCandidate {
 
 impl FsUnionCandidate {
     /// The build source established when this candidate was discovered,
-    /// for its plan row's `build_evidence` (docs/reference.md, Output):
+    /// for a skipped plan row's `build_evidence` (docs/reference.md,
+    /// Output: discovery's, which may not have survived later rechecks):
     /// `source`'s (an index into the tier's sources, the row's profile)
-    /// when it has one, else that of any term that found it. The evidence
-    /// belongs to the candidate, not to the term the row names: a plain
-    /// term listed before an anchored one must not hide it.
+    /// when it has one, else that of any term that found it, so a plain
+    /// term listed before an anchored one does not hide it.
     fn discovered(&self, source: usize) -> Option<&fs_kind::SourceEvidence> {
         fn evidence((_, found): &(usize, fs_kind::Found)) -> Option<&fs_kind::SourceEvidence> {
             found.source_evidence.as_ref()
@@ -3370,16 +3370,11 @@ fn plan_fs_union<H: Host>(
             let mut entry = plan_entry(tier, path, None, Some(tally.bytes));
             entry.profile = source.profile.to_owned();
             entry.checkouts = checkouts;
-            // The judgement's verified source, else discovery's (another
-            // admitted term's anchor) with this walk's age.
-            entry.build_evidence = eligible_build_evidence(
-                host,
-                tally
-                    .source_evidence
-                    .as_ref()
-                    .or_else(|| candidate.discovered(index)),
-                tally.newest_change,
-            );
+            // Only the source the selected term's judgement verified: an
+            // eligible row's evidence survived its rechecks (a skipped
+            // row's records discovery, docs/reference.md, Output).
+            entry.build_evidence =
+                eligible_build_evidence(host, tally.source_evidence.as_ref(), tally.newest_change);
             log(&format!(
                 "{}: {}: eligible by `{}` ({} estimated)",
                 tier.name,

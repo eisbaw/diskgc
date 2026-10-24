@@ -294,14 +294,14 @@ fn browser_cache_builtins_have_golden_sets_and_refuse_live_locks() {
         .into_iter()
         .map(|suffix| (format!("/home/mark/.cache/{cache}/{suffix}"), None))
         .collect();
-        expected.sort();
+        expected.sort_by(by_candidate_then_reason);
 
         let mut stopped = plan(&dry_run(&stopped_host, &request));
-        stopped.sort();
+        stopped.sort_by(by_candidate_then_reason);
         assert_eq!(stopped, expected, "{profile} stopped match set");
 
         let mut guarded = plan(&dry_run(&live_host, &request));
-        guarded.sort();
+        guarded.sort_by(by_candidate_then_reason);
         let blocked: Vec<_> = expected
             .iter()
             .map(|(path, _)| (path.clone(), Some(Reason::InUse)))
@@ -1059,6 +1059,15 @@ fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) 
 }
 
 /// The plan as (candidate, reason) pairs, in order.
+/// Plan rows in a stable order: candidate, then the reason's name
+/// (`Reason` has no order of its own: its declaration order means nothing).
+fn by_candidate_then_reason(
+    a: &(String, Option<Reason>),
+    b: &(String, Option<Reason>),
+) -> std::cmp::Ordering {
+    (&a.0, a.1.map(Reason::as_str)).cmp(&(&b.0, b.1.map(Reason::as_str)))
+}
+
 fn plan(report: &Report) -> Vec<(String, Option<Reason>)> {
     report
         .plan
@@ -1331,7 +1340,7 @@ fn exact_exclusion_still_traverses_a_deeper_positive_pattern() {
     )));
     let report = dry_run(&host, &request("profile:excluded-prefix", &[], "/tmp"));
     let mut actual = plan(&report);
-    actual.sort();
+    actual.sort_by(by_candidate_then_reason);
     assert_eq!(
         actual,
         [
@@ -1636,7 +1645,7 @@ fn anchored_cmake_needs_a_surviving_source_and_idle_output() {
         &built_in_request("profile:cmake-build-anchored", "/home/mark/src"),
     );
     let mut actual = plan(&report);
-    actual.sort();
+    actual.sort_by(by_candidate_then_reason);
     assert_eq!(
         actual,
         [
@@ -1722,7 +1731,7 @@ fn anchored_west_build_requires_source_and_zephyr_directory() {
         &built_in_request("profile:west-build-anchored", root),
     );
     let mut actual = plan(&report);
-    actual.sort();
+    actual.sort_by(by_candidate_then_reason);
     assert_eq!(
         actual,
         [
@@ -1775,7 +1784,7 @@ fn shipped_project_python_caches_find_only_cache_directories() {
     ));
     let pycache = dry_run(&host, &built_in_request("profile:python-pycache", root));
     let mut actual = plan(&pycache);
-    actual.sort();
+    actual.sort_by(by_candidate_then_reason);
     assert_eq!(
         actual,
         [
@@ -2307,7 +2316,7 @@ fn a_checkout_marker_anywhere_in_a_plain_delete_candidate_is_contains_checkout()
     )));
     let report = dry_run(&host, &request("profile:tmp-entry", &[], "/tmp"));
     let mut found = plan(&report);
-    found.sort();
+    found.sort_by(by_candidate_then_reason);
     assert_eq!(
         found,
         [
@@ -2362,7 +2371,7 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
     let refusing = host();
     let (report, lines) = dry_run_logged(&refusing, &request("profile:tmp-entry", &[], "/tmp"));
     let mut found = plan(&report);
-    found.sort();
+    found.sort_by(by_candidate_then_reason);
     assert_eq!(
         found,
         [
@@ -2401,7 +2410,7 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
         &request("profile:tmp-entry-checkouts", &[], "/tmp"),
     );
     let mut found = plan(&report);
-    found.sort();
+    found.sort_by(by_candidate_then_reason);
     assert_eq!(
         found,
         [
@@ -2452,7 +2461,7 @@ fn the_checkout_path_rule_follows_the_profiles_setting() {
             ),
         );
         let mut found = plan(&report);
-        found.sort();
+        found.sort_by(by_candidate_then_reason);
         assert_eq!(
             found,
             [
@@ -2588,7 +2597,7 @@ fn a_candidate_inside_a_checkouts_metadata_is_contains_checkout_by_its_path() {
         &request("profile:deep-dirs", &["/home/mark/src"], "/home/mark"),
     );
     let mut found = plan(&report);
-    found.sort();
+    found.sort_by(by_candidate_then_reason);
     assert_eq!(
         found,
         [

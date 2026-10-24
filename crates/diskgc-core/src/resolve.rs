@@ -132,8 +132,10 @@ impl ResolveError {
         }
     }
 
-    /// [`Self::skip_reason`]'s name, or `error` (messages and tests).
-    pub fn reason(&self) -> &'static str {
+    /// [`Self::skip_reason`]'s name, or `error`: a label for diagnostic
+    /// transcripts (the container driver's), never a report value (a
+    /// report's reason is a [`Reason`]).
+    pub fn transcript_label(&self) -> &'static str {
         self.skip_reason().map_or("error", Reason::as_str)
     }
 }
@@ -744,15 +746,15 @@ mod tests {
     #[test]
     fn kernel_refusals_become_skip_reasons() {
         for (errno, reason) in [
-            (Errno::ELOOP, "unsafe_path"),
-            (Errno::EXDEV, "unsafe_path"),
-            (Errno::ENOENT, "missing"),
-            (Errno::ENOTDIR, "missing"),
-            (Errno::EACCES, "error"),
+            (Errno::ELOOP, Some(Reason::UnsafePath)),
+            (Errno::EXDEV, Some(Reason::UnsafePath)),
+            (Errno::ENOENT, Some(Reason::Missing)),
+            (Errno::ENOTDIR, Some(Reason::Missing)),
+            (Errno::EACCES, None),
         ] {
             let host = tmp_host(good_mount(), Err(errno));
             let err = resolve(&host, Path::new("/tmp/a/b"), Want::Any).unwrap_err();
-            assert_eq!(err.reason(), reason, "{errno}: {err}");
+            assert_eq!(err.skip_reason(), reason, "{errno}: {err}");
             if let ResolveError::UnsafePath { path, .. } = &err {
                 assert_eq!(
                     path,
@@ -775,7 +777,7 @@ mod tests {
         ] {
             let host = tmp_host(mount_stat, Ok(good_target()));
             let err = resolve(&host, Path::new("/tmp/a/b"), Want::Any).unwrap_err();
-            assert_eq!(err.reason(), "unsupported_fs", "{err}");
+            assert_eq!(err.skip_reason(), Some(Reason::UnsupportedFs), "{err}");
             assert!(err.to_string().contains(what), "{err}");
         }
         // The same for the object below the mount.
@@ -784,7 +786,7 @@ mod tests {
             Ok(stat(None, Some(false), FileType::Directory)),
         );
         let err = resolve(&host, Path::new("/tmp/a/b"), Want::Any).unwrap_err();
-        assert_eq!(err.reason(), "unsupported_fs", "{err}");
+        assert_eq!(err.skip_reason(), Some(Reason::UnsupportedFs), "{err}");
     }
 
     #[test]
@@ -850,7 +852,7 @@ mod tests {
         for rel in ["/abs", "a/../b", "../x", "./a", "a/./b"] {
             let err =
                 open_beneath(&host, &0, 30, Path::new(rel), Access::Path, Want::Any).unwrap_err();
-            assert_eq!(err.reason(), "unsafe_path", "{rel}");
+            assert_eq!(err.skip_reason(), Some(Reason::UnsafePath), "{rel}");
         }
         assert!(host.calls.borrow().is_empty());
     }

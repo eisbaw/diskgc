@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{dir, failure, host, tmp_yaml};
+use diskgc_core::engine::Reason;
 use diskgc_core::host::{
     Access, Base, Delete, DirListing, Errno, FileType, Host, Pid, ProcError, ProcLink, Unlink,
 };
@@ -102,7 +103,7 @@ fn cross_bind_rename_is_exdev_and_alias_reference_prevents_inode_reuse() {
 fn a_symlink_on_the_way_is_unsafe_path() {
     let host = host(&tmp_yaml("  /tmp/link: {symlink: /tmp/a}\n"));
     let err = resolve(&host, Path::new("/tmp/link/f"), Want::Any).unwrap_err();
-    assert_eq!(err.reason(), "unsafe_path", "{err}");
+    assert_eq!(err.skip_reason(), Some(Reason::UnsafePath), "{err}");
     let err = resolve(&host, Path::new("/tmp/link"), Want::Any).unwrap_err();
     assert!(
         matches!(
@@ -180,7 +181,7 @@ fn statx_fields_a_filesystem_does_not_answer_are_none() {
         );
         let host = host(&yaml);
         let err = resolve(&host, Path::new("/tmp/a"), Want::Directory).unwrap_err();
-        assert_eq!(err.reason(), "unsupported_fs", "{err}");
+        assert_eq!(err.skip_reason(), Some(Reason::UnsupportedFs), "{err}");
         assert!(err.to_string().contains(missing), "{err}");
     }
 }

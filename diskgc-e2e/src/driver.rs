@@ -347,7 +347,7 @@ impl Lines<'_> {
     }
 
     fn resolve_err(&mut self, path: &Path, e: &ResolveError) {
-        self.err(e.reason(), path, e);
+        self.err(e.transcript_label(), path, e);
     }
 
     /// A result line that counts as a failure.

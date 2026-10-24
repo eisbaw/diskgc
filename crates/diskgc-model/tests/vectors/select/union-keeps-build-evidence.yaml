@@ -2,8 +2,9 @@
 # the source-anchored Meson output keeps its build_evidence (marker,
 # source, idle age), and the plain user profile's candidate has none
 # (docs/reference.md, Output; TASK-128). p2/out is found by a plain term
-# listed first (`outs`, so its row names that profile) and by the Meson
-# term: the evidence belongs to the candidate and is still reported.
+# listed first (`outs`) and by the Meson term; the row is `outs`'s, whose
+# judgement verified no source, so the eligible row has no build_evidence:
+# an eligible row reports only evidence its own rechecks verified.
 profile_vector: 1
 user_profiles:
   - name: outs
@@ -34,13 +35,13 @@ host:
 expect:
   plan:
     - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
-    - {candidate: /home/tester/src/p2/out, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/p2/out}
     - {candidate: /home/tester/src/scratch-a}
   # In discovery order (the union's terms in turn); clock - newest mtime
   # = 14 d 3 h = 1220400 s.
   dry_run_report:
     plan:
-      - {candidate: /home/tester/src/p2/out, profile: outs, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p2, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/p2/out, profile: outs}
       - {candidate: /home/tester/src/p1/out, profile: meson-build-anchored, build_evidence: {marker: meson-info/meson-info.json, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
       - {candidate: /home/tester/src/scratch-a, profile: scratch}
   reclaim_exit: 1

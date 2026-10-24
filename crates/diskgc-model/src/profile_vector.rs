@@ -16,7 +16,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::config::Config;
 use diskgc_core::invocation::{self, Catalog, ConfigFile, ConfigUse, EnsureOptions, Platform};
 use diskgc_core::profile::{Action, Body, Library, Origin, ProfileSpec};
 use diskgc_core::report::Report;
@@ -284,16 +283,6 @@ impl ProfileVector {
         }
     }
 
-    /// The configuration as the run loads it (through the product's
-    /// [`Catalog::config`]), for the invariants' library; `None` when
-    /// there is none or it does not load (the run then refuses, exit 2).
-    fn loaded_config(&self) -> Option<Config> {
-        let text = self.config.as_ref()?;
-        Catalog::from(self.catalog)
-            .config(Path::new(CONFIG_PATH), text.as_bytes(), ConfigUse::Run)
-            .ok()
-    }
-
     /// The built-ins before the catalog narrows them: the embedded ones
     /// plus the vector's `user_profiles`.
     fn builtins(&self) -> Result<Library, String> {
@@ -305,16 +294,19 @@ impl ProfileVector {
         }
     }
 
-    /// The library the run selects from, for the per-action invariants:
-    /// the configuration's, or `builtins` under the vector's catalog. A
-    /// catalog that refuses `builtins` (a user profile under the 0.1
-    /// catalog) leaves them unnarrowed here: the run refuses it.
-    fn library(&self, config: Option<&Config>, builtins: Library) -> Library {
-        match config {
-            Some(config) => config.library.clone(),
-            None => Catalog::from(self.catalog)
-                .library(builtins.clone())
-                .unwrap_or(builtins),
+    /// The library the run selects from, for the per-action invariants,
+    /// loaded through the product's [`Catalog::config`] or
+    /// [`Catalog::library`]: the configuration's, or `builtins` under the
+    /// vector's catalog. `None` when that does not load, so the run must
+    /// refuse (checked by [`Self::check_with`]).
+    fn library(&self, builtins: Library) -> Option<Library> {
+        let catalog = Catalog::from(self.catalog);
+        match &self.config {
+            Some(text) => catalog
+                .config(Path::new(CONFIG_PATH), text.as_bytes(), ConfigUse::Run)
+                .ok()
+                .map(|config| config.library),
+            None => catalog.library(builtins).ok(),
         }
     }
 
@@ -361,7 +353,7 @@ impl ProfileVector {
     /// The expectations are independent data: no expected path is derived
     /// from diskgc's report.
     fn check_with(&self, builtins: &Library) -> Result<Checked, String> {
-        let library = &self.library(self.loaded_config().as_ref(), builtins.clone());
+        let library = self.library(builtins.clone());
         let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
         let dry_run = self.run(&planning, true, builtins)?;
         compare_plan(&dry_run, &self.expect.plan).map_err(|e| {
@@ -415,13 +407,24 @@ impl ProfileVector {
         if let Some(subset) = &self.expect.report {
             json_subset(subset, &json(&reclaim)?, "report")?;
         }
+        if library.is_none()
+            && (dry_run.exit_code() != 2 || reclaim.exit_code() != 2 || !reclaim.actions.is_empty())
+        {
+            return Err(
+                "the configuration or built-ins do not load under the catalog, yet the run did \
+                 not refuse with exit 2"
+                    .to_owned(),
+            );
+        }
+        let library = library.as_ref();
         self.check_filesystem(&reclaiming, &reclaim, library)?;
         self.check_commands(&reclaiming, &reclaim, library)?;
         if !reclaiming.unfired_events().is_empty() {
             return Err(format!("unfired events: {:?}", reclaiming.unfired_events()));
         }
         let builtin = library
-            .profiles()
+            .into_iter()
+            .flat_map(Library::profiles)
             .filter(|profile| profile.origin == Origin::BuiltIn)
             .map(|profile| profile.name.clone())
             .collect();
@@ -465,7 +468,7 @@ impl ProfileVector {
         &self,
         host: &ModelHost,
         reclaim: &Report,
-        library: &Library,
+        library: Option<&Library>,
     ) -> Result<(), String> {
         let actions = &self.expect.actions;
         for path in &self.expect.removed {
@@ -520,7 +523,7 @@ impl ProfileVector {
         &self,
         host: &ModelHost,
         reclaim: &Report,
-        library: &Library,
+        library: Option<&Library>,
     ) -> Result<(), String> {
         let runs: Vec<_> = host
             .trace()
@@ -619,7 +622,10 @@ impl ProfileVector {
     }
 }
 
-fn action_of<'l>(library: &'l Library, profile: &str) -> Result<&'l Action, String> {
+/// `profile`'s action in the run's library; an error when there is none
+/// (a refused run has no actions to ask about).
+fn action_of<'l>(library: Option<&'l Library>, profile: &str) -> Result<&'l Action, String> {
+    let library = library.ok_or_else(|| format!("action of `{profile}` in a refused run"))?;
     match library.get(profile).map(|p| &p.body) {
         Some(Body::Source(source)) => Ok(&source.action),
         _ => Err(format!("action of unknown source profile `{profile}`")),

@@ -3364,6 +3364,7 @@ mod tests {
     //! and a main thread that exits need the container tests (diskgc-e2e).
 
     use super::*;
+    use diskgc_core::engine::Reason;
     use diskgc_core::host::{Cause, Ids};
     use diskgc_core::resolve::{Want, resolve, resolve_in};
     use std::io::{BufRead, BufReader, Read, Write};
@@ -3967,7 +3968,7 @@ mod tests {
         assert_eq!(proc.mount.fs_type, "proc");
         // /proc/self is a symlink: refused.
         let err = resolve(&host, Path::new("/proc/self"), Want::Any).unwrap_err();
-        assert_eq!(err.reason(), "unsafe_path", "{err}");
+        assert_eq!(err.skip_reason(), Some(Reason::UnsafePath), "{err}");
     }
 
     #[test]
@@ -4016,7 +4017,7 @@ mod tests {
         fake.mount_point = link.clone();
         let err = resolve_in(&host, &[fake], &link, Want::Directory)
             .expect_err("a symlink cannot be a mount point");
-        assert_eq!(err.reason(), "unsafe_path", "{err}");
+        assert_eq!(err.skip_reason(), Some(Reason::UnsafePath), "{err}");
 
         let file = dir.0.join("regular");
         std::fs::write(&file, b"").expect("create regular file");
@@ -4028,7 +4029,7 @@ mod tests {
         fake_file.mount_point = file.clone();
         let err = resolve_in(&host, &[fake_file], &file, Want::Directory)
             .expect_err("a regular file cannot be a mount point");
-        assert_eq!(err.reason(), "missing", "{err}");
+        assert_eq!(err.skip_reason(), Some(Reason::Missing), "{err}");
     }
 
     #[test]

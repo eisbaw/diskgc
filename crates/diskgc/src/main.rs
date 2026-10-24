@@ -576,9 +576,6 @@ fn ensure(args: &EnsureArgs) -> Report {
         Ok(config) => config,
         Err(why) => return fail(ErrorCause::Config, why),
     };
-    let builtins = || {
-        Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
-    };
     let platform = Platform {
         catalog: CATALOG,
         draw_seed: &draw_seed,
@@ -594,12 +591,15 @@ fn ensure(args: &EnsureArgs) -> Report {
     )
 }
 
-/// The built-in profiles of [`CATALOG`] alone; an error is a bug in the
-/// shipped YAML (the tests load it).
+/// The embedded built-in profiles, before [`CATALOG`] narrows them; an
+/// error is a bug in the shipped YAML (the tests load it).
+fn builtins() -> Result<Library, String> {
+    Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
+}
+
+/// The built-in profiles of [`CATALOG`] alone.
 fn builtin_library() -> Result<Library, String> {
-    let library = Library::builtin()
-        .map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))?;
-    CATALOG.library(library)
+    CATALOG.library(builtins()?)
 }
 
 /// `profiles list | show NAME | test`: the text or JSON for stdout, or why not

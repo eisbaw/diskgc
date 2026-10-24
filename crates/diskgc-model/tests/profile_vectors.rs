@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use diskgc_core::engine::{ProcessEvidence, RESERVED_REASONS, Reason};
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
-use diskgc_model::profile_vector::{Checked, ProfileVector, corpus_files};
+use diskgc_model::profile_vector::{Checked, ProfileVector, VectorCatalog, corpus_files};
 
 fn read(path: &Path) -> ProfileVector {
     let yaml = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -54,6 +54,28 @@ fn corpus() -> &'static [(PathBuf, Result<Checked, String>)] {
             })
             .collect()
     })
+}
+
+/// The `release` area is exactly the vectors that run the proposed 0.1
+/// catalog: one put there without `catalog:` would silently run the
+/// development catalog and still pass.
+#[test]
+fn release_vectors_are_exactly_the_proposed_catalog_ones() {
+    let release = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/release");
+    let files = corpus_files(&corpus_roots()).expect("corpus layout");
+    let mut in_area = 0;
+    for path in &files {
+        let under = path.starts_with(&release);
+        in_area += usize::from(under);
+        let proposed = read(path).catalog == VectorCatalog::ProposedRelease01;
+        assert_eq!(
+            under,
+            proposed,
+            "{}: below tests/vectors/release iff `catalog: proposed-release-01`",
+            path.display()
+        );
+    }
+    assert!(in_area > 0, "no vectors below {}", release.display());
 }
 
 /// Every failing file is named, not only the first. `VECTOR_TRACE=<part

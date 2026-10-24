@@ -457,7 +457,7 @@ impl WalkRecord {
 
 /// Why a candidate is not deleted, by its skip reason (docs/reference.md,
 /// Output).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// The candidate itself is gone.
     Missing,

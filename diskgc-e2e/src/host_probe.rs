@@ -749,7 +749,7 @@ fn ok_line(i: usize, stat: &Stat) -> String {
 }
 
 fn err_line(i: usize, e: &ResolveError) -> String {
-    format!("{i} err {} {} -- {e}", e.reason(), tag(e))
+    format!("{i} err {} {} -- {e}", e.transcript_label(), tag(e))
 }
 
 fn resolve_paths(host: &LinuxHost, want_text: &str, paths: &[String]) -> Result<(), String> {
