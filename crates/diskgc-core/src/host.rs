@@ -746,21 +746,70 @@ pub struct ProcView {
     /// The environment, or why it could not be read (kept: the in-use
     /// check decides what a failed environment means).
     pub environ: Result<Environ, ProcError>,
+    /// The pytest contract's facts, when the read asked for them
+    /// ([`read_proc_view`]).
+    pub facts: Option<ViewFacts>,
+}
+
+/// What the pytest contract reads of a process within the scan's own reads
+/// (docs/safety.md, pytest sessions: every read only adds), so that a
+/// child the process forks before it ends is listed and read as well: its
+/// uids, its command line, and every value pytest would resolve looked up
+/// in its own root ([`Host::proc_root_lookup`]; the values are
+/// [`crate::liveness::pytest::wanted_lookups`] of its environment and
+/// command line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewFacts {
+    pub uids: Result<Ids, ProcError>,
+    pub cmdline: Result<Vec<OsString>, ProcError>,
+    /// Each lookup: the normalised path, whether it was climbed, and the
+    /// answer (never `Gone`: the whole read is `Gone` then).
+    pub lookups: Vec<(PathBuf, bool, Result<Vec<DevIno>, ProcError>)>,
 }
 
 /// Reads one process for the in-use check through the readers of `host`:
-/// fds, memory map, cwd, root, exe, then environment. The first reader
-/// that fails, other than the environment's, is the result: the others are
-/// not asked (a process of another user costs one refused read).
-pub fn read_proc_view<H: Host + ?Sized>(host: &H, pid: Pid) -> Result<ProcView, ProcError> {
+/// fds, memory map, cwd, root, exe, then environment, and with `facts` the
+/// pytest contract's [`ViewFacts`]. The first reader that fails, other
+/// than the environment's and the facts', is the result: the others are
+/// not asked (a process of another user costs one refused read). A reader
+/// that finds the process gone makes the whole read `Gone`.
+pub fn read_proc_view<H: Host + ?Sized>(
+    host: &H,
+    pid: Pid,
+    facts: bool,
+) -> Result<ProcView, ProcError> {
     let fds = host.proc_fds(pid)?;
     let maps = host.proc_maps(pid)?;
     let cwd = host.proc_links(pid, ProcLink::Cwd)?;
     let root = host.proc_links(pid, ProcLink::Root)?;
     let exe = host.proc_links(pid, ProcLink::Exe)?;
-    let environ = match host.proc_environ(pid) {
-        Err(ProcError::Gone) => return Err(ProcError::Gone),
-        other => other,
+    let environ = host.proc_environ(pid);
+    if is_gone(&environ) {
+        return Err(ProcError::Gone);
+    }
+    let facts = if facts {
+        let uids = host.proc_uids(pid);
+        let cmdline = host.proc_cmdline(pid);
+        if is_gone(&uids) || is_gone(&cmdline) {
+            return Err(ProcError::Gone);
+        }
+        let wanted =
+            crate::liveness::pytest::wanted_lookups(environ.as_ref().ok(), cmdline.as_deref().ok());
+        let mut lookups = Vec::with_capacity(wanted.len());
+        for (path, climb) in wanted {
+            let answer = host.proc_root_lookup(pid, &path, climb);
+            if is_gone(&answer) {
+                return Err(ProcError::Gone);
+            }
+            lookups.push((path, climb, answer));
+        }
+        Some(ViewFacts {
+            uids,
+            cmdline,
+            lookups,
+        })
+    } else {
+        None
     };
     Ok(ProcView {
         fds,
@@ -769,7 +818,13 @@ pub fn read_proc_view<H: Host + ?Sized>(host: &H, pid: Pid) -> Result<ProcView, 
         root,
         exe,
         environ,
+        facts,
     })
+}
+
+/// Whether a reader found the process gone.
+fn is_gone<T>(answer: &Result<T, ProcError>) -> bool {
+    matches!(answer, Err(ProcError::Gone))
 }
 
 /// Why a `/proc/<pid>` reader returned nothing (docs/safety.md, In use:
@@ -998,14 +1053,17 @@ pub trait Host {
     /// The process's initial environment, read through a live task.
     fn proc_environ(&self, pid: Pid) -> Result<Environ, ProcError>;
 
-    /// [`read_proc_view`] of every pid in `pids`, results in the same
-    /// order. The provided method reads them one after another through the
-    /// readers above (so a model or a wrapper sees every reader call);
-    /// `LinuxHost` reads several processes at once. Each process is read on
-    /// its own, so the order and overlap of reads of different processes
-    /// changes nothing about any one result.
-    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
-        pids.iter().map(|pid| read_proc_view(self, *pid)).collect()
+    /// [`read_proc_view`] of every pid in `pids` (with the pytest facts
+    /// when `facts`), results in the same order. The provided method reads
+    /// them one after another through the readers above (so a model or a
+    /// wrapper sees every reader call); `LinuxHost` reads several processes
+    /// at once. Each process is read on its own, so the order and overlap
+    /// of reads of different processes changes nothing about any one
+    /// result.
+    fn proc_views(&self, pids: &[Pid], facts: bool) -> Vec<Result<ProcView, ProcError>> {
+        pids.iter()
+            .map(|pid| read_proc_view(self, *pid, facts))
+            .collect()
     }
 
     /// diskgc's own process id (`getpid`), as [`Host::pids`] lists it.

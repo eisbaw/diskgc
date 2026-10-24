@@ -1141,15 +1141,20 @@ root (the parent of `P`):
   either; Chromium's sandbox chroots its renderers into one, 66 processes
   on the development host), or an environment that cannot be read and is
   not excused at a privilege boundary (In use).
-- *Every read only adds* (as in In use; step 5, 2026-10-24): the facts
-  above are read after the scan's last listing, and a process found gone
-  by one of those reads keeps what was read of it, its initial
-  environment above all, since a child it forked meanwhile inherited that
-  environment and is not listed. Its unread uids are unknown (it counts
-  for every owner); a value it can no longer resolve in its own root is
-  compared as a path in diskgc's view; its unread command line is taken
-  as empty (an ended process runs and names nothing by it; only a fork
-  without `exec` would carry it on, a limit).
+- *Every read only adds* (as in In use; step 5, 2026-10-24, after the
+  step's Codex review): the facts above (uids, command line, initial
+  environment, working directories and the lookups in the process's root)
+  are read with each process's other entries within the in-use scan's
+  rounds, never after its last listing, so a child a process forks before
+  it ends is listed and read in a later round, as for its fds. A process
+  that ends during its own read is gone, as In use takes it; the latest
+  read that gave its facts stands, also for a process found gone later. A
+  reader that fails leaves that fact unreadable or unresolvable (rows 8,
+  9), never harmless; a root that cannot be opened at all (a leader that
+  called `pthread_exit`) is unresolvable too, never the absence of a path
+  in it. (Read after the last listing, as first implemented, a process
+  ending in that window either lost its evidence or made the scan
+  undecidable: 7 of 30 scans on the development host.)
 - When an Owner PID precondition other than the filesystem one fails (the
   PID namespace, `hidepid`), the process list is not complete: a pytest
   counts as running, and naming and root use as undecidable.
@@ -1407,16 +1412,18 @@ schema only with its first producer.
   `statx` calls (In use, A process using a dead mount).
 - *Cost.* Only when a selected source has a contract: one more read of
   each listed process's `status` (Owner PID's `NSpid`). For `pytest`,
-  once per scan and after its last listing, for each readable process
-  with a uid of the users diskgc judges for: one more `status` read (its
-  uids), one `cmdline` read, and one `RESOLVE_IN_ROOT` lookup per
-  temp-directory or `--basetemp` value it carries and per Python fallback
-  root (three), each with its own pidfd and open of `/proc/<pid>/root`
-  (per process and value, not shared across processes: two processes'
-  roots can differ). Measured on Linux 7.2.9 with 665 processes, 357 of
-  the user (2026-10-24): some thousands more syscalls per scan (about
-  4,500 `pidfd_open` and 2,200 `openat2`), against about 2.1 million for
-  the scan itself; per
+  within the scan's reads of every process it can read (the user's; every
+  process under `--allow-root`, filtered by uid afterwards): one more
+  `status` read (its uids), one `cmdline` read (the leader's; through a
+  live task only when that reads empty), and one `RESOLVE_IN_ROOT` lookup
+  per temp-directory or `--basetemp` value it carries and per Python
+  fallback root (three), each with its own pidfd and open of
+  `/proc/<pid>/root` (per process and value, not shared across processes:
+  two processes' roots can differ). Measured on Linux 7.2.9 with about 660
+  processes, 350 of the user, load about 10 (2026-10-24, glibc release
+  build, 12 interleaved one-candidate dry runs): median 1.69 s against
+  1.59 s without the contract; the scan itself, about 2.1 million
+  syscalls, dominates; per
   check, one listing of the session's `pytest-of-<user>` (at most 65,536
   names; more is a listing cut short, row 2), one lookup of `S`'s `.lock`
   and one safe resolution of `R`; byte comparison for every other string.

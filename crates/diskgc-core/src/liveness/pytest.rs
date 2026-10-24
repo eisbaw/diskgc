@@ -123,10 +123,6 @@ pub enum Lookup {
     /// The object's (device, inode), then (for `--basetemp`) those of its
     /// ancestors by `..`, up to the fixpoint.
     Resolved(Vec<DevIno>),
-    /// The process ended before its value could be looked up in its root:
-    /// the value (normalised) is compared as a path in diskgc's view, the
-    /// only evidence left (a child it forked meanwhile inherited it).
-    Ended(PathBuf),
 }
 
 /// Where a `--basetemp` value came from: it decides the evidence of a
@@ -398,6 +394,37 @@ pub fn basetemp_values(
     out
 }
 
+/// What a process's facts look up in its own root, given its environment
+/// and command line: every absolute (normalised) value of
+/// [`TEMP_ROOT_VARS`] and Python's [`FALLBACK_ROOTS`] (not climbed), and
+/// every absolute `--basetemp` value (climbed by `..`), each once.
+/// Relative and empty values are never looked up.
+pub fn wanted_lookups(
+    environ: Option<&Environ>,
+    cmdline: Option<&[OsString]>,
+) -> Vec<(PathBuf, bool)> {
+    let mut wanted: Vec<(PathBuf, bool)> = Vec::new();
+    let mut add = |path: PathBuf, climb: bool| {
+        if !wanted.contains(&(path.clone(), climb)) {
+            wanted.push((path, climb));
+        }
+    };
+    for value in environ.map(temp_root_values).unwrap_or_default() {
+        if let Some(path) = normalize(value.as_bytes()) {
+            add(path, false);
+        }
+    }
+    for root in FALLBACK_ROOTS {
+        add(PathBuf::from(root), false);
+    }
+    for (_, value) in basetemp_values(cmdline, environ) {
+        if let Some(path) = normalize(value.as_bytes()) {
+            add(path, true);
+        }
+    }
+    wanted
+}
+
 /// POSIX `shlex.split` (Python's, `posix=True`, no comments): words
 /// separated by whitespace, `'...'` literal, `"..."` with `\` escaping
 /// `\`, `"`, `$` and `` ` ``, and `\` escaping any byte outside quotes. An
@@ -502,13 +529,8 @@ fn naming(process: &ProcessFacts, facts: &Facts<'_>) -> Option<Evidence> {
     let resolved_into = |source: BasetempSource| {
         process.basetemps.iter().any(|(from, _, lookup)| {
             *from == source
-                && match lookup {
-                    Lookup::Resolved(chain) => {
-                        chain.iter().any(|id| facts.session_tree.contains(id))
-                    }
-                    Lookup::Ended(path) => path.starts_with(facts.session_path),
-                    Lookup::Relative | Lookup::Unresolvable(_) => false,
-                }
+                && matches!(lookup, Lookup::Resolved(chain)
+                    if chain.iter().any(|id| facts.session_tree.contains(id)))
         })
     };
     if resolved_into(BasetempSource::CommandLine) {
@@ -536,7 +558,7 @@ fn naming_undecidable(process: &ProcessFacts) -> Option<Evidence> {
     process
         .basetemps
         .iter()
-        .any(|(_, _, lookup)| matches!(lookup, Lookup::Relative | Lookup::Unresolvable(_)))
+        .any(|(_, _, lookup)| !matches!(lookup, Lookup::Resolved(_)))
         .then_some(Evidence::RelativePath)
 }
 
@@ -552,11 +574,9 @@ fn uses_root(process: &ProcessFacts, facts: &Facts<'_>) -> bool {
         || process.fallback_roots.contains(&facts.root_id);
     fallback
         || process.cwds.contains(&facts.root_id)
-        || process.temp_roots.iter().any(|(_, lookup)| match lookup {
-            Lookup::Resolved(chain) => chain.first() == Some(&facts.root_id),
-            Lookup::Ended(path) => path.as_path() == facts.root_path,
-            Lookup::Relative | Lookup::Unresolvable(_) => false,
-        })
+        || process.temp_roots.iter().any(
+            |(_, lookup)| matches!(lookup, Lookup::Resolved(chain) if chain.first() == Some(&facts.root_id)),
+        )
 }
 
 /// Why a process makes the root use undecidable (row 9), if it does.
@@ -567,7 +587,7 @@ fn root_use_undecidable(process: &ProcessFacts) -> Option<Evidence> {
     let unresolved = process
         .temp_roots
         .iter()
-        .any(|(_, lookup)| matches!(lookup, Lookup::Relative | Lookup::Unresolvable(_)));
+        .any(|(_, lookup)| !matches!(lookup, Lookup::Resolved(_)));
     (unresolved || !process.fallback_unresolved.is_empty()).then_some(Evidence::RelativePath)
 }
 

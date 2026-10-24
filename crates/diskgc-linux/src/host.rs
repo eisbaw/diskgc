@@ -1574,7 +1574,7 @@ impl Host for LinuxHost {
     /// read (task-6 measured about 0.8 s for 480 processes on one thread).
     /// A helper thread that cannot be started leaves its share to the
     /// others; a reader that panics is a bug and panics here too.
-    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
+    fn proc_views(&self, pids: &[Pid], facts: bool) -> Vec<Result<ProcView, ProcError>> {
         let threads = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get)
             .min(PROC_READERS)
@@ -1587,7 +1587,7 @@ impl Host for LinuxHost {
                 let Some(pid) = pids.get(i) else {
                     return done;
                 };
-                done.push((i, read_proc_view(self, *pid)));
+                done.push((i, read_proc_view(self, *pid, facts)));
             }
         };
         let mut slots: Vec<Option<Result<ProcView, ProcError>>> = vec![None; pids.len()];
@@ -1806,10 +1806,19 @@ impl Host for LinuxHost {
         }
     }
 
-    /// Through a live task, as the environment: a leader that called
-    /// `pthread_exit` has no memory map and reads empty.
+    /// The leader's `cmdline` first: every task shares the one memory map
+    /// it is read from, so a non-empty read is the answer. A leader that
+    /// called `pthread_exit` has no memory map and reads empty; then, and
+    /// for any failed read, through a live task, as the environment is
+    /// read (enumerating the tasks costs a `stat` per thread, which a
+    /// browser's dozens of threads make worth avoiding).
     fn proc_cmdline(&self, pid: Pid) -> Result<Vec<OsString>, ProcError> {
         let proc = self.root();
+        if let Ok(bytes) = read_cmdline(&Kernel(proc), &format!("{pid}/cmdline"))
+            && !bytes.is_empty()
+        {
+            return Ok(parse_cmdline(&bytes));
+        }
         let (_, bytes) = read_through_live_task(proc, pid, ("cmdline", "command line"), |path| {
             read_cmdline(&Kernel(proc), path)
         })?;
@@ -1832,15 +1841,26 @@ impl Host for LinuxHost {
         let proc = self.root();
         let pidfd = open_pidfd(pid)?;
         let rel = format!("{pid}/root");
+        // A root that cannot be opened (a leader that called pthread_exit
+        // while other threads live has none, ENOENT) says nothing about
+        // what exists inside it: the error carries no errno, so no caller
+        // can read it as the absence of the path looked up.
+        let unopened = |e: HostError| {
+            ProcError::Failed(HostError::invalid(
+                "open",
+                ProcRoot::shown(&rel),
+                format!("the process's root cannot be opened: {e}"),
+            ))
+        };
         let root = match proc.open(&rel, OFlags::PATH | OFlags::DIRECTORY) {
             Ok(root) => root,
             Err(e) if is_vanished(&e) => {
                 return match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
                     PidfdPoll::Hangup => Err(ProcError::Gone),
-                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::from_host(e)),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(unopened(e)),
                 };
             }
-            Err(e) => return Err(ProcError::from_host(e)),
+            Err(e) => return Err(unopened(e)),
         };
         let shown = || format!("{} in {}", path.display(), ProcRoot::shown(&rel));
         let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS;

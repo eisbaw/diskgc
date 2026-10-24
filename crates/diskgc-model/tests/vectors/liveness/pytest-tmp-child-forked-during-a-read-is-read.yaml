@@ -1,8 +1,9 @@
-# Every read only adds: process 900, whose TMPDIR is the session's root, ends
-# right after the scan's last listing, before its TMPDIR is looked up in its
-# root (a child it forked meanwhile, unlisted, inherited that TMPDIR). Its
-# environment still counts, the value compared as a path in diskgc's view:
-# the sessions above the rank stay in_use (row 10).
+# A pytest whose --basetemp names pytest-3 and whose TMPDIR is the root forks
+# a child while it is being read and then ends: the scan lists again, reads
+# the child, which inherited both, and keeps pytest-3 (row 6, command_line)
+# and the other sessions above the rank (row 10); the old sessions below the
+# rank go by row 7. Every read only adds, without a window after the last
+# listing.
 profile_vector: 1
 profile: pytest-tmp
 path: /tmp
@@ -17,7 +18,6 @@ host:
     /run/diskgc/lock: {uid: 0, gid: 0}
     /usr/bin/bash: {}
     /usr/bin/python: {}
-    /home/tester: {.: {mtime: 2026-10-05T03:00:00Z}}
     /tmp/other: {.: {mtime: 2026-10-05T03:00:00Z}}
     /tmp/nix-shell.AB: {.: {mtime: 2026-10-05T03:00:00Z}}
     /tmp/nix-shell.AB/pytest-of-tester: {.: {mtime: 2026-10-05T03:00:00Z}}
@@ -27,9 +27,10 @@ host:
     /tmp/nix-shell.AB/pytest-of-tester/pytest-3: {.: {mtime: 2026-10-05T03:00:00Z}}
     /tmp/nix-shell.AB/pytest-of-tester/pytest-4: {.: {mtime: 2026-10-05T03:00:00Z}}
   processes:
-    - {pid: 900, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: ["HOME=/home/tester", "TMPDIR=/tmp/nix-shell.AB"], fds: [{path: /usr/bin/bash}]}
+    - {pid: 900, exe: /usr/bin/python, cwd: /, maps: [/usr/bin/python], environ: ["HOME=/home/tester", "TMPDIR=/tmp/nix-shell.AB"], fds: [{path: /usr/bin/python}], cmdline: ["python", "-m", "pytest", "--basetemp=/tmp/nix-shell.AB/pytest-of-tester/pytest-3"]}
   events:
-    - {at: {op: proc_root_lookup, path: /tmp/nix-shell.AB, nth: 1, when: before}, exit: 900}
+    - {at: {op: proc_cmdline, path: /proc/900/cmdline, nth: 1, when: before}, fork: {pid: 900, child: 901}}
+    - {at: {op: proc_cmdline, path: /proc/900/cmdline, nth: 1, when: after}, exit: 900}
 expect:
   plan:
     - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-0}
@@ -41,9 +42,9 @@ expect:
   actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
   removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
   skipped:
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: in_use, process_blockers: [{pid: 900, evidence: temp_root}]}
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: in_use, process_blockers: [{pid: 900, evidence: temp_root}]}
-    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: in_use, process_blockers: [{pid: 900, evidence: temp_root}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: in_use, process_blockers: [{pid: 901, evidence: temp_root}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: in_use, process_blockers: [{pid: 901, evidence: command_line}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: in_use, process_blockers: [{pid: 901, evidence: temp_root}]}
   preserved:
     - /tmp/nix-shell.AB/pytest-of-tester/pytest-2
     - /tmp/nix-shell.AB/pytest-of-tester/pytest-3

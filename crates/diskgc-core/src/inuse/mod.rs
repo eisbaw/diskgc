@@ -176,14 +176,14 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
     // again after the NSpid reads, so they cover the window of the
     // listings they qualify ([`scan::pid_table`]).
     let namespace_before = options.pid_lookup.then(|| host.pid_namespace());
-    let gathered = scan::gather(host, options.users)?;
+    let gathered = scan::gather(host, options.users, options.pytest_facts)?;
     let pid_table = namespace_before.map(|before| {
         scan::pid_table(host, before, &gathered.listed, gathered.unsettled.is_none())
     });
     let pytest_facts = options.pytest_facts.then(|| {
         (
             options.users.to_vec(),
-            scan::pytest_facts(host, &gathered, options.users),
+            scan::pytest_facts(&gathered, options.users),
         )
     });
     let mut s = Scan {

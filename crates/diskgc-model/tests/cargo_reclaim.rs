@@ -1085,8 +1085,8 @@ impl Host for Gated {
     fn proc_environ(&self, pid: Pid) -> Result<Environ, ProcError> {
         self.0.proc_environ(pid)
     }
-    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
-        self.0.proc_views(pids)
+    fn proc_views(&self, pids: &[Pid], facts: bool) -> Vec<Result<ProcView, ProcError>> {
+        self.0.proc_views(pids, facts)
     }
     fn own_pid(&self) -> Pid {
         self.0.own_pid()

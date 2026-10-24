@@ -599,7 +599,7 @@ fn gen_process() -> impl Strategy<Value = (ProcessFacts, Signs)> {
             1 => Just(vec![("rel".into(), Lookup::Relative)]),
             1 => Just(vec![("/x".into(), Lookup::Resolved(vec![id(ROOT)]))]),
             1 => Just(vec![("/y".into(), Lookup::Unresolvable("ENOENT".into()))]),
-            1 => Just(vec![("/tmp".into(), Lookup::Ended("/tmp".into()))]),
+            1 => Just(vec![("/tmp".into(), Lookup::Unresolvable("ended".into()))]),
         ],
         prop_oneof![6 => Just(0usize), 1 => Just(1), 1 => Just(2), 1 => Just(3)],
         prop_oneof![6 => Just(0usize), 1 => Just(1), 1 => Just(2)],

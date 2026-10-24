@@ -207,6 +207,12 @@ pub(crate) struct Read {
     /// The whole initial environment of the latest read that gave one
     /// (the pytest contract reads its variables, not only its paths).
     pub environ_raw: Option<Environ>,
+    /// The pytest contract's facts of the latest read that gave them
+    /// (boxed: most reads carry none).
+    pub facts: Option<Box<crate::host::ViewFacts>>,
+    /// The latest read's facts lack its uids or command line (a reader
+    /// failed): read again, as for a failed environment.
+    pub facts_failed: bool,
 }
 
 /// One process's read.
@@ -234,9 +240,6 @@ pub(crate) struct Gathered {
     /// The pids of the last listing (diskgc's own included): every process
     /// alive when the scan settled was in it.
     pub listed: Vec<Pid>,
-    /// The processes whose last read succeeded (their environment
-    /// possibly excepted): neither gone nor unreadable.
-    pub readable: BTreeSet<Pid>,
 }
 
 /// One process during a scan.
@@ -272,7 +275,7 @@ impl Entry {
         self.attempts += 1;
         self.latest = Some(match outcome {
             Outcome::Read(read) => {
-                if read.environ_failed.is_none() {
+                if read.environ_failed.is_none() && !read.facts_failed {
                     self.environ_read = true;
                 }
                 self.found.add(read);
@@ -322,6 +325,14 @@ impl Read {
         if other.environ_raw.is_some() {
             self.environ_raw = other.environ_raw;
         }
+        // The latest complete facts stand; an incomplete read only
+        // replaces facts that were incomplete too.
+        if other.facts.is_some()
+            && (!other.facts_failed || self.facts_failed || self.facts.is_none())
+        {
+            self.facts = other.facts;
+            self.facts_failed = other.facts_failed;
+        }
     }
 }
 
@@ -329,7 +340,7 @@ impl Read {
 /// `users`: the uids whose files candidates may hold. Fails only when the
 /// process list itself cannot be read, or the host answers a read of
 /// several processes with another number of results.
-pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostError> {
+pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Gathered, HostError> {
     // `users` is the candidate ownership allowlist, not the complete set of
     // processes that can use their files. In root mode a root process can
     // open any listed user's candidate, so an unreadable root process must
@@ -472,7 +483,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
                 .filter(|(_, due)| *due <= now)
                 .map(|(pid, _)| *pid),
         );
-        let views = host.proc_views(&batch);
+        let views = host.proc_views(&batch, facts);
         if views.len() != batch.len() {
             return Err(HostError::invalid(
                 "proc_views",
@@ -532,12 +543,8 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
     let mut read = BTreeMap::new();
     let mut unreadable = Vec::new();
     let mut environ_failed = Vec::new();
-    let mut readable = BTreeSet::new();
     let mut gone = 0;
     for (pid, entry) in entries {
-        if matches!(entry.latest, Some(Latest::Read)) {
-            readable.insert(pid);
-        }
         match &entry.latest {
             Some(Latest::Gone) => gone += 1,
             Some(Latest::Unreadable(error)) => {
@@ -568,7 +575,6 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32]) -> Result<Gathered, HostE
         environ_failed,
         gone,
         listed: last_listing,
-        readable,
     })
 }
 
@@ -633,106 +639,70 @@ pub(crate) fn pid_table<H: Host>(
 }
 
 /// The pytest contract's process facts (docs/safety.md, pytest sessions:
-/// terms; A process's paths) of a gathered scan, read after its last
-/// listing as Owner PID's table is: for every readable process with a uid
-/// among `users` (or whose uids could not be read), its uids, command
-/// line, initial environment, working directories, and the
-/// temp-directory and `--basetemp` values pytest resolves and Python's
-/// fallback roots, each looked up once in the process's own root
-/// ([`Host::proc_root_lookup`]); and every unreadable process not excused
-/// at a privilege boundary, as [`ProcessFacts::unreadable`] (it already
-/// blocks every candidate in the in-use check). Reads that fail are
-/// retried in rounds as [`pid_table`] does (at most 40 ms per scan); one
-/// that stays unreadable is `None` in its facts, which the verdict treats
-/// as undecidable.
-///
-/// Every read only adds, as in the in-use scan: a process found gone by
-/// one of these reads (it ended after the last listing) keeps what was
-/// read of it, its initial environment above all, since a child it forked
-/// meanwhile inherited that and the scan did not list the child. Its
-/// unread uids are unknown (it counts for every owner); its unread command
-/// line is taken as empty (it runs and names nothing by it any more; only
-/// a fork without `exec` would carry it on, a limit); a value it could no
-/// longer resolve in its own root is compared as a path in diskgc's view
-/// ([`Lookup::Ended`]).
-pub(crate) fn pytest_facts<H: Host>(
-    host: &H,
-    gathered: &Gathered,
-    users: &[u32],
-) -> Vec<ProcessFacts> {
-    let mut facts = Vec::new();
-    // Uids first: another user's process needs nothing else.
-    let mut uids: BTreeMap<Pid, Option<crate::host::Ids>> = BTreeMap::new();
-    let mut cmdlines: BTreeMap<Pid, Option<Vec<OsString>>> = BTreeMap::new();
-    let readable: Vec<Pid> = gathered.readable.iter().copied().collect();
-    retried(host, &readable, |pid| match host.proc_uids(pid) {
-        Ok(ids) => {
-            uids.insert(pid, Some(ids));
-            Ok(())
-        }
-        // Ended: its uids stay unknown, it counts for every owner.
-        Err(ProcError::Gone) => {
-            uids.insert(pid, None);
-            Ok(())
-        }
-        Err(e) => {
-            uids.insert(pid, None);
-            Err(e)
-        }
-    });
-    let wanted: Vec<Pid> = uids
+/// terms; A process's paths) of a gathered scan. Every process some read
+/// of which gave [`crate::host::ViewFacts`] (read within the scan's rounds,
+/// [`crate::host::read_proc_view`], so a child forked before the process
+/// ended is listed and read too; every read only adds: the latest read
+/// that gave facts stands, also for a process found gone later) and whose
+/// uids are among `users` or unknown: its uids, command line, initial
+/// environment, working directories and lookups; and every unreadable
+/// process not excused at a privilege boundary, as
+/// [`ProcessFacts::unreadable`] (it already blocks every candidate in the
+/// in-use check). A reader that failed is `None` (or an unresolvable
+/// lookup), which the verdict treats as undecidable. Pure: no I/O.
+pub(crate) fn pytest_facts(gathered: &Gathered, users: &[u32]) -> Vec<ProcessFacts> {
+    let blocking: BTreeSet<Pid> = gathered
+        .unreadable
         .iter()
-        .filter(|(_, ids)| ids.is_none_or(|ids| super::scan::is_users_ids(ids, users)))
-        .map(|(pid, _)| *pid)
+        .filter(|u| u.excuse.is_none())
+        .map(|u| u.pid)
         .collect();
-    retried(host, &wanted, |pid| match host.proc_cmdline(pid) {
-        Ok(args) => {
-            cmdlines.insert(pid, Some(args));
-            Ok(())
+    let mut facts = Vec::new();
+    for (pid, read) in &gathered.read {
+        let Some(view) = &read.facts else { continue };
+        if blocking.contains(pid) {
+            continue;
         }
-        // Ended: it runs and names nothing by its command line any more.
-        Err(ProcError::Gone) => {
-            cmdlines.insert(pid, Some(Vec::new()));
-            Ok(())
+        let uids = view.uids.as_ref().ok().copied();
+        if uids.is_some_and(|ids| !is_users_ids(ids, users)) {
+            continue;
         }
-        Err(e) => {
-            cmdlines.insert(pid, None);
-            Err(e)
-        }
-    });
-    for pid in wanted {
-        let read = &gathered.read[&pid];
         let environ: Option<Environ> = read
             .environ_failed
             .is_none()
             .then(|| read.environ_raw.clone())
             .flatten();
-        let cwds = read
-            .uses
-            .iter()
-            .filter(|(_, how)| *how == How::Cwd)
-            .map(|(id, _)| *id)
-            .collect();
+        let cmdline = view.cmdline.as_ref().ok().cloned();
+        let answer = |path: &Path, climb: bool| -> Lookup {
+            match view
+                .lookups
+                .iter()
+                .find(|(p, c, _)| p == path && *c == climb)
+            {
+                Some((_, _, Ok(chain))) => Lookup::Resolved(chain.clone()),
+                Some((_, _, Err(e))) => Lookup::Unresolvable(e.to_string()),
+                None => Lookup::Unresolvable("not looked up in this read".to_owned()),
+            }
+        };
+        let lookup = |value: &OsStr, climb: bool| match pytest::normalize(value.as_bytes()) {
+            None => Lookup::Relative,
+            Some(path) => answer(&path, climb),
+        };
         let mut process = ProcessFacts {
-            pid,
-            uids: uids[&pid],
-            cmdline: cmdlines.remove(&pid).expect("every wanted pid was read"),
+            pid: *pid,
+            uids,
+            cmdline,
             environ,
-            cwds,
+            cwds: read
+                .uses
+                .iter()
+                .filter(|(_, how)| *how == How::Cwd)
+                .map(|(id, _)| *id)
+                .collect(),
             temp_roots: Vec::new(),
             fallback_roots: Vec::new(),
             fallback_unresolved: Vec::new(),
             basetemps: Vec::new(),
-        };
-        let lookup = |value: &OsStr, climb: bool| -> Lookup {
-            let Some(path) = pytest::normalize(value.as_bytes()) else {
-                return Lookup::Relative;
-            };
-            match host.proc_root_lookup(pid, &path, climb) {
-                Ok(chain) => Lookup::Resolved(chain),
-                Err(ProcError::Gone) => Lookup::Ended(path),
-                Err(e) => Lookup::Unresolvable(e.to_string()),
-            }
         };
         for value in process
             .environ
@@ -744,21 +714,27 @@ pub(crate) fn pytest_facts<H: Host>(
             process.temp_roots.push((value, found));
         }
         for root in pytest::FALLBACK_ROOTS {
-            match host.proc_root_lookup(pid, Path::new(root), false) {
-                Ok(chain) => process.fallback_roots.extend(chain.first()),
-                // Ended: R being a fallback by diskgc's path still counts.
-                Err(ProcError::Gone) => {}
+            match view
+                .lookups
+                .iter()
+                .find(|(p, c, _)| p.as_os_str() == root && !*c)
+                .map(|(_, _, answer)| answer)
+            {
+                Some(Ok(chain)) => process.fallback_roots.extend(chain.first()),
                 // Missing: not a root Python could use. ESRCH: the process's
                 // root is a dead process's /proc directory (Chromium's
                 // sandbox chroots its renderers into one, 66 processes on
                 // the development host), where nothing resolves for the
                 // process either.
-                Err(ProcError::Failed(e) | ProcError::Denied(e))
+                Some(Err(ProcError::Failed(e) | ProcError::Denied(e)))
                     if matches!(
                         e.kernel_errno(),
                         Some(Errno::ENOENT | Errno::ENOTDIR | Errno::ESRCH)
                     ) => {}
-                Err(e) => process.fallback_unresolved.push(format!("{root}: {e}")),
+                Some(Err(e)) => process.fallback_unresolved.push(format!("{root}: {e}")),
+                None => process
+                    .fallback_unresolved
+                    .push(format!("{root}: not looked up in this read")),
             }
         }
         for (source, value) in
@@ -778,21 +754,6 @@ pub(crate) fn pytest_facts<H: Host>(
     }
     facts.sort_by_key(|p| p.pid);
     facts
-}
-
-/// Calls `read` for each pid, then again, after each pause of
-/// [`REREAD_PAUSES`], for those whose read failed, until none fails or the
-/// pauses are used up (the last failure stands).
-fn retried<H: Host>(host: &H, pids: &[Pid], mut read: impl FnMut(Pid) -> Result<(), ProcError>) {
-    let mut pending: Vec<Pid> = pids.to_vec();
-    let mut pauses = REREAD_PAUSES.iter();
-    loop {
-        pending.retain(|pid| read(*pid).is_err());
-        match pauses.next() {
-            Some(pause) if !pending.is_empty() => host.sleep(*pause),
-            _ => return,
-        }
-    }
 }
 
 /// Whether any of the four uids is one of `users`.
@@ -1005,6 +966,10 @@ fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
     }
     read.uses.sort_unstable();
     read.uses.dedup();
+    if let Some(facts) = view.facts {
+        read.facts_failed = facts.uids.is_err() || facts.cmdline.is_err();
+        read.facts = Some(Box::new(facts));
+    }
     match view.environ {
         Ok(env) => {
             read.environ = environ::paths(&env);

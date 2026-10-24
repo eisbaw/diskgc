@@ -1635,8 +1635,21 @@ impl Host for ModelHost {
             let Some(proc) = state.procs.get(&pid.0) else {
                 return (Err(ProcError::Gone), None, "gone".to_owned());
             };
+            // A root that cannot be opened carries no errno (as on Linux):
+            // it says nothing about what exists inside it.
+            let unopened = |why: &str| {
+                (
+                    Err(ProcError::Failed(HostError::invalid(
+                        "open",
+                        format!("/proc/{pid}/root"),
+                        format!("the process's root cannot be opened: {why}"),
+                    ))),
+                    None,
+                    "failed (root)".to_owned(),
+                )
+            };
             if proc.zombie {
-                return fail(Errno::ENOENT);
+                return unopened("a zombie has no root");
             }
             match proc.access {
                 ProcAccess::Readable => {}
@@ -1651,7 +1664,7 @@ impl Host for ModelHost {
                         "denied".to_owned(),
                     );
                 }
-                ProcAccess::Failed => return fail(Errno::EIO),
+                ProcAccess::Failed => return unopened("the model says it cannot be inspected"),
             }
             match view_lookup(state, proc, path) {
                 Err(e) => fail(e),

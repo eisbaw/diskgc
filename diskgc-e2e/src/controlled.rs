@@ -540,15 +540,15 @@ impl<H: Host> Host for Controlled<H> {
     /// one call, unless a planned point names a `/proc` reader or a call by
     /// number: then the provided method, one reader call after another,
     /// each counted and pausable.
-    fn proc_views(&self, pids: &[Pid]) -> Vec<Result<ProcView, ProcError>> {
+    fn proc_views(&self, pids: &[Pid], facts: bool) -> Vec<Result<ProcView, ProcError>> {
         if self.targets_readers() {
             return pids
                 .iter()
-                .map(|pid| diskgc_core::host::read_proc_view(self, *pid))
+                .map(|pid| diskgc_core::host::read_proc_view(self, *pid, facts))
                 .collect();
         }
         self.before("proc_views");
-        self.host.proc_views(pids)
+        self.host.proc_views(pids, facts)
     }
 
     fn own_pid(&self) -> Pid {
@@ -717,7 +717,7 @@ processes:
         // Delegated as one call: the model's provided method then reads
         // the readers itself (not counted here); one pid, five readers
         // plus the environment.
-        assert_eq!(host.proc_views(&[Pid(42)]).len(), 1);
+        assert_eq!(host.proc_views(&[Pid(42)], false).len(), 1);
         host.own_pid();
         host.proc_status(Pid(42)).expect("proc_status");
         host.bound_unix_sockets().expect("bound_unix_sockets");
@@ -776,7 +776,7 @@ processes:
             },
             Action::Pause,
         ));
-        host.proc_views(&[Pid(42)]);
+        host.proc_views(&[Pid(42)], false);
         assert_eq!(host.calls_per_op().get("proc_views"), Some(&1));
         assert_eq!(host.calls_per_op().get("proc_fds"), None);
         for point in [
@@ -787,7 +787,7 @@ processes:
             Point::Call(999),
         ] {
             let (host, _) = recorded(Plan::new().at(point, Action::Pause));
-            host.proc_views(&[Pid(42)]);
+            host.proc_views(&[Pid(42)], false);
             assert_eq!(host.calls_per_op().get("proc_views"), None, "{point}");
             assert_eq!(host.calls_per_op().get("proc_fds"), Some(&1), "{point}");
         }

@@ -595,9 +595,11 @@ dropped (`fallback-root-counts-for-a-chrooted-process`); `PYTEST_ADDOPTS`
 ignored; an unreadable command line taken as empty; `R` not checked to
 hold `P` (`root-replaced-unknown`); `P`'s owner not checked against the
 judged users (`pytest-of-owner-not-judged-unknown`); a fallback lookup
-error taken as no root (`fallback-root-lookup-error-unknown`); an ended
-process's value dropped (`process-ends-before-lookup-still-counts`; both
-from the step's reviews). Equivalent at every
+error taken as no root (`fallback-root-lookup-error-unknown`); `ESRCH`
+from a dead `/proc` root taken as undecidable
+(`dead-procfs-root-not-a-temp-root`); the facts read only in the scan's
+first listing round (`child-forked-during-a-read-is-read`; all from the
+step's reviews). Equivalent at every
 level: dropping the `.lock` type check (the lock is opened without
 following a symlink and read as a regular file, which refuse the same
 objects). Through the real binary: an ended owner permitting fails
@@ -753,7 +755,8 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-pytest-of-owner-not-judged-unknown` | `/tmp/nix-shell.AB/pytest-of-other` owned by uid 2000 holding the user's `pytest-0` | 0 `producer_unknown`: that uid's processes are not read |
 | `pytest-tmp-root-replaced-unknown` | B `{0}`; `/tmp/nix-shell.AB` renamed away just before the contract's listing and a new directory made under its name | 0 `producer_unknown`: `R` by path no longer holds `P` |
 | `pytest-tmp-fallback-root-lookup-error-unknown` | as `pytest-tmp-root-via-mount-view-refused`, the lookup of the process's `/tmp` failing with `EIO` | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `relative_path` (row 9: not "no such root") |
-| `pytest-tmp-process-ends-before-lookup-still-counts` | as `pytest-tmp-live-shell-root-refused`, process 900 ending just before its `TMPDIR` is looked up | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root` 900 (every read only adds) |
+| `pytest-tmp-process-ending-during-its-read-is-gone` | B `{0..4}`; the only process, with `TMPDIR` the root, ends during its own read (before its `TMPDIR` lookup) | 0 to 4 eligible: it is gone, as In use takes it |
+| `pytest-tmp-child-forked-during-a-read-is-read` | B `{0..4}`; a pytest with `--basetemp` into `pytest-3` and `TMPDIR` the root forks a child during its read and ends | the child is listed and read: 3 `in_use`, `command_line` 901; 2, 4 `in_use`, `temp_root` 901; 0, 1 eligible (row 7) |
 | `pytest-tmp-missing-absolute-tmpdir-unknown` | B `{0..4}`; a process with `TMPDIR=/tmp/nix-shell.GONE` (absent) | 0, 1 eligible; 2, 3, 4 `producer_unknown`, `relative_path` (row 9) |
 | `pytest-tmp-dead-procfs-root-not-a-temp-root` | B `{0..2}`; *proc*'s lookups of `/tmp`, `/var/tmp` and `/usr/tmp` in its root fail with `ESRCH` (a sandboxed renderer's dead `/proc` root) | 0, 1, 2 eligible (row 11): not undecidable |
 
