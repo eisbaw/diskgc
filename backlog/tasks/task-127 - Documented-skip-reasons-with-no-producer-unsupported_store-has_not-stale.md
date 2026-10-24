@@ -1,10 +1,10 @@
 ---
 id: TASK-127
 title: 'Documented skip reasons with no producer: unsupported_store, has_not, stale'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-23 21:59'
-updated_date: '2026-10-24 08:32'
+updated_date: '2026-10-24 20:48'
 labels:
   - contract
   - verification
@@ -26,4 +26,8 @@ From TASK-121 (2026-10-24): every_skip_reason_has_a_vector exempts these three b
 Orchestrator 2026-10-24 (COMPASS round 2): 'stale' gets its producer in TASK-31, 'unsupported_store' is settled in TASK-118/36; 'has_not' should be removed from the enum. All must be settled before any release freezes the JSON (0.1 included).
 
 From TASK-118 (2026-10-24, branch task118-design): unsupported_store REMOVED from the documented JSON skip enum (store selection is part of backend binding: unsupported_backend or remote_backend) and from REASONS_WITHOUT_PRODUCER / report tests' backend_reasons. backend_unavailable ADDED (Mark's Docker ruling; producers TASK-36 and TASK-113), exempted in REASONS_WITHOUT_PRODUCER until a producer lands. has_not and stale unchanged here.
+
+Implemented 2026-10-24 on branch task130 (commit 2bd9c7c + review fixes 8d9ddc9). has_not removed from reference.md's skipped[].reason enum (a predicate name, never a skip reason). Closed enum adopted: PlanEntry.reason / SkipEntry.reason are engine::Reason; RemoteBackend and UnsupportedBackend added; docker_backend, the Docker recheck's 'changed' and ResolveError::skip_reason() produce Reason values (ResolveError::reason() renamed transcript_label(), diagnostic only). engine::RESERVED_REASONS = stale (TASK-31), backend_unavailable (TASK-36, TASK-113); report test pins Reason::ALL + RESERVED_REASONS == reference.md enum exactly; every_skip_reason_has_a_vector needs a vector per Reason and fails if a reserved reason enters ALL or is shown; the diskgc-core source scan is deleted. Reason derives no Ord (declaration order must not order output); JSON/summary ordering keys on as_str, unchanged. JSON contract change reviewed: mped-architect GO, qa-test-runner GO.
+
+Merged to master (fast-forward) at 5e81db1 after nix develop -c just e2e exit 0 (2026-10-24T20:47Z; see git note on 5e81db1).
 <!-- SECTION:NOTES:END -->
