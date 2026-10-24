@@ -1661,6 +1661,7 @@ fn ensure_inner<H: Delete>(
         log,
         deadline_hit: false,
         run_stopped: false,
+        in_use_unknown_in_a_row: 0,
     };
     run.run(owners);
     let deadline_hit = run.deadline_hit;
@@ -2070,6 +2071,7 @@ fn ensure_grouped_inner<H: Delete>(
             log,
             deadline_hit: false,
             run_stopped: false,
+            in_use_unknown_in_a_row: 0,
         };
         run.run(owners);
         let timed_out = run.deadline_hit;
@@ -3717,7 +3719,19 @@ struct Reclaim<'a, 'l, H: Delete> {
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
     run_stopped: bool,
+    /// Candidates in a row, in the order taken, whose reclaim ended
+    /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
+    in_use_unknown_in_a_row: usize,
 }
+
+/// After this many candidates in a row of one tier end `in_use_unknown`
+/// (each spent its [`crate::inuse::FRESH_ATTEMPTS`]), the host is taken to
+/// be too busy for this run: the tier's remaining candidates are skipped
+/// `in_use_unknown` unchecked rather than each spending its own scans and
+/// pauses (docs/safety.md, In use: Freshness). Three: one unlucky
+/// candidate, or two, is a spike; three in a row (at least nine stale
+/// scans) is the load the run is in.
+const IN_USE_UNKNOWN_IN_A_ROW_MAX: usize = 3;
 
 impl<H: Delete> Reclaim<'_, '_, H> {
     fn stop_if_interrupted(&mut self) -> bool {
@@ -4006,6 +4020,26 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 note: String::new(),
             },
         );
+    }
+
+    /// Whether the tier has given up checking (see
+    /// [`IN_USE_UNKNOWN_IN_A_ROW_MAX`]); then `candidate` is skipped
+    /// `in_use_unknown` unchecked, and `true`.
+    fn too_busy_to_check(&mut self, candidate: &Path, profile: &str) -> bool {
+        if self.in_use_unknown_in_a_row < IN_USE_UNKNOWN_IN_A_ROW_MAX {
+            return false;
+        }
+        let skip = Skip::new(
+            Reason::InUseUnknown,
+            candidate.to_owned(),
+            format!(
+                "not checked: the host was too busy to check the {} candidates before it in \
+                 this tier; kept, run again when the host is less busy",
+                self.in_use_unknown_in_a_row
+            ),
+        );
+        self.skip_as(candidate, profile, &skip);
+        true
     }
 
     fn skip(&mut self, candidate: &Path, skip: &Skip) {
@@ -4374,6 +4408,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 );
                 continue;
             }
+            if self.too_busy_to_check(&target.path, &self.tier.profile.clone()) {
+                continue;
+            }
             (self.log)(&match &tally {
                 Some(tally) => format!(
                     "{}: checking {} (est. {}, {} entries, last build {})",
@@ -4591,6 +4628,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     found.path.display()
                 ));
                 return;
+            }
+            if self.too_busy_to_check(&found.path, &self.tier.profile.clone()) {
+                continue;
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
@@ -4963,6 +5003,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 ));
                 return;
             }
+            let first_profile = sources[candidate.found_by[0].0].profile;
+            if self.too_busy_to_check(path, first_profile) {
+                continue;
+            }
             (self.log)(&format!(
                 "{}: checking {} ({}), found by {} source term(s)",
                 self.tier.name,
@@ -5236,6 +5280,19 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 idle_age_seconds: outcome.idle_age_seconds,
                 count: 1,
             });
+        }
+        if matches!(&outcome.end, ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown)
+        {
+            self.in_use_unknown_in_a_row += 1;
+            if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
+                (self.log)(&format!(
+                    "{}: {} candidates in a row could not be checked (the host is too busy): \
+                     the rest of this tier is skipped unchecked",
+                    self.tier.name, self.in_use_unknown_in_a_row
+                ));
+            }
+        } else {
+            self.in_use_unknown_in_a_row = 0;
         }
         match outcome.end {
             ReclaimEnd::Complete => {}

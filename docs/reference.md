@@ -453,7 +453,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage", "message": ""}]
@@ -516,7 +516,7 @@ is `host`.
   sample around the action failed. Anything diskgc did not measure is
   `null`, never 0: `avail_after_bytes` when the final sample failed (and
   then `target_met` too, and the run never counts as met). A candidate
-  deleted part-way (its deletion stopped, `changed`, `in_use` or an error)
+  deleted part-way (its deletion stopped, `changed`, `in_use`, `in_use_unknown` or an error)
   is an action too, and also in `skipped` or `errors` with why it
   stopped. `actions` records attempts, not a guarantee that each candidate
   was completely removed. The summary rows described below mean a consumer

@@ -13,9 +13,11 @@ use super::reclaim::{Alternative, runtime_retention_guard_veto};
 use crate::command_action::{self, Ready};
 use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{
-    Base, Cause, CommandExit, CommandInvocation, Delete, FileType, HostError, MonoTime,
+    Base, Cause, CommandExit, CommandInvocation, Delete, FileType, Host, HostError, MonoTime,
 };
-use crate::inuse::{CandidateLock, Checker, lock_candidate, locked_is_walked};
+use crate::inuse::{
+    CandidateLock, Checker, FRESH_ATTEMPTS, FreshAttempts, Stale, lock_candidate, locked_is_walked,
+};
 use crate::outcome::{ReclaimEnd, Stop};
 use crate::profile::Cwd;
 
@@ -211,6 +213,9 @@ fn protocol<H: Delete>(
     // gets at most one final-boundary refusal; policy flapping cannot spin.
     let mut refused_at_boundary = vec![false; alternatives.len()];
     let mut boundary_skip = None;
+    // One budget for the candidate, across alternatives: a busy host does
+    // not get more attempts because a policy refused a source.
+    let mut attempts = FreshAttempts::new(deadline);
     loop {
         let Admitted {
             index,
@@ -263,20 +268,14 @@ fn protocol<H: Delete>(
         // The clear verdict is valid only briefly. Build the source-specific
         // argv first, then start immediately after the final policy scan.
         let mut retry_alternative = false;
-        for attempt in 0..2 {
+        // Bounded by `attempts`: each pass runs, refuses, or spends one.
+        for _ in 0..FRESH_ATTEMPTS {
             let clear = checker
-                .check(host, &candidate, &record)
+                .check(host, &candidate, &record, &mut attempts)
                 .map_err(stopped)??;
             if host.now() >= clear.fresh_until() {
-                if attempt == 0 {
-                    checker.forget();
-                    continue;
-                }
-                return Err(stopped(HostError::invalid(
-                    "command in-use check",
-                    path.display(),
-                    "two clear verdicts expired before the command could start",
-                )));
+                expired(host, checker, &mut attempts, path)?;
+                continue;
             }
             check_deadline(host, deadline, path)?;
             if let Some(app_lock) = &judge.find.app_not_running {
@@ -319,15 +318,8 @@ fn protocol<H: Delete>(
             // The policy may scan other trees and take longer than the in-use
             // verdict remains fresh. Recheck its lifetime at the point of use.
             if host.now() >= clear.fresh_until() {
-                if attempt == 0 {
-                    checker.forget();
-                    continue;
-                }
-                return Err(stopped(HostError::invalid(
-                    "command in-use check",
-                    path.display(),
-                    "two clear verdicts expired before the command could start",
-                )));
+                expired(host, checker, &mut attempts, path)?;
+                continue;
             }
             let exit = match host.run_command(cwd_fd, &run) {
                 CommandInvocation::Started(exit_result) => {
@@ -375,9 +367,25 @@ fn protocol<H: Delete>(
             };
         }
         if !retry_alternative {
-            unreachable!("at most two freshness attempts")
+            return Err(attempts.spent(path).into());
         }
     }
+}
+
+/// A clear that expired before the command could start spends one of the
+/// candidate's attempts at a fresh verdict; the candidate's
+/// `in_use_unknown` skip once they are spent.
+fn expired<H: Host>(
+    host: &H,
+    checker: &mut Checker<'_>,
+    attempts: &mut FreshAttempts,
+    path: &Path,
+) -> Result<(), ReclaimEnd> {
+    let scan = checker.latest().expect("the check made or kept one");
+    let stale = Stale::of(scan, "its clear expired before the command could start");
+    attempts
+        .retry(host, checker, path, stale)
+        .map_err(ReclaimEnd::from)
 }
 
 /// A complete source decision under the held inode lock. The outer command

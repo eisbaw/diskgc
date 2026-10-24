@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use common::{dir, host};
 use diskgc_core::engine::{Candidate, DeleteOptions, Deletion, End, Reason, Rules, Skip, walk};
 use diskgc_core::host::{Dev, Host, Pid};
-use diskgc_core::inuse::{self, Checker, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan};
+use diskgc_core::inuse::{
+    self, Checker, FreshAttempts, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan,
+};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
 use diskgc_model::support::{Stop, delete_unused};
@@ -790,14 +792,14 @@ fn a_clear_for_one_candidate_deletes_only_that_candidate() {
     assert_eq!(c_record.root().identity, d_record.root().identity);
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let mismatch = checker
-        .check(&host, &dc, &c_record)
+        .check(&host, &dc, &c_record, &mut FreshAttempts::new(None))
         .expect_err("a hard-linked alias is a different candidate name");
     assert!(
         mismatch.detail.contains("another candidate name"),
         "{mismatch}"
     );
     let clear = checker
-        .check(&host, &cc, &c_record)
+        .check(&host, &cc, &c_record, &mut FreshAttempts::new(None))
         .expect("check")
         .expect("c is clear");
     let deleted = inuse::delete_cleared(&host, clear, DeleteOptions::default())
@@ -1086,7 +1088,7 @@ fn a_transiently_unsettled_scan_is_retried_before_judgement() {
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     assert!(
         checker
-            .check(&host, &candidate, &record)
+            .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
             .expect("check")
             .is_ok()
     );
@@ -1133,7 +1135,7 @@ fn a_persistently_unsettled_scan_is_never_reused() {
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     assert_eq!(
         checker
-            .check(&host, &candidate, &record)
+            .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
             .expect("check")
             .expect_err("two unsettled scans must block")
             .reason,
@@ -1150,7 +1152,7 @@ fn a_persistently_unsettled_scan_is_never_reused() {
     );
     assert!(
         checker
-            .check(&host, &candidate, &record)
+            .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
             .expect("check")
             .is_ok()
     );
@@ -1175,7 +1177,7 @@ fn a_blocking_scan_respects_zero_reuse() {
     for _ in 0..2 {
         assert_eq!(
             checker
-                .check(&host, &candidate, &record)
+                .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
                 .expect("check")
                 .expect_err("unreadable process blocks")
                 .reason,
@@ -1205,7 +1207,7 @@ fn a_slow_blocking_scan_is_reused_from_completion() {
     for _ in 0..2 {
         assert!(
             checker
-                .check(&host, &candidate, &record)
+                .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
                 .expect("check")
                 .is_err()
         );
@@ -1217,7 +1219,7 @@ fn a_slow_blocking_scan_is_reused_from_completion() {
     host.sleep(std::time::Duration::from_millis(500));
     assert!(
         checker
-            .check(&host, &candidate, &record)
+            .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
             .expect("check")
             .is_err()
     );
@@ -1244,7 +1246,7 @@ fn forty_thousand_candidate_checks_share_a_scan_within_freshness() {
     for _ in 0..40_000 {
         assert!(
             checker
-                .check(&host, &candidate, &record)
+                .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
                 .expect("check")
                 .is_ok()
         );
@@ -1258,7 +1260,7 @@ fn forty_thousand_candidate_checks_share_a_scan_within_freshness() {
     host.sleep(std::time::Duration::from_millis(100));
     assert!(
         checker
-            .check(&host, &candidate, &record)
+            .check(&host, &candidate, &record, &mut FreshAttempts::new(None))
             .expect("check")
             .is_ok()
     );
@@ -1556,4 +1558,123 @@ fn a_suspend_during_the_scan_makes_the_checker_scan_again() {
     complete(reclaim(&host, "/tmp/c", true));
     let scans = host.trace().iter().filter(|c| c.op == Op::OwnPid).count();
     assert_eq!(scans, 2, "the stale scan was replaced");
+}
+
+// ---- No fresh scan (TASK-144) ----
+
+/// Events that make each of the first `stale` scans finish stale: the
+/// clock jumps 2 s (twice the freshness bound) right after the scan reads
+/// the one process's environment, as a scan on a busy host would take.
+fn stale_scans(stale: u32) -> String {
+    let mut events = String::from("events:\n");
+    for nth in 1..=stale {
+        events.push_str(&format!(
+            "  - {{at: {{op: proc_environ, nth: {nth}, when: after}}, advance: 2s}}\n"
+        ));
+    }
+    format!("{}{events}", processes(&[process(10, &[])]))
+}
+
+fn scans(host: &ModelHost) -> usize {
+    host.trace().iter().filter(|c| c.op == Op::OwnPid).count()
+}
+
+/// Every scan finishes stale: the candidate gets `FRESH_ATTEMPTS` scans,
+/// paused 250 ms then 1 s, and is then skipped `in_use_unknown` (never an
+/// error of the run); nothing is deleted on a stale scan.
+#[test]
+fn a_candidate_without_a_fresh_scan_is_skipped_in_use_unknown() {
+    let host = model(&stale_scans(inuse::FRESH_ATTEMPTS as u32));
+    let started = host.now();
+    let skip = skip_of(reclaim(&host, "/tmp/c", true));
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
+    assert!(
+        skip.detail.contains("too busy") && skip.detail.contains("3 attempt(s)"),
+        "{skip}"
+    );
+    assert_eq!(scans(&host), inuse::FRESH_ATTEMPTS);
+    assert!(exists(&host, "/tmp/c/a") && exists(&host, "/tmp/c/sub/f"));
+    assert!(
+        !host.trace().iter().any(|c| c.op == Op::Unlinkat),
+        "nothing is unlinked on a stale scan"
+    );
+    let pauses: std::time::Duration = inuse::FRESH_RETRY_PAUSES.iter().sum();
+    let stale = std::time::Duration::from_secs(2) * inuse::FRESH_ATTEMPTS as u32;
+    assert_eq!(host.now().saturating_since(started), stale + pauses);
+    assert!(host.unfired_events().is_empty());
+}
+
+/// Two stale scans, then a fresh one: the third attempt deletes.
+#[test]
+fn a_fresh_scan_on_the_last_attempt_deletes() {
+    let host = model(&stale_scans(inuse::FRESH_ATTEMPTS as u32 - 1));
+    complete(reclaim(&host, "/tmp/c", true));
+    assert_eq!(scans(&host), inuse::FRESH_ATTEMPTS);
+    assert!(!exists(&host, "/tmp/c"));
+}
+
+/// The retries never pause to or past the deadline: with less time left
+/// than the first pause, the first stale scan is the last attempt.
+#[test]
+fn no_retry_pause_reaches_the_deadline() {
+    let host = model(&stale_scans(inuse::FRESH_ATTEMPTS as u32));
+    let deadline = host
+        .now()
+        .checked_add(std::time::Duration::from_millis(2100))
+        .expect("in range");
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("a name");
+    let mut checker = Checker::new(&rules(true), REUSE_LIMIT);
+    let options = DeleteOptions {
+        deadline: Some(deadline),
+        ..DeleteOptions::default()
+    };
+    let skip = skip_of(delete_unused(
+        &host,
+        &mut checker,
+        &candidate,
+        &rules(true),
+        options,
+    ));
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
+    assert!(skip.detail.contains("deadline"), "{skip}");
+    assert_eq!(scans(&host), 1);
+    assert!(host.now() < deadline, "no pause ran into the deadline");
+    assert!(exists(&host, "/tmp/c/a"));
+}
+
+/// A clear that expires before the delete on every attempt (the caller's
+/// own check between them is slower than the bound) spends the same
+/// budget: `in_use_unknown` after `FRESH_ATTEMPTS` scans, nothing deleted.
+#[test]
+fn clears_that_keep_expiring_share_the_budget() {
+    let host = model(&processes(&[process(10, &[])]));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("a name");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let mut caller_checks = 0;
+    let result = inuse::clear_and_delete(
+        &host,
+        &mut checker,
+        &candidate,
+        &record,
+        DeleteOptions::default(),
+        &mut |_| {
+            caller_checks += 1;
+            host.sleep(std::time::Duration::from_secs(2));
+            Ok(())
+        },
+    );
+    let Err(inuse::NotDeleted::Skipped(skip)) = result else {
+        panic!("expected a skip, got {result:?}");
+    };
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
+    assert!(skip.detail.contains("expired"), "{skip}");
+    assert_eq!(caller_checks, inuse::FRESH_ATTEMPTS);
+    assert_eq!(scans(&host), inuse::FRESH_ATTEMPTS);
+    assert!(exists(&host, "/tmp/c/a"));
 }

@@ -686,3 +686,29 @@ fn rounded_space_comparison_includes_exact_bytes_for_both_values() {
         "{text}"
     );
 }
+
+/// TASK-144: `in_use_unknown` skips get a plain line saying the host was
+/// too busy and to run again; other reasons do not.
+#[test]
+fn human_summary_says_a_busy_host_kept_candidates_and_to_run_again() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    report.mount = Some("/tmp".into());
+    report.skipped.push(skip("/tmp/a", "t", "p", Reason::InUse));
+    let text = report.summary().expect("summary");
+    assert!(!text.contains("too busy"), "{text}");
+    report
+        .skipped
+        .push(skip("/tmp/b", "t", "p", Reason::InUseUnknown));
+    report
+        .skipped
+        .push(skip("/tmp/c", "t", "p", Reason::InUseUnknown));
+    let text = report.summary().expect("summary");
+    assert!(text.contains("kept /tmp/b: in_use_unknown"), "{text}");
+    assert!(
+        text.contains(
+            "the host was too busy to check 2 candidate(s) for use (in_use_unknown): kept; \
+             run again when the host is less busy"
+        ),
+        "{text}"
+    );
+}

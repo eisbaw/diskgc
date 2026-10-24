@@ -494,6 +494,12 @@ pub enum Reason {
     /// unreadable process, an incomplete process scan): the in-use check
     /// (docs/safety.md, In use; [`crate::inuse`]).
     InUse,
+    /// No in-use verdict could be had: every in-use scan the candidate was
+    /// given finished older than the freshness bound (a host too busy, or
+    /// a suspend), or later candidates of a tier after several in a row
+    /// did (docs/safety.md, In use: Freshness). Never deleted on a stale
+    /// scan; a later run may reclaim it.
+    InUseUnknown,
     /// The candidate directory is `flock`ed by someone else.
     Locked,
     /// A path that cannot be reached safely: a symlink or mount crossing
@@ -546,7 +552,7 @@ pub enum Reason {
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 29] = [
+    pub const ALL: [Reason; 30] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -559,6 +565,7 @@ impl Reason {
         Reason::Changed,
         Reason::TooManyEntries,
         Reason::InUse,
+        Reason::InUseUnknown,
         Reason::Locked,
         Reason::UnsafePath,
         Reason::UnsupportedLayout,
@@ -593,6 +600,7 @@ impl Reason {
             Self::Changed => "changed",
             Self::TooManyEntries => "too_many_entries",
             Self::InUse => "in_use",
+            Self::InUseUnknown => "in_use_unknown",
             Self::Locked => "locked",
             Self::UnsafePath => "unsafe_path",
             Self::UnsupportedLayout => "unsupported_layout",

@@ -696,10 +696,22 @@ second (monotonic clock including suspend time) when that candidate's
 deletion starts. A scan is as old as its first read. One scan serves the
 candidates checked strictly before 500 ms from its start. The check that
 clears a candidate looks at the clock as its last step before the
-deletion starts; if its scan is no longer fresh then (a suspend during the
-scan or right after it, a slow scan), the candidate is checked again
-against a new scan, and if that one is not fresh either, it is an error of
-the run, not a skip. Refusing needs no freshness. Buckets
+deletion starts, and the deletion (or command) looks again as its own
+last step. A stale scan there (a suspend during the scan or right after
+it, a scan slower than the bound on a busy host) never clears anything:
+it spends one of the candidate's three attempts, and the next attempt
+waits (250 ms, then 1 s; never to or past the deadline) and checks against
+a new scan. When the attempts are spent the candidate is skipped
+`in_use_unknown` and the run goes on with the next one; its exit code
+follows available space like any other skip (decided 2026-10-25 for
+TASK-144 on Mark's delegation: "never delete on a stale scan; retry with
+backoff a few times, then skip that candidate and carry on"). A part-way
+Cargo target stops at the part that hit it, as for `in_use`. After three
+candidates in a row of one tier (in the order taken) end `in_use_unknown`,
+the host is taken to be too busy for this run: the tier's remaining
+candidates are skipped `in_use_unknown` without a scan, and any other
+outcome resets the count. A later tier starts again from zero. Refusing
+needs no freshness. Buckets
 ([architecture.md](architecture.md#the-index)) only group candidates for
 scheduling; each member gets its own check under this bound, which a scan
 less than 500 ms old may answer: a use that starts after that scan

@@ -1,0 +1,40 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-144: on a host too busy for a fresh in-use scan, the candidate is
+# never deleted on a stale scan: after its three attempts (each scan here
+# finishes 2 s after it started, twice the freshness bound) it is skipped
+# `in_use_unknown`, and the run goes on: the next candidate gets a fresh
+# scan and is reclaimed. The exit follows available space (1: the goal
+# of 100 % is never met), not an error of the run (3).
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-old: {.: {mtime: 2026-10-01T00:00:00Z}, data: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+    /tmp/zephyr-new: {.: {mtime: 2026-10-02T00:00:00Z}, data: {size: 4K, mtime: 2026-10-02T00:00:00Z}}
+  processes:
+    - {pid: 601, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+  events:
+    - {at: {op: proc_environ, nth: 1, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 2, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 3, when: after}, advance: 2s}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-old}
+    - {candidate: /tmp/zephyr-new}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-new]
+  removed: [/tmp/zephyr-new]
+  skipped:
+    - {candidate: /tmp/zephyr-old, reason: in_use_unknown}
+  preserved: [/tmp/zephyr-old/data]

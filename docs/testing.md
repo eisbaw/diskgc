@@ -475,6 +475,11 @@ Model scenarios required by [safety.md](safety.md) and
   used for the earlier member is older than the reuse limit or the bucket
   spans a suspend ([safety.md](safety.md#in-use), Freshness); an open within
   the reuse window is the accepted limit 5 and is pinned as such;
+- a host too busy for a fresh in-use scan (every scan finishing older
+  than the freshness bound): nothing is deleted on a stale scan, the
+  candidate is skipped `in_use_unknown` after its three attempts and the
+  next one is still tried, and after three in a row the tier's rest is
+  skipped unchecked (`vectors/inuse/busy-host-*`, TASK-144);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must;

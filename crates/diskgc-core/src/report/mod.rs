@@ -776,6 +776,10 @@ impl Report {
                     text.push('\n');
                     text.push_str(&line);
                 }
+                if let Some(line) = self.human_busy_line() {
+                    text.push('\n');
+                    text.push_str(&line);
+                }
                 for line in self.human_preflight_lines() {
                     text.push('\n');
                     text.push_str(&line);
@@ -843,6 +847,23 @@ impl Report {
             }
         }
         lines
+    }
+
+    /// What a user does about `in_use_unknown` skips, in plain words: the
+    /// reason name alone does not say that a later run may reclaim them.
+    fn human_busy_line(&self) -> Option<String> {
+        let count = self
+            .skipped
+            .iter()
+            .filter(|skip| skip.reason == Reason::InUseUnknown)
+            .map(|skip| skip.count)
+            .fold(0, u64::saturating_add);
+        (count > 0).then(|| {
+            format!(
+                "  the host was too busy to check {count} candidate(s) for use (in_use_unknown): \
+                 kept; run again when the host is less busy"
+            )
+        })
     }
 
     fn human_preflight_lines(&self) -> Vec<String> {
