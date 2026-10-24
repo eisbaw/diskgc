@@ -4,7 +4,7 @@ title: 'Library: /tmp and Nix leftovers profiles, verified'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+updated_date: '2026-10-24 18:01'
 labels:
   - wave-4
   - config
@@ -51,6 +51,8 @@ From task-68's dry run on the laptop (2026-10-18; numbers and runtimes in task-6
 2026-10-20 RELEASE NO-GO for nix-shell-rc (supersedes the earlier implementation-ready note): Nix uses getpid() from the shell PID namespace in nix-shell-<pid>-<nonce> and nix-develop-<pid>-<nonce>. LinuxHost::new checks only that diskgc and its mounted /proc use the same PID namespace; it does not establish that Nix shells sharing /tmp use it. Real-kernel unshare --user --map-root-user --pid --fork --mount-proc proof: a live sleep task had host PID 3025375 and NSpid 3025375 9, while host /proc/9/status was absent. A live Nix shell in that namespace could create nix-develop-9-<nonce>; the proposed proc_status(Pid(9)) guard would report Gone and allow deletion. Same-namespace dry run and E2E cannot prove cross-namespace safety. Do not ship nix-shell-rc or expose the predicate until a sound all-namespace NSpid/liveness design with fresh pre-deletion recheck and measured cost is implemented and tested. nix-shell-tmpdir and tmp-entry remain unshipped for the separate dormant TMPDIR invisibility reason. TASK39 remains To Do. No host deletion.
 
 Orchestrator 2026-10-24 (COMPASS round 2): dropped the TASK-38 edge. Remaining profiles are already in builtin.yaml; their admission is TASK-122's classification, dormant nix-shell sessions are TASK-112 steps 1 and 4. Shrink to verified_with and golden sets, or close into TASK-122 when it runs.
+
+2026-10-24 TASK-122 (master 808a8e8): every remaining TASK-39 profile is classified in docs/reference.md Liveness contracts: node-compile-cache tolerant (Node 24.21.0 probe), Shipped; nix-user-cache verified heuristic, Decision pending; claude-code-tmp, chromium-tmp and playwright-tmp class none, proposed withdrawals with counterexample vectors. Not closed into TASK-122: its ACs (examples, golden sets and verified_with; the dormant nix-shell TMPDIR container test) are not literally the classification. AC1 is met by the existing built-ins and golden tests, AC2 by TASK-112 (nix-shell-tmpdir excluded, the dormant-temp-users container test). Recommendation: close as superseded once Mark rules on the TASK-122 withdrawals.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
