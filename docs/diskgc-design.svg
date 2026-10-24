@@ -77,7 +77,7 @@
   <rect x="420" y="368" width="360" height="226" rx="10" fill="#fbf7ff" stroke="#8b5cf6" stroke-width="1.5"/>
   <text x="440" y="394" class="h3">Composing them in a tier</text>
   <text x="440" y="420" class="mono code">select: (profile:node-compile-cache ||</text>
-  <text x="440" y="438" class="mono code">          profile:playwright-tmp)</text>
+  <text x="440" y="438" class="mono code">          profile:nix-shell-rc)</text>
   <text x="440" y="456" class="mono code">        &amp;&amp; filter:idle-3d</text>
   <text x="440" y="482" class="body">• names qualified: profile:… and filter:…</text>
   <text x="440" y="500" class="body">• term: one profile &amp;&amp; filters, !filter:, !profile:</text>
@@ -92,10 +92,10 @@
   <text x="820" y="436" class="body"><tspan font-weight="700">nix</tspan>  nix-shell-rc, nix-shell-tmpdir, nix-garbage</text>
   <text x="820" y="454" class="body"><tspan font-weight="700">rust</tspan>  cargo-target</text>
   <text x="820" y="472" class="body"><tspan font-weight="700">containers</tspan>  docker-build-cache, -dangling</text>
-  <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-tmp</text>
+  <text x="820" y="490" class="body"><tspan font-weight="700">ai agents</tspan>  claude-code-versions, codex-releases</text>
   <text x="820" y="508" class="body"><tspan font-weight="700">python/js</tspan>  uv, pnpm, yarn, jest, playwright</text>
   <text x="820" y="526" class="body"><tspan font-weight="700">c/c++/jvm</tspan>  cmake-build-anchored, gradle, maven</text>
-  <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  zephyr-tmp, west-build-anchored, renode</text>
+  <text x="820" y="544" class="body"><tspan font-weight="700">embedded</tspan>  west-build-anchored, platformio-cache</text>
   <text x="820" y="562" class="body"><tspan font-weight="700">filters</tspan>  idle-1h … idle-30d</text>
   <text x="820" y="582" class="small">each ships once verified on a real system</text>
 
@@ -163,7 +163,7 @@
   <text x="64" y="1114" class="mono code">docker-dangling       profile:docker-dangling</text>
   <text x="64" y="1134" class="mono code">node-cache-old        profile:node-compile-cache &amp;&amp; filter:idle-2d</text>
   <text x="64" y="1154" class="mono code">cargo-recent          profile:cargo-target &amp;&amp; filter:idle-1h   roots: /home/mark/src</text>
-  <text x="64" y="1186" class="mono code">protect: [claude-code-tmp]</text>
+  <text x="64" y="1186" class="mono code">protect: [claude-sessions]</text>
   <text x="300" y="1186" class="small">(never deleted by any tier, by overlap)</text>
 
   <rect x="800" y="938" width="360" height="262" rx="10" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>

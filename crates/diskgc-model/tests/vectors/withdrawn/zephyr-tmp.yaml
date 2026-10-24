@@ -1,15 +1,17 @@
-# zephyr-tmp below its fixed root, one candidate per role.
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
+# zephyr-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 config: |
   version: 1
   profiles:
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
     - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["zephyr-c"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-c"]}}
   protect: [pin]
   groups:
     - name: g
       tiers:
-        - {"name": "t", "select": "profile:zephyr-tmp"}
-select: "profile:zephyr-tmp"
+        - {"name": "t", "select": "profile:zephyr-tmp-probe"}
+select: "profile:zephyr-tmp-probe"
 path: /tmp
 min_free: 100%
 host:

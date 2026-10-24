@@ -1,8 +1,10 @@
-# chromium-tmp below its fixed root, one candidate per role.
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): chromium-tmp is replaced by a user probe profile with its matching set.
+# chromium-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 user_profiles:
+  - {"name": "chromium-tmp-probe", "find": {"roots": ["/tmp"], "paths": [".org.chromium.Chromium.*", "org.chromium.Chromium.*"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/.org.chromium.Chromium.aB3dEf"]}}
   - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["org.chromium.Chromium.cc"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/org.chromium.Chromium.cc"]}}
-select: "profile:chromium-tmp && !profile:pin"
+select: "profile:chromium-tmp-probe && !profile:pin"
 path: /tmp
 min_free: 100%
 host:

@@ -15,12 +15,7 @@ use crate::fs_kind::{Find, path_matches};
 use std::collections::BTreeSet;
 
 const TEMP_PROFILE_NAMES: &[&str] = &[
-    "claude-code-tmp",
-    "chromium-tmp",
     "node-compile-cache",
-    "playwright-tmp",
-    "zephyr-tmp",
-    "renode-tmp",
     "jest-cache",
     "nix-shell-rc",
     "pytest-tmp",
@@ -620,44 +615,9 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         };
         let (roots, base, entry_type, preset, checkouts): (&[&str], &[&str], _, _, _) = match *name
         {
-            "claude-code-tmp" => (
-                &["/tmp"],
-                &["claude-{uid}/-*/*"],
-                EntryType::Dir,
-                false,
-                Checkouts::Refuse,
-            ),
-            "chromium-tmp" => (
-                &["/tmp"],
-                &[".org.chromium.Chromium.*", "org.chromium.Chromium.*"],
-                EntryType::Any,
-                false,
-                Checkouts::Refuse,
-            ),
             "node-compile-cache" => (
                 &["/tmp"],
                 &["node-compile-cache"],
-                EntryType::Dir,
-                true,
-                Checkouts::Refuse,
-            ),
-            "playwright-tmp" => (
-                &["/tmp"],
-                &["playwright*"],
-                EntryType::Dir,
-                true,
-                Checkouts::Refuse,
-            ),
-            "zephyr-tmp" => (
-                &["/tmp"],
-                &["zephyr-*"],
-                EntryType::Dir,
-                false,
-                Checkouts::Refuse,
-            ),
-            "renode-tmp" => (
-                &["/tmp"],
-                &["renode-*"],
                 EntryType::Dir,
                 true,
                 Checkouts::Refuse,
@@ -747,90 +707,6 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
 }
 
 #[test]
-fn xdg_cache_entry_has_a_frozen_exclusion_and_golden_set() {
-    let library = Library::builtin().expect("built-ins");
-    let Body::Source(source) = &library.get("xdg-cache-entry-v2").expect("built-in").body else {
-        panic!("xdg-cache-entry-v2 is a source");
-    };
-    assert_eq!(source.roots, Roots::Required);
-    assert_eq!(
-        source.finds,
-        Finds::Paths {
-            patterns: vec!["*".into()],
-            exclude: [
-                ".bun",
-                "borg",
-                "BraveSoftware",
-                "ccache",
-                "claude",
-                "containers",
-                "chromium",
-                "cursor_api_sessions",
-                "dconf",
-                "gh",
-                "ghidra",
-                "go-build",
-                "google-chrome",
-                "gpauth",
-                "huggingface",
-                "Microsoft",
-                "microsoft-edge",
-                "mozilla",
-                "nix",
-                "opencode",
-                "Palo Alto Networks",
-                "pip",
-                "pre-commit",
-                "sccache",
-                "sdkmanager",
-                "sessions",
-                "teleport-device",
-                "torch",
-                "uv",
-                "wine",
-                "yarn",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-            entry_type: EntryType::Any,
-        }
-    );
-    assert!(source.where_.is_empty());
-    assert_eq!(
-        source.min_idle_for,
-        Some(super::IdleFor(Duration::from_secs(30 * 24 * 60 * 60)))
-    );
-    assert_eq!(source.checkouts, Checkouts::Refuse);
-    assert_eq!(
-        source.action,
-        Action::Delete {
-            make_writable: false
-        }
-    );
-    let mut bound = source.clone();
-    bound.roots = Roots::Fixed(vec!["/home/mark/.cache".into()]);
-    assert_eq!(
-        matches(&bound),
-        [
-            "/home/mark/.cache/nix-index",
-            "/home/mark/.cache/icon-cache.kcache",
-            "/home/mark/.cache/unknown-repo",
-        ]
-    );
-    let mut changed = bound.clone();
-    let Finds::Paths { exclude, .. } = &mut changed.finds else {
-        unreachable!()
-    };
-    exclude.retain(|path| path != "huggingface");
-    assert_ne!(
-        matches(&changed),
-        matches(&bound),
-        "exclusion mutation must change golden set"
-    );
-}
-
-#[test]
 fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
     let library = Library::builtin().expect("built-ins");
     for name in TEMP_PROFILE_NAMES {
@@ -840,32 +716,12 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
         };
         assert!(matches!(source.finds, Finds::Paths { .. }), "{name} is fs");
         let want: &[&str] = match profile.name.as_str() {
-            "claude-code-tmp" => &["/tmp/claude-1000/-home-mark-src-app/session-1"],
-            "chromium-tmp" => &[
-                "/tmp/.org.chromium.Chromium.A",
-                "/tmp/org.chromium.Chromium.X",
-            ],
             "node-compile-cache" => &[
                 "/tmp/nix-shell.AbC123/node-compile-cache",
                 "/tmp/claude-1000/nix-shell.Ab1/node-compile-cache",
                 "/tmp/nix-shell-1-2/node-compile-cache",
                 "/tmp/nix-develop-1-2/node-compile-cache",
                 "/tmp/node-compile-cache",
-            ],
-            "playwright-tmp" => &[
-                "/tmp/nix-shell.AbC123/playwright_chromiumdev_profile-X",
-                "/tmp/claude-1000/nix-shell.Ab1/playwright-artifacts",
-                "/tmp/nix-shell-1-2/playwright-artifacts",
-                "/tmp/nix-develop-1-2/playwright-artifacts",
-                "/tmp/playwright-artifacts-1",
-            ],
-            "zephyr-tmp" => &["/tmp/zephyr-h5e5-run.X", "/tmp/zephyr-scratch"],
-            "renode-tmp" => &[
-                "/tmp/nix-shell.AbC123/renode-123",
-                "/tmp/nix-shell-1-2/renode-1",
-                "/tmp/nix-develop-1-2/renode-1",
-                "/tmp/zephyr-h5e5-run.X/renode-1",
-                "/tmp/renode-1045514-crash",
             ],
             "jest-cache" => &[
                 "/tmp/nix-shell.AbC123/jest_app_hash",
@@ -1006,6 +862,22 @@ fn cell_value<'a>(cell: &'a str, key: &str) -> Option<&'a str> {
     Some(&cell[start..start + len])
 }
 
+/// Whether a Verdict cell records an admission decision, in one of the two
+/// accepted forms only: Mark's own ("admitted by Mark, DATE") or one made
+/// on his delegation ("admitted by mark-emulator for Mark, DATE",
+/// TASK-122). The sentence may start the cell, so either case of "a".
+fn admission_recorded(cell: &str) -> bool {
+    [
+        "dmitted by Mark, 20",
+        "dmitted by mark-emulator for Mark, 20",
+    ]
+    .iter()
+    .any(|form| {
+        cell.match_indices(form)
+            .any(|(at, _)| at > 0 && matches!(&cell[at - 1..at], "a" | "A"))
+    })
+}
+
 /// The class a Class cell starts with: a class's table name followed by
 /// the end, a space, `,` or `:` (`sound (presence marker)`, `verified
 /// heuristic: ...`).
@@ -1050,7 +922,7 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             class,
             residuals: row[4].trim().to_owned(),
             verdict: Verdict::of(&row[5]),
-            decided: row[5].to_lowercase().contains("admitted by mark, 20"),
+            decided: admission_recorded(&row[5]),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -1338,11 +1210,19 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "contract added to a built-in",
             liveness_sync_problems(
                 &rows,
-                &edit_builtin("chromium-tmp", &|b| {
+                &edit_builtin("node-compile-cache", &|b| {
                     b.guard.contract = Some("pytest".into())
                 }),
             ),
-            "built-in chromium-tmp has a liveness guard",
+            "node-compile-cache: row's guard",
+        ),
+        (
+            "a guarded built-in whose row is not Shipped",
+            liveness_sync_problems(
+                &edit_row("nix-shell-rc", &|r| r.verdict = Verdict::DecisionPending),
+                &builtins,
+            ),
+            "built-in nix-shell-rc has a liveness guard",
         ),
         (
             "app_not_running dropped from a built-in",
@@ -1432,15 +1312,17 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
         (
             "class none Shipped",
             liveness_sync_problems(
-                &edit_row("zephyr-tmp", &|r| r.verdict = Verdict::Shipped),
+                &edit_row("node-compile-cache", &|r| {
+                    r.class = LivenessClass::NoContract
+                }),
                 &builtins,
             ),
-            "zephyr-tmp: Shipped with class none",
+            "node-compile-cache: Shipped with class none",
         ),
         (
             "verified heuristic Shipped without a decision",
             liveness_sync_problems(
-                &edit_row("codex-releases", &|r| r.verdict = Verdict::Shipped),
+                &edit_row("codex-releases", &|r| r.decided = false),
                 &builtins,
             ),
             "codex-releases: a verified heuristic Shipped without Mark's dated decision",
@@ -1470,9 +1352,12 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "go-mod-cache: row names no residuals",
         ),
         (
-            "class none in the 0.1 catalog",
-            liveness_sync_problems(&rows, &edit_builtin("renode-tmp", &|b| b.released = true)),
-            "renode-tmp: in the 0.1 catalog (release) but its row is ProposedWithdrawal",
+            "a release for a row that is not Shipped",
+            liveness_sync_problems(
+                &edit_row("bun-cache", &|r| r.verdict = Verdict::DecisionPending),
+                &edit_builtin("bun-cache", &|b| b.released = true),
+            ),
+            "bun-cache: in the 0.1 catalog (release) but its row is DecisionPending",
         ),
         (
             "a filter with a row",
@@ -1520,6 +1405,19 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
         ]
     );
     assert_eq!(class_of("soundly"), None);
+    for (cell, recorded) in [
+        ("Shipped, admitted by Mark, 2026-10-23.", true),
+        ("Admitted by Mark, 2026-10-23.", true),
+        (
+            "Shipped, admitted by mark-emulator for Mark, 2026-10-24.",
+            true,
+        ),
+        ("Shipped; needs Mark's decision.", false),
+        ("Shipped, admitted by someone for Mark, 2026-10-24.", false),
+        ("Shipped (Mark, 2026-10-23).", false),
+    ] {
+        assert_eq!(admission_recorded(cell), recorded, "{cell}");
+    }
     assert_eq!(
         class_of("verified heuristic: lock rows"),
         Some(LivenessClass::VerifiedHeuristic)

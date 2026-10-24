@@ -1,10 +1,13 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): playwright-tmp is replaced by a user probe profile with its matching set.
 # TASK-122 counterexample (class none), from the host 2026-10-24: a live
 # Playwright driver (pid 4242) and its headless browser (pid 4343). The
 # browser holds its user-data directory (in_use), but the artifacts
 # directory created with it, where its downloads, traces and videos go,
 # is held by no process and is deleted past a 1-day filter.
 profile_vector: 1
-select: "profile:playwright-tmp && filter:idle-1d"
+user_profiles:
+  - {"name": "playwright-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["playwright*", "nix-shell.*/playwright*", "tmp.*/playwright*", "nix-shell-*-*/playwright*", "nix-develop-*-*/playwright*", "zephyr-*-run.*/playwright*", "claude-{uid}/playwright*", "nix-shell.*/nix-shell.*/playwright*", "nix-shell.*/tmp.*/playwright*", "tmp.*/nix-shell.*/playwright*", "claude-{uid}/nix-shell.*/playwright*", "claude-{uid}/tmp.*/playwright*", "claude-{uid}/nix-shell.*/nix-shell.*/playwright*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/playwright-artifacts-0a3aQN"]}}
+select: "profile:playwright-tmp-probe && filter:idle-1d"
 path: /tmp
 min_free: 100%
 host:

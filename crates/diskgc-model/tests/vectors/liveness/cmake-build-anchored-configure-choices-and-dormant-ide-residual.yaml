@@ -1,0 +1,36 @@
+# TASK-122 residuals (1) and (3) of the anchored build profiles (verified
+# heuristic, admitted by mark-emulator for Mark, 2026-10-24): the build
+# directory's CMakeCache.txt holds the only record of the user's -D
+# choices, and an IDE configured on it runs with the source directory as
+# its working directory, holding nothing in the build. Past the 3-day
+# floor the build directory is deleted with both.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/ide: {mode: "0755"}
+    /home/tester/src/p1/CMakeLists.txt: {content: "project(p1)\n"}
+    /home/tester/src/p1/out:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p1\nCMAKE_BUILD_TYPE:STRING=RelWithDebInfo\nWITH_TRACING:BOOL=ON\n", mtime: 2026-10-01T00:00:00Z}
+      CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}
+      app: {size: 8K, mtime: 2026-10-01T00:00:00Z}
+  processes:
+    - {pid: 4242, exe: /usr/bin/ide, cwd: /home/tester/src/p1, maps: [/usr/bin/ide], environ: [HOME=/home/tester], fds: [{path: /home/tester/src/p1/CMakeLists.txt}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/out, source: /home/tester/src/p1}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/out]
+  removed: [/home/tester/src/p1/out]
+  skipped: []
+  preserved: [/home/tester/src/p1/CMakeLists.txt]

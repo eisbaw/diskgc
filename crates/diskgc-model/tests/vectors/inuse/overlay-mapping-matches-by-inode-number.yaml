@@ -1,10 +1,13 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # On overlayfs a memory map shows the layer's device, not the one statx
 # shows, so a mapping matches by inode number alone (inode_map). Modelled
 # as in inuse.rs: a second filesystem built the same way, so its lib.so
 # has the candidate's lib.so inode number. A tmpfs candidate would not
 # match (inuse.rs a_mapping_on_overlay_matches_by_inode_number_alone).
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

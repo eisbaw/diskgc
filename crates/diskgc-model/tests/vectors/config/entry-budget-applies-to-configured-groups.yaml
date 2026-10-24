@@ -1,3 +1,4 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): renode-tmp, zephyr-tmp is replaced by a user probe profile with its matching set.
 # The walk's entry budget is run-wide: with configured groups (no
 # --select) every tier walks under it, the later group's too. Test-only
 # `entry_budget` seam, as walk/too-many-entries.yaml.
@@ -5,13 +6,16 @@ profile_vector: 1
 entry_budget: 5
 config: |
   version: 1
+  profiles:
+    - {"name": "renode-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["renode-*", "nix-shell.*/renode-*", "tmp.*/renode-*", "nix-shell-*-*/renode-*", "nix-develop-*-*/renode-*", "zephyr-*-run.*/renode-*", "claude-{uid}/renode-*", "nix-shell.*/nix-shell.*/renode-*", "nix-shell.*/tmp.*/renode-*", "tmp.*/nix-shell.*/renode-*", "claude-{uid}/nix-shell.*/renode-*", "claude-{uid}/tmp.*/renode-*", "claude-{uid}/nix-shell.*/nix-shell.*/renode-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/renode-1045514-crash"]}}
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
   groups:
     - name: stale
       tiers:
-        - {name: renode, select: profile:renode-tmp}
+        - {name: renode, select: profile:renode-tmp-probe}
     - name: pressure
       tiers:
-        - {name: zephyr, select: profile:zephyr-tmp}
+        - {name: zephyr, select: profile:zephyr-tmp-probe}
 path: /tmp
 min_free: 100%
 host:

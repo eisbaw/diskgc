@@ -1,0 +1,30 @@
+# TASK-122 residual of mypy-cache (verified heuristic, admitted by
+# mark-emulator for Mark, 2026-10-24): a mypy run between two cache writes
+# holds nothing in .mypy_cache, so the cache is deleted under it; the run
+# can stop with a blocking cache-write error (one failed, retryable run).
+profile_vector: 1
+select: profile:mypy-cache
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/mypy: {mode: "0755"}
+    /home/tester/src/app/mod.py: {size: 1K}
+    /home/tester/src/app/.mypy_cache: {payload: {size: 8K}, CACHEDIR.TAG: {cachedir_tag: true}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/mypy, cwd: /home/tester/src/app, maps: [/usr/bin/mypy], environ: [HOME=/home/tester], fds: [{path: /home/tester/src/app/mod.py}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/app/.mypy_cache}
+  reclaim_exit: 1
+  actions: [/home/tester/src/app/.mypy_cache]
+  removed: [/home/tester/src/app/.mypy_cache]
+  skipped: []
+  preserved: [/home/tester/src/app/mod.py]

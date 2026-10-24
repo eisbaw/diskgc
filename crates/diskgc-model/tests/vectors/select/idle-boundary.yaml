@@ -1,8 +1,11 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # `filter:idle-3d` on kind fs: the newest mtime/ctime in the tree must be
 # at least three days old. Exactly three days, one second short, and one
 # nested young file in an old tree (the newest entry decides, not the top).
 profile_vector: 1
-select: profile:zephyr-tmp && filter:idle-3d
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+select: profile:zephyr-tmp-probe && filter:idle-3d
 path: /tmp
 min_free: 100%
 host:

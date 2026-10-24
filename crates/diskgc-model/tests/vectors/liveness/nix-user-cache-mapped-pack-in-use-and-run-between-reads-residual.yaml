@@ -1,0 +1,34 @@
+# TASK-122, nix-user-cache (verified heuristic, admitted by mark-emulator
+# for Mark, 2026-10-24): the evidence and its residual. In home a, a Nix
+# process maps a pack file of its Git cache (in_use, evidence map); in
+# home b, a Nix process between two reads holds nothing there, and the
+# cache is deleted under it (it can fail once, retryably).
+profile_vector: 1
+select: profile:nix-user-cache
+roots: [/home/a, /home/b]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/nix: {mode: "0755"}
+    /home/a/.cache/nix/gitv3: {pack.pack: {size: 8K}}
+    /home/b/.cache/nix/gitv3: {pack.pack: {size: 8K}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/nix, cwd: /, maps: [/usr/bin/nix, /home/a/.cache/nix/gitv3/pack.pack], environ: [HOME=/home/a], fds: [{path: /usr/bin/nix}]}
+    - {pid: 4343, exe: /usr/bin/nix, cwd: /, maps: [/usr/bin/nix], environ: [HOME=/home/b], fds: [{path: /usr/bin/nix}]}
+expect:
+  plan:
+    - {candidate: /home/a/.cache/nix/gitv3, reason: in_use}
+    - {candidate: /home/b/.cache/nix/gitv3}
+  reclaim_exit: 1
+  actions: [/home/b/.cache/nix/gitv3]
+  removed: [/home/b/.cache/nix/gitv3]
+  skipped:
+    - {candidate: /home/a/.cache/nix/gitv3, reason: in_use, process_blockers: [{pid: 4242, evidence: map}]}
+  preserved: [/home/a/.cache/nix/gitv3/pack.pack]

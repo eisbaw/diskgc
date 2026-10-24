@@ -487,7 +487,7 @@ impl Facts for PatternFacts {
 fn tmp_entry_excludes_entire_claude_session_container() {
     let user = profile::parse_profiles(include_str!("../test-profiles.yaml")).unwrap();
     let library = Library::with_user_profiles(&user).unwrap();
-    let checked = compile("profile:tmp-entry && !profile:claude-code-tmp", &library).unwrap();
+    let checked = compile("profile:tmp-entry && !profile:claude-sessions", &library).unwrap();
     let candidates = [
         PathBuf::from("/tmp/claude-1000"),
         PathBuf::from("/tmp/other"),
@@ -501,7 +501,7 @@ fn tmp_entry_excludes_entire_claude_session_container() {
             .collect(),
         excluded: [claude_session]
             .into_iter()
-            .filter(|p| found_by(&library, "claude-code-tmp", p))
+            .filter(|p| found_by(&library, "claude-sessions", p))
             .collect(),
     };
     assert!(!eligible(&checked, &candidates[0], &[], &facts).unwrap());
@@ -510,7 +510,7 @@ fn tmp_entry_excludes_entire_claude_session_container() {
         !eligible(
             &compile("profile:tmp-entry", &library).unwrap(),
             &candidates[0],
-            &["claude-code-tmp".into()],
+            &["claude-sessions".into()],
             &facts
         )
         .unwrap()

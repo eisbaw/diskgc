@@ -1,3 +1,4 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A candidate directory flock'ed by someone else, shared or exclusive, is
 # `locked` (the systemd-tmpfiles convention, docs/safety.md, In use); no
 # process evidence is attributed (process_blockers null). A lock on a file
@@ -5,7 +6,9 @@
 # The dry run takes no candidate lock, so it sees each holder's fd on the
 # directory and plans in_use; only reclaim's flock attempt says `locked`.
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

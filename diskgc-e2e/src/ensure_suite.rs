@@ -312,16 +312,26 @@ pub fn ensure_claude_and_pytest_tmp_profiles_keep_open_units(ctx: &Ctx) -> TestR
         TESTER,
     )?;
 
+    // claude-code-tmp was withdrawn (TASK-122); its matching set as a user
+    // probe profile keeps this evidence of what the in-use scan sees.
+    ctx.home.write_file(
+        "claude-probe.yaml",
+        b"version: 1\nprofiles:\n  - name: claude-code-tmp-probe\n    find: {roots: [/tmp], paths: ['claude-{uid}/-*/*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/claude-1000/-home-tester-proj/session-live]}\n",
+        0o600,
+        TESTER,
+    )?;
     let oracle = Oracle::arm(Fixture::new())?;
     let claude_run = ensure_run(
         ctx,
         &[
             "--dry-run",
             "--json",
+            "--config",
+            "/home/tester/claude-probe.yaml",
             "--min-free",
             "1K",
             "--select",
-            "profile:claude-code-tmp",
+            "profile:claude-code-tmp-probe",
             "/tmp",
         ],
     )?;
@@ -1191,7 +1201,7 @@ pub fn root_mode_uses_explicit_uid_without_passwd_entry(ctx: &Ctx) -> TestResult
 }
 
 /// `{uid}` would expand to root's 0, even if owners names one or several
-/// other users. The selected built-in must be refused before a plan exists.
+/// other users. The selected profile must be refused before a plan exists.
 pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     s.mkdir("claude-0", 0o755, TESTER)?;
@@ -1201,7 +1211,10 @@ pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> Tes
     let oracle = Oracle::arm(Fixture::new())?;
     let mut runs = Vec::new();
     for (name, owners) in [("one", "[tester]"), ("two", "[tester, {uid: 2001}]")] {
-        let config = format!("version: 1\nowners: {owners}\n");
+        // A user profile with the withdrawn claude-code-tmp's `{uid}` pattern.
+        let config = format!(
+            "version: 1\nowners: {owners}\nprofiles:\n  - name: claude-code-tmp-probe\n    find: {{roots: [/tmp], paths: ['claude-{{uid}}/-*/*'], type: dir}}\n    action: delete\n    examples: {{match: [/tmp/claude-0/-project/session]}}\n"
+        );
         let file = format!("uid-placeholder-{name}.yaml");
         ctx.run_diskgc
             .write_file(&file, config.as_bytes(), 0o600, ROOT)?;
@@ -1215,7 +1228,7 @@ pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> Tes
                 "--config",
                 &path,
                 "--select",
-                "profile:claude-code-tmp",
+                "profile:claude-code-tmp-probe",
                 "/tmp",
             ]);
             let run = ctx.run_as_root(&ctx.diskgc(), &args)?;
@@ -1223,7 +1236,7 @@ pub fn root_mode_refuses_uid_placeholder_for_one_or_two_owners(ctx: &Ctx) -> Tes
             ensure!(
                 run.stderr.contains("`{uid}`")
                     && run.stderr.contains("find.paths")
-                    && run.stderr.contains("claude-code-tmp"),
+                    && run.stderr.contains("claude-code-tmp-probe"),
                 "{name}, dry_run={dry_run}: {}",
                 run.stderr
             );

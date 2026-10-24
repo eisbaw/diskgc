@@ -1,10 +1,13 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # The structural Cargo recogniser (docs/safety.md, No special content): a
 # directory with CACHEDIR.TAG whose profile directory holds a .cargo-*lock*
 # file, known or unknown name, at <t>/<p>/ or <t>/<triple>/<p>/, refuses
 # the enclosing plain-delete candidate. A CACHEDIR.TAG without any lock
 # file is no Cargo target, so that candidate is deleted.
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

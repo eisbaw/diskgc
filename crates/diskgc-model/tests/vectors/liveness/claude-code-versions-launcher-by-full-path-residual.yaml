@@ -1,0 +1,39 @@
+# TASK-122 residual of the version profiles (verified heuristic, admitted
+# by mark-emulator for Mark, 2026-10-24): a launcher script that names an
+# older version by its full path is a file, not a link in a protected
+# link directory, so the version it names is deleted; the launcher fails
+# to start until reinstalled.
+profile_vector: 1
+select: profile:claude-code-versions
+roots: [/home/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/a/scripts/run-pinned-claude: {content: "#!/bin/sh\nexec /home/a/.local/share/claude/versions/2.1.1 \"$@\"\n", mode: "0755"}
+    /home/a/.local/share/claude/versions:
+      .: {mtime: 2026-10-05T00:00:00Z}
+      2.1.1: {size: 8K, mode: "0755", mtime: 2026-10-01T00:00:00Z}
+      2.1.2: {size: 8K, mode: "0755", mtime: 2026-10-02T00:00:00Z}
+      2.1.3: {size: 8K, mode: "0755", mtime: 2026-10-03T00:00:00Z}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/a], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/a/.local/share/claude/versions/2.1.1}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.2, reason: newest_version}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.3, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/a/.local/share/claude/versions/2.1.1]
+  removed: [/home/a/.local/share/claude/versions/2.1.1]
+  skipped:
+    - {candidate: /home/a/.local/share/claude/versions/2.1.2, reason: newest_version}
+    - {candidate: /home/a/.local/share/claude/versions/2.1.3, reason: newest_version}
+  preserved: [/home/a/scripts/run-pinned-claude, /home/a/.local/share/claude/versions/2.1.2, /home/a/.local/share/claude/versions/2.1.3]

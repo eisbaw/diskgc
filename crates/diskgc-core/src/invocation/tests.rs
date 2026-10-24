@@ -33,7 +33,7 @@ fn root_mode_checks_the_final_cli_selection() {
 #[test]
 fn root_mode_refuses_each_uid_placeholder_input() {
     let library = Library::builtin().expect("built-ins");
-    let Some(Body::Source(source)) = library.get("claude-code-tmp").map(|p| &p.body) else {
+    let Some(Body::Source(source)) = library.get("node-compile-cache").map(|p| &p.body) else {
         panic!("missing built-in")
     };
     let mut source = (**source).clone();

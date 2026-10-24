@@ -1,7 +1,8 @@
 # Test profiles for diskgc-core's select tests (select/tests.rs), loaded
 # with the real loader as user profiles: the abstract `a`, `b`, `f` of the
 # grammar's prose (docs/reference.md: `a`, `b` of kind fs with action delete,
-# `f` with idle_for), the example config's `zephyr-run`, and STAND-INS for
+# `f` with idle_for), the example config's `zephyr-run` and `claude-sessions`
+# (the withdrawn claude-code-tmp's matching set as a user profile), and STAND-INS for
 # rows of the built-in library table that are not built in yet (wave 4).
 # When the real one ships, its name collides with the stand-in here and the
 # test catalog fails to load: delete the stand-in then.
@@ -19,6 +20,10 @@
   find: {roots: [/tmp], paths: ["zephyr-*-run.*"], type: dir}
   action: delete
   examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH]}
+- name: claude-sessions
+  find: {roots: [/tmp], paths: ["claude-{uid}/-*/*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/claude-1000/-home-mark-src/7cc7f78e]}
 
 # Stand-ins, not built in yet.
 - name: nix-shell-tmpdir

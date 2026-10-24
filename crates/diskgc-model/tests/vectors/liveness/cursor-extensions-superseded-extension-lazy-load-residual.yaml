@@ -1,0 +1,37 @@
+# TASK-122 residual of the version profiles (verified heuristic, admitted
+# by mark-emulator for Mark, 2026-10-24): an open Cursor window's
+# extension host still runs a.ext 1.0.0, superseded twice; it read the
+# extension's files and closed them, so nothing shows it in use. The
+# version is deleted; its next lazy load fails until the window reloads.
+profile_vector: 1
+select: profile:cursor-extensions
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/cursor: {mode: "0755"}
+    /home/tester/.cursor/extensions/a.ext-1.0.0: {.: {mtime: 2026-10-01T00:00:00Z}, main.js: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-2.0.0: {.: {mtime: 2026-10-02T00:00:00Z}, main.js: {size: 8K, mtime: 2026-10-02T00:00:00Z}}
+    /home/tester/.cursor/extensions/a.ext-3.0.0: {.: {mtime: 2026-10-03T00:00:00Z}, main.js: {size: 8K, mtime: 2026-10-03T00:00:00Z}}
+    /home/tester/.cursor/extensions/extensions.json: {content: '[]'}
+  processes:
+    - {pid: 4242, exe: /usr/bin/cursor, cwd: /, maps: [/usr/bin/cursor], environ: [HOME=/home/tester], fds: [{path: /usr/bin/cursor}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-1.0.0}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-2.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: newest_version}
+  reclaim_exit: 1
+  actions: [/home/tester/.cursor/extensions/a.ext-1.0.0]
+  removed: [/home/tester/.cursor/extensions/a.ext-1.0.0]
+  skipped:
+    - {candidate: /home/tester/.cursor/extensions/a.ext-2.0.0, reason: newest_version}
+    - {candidate: /home/tester/.cursor/extensions/a.ext-3.0.0, reason: newest_version}
+  preserved: [/home/tester/.cursor/extensions/a.ext-2.0.0/main.js, /home/tester/.cursor/extensions/a.ext-3.0.0/main.js, /home/tester/.cursor/extensions/extensions.json]

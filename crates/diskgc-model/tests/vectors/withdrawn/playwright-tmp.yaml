@@ -1,8 +1,10 @@
-# playwright-tmp below its fixed root, one candidate per role.
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): playwright-tmp is replaced by a user probe profile with its matching set.
+# playwright-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 user_profiles:
+  - {"name": "playwright-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["playwright*", "nix-shell.*/playwright*", "tmp.*/playwright*", "nix-shell-*-*/playwright*", "nix-develop-*-*/playwright*", "zephyr-*-run.*/playwright*", "claude-{uid}/playwright*", "nix-shell.*/nix-shell.*/playwright*", "nix-shell.*/tmp.*/playwright*", "tmp.*/nix-shell.*/playwright*", "claude-{uid}/nix-shell.*/playwright*", "claude-{uid}/tmp.*/playwright*", "claude-{uid}/nix-shell.*/nix-shell.*/playwright*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/playwright-artifacts-0a3aQN"]}}
   - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["nix-shell.X/playwright-3"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/nix-shell.X/playwright-3"]}}
-select: "profile:playwright-tmp && !profile:pin"
+select: "profile:playwright-tmp-probe && !profile:pin"
 path: /tmp
 min_free: 100%
 host:

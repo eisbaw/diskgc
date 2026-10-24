@@ -1,15 +1,17 @@
-# claude-code-tmp below its fixed root, one candidate per role.
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): claude-code-tmp is replaced by a user probe profile with its matching set.
+# claude-code-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 config: |
   version: 1
   profiles:
+    - {"name": "claude-code-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["claude-{uid}/-*/*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a"]}}
     - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["claude-1000/-home-b/s3"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/claude-1000/-home-b/s3"]}}
   protect: [pin]
   groups:
     - name: g
       tiers:
-        - {"name": "t", "select": "profile:claude-code-tmp"}
-select: "profile:claude-code-tmp"
+        - {"name": "t", "select": "profile:claude-code-tmp-probe"}
+select: "profile:claude-code-tmp-probe"
 path: /tmp
 min_free: 100%
 host:

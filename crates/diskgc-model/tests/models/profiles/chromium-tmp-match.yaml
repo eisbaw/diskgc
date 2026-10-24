@@ -1,6 +1,9 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): chromium-tmp is replaced by a user probe profile with its matching set.
 # The exact cache entry is eligible; a similar path or missing marker is preserved.
 profile_vector: 1
-profile: chromium-tmp
+user_profiles:
+  - {"name": "chromium-tmp-probe", "find": {"roots": ["/tmp"], "paths": [".org.chromium.Chromium.*", "org.chromium.Chromium.*"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/.org.chromium.Chromium.aB3dEf"]}}
+profile: chromium-tmp-probe
 path: /tmp
 
 min_free: 100%

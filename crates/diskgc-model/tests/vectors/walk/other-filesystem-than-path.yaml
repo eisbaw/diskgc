@@ -1,8 +1,11 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A root on another filesystem than the one PATH names frees nothing
 # there: the root is skipped whole as other_fs before discovery, and
 # nothing below it is touched (docs/architecture.md, Filesystem matching).
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /home
 min_free: 100%
 host:

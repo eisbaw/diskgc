@@ -375,11 +375,6 @@ under the candidate lock, and immediately before deletion or a command
 action after the process scan. A browser started after the last check can
 still race deletion; Chromium's symlink is not a lock diskgc can acquire to
 exclude that startup.
-When given the XDG cache directory itself as its required root,
-`xdg-cache-entry-v2` excludes the top-level cache roots of Brave,
-Chrome, Chromium, Edge and Mozilla. The exclusions are relative to that
-supplied root. Supplying a root *inside* an application cache directory
-defeats this boundary; do not use this broad profile on such a root.
 
 **Every process, and only once settled.** The scan works in rounds: it
 lists the processes, then reads every one it has not read yet and every
@@ -780,9 +775,11 @@ contract class, recorded in the
 - **verified heuristic**: the verdict can be wrong in named residual cases.
   Admissible only when each residual is named in the liveness table; the
   loss in each is rebuildable data or one failed, retryable producer run,
-  never a user's own work (one dated exception, Mark 2026-10-23:
+  never a user's own work (two dated exceptions: Mark 2026-10-23,
   hand-edited files in a dependency directory, under the project
-  contracts below); every known counterexample has a checked-in
+  contracts below; mark-emulator for Mark 2026-10-24, files placed by hand
+  in a build directory, under the anchored build profiles, Source-anchored
+  CMake output); every known counterexample has a checked-in
   ModelHost vector and, where the kernel's view matters, a container test
   with the real pinned producer; and Mark's decision to admit it is recorded
   in the task and in the table.
@@ -1399,7 +1396,7 @@ view goes.
 ([Liveness contracts](reference.md#liveness-contracts)) is chosen because
 a reinstall costs minutes and a network fetch; a pause of a few weeks (a
 holiday, a project parked for a sprint) is common and should not cost a
-reinstall on return; 30 days is also the floor of `xdg-cache-entry-v2`. A
+reinstall on return. A
 tier may demand longer.
 
 *Dated exception* (Mark, 2026-10-23). A dependency file edited by hand
@@ -1519,6 +1516,18 @@ schema only with its first producer.
   defence against a hostile local user (Principles).
 
 ### Source-anchored CMake output
+
+*Dated exception* (mark-emulator for Mark, 2026-10-24, TASK-122). A file
+a user placed by hand in a build directory (notes, test data, a script) is
+the user's own work, which a rebuild does not recreate; the admission
+rule's "never a user's own work" is waived for the anchored build profiles
+(`cmake-build-anchored`, `meson-build-anchored`,
+`autotools-build-anchored`, `west-build-anchored`) for that case only. So
+are configure choices kept only in the build directory (`-D` values,
+Meson options, `./configure` arguments), which must be entered again. The
+operator's remedy is a `.diskgc-keep` file in the build directory or a
+`protect` entry. Vectors: `cmake-build-anchored-hand-placed-file-residual`,
+`cmake-build-anchored-configure-choices-and-dormant-ide-residual`.
 
 `cmake-build-anchored` accepts an output directory of any name only when
 it has a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no

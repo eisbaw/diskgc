@@ -1,7 +1,11 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): renode-tmp, zephyr-tmp is replaced by a user probe profile with its matching set.
 # A malformed --select is a parse error (exit 2, cause parse) before the
 # machine is touched; a mixed && / || without grouping is one.
 profile_vector: 1
-select: profile:zephyr-tmp || profile:renode-tmp && filter:idle-3d
+user_profiles:
+  - {"name": "renode-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["renode-*", "nix-shell.*/renode-*", "tmp.*/renode-*", "nix-shell-*-*/renode-*", "nix-develop-*-*/renode-*", "zephyr-*-run.*/renode-*", "claude-{uid}/renode-*", "nix-shell.*/nix-shell.*/renode-*", "nix-shell.*/tmp.*/renode-*", "tmp.*/nix-shell.*/renode-*", "claude-{uid}/nix-shell.*/renode-*", "claude-{uid}/tmp.*/renode-*", "claude-{uid}/nix-shell.*/nix-shell.*/renode-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/renode-1045514-crash"]}}
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+select: profile:zephyr-tmp-probe || profile:renode-tmp-probe && filter:idle-3d
 path: /tmp
 min_free: 100%
 host:

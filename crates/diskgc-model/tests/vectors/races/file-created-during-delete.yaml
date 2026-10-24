@@ -1,10 +1,13 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A file created in the candidate after the walk was recorded is not
 # deleted: it was never checked (PRD: any entry the eligibility walk did
 # not check). The directory cannot be removed around it: ENOTEMPTY is an
 # error for the candidate, never retried silently (docs/safety.md,
 # Deletion), so the run exits 3.
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

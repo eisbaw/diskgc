@@ -1,12 +1,15 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # owners: is required with --allow-root and forbidden otherwise.
 profile_vector: 1
 config: |
   version: 1
+  profiles:
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
   owners: [tester]
   groups:
     - name: g
       tiers:
-        - {name: t, select: profile:zephyr-tmp}
+        - {name: t, select: profile:zephyr-tmp-probe}
 path: /tmp
 min_free: 100%
 host:

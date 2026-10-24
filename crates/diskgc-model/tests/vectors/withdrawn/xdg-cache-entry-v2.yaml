@@ -1,9 +1,11 @@
-# xdg-cache-entry-v2's top-level entries, past 30 days; huggingface is
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): xdg-cache-entry-v2 is replaced by a user probe profile with its matching set.
+# xdg-cache-entry-v2-probe's top-level entries, past 30 days; huggingface is
 # excluded by the profile.
 profile_vector: 1
 user_profiles:
+  - {"name": "xdg-cache-entry-v2-probe", "find": {"roots": "required", "paths": ["*"], "exclude": [".bun", "borg", "BraveSoftware", "ccache", "claude", "containers", "chromium", "cursor_api_sessions", "dconf", "gh", "ghidra", "go-build", "google-chrome", "gpauth", "huggingface", "Microsoft", "microsoft-edge", "mozilla", "nix", "opencode", "Palo Alto Networks", "pip", "pre-commit", "sccache", "sdkmanager", "sessions", "teleport-device", "torch", "uv", "wine", "yarn"], "type": "any"}, "min_idle_for": "30d", "checkouts": "refuse", "action": "delete", "examples": {"match": ["/home/mark/.cache/nix-index"]}}
   - {"name": "pin", "find": {"roots": ["/home"], "paths": ["tester/.cache/fontconfig"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.cache/fontconfig"]}}
-select: "profile:xdg-cache-entry-v2 && !profile:pin"
+select: "profile:xdg-cache-entry-v2-probe && !profile:pin"
 roots: ["/home/tester/.cache"]
 path: /home
 min_free: 100%

@@ -1,8 +1,11 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A 40-level chain, deeper than FD_WINDOW (16): the walk and the delete
 # reopen evicted ancestors by name with identity checks, never via `..`,
 # and the whole chain goes (docs/safety.md, Shape of the walk).
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

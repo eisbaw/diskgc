@@ -1,8 +1,10 @@
-# renode-tmp below its fixed root, one candidate per role.
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): renode-tmp is replaced by a user probe profile with its matching set.
+# renode-tmp-probe below its fixed root, one candidate per role.
 profile_vector: 1
 user_profiles:
+  - {"name": "renode-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["renode-*", "nix-shell.*/renode-*", "tmp.*/renode-*", "nix-shell-*-*/renode-*", "nix-develop-*-*/renode-*", "zephyr-*-run.*/renode-*", "claude-{uid}/renode-*", "nix-shell.*/nix-shell.*/renode-*", "nix-shell.*/tmp.*/renode-*", "tmp.*/nix-shell.*/renode-*", "claude-{uid}/nix-shell.*/renode-*", "claude-{uid}/tmp.*/renode-*", "claude-{uid}/nix-shell.*/nix-shell.*/renode-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/renode-1045514-crash"]}}
   - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["zephyr-x-run.y/renode-3"], "type": "any"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-x-run.y/renode-3"]}}
-select: "profile:renode-tmp && !profile:pin"
+select: "profile:renode-tmp-probe && !profile:pin"
 path: /tmp
 min_free: 100%
 host:

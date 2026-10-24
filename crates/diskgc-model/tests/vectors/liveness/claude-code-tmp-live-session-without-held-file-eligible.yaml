@@ -1,11 +1,14 @@
-# TASK-122 counterexample (class none): claude-code-tmp rests on the in-use
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): claude-code-tmp is replaced by a user probe profile with its matching set.
+# TASK-122 counterexample (class none): claude-code-tmp-probe rests on the in-use
 # scan alone. Claude Code 2.1.280 holds its session's `tasks` directory
 # open while it runs (session 2bbb..., in_use), but that is undocumented,
 # version-dependent behaviour: a live session that holds nothing there
 # (pid 4242, as the 2026-10-18 dry run saw idle sessions) has its
 # scratchpad, a patch the agent wrote, deleted even past a 1-day filter.
 profile_vector: 1
-select: "profile:claude-code-tmp && filter:idle-1d"
+user_profiles:
+  - {"name": "claude-code-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["claude-{uid}/-*/*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a"]}}
+select: "profile:claude-code-tmp-probe && filter:idle-1d"
 path: /tmp
 min_free: 100%
 host:

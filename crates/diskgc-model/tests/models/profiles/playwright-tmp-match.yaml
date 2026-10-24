@@ -1,6 +1,9 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): playwright-tmp is replaced by a user probe profile with its matching set.
 # The exact cache entry is eligible; a similar path or missing marker is preserved.
 profile_vector: 1
-profile: playwright-tmp
+user_profiles:
+  - {"name": "playwright-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["playwright*", "nix-shell.*/playwright*", "tmp.*/playwright*", "nix-shell-*-*/playwright*", "nix-develop-*-*/playwright*", "zephyr-*-run.*/playwright*", "claude-{uid}/playwright*", "nix-shell.*/nix-shell.*/playwright*", "nix-shell.*/tmp.*/playwright*", "tmp.*/nix-shell.*/playwright*", "claude-{uid}/nix-shell.*/playwright*", "claude-{uid}/tmp.*/playwright*", "claude-{uid}/nix-shell.*/nix-shell.*/playwright*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/playwright-artifacts-0a3aQN"]}}
+profile: playwright-tmp-probe
 path: /tmp
 
 min_free: 100%

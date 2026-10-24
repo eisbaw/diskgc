@@ -699,13 +699,17 @@ profiles:                          # optional: your own, or overrides
     find: {roots: [/tmp], paths: ["zephyr-*-run.*"], type: dir}
     action: delete
     examples: {match: [/tmp/zephyr-h5e5-run.jTm9zGlH], no_match: [/tmp/zephyr-hal]}
+  - name: claude-sessions          # Claude Code's session dirs (no built-in)
+    find: {roots: [/tmp], paths: ["claude-{uid}/-*/*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/claude-1000/-home-mark-src/7cc7f78e]}
 
 profile_policies:                  # optional: checkout guard only; names a built-in source
   - profile: npm-cache
     checkouts: allow
 
 protect:                           # never deleted by any tier (by overlap)
-  - claude-code-tmp                # fixed-root profile: bare name
+  - claude-sessions                # fixed-root profile: bare name
   - {profile: cargo-target, roots: [/home/mark/src/important]}
 
 groups:
@@ -725,7 +729,7 @@ groups:
       - name: docker-dangling
         select: profile:docker-dangling
       - name: tmp-old
-        select: profile:chromium-tmp && filter:idle-2d
+        select: profile:pytest-tmp && filter:idle-2d
       - name: cargo-recent
         select: profile:cargo-target && filter:idle-1h
         roots: [/home/mark/src, /home/mark/topics]
@@ -864,7 +868,9 @@ which tier happens to supply roots. Only kinds `fs` and `cargo-target` can be
 protected (Docker images and Nix paths are protected by Docker's and Nix's
 own means: running containers, GC roots). Like `!profile:`, a protected
 profile covers everything its `find` finds and ignores its `where`. The
-example config protects `claude-code-tmp`. Filesystem and Cargo reclaim
+example config protects `claude-sessions`, a user profile over Claude
+Code's session directories (the matching set of the withdrawn
+`claude-code-tmp`). Filesystem and Cargo reclaim
 re-enumerate matches under candidate locks and just before deletion; Docker
 rechecks protection before invoking prune. An incomplete scan stops the
 run. Concurrent changes in an independently writable protected tree cannot
@@ -1203,11 +1209,11 @@ fixture-only parser catalog; that deletion profile is not shipped:
 |---|---|---|
 | `profile:pytest-tmp && filter:idle-10d` | `profile:pytest-tmp && filter:idle-10d` | pytest temp dirs idle for 10 days |
 | `(profile:pytest-tmp \|\| profile:node-compile-cache) && filter:idle-3d` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:node-compile-cache && filter:idle-3d)` | either, idle for 3 days |
-| `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | `profile:chromium-tmp && filter:idle-2d && !filter:idle-30d` | Chromium scratch idle for 2 to 30 days |
-| `profile:node-compile-cache && filter:idle-2d && !profile:claude-code-tmp` | `profile:node-compile-cache && filter:idle-2d && !profile:claude-code-tmp` | Node cache idle for 2 days, except what overlaps Claude Code's session dirs |
+| `profile:nix-shell-rc && filter:idle-2d && !filter:idle-30d` | `profile:nix-shell-rc && filter:idle-2d && !filter:idle-30d` | nix-shell rc directories idle for 2 to 30 days |
+| `profile:node-compile-cache && filter:idle-2d && !profile:claude-sessions` | `profile:node-compile-cache && filter:idle-2d && !profile:claude-sessions` | Node cache idle for 2 days, except what overlaps Claude Code's session dirs (the example config's `claude-sessions`) |
 | `profile:pytest-tmp \|\| profile:node-compile-cache` | `profile:pytest-tmp \|\| profile:node-compile-cache` | either, at any age |
 | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:node-compile-cache` | `(profile:pytest-tmp && filter:idle-3d) \|\| profile:node-compile-cache` | pytest dirs idle for 3 days, Node cache at any age |
-| `((profile:pytest-tmp \|\| profile:node-compile-cache) && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:node-compile-cache && filter:idle-3d) \|\| (profile:chromium-tmp && filter:idle-30d)` | the first two idle for 3 days, Chromium scratch idle for 30 |
+| `((profile:pytest-tmp \|\| profile:node-compile-cache) && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-30d)` | `(profile:pytest-tmp && filter:idle-3d) \|\| (profile:node-compile-cache && filter:idle-3d) \|\| (profile:nix-shell-rc && filter:idle-30d)` | the first two idle for 3 days, nix-shell rc directories idle for 30 |
 
 - **Qualifiers are required.** A term without a `profile:` is rejected by
   the parser; a wrong qualifier (`filter:pytest-tmp`) is a load-time error
@@ -1295,7 +1301,7 @@ action `delete`) and `f` (`idle_for`):
 | `profile:tmp-entry && tag:old` | unknown qualifier `tag:`: names are written `profile:NAME` or `filter:NAME` |
 | `profile:Tmp-entry` | `Tmp-entry` is not a valid name: a name is lowercase letters, digits, `-` and `_`, starting with a letter or a digit |
 | `filter:pytest-tmp` | `filter:pytest-tmp`: `pytest-tmp` is a source profile of kind fs, not a filter; write `profile:pytest-tmp` |
-| `profile:tmp-entry && !filter:claude-code-tmp` | `!filter:claude-code-tmp`: `claude-code-tmp` is a source profile of kind fs, not a filter; write `!profile:claude-code-tmp` |
+| `profile:tmp-entry && !filter:claude-sessions` | `!filter:claude-sessions`: `claude-sessions` is a source profile of kind fs, not a filter; write `!profile:claude-sessions` |
 | `profile:a && filter:nix-garbage` | `filter:nix-garbage`: `nix-garbage` is a source profile of kind nix-store, not a filter |
 | `profile:tmp-entry && filter:nope` | `filter:nope`: no profile or filter is named `nope` |
 | `profile:pytest-tmp \|\| profile:cargo-target` | `profile:pytest-tmp` is of kind fs but `profile:cargo-target` is of kind cargo-target: the sources of one expression share one kind; select them in separate tiers |
@@ -1393,10 +1399,9 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
 | containers | `containers-image-tmp` | withdrawn (Mark, 2026-10-23): matched top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` with a mandatory `min_idle_for: 3d`, which cannot show that a producer is done with a spool it may reopen; removed from the library (TASK-112 step 0), its matching set kept as the user-probe vector `containers-image-age`; re-admission only under a new name after TASK-125 | none |
+| withdrawn | `claude-code-tmp`, `chromium-tmp`, `playwright-tmp`, `zephyr-tmp`, `renode-tmp`, `xdg-cache-entry-v2` | withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24): class *none* ([Liveness contracts](#liveness-contracts)); removed from the library, each matching set kept as a user probe profile in the vectors (`<name>-probe`); re-admission only under a new name (TASK-135, TASK-136) | none |
 | agents | `cursor-agent-versions`, `codex-releases`, `claude-code-versions` | versions under a supplied home root; keep the two newest per sibling set and the installed symlink targets. `claude-code-versions` matches native installer version files only, not `~/bin/claude-*` | `delete` |
 | editors | `cursor-extensions` | version directories under `.cursor/extensions` of a supplied home root; keep the two newest of each extension id and every installed directory in `extensions.json` | `delete` |
-| ai agents | `claude-code-tmp` | `/tmp/claude-{uid}/-*/*` session dirs (project dirs are named after the project's path, so they start with `-`; `/tmp/claude-{uid}` is also the `TMPDIR` of the tools Claude Code runs, so `*/*` would match inside their temp dirs too) | `delete` |
-| browsers | `chromium-tmp` | `.org.chromium.Chromium.*` (files) and `org.chromium.Chromium.*` (directories: URL fetcher and unpacker scratch of Chromium and Brave) in `/tmp` | `delete` |
 | browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to be absent | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
@@ -1406,18 +1411,15 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 | python / js | `mypy-cache` | `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
 | python / js | `node-modules`, `python-venv` | planned: `node_modules` directories, and `.venv` directories holding `pyvenv.cfg`, at relative depths 1 through 5 below a supplied project or workspace root and inside no other dependency directory, judged by their project's activity; `checkouts: refuse` | no safe action yet; contract designed, see [Liveness contracts](#liveness-contracts) |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
-| python / js | `playwright-tmp`, `node-compile-cache` | `playwright*` and `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
+| python / js | `node-compile-cache` | `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `meson-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `autotools-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with regular `config.status`, `config.log`, and `Makefile`, status script recording this exact build directory and a surviving `configure.ac` source ancestor, and no `configure.ac` entry in the output; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
-| embedded | `zephyr-tmp` | `/tmp/zephyr-*` scratch and `zephyr-*-run.*` dirs | `delete` |
 | embedded | `west-build-anchored` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, no `CMakeLists.txt` entry, surviving recorded CMake source ancestor under the root, and mandatory 3-day idle age | `delete` |
-| embedded | `renode-tmp` | `renode-*` directories under `/tmp`'s temp-prefix v1 preset, including Zephyr run dirs; plain files are excluded | `delete` |
 | embedded | `platformio-cache` | `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
 | generic | `mktemp-dir` | planned: `tmp.*` directories under `/tmp`'s temp-prefix v1 preset; a live shell can use one as `TMPDIR` after exec, invisible to the process scan | no safe action yet |
-| generic | `xdg-cache-entry-v2` | top-level entries of a supplied `$XDG_CACHE_HOME`; excludes known state, browser roots and dedicated/deferred caches; `checkouts: refuse`; `min_idle_for: 30d` | `delete` |
 | filters | `idle-1h`, `idle-1d`, `idle-2d`, `idle-3d`, `idle-7d`, `idle-10d`, `idle-30d` | (no `find`) | none |
 
 `has-cachedir-tag` in the selection error examples is a parser-test fixture,
@@ -1430,9 +1432,9 @@ uv and npm caches contain `.git` metadata; those candidates report
 check merely because the tool has a cleaner. A cache tool must be available
 on `PATH` for its command profile to run.
 
-**Built-in temp-prefix v1 preset.** `node-compile-cache`, `playwright-tmp`,
-`renode-tmp`, `jest-cache` and `pytest-tmp` opt in. Each base pattern
-(`node-compile-cache`, `playwright*`, `renode-*`, `jest_*`,
+**Built-in temp-prefix v1 preset.** `node-compile-cache`, `jest-cache`
+and `pytest-tmp` opt in (`playwright-tmp` and `renode-tmp` did until their
+withdrawal). Each base pattern (`node-compile-cache`, `jest_*`,
 `pytest-of-*/pytest-*` respectively)
 is searched under each prefix below,
 relative to each profile's fixed roots. The empty prefix is the root itself.
@@ -1500,16 +1502,12 @@ needs a different guard and is outside this Chromium-family set.
 - Each source's liveness class, residuals and verdict are its row in
   [Liveness contracts](#liveness-contracts). TASK-122 classified
   `claude-code-tmp`, `chromium-tmp`, `playwright-tmp`, `zephyr-tmp`,
-  `renode-tmp` and `xdg-cache-entry-v2` as class *none*: proposed
-  withdrawals, kept in the development library until Mark decides, never
-  in a release catalog. The anchored build and version profiles, and
-  `nix-user-cache`, `go-mod-cache`, `bun-cache` and `mypy-cache` (whose
-  runs in flight can fail, and two of which can lose what cannot be
-  fetched again), are verified heuristics awaiting his decision.
-- `claude-code-tmp` sees a live session as `in_use` when a process holds a
-  file or directory in its candidate. An active session can hold no scratch
-  file descriptor; use a tier idle filter and `protect` for sessions that
-  must remain, including the current session.
+  `renode-tmp` and `xdg-cache-entry-v2` as class *none*; they were
+  withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). A user profile can still select
+  such paths, at its author's risk: a live Claude Code session, Chromium
+  or Electron application, Playwright browser or Renode emulation can use
+  its directory without any visible evidence, and `zephyr-*` and
+  `$XDG_CACHE_HOME` hold whatever their writers put there.
 - `sccache` is deferred: whether its server is using the cache cannot be
   established from open files (an idle server need not hold any); it needs
   a server-aware protocol first.
@@ -1537,37 +1535,6 @@ needs a different guard and is outside this Chromium-family set.
 - `pytest-cache` finds only `.pytest_cache` through three directory levels
   below each supplied root. Supply project roots for deeper trees. It
   deletes pytest's result cache, which pytest recreates on the next run.
-- `xdg-cache-entry-v2` takes the cache directory itself as a required root,
-  normally `$XDG_CACHE_HOME` or `~/.cache`, and enforces a 30-day minimum age
-  even when selected without a filter. It explicitly refuses checkouts: a cache entry such as
-  `pre-commit` can hold hook repositories with local changes. Its exact-name
-  exclusions keep `borg` and `huggingface` (backup or model data),
-  `claude`, `cursor_api_sessions`, `dconf`, `gh`, `ghidra`, `gpauth`,
-  `Microsoft`, `opencode`, `Palo Alto Networks`, `sdkmanager`, `sessions`,
-  and `teleport-device` (session, credential or application state),
-  `containers` (container storage), `torch` (models), `wine` (prefix data),
-  and `pre-commit`
-  (repository cache). It excludes `BraveSoftware`, `google-chrome`,
-  `chromium`, `microsoft-edge`, and `mozilla` so this broad profile cannot
-  bypass the browser profiles' narrower cache paths and live-app checks.
-  It also excludes `.bun`, `ccache`, `go-build`, `nix`, `pip`, `uv`, and
-  `yarn` so dedicated profiles retain their narrower boundaries and
-  cleaner actions. `sccache` remains excluded because its active server
-  state is not safely classifiable by an idle timestamp. The former
-  `xdg-cache-entry` name was withdrawn before release: v2 narrows the
-  match set, which requires a new built-in name. These exact-name
-  exclusions apply to children of the supplied root. Supply the XDG
-  cache directory itself, never a directory inside a browser or other
-  application's cache. A redirected cache root is supplied explicitly;
-  the profile never infers an environment variable.
-  Unknown applications
-  can still store valuable data under the cache root, and a 30-day idle
-  threshold only measures filesystem changes. Review its read-only plan
-  and add `protect` rules or `.diskgc-keep` markers for local data before
-  enabling it. The broad source is excluded from an ordinary dedicated
-  cache tier by selecting the dedicated profile alone; selecting the two
-  in separate tiers can still let this profile reach other entries, so its
-  built-in exclusions are the guarantee for the named dedicated paths.
 - Profiles that find at several depths under a project root (`pytest-cache`,
   `cmake-build-anchored`, `west-build-anchored`, `python-pycache`,
   `mypy-cache`) cannot use `**`;
@@ -1594,7 +1561,7 @@ needs a different guard and is outside this Chromium-family set.
 
 **A built-in profile's matching set never changes under its name.** Any
 change to what a built-in matches, narrower or broader, ships under a new
-name (e.g. `claude-code-tmp-2`). An old name is never redefined; a new config
+name (e.g. `pytest-tmp-2`). An old name is never redefined; a new config
 `version` may retire it (using a retired name is then a load-time error). Narrowing is not safe either: a narrower profile protects
 less where it is used in `!profile:` or `protect`. Each built-in profile has
 a golden match set over fixtures; any change to it fails CI unless the
@@ -1616,8 +1583,9 @@ source in exactly one row, the same class, a release only for a Shipped
 row). Rows marked *planned* name a contract that is designed but not
 implemented.
 
-Verdicts: *Shipped* (admitted; a verified heuristic only with Mark's dated
-admission, "admitted by Mark, DATE", in the row); *Decision pending* (a verified heuristic that awaits
+Verdicts: *Shipped* (admitted; a verified heuristic only with a dated
+admission in the row, "admitted by Mark, DATE" or, for a decision made on
+his delegation, "admitted by mark-emulator for Mark, DATE"); *Decision pending* (a verified heuristic that awaits
 Mark's decision; not admissible to a release until then); *Proposed
 withdrawal* (class *none*, still in the development library until Mark
 decides; never in a release catalog); any other verdict names no
@@ -1636,19 +1604,19 @@ its task notes.
 | `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 (command actions are outside its scope). |
 | `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test. | Shipped. |
 | `python-pycache` | CPython 3.13.15 (importlib) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds the only copy of code | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). | Shipped. |
-| `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2 | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error: one failed, retryable run (the in-use scan sees the run only while it holds a file there). | Decision pending (TASK-122): tolerant between runs, not for a run in flight. Vector missing: the run in flight. |
+| `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2 | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error: one failed, retryable run (the in-use scan sees the run only while it holds a file there). | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: tolerant between runs, not for a run in flight. Vector: `mypy-cache-run-in-flight-residual`. |
 | `node-compile-cache` | Node.js 24.21.0 (probe, TASK-122: a cold cache, a warm cache with hits, the directory renamed away mid-run and a path below a regular file all exit 0; the mid-run write fails with "no such file or directory" and is ignored) | consumer tolerance: entries are keyed by Node version and content hash, and every read or write failure is a miss | tolerant | Recompilation on the next start (time only). | Shipped. |
-| `nix-user-cache` | Nix 2.34.8 (probe, TASK-122, private `XDG_CACHE_HOME`: `tarball-cache-v2` moved away while `fetcher-cache-v4.sqlite` stayed; `fetchTarball` over HTTP downloaded again and returned the same store path, exit 0). `gitv3` and `eval-cache-v*` not probed | in use (a reading process maps the Git cache's pack files); consumer tolerance between runs: Nix refetches or re-evaluates what its cache lacks | verified heuristic | A process between two reads of a Git cache can fail once (retryable). Refetching needs the network, so an offline build fails until the cache is repopulated. Not rebuildable: a source whose upstream is gone and whose store path was collected is lost with its cache copy. | Decision pending (TASK-122): the lost-upstream residual is outside the rule's loss bound. Vectors missing: the run in flight. |
-| `go-mod-cache` | Go 1.26.7 (`go env GOMODCACHE`; Go's own `go clean -modcache` removes the same whole directory) | in use; consumer tolerance between runs: a missing module is downloaded again and checked against `go.sum` | verified heuristic | A build reading module sources while they are deleted can fail once (retryable). Needs the network: `GOPROXY=off` or offline builds fail until re-download. Not rebuildable: a module version neither the proxy nor its origin still serves. | Decision pending (TASK-122): the unserved-module residual is outside the rule's loss bound. Vector missing: the build in flight. |
-| `bun-cache` | Bun 1.3.3 (`bun pm cache`; Bun's own `bun pm cache rm` removes the same whole directory); install backends from Bun's documentation, not probed | in use; consumer tolerance between runs: an install hardlinks or copies from the cache (Linux default), so installed `node_modules` keep their data; a missing package is downloaded again | verified heuristic | An install in flight can fail once (retryable). Needs the network. Projects installed with the non-default `--backend=symlink` point into the cache and break until reinstalled. | Decision pending (TASK-122): the backend claim is unprobed. Vectors missing: the install in flight, the symlink backend. |
-| `cmake-build-anchored`, `meson-build-anchored`, `autotools-build-anchored`, `west-build-anchored` | CMake 3.30.5, Meson 1.7.0, GNU Autoconf 2.73, Zephyr West 1.5.0 build directories; the producer (`cmake --build`, `ninja`, `make`, `west build`) runs with the build directory as its working directory for the whole build | in use (a running build's cwd, a running built program's executable or mappings), `min_idle_for: 3d`, the recorded source survives (source anchor), `checkouts: refuse` | verified heuristic | (1) Configure choices kept only in the build directory (`CMakeCache.txt` `-D` values, Meson options, `./configure` arguments in `config.status`) must be entered again. (2) Files a user put in a build directory by hand are deleted with it: a user's own work, outside the rule's loss bound (vector `cmake-build-anchored-hand-placed-file-residual`). (3) A dormant IDE or debugger configured on the directory finds it gone and rebuilds. | Decision pending (TASK-122): residual (2) needs Mark's decision, as for dependency directories, or the four are withdrawn. Vectors missing: residuals (1) and (3). |
-| `cursor-agent-versions`, `codex-releases`, `claude-code-versions`, `cursor-extensions` | Claude Code native installer (host 2026-10-24: three versions kept beside the link target, so it prunes to three itself), Cursor agent CLI (31 versions on the host: no pruning), Codex CLI (11 releases), Cursor 3.1.15 extensions (superseded versions stay until Cursor's own startup cleanup, not verified) | `keep_newest: 2`, the installed link targets, `current` and `extensions.json`; in use: a running version's executable or mapped files lie inside its candidate (vectors: exe, map, cwd, fd) | verified heuristic | A launcher or script that runs an older version by its full path fails to start until reinstalled; a process of an older version that reads its code files and closes them (the extension host of an open Cursor window still running a superseded extension beyond the two newest) fails on its next lazy load until reloaded. Versions are downloaded again. | Decision pending (TASK-122). Vectors missing: the launcher by full path, the superseded extension's lazy load (the exe evidence the class rests on is `claude-code-versions-running-old-version-exe-in-use`). |
-| `claude-code-tmp` | Claude Code 2.1.280 (host 2026-10-24: each of 18 live interactive sessions held its own `<session>/tasks` directory open; on 2026-10-18, TASK-68, idle sessions held nothing in their directory: undocumented, version-dependent behaviour) | in use only; no floor (the tier's idle filter) | none | A session that ended and is resumed later (`--resume`) finds its scratchpad and task output gone; under a version that holds nothing, a live session's directory too. The loss is the agent's scratch files and background-task output, which can hold a user's work (scripts, patches, reports). Counterexample vector `claude-code-tmp-live-session-without-held-file-eligible`. | Proposed withdrawal (TASK-122). Re-admission only under a new name, with the held directory pinned per version, a floor, and Mark's decision on resumed sessions. |
-| `chromium-tmp` | every Chromium-based browser and Electron application: the `org.chromium.Chromium` temporary-name prefix belongs to Chromium's base library, shared by all builds not branded Chrome (host 2026-10-24: 312 directories, of them 245 component-updater URL fetcher and 5 unpacker scratch of Brave and Chromium, 62 unnamed; 8 files; live Brave and Chromium) | in use only; no floor; no presence marker covers every producer | none | Not all can be named: a live application's temporary files and directories under the shared prefix, whose uses were not enumerated. For the updater scratch alone, one failed component update, retried by the updater. Counterexample vector `chromium-tmp-live-updater-scratch-eligible`. | Proposed withdrawal (TASK-122). A narrower name for the updater scratch could be a verified heuristic. |
-| `playwright-tmp` | Playwright 1.56.1 (`verified_with`); 1.59.1 running on the host 2026-10-24: a 5-day-old driver with headless Chromium held its `playwright_chromiumdev_profile-*` (descriptors and mappings), while its `playwright-artifacts-qHgpwa`, created in the same second, was held by no process | in use only; no floor | none | A live session's later download, trace or video fails until its browser is relaunched; the glob `playwright*` also matches whatever else a tool names so. The loss is not a cache miss, and a live producer leaves no evidence. Counterexample vector `playwright-tmp-live-artifacts-eligible`. | Proposed withdrawal (TASK-122). |
-| `zephyr-tmp` | no tool: on the host, a project script (`mktemp -d /tmp/zephyr-h5e5-run.XXXXXXXX`; 2,578 such and 213 `zephyr-h5-run.*`) removes its run directory on success and keeps it on failure, printing its Renode and UART log paths for the user; hand-made directories (`zephyr-h5-clock-patch`, `zephyr-usart-patch.*`, without `.git`) and Git checkouts match too | in use only; no floor | none | Failure diagnostics the user was pointed to; hand-made work without a checkout; a live run's directory between two steps. Counterexample vector `zephyr-tmp-kept-failure-diagnostics-eligible`. | Proposed withdrawal (TASK-122). |
-| `renode-tmp` | Renode 1.17.0 TemporaryFilesManager (source read, renode-infrastructure `f3d5d7b7d`): one `renode-<pid>` per process; `GetTemporaryFile` creates each file and closes it; at start and exit Renode removes `renode-<pid>` directories of pids that are not alive, never `*-crash` (its crash reports) and nothing under `--keep-temporary-files` | in use only; no floor | none | A live Renode's directory holds no descriptor between uses, so a running emulation loses the files it created; crash reports (`renode-<pid>-crash`, 29 on the host) and directories kept on request are deleted. Counterexample vector `renode-tmp-live-emulation-eligible`. | Proposed withdrawal (TASK-122). Re-admission: a new name over `renode-<pid>` only, without `-crash`, under an Owner PID contract (Renode's own rule). |
-| `xdg-cache-entry-v2` | any application under `$XDG_CACHE_HOME` (XDG Base Directory Specification 0.8 calls it non-essential data; the profile's own exclusion list records applications that keep sessions, credentials, models and backups there) | in use, `min_idle_for: 30d`, `checkouts: refuse`, exact-name exclusions | none | Not all can be named: any unknown application's state, or a cache that is the only copy; a dormant application that reads its cache only when it starts. Counterexample vector `xdg-cache-entry-v2-unknown-app-state-eligible`. | Proposed withdrawal (TASK-122). |
+| `nix-user-cache` | Nix 2.34.8 (probe, TASK-122, private `XDG_CACHE_HOME`: `tarball-cache-v2` moved away while `fetcher-cache-v4.sqlite` stayed; `fetchTarball` over HTTP downloaded again and returned the same store path, exit 0). `gitv3` and `eval-cache-v*` not probed | in use (a reading process maps the Git cache's pack files); consumer tolerance between runs: Nix refetches or re-evaluates what its cache lacks | verified heuristic | A process between two reads of a Git cache can fail once (retryable). Refetching needs the network, so an offline build fails until the cache is repopulated. Not rebuildable: a source whose upstream is gone and whose store path was collected is lost with its cache copy. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the lost-upstream residual is outside the rule's loss bound. Vector: `nix-user-cache-mapped-pack-in-use-and-run-between-reads-residual`. |
+| `go-mod-cache` | Go 1.26.7 (`go env GOMODCACHE`; Go's own `go clean -modcache` removes the same whole directory) | in use; consumer tolerance between runs: a missing module is downloaded again and checked against `go.sum` | verified heuristic | A build reading module sources while they are deleted can fail once (retryable). Needs the network: `GOPROXY=off` or offline builds fail until re-download. Not rebuildable: a module version neither the proxy nor its origin still serves. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the unserved-module residual is outside the rule's loss bound. Vector: `go-mod-cache-build-in-flight-residual`. |
+| `bun-cache` | Bun 1.3.3 (`bun pm cache`; Bun's own `bun pm cache rm` removes the same whole directory); install backends from Bun's documentation, not probed | in use; consumer tolerance between runs: an install hardlinks or copies from the cache (Linux default), so installed `node_modules` keep their data; a missing package is downloaded again | verified heuristic | An install in flight can fail once (retryable). Needs the network. Projects installed with the non-default `--backend=symlink` point into the cache and break until reinstalled. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the backend claim is unprobed. Vector: `bun-cache-symlink-backend-and-install-in-flight-residual`. |
+| `cmake-build-anchored`, `meson-build-anchored`, `autotools-build-anchored`, `west-build-anchored` | CMake 3.30.5, Meson 1.7.0, GNU Autoconf 2.73, Zephyr West 1.5.0 build directories; the producer (`cmake --build`, `ninja`, `make`, `west build`) runs with the build directory as its working directory for the whole build | in use (a running build's cwd, a running built program's executable or mappings), `min_idle_for: 3d`, the recorded source survives (source anchor), `checkouts: refuse` | verified heuristic | (1) Configure choices kept only in the build directory (`CMakeCache.txt` `-D` values, Meson options, `./configure` arguments in `config.status`) must be entered again. (2) Files a user put in a build directory by hand are deleted with it: a user's own work, outside the rule's loss bound (vector `cmake-build-anchored-hand-placed-file-residual`). (3) A dormant IDE or debugger configured on the directory finds it gone and rebuilds. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122). Residuals (1) and (2) fall under the dated exception in safety.md (Source-anchored CMake output); remedy `.diskgc-keep` or `protect`. Vectors: `cmake-build-anchored-hand-placed-file-residual`, `cmake-build-anchored-configure-choices-and-dormant-ide-residual`. |
+| `cursor-agent-versions`, `codex-releases`, `claude-code-versions`, `cursor-extensions` | Claude Code native installer (host 2026-10-24: three versions kept beside the link target, so it prunes to three itself), Cursor agent CLI (31 versions on the host: no pruning), Codex CLI (11 releases), Cursor 3.1.15 extensions (superseded versions stay until Cursor's own startup cleanup, not verified) | `keep_newest: 2`, the installed link targets, `current` and `extensions.json`; in use: a running version's executable or mapped files lie inside its candidate (vectors: exe, map, cwd, fd) | verified heuristic | A launcher or script that runs an older version by its full path fails to start until reinstalled; a process of an older version that reads its code files and closes them (the extension host of an open Cursor window still running a superseded extension beyond the two newest) fails on its next lazy load until reloaded. Versions are downloaded again. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122). Vectors: `claude-code-versions-running-old-version-exe-in-use` (the evidence), `claude-code-versions-launcher-by-full-path-residual`, `cursor-extensions-superseded-extension-lazy-load-residual`. |
+| `claude-code-tmp` | Claude Code 2.1.280 (host 2026-10-24: each of 18 live interactive sessions held its own `<session>/tasks` directory open; on 2026-10-18, TASK-68, idle sessions held nothing in their directory: undocumented, version-dependent behaviour) | in use only; no floor (the tier's idle filter) | none | Not a built-in. Was: A session that ended and is resumed later (`--resume`) finds its scratchpad and task output gone; under a version that holds nothing, a live session's directory too. The loss is the agent's scratch files and background-task output, which can hold a user's work (scripts, patches, reports). Counterexample vector (user probe `claude-code-tmp-probe`) `claude-code-tmp-live-session-without-held-file-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). Re-admission only under a new name, with the held directory pinned per version, a floor, and Mark's decision on resumed sessions. |
+| `chromium-tmp` | every Chromium-based browser and Electron application: the `org.chromium.Chromium` temporary-name prefix belongs to Chromium's base library, shared by all builds not branded Chrome (host 2026-10-24: 312 directories, of them 245 component-updater URL fetcher and 5 unpacker scratch of Brave and Chromium, 62 unnamed; 8 files; live Brave and Chromium) | in use only; no floor; no presence marker covers every producer | none | Not a built-in. Was: Not all can be named: a live application's temporary files and directories under the shared prefix, whose uses were not enumerated. For the updater scratch alone, one failed component update, retried by the updater. Counterexample vector (user probe `chromium-tmp-probe`) `chromium-tmp-live-updater-scratch-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). A narrower name for the updater scratch could be a verified heuristic. |
+| `playwright-tmp` | Playwright 1.56.1 (`verified_with`); 1.59.1 running on the host 2026-10-24: a 5-day-old driver with headless Chromium held its `playwright_chromiumdev_profile-*` (descriptors and mappings), while its `playwright-artifacts-qHgpwa`, created in the same second, was held by no process | in use only; no floor | none | Not a built-in. Was: A live session's later download, trace or video fails until its browser is relaunched; the glob `playwright*` also matches whatever else a tool names so. The loss is not a cache miss, and a live producer leaves no evidence. Counterexample vector (user probe `playwright-tmp-probe`) `playwright-tmp-live-artifacts-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
+| `zephyr-tmp` | no tool: on the host, a project script (`mktemp -d /tmp/zephyr-h5e5-run.XXXXXXXX`; 2,578 such and 213 `zephyr-h5-run.*`) removes its run directory on success and keeps it on failure, printing its Renode and UART log paths for the user; hand-made directories (`zephyr-h5-clock-patch`, `zephyr-usart-patch.*`, without `.git`) and Git checkouts match too | in use only; no floor | none | Not a built-in. Was: Failure diagnostics the user was pointed to; hand-made work without a checkout; a live run's directory between two steps. Counterexample vector (user probe `zephyr-tmp-probe`) `zephyr-tmp-kept-failure-diagnostics-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
+| `renode-tmp` | Renode 1.17.0 TemporaryFilesManager (source read, renode-infrastructure `f3d5d7b7d`): one `renode-<pid>` per process; `GetTemporaryFile` creates each file and closes it; at start and exit Renode removes `renode-<pid>` directories of pids that are not alive, never `*-crash` (its crash reports) and nothing under `--keep-temporary-files` | in use only; no floor | none | Not a built-in. Was: A live Renode's directory holds no descriptor between uses, so a running emulation loses the files it created; crash reports (`renode-<pid>-crash`, 29 on the host) and directories kept on request are deleted. Counterexample vector (user probe `renode-tmp-probe`) `renode-tmp-live-emulation-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). Re-admission: a new name over `renode-<pid>` only, without `-crash`, under an Owner PID contract (Renode's own rule). |
+| `xdg-cache-entry-v2` | any application under `$XDG_CACHE_HOME` (XDG Base Directory Specification 0.8 calls it non-essential data; the profile's own exclusion list records applications that keep sessions, credentials, models and backups there) | in use, `min_idle_for: 30d`, `checkouts: refuse`, exact-name exclusions | none | Not a built-in. Was: Not all can be named: any unknown application's state, or a cache that is the only copy; a dormant application that reads its cache only when it starts. Counterexample vector (user probe `xdg-cache-entry-v2-probe`) `xdg-cache-entry-v2-unknown-app-state-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
 | `node-modules`, `python-venv` | npm: to be verified by the planned container test (an install from an offline tarball, a read-only run); pnpm, Yarn, Bun, venv, virtualenv and uv: planned, not verified; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Those of safety.md (Project dependency directories); the loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Admitted by Mark, 2026-10-23. Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Not shipped: the loader refuses both contracts until they land with their vectors and container tests (TASK-79, which took over TASK-112 step 6). |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Not a built-in. | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Not a built-in. | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |

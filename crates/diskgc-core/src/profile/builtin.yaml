@@ -330,28 +330,6 @@
   liveness_class: delegated
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.
-- name: claude-code-tmp
-  category: ai agents
-  description: Claude Code numbered session directories under its per-user temp root
-  find: {roots: [/tmp], paths: ["claude-{uid}/-*/*"], type: dir}
-  action: delete
-  examples:
-    match: [/tmp/claude-1000/-home-mark-src-app/7cc7f78e-2a90-4962-9538-3cc833eda22a]
-    no_match: [/tmp/claude-1000/-home-mark-src-app, /tmp/claude-1000/nix-shell.Ab1/pytest-of-mark, /tmp/claude-1001x/-a/b]
-  verified_with: Claude Code 2.1.280 (host layout 2026-10-20; read-only survey 2026-10-18)
-  liveness_class: none
-
-- name: chromium-tmp
-  category: browsers
-  description: Chromium and Brave scratch files and directories in /tmp
-  find: {roots: [/tmp], paths: [".org.chromium.Chromium.*", "org.chromium.Chromium.*"], type: any}
-  action: delete
-  examples:
-    match: [/tmp/.org.chromium.Chromium.aB3dEf, /tmp/org.chromium.Chromium.BraveComponentUpdater_chrome_url_fetcher_.x1Y2z3]
-    no_match: [/tmp/org.mozilla.firefox.x, /tmp/sub/org.chromium.Chromium.x]
-  verified_with: Brave Browser 154.1.96.61 (host layout 2026-10-20; read-only survey 2026-10-18)
-  liveness_class: none
-
 - name: node-compile-cache
   category: python / js
   description: Node compile cache under temp-prefix v1 roots in /tmp
@@ -362,17 +340,6 @@
     no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
   verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18)
   liveness_class: tolerant
-
-- name: playwright-tmp
-  category: python / js
-  description: Playwright scratch directories under temp-prefix v1 roots in /tmp
-  find: {roots: [/tmp], paths: ["playwright*"], type: dir}
-  action: delete
-  examples:
-    match: [/tmp/playwright-artifacts-0a3aQN, /tmp/nix-shell.x1/playwright_chromiumdev_profile-Sw4zrD, /tmp/nix-develop-1-2/playwright_abc, /tmp/claude-1000/nix-shell.Ab1/playwright-artifacts]
-    no_match: [/tmp/a/playwright-x, /tmp/playwright-artifacts-0a3aQN/log.txt]
-  verified_with: Playwright 1.56.1 (controlled browser TMPDIR probe 2026-10-20)
-  liveness_class: none
 
 # Admitted under the Owner PID contract (docs/safety.md, Producer liveness;
 # docs/reference.md, Liveness contracts): the pid in the name is the shell's,
@@ -412,47 +379,6 @@
     no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/c/pytest-of-mark/pytest-1, /var/tmp/pytest-of-ci/pytest-1]
   verified_with: pytest 9.1.1 (pytest_lifecycle_is_pinned 2026-10-24; contract container tests 2026-10-24)
   liveness_class: verified-heuristic
-
-- name: zephyr-tmp
-  category: embedded
-  description: Zephyr scratch and run directories directly under /tmp
-  find: {roots: [/tmp], paths: ["zephyr-*"], type: dir}
-  action: delete
-  examples:
-    match: [/tmp/zephyr-h5e5-run.jTm9zGlH, /tmp/zephyr-scratch]
-    no_match: [/tmp/zephyr, /tmp/a/zephyr-x]
-  verified_with: Zephyr 4.5.0-rc1 (host run log 2026-10-19; read-only survey 2026-10-18)
-  liveness_class: none
-
-- name: renode-tmp
-  category: embedded
-  description: Renode temp directories under temp-prefix v1 roots in /tmp
-  find: {roots: [/tmp], paths: ["renode-*"], type: dir}
-  action: delete
-  examples:
-    match: [/tmp/renode-1045514-crash, /tmp/nix-shell.Ab1/renode-1000523, /tmp/zephyr-h5e5-run.jTm9zGlH/renode-1]
-    no_match: [/tmp/renode, /tmp/a/renode-1]
-  verified_with: Renode 1.17.0 (installed TemporaryFilesManager source; host dry-run 2026-10-18)
-  liveness_class: none
-
-- name: xdg-cache-entry-v2
-  category: generic
-  description: Top-level entries of a supplied XDG_CACHE_HOME, excluding known state and dedicated caches
-  find:
-    roots: required
-    paths: ["*"]
-    # These are exact names relative to XDG_CACHE_HOME. Keep user data,
-    # credentials, repository caches and entries owned by dedicated profiles.
-    exclude: [.bun, borg, BraveSoftware, ccache, claude, containers, chromium, cursor_api_sessions, dconf, gh, ghidra, go-build, google-chrome, gpauth, huggingface, Microsoft, microsoft-edge, mozilla, nix, opencode, "Palo Alto Networks", pip, pre-commit, sccache, sdkmanager, sessions, teleport-device, torch, uv, wine, yarn]
-    type: any
-  min_idle_for: 30d
-  checkouts: refuse
-  action: delete
-  examples:
-    match: [/home/mark/.cache/nix-index, /home/mark/.cache/icon-cache.kcache]
-    no_match: [/home/mark/.cache/huggingface, /home/mark/.cache/borg, /home/mark/.cache/nix, /home/mark/.cache/pre-commit, /home/mark/.cache/uv, /home/mark/.cache/BraveSoftware, /home/mark/.cache/google-chrome, /home/mark/.cache/chromium, /home/mark/.cache/microsoft-edge, /home/mark/.cache/mozilla, /home/mark/.cache/yarn, /home/mark/.cache/sccache]
-  verified_with: XDG Base Directory Specification 0.8; host XDG_CACHE_HOME layout surveyed 2026-10-20
-  liveness_class: none
 
 # Browser cache paths are below the supplied home root. Each application
 # needs its own source because app_not_running checks one SingletonLock.

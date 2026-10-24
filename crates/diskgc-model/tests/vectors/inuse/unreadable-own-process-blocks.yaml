@@ -1,9 +1,12 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A process of the user that cannot be read could be using anything: it
 # blocks every candidate as in_use with evidence `unreadable` (fail
 # closed). A modelled process without fds reads as Failed on LinuxHost's
 # terms, so it is unreadable too (TASK-64 gotcha).
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

@@ -961,63 +961,6 @@ fn shipped_home_cache_profiles_never_match_regular_files() {
     }
 }
 
-/// The broad cache source has a frozen one-level match set, including files.
-/// Named state and dedicated caches are omitted before eligibility. A
-/// checkout not on the name list remains visible, but is refused by the
-/// ordinary checkout guard. The source's mandatory idle floor applies to
-/// both entry types even without a tier filter.
-#[test]
-fn xdg_cache_entry_golden_match_and_idle_policy() {
-    let host = host(&yaml(
-        r#"  /home/mark/.cache/nix-index: {.: {mtime: 2026-09-01T00:00:00Z}, index: {size: 4K, mtime: 2026-09-01T00:00:00Z}}
-  /home/mark/.cache/icon-cache.kcache: {size: 8K, mtime: 2026-09-01T00:00:00Z}
-  /home/mark/.cache/fresh: {.: {mtime: 2026-10-14T00:00:00Z}, data: {size: 1K, mtime: 2026-10-14T00:00:00Z}}
-  /home/mark/.cache/unknown-repo: {.: {mtime: 2026-09-01T00:00:00Z}, .git: {.: {mtime: 2026-09-01T00:00:00Z}}}
-  /home/mark/.cache/huggingface: {.: {mtime: 2026-09-01T00:00:00Z}, model: {size: 100M}}
-  /home/mark/.cache/borg: {.: {mtime: 2026-09-01T00:00:00Z}}
-  /home/mark/.cache/nix: {.: {mtime: 2026-09-01T00:00:00Z}, gitv3: {.: {mtime: 2026-09-01T00:00:00Z}}}
-  /home/mark/.cache/.bun: {.: {mtime: 2026-09-01T00:00:00Z}}
-  /home/mark/.cache/BraveSoftware: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/google-chrome: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/chromium: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/microsoft-edge: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/mozilla: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/yarn: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/sccache: {.: {mtime: 2026-09-01T00:00:00Z}, state: {size: 1K}}
-  /home/mark/.cache/pre-commit: {.: {mtime: 2026-09-01T00:00:00Z}, .git: {.: {mtime: 2026-09-01T00:00:00Z}}}
-"#,
-    ));
-    let report = dry_run(
-        &host,
-        &built_in_request("profile:xdg-cache-entry-v2", "/home/mark/.cache"),
-    );
-    assert_eq!(report.status, Status::DryRun, "{report:#?}");
-    let mut actual = plan(&report);
-    actual.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(
-        actual,
-        [
-            ("/home/mark/.cache/fresh".to_owned(), Some("not_idle")),
-            ("/home/mark/.cache/icon-cache.kcache".to_owned(), None),
-            ("/home/mark/.cache/nix-index".to_owned(), None),
-            (
-                "/home/mark/.cache/unknown-repo".to_owned(),
-                Some("contains_checkout")
-            ),
-        ]
-    );
-    let nix = dry_run(
-        &host,
-        &built_in_request("profile:nix-user-cache", "/home/mark"),
-    );
-    assert_eq!(
-        reason_of(&nix, "/home/mark/.cache/nix/gitv3"),
-        Some(None),
-        "the dedicated profile still reaches its narrower cache path"
-    );
-    nothing_locked_or_deleted(&host);
-}
-
 /// The Go cache really can contain read-only module directories. Derive the
 /// delete option from the shipped profile and prove the model deletion uses
 /// it, rather than merely asserting the YAML field's spelling.
@@ -2568,12 +2511,12 @@ fn jest_cache_finds_only_default_temp_directories_in_the_model() {
     nothing_locked_or_deleted(&host);
 }
 
-/// The three additional shipped sources have distinct deletion units:
-/// Claude sessions, Chromium scratch entries, and one Node cache tree per
-/// TMPDIR. Path lookalikes and a nested Node version directory do not
+/// node-compile-cache plans one Node cache tree per TMPDIR. Path lookalikes
+/// (Claude session and Chromium scratch entries, whose built-ins were
+/// withdrawn in TASK-122) and a nested Node version directory do not
 /// become extra candidates.
 #[test]
-fn claude_chromium_and_node_builtins_plan_only_their_units() {
+fn node_compile_cache_builtin_plans_only_its_units() {
     let at = "{mtime: 2026-10-01T00:00:00Z}";
     let host = host(&yaml(&format!(
         "  /tmp/claude-1000/-home-mark-src-app/session-1: {{.: {at}, output: {at}}}\n  \
@@ -2585,91 +2528,20 @@ fn claude_chromium_and_node_builtins_plan_only_their_units() {
          /tmp/nix-shell.Ab1/node-compile-cache: {{.: {at}}}\n  \
          /tmp/claude-1000/nix-shell.Ab1/node-compile-cache: {{.: {at}}}\n"
     )));
-    for (profile, want) in [
-        (
-            "claude-code-tmp",
-            vec!["/tmp/claude-1000/-home-mark-src-app/session-1"],
-        ),
-        (
-            "chromium-tmp",
-            vec![
-                "/tmp/.org.chromium.Chromium.A",
-                "/tmp/org.chromium.Chromium.X",
-            ],
-        ),
-        (
-            "node-compile-cache",
-            vec![
-                "/tmp/node-compile-cache",
-                "/tmp/nix-shell.Ab1/node-compile-cache",
-                "/tmp/claude-1000/nix-shell.Ab1/node-compile-cache",
-            ],
-        ),
-    ] {
-        let report = dry_run(&host, &request(&format!("profile:{profile}"), &[], "/tmp"));
-        let mut actual: Vec<String> = plan(&report)
-            .into_iter()
-            .filter(|(_, reason)| reason.is_none())
-            .map(|(path, _)| path)
-            .collect();
-        actual.sort();
-        let mut want = want;
-        want.sort();
-        assert_eq!(actual, want, "{profile}: {:#?}", report.plan);
-    }
-    nothing_locked_or_deleted(&host);
-}
-
-/// Playwright and Renode share the fixed TMPDIR prefix preset, while Zephyr
-/// itself selects only top-level directories. A file named zephyr-* cannot
-/// be deleted by the directory-only Zephyr source.
-#[test]
-fn playwright_zephyr_and_renode_builtins_plan_only_their_units() {
-    let at = "{mtime: 2026-10-01T00:00:00Z}";
-    let host = host(&yaml(&format!(
-        "  /tmp/playwright-artifacts-1: {{.: {at}}}\n  \
-         /tmp/nix-shell.Ab1/playwright_chromiumdev_profile-X: {{.: {at}}}\n  \
-         /tmp/claude-1000/nix-shell.Ab1/playwright-artifacts: {{.: {at}}}\n  \
-         /tmp/zephyr-h5e5-run.X/renode-1: {{.: {at}, work: {at}}}\n  \
-         /tmp/zephyr-scratch: {{.: {at}}}\n  \
-         /tmp/zephyr-log.txt: {at}\n  \
-         /tmp/renode-1045514-crash: {{.: {at}}}\n  \
-         /tmp/renode-log.txt: {at}\n  \
-         /tmp/nix-shell.Ab1/renode-123: {{.: {at}}}\n"
-    )));
-    for (profile, want) in [
-        (
-            "playwright-tmp",
-            vec![
-                "/tmp/playwright-artifacts-1",
-                "/tmp/nix-shell.Ab1/playwright_chromiumdev_profile-X",
-                "/tmp/claude-1000/nix-shell.Ab1/playwright-artifacts",
-            ],
-        ),
-        (
-            "zephyr-tmp",
-            vec!["/tmp/zephyr-h5e5-run.X", "/tmp/zephyr-scratch"],
-        ),
-        (
-            "renode-tmp",
-            vec![
-                "/tmp/renode-1045514-crash",
-                "/tmp/nix-shell.Ab1/renode-123",
-                "/tmp/zephyr-h5e5-run.X/renode-1",
-            ],
-        ),
-    ] {
-        let report = dry_run(&host, &request(&format!("profile:{profile}"), &[], "/tmp"));
-        let mut actual: Vec<String> = plan(&report)
-            .into_iter()
-            .filter(|(_, reason)| reason.is_none())
-            .map(|(path, _)| path)
-            .collect();
-        actual.sort();
-        let mut want = want;
-        want.sort();
-        assert_eq!(actual, want, "{profile}: {:#?}", report.plan);
-    }
+    let report = dry_run(&host, &request("profile:node-compile-cache", &[], "/tmp"));
+    let mut actual: Vec<String> = plan(&report)
+        .into_iter()
+        .filter(|(_, reason)| reason.is_none())
+        .map(|(path, _)| path)
+        .collect();
+    actual.sort();
+    let mut want = vec![
+        "/tmp/node-compile-cache",
+        "/tmp/nix-shell.Ab1/node-compile-cache",
+        "/tmp/claude-1000/nix-shell.Ab1/node-compile-cache",
+    ];
+    want.sort();
+    assert_eq!(actual, want, "{:#?}", report.plan);
     nothing_locked_or_deleted(&host);
 }
 

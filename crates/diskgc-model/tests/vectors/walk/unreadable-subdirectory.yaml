@@ -1,9 +1,12 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A listing refused with EACCES (the user's own mode-000 directory) skips
 # the candidate as unreadable, never treating it as empty (docs/safety.md,
 # Fail closed on anything unreadable). The fault is injected on the first
 # listing of that directory in each run.
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

@@ -1,9 +1,12 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # Every checkout marker the walk recognises (docs/safety.md, No source
 # checkout): a .git directory, a worktree's .git file, a .git symlink (never
-# followed), .hg and .svn, each deep inside its candidate. zephyr-tmp says
+# followed), .hg and .svn, each deep inside its candidate. zephyr-tmp-probe says
 # nothing about checkouts, so it refuses them (fail closed).
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 path: /tmp
 min_free: 100%
 host:

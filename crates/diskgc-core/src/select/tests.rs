@@ -160,7 +160,7 @@ fn prd_selection_expressions_are_classified() {
         .collect();
     assert_eq!(
         found,
-        ["(profile:node-compile-cache || profile:playwright-tmp) && filter:idle-3d"]
+        ["(profile:node-compile-cache || profile:nix-shell-rc) && filter:idle-3d"]
     );
     for expression in found {
         assert!(
@@ -225,7 +225,7 @@ const CODE_BLOCK_EXPRESSIONS: &[&str] = &[
     "profile:cargo-target && filter:idle-7d",
     "profile:docker-build-cache && filter:idle-7d",
     "profile:docker-dangling",
-    "profile:chromium-tmp && filter:idle-2d",
+    "profile:pytest-tmp && filter:idle-2d",
     "profile:cargo-target && filter:idle-1h",
 ];
 
@@ -1113,7 +1113,7 @@ fn negated_profiles_do_not_count_towards_kind_or_action() {
     .unwrap();
     assert_eq!(checked.kind(), Kind::Fs);
     let checked = compile(
-        "profile:cargo-target && !profile:claude-code-tmp",
+        "profile:cargo-target && !profile:claude-sessions",
         &catalog(),
     )
     .unwrap();

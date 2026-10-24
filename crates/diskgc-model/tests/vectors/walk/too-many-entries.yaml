@@ -1,3 +1,4 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): zephyr-tmp is replaced by a user probe profile with its matching set.
 # A candidate with more entries than the walk's budget is skipped
 # (too_many_entries) as soon as a listing would exceed what is left, so
 # no record or listing can exhaust memory (docs/safety.md, Bounded). The
@@ -6,7 +7,9 @@
 # candidate of exactly 5 entries (its own directory included) is deleted;
 # one of 6 is refused whole.
 profile_vector: 1
-profile: zephyr-tmp
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
 entry_budget: 5
 path: /tmp
 min_free: 100%

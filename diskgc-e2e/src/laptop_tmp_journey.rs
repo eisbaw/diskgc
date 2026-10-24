@@ -98,7 +98,11 @@ profiles:
     find: {roots: [/tmp], paths: [claude-1000], type: dir}
     action: delete
     examples: {match: [/tmp/claude-1000]}
-protect: [claude-code-tmp]
+  - name: laptop-claude-sessions
+    find: {roots: [/tmp], paths: ['claude-{uid}/-*/*'], type: dir}
+    action: delete
+    examples: {match: [/tmp/claude-1000/-home-tester/session]}
+protect: [laptop-claude-sessions]
 groups:
   - name: stale
     tiers:

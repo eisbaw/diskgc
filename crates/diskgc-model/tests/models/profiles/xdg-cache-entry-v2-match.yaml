@@ -1,6 +1,9 @@
+# Withdrawn built-in (TASK-122, mark-emulator for Mark, 2026-10-24): xdg-cache-entry-v2 is replaced by a user probe profile with its matching set.
 # An unknown cache entry is eligible; known app roots and cleaner-owned stores stay intact.
 profile_vector: 1
-profile: xdg-cache-entry-v2
+user_profiles:
+  - {"name": "xdg-cache-entry-v2-probe", "find": {"roots": "required", "paths": ["*"], "exclude": [".bun", "borg", "BraveSoftware", "ccache", "claude", "containers", "chromium", "cursor_api_sessions", "dconf", "gh", "ghidra", "go-build", "google-chrome", "gpauth", "huggingface", "Microsoft", "microsoft-edge", "mozilla", "nix", "opencode", "Palo Alto Networks", "pip", "pre-commit", "sccache", "sdkmanager", "sessions", "teleport-device", "torch", "uv", "wine", "yarn"], "type": "any"}, "min_idle_for": "30d", "checkouts": "refuse", "action": "delete", "examples": {"match": ["/home/mark/.cache/nix-index"]}}
+profile: xdg-cache-entry-v2-probe
 path: /home/tester/.cache
 roots: [/home/tester/.cache]
 min_free: 100%
