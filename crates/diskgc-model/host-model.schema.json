@@ -248,6 +248,20 @@
         "uid"
       ]
     },
+    "CmdlineSpec": {
+      "description": "A process's command line, or `unreadable`.",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/$defs/UnreadableTag"
+        }
+      ]
+    },
     "Dev": {
       "description": "A device number major:minor, e.g. \"254:1\".",
       "type": "string",
@@ -952,6 +966,9 @@
         "proc_nspid",
         "pid_alive",
         "fs_magic",
+        "proc_uids",
+        "proc_cmdline",
+        "proc_root_lookup",
         "may_delete",
         "unlinkat",
         "fchmod",
@@ -1017,6 +1034,17 @@
       "description": "A process, as its `/proc` entry shows it.",
       "type": "object",
       "properties": {
+        "cmdline": {
+          "description": "Its command line (`/proc/<pid>/cmdline`), one string per argument;\ndefault `[exe]` (the executable's path, or nothing without one);\n`unreadable`: every read fails (`Failed`). Readable whatever\n`proc:` says, as on Linux; a zombie's reads empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CmdlineSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cwd": {
           "description": "Working directory; default `/`.",
           "type": [
@@ -1127,6 +1155,13 @@
             "string",
             "null"
           ]
+        },
+        "view": {
+          "description": "Path prefixes as its root and mount namespace see them, mapped to\nthe model's paths (`{/tmp: /tmp/nix-shell.AB}`: its `/tmp` is the\nmodel's `/tmp/nix-shell.AB`), used only by temp-root lookups\n(`proc_root_lookup`); the longest matching prefix wins, and a path\nno prefix matches is below its `root`. Default: none.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "zombie": {
           "description": "Exited but not reaped: listed, its `status` (and `NSpid`) readable,\nits pidfd open, every other reader `Gone` (no live task). Has no\nfds or maps.",

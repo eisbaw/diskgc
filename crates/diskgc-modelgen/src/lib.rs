@@ -175,6 +175,8 @@ pub fn process(
             proc,
             nspid: None,
             zombie: false,
+            cmdline: None,
+            view: Default::default(),
             name: None,
             uid: None,
             euid: None,

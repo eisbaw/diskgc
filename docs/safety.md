@@ -685,10 +685,11 @@ Fine for one-user machines and runners; weaker on shared hosts.
 
 Status (TASK-112): Owner PID and the `nix-shell` contract are
 implemented (step 3) and any user profile can require them; the
-`nix-shell-rc` built-in uses the `nix-shell` contract (step 4). The pytest and
-project-dependency contracts below are designed, not implemented: the
-loader refuses them until their steps land (5 and 6). The protocols below
-are normative for the implementation.
+`nix-shell-rc` built-in uses the `nix-shell` contract (step 4). The pytest
+contract is implemented and the `pytest-tmp` built-in uses it (step 5).
+The project-dependency contracts below are designed, not implemented: the
+loader refuses them until they land (TASK-79). The protocols below are
+normative for the implementation.
 
 The in-use scan answers "does a visible process use this candidate now?".
 It cannot answer "has the program that made this candidate finished with
@@ -883,7 +884,14 @@ command line are strings in the process's own view. Nothing outside the
 sought tree is walked or resolved by name, except the temp-directory and
 `--basetemp` values pytest itself resolves (below); the `..` climbs of
 held directories read only the device and inode of ancestors, and a held
-file's link text is translated through mount tables, not resolved. So:
+file's link text is translated through mount tables, not resolved. The
+pytest contract's sought tree is the session, the candidate itself, whose
+held objects In use already matches by device and inode (a directory of
+the session bound elsewhere included, since every directory of the walk is
+matched); of the rules below it uses the process set, the strings and
+the values pytest resolves (with a climb from a resolved `--basetemp`
+value). The climbs of held directories and the translation of held files
+serve the project contracts. So:
 
 - *The process set* of a contract is the processes with any of their four
   uids equal to the owner of the directory the contract judges (pytest
@@ -1130,6 +1138,16 @@ root (the parent of `P`):
 - When an Owner PID precondition other than the filesystem one fails (the
   PID namespace, `hidepid`), the process list is not complete: a pytest
   counts as running, and naming and root use as undecidable.
+- *Before the table* (each `producer_unknown`, never eligible): `P`'s owner
+  `U` must be one of the users diskgc judges for (diskgc's uid, or the
+  `owners:` under `--allow-root`), since only their processes' facts are
+  read; `R`, reached again from the root by path, must hold `P` (same
+  device and inode), so a temp root renamed or replaced meanwhile is never
+  compared with the processes' roots; and `S` must be the walked object
+  (otherwise `changed`). A refusal by the kernel (`EACCES`, `EPERM`,
+  `ENOENT`, `ENOTDIR`) while `S` or its `.lock` is reopened keeps the
+  session (`unreadable`, or row 3 for the lock, as pytest's own cleanup
+  keeps a lock it cannot examine); any other error is an error of the run.
 
 *The verdict*, ordered: the first row that applies decides. Every session
 of `P` gets exactly one row.
@@ -1373,14 +1391,21 @@ schema only with its first producer.
   temp-root `statx` on a dead mount can block like the scan's other
   `statx` calls (In use, A process using a dead mount).
 - *Cost.* Only when a selected source has a contract: one more read of
-  each listed process's `status` and `cmdline`; one climb per directory a
-  process holds, once per scan; one `statx` per held file, and, only for
-  files on one of the tree's devices, a lexical translation (one read of
+  each listed process's `status` (Owner PID's `NSpid`). For `pytest`,
+  once per scan and after its last listing, for each readable process
+  with a uid of the users diskgc judges for: one more `status` read (its
+  uids), one `cmdline` read, and one `RESOLVE_IN_ROOT` lookup per
+  temp-directory or `--basetemp` value it carries (per process and value,
+  not shared across processes: two processes' roots can differ); per
+  check, one listing of the session's `pytest-of-<user>` (at most 65,536
+  names; more is a listing cut short, row 2), one lookup of `S`'s `.lock`
+  and one safe resolution of `R`; byte comparison for every other string.
+  For the project contracts: one climb per directory a process holds,
+  once per scan; one `statx` per held file, and, only for files on one of
+  the tree's devices, a lexical translation (one read of
   `/proc/<pid>/mountinfo` per (mount namespace, root device and inode)
-  and scan) and a suffix resolution beneath the tree; at most one `openat2` per temp-directory or `--basetemp` value
-  pytest itself resolves (deduplicated); byte comparison for every other
-  string; one listing of each `pytest-of-<user>` per scan; and for
-  project contracts a walk of each project, bounded by the entry budget.
+  and scan) and a suffix resolution beneath the tree; and a walk of each
+  project, bounded by the entry budget.
 
 **Limits, stated plainly.**
 

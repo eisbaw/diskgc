@@ -526,7 +526,13 @@ cases and properties are Rust tests. The model has no parent links, so
 the "setsid" and "nohup" children of the orphan and detached-child rows
 are plain processes with or without the reference; nor process identity,
 so the reused-pid row differs from the live-owner row only in intent. The
-pytest and project vectors land with steps 5 and 6. Mutation record (step 3, each vector-corpus run red):
+pytest vectors landed with step 5: every row of the pytest table below is a
+file of that name in `vectors/liveness/` (against the built-in), plus
+`vectors/builtins/pytest-tmp.yaml` for the built-in's roles (a plain
+session and one holding a test's Git fixture reclaimed under `checkouts:
+allow`, `in_use` by an fd, `protected`, `kept`, `pytest-05` `filtered`, a
+test directory and sessions outside the temp-prefix preset not matched).
+The project vectors land with TASK-79. Mutation record (step 3, each vector-corpus run red):
 skipping the namespace, `hidepid` or filesystem precondition; tabling only
 the first `NSpid` level; ignoring unreadable processes; ignoring the
 probe; dropping the contract check in the plan, before the delete or
@@ -555,6 +561,46 @@ oracle), skipping the namespace fails
 `owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
 (deletion oracle), naming the namespace first fails
 `owner_pid_is_unknown_under_hidepid` (its detail).
+Mutation record (step 5, `pytest`; vector corpus, the verdict's unit and
+property tests, profile tests; every vector-level bite below):
+dropping `liveness_contract` from `pytest-tmp` (44 vectors); an ended lock
+owner permitting alone (`killed-newest-session`, both orphan-worker
+vectors); ignoring the lock's age in row 7
+(`young-lock-ended-owner-below-rank-kept`,
+`lock-within-dead-lock-margin-kept`); dropping the dead-lock margin
+(`lock-within-dead-lock-margin-kept`); row 7 permitting a young session
+while a pytest runs (four vectors); an undecidable naming blocking row 7
+(`cmdline-unreadable`, `environ-unreadable`, `basetemp-separate-relative`);
+undecidable naming, undecidable root use or an incomplete process list
+falling through to eligible (their vectors); counting other owners'
+processes (`other-owner-process-not-in-set`); the naming veto after the
+rank (`basetemp-within-rank-refused`); `--basetemp` by bytes only (the
+three `basetemp` identity vectors); resolving a variable pytest does not
+use (`other-variable-not-resolved`); counting an empty value
+(`empty-tmpdir-ignored`); keeping two sessions instead of three (32
+vectors); dropping `TEMP`, `TMP` or `PYTEST_DEBUG_TEMPROOT` (one vector
+each); a relative value treated as resolved (four vectors); ignoring the
+process's view for the fallback roots (`root-via-mount-view`); looking the
+values up in another process's root (14 vectors; resolving in diskgc's own
+root is a `LinuxHost` mutation no model vector can see, a limit); row 6 off (the four naming
+vectors); an unreadable environment taken as harmless; a privilege
+boundary not excused; the execnet bootstrap not a running sign
+(`xdist-bootstrap-counts-as-running`); the old session measured on the
+directory alone (`old-dir-young-tree-kept`); leading zeros not counted in
+`M` (`rank-ignores-other-names`); the working-directory extra dropped;
+`PYTEST_CURRENT_TEST` not a running sign; a lock owner that may be in use
+taken as ended (`live-lock-refused`, `lock-namespace-pid-refused`); a
+failed listing ignored (`listing-unreadable`); the fallback `/tmp` by path
+dropped (`fallback-root-counts-for-a-chrooted-process`); `PYTEST_ADDOPTS`
+ignored; an unreadable command line taken as empty; `R` not checked to
+hold `P` (`root-replaced-unknown`); `P`'s owner not checked against the
+judged users (`pytest-of-owner-not-judged-unknown`). Equivalent at every
+level: dropping the `.lock` type check (the lock is opened without
+following a symlink and read as a regular file, which refuse the same
+objects). Through the real binary: an ended owner permitting fails
+`pytest_orphan_xdist_worker_keeps_session`, dropping the contract fails
+`pytest_live_policy_none_session_in_shell_root_is_kept`, the naming veto
+off fails `pytest_live_basetemp_session_is_kept` (deletion oracle each).
 The contracts are in [safety.md](safety.md#producer-liveness), the schema
 in [reference.md](reference.md#liveness-contract-predicate). Every
 case below is a checked-in profile vector
@@ -575,8 +621,13 @@ Extensions they need. Of the profile-vector file:
 
 Of the host model (the test-model schema, tentative). `pid_namespace`,
 `proc_hidepid`, `nspid` and `zombie` landed with Owner PID (TASK-112 step
-2); each other extension lands with the contract that reads it (no field
-without a reader):
+2), `cmdline` and `view` with the pytest contract (step 5; `view` is read
+only by `proc_root_lookup`, which resolves a value in the process's view,
+following symlinks there with `..` clamped at its root, as
+`RESOLVE_IN_ROOT` does; the pytest vectors need no other extension: a
+file's `content` and `fail` events on a listing already existed); each
+other extension lands with the contract that reads it (no field without a
+reader):
 
 - top level `pid_namespace: initial | nested` (default `initial`): the
   answer of diskgc's held `/proc` to the initial-namespace check;
@@ -690,6 +741,18 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-fresh-session-not-idle` | B `{0}` made 10 minutes before the clock; no processes | 0 `not_idle` (below the built-in's floor) |
 | `pytest-tmp-listing-unreadable` | B `{0..4}`; a `fail: EACCES` event on the second listing of `pytest-of-tester` | 0 to 4 `unreadable` (row 2) |
 | `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester` `{0..4}`; a process with `TMPDIR=/tmp/claude-1000` | 0, 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-other-variable-not-resolved` | B `{0..2}`; a process with `XDG_RUNTIME_DIR=/tmp/nix-shell.AB` and no temp-directory variable | 0, 1, 2 eligible (only pytest's variables are resolved) |
+| `pytest-tmp-young-lock-ended-owner-below-rank-kept` | A `{0..4}`, `pytest-0/.lock` holds `42`, one day old; no process 42; *proc* | 0 `in_use`, `temp_root` (a young lock fails row 7 with no pytest running); 1 eligible; 2, 3, 4 `in_use` |
+| `pytest-tmp-lock-within-dead-lock-margin-kept` | as above, the lock three days and 30 s old | the same (pytest's three days passed, diskgc's extra minute not) |
+| `pytest-tmp-xdist-bootstrap-counts-as-running` | B `{0..4}`, `pytest-0` one day old; an execnet worker (bootstrap command line, `TMPDIR=/tmp/other`) and a process 900 with a relative `TMPDIR` | 0 `producer_unknown`, `relative_path` 900 (row 7 refused: a pytest runs; row 9); 1 eligible; 2, 3, 4 `producer_unknown` |
+| `pytest-tmp-other-owner-process-not-in-set` | `--allow-root`, owners tester and a uid 2000 user; B `{0..4}` owned by tester; only a uid 2000 process with `TMPDIR=/tmp/nix-shell.AB` | 0 to 4 eligible: another owner's process is not in the session owner's set |
+| `pytest-tmp-fallback-root-counts-for-a-chrooted-process` | A `{0..4}`; a process with `root: /home/tester` (its own `/tmp` does not resolve) | 0, 1 eligible; 2, 3, 4 `in_use`, `temp_root`: `R` is `/tmp` by diskgc's path, always counted |
+| `pytest-tmp-pytest-of-owner-not-judged-unknown` | `/tmp/nix-shell.AB/pytest-of-other` owned by uid 2000 holding the user's `pytest-0` | 0 `producer_unknown`: that uid's processes are not read |
+| `pytest-tmp-root-replaced-unknown` | B `{0}`; `/tmp/nix-shell.AB` renamed away just before the contract's listing and a new directory made under its name | 0 `producer_unknown`: `R` by path no longer holds `P` |
+
+`pytest-tmp-listing-unreadable` fails every listing of `pytest-of-tester`
+after discovery's first (`read_dir` calls 2 to 6, one per candidate's
+check, in the dry run and in the reclaim alike).
 
 **Project dependency directories** (`node-modules`, `python-venv`; the
 project is the candidate's parent; idle bound 30 days; TASK-79's container
@@ -828,7 +891,17 @@ is read-only and has no database: legacy `nix-shell` of a derivation
 without inputs, and `nix develop` of a ready dev environment, build
 nothing. The others land with the steps that use them; the three Owner
 PID tests landed with step 4 (`diskgc-e2e/src/owner_pid_suite.rs`, tier
-`full`, `--pid=host`, Container setup).
+`full`, `--pid=host`, Container setup), the three pytest contract tests
+with step 5 (`diskgc-e2e/src/pytest_contract_suite.rs`, tier `full`,
+`--pid=host`: in a PID namespace of its own diskgc's process list is not
+complete and every session above the rank is `producer_unknown`, row 8).
+Each asserts the deciding row by the report's detail
+(`liveness_contract pytest row N (rule): ...`), and every run is judged
+by the deletion oracle; the sessions are made now, so the sandboxed
+binary's clock is advanced two hours past the 1h floor and below the
+3-day dead-lock age. `live_pytest_without_session_lock_is_unsafe_to_reclaim`
+(tier `fast`, its own PID namespace) also requires the shipped
+`pytest-tmp` to keep its live session (`producer_unknown`, row 8).
 `nix_shell_rc_lifecycle_is_pinned` (pinned Nix: the directory's pid equals
 the shell's for legacy `nix-shell` and `nix develop`, interactive and
 `-c`; what remains after a normal exit, `SIGHUP` and `SIGKILL`; whether
@@ -861,12 +934,25 @@ days; a `keep` 0 session deleting a concurrent lockless one,
 row 7's invariant rests on),
 `pytest_live_policy_none_session_in_shell_root_is_kept` (a sleeping
 `tmp_path_retention_policy=none` test with `TMPDIR` in a `nix-shell.*`
-root: kept; reclaimed after the run ends),
+root, no lock and nothing held in the session: `in_use`, `temp_root` with
+the pytest's pid, row 10; killed, it leaves the session, which is then
+reclaimed by row 11),
 `pytest_live_basetemp_session_is_kept` (a sleeping run with `--basetemp`
-shaped like a session in a dead shell root: kept),
-`pytest_orphan_xdist_worker_keeps_session` (pinned pytest-xdist: the
-controller killed, a real worker alive; the test asserts the deciding row
-of the pure verdict, row 10, not only the outcome), `node_and_python_project_read_keeps_dependencies`
+shaped like a session, `pytest-7`, in a dead shell root: `in_use`,
+`command_line`, row 6; a leftover lockless `pytest-1` below the rank in the
+same directory is reclaimed meanwhile, row 11, since a running pytest
+makes row 7 need an old session; the `--basetemp` session is reclaimed
+once the run is killed),
+`pytest_orphan_xdist_worker_keeps_session` (pinned pytest-xdist 3.8.0 and
+execnet 2.1.2: the controller, whose pid the `.lock` holds, is killed
+while its worker sleeps in a test; the worker's command line is the
+execnet bootstrap and its initial environment holds no `PYTEST_XDIST_*`;
+`in_use`, `temp_root` with the worker's pid, row 10, not only the
+outcome. execnet bounds an orphan's life: its receiver thread, seeing the
+controller's pipe close, SIGINTs the worker after 5 s and `_exit`s it 10 s
+later (`WorkerGateway._terminate_execution`), so the test's worker
+ignores SIGINT and the test checks that the worker still lived after
+diskgc's runs; once it has ended the session is reclaimed, row 11), `node_and_python_project_read_keeps_dependencies`
 (TASK-79's probe on a `relatime` tmpfs: a run that only reads keeps the
 dependency directory; on a `noatime` mount the residual is shown),
 `npm_install_leaves_old_mtimes_and_new_ctimes` (the pinned npm: after an

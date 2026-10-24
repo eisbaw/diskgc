@@ -683,6 +683,14 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
                 },
                 nspid,
                 zombie: spec.zombie,
+                cmdline: match &spec.cmdline {
+                    None => Some(spec.exe.iter().map(|e| e.as_os_str().to_owned()).collect()),
+                    Some(crate::spec::CmdlineSpec::Unreadable(_)) => None,
+                    Some(crate::spec::CmdlineSpec::Args(args)) => {
+                        Some(args.iter().map(Into::into).collect())
+                    }
+                },
+                view: view(&at, &spec.view)?,
             },
         );
         for fd in &spec.fds {
@@ -694,6 +702,20 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
         }
     }
     Ok(())
+}
+
+/// A process's `view`: absolute, normal prefixes on both sides (the
+/// targets need not exist: a lookup through a missing one fails as on
+/// Linux).
+fn view(
+    at: &str,
+    view: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<BTreeMap<PathBuf, PathBuf>, LoadError> {
+    for (from, to) in view {
+        require_normal(&format!("{at}.view"), from)?;
+        require_normal(&format!("{at}.view"), to)?;
+    }
+    Ok(view.clone())
 }
 
 /// Splits `NAME=value` entries at the first `=`.

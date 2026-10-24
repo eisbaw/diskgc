@@ -461,8 +461,11 @@ fn liveness_contract(contract: LivenessContract, find: &FindSpec, problems: &mut
     }
     let shapes = contract.name_shapes();
     for path in find.paths.iter().flatten() {
-        let last = path.rsplit('/').next().unwrap_or(path);
-        if !shapes.contains(&last) {
+        let ends_in = |shape: &&str| {
+            path.strip_suffix(*shape)
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
+        };
+        if !shapes.iter().any(ends_in) {
             problems.push(format!(
                 "`liveness_contract: {name}` recognises only names shaped {}: the \
                  pattern `{path}` must end in one of them",

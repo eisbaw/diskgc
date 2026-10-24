@@ -46,7 +46,7 @@ const PID_RANGE_WIDTH: u32 = 1000;
 const PID_RANGE_SEARCH_FROM_FRACTION: u32 = 2;
 /// Bound for a fixture to reach its state (a nix develop start included).
 const FIXTURE_TIMEOUT: Duration = Duration::from_secs(120);
-const POLL: Duration = Duration::from_millis(100);
+pub(crate) const POLL: Duration = Duration::from_millis(100);
 const NIX_SHELL_RC_SELECT: &str = "profile:nix-shell-rc";
 
 /// The detail Owner PID gives when a precondition fails (crate
@@ -368,7 +368,7 @@ fn reclaim_args() -> Vec<&'static str> {
 }
 
 /// The plan has exactly these candidates with these reasons.
-fn expect_plan(run: &Run, want: &[(&PathBuf, Option<&str>)]) -> TestResult {
+pub(crate) fn expect_plan(run: &Run, want: &[(&PathBuf, Option<&str>)]) -> TestResult {
     let report = report(run)?;
     let mut got: Vec<(String, Option<String>)> = report["plan"]
         .as_array()
@@ -393,7 +393,7 @@ fn expect_plan(run: &Run, want: &[(&PathBuf, Option<&str>)]) -> TestResult {
 
 /// The reclaim skipped `candidate` for `reason` with exactly these
 /// process blockers (`[]`: none reported), and, when given, this detail.
-fn expect_skipped(
+pub(crate) fn expect_skipped(
     run: &Run,
     candidate: &Path,
     reason: &str,
@@ -449,7 +449,7 @@ fn expect_skipped(
 }
 
 /// The reclaim acted on `candidate`.
-fn expect_action(run: &Run, candidate: &Path) -> TestResult {
+pub(crate) fn expect_action(run: &Run, candidate: &Path) -> TestResult {
     let report = report(run)?;
     ensure!(
         report["actions"].as_array().is_some_and(|actions| actions
@@ -549,7 +549,7 @@ fn free_pid_range() -> Result<u32, String> {
 /// `--min-free 100%` is met on a tmpfs that holds no allocated bytes
 /// (an empty directory takes none): `ensure` would then act on nothing. A
 /// file outside every candidate keeps `/tmp` below the goal.
-fn below_the_goal(ctx: &Ctx) -> TestResult {
+pub(crate) fn below_the_goal(ctx: &Ctx) -> TestResult {
     ctx.scratch
         .write_file("not-a-candidate", &[0x5a; 8192], 0o600, TESTER)?;
     Ok(())
@@ -559,7 +559,7 @@ fn below_the_goal(ctx: &Ctx) -> TestResult {
 /// is the parent namespace's 1, not the invoking user): with the host's
 /// PID namespace, an unshifted map would make container root the owner of
 /// the user's host processes (docs/testing.md, Container setup).
-fn require_shifted_uid_map() -> TestResult {
+pub(crate) fn require_shifted_uid_map() -> TestResult {
     let map = std::fs::read_to_string("/proc/self/uid_map")
         .map_err(|e| format!("read /proc/self/uid_map: {e}"))?;
     let fields: Vec<&str> = map.split_whitespace().collect();
@@ -809,7 +809,7 @@ impl Drop for Namespace {
 /// A fixture child killed and reaped when dropped. `Child::kill` signals
 /// by pid, which is safe: until this process reaps it the pid stays its
 /// (a zombie holds it), and once reaped `Child` sends nothing.
-struct KillOnDrop(Child);
+pub(crate) struct KillOnDrop(pub(crate) Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
@@ -819,7 +819,7 @@ impl Drop for KillOnDrop {
 }
 
 /// Polls `probe` until it returns a value, bounded by `timeout`.
-fn wait_for<T>(
+pub(crate) fn wait_for<T>(
     timeout: Duration,
     what: &str,
     mut probe: impl FnMut() -> Result<Option<T>, String>,

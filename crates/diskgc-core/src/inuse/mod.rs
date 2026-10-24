@@ -41,6 +41,7 @@ use crate::host::{
     Locked, MonoTime, Pid, TryLock,
 };
 use crate::liveness::PidTable;
+use crate::liveness::pytest::ProcessFacts;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
@@ -94,6 +95,12 @@ pub struct Options<'a> {
     /// facts for Owner PID ([`Scan::pid_table`]); only when a selected
     /// source has a liveness contract (one more `status` read per process).
     pub pid_lookup: bool,
+    /// Also read the pytest contract's process facts ([`Scan::pytest_facts`]:
+    /// uids, command line, environment, and the temp-root and
+    /// `--basetemp` lookups); only when a selected source has
+    /// `liveness_contract: pytest`. Implies nothing about `pid_lookup`,
+    /// which that contract also needs.
+    pub pytest_facts: bool,
 }
 
 impl<'a> Options<'a> {
@@ -106,6 +113,7 @@ impl<'a> Options<'a> {
             users: rules.owners,
             sockets: !rules.block_ipc,
             pid_lookup: false,
+            pytest_facts: false,
         }
     }
 }
@@ -115,6 +123,15 @@ impl Options<'_> {
     #[must_use]
     pub fn with_pid_lookup(self, pid_lookup: bool) -> Self {
         Self { pid_lookup, ..self }
+    }
+
+    /// These options, also reading the pytest contract's process facts.
+    #[must_use]
+    pub fn with_pytest_facts(self, pytest_facts: bool) -> Self {
+        Self {
+            pytest_facts,
+            ..self
+        }
     }
 }
 
@@ -143,6 +160,9 @@ pub struct Scan {
     sockets: Option<Result<Vec<BoundSocket>, HostError>>,
     /// Owner PID's lookup table, when the options asked for it.
     pid_table: Option<PidTable>,
+    /// The pytest contract's process facts, when the options asked for
+    /// them (sorted by pid), with the users they were read for.
+    pytest_facts: Option<(Vec<u32>, Vec<ProcessFacts>)>,
 }
 
 /// Reads every visible process (see [`self::scan`] for the order of
@@ -159,6 +179,12 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
     let gathered = scan::gather(host, options.users)?;
     let pid_table = namespace_before.map(|before| {
         scan::pid_table(host, before, &gathered.listed, gathered.unsettled.is_none())
+    });
+    let pytest_facts = options.pytest_facts.then(|| {
+        (
+            options.users.to_vec(),
+            scan::pytest_facts(host, &gathered, options.users),
+        )
     });
     let mut s = Scan {
         started,
@@ -178,6 +204,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         held_deleted: Vec::new(),
         sockets,
         pid_table,
+        pytest_facts,
     };
     for (pid, read) in gathered.read {
         for (id, how) in read.uses {
@@ -223,6 +250,15 @@ impl Scan {
     /// [`Options::pid_lookup`]).
     pub fn pid_table(&self) -> Option<&PidTable> {
         self.pid_table.as_ref()
+    }
+
+    /// The pytest contract's process facts (`None`: not asked for, see
+    /// [`Options::pytest_facts`]), with the users whose processes they
+    /// cover: a process with none of them as a uid was not read.
+    pub fn pytest_facts(&self) -> Option<(&[u32], &[ProcessFacts])> {
+        self.pytest_facts
+            .as_ref()
+            .map(|(users, facts)| (users.as_slice(), facts.as_slice()))
     }
 
     /// Whether the process list settled ([`MAX_LISTINGS`]).
@@ -675,6 +711,16 @@ impl<'a> Checker<'a> {
     #[must_use]
     pub fn with_pid_lookup(mut self, pid_lookup: bool) -> Self {
         self.options = self.options.with_pid_lookup(pid_lookup);
+        self.latest = None;
+        self
+    }
+
+    /// This checker, its scans also reading the pytest contract's process
+    /// facts ([`Options::with_pytest_facts`]): set when a source it serves
+    /// has `liveness_contract: pytest`.
+    #[must_use]
+    pub fn with_pytest_facts(mut self, pytest_facts: bool) -> Self {
+        self.options = self.options.with_pytest_facts(pytest_facts);
         self.latest = None;
         self
     }

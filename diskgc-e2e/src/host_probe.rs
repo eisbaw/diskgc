@@ -71,6 +71,7 @@ fn inuse_index_memory(host: &LinuxHost) -> Result<(), String> {
             users: &[1000],
             sockets: false,
             pid_lookup: false,
+            pytest_facts: false,
         },
     )
     .map_err(|e| format!("scan for index memory: {e}"))?;

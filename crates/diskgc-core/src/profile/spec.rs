@@ -187,22 +187,23 @@ impl LivenessContract {
 
     /// Whether this version judges the contract. The loader refuses the
     /// others, so nothing half-built can be selected; their own load rules
-    /// (shapes, checkouts) land with them: `pytest` with TASK-112 step 5,
-    /// `node-project` and `python-project` with step 6.
+    /// (shapes, checkouts) land with them: `node-project` and
+    /// `python-project` with TASK-112 step 6 (TASK-79).
     pub fn implemented(self) -> bool {
         match self {
-            Self::NixShell => true,
-            Self::Pytest | Self::NodeProject | Self::PythonProject => false,
+            Self::NixShell | Self::Pytest => true,
+            Self::NodeProject | Self::PythonProject => false,
         }
     }
 
-    /// The last segment every `find.paths` pattern of a source with this
-    /// implemented contract must have: the contract recognises only names
-    /// of these shapes.
+    /// The shapes every `find.paths` pattern of a source with this
+    /// implemented contract must end in, whole `/`-separated segments: the
+    /// contract recognises only paths of these shapes.
     pub fn name_shapes(self) -> &'static [&'static str] {
         match self {
             Self::NixShell => &["nix-shell-*-*", "nix-develop-*-*"],
-            Self::Pytest | Self::NodeProject | Self::PythonProject => &[],
+            Self::Pytest => &["pytest-of-*/pytest-*"],
+            Self::NodeProject | Self::PythonProject => &[],
         }
     }
 }

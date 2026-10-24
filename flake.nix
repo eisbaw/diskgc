@@ -467,6 +467,14 @@
         chmod 0700 run/diskgc-e2e
       '';
 
+      # The pinned pytest with pytest-xdist (and execnet) in one interpreter,
+      # for the pytest contract's orphan-worker container test
+      # (diskgc-e2e/src/pytest_contract_suite.rs).
+      pytestXdistEnv = pkgs.python3.withPackages (ps: [
+        ps.pytest
+        ps.pytest-xdist
+      ]);
+
       # A pure flake whose evaluation lasts long enough to inspect Nix's
       # naturally opened eval-cache descriptor. Impure evaluation disables
       # that cache in Nix itself.
@@ -552,6 +560,9 @@
           # cannot fetch bashInteractive.
           ln -s ${pkgs.bash}/bin/bash opt/nix-eval/bash
           ln -s ${pkgs.python3Packages.pytest}/bin/pytest opt/pytest-under-test
+          # Reached only through this link (as the Cargo toolchains are), so
+          # its bin/pytest does not collide with pytest's in the image root.
+          ln -s ${pytestXdistEnv}/bin/pytest opt/pytest-xdist-under-test
           ln -s ${nixEvalFixture} opt/nix-eval/flake
           ln -s ${cargoUnderTestCc} opt/cargo-under-test/cc
           ${lib.concatMapStrings (t: ''

@@ -1,0 +1,65 @@
+# pytest-tmp below a shell temp root (temp-prefix v1), one candidate per role
+# (TASK-112 step 5); the root is a finished shell's TMPDIR, so free sessions
+# are reclaimed by the pytest contract's row 11 (rank rule for the oldest):
+# a plain session; one holding a test's Git fixture (checkouts: allow: the
+# run's own output); one a process holds a file in (in_use by fd, whatever
+# the contract says); one a protect entry overlaps; one holding .diskgc-keep;
+# pytest-05 (not a session name: filtered). A test directory inside a
+# session, and sessions outside the preset's prefixes, are not matched.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["nix-shell.*/pytest-of-*/pytest-3"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/nix-shell.AB/pytest-of-tester/pytest-3"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:pytest-tmp"}
+select: "profile:pytest-tmp"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/tool: {mode: "0755"}
+    /tmp/nix-shell.AB: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-0: {.: {mtime: 2026-10-05T03:00:00Z}, test_x0: {.: {mtime: 2026-10-05T03:00:00Z}, out: {mtime: 2026-10-05T03:00:00Z}}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-1: {.: {mtime: 2026-10-05T03:00:00Z}, test_repo0: {.: {mtime: 2026-10-05T03:00:00Z}, .git: {.: {mtime: 2026-10-05T03:00:00Z}, HEAD: {mtime: 2026-10-05T03:00:00Z}}}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-2: {.: {mtime: 2026-10-05T03:00:00Z}, test_a0: {.: {mtime: 2026-10-05T03:00:00Z}, f: {mtime: 2026-10-05T03:00:00Z}}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-3: {.: {mtime: 2026-10-05T03:00:00Z}, test_b0: {.: {mtime: 2026-10-05T03:00:00Z}}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-4: {.: {mtime: 2026-10-05T03:00:00Z}, .diskgc-keep: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-05: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/a/b/pytest-of-tester/pytest-1: {.: {mtime: 2026-10-05T03:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /tmp/nix-shell.AB/pytest-of-tester/pytest-2/test_a0/f}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-0}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-05, reason: filtered}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-1}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: in_use}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: protected}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: kept}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  skipped:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-05, reason: filtered}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: protected}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: kept}
+  preserved:
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-05
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-2/test_a0/f
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-3/test_b0
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-4/.diskgc-keep
+    - /tmp/a/b/pytest-of-tester/pytest-1

@@ -48,7 +48,7 @@ pub use command::{
 pub use discover::{Discovery, Found, discover, discover_union};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
-pub use plan::{Planned, contract_veto, judge_one, plan};
+pub use plan::{Planned, contract_veto, judge_one, judge_walked, plan};
 pub use reclaim::{
     Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked,
     retention_guard_veto, tally, tally_for_union,

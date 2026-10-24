@@ -19,6 +19,7 @@ fn scan_with_pids(host: &diskgc_model::ModelHost) -> inuse::Scan {
             users: &[1000],
             sockets: false,
             pid_lookup: true,
+            pytest_facts: false,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"))
@@ -135,6 +136,7 @@ fn without_the_option_no_status_is_read() {
             users: &[1000],
             sockets: false,
             pid_lookup: false,
+            pytest_facts: false,
         },
     )
     .expect("scan");

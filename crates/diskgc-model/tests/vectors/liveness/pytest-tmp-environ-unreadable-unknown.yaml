@@ -1,0 +1,45 @@
+# A process of the user whose environment reads empty (Failed, as after env -i) and
+# is not excused: naming and root use are undecidable.
+profile_vector: 1
+profile: pytest-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/python: {}
+    /home/tester: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/other: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-0: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-1: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-2: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-3: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-4: {.: {mtime: 2026-10-05T03:00:00Z}}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-0}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-1}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: producer_unknown}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: producer_unknown}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: producer_unknown}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0, /tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  skipped:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-2, reason: producer_unknown, process_blockers: [{pid: 900, evidence: unreadable}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-3, reason: producer_unknown, process_blockers: [{pid: 900, evidence: unreadable}]}
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-4, reason: producer_unknown, process_blockers: [{pid: 900, evidence: unreadable}]}
+  preserved:
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-2
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-3
+    - /tmp/nix-shell.AB/pytest-of-tester/pytest-4

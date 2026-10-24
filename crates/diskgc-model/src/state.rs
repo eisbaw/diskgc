@@ -226,6 +226,11 @@ pub struct Proc {
     pub nspid: Option<Vec<u32>>,
     /// Exited, not reaped (see `ProcessSpec::zombie`).
     pub zombie: bool,
+    /// Its command line (`None`: unreadable).
+    pub cmdline: Option<Vec<OsString>>,
+    /// Its view's prefixes, mapped to the model's paths (see
+    /// `ProcessSpec::view`).
+    pub view: BTreeMap<PathBuf, PathBuf>,
 }
 
 /// What reading a modelled `uid_map` gives (`None`: it does not exist).

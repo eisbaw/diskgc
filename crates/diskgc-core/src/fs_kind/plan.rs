@@ -16,7 +16,7 @@ use super::discover::{Discovery, check_deadline, discover};
 use super::judge::{Judge, Tally, mountinfo};
 use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
-use crate::engine::{Reason, Rules, Skip};
+use crate::engine::{Reason, Rules, Skip, WalkRecord};
 use crate::host::{Dev, Host, MonoTime};
 use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
@@ -89,7 +89,11 @@ pub fn plan<H: Host>(
         idle,
         dev,
     };
-    let mut checker = Checker::for_plan(rules).with_pid_lookup(find.liveness_contract.is_some());
+    let mut checker = Checker::for_plan(rules)
+        .with_pid_lookup(find.liveness_contract.is_some())
+        .with_pytest_facts(
+            find.liveness_contract == Some(crate::profile::LivenessContract::Pytest),
+        );
     let total = candidates.len();
     for (path, candidate) in candidates {
         if host.interrupted().is_some() {
@@ -130,6 +134,19 @@ pub fn judge_one<H: Host>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Judged<Tally> {
+    Ok(judge_walked(host, judge, found, checker, deadline)?.map(|(tally, _)| tally))
+}
+
+/// [`judge_one`], also returning the walk of an admitted candidate (a
+/// union plan judges the other terms' liveness contracts on it,
+/// [`contract_veto`]).
+pub fn judge_walked<H: Host>(
+    host: &H,
+    judge: &Judge<'_>,
+    found: &Found,
+    checker: &mut Checker<'_>,
+    deadline: Option<MonoTime>,
+) -> Judged<(Tally, WalkRecord)> {
     check_deadline(host, deadline, &found.path)?;
     let mounts = mountinfo(host)?;
     let reached = judged!(judge.approach(host, found, &mounts, deadline));
@@ -161,9 +178,11 @@ pub fn judge_one<H: Host>(
         scan,
         judge.find,
         found,
-        candidate.parent()
+        candidate.parent(),
+        &walked.record
     ));
-    Ok(Ok(walked.tally()))
+    let tally = walked.tally();
+    Ok(Ok((tally, walked.record)))
 }
 
 /// The union rule of liveness contracts for the plan: every admitted
@@ -171,12 +190,15 @@ pub fn judge_one<H: Host>(
 /// permit it (the refusing source's index in `sources` comes back), judged from
 /// the plan's scan ([`super::liveness::veto`]; the reclaim applies the
 /// same rule on its last scan). The candidate's parent is reached again
-/// safely; one that cannot be is `unsafe_path`.
+/// safely; one that cannot be is `unsafe_path`. `record` is the walk of
+/// the candidate by the term that admitted it: every term found the same
+/// path, so its tree is theirs.
 pub fn contract_veto<'a, H: Host>(
     host: &H,
     sources: &[(&'a Find, &'a Found)],
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
+    record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
     let Some((_, first)) = sources
         .iter()
@@ -213,5 +235,5 @@ pub fn contract_veto<'a, H: Host>(
         path: first.path.clone(),
         error,
     })?;
-    super::liveness::veto(host, scan, sources.iter().copied(), &parent.fd)
+    super::liveness::veto(host, scan, sources.iter().copied(), &parent.fd, record)
 }

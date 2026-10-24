@@ -356,6 +356,26 @@
     no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586, /tmp/nix-shell.AB/nix-shell-1-2]
   verified_with: Nix 2.34.9 (nix_shell_rc_lifecycle_is_pinned 2026-10-24); Nix 2.34.8 (host dry run 2026-10-24)
 
+# Admitted as a verified heuristic (Mark, 2026-10-23) under the pytest
+# contract (docs/safety.md, pytest sessions; docs/reference.md, Liveness
+# contracts): one candidate per session; the lock rows are Owner PID, the
+# rank row never removes what pytest's own next cleanup keeps, and the
+# unused-root row is the named heuristic. checkouts: allow because tests
+# create Git fixtures in their temp directories. Why the 1h floor:
+# docs/reference.md, Liveness contracts (pytest's mkdir-to-lock window).
+- name: pytest-tmp
+  category: test
+  description: pytest session directories under temp-prefix v1 roots in /tmp, once the pytest contract permits
+  find: {roots: [/tmp], paths: ["pytest-of-*/pytest-*"], type: dir}
+  where: {liveness_contract: pytest}
+  min_idle_for: 1h
+  checkouts: allow
+  action: delete
+  examples:
+    match: [/tmp/pytest-of-mark/pytest-3, /tmp/nix-shell.x1/pytest-of-mark/pytest-12, /tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-0]
+    no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/c/pytest-of-mark/pytest-1, /var/tmp/pytest-of-ci/pytest-1]
+  verified_with: pytest 9.1.1 (pytest_lifecycle_is_pinned 2026-10-24; contract container tests 2026-10-24)
+
 - name: zephyr-tmp
   category: embedded
   description: Zephyr scratch and run directories directly under /tmp

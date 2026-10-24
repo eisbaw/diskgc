@@ -658,6 +658,23 @@ mod tests {
         fn fs_magic(&self, _: &Self::Fd) -> Result<u64, HostError> {
             unreachable!()
         }
+
+        fn proc_uids(&self, _: Pid) -> Result<crate::host::Ids, ProcError> {
+            unreachable!()
+        }
+
+        fn proc_cmdline(&self, _: Pid) -> Result<Vec<std::ffi::OsString>, ProcError> {
+            unreachable!()
+        }
+
+        fn proc_root_lookup(
+            &self,
+            _: Pid,
+            _: &Path,
+            _: bool,
+        ) -> Result<Vec<crate::host::DevIno>, ProcError> {
+            unreachable!()
+        }
     }
 
     /// `/` (id 1) and a tmpfs at `/tmp` (id 30): `/tmp` opens as fd 0, and

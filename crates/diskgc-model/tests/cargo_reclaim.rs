@@ -1119,6 +1119,26 @@ impl Host for Gated {
     fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError> {
         self.0.fs_magic(fd)
     }
+
+    fn proc_uids(&self, pid: Pid) -> Result<diskgc_core::host::Ids, diskgc_core::host::ProcError> {
+        self.0.proc_uids(pid)
+    }
+
+    fn proc_cmdline(
+        &self,
+        pid: Pid,
+    ) -> Result<Vec<std::ffi::OsString>, diskgc_core::host::ProcError> {
+        self.0.proc_cmdline(pid)
+    }
+
+    fn proc_root_lookup(
+        &self,
+        pid: Pid,
+        path: &std::path::Path,
+        climb: bool,
+    ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
+        self.0.proc_root_lookup(pid, path, climb)
+    }
 }
 
 impl Delete for Gated {

@@ -84,6 +84,7 @@ pub mod probe;
 pub mod proc_locks;
 pub mod profile_vector_suite;
 pub mod project_cache_suite;
+pub mod pytest_contract_suite;
 pub mod release_check;
 pub mod release_suite;
 pub mod runner;

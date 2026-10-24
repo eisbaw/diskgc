@@ -56,6 +56,7 @@ const EXCLUDED: &[&str] = &[
     "zephyr-tmp",
     "renode-tmp",
     "nix-shell-rc",
+    "pytest-tmp",
     "xdg-cache-entry-v2",
     "brave-browser-cache",
     "chrome-browser-cache",

@@ -687,6 +687,12 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
             "the helper is one live process in the container's PID namespace",
         );
     }
+    if process.cmdline.is_some() || !process.view.is_empty() {
+        return unsupported(
+            "cmdline/view",
+            "the helper's command line and mount view are fixed by the harness",
+        );
+    }
     if (!locked && process.fds.len() != 1)
         || (locked && !process.fds.is_empty())
         || process.fds.iter().any(|fd| fd.deleted || fd.fd.is_some())

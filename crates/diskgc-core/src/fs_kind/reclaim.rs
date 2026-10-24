@@ -424,6 +424,7 @@ fn protocol<H: Delete>(
                 scan,
                 admitted.iter().map(|a| (a.judge.find, a.found)),
                 candidate.parent(),
+                &record,
             )
             .map_err(NotDeleted::Stopped)?
             {

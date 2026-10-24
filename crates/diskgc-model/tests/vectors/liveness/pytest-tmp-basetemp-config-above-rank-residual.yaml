@@ -1,0 +1,31 @@
+# The stated residual: a configuration-file --basetemp session above the rank in a
+# root its pytest does not use is reclaimed (row 11).
+profile_vector: 1
+profile: pytest-tmp
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/python: {}
+    /home/tester: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/other: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester: {.: {mtime: 2026-10-05T03:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-0: {.: {mtime: 2026-10-15T01:00:00Z}}
+  processes:
+    - {pid: 600, exe: /usr/bin/python, cwd: /, maps: [/usr/bin/python], environ: ["HOME=/home/tester", "TMPDIR=/tmp/other"], fds: [{path: /usr/bin/python}], cmdline: ["python", "-m", "pytest"]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-0}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0]
+  removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0]
+  skipped: []
+  preserved: []

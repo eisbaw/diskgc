@@ -571,6 +571,7 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
             users: &[owner],
             sockets: false,
             pid_lookup: false,
+            pytest_facts: false,
         },
     )
     .map_err(|e| format!("scan: {e}"))?;

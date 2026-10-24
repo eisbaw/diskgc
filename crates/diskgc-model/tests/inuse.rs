@@ -88,6 +88,7 @@ fn options(sockets: bool) -> Options<'static> {
         users: &[ME],
         sockets,
         pid_lookup: false,
+        pytest_facts: false,
     }
 }
 

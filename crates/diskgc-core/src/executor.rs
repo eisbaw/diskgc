@@ -55,7 +55,7 @@ use crate::host::{
 };
 use crate::hostlock::{self, LockError};
 use crate::inuse::{Checker, REUSE_LIMIT};
-use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, Where};
+use crate::profile::{Action, Body, Finds, IdleFor, IdleWindow, Library, LivenessContract, Where};
 use crate::report::{
     ActionEntry, BuildEvidence, ErrorCause, ErrorEntry, Final, HeldEntry, OverrunEntry, PlanEntry,
     Report, SkipEntry, Status, after_lock_timeout, conclude, human_space_values, signed_bytes,
@@ -300,6 +300,15 @@ impl Tier {
             .fs_union
             .iter()
             .any(|term| term.find.liveness_contract.is_some())
+    }
+
+    /// Whether a source of this tier (its own or a union term) has
+    /// `liveness_contract: pytest`: its in-use scans then also read that
+    /// contract's process facts (docs/safety.md, Producer liveness, Cost).
+    pub fn pytest_facts(&self) -> bool {
+        let pytest = |find: &Find| find.liveness_contract == Some(LivenessContract::Pytest);
+        let own = matches!(&self.source, SourceKind::Fs(find) if pytest(find));
+        own || self.fs_union.iter().any(|term| pytest(&term.find))
     }
 
     fn fs_sources(&self) -> Vec<FsUnionSourceRef<'_>> {
@@ -2283,7 +2292,9 @@ fn dry_run_inner<H: Host>(
         }
     }
     let rules = rules(tier, owners, log);
-    let mut checker = Checker::for_plan(&rules).with_pid_lookup(tier.pid_lookup());
+    let mut checker = Checker::for_plan(&rules)
+        .with_pid_lookup(tier.pid_lookup())
+        .with_pytest_facts(tier.pytest_facts());
     let started = host.now();
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
@@ -3189,7 +3200,9 @@ fn plan_fs_union<H: Host>(
             return planned;
         }
     };
-    let mut checker = Checker::for_plan(rules).with_pid_lookup(tier.pid_lookup());
+    let mut checker = Checker::for_plan(rules)
+        .with_pid_lookup(tier.pid_lookup())
+        .with_pytest_facts(tier.pytest_facts());
     for candidate in &candidates {
         if host.interrupted().is_some() {
             return planned;
@@ -3216,6 +3229,7 @@ fn plan_fs_union<H: Host>(
         };
         let mut first_skip = None;
         let mut selected = None;
+        let mut selected_record = None;
         let mut admitted = Vec::new();
         let mut checkout_marker = None;
         for (index, found) in &candidate.found_by {
@@ -3246,14 +3260,15 @@ fn plan_fs_union<H: Host>(
                 idle: source.idle,
                 dev,
             };
-            match fs_kind::judge_one(host, &judge, found, &mut checker, deadline) {
-                Ok(Ok(tally)) => {
+            match fs_kind::judge_walked(host, &judge, found, &mut checker, deadline) {
+                Ok(Ok((tally, record))) => {
                     admitted.push(*index);
                     if source.checkouts == Checkouts::Refuse && tally.contains_checkout {
                         checkout_marker.get_or_insert((*index, found.path.as_path()));
                     }
                     if selected.is_none() {
                         selected = Some((*index, found.path.as_path(), tally));
+                        selected_record = Some(record);
                     }
                 }
                 Ok(Err(skip)) => {
@@ -3279,7 +3294,10 @@ fn plan_fs_union<H: Host>(
                 .iter()
                 .map(|(source, found)| (sources[*source].find, *found))
                 .collect();
-            match fs_kind::contract_veto(host, &contracts, &mut checker, deadline) {
+            let record = selected_record
+                .as_ref()
+                .expect("the selected term walked the candidate");
+            match fs_kind::contract_veto(host, &contracts, &mut checker, deadline, record) {
                 Ok(Ok(())) => {}
                 Ok(Err((veto, skip))) => {
                     log_skip(log, tier, &skip);
@@ -4040,7 +4058,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             return;
         }
         let rules = rules(self.tier, owners, self.log);
-        let mut checker = Checker::new(&rules, REUSE_LIMIT).with_pid_lookup(self.tier.pid_lookup());
+        let mut checker = Checker::new(&rules, REUSE_LIMIT)
+            .with_pid_lookup(self.tier.pid_lookup())
+            .with_pytest_facts(self.tier.pytest_facts());
         // No `_` arm: a new source kind must decide here (and in `ensure`'s
         // allowlist) how it is reclaimed. Each kind runs its own protocol
         // only: an fs tier never reaches the Cargo reclaim, a Cargo tier

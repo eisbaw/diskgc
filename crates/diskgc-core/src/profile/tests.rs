@@ -241,6 +241,7 @@ fn the_built_in_library_loads() {
         "zephyr-tmp",
         "renode-tmp",
         "nix-shell-rc",
+        "pytest-tmp",
         "west-build-anchored",
         "xdg-cache-entry-v2",
         "ccache",
@@ -320,17 +321,31 @@ fn withdrawn_containers_image_tmp_fails_selection() {
     );
 }
 
+/// The TASK-65 counterexample (a live `tmp_path_retention_policy=none`
+/// session with no fd and no lock) kept `pytest-tmp` out until it could
+/// ship with the pytest contract, one candidate per session (TASK-112
+/// step 5): the name now selects exactly that, never test directories.
 #[test]
-fn no_descriptor_live_pytest_cannot_be_selected_as_a_builtin() {
+fn pytest_tmp_ships_only_with_the_pytest_contract_per_session() {
     let library = Library::builtin().expect("built-ins");
-    assert!(library.get("pytest-tmp").is_none());
-    let error = crate::select::compile("profile:pytest-tmp", &library)
-        .expect_err("unsafe pytest temp deletion profile must not ship");
-    assert!(
-        error
-            .to_string()
-            .contains("no profile or filter is named `pytest-tmp`")
+    let profile = library.get("pytest-tmp").expect("shipped");
+    let Body::Source(source) = &profile.body else {
+        panic!("pytest-tmp is a source")
+    };
+    assert_eq!(
+        source.where_.liveness_contract,
+        Some(LivenessContract::Pytest)
     );
+    let Finds::Paths { patterns, .. } = &source.finds else {
+        panic!("pytest-tmp finds paths")
+    };
+    assert!(
+        patterns
+            .iter()
+            .all(|p| p == "pytest-of-*/pytest-*" || p.ends_with("/pytest-of-*/pytest-*")),
+        "{patterns:?}"
+    );
+    crate::select::compile("profile:pytest-tmp", &library).expect("selectable");
 }
 
 /// A command profile's paths and argv form one contract: the cleaner must
@@ -1755,19 +1770,57 @@ fn nix_shell_contract_requires_the_rc_name_shape() {
     }
 }
 
-/// Designed but not implemented: refused at load, so nothing half-built
-/// can be selected. The session-layout rule lands with the contract
-/// (TASK-112 step 5); until then any pytest source with it is refused.
+/// The pytest contract recognises only session directories
+/// `pytest-of-*/pytest-*`: every pattern must end in that shape, whole
+/// segments (TASK-112 step 5), and it judges directories only.
 #[test]
 fn pytest_contract_requires_the_session_layout() {
-    let yaml = "- name: p\n  find: {roots: [/tmp], paths: [\"pytest-of-*/pytest-*\"], type: dir}\n  where: {liveness_contract: pytest}\n  action: delete\n";
-    assert_has(
-        &user_errors(yaml),
-        "`liveness_contract: pytest` is not supported by this version of diskgc (supported: nix-shell)",
-    );
+    for (paths, example, ok) in [
+        (
+            "[\"pytest-of-*/pytest-*\"]",
+            "/tmp/pytest-of-u/pytest-1",
+            true,
+        ),
+        (
+            "[\"nix-shell.*/pytest-of-*/pytest-*\"]",
+            "/tmp/nix-shell.a/pytest-of-u/pytest-1",
+            true,
+        ),
+        ("[\"pytest-*\"]", "/tmp/pytest-1", false),
+        ("[\"x/pytest-*\"]", "/tmp/x/pytest-1", false),
+        (
+            "[\"apytest-of-*/pytest-*\"]",
+            "/tmp/apytest-of-u/pytest-1",
+            false,
+        ),
+        (
+            "[\"pytest-of-*/pytest-*/*\"]",
+            "/tmp/pytest-of-u/pytest-1/t",
+            false,
+        ),
+        ("[\"pytest-of-*/pytest-*\", \"tmp.*\"]", "/tmp/tmp.a", false),
+    ] {
+        let yaml = format!(
+            "- name: p\n  find: {{roots: [/tmp], paths: {paths}, type: dir}}\n  where: {{liveness_contract: pytest}}\n  action: delete\n  examples: {{match: [{example}]}}\n"
+        );
+        match with_user(&yaml) {
+            Ok(_) => assert!(ok, "accepted {paths}"),
+            Err(errors) => {
+                assert!(!ok, "refused {paths}: {errors}");
+                assert!(
+                    errors
+                        .to_string()
+                        .contains("recognises only names shaped `pytest-of-*/pytest-*`"),
+                    "{errors}"
+                );
+            }
+        }
+    }
+    let yaml = "- name: p\n  find: {roots: [/tmp], paths: [\"pytest-of-*/pytest-*\"], type: any}\n  where: {liveness_contract: pytest}\n  action: delete\n";
+    assert_has(&user_errors(yaml), "needs `find.type: dir`");
 }
 
-/// As for pytest: refused until TASK-112 step 6, whose rule this becomes.
+/// Refused until TASK-112 step 6 (TASK-79), whose rule this becomes.
 #[test]
 fn node_project_contract_requires_node_modules() {
     let yaml = "- name: n\n  find: {roots: required, paths: [\"*/node_modules\"], type: dir}\n  where: {liveness_contract: node-project}\n  action: delete\n";

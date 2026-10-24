@@ -1553,6 +1553,194 @@ impl Host for ModelHost {
             (Ok(magic), None, format!("{fs} {magic:#x}"))
         })
     }
+
+    /// Readable for every process, zombies included (as `status` is).
+    fn proc_uids(&self, pid: Pid) -> Result<Ids, ProcError> {
+        let path = PathBuf::from(format!("/proc/{pid}/status"));
+        let shown = path.display().to_string();
+        self.call(Op::ProcUids, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(ProcError::from_host(HostError::errno("read", &shown, e))),
+                    None,
+                    errno_text(e),
+                );
+            }
+            if pid.0 == inner.state.own_pid {
+                let own = Ids::same(inner.state.own_uid);
+                return (Ok(own), None, "ok (own)".to_owned());
+            }
+            match inner.state.procs.get(&pid.0) {
+                None => (Err(ProcError::Gone), None, "gone".to_owned()),
+                Some(proc) => (Ok(proc.uid), None, proc.uid.to_string()),
+            }
+        })
+    }
+
+    /// The model's `cmdline`, whatever `proc:` says (world-readable on
+    /// Linux); a zombie's is empty; `unreadable` is `Failed`.
+    fn proc_cmdline(&self, pid: Pid) -> Result<Vec<OsString>, ProcError> {
+        let path = PathBuf::from(format!("/proc/{pid}/cmdline"));
+        let shown = path.display().to_string();
+        self.call(Op::ProcCmdline, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(ProcError::from_host(HostError::errno("read", &shown, e))),
+                    None,
+                    errno_text(e),
+                );
+            }
+            match inner.state.procs.get(&pid.0) {
+                None => (Err(ProcError::Gone), None, "gone".to_owned()),
+                Some(proc) if proc.zombie => (Ok(Vec::new()), None, "empty (zombie)".to_owned()),
+                Some(proc) => match &proc.cmdline {
+                    Some(args) => (Ok(args.clone()), None, format!("{args:?}")),
+                    None => (
+                        Err(ProcError::Failed(HostError::invalid(
+                            "read",
+                            &shown,
+                            "the model says its command line is unreadable",
+                        ))),
+                        None,
+                        "failed (unreadable)".to_owned(),
+                    ),
+                },
+            }
+        })
+    }
+
+    /// Resolves `path` in the process's `view` and `root`, following
+    /// symlinks inside that view (an absolute target restarts from its
+    /// root, `..` clamps there), as `RESOLVE_IN_ROOT` does; the climb is
+    /// the object's ancestors in the model's tree (diskgc's view).
+    fn proc_root_lookup(
+        &self,
+        pid: Pid,
+        path: &Path,
+        climb: bool,
+    ) -> Result<Vec<DevIno>, ProcError> {
+        let shown = format!("{} in /proc/{pid}/root", path.display());
+        self.call(Op::ProcRootLookup, Some(path.to_owned()), None, |inner| {
+            let fail = |e: Errno| {
+                (
+                    Err(ProcError::Failed(HostError::errno("openat2", &shown, e))),
+                    None,
+                    errno_text(e),
+                )
+            };
+            if let Some(e) = inner.injected.take() {
+                return fail(e);
+            }
+            let state = &inner.state;
+            let Some(proc) = state.procs.get(&pid.0) else {
+                return (Err(ProcError::Gone), None, "gone".to_owned());
+            };
+            if proc.zombie {
+                return fail(Errno::ENOENT);
+            }
+            match proc.access {
+                ProcAccess::Readable => {}
+                ProcAccess::Denied => {
+                    return (
+                        Err(ProcError::Denied(HostError::errno(
+                            "open",
+                            &shown,
+                            Errno::EACCES,
+                        ))),
+                        None,
+                        "denied".to_owned(),
+                    );
+                }
+                ProcAccess::Failed => return fail(Errno::EIO),
+            }
+            match view_lookup(state, proc, path) {
+                Err(e) => fail(e),
+                Ok(model_path) => {
+                    let loc = state
+                        .lookup_link(&model_path)
+                        .unwrap_or_else(|f| model_error(format!("{shown}: {f:?}")));
+                    let object = state.dev_ino(loc);
+                    let mut chain = vec![object];
+                    if climb && state.inode(loc).entries().is_some() {
+                        for ancestor in model_path.ancestors().skip(1) {
+                            let up = state
+                                .lookup(ancestor)
+                                .unwrap_or_else(|f| model_error(format!("{shown}: {f:?}")));
+                            chain.push(state.dev_ino(up));
+                        }
+                    }
+                    let text = model_path.display().to_string();
+                    (Ok(chain), Some(object), text)
+                }
+            }
+        })
+    }
+}
+
+/// The most symlinks one temp-root lookup follows (Linux's `MAXSYMLINKS`).
+const MAX_SYMLINKS: usize = 40;
+
+/// A path in a process's view as the model names it: below the longest
+/// `view` prefix that matches, else below its `root`.
+fn to_model(proc: &crate::state::Proc, view_path: &Path) -> PathBuf {
+    let mapped = proc
+        .view
+        .iter()
+        .filter(|(from, _)| view_path.starts_with(from))
+        .max_by_key(|(from, _)| from.components().count());
+    match mapped {
+        Some((from, to)) => to.join(view_path.strip_prefix(from).expect("matched prefix")),
+        None => proc.root.path.join(
+            view_path
+                .strip_prefix("/")
+                .expect("a view path is absolute"),
+        ),
+    }
+}
+
+/// The model path of `path` resolved in the process's view, one name at a
+/// time, following symlinks inside the view (at most [`MAX_SYMLINKS`]),
+/// `..` clamped at the view's root (`RESOLVE_IN_ROOT`).
+fn view_lookup(state: &State, proc: &crate::state::Proc, path: &Path) -> Result<PathBuf, Errno> {
+    let names = |p: &Path| -> Vec<OsString> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::Normal(name) => Some(name.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+            })
+            .collect()
+    };
+    let mut pending: std::collections::VecDeque<OsString> = names(path).into();
+    let mut here = PathBuf::from("/");
+    let mut links = 0;
+    while let Some(name) = pending.pop_front() {
+        if name == ".." {
+            here.pop();
+            continue;
+        }
+        let next = here.join(&name);
+        let loc = match state.lookup_link(&to_model(proc, &next)) {
+            Ok(loc) => loc,
+            Err(Fault::Errno(e)) => return Err(e),
+            Err(Fault::Model(m)) => model_error(m),
+        };
+        if let Kind::Symlink(target) = &state.inode(loc).kind {
+            links += 1;
+            if links > MAX_SYMLINKS {
+                return Err(Errno::ELOOP);
+            }
+            if target.is_absolute() {
+                here = PathBuf::from("/");
+            }
+            for name in names(target).into_iter().rev() {
+                pending.push_front(name);
+            }
+            continue;
+        }
+        here = next;
+    }
+    Ok(to_model(proc, &here))
 }
 
 impl Delete for ModelHost {

@@ -647,10 +647,21 @@ pub enum ProcessEvidence {
     /// A listed process carries the number a liveness contract recorded
     /// as its producer's pid (a number match, not proof of identity).
     OwnerPid,
+    /// An element of the process's command line names the candidate (a
+    /// path string, or a `--basetemp` value resolved into it): the pytest
+    /// contract.
+    CommandLine,
+    /// The process could use the pytest session's temp root (a
+    /// temp-directory variable resolving to it, Python's fallback roots,
+    /// its working directory).
+    TempRoot,
+    /// The process has a relative or unresolvable value of a variable or
+    /// option pytest resolves, so the pytest contract cannot decide.
+    RelativePath,
 }
 
 impl ProcessEvidence {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 17] = [
         Self::Fd,
         Self::Cwd,
         Self::Root,
@@ -665,6 +676,9 @@ impl ProcessEvidence {
         Self::DetachedCargo,
         Self::CargoManifestDir,
         Self::OwnerPid,
+        Self::CommandLine,
+        Self::TempRoot,
+        Self::RelativePath,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -683,6 +697,9 @@ impl ProcessEvidence {
             Self::DetachedCargo => "detached_cargo",
             Self::CargoManifestDir => "cargo_manifest_dir",
             Self::OwnerPid => "owner_pid",
+            Self::CommandLine => "command_line",
+            Self::TempRoot => "temp_root",
+            Self::RelativePath => "relative_path",
         }
     }
 }

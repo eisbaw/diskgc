@@ -23,6 +23,7 @@ const TEMP_PROFILE_NAMES: &[&str] = &[
     "renode-tmp",
     "jest-cache",
     "nix-shell-rc",
+    "pytest-tmp",
 ];
 
 #[test]
@@ -604,14 +605,18 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         let Body::Source(source) = &profile.body else {
             panic!("{name} is a source")
         };
-        // Only nix-shell-rc carries a liveness contract and a floor (TASK-112).
-        let (contract, floor) = if *name == "nix-shell-rc" {
-            (
+        // Only nix-shell-rc and pytest-tmp carry a liveness contract and a
+        // floor (TASK-112).
+        let (contract, floor) = match *name {
+            "nix-shell-rc" => (
                 Some(LivenessContract::NixShell),
                 Some(IdleFor(Duration::from_secs(3600))),
-            )
-        } else {
-            (None, None)
+            ),
+            "pytest-tmp" => (
+                Some(LivenessContract::Pytest),
+                Some(IdleFor(Duration::from_secs(3600))),
+            ),
+            _ => (None, None),
         };
         let (roots, base, entry_type, preset, checkouts): (&[&str], &[&str], _, _, _) = match *name
         {
@@ -670,6 +675,13 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
                 EntryType::Dir,
                 false,
                 Checkouts::Refuse,
+            ),
+            "pytest-tmp" => (
+                &["/tmp"],
+                &["pytest-of-*/pytest-*"],
+                EntryType::Dir,
+                true,
+                Checkouts::Allow,
             ),
             _ => panic!("unreviewed temporary profile {name}"),
         };
@@ -864,6 +876,13 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
                 "/tmp/nix-shell-1-2",
                 "/tmp/nix-develop-1-2",
                 "/tmp/nix-shell-abc-1",
+            ],
+            "pytest-tmp" => &[
+                "/tmp/pytest-of-mark/pytest-3",
+                "/tmp/nix-shell.AbC123/pytest-of-ci/pytest-4",
+                "/tmp/nix-shell.AbC123/nix-shell.B2/pytest-of-ci/pytest-5",
+                "/tmp/claude-1000/nix-shell.Ab1/pytest-of-ci/pytest-6",
+                "/tmp/tmp.AbC123/pytest-of-ci/pytest-5",
             ],
             name => panic!("built-in /tmp source `{name}` has no golden set"),
         };

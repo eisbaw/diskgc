@@ -41,10 +41,7 @@ fn unknown_keys_are_load_errors_at_every_level() {
             "directory attributes",
             tmp_yaml("").replace("{.: {}}", "{.: {owner: 1000}}"),
         ),
-        (
-            "process",
-            tmp_yaml("processes:\n  - {pid: 7, cmdline: x}\n"),
-        ),
+        ("process", tmp_yaml("processes:\n  - {pid: 7, argv: x}\n")),
         (
             "process fd",
             tmp_yaml("processes:\n  - {pid: 7, fds: [{path: /tmp/a/f, flags: r}]}\n"),
@@ -188,6 +185,60 @@ fn owner_pid_facts_are_checked() {
         "pid_namespace: nested\nproc_hidepid: true\nprocesses:\n  - {pid: 7, nspid: [7, 9], zombie: true}\n  - {pid: 8, nspid: unreadable}\n",
     ))
     .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The pytest contract's model facts (TASK-112 step 5): `cmdline` is a
+/// list of strings or `unreadable` (default `[exe]`), readable whatever
+/// `proc:` says; `view` maps normal absolute prefixes; `proc_root_lookup`
+/// resolves in that view, following symlinks there, `..` clamped.
+#[test]
+fn pytest_facts_are_checked_and_answered() {
+    use diskgc_core::host::{Host, Pid, ProcError};
+    use std::path::Path;
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, cmdline: maybe}\n"),
+        &["CmdlineSpec"],
+    );
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, view: {/tmp: tmp/a}}\n"),
+        &["processes[pid 7].view"],
+    );
+    assert_error(
+        &tmp_yaml("processes:\n  - {pid: 7, view: {/x/../tmp: /tmp/a}}\n"),
+        &["processes[pid 7].view"],
+    );
+    let host = ModelHost::from_yaml(&tmp_yaml(
+        "processes:\n  - {pid: 7, exe: /tmp/a/f, proc: denied}\n  - {pid: 8, cmdline: unreadable}\n  - {pid: 9, cmdline: [python, -m, pytest], view: {/w: /tmp/a}}\n",
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        host.proc_cmdline(Pid(7)).expect("readable when denied"),
+        ["/tmp/a/f"]
+    );
+    assert!(matches!(
+        host.proc_cmdline(Pid(8)),
+        Err(ProcError::Failed(_))
+    ));
+    assert_eq!(
+        host.proc_cmdline(Pid(9)).expect("cmdline"),
+        ["python", "-m", "pytest"]
+    );
+    assert_eq!(host.proc_cmdline(Pid(10)), Err(ProcError::Gone));
+    let target = host.stat_path(Path::new("/tmp/a")).expect("/tmp/a");
+    let chain = host
+        .proc_root_lookup(Pid(9), Path::new("/w/../../w"), true)
+        .expect("resolves in the view");
+    assert_eq!(chain.first(), target.dev_ino().as_ref());
+    assert_eq!(chain.len(), 3, "/tmp/a, /tmp, /: {chain:?}");
+    assert!(matches!(
+        host.proc_root_lookup(Pid(9), Path::new("/nowhere"), false),
+        Err(ProcError::Failed(_))
+    ));
+    assert!(matches!(
+        host.proc_root_lookup(Pid(7), Path::new("/tmp"), false),
+        Err(ProcError::Denied(_))
+    ));
+    assert_eq!(host.proc_uids(Pid(9)).expect("uids").real, 1000);
 }
 
 #[test]

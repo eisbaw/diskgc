@@ -15,7 +15,9 @@ use crate::{TESTER, ensure};
 /// numbered session and test directory, but no `.lock`; while the test sleeps
 /// it holds no descriptor inside the test directory. A user-configured
 /// deletion probe must classify that live directory as eligible, which is
-/// why the same rule cannot ship as a built-in.
+/// why a plain path rule cannot ship as a built-in; the shipped
+/// `pytest-tmp`, one session per candidate under the pytest contract,
+/// keeps it (TASK-112 step 5).
 pub fn live_pytest_without_session_lock_is_unsafe_to_reclaim(ctx: &Ctx) -> TestResult {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -129,9 +131,40 @@ pub fn live_pytest_without_session_lock_is_unsafe_to_reclaim(ctx: &Ctx) -> TestR
         .iter()
         .filter_map(|p| p["name"].as_str())
         .collect();
+    // pytest-tmp ships (TASK-112 step 5) only with the pytest contract, one
+    // session per candidate: the built-in keeps this live session. In this
+    // container diskgc has a PID namespace of its own, so its process list
+    // is not complete and the session above the rank is producer_unknown
+    // (row 8); the contract's other rows are the host-PID-namespace tests'
+    // (pytest_contract_suite). Its 1h floor needs the clock advanced.
+    ensure!(names.contains(&"pytest-tmp"), "pytest-tmp is not shipped");
+    let session = s.path("pytest-of-tester/pytest-0");
+    let clock = crate::differential_suite::SandboxClockOffset::install(2 * 3600)?;
+    let builtin = ensure_run(
+        ctx,
+        &[
+            "--dry-run",
+            "--json",
+            "--no-index",
+            "--min-free",
+            "100%",
+            "--select",
+            "profile:pytest-tmp",
+            "/tmp",
+        ],
+    )?;
+    drop(clock);
+    oracle.judge_runs(&[&builtin])?.assert_clean()?;
+    builtin.expect_code(0)?;
+    let builtin_plan = report(&builtin)?;
     ensure!(
-        !names.contains(&"pytest-tmp"),
-        "unsafe pytest-tmp is shipped"
+        builtin_plan["plan"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["candidate"].as_str() == session.to_str()
+                    && entry["reason"] == "producer_unknown"
+            })),
+        "the pytest-tmp built-in did not keep the live session: {builtin_plan}"
     );
     let plan = report(&dry)?;
     ensure!(

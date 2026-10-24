@@ -43,7 +43,8 @@ use crate::{
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
     lifecycle_suite, meson_suite, owner_pid_suite, packaging_suite, profile_vector_suite,
-    project_cache_suite, release_suite, scale_suite, signal_suite, stdout_suite, temp_safety_suite,
+    project_cache_suite, pytest_contract_suite, release_suite, scale_suite, signal_suite,
+    stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -165,6 +166,18 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs pinned pytest in the Nix image",
     ),
     (
+        "pytest_live_policy_none_session_in_shell_root_is_kept",
+        "needs pinned pytest in the Nix image",
+    ),
+    (
+        "pytest_live_basetemp_session_is_kept",
+        "needs pinned pytest in the Nix image",
+    ),
+    (
+        "pytest_orphan_xdist_worker_keeps_session",
+        "needs pinned pytest-xdist in the Nix image",
+    ),
+    (
         "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
         "needs the pinned Nix and bash from the Nix image",
     ),
@@ -259,6 +272,9 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
     "owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace",
     "owner_pid_is_unknown_under_hidepid",
+    "pytest_live_policy_none_session_in_shell_root_is_kept",
+    "pytest_live_basetemp_session_is_kept",
+    "pytest_orphan_xdist_worker_keeps_session",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -435,6 +451,24 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: owner_pid_suite::owner_pid_is_unknown_under_hidepid,
+    },
+    Test {
+        name: "pytest_live_policy_none_session_in_shell_root_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: pytest_contract_suite::pytest_live_policy_none_session_in_shell_root_is_kept,
+    },
+    Test {
+        name: "pytest_live_basetemp_session_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: pytest_contract_suite::pytest_live_basetemp_session_is_kept,
+    },
+    Test {
+        name: "pytest_orphan_xdist_worker_keeps_session",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: pytest_contract_suite::pytest_orphan_xdist_worker_keeps_session,
     },
     Test {
         name: "nested_claude_shell_cache_reclaims_only_its_exact_entry",

@@ -1062,7 +1062,55 @@ pub trait Host {
     /// The filesystem type (`fstatfs` `f_type`) of the filesystem holding
     /// `fd`.
     fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError>;
+
+    /// The `Uid:` line of `/proc/<pid>/status` (real, effective, saved,
+    /// filesystem), read as [`Host::proc_nspid`] reads that file: readable
+    /// for every user's process unless `hidepid` hides it; `Gone` only on
+    /// the kernel's word. Who a liveness contract's process set holds
+    /// (docs/safety.md, Producer liveness, A process's paths).
+    fn proc_uids(&self, pid: Pid) -> Result<Ids, ProcError>;
+
+    /// The process's command line (`/proc/<pid>/cmdline`, its argument
+    /// vector split at NUL bytes), read through a live task as the
+    /// environment is. World-readable on Linux (no ptrace check), so
+    /// `Denied` comes only with `hidepid`. Empty for a process without a
+    /// memory map (a zombie, a kernel thread). For the pytest contract's
+    /// "a pytest is running" and naming tests (docs/safety.md, pytest
+    /// sessions).
+    fn proc_cmdline(&self, pid: Pid) -> Result<Vec<OsString>, ProcError>;
+
+    /// Resolves the absolute `path` in the process's own root, as the
+    /// kernel resolves it for that process: one `openat2` (`O_PATH`) from
+    /// `/proc/<pid>/root` with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`
+    /// (`..` clamps at that root; symlinks are followed inside it), `EAGAIN`
+    /// retried at most [`ROOT_LOOKUP_EAGAIN_RETRIES`] times, then a `statx`
+    /// of the result with `AT_NO_AUTOMOUNT | AT_STATX_DONT_SYNC`. The answer
+    /// starts with the object's (device, inode); with `climb`, it is
+    /// followed by those of the directories reached by `..` from it, by fd
+    /// (in diskgc's view, which only adds ancestors), up to the fixpoint
+    /// where `..` returns the same object, at most [`CLIMB_LEVELS_MAX`]
+    /// levels (more is an error). A non-directory is not climbed. Only
+    /// the temp-directory and `--basetemp` values pytest itself resolves
+    /// are ever looked up this way (docs/safety.md, A process's paths).
+    /// `Gone`: the process ended (the kernel's word, as for the other
+    /// readers); any other error: the value is unresolvable.
+    fn proc_root_lookup(
+        &self,
+        pid: Pid,
+        path: &Path,
+        climb: bool,
+    ) -> Result<Vec<DevIno>, ProcError>;
 }
+
+/// How often [`Host::proc_root_lookup`] retries an `openat2` that failed
+/// with `EAGAIN` (a rename raced the `RESOLVE_IN_ROOT` lookup) before the
+/// value is unresolvable (docs/safety.md, A process's paths).
+pub const ROOT_LOOKUP_EAGAIN_RETRIES: usize = 3;
+
+/// The defensive bound of a `..` climb without a fixpoint (docs/safety.md,
+/// A process's paths): a real tree is far shallower than this (`PATH_MAX`
+/// of 4096 bytes allows at most 2048 levels of one-byte names).
+pub const CLIMB_LEVELS_MAX: usize = 4096;
 
 /// The result of [`Host::read_dir`].
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -38,11 +38,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DirListing,
-    DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, LinkTarget,
-    LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry, OpenHow,
-    PROC_PID_INIT_INO, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, Space,
-    Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock, is_single_name, read_proc_view,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError,
+    LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
+    OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus,
+    ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock, is_single_name,
+    read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -1108,6 +1109,18 @@ fn read_environ(files: &impl ProcFiles, path: &str) -> Result<Vec<u8>, HostError
     .ok_or_else(|| HostError::invalid("read", path, "environment too large"))
 }
 
+/// Reads `cmdline` in one call, bounded as the environment is (both live
+/// in the argument area `execve` limits).
+fn read_cmdline(files: &impl ProcFiles, path: &str) -> Result<Vec<u8>, HostError> {
+    read_in_one_call(
+        FIRST_BUFFER,
+        MAX_ENVIRON,
+        || files.open(path),
+        |file, buf| files.read(file, buf),
+    )?
+    .ok_or_else(|| HostError::invalid("read", path, "command line too large"))
+}
+
 /// Reads `maps` of one task in two passes on separate opens, each to the
 /// end and confirmed (see [`read_confirmed`]), and takes their union (see
 /// [`read_two_passes`]).
@@ -1768,6 +1781,155 @@ impl Host for LinuxHost {
             )
         })
     }
+
+    /// One read of `/proc/<pid>/status` under a pidfd taken first, as
+    /// [`Host::proc_nspid`] reads it.
+    fn proc_uids(&self, pid: Pid) -> Result<diskgc_core::host::Ids, ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let path = format!("{pid}/status");
+        let read = || -> Result<diskgc_core::host::Ids, ProcError> {
+            let text = proc.read(&path).map_err(ProcError::from_host)?;
+            parse_status_ids(&text).map(|ids| ids.uid).map_err(|e| {
+                ProcError::Failed(HostError::invalid("parse", ProcRoot::shown(&path), e))
+            })
+        };
+        match read() {
+            Ok(uids) => Ok(uids),
+            Err(ProcError::Failed(e)) if is_vanished(&e) => {
+                match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                    PidfdPoll::Hangup => Err(ProcError::Gone),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::Failed(e)),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Through a live task, as the environment: a leader that called
+    /// `pthread_exit` has no memory map and reads empty.
+    fn proc_cmdline(&self, pid: Pid) -> Result<Vec<OsString>, ProcError> {
+        let proc = self.root();
+        let (_, bytes) = read_through_live_task(proc, pid, ("cmdline", "command line"), |path| {
+            read_cmdline(&Kernel(proc), path)
+        })?;
+        Ok(parse_cmdline(&bytes))
+    }
+
+    fn proc_root_lookup(
+        &self,
+        pid: Pid,
+        path: &Path,
+        climb: bool,
+    ) -> Result<Vec<DevIno>, ProcError> {
+        if !path.is_absolute() {
+            return Err(ProcError::Failed(HostError::invalid(
+                "openat2",
+                path.display(),
+                "a temp-root value is looked up only when absolute",
+            )));
+        }
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let rel = format!("{pid}/root");
+        let root = match proc.open(&rel, OFlags::PATH | OFlags::DIRECTORY) {
+            Ok(root) => root,
+            Err(e) if is_vanished(&e) => {
+                return match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                    PidfdPoll::Hangup => Err(ProcError::Gone),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::from_host(e)),
+                };
+            }
+            Err(e) => return Err(ProcError::from_host(e)),
+        };
+        let shown = || format!("{} in {}", path.display(), ProcRoot::shown(&rel));
+        let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS;
+        let mut attempts = 0;
+        let object = loop {
+            match rustix::fs::openat2(
+                &root,
+                path,
+                OFlags::PATH | OFlags::CLOEXEC,
+                Mode::empty(),
+                resolve,
+            ) {
+                Ok(fd) => break fd,
+                Err(rustix::io::Errno::AGAIN)
+                    if attempts < diskgc_core::host::ROOT_LOOKUP_EAGAIN_RETRIES =>
+                {
+                    attempts += 1;
+                }
+                Err(e) => {
+                    return Err(ProcError::Failed(HostError::errno(
+                        "openat2",
+                        shown(),
+                        errno_of(e),
+                    )));
+                }
+            }
+        };
+        let id_of = |fd: &OwnedFd| -> Result<(DevIno, bool), ProcError> {
+            let stat = rustix::fs::statx(
+                fd,
+                "",
+                AtFlags::EMPTY_PATH | AtFlags::NO_AUTOMOUNT | AtFlags::STATX_DONT_SYNC,
+                STATX_MASK,
+            )
+            .map(|x| stat_from_statx(&x))
+            .map_err(|e| ProcError::Failed(HostError::errno("statx", shown(), errno_of(e))))?;
+            let id = stat.dev_ino().ok_or_else(|| {
+                ProcError::Failed(HostError::invalid(
+                    "statx",
+                    shown(),
+                    "the kernel reported no inode number",
+                ))
+            })?;
+            Ok((id, stat.file_type == Some(FileType::Directory)))
+        };
+        let (first, is_dir) = id_of(&object)?;
+        let mut chain = vec![first];
+        if !(climb && is_dir) {
+            return Ok(chain);
+        }
+        let mut here = object;
+        for _ in 0..diskgc_core::host::CLIMB_LEVELS_MAX {
+            let up = rustix::fs::openat(
+                &here,
+                "..",
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| ProcError::Failed(HostError::errno("openat", shown(), errno_of(e))))?;
+            let (id, _) = id_of(&up)?;
+            if Some(&id) == chain.last() {
+                return Ok(chain);
+            }
+            chain.push(id);
+            here = up;
+        }
+        Err(ProcError::Failed(HostError::invalid(
+            "climb",
+            shown(),
+            format!(
+                "no fixpoint after {} levels of `..`",
+                diskgc_core::host::CLIMB_LEVELS_MAX
+            ),
+        )))
+    }
+}
+
+/// `/proc/<pid>/cmdline`: the arguments, each ended by a NUL byte (the
+/// last one's NUL may be missing when a process rewrote its argument
+/// area). Nothing is dropped: an empty argument stays an empty string.
+fn parse_cmdline(bytes: &[u8]) -> Vec<OsString> {
+    let bytes = bytes.strip_suffix(b"\0").unwrap_or(bytes);
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    bytes
+        .split(|b| *b == 0)
+        .map(|arg| OsString::from_vec(arg.to_vec()))
+        .collect()
 }
 
 /// A `statfs` `f_type` as a 32-bit magic, without folding: a value that
@@ -3956,6 +4118,57 @@ mod tests {
         assert_eq!(facts.initial, inode == PROC_PID_INIT_INO, "{facts:?}");
     }
 
+    /// The pytest contract's readers on our own process (read-only, the
+    /// host's real `/proc`): our uids and command line; a value resolved
+    /// in our root is the object a plain `stat` names, `..` clamped at the
+    /// root, the climb ending at the root's fixpoint; a relative value and
+    /// a missing path are refused, a reaped child is `Gone`.
+    #[test]
+    fn pytest_readers_follow_the_process() {
+        let host = LinuxHost::new().expect("host setup");
+        let own = host.own_pid();
+        let uids = host.proc_uids(own).expect("own uids");
+        assert_eq!(uids.real, rustix::process::getuid().as_raw());
+        let args = host.proc_cmdline(own).expect("own command line");
+        let expected: Vec<OsString> = std::env::args_os().collect();
+        assert_eq!(args, expected);
+        let ino = |path: &str| std::fs::metadata(path).expect("stat").ino();
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.to_str().expect("UTF-8 temp dir");
+        let chain = host
+            .proc_root_lookup(own, Path::new(&format!("/../..{tmp}")), true)
+            .expect("temp dir in our root");
+        assert_eq!(chain.first().expect("the object first").ino, ino(tmp));
+        let root = chain.last().expect("a climb ends at the root");
+        assert_eq!(root.ino, ino("/"), "{chain:?}");
+        assert_eq!(
+            host.proc_root_lookup(own, Path::new("/"), true)
+                .expect("the root")
+                .len(),
+            1,
+            "the root is its own fixpoint"
+        );
+        assert!(matches!(
+            host.proc_root_lookup(own, Path::new("relative"), false),
+            Err(ProcError::Failed(_))
+        ));
+        assert!(matches!(
+            host.proc_root_lookup(own, Path::new("/nonexistent-diskgc-test-path"), false),
+            Err(ProcError::Failed(_))
+        ));
+        let mut child = process::Command::new("true").spawn().expect("spawn true");
+        let pid = Pid(child.id());
+        child.wait().expect("reap");
+        if !host.pid_alive(pid).expect("probe a reaped pid") {
+            assert_eq!(host.proc_cmdline(pid), Err(ProcError::Gone));
+            assert_eq!(host.proc_uids(pid), Err(ProcError::Gone));
+            assert_eq!(
+                host.proc_root_lookup(pid, Path::new("/"), false),
+                Err(ProcError::Gone)
+            );
+        }
+    }
+
     /// Our own NSpid starts with our pid; a reaped child's pid is no
     /// longer alive and its status is `Gone`.
     #[test]
@@ -4157,6 +4370,7 @@ mod tests {
                 users: &[uid],
                 sockets: true,
                 pid_lookup: true,
+                pytest_facts: false,
             },
         )
         .expect("scan");

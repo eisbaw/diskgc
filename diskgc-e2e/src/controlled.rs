@@ -595,6 +595,26 @@ impl<H: Host> Host for Controlled<H> {
         self.before("fs_magic");
         self.host.fs_magic(fd)
     }
+
+    fn proc_uids(&self, pid: Pid) -> Result<diskgc_core::host::Ids, ProcError> {
+        self.before("proc_uids");
+        self.host.proc_uids(pid)
+    }
+
+    fn proc_cmdline(&self, pid: Pid) -> Result<Vec<std::ffi::OsString>, ProcError> {
+        self.before("proc_cmdline");
+        self.host.proc_cmdline(pid)
+    }
+
+    fn proc_root_lookup(
+        &self,
+        pid: Pid,
+        path: &Path,
+        climb: bool,
+    ) -> Result<Vec<diskgc_core::host::DevIno>, ProcError> {
+        self.before("proc_root_lookup");
+        self.host.proc_root_lookup(pid, path, climb)
+    }
 }
 
 impl<H: Delete> Delete for Controlled<H> {

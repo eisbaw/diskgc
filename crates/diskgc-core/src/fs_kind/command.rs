@@ -297,6 +297,7 @@ fn protocol<H: Delete>(
                     .iter()
                     .map(|at| (alternatives[*at].judge.find, alternatives[*at].found)),
                 candidate.parent(),
+                &record,
             )? {
                 result.selected = Some(admitted[veto_index]);
                 return Err(skip.into());

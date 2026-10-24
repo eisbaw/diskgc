@@ -379,6 +379,27 @@ pub struct ProcessSpec {
     /// fds or maps.
     #[serde(default, skip_serializing_if = "is_false")]
     pub zombie: bool,
+    /// Its command line (`/proc/<pid>/cmdline`), one string per argument;
+    /// default `[exe]` (the executable's path, or nothing without one);
+    /// `unreadable`: every read fails (`Failed`). Readable whatever
+    /// `proc:` says, as on Linux; a zombie's reads empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<CmdlineSpec>,
+    /// Path prefixes as its root and mount namespace see them, mapped to
+    /// the model's paths (`{/tmp: /tmp/nix-shell.AB}`: its `/tmp` is the
+    /// model's `/tmp/nix-shell.AB`), used only by temp-root lookups
+    /// (`proc_root_lookup`); the longest matching prefix wins, and a path
+    /// no prefix matches is below its `root`. Default: none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view: BTreeMap<PathBuf, PathBuf>,
+}
+
+/// A process's command line, or `unreadable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CmdlineSpec {
+    Args(Vec<String>),
+    Unreadable(UnreadableTag),
 }
 
 /// Which PID namespace diskgc runs in, as Owner PID's precondition sees it.
@@ -669,6 +690,9 @@ pub enum Op {
     ProcNspid,
     PidAlive,
     FsMagic,
+    ProcUids,
+    ProcCmdline,
+    ProcRootLookup,
     MayDelete,
     Unlinkat,
     Fchmod,
@@ -710,6 +734,9 @@ impl Op {
             Self::ProcNspid => "proc_nspid",
             Self::PidAlive => "pid_alive",
             Self::FsMagic => "fs_magic",
+            Self::ProcUids => "proc_uids",
+            Self::ProcCmdline => "proc_cmdline",
+            Self::ProcRootLookup => "proc_root_lookup",
             Self::MayDelete => "may_delete",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",

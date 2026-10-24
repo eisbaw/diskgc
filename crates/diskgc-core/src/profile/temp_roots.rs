@@ -9,6 +9,7 @@ const NODE_COMPILE_CACHE_BASE: &str = "node-compile-cache";
 const PLAYWRIGHT_BASE: &str = "playwright*";
 const RENODE_BASE: &str = "renode-*";
 const JEST_BASE: &str = "jest_*";
+const PYTEST_BASE: &str = "pytest-of-*/pytest-*";
 
 /// Relative to each fixed root of an opting-in built-in. The empty prefix
 /// covers the root itself. Nested-shell patterns end after two shell levels
@@ -61,6 +62,7 @@ pub(super) fn effective(
         "playwright-tmp" => PLAYWRIGHT_BASE,
         "renode-tmp" => RENODE_BASE,
         "jest-cache" => JEST_BASE,
+        "pytest-tmp" => PYTEST_BASE,
         _ => return Ok(patterns),
     };
     let expanded = expand(base);
@@ -108,6 +110,7 @@ mod tests {
             ("playwright-tmp", PLAYWRIGHT_BASE),
             ("renode-tmp", RENODE_BASE),
             ("jest-cache", JEST_BASE),
+            ("pytest-tmp", PYTEST_BASE),
         ] {
             let expanded = effective(Origin::BuiltIn, name, vec![base.to_owned()]).expect("preset");
             assert_eq!(
