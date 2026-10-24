@@ -129,6 +129,10 @@ namespace, under `hidepid`, or on a filesystem off their local list, and
 assume such a filesystem is written by this kernel only; heuristic
 contracts name their residual cases in the liveness table
 ([reference.md](docs/reference.md#liveness-contracts)).
+The `nix-store` kind binds one daemon and its root database; it cannot
+rule out a second root database over the same physical store, and Nix's
+own root discovery removes stale `gcroots/auto` registrations whose
+out-link is gone ([safety.md](docs/safety.md#nix-store)).
 
 ## What good looks like (observable)
 
@@ -179,8 +183,8 @@ when, and never as root.
   files open, mapped or as working directory; a socket or FIFO deleted
   under the default policy, or, under any policy, one a visible process
   holds open or has bound in diskgc's network namespace.
-- A Docker volume or container, a Nix GC root, profile or generation
-  removed.
+- A Docker volume or container removed; a Nix GC root, profile or
+  generation of the bound daemon's root database removed.
 - Deletion following a symlink or crossing into another mount.
 - A pressure tier running while an earlier tier still had eligible
   candidates that diskgc could have discovered.

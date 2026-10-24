@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-19 12:19'
-updated_date: '2026-10-20 03:13'
+updated_date: '2026-10-24 08:32'
 labels:
   - library
 dependencies:
@@ -34,4 +34,6 @@ Why: dead Nix store paths were only ~2 GiB, but 19-74 GiB of the 157 GiB store i
 Implementation dependency/safety design: The current fs profile EntryType and discovery refuse every symlink candidate, and ordinary engine deletion cannot yet express the root registration check. A dedicated no-follow out-link protocol must verify a user-owned result-style symlink under supplied roots, its absolute store target, exact registration name and readlink content under /nix/var/nix/gcroots/auto, exclude /nix/var/nix/profiles and all system/user profile links, check idle/in-use and ownership, then recheck both link identities/content immediately before fd-relative unlink. Avoid unlinking root-owned auto entries directly; Nix cleans a dangling auto entry during its later GC. This needs model and isolated-Nix-store E2E tests, including forged registration, symlink swap, active result, profiles, and alternative NIX_REMOTE.
 
 AC #2 is blocked by TASK-36 (nix-store kind currently rejected by profile loader) and a further what-if estimation problem: before out-links are removed, Nix still treats them as live, so current dead-path queries cannot report the store bytes that a subsequent GC would free. Implement and verify an explicit hypothetical-root closure analysis or revise the AC to report link count plus a separately measured post-removal GC result; do not call a host GC query read-only because Nix root discovery mutates stale registrations. No profile shipped in this audit.
+
+From TASK-118 (2026-10-24): the nix-store kind (designed, docs/safety.md nix-store) never removes out-links or gcroots/auto registrations itself; Nix's root discovery (its pre-GC root check and the GC) unlinks only registrations whose out-link is gone. Removing stale but extant out-links remains this task's protocol. Nix units are unsized (architecture.md, The tally): AC #2's 'store bytes the GC would then free' still needs the hypothetical-root analysis noted above; nix-store's own dry run reports estimated_bytes null and does not run --query --roots.
 <!-- SECTION:NOTES:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-118
 title: 'Design: nix-store store and root-database binding protocol'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:19'
-updated_date: '2026-10-24 08:24'
+updated_date: '2026-10-24 08:45'
 labels:
   - irreversible
   - design
@@ -21,10 +21,10 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 docs/safety.md nix-store has a complete binding protocol and failure modes
-- [ ] #2 docs/reference.md nix-store schema fields are final (not provisional)
-- [ ] #3 docs/testing.md names the nix-store scenarios
-- [ ] #4 mped-architect design review GO recorded in notes
+- [x] #1 docs/safety.md nix-store has a complete binding protocol and failure modes
+- [x] #2 docs/reference.md nix-store schema fields are final (not provisional)
+- [x] #3 docs/testing.md names the nix-store scenarios
+- [x] #4 mped-architect design review GO recorded in notes
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -47,4 +47,14 @@ Host facts (2026-10-24, read-only, uid 1000 untrusted): nix --version -> 'nix (N
 Design written on branch task118-design (docs/safety.md nix-store, reference.md Backend skips and errors + Backend version allowlist + final nix-store profile shape, architecture.md Nix unsized, testing.md nix-store backend vectors + Nix GC container scenarios; JSON skip enum: unsupported_store removed, backend_unavailable added, with the two test lists that pin it).
 Reviews. codex round 1 (cross-model, adversarial, read Nix 2.34.8 source): BLOCKERS: root check passable via per-link indirection; realStoreDir unbound; root check and GC on separate connections; NIX_DAEMON_SOCKET_PATH uncaught; second root DB and gcroots/auto unlinking vs the PRD must-never; order and trusted-settings wording. mped-architect round 1: FIX FIRST: step 1 rejected every real CppNix (bin/nix-store is a symlink to the multi-call nix, verified on host); nix argv lacked --extra-experimental-features nix-command; caller-env 'nix store info' would connect to a user-selected remote store (replaced by 'nix config show store', verified to open no store and to reflect NIX_CONFIG/NIX_REMOTE); a bare connect misses a failed socket-activated daemon (now a bounded WORKER_MAGIC handshake probe); unstated canary cost and step 8->9 window. Changes: all folded in; step 8 now checks every generation link (bounded) and states the indirection false pass, realStoreDir and the 8->9 window as limits; allowlist split into daemon and client lists. codex round 2: handshake (authPeer before WORKER_MAGIC_2) and root-check claims confirmed against source; one new blocker: NIX_STATE_DIR (and NIX_STORE_DIR/NIX_STORE) redirect 'auto' without showing in the store setting (resolveStoreConfig takes a local store when the state dir is writable) -> step 5 now refuses non-default NIX_STATE_DIR, NIX_STORE_DIR, NIX_STORE, NIX_DAEMON_SOCKET_PATH (env names confirmed in 2.34.8 globals.cc/store-api.cc). mped-architect round 2: GO (non-blocking: clarify the 1,024 bound -> done; probe may log a daemon error per preflight -> TASK-36 to observe). Not adopted: root-DB mismatch as error instead of skip (kept under the one rule).
 Open for Mark: (a) PRD 'A Nix GC root, profile or generation removed' must-never vs the stated limit (second root database over the same physical store) and Nix's unlinking of dangling gcroots/auto registrations during root discovery: proposed PRD wording 'a GC root, profile or generation of the bound daemon's root database'; (b) remote Nix stores reported as remote_backend (consistent with Docker and architecture.md) instead of unsupported_backend as in the 2026-10-23 ruling.
+
+Committed 460d264 on task118-design (rebased onto master 109895b, clean). Evidence (worktree cwd, CARGO_TARGET_DIR=<worktree>/tmp/target): 'nix develop -c just docs-check' exit 0 (diskgc-core lib 266 passed); 'python3 tools/check_docs.py docs/reference.md docs/safety.md' exit 0; same for docs/architecture.md docs/testing.md exit 0; 'nix develop -c just e2e' exit 0 (10:32-10:44 CEST, after the other session's e2e had finished); qa-test-runner on the pre-rebase tree: just check, cargo test -p diskgc-model/-p diskgc-core all exit 0, clippy clean. Not merged. Status left In Progress pending merge and Mark's two open decisions above.
+
+Decision 2026-10-24 by mark-emulator (Mark delegated questions to it; Mark may veto): (1) PRD 'What bad looks like' scoped to 'a Nix GC root, profile or generation of the bound daemon's root database removed', and the second-root-database / gcroots-auto behaviour stated in PRD Limits. (2) remote_backend (not unsupported_backend) for remote Nix stores, consistent with Docker. Design merged to master (460d264).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Design merged (460d264): nix-store binding protocol in docs/safety.md, final schema and backend skip-vs-error rule in docs/reference.md, Nix sizing in docs/architecture.md, vectors and container scenarios in docs/testing.md. Reviews: codex x2 (blockers fixed), mped-architect GO, QA pass; just e2e exit 0 on the rebased tree. PRD scoped per mark-emulator decision. Implementation is TASK-36.
+<!-- SECTION:FINAL_SUMMARY:END -->

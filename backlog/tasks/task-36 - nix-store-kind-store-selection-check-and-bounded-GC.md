@@ -4,7 +4,7 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+updated_date: '2026-10-24 08:45'
 labels:
   - wave-4
   - irreversible
@@ -25,8 +25,8 @@ Why: Nix stores grow without bound on development machines. Implement nix-store 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 GC removes only dead paths in the container store; roots and generations survive
-- [ ] #2 NIX_REMOTE pointing elsewhere yields unsupported_store reported as an error
-- [ ] #3 Killing diskgc while nix-store runs leaves the host lock held until it exits
+- [ ] #2 Killing diskgc while nix-store runs leaves the host lock held until it exits
+- [ ] #3 A remote or non-default store, a single-user layout, or a non-allowlisted Nix version is skipped per docs/reference.md 'Backend skips and errors' (remote_backend / unsupported_backend), never GC'd
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -50,6 +50,16 @@ Clarification of the preceding state-A/state-B experiment: state B recorded the 
 Orchestrator 2026-10-23 (design audit): now depends on TASK-118 (store/root-db binding protocol design).
 
 Orchestrator 2026-10-24 (COMPASS round 2): dropped the TASK-34 edge (nix-store does not depend on index hardening). Naming: settle skip-vs-error and unsupported_store vs unsupported_backend across all backends inside TASK-118 (Mark ruled refuse with unsupported_backend; Docker client failures are skips per TASK-120).
+
+From TASK-118 (2026-10-24, branch task118-design; design in docs/safety.md nix-store, reference.md 'Backend skips and errors' and 'Backend version allowlist', testing.md 'nix-store backend vectors' + 'Nix GC' container scenarios). Implementation plan, bottom-up:
+1. Host port (diskgc-core host.rs): closed enum NixQuery {ClientVersion, ConfigShowStore, StoreInfoPinned, } on Host (ungated), mapped to constant argv in LinuxHost; every 'nix' argv carries --extra-experimental-features nix-command; exec '<store path>/bin/nix-store' or '<dir>/bin/nix' (argv[0] keeps multi-call dispatch), never PATH again. New ungated query nix_daemon_probe(pinned fd): connect, send WORKER_MAGIC_1, read WORKER_MAGIC_2 within 10 s, close -> Serving | Eof | Timeout | WrongMagic | Errno. Socket pin reuses the Docker pattern (O_PATH|O_NOFOLLOW, fstat, /proc/self/fd/N inherited). Deleting runs on Delete (gated, Permit): NixRun {QueryRoots(targets), Gc{max_freed}}; env exactly HOME + NIX_USER_CONF_FILES=''; inherit host lock; own process group; SIGTERM->10 s->SIGKILL. Extend the source-scan allowlist by those wrappers only.
+2. Pure binder diskgc-core nix_backend.rs (mirror docker_backend.rs: Binding::{Bound,Skipped}, reasons as in safety.md steps 1-6), plus the allowlist constants (two lists: daemon versions, client --version lines; both EMPTY until step 5 passes). Root check (step 8) pure: generation-link selection from listings (<=4,096 entries per dir, <=1,024 links) and exact '<link> -> <target>' matching of --query --roots output.
+3. Executor: kind nix-store loads ({kind, find:{roots: daemon}} only), refused under --allow-root at static invocation (exit 2); preflight binds; reclaim does recheck (changed), root check, GC with need = goal - fresh sample (>=1), one GC per tier, action candidate /nix/store, estimated_bytes null. backend_unavailable becomes a produced reason: drop it from REASONS_WITHOUT_PRODUCER (profile_vectors.rs).
+4. ModelHost 'nix:' block + the vectors listed in testing.md (each must turn red when its step is removed).
+5. Container image with pinned CppNix 2.34.8 daemon (own /nix, diskgc uid 1000) and the listed scenarios; confirm in it: --query --roots output format for direct and per-user generation links, handshake EOF on allowed-users refusal and on a failed socket-activated service, the claimed GC semantics (max-freed stop, .links phase after limit, hang-up interruption), whether a trusted client forwards system-file settings, and the root check's duration. Only then add 2.34.8 to both allowlist lists and lift the loader refusal.
+AC #2 is superseded by the one backend rule (reference.md): NIX_REMOTE pointing elsewhere is a SKIP, remote_backend for remote schemes and unsupported_backend otherwise, exit decided by space; 'unsupported_store' no longer exists. Suggest rewording AC #2 accordingly (not edited here: TASK-118 may only append notes to this task).
+
+Orchestrator 2026-10-24: AC #2 text ('unsupported_store reported as an error') is superseded by TASK-118: unsupported_store is removed from the JSON enum; remote stores skip with remote_backend, unsupported layouts/versions with unsupported_backend, per the backend skip-vs-error rule in docs/reference.md. Rewording AC #2 accordingly.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
