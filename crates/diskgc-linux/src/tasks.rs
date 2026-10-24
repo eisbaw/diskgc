@@ -139,7 +139,7 @@
 //! call.
 //!
 //! Each task entry is bracketed by two `stat` reads through the same held
-//! procfs task directory. The directory inode holds the kernel `struct pid`;
+//! procfs `stat` file of the task. Its inode holds the kernel `struct pid`;
 //! a recycled numeric tid cannot redirect the second `stat` to a new task,
 //! even if both tasks started in one clock tick. A changed `starttime`
 //! (field 22) or a vanished held task discards the round. `de_thread` swaps
@@ -161,6 +161,11 @@
 //! freshness limit bounds the time this answer can be used, but not the
 //! rate of pid reuse within it. A zombie whose `status` is hidden
 //! (`hidepid`) is `Failed`, not `Gone`.
+//!
+//! For [`Want::EveryTask`], a task whose entry the kernel says is the very
+//! object an earlier task of the round was read for (an fd table shared by
+//! `CLONE_FILES`) counts as read by that read ([`same_as_reference`]): a
+//! desktop's thousands of threads share some hundreds of fd tables.
 //!
 //! The decisions are made here without I/O ([`collect`] takes the reads as
 //! closures; [`has_exited`], [`shortfall`], [`task_status`] and
@@ -206,22 +211,24 @@ pub(crate) fn parse_task_stat(text: &[u8]) -> Result<TaskStat, String> {
         .ok_or_else(|| format!("task stat without ')': {}", shown()))?;
     let rest = std::str::from_utf8(&text[close + 1..])
         .map_err(|_| format!("non-UTF-8 task stat: {}", shown()))?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
     // After the name: state(3) ppid(4) pgrp(5) session(6) tty_nr(7)
-    // tpgid(8) flags(9) ... starttime(22).
+    // tpgid(8) flags(9) ... starttime(22). Read in place: this runs twice
+    // per task entry read, so it allocates nothing (TASK-115).
+    let mut fields = rest.split_whitespace();
     let state = fields
-        .first()
+        .next()
         .and_then(|s| {
             let mut chars = s.chars();
             chars.next().filter(|_| chars.next().is_none())
         })
         .ok_or_else(|| format!("no state in task stat: {}", shown()))?;
+    // nth counts from the field after the state.
     let flags: u64 = fields
-        .get(6)
+        .nth(5)
         .and_then(|f| f.parse().ok())
         .ok_or_else(|| format!("no flags in task stat: {}", shown()))?;
     let start_ticks = fields
-        .get(19)
+        .nth(12)
         .and_then(|f| f.parse().ok())
         .ok_or_else(|| format!("no starttime in task stat: {}", shown()))?;
     Ok(TaskStat {
@@ -316,6 +323,13 @@ impl Listing {
         }
     }
 
+    /// The tasks of one plain listing, for [`Want::FirstLiveTask`]: neither
+    /// counted nor confirmed, which that want does not need (see
+    /// [`shortfall`]).
+    pub(crate) fn candidates(tids: Vec<u32>) -> Self {
+        Self::new(tids, 0, &[])
+    }
+
     /// A host saw a different procfs inode under a numeric tid before and
     /// after the count. The numeric listing alone cannot prove which tasks
     /// were counted, even if it contains the same numbers both times.
@@ -384,7 +398,7 @@ pub(crate) struct Process<L, P, G> {
 }
 
 /// How [`collect`] reaches the tasks of one process.
-pub(crate) struct Tasks<R, E, S> {
+pub(crate) struct Tasks<R, E, S, K> {
     /// What a read gives, for messages ("fd table", "environment", ...).
     pub what: &'static str,
     /// Reads one task's entry.
@@ -394,6 +408,16 @@ pub(crate) struct Tasks<R, E, S> {
     pub is_empty: E,
     /// Reads one task's `stat`.
     pub stat: S,
+    /// `shares(reference, tid)`: whether the kernel says, now, that task
+    /// `tid` holds the very object task `reference` holds for this entry
+    /// (`kcmp(KCMP_FILES)` for the fd table). `false` whenever that cannot
+    /// be told; then `tid` is read in full ([`same_as_reference`]).
+    pub shares: K,
+}
+
+/// The `shares` of an entry that is never taken from another task's read.
+pub(crate) fn never_shared(_: u32, _: u32) -> bool {
+    false
 }
 
 /// What one read of one task says, for the round's decision.
@@ -435,9 +459,10 @@ fn observe<T>(
         impl FnMut(u32) -> Result<T, HostError>,
         impl Fn(&T) -> bool,
         impl FnMut(u32) -> Result<TaskStat, HostError>,
+        impl FnMut(u32, u32) -> bool,
     >,
     want: Want,
-) -> Result<(Option<T>, Seen), ProcError> {
+) -> Result<(Option<T>, Seen, Option<TaskStat>), ProcError> {
     let before = (tasks.stat)(tid);
     let result = (tasks.read)(tid);
     let after = (tasks.stat)(tid);
@@ -465,18 +490,86 @@ fn observe<T>(
         Err(e) if is_vanished(&e) => None,
         Err(e) => return Err(ProcError::from_host(e)),
     };
-    Ok((value, seen))
+    Ok((value, seen, after.ok()))
+}
+
+/// Whether task `tid` can be counted as read by the round's reference read
+/// (`reference`: a task whose own read in this round was kept, trusted and
+/// made while it was live, and its `stat` after that read), without
+/// reading `tid`'s entry itself. In this order: `tid`'s `stat` (which pins
+/// it before the comparison; it being live already only spares a
+/// comparison that could not count); `shares(reference, tid)` true; the reference's `stat` again, live and
+/// with its start time; `tid`'s `stat` again, live and with its start time.
+/// Every `stat` goes through the task's held procfs file, which pins its
+/// `struct pid`. Anything else, an error included, is `false`, and `tid`
+/// is read in full (and its errors reported) by [`observe`].
+///
+/// Why one read then stands for both (`KCMP_FILES`, the fd table): a task
+/// only ever leaves a table it shares, never joins one that exists:
+/// `unshare(CLONE_FILES)` and `execve` give the caller a copy, and only a
+/// task created afterwards by `clone(CLONE_FILES)` can share that copy.
+/// The reference was live with its start time after its read and again
+/// after the comparison, through its held file, so the comparison saw the
+/// reference itself, not a task that took its number. `tid`'s held file may
+/// have been opened only here (by number, after the listing), so `tid` is
+/// not shown to be the listed task; it does not need to be. The table both
+/// hold at the comparison is either the one the reference read, which
+/// `tid` held at the read too or joined only by being created since (a
+/// thread started after the round's count, docs/safety.md limit 1), or a
+/// copy the reference made after its read, which only a task created since
+/// can share (limit 1 again); what was opened in it after the read is the
+/// check-to-use race (limit 5). An exec in the process kills every other
+/// task before it swaps tids (`de_thread`), so a task compared across it is
+/// not live at its second `stat`. `kcmp` itself compares two pointers
+/// without a lock (docs/safety.md limit 7).
+fn same_as_reference(
+    reference: (u32, TaskStat),
+    tid: u32,
+    stat: &mut impl FnMut(u32) -> Result<TaskStat, HostError>,
+    shares: &mut impl FnMut(u32, u32) -> bool,
+) -> bool {
+    let live = |read: &Result<TaskStat, HostError>| matches!(task_status(read), Ok(Status::Live));
+    let (reference_tid, reference_stat) = reference;
+    let before = stat(tid);
+    if !live(&before) || !shares(reference_tid, tid) {
+        return false;
+    }
+    let reference_again = stat(reference_tid);
+    if !live(&reference_again)
+        || reference_again.is_ok_and(|now| now.start_ticks != reference_stat.start_ticks)
+    {
+        return false;
+    }
+    let after = stat(tid);
+    live(&after) && matches!((before, after), (Ok(b), Ok(a)) if b.start_ticks == a.start_ticks)
 }
 
 /// What one round of [`collect`] has read so far.
 struct Round<T> {
     results: Vec<T>,
     seen: BTreeMap<u32, Seen>,
+    /// The first task of the round whose own read was kept, trusted and
+    /// made while it was live, with its `stat` after that read: the read a
+    /// task sharing its entry is counted by ([`same_as_reference`]). Only
+    /// for [`Want::EveryTask`]; never carried into another round.
+    reference: Option<(u32, TaskStat)>,
 }
 
 impl<T> Round<T> {
-    /// Reads task `tid` into the round (see [`observe`]); true when the
-    /// round is done: [`Want::FirstLiveTask`] got its read.
+    fn new() -> Self {
+        Self {
+            results: Vec::new(),
+            seen: BTreeMap::new(),
+            reference: None,
+        }
+    }
+
+    /// Reads task `tid` into the round (see [`observe`]), or counts it as
+    /// read by the round's reference read when it shares the reference's
+    /// entry ([`same_as_reference`]); true when the round is done:
+    /// [`Want::FirstLiveTask`] got its read. `may_share` false: always a
+    /// read of its own (the leader's re-read after a task was seen ended,
+    /// which looks for an exec's survivor).
     fn read(
         &mut self,
         pid: u32,
@@ -485,12 +578,30 @@ impl<T> Round<T> {
             impl FnMut(u32) -> Result<T, HostError>,
             impl Fn(&T) -> bool,
             impl FnMut(u32) -> Result<TaskStat, HostError>,
+            impl FnMut(u32, u32) -> bool,
         >,
         want: Want,
+        may_share: bool,
     ) -> Result<bool, ProcError> {
-        let (value, seen) = observe(pid, tid, tasks, want)?;
+        if want == Want::EveryTask
+            && may_share
+            && let Some(reference) = self.reference
+            && reference.0 != tid
+            && same_as_reference(reference, tid, &mut tasks.stat, &mut tasks.shares)
+        {
+            self.seen.insert(tid, Seen::Trusted(Status::Live));
+            return Ok(false);
+        }
+        let (value, seen, after) = observe(pid, tid, tasks, want)?;
         self.seen.insert(tid, seen);
         let kept = value.map(|value| self.results.push(value)).is_some();
+        if want == Want::EveryTask
+            && kept
+            && seen == Seen::Trusted(Status::Live)
+            && self.reference.is_none()
+        {
+            self.reference = after.map(|after| (tid, after));
+        }
         Ok(kept && want == Want::FirstLiveTask)
     }
 }
@@ -504,8 +615,12 @@ enum Shortfall {
     Miscounted { listed: usize, counted: usize },
     /// A task's read cannot be trusted.
     Untrusted { tid: u32, seen: Seen },
-    /// No task of a complete listing was live.
+    /// No task of a complete listing (or, for [`Want::FirstLiveTask`], of
+    /// the plain listing) gave a usable read.
     NothingLive,
+    /// The same for [`Want::FirstLiveTask`], whose listing is not checked
+    /// for completeness.
+    NoLiveRead,
 }
 
 impl Shortfall {
@@ -518,8 +633,8 @@ impl Shortfall {
             }
             Self::Untrusted { tid, seen } => match seen {
                 Seen::Empty => format!(
-                    "task {tid} is live but its {what} was empty (an empty one cannot be told \
-                     from a read bound to another task)"
+                    "task {tid} is live but gave an empty or incomplete {what} (which cannot be \
+                     told from a read bound to another task)"
                 ),
                 Seen::Missing => format!("task {tid} is live but its {what} said ENOENT"),
                 Seen::LeaderVanished => format!("the leader's entry (task {tid}) vanished"),
@@ -527,6 +642,7 @@ impl Shortfall {
                 Seen::Trusted(_) => format!("task {tid} gave no trustworthy read"),
             },
             Self::NothingLive => "no task of a complete listing was live".to_owned(),
+            Self::NoLiveRead => format!("no listed task gave its {what} while live"),
         }
     }
 }
@@ -534,7 +650,22 @@ impl Shortfall {
 /// What a round lacks to be the answer, or `None` when it is the answer:
 /// its listing is [complete](Listing::complete), every task it read gave a
 /// trusted read, and one of them is live.
-fn shortfall(listing: &Listing, seen: &BTreeMap<u32, Seen>) -> Option<Shortfall> {
+///
+/// For [`Want::FirstLiveTask`] the listing is not judged: such a round is
+/// the answer as soon as one task gives a usable read ([`collect`] returns
+/// it then, before asking this), whatever else the listing holds or lacks,
+/// because every task of a process shares the memory map and environment
+/// it reads, and that read is bracketed by the task's own `stat`s. Its
+/// listing only names the tasks to try ([`Listing::candidates`]); here it
+/// only says why no task gave one.
+fn shortfall(listing: &Listing, seen: &BTreeMap<u32, Seen>, want: Want) -> Option<Shortfall> {
+    if want == Want::FirstLiveTask {
+        return seen
+            .iter()
+            .find(|(_, seen)| !matches!(seen, Seen::Trusted(_)))
+            .map(|(&tid, &seen)| Shortfall::Untrusted { tid, seen })
+            .or(Some(Shortfall::NoLiveRead));
+    }
     if !listing.confirmed {
         Some(Shortfall::Changed)
     } else if !listing.complete() {
@@ -580,6 +711,7 @@ pub(crate) fn collect<T>(
         impl FnMut(u32) -> Result<T, HostError>,
         impl Fn(&T) -> bool,
         impl FnMut(u32) -> Result<TaskStat, HostError>,
+        impl FnMut(u32, u32) -> bool,
     >,
     want: Want,
 ) -> Result<Vec<T>, ProcError> {
@@ -597,12 +729,9 @@ pub(crate) fn collect<T>(
             lacked = "its task listing vanished".to_owned();
             continue;
         };
-        let mut round = Round {
-            results: Vec::new(),
-            seen: BTreeMap::new(),
-        };
+        let mut round = Round::new();
         for &tid in &listing.tids {
-            if round.read(pid, tid, &mut tasks, want)? {
+            if round.read(pid, tid, &mut tasks, want, true)? {
                 return Ok(round.results);
             }
         }
@@ -612,10 +741,10 @@ pub(crate) fn collect<T>(
             .seen
             .iter()
             .any(|(&tid, how)| tid != pid && matches!(how, Seen::Trusted(s) if s.ended()));
-        if thread_ended && round.read(pid, pid, &mut tasks, want)? {
+        if thread_ended && round.read(pid, pid, &mut tasks, want, false)? {
             return Ok(round.results);
         }
-        match shortfall(&listing, &round.seen) {
+        match shortfall(&listing, &round.seen, want) {
             None => return Ok(round.results),
             Some(lack) => {
                 lacked = lack.describe(tasks.what);
@@ -675,7 +804,7 @@ pub(crate) fn owner_through_live_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     fn errno(e: Errno) -> HostError {
         HostError::errno("read", "/proc/1/task/2/fd", e)
@@ -797,6 +926,35 @@ mod tests {
                 read,
                 is_empty,
                 stat,
+                shares: never_shared,
+            },
+            want,
+        )
+    }
+
+    /// [`collect`] with a `shares` answer, for a process whose pidfd never
+    /// says readable.
+    fn scan_sharing(
+        pid: u32,
+        list: impl FnMut() -> Result<Option<Listing>, ProcError>,
+        read: impl FnMut(u32) -> Result<&'static str, HostError>,
+        stat: impl FnMut(u32) -> Result<TaskStat, HostError>,
+        shares: impl FnMut(u32, u32) -> bool,
+        want: Want,
+    ) -> Result<Vec<&'static str>, ProcError> {
+        collect(
+            Process {
+                pid,
+                list,
+                poll: || Ok(PidfdPoll::Running),
+                status: no_status,
+            },
+            Tasks {
+                what: "table",
+                read,
+                is_empty: |v: &&'static str| v.is_empty(),
+                stat,
+                shares,
             },
             want,
         )
@@ -1438,7 +1596,10 @@ mod tests {
             Want::FirstLiveTask,
         );
         assert!(
-            failed_saying(&got, "task 10 is live but its table was empty"),
+            failed_saying(
+                &got,
+                "task 10 is live but gave an empty or incomplete table"
+            ),
             "{got:?}"
         );
     }
@@ -1580,13 +1741,20 @@ mod tests {
                 .map(|&t| (t, Seen::Trusted(Status::Live)))
                 .collect()
         };
-        assert_eq!(shortfall(&complete(&[10, 11]), &trusted(&[10, 11])), None);
         assert_eq!(
-            shortfall(&Listing::new(vec![10, 11], 2, &[10]), &trusted(&[10, 11])),
+            shortfall(&complete(&[10, 11]), &trusted(&[10, 11]), Want::EveryTask),
+            None
+        );
+        assert_eq!(
+            shortfall(
+                &Listing::new(vec![10, 11], 2, &[10]),
+                &trusted(&[10, 11]),
+                Want::EveryTask
+            ),
             Some(Shortfall::Changed)
         );
         assert_eq!(
-            shortfall(&counted(&[10], 2), &trusted(&[10])),
+            shortfall(&counted(&[10], 2), &trusted(&[10]), Want::EveryTask),
             Some(Shortfall::Miscounted {
                 listed: 1,
                 counted: 2
@@ -1595,7 +1763,7 @@ mod tests {
         let mut seen = trusted(&[10, 11]);
         seen.insert(11, Seen::Empty);
         assert_eq!(
-            shortfall(&complete(&[10, 11]), &seen),
+            shortfall(&complete(&[10, 11]), &seen, Want::EveryTask),
             Some(Shortfall::Untrusted {
                 tid: 11,
                 seen: Seen::Empty
@@ -1603,7 +1771,7 @@ mod tests {
         );
         let ended: BTreeMap<u32, Seen> = [(10, Seen::Trusted(Status::Exited))].into();
         assert_eq!(
-            shortfall(&complete(&[10]), &ended),
+            shortfall(&complete(&[10]), &ended, Want::EveryTask),
             Some(Shortfall::NothingLive)
         );
     }
@@ -1671,5 +1839,246 @@ mod tests {
         );
         assert_eq!(got, Ok(Some(1000)));
         assert_eq!(first_tid_stats.get(), 2);
+    }
+
+    /// TASK-115: a task the kernel says shares the reference's table is
+    /// counted by the reference's read, without a read of its own, and the
+    /// round is still the answer.
+    #[test]
+    fn a_task_sharing_the_references_table_is_not_read_again() {
+        let reads = RefCell::new(Vec::new());
+        let got = scan_sharing(
+            10,
+            rounds(vec![complete(&[10, 11, 12])]),
+            |tid| {
+                reads.borrow_mut().push(tid);
+                Ok("table")
+            },
+            |_| live(),
+            |reference, tid| reference == 10 && tid != 10,
+            Want::EveryTask,
+        );
+        assert_eq!(got, Ok(vec!["table"]));
+        assert_eq!(*reads.borrow(), vec![10], "only the reference is read");
+    }
+
+    /// Every way the comparison can fail to show the same table makes the
+    /// task be read in full: the kernel says no (or cannot say), the task
+    /// is not live around it, its start time changes, the reference is
+    /// gone or replaced.
+    #[test]
+    fn a_task_not_proven_to_share_is_read_in_full() {
+        type StatFn = fn(u32, usize) -> Result<TaskStat, HostError>;
+        let cases: [(&str, bool, StatFn); 5] = [
+            ("kcmp says different or fails", false, |_, _| live()),
+            ("the task is a zombie at its second stat", true, |tid, n| {
+                if tid == 11 && n >= 1 {
+                    zombie()
+                } else {
+                    live()
+                }
+            }),
+            ("the task's start time changes", true, |tid, n| {
+                let mut stat = live().expect("live");
+                stat.start_ticks = if tid == 11 && n >= 1 { 2 } else { 1 };
+                Ok(stat)
+            }),
+            (
+                "the reference is gone after the comparison",
+                true,
+                |tid, n| {
+                    if tid == 10 && n >= 2 {
+                        Err(errno(Errno::ESRCH))
+                    } else {
+                        live()
+                    }
+                },
+            ),
+            (
+                "the reference's number names another task",
+                true,
+                |tid, n| {
+                    let mut stat = live().expect("live");
+                    stat.start_ticks = if tid == 10 && n >= 2 { 9 } else { 1 };
+                    Ok(stat)
+                },
+            ),
+        ];
+        for (why, shares, stat) in cases {
+            let reads = RefCell::new(Vec::new());
+            let stats: RefCell<BTreeMap<u32, usize>> = RefCell::new(BTreeMap::new());
+            let _ = scan_sharing(
+                10,
+                rounds(vec![complete(&[10, 11])]),
+                |tid| {
+                    reads.borrow_mut().push(tid);
+                    Ok("table")
+                },
+                |tid| {
+                    let n = {
+                        let mut stats = stats.borrow_mut();
+                        let n = stats.entry(tid).or_default();
+                        *n += 1;
+                        *n - 1
+                    };
+                    stat(tid, n)
+                },
+                |_, _| shares,
+                Want::EveryTask,
+            );
+            assert!(
+                reads.borrow().contains(&11),
+                "{why}: task 11 must be read in full, reads {:?}",
+                reads.borrow()
+            );
+        }
+    }
+
+    /// Only a read that was kept, trusted and live can be the reference:
+    /// an empty table of a live task is untrusted, so the next task is read
+    /// in full and becomes the reference.
+    #[test]
+    fn an_untrusted_read_is_never_the_reference() {
+        let reads = RefCell::new(Vec::new());
+        let compared = RefCell::new(Vec::new());
+        let _ = scan_sharing(
+            10,
+            rounds(vec![complete(&[10, 11, 12])]),
+            |tid| {
+                reads.borrow_mut().push(tid);
+                Ok(if tid == 10 { "" } else { "table" })
+            },
+            |_| live(),
+            |reference, tid| {
+                compared.borrow_mut().push((reference, tid));
+                true
+            },
+            Want::EveryTask,
+        );
+        assert!(
+            compared
+                .borrow()
+                .iter()
+                .all(|(reference, _)| *reference != 10),
+            "the untrusted read of 10 was used as the reference: {:?}",
+            compared.borrow()
+        );
+        assert!(
+            reads.borrow().starts_with(&[10, 11]),
+            "{:?}",
+            reads.borrow()
+        );
+    }
+
+    /// The leader's re-read after a task was seen ended looks for an
+    /// exec's survivor under the leader's tid: it is always a read of its
+    /// own, and a reference never crosses into another round.
+    #[test]
+    fn the_leaders_re_read_and_a_new_round_never_share() {
+        let reads = RefCell::new(Vec::new());
+        let compared = RefCell::new(Vec::new());
+        let _ = scan_sharing(
+            10,
+            rounds(vec![complete(&[10, 11, 12]), complete(&[10, 12])]),
+            |tid| {
+                reads.borrow_mut().push(tid);
+                Ok("table")
+            },
+            |tid| if tid == 11 { zombie() } else { live() },
+            |reference, tid| {
+                compared.borrow_mut().push((reference, tid));
+                true
+            },
+            Want::EveryTask,
+        );
+        // Round 1: 10 read (reference), 11 a zombie (not live: read), 12
+        // shared, then the leader read again in full.
+        assert_eq!(reads.borrow()[..3], [10, 11, 10], "{:?}", reads.borrow());
+        assert!(
+            !compared.borrow().contains(&(10, 10)),
+            "the leader was compared with itself: {:?}",
+            compared.borrow()
+        );
+    }
+
+    /// The same when the reference is another task than the leader: the
+    /// leader's re-read is a full read even though the kernel would say it
+    /// shares the reference's table.
+    #[test]
+    fn the_leaders_re_read_is_full_also_with_another_reference() {
+        let leader_reads = Cell::new(0);
+        let _ = scan_sharing(
+            10,
+            rounds(vec![complete(&[10, 11, 12])]),
+            |tid| {
+                if tid == 10 {
+                    leader_reads.set(leader_reads.get() + 1);
+                    // Empty: untrusted, so 11 becomes the reference.
+                    return Ok(if leader_reads.get() == 1 {
+                        ""
+                    } else {
+                        "survivor"
+                    });
+                }
+                Ok("table")
+            },
+            |tid| if tid == 12 { zombie() } else { live() },
+            |_, _| true,
+            Want::EveryTask,
+        );
+        assert_eq!(leader_reads.get(), 2, "the leader's re-read was skipped");
+    }
+
+    /// The memory map and the environment are read from one live task;
+    /// nothing is ever taken from another task's read there.
+    #[test]
+    fn first_live_reads_never_ask_whether_tasks_share() {
+        let got = scan_sharing(
+            10,
+            rounds(vec![complete(&[10, 11])]),
+            |_| Ok("map"),
+            |_| live(),
+            |_, _| panic!("shares asked for a first-live read"),
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["map"]));
+    }
+
+    /// A first-live read needs no counted or confirmed listing: a plain
+    /// listing's first live task answers, and when none does, the reason
+    /// is the tasks' reads, not the listing.
+    #[test]
+    fn first_live_reads_use_a_plain_listing() {
+        let got = scan(
+            10,
+            rounds(vec![Listing::candidates(vec![10, 11])]),
+            |_| Ok("map"),
+            |_| live(),
+            Want::FirstLiveTask,
+        );
+        assert_eq!(got, Ok(vec!["map"]));
+        let got = scan(
+            10,
+            rounds(vec![Listing::candidates(vec![10])]),
+            |_| Ok(""),
+            |_| live(),
+            Want::FirstLiveTask,
+        );
+        assert!(
+            failed_saying(
+                &got,
+                "task 10 is live but gave an empty or incomplete table"
+            ),
+            "{got:?}"
+        );
+        // The same plain listing never makes an every-task round the answer.
+        let got = scan(
+            10,
+            rounds(vec![Listing::candidates(vec![10])]),
+            |_| Ok("table"),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(failed_saying(&got, "listing changed"), "{got:?}");
     }
 }

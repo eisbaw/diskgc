@@ -143,6 +143,8 @@ pub struct Scan {
     listings: usize,
     unsettled: Option<String>,
     retried_unsettled: Option<String>,
+    /// What the `/proc` readers reported ([`Host::take_proc_read_notes`]).
+    reader_notes: Vec<String>,
     processes: usize,
     gone: usize,
     /// Every process read in full, by pid (ordered, so reports are).
@@ -192,6 +194,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
         listings: gathered.listings,
         unsettled: gathered.unsettled,
         retried_unsettled: None,
+        reader_notes: host.take_proc_read_notes(),
         processes: gathered.read.len(),
         gone: gathered.gone,
         seen: BTreeMap::new(),
@@ -324,6 +327,7 @@ impl Scan {
         if let Some(why) = &self.unsettled {
             notes.push(format!("process scan unsettled: {why}"));
         }
+        notes.extend(self.reader_notes.iter().cloned());
         let others = self
             .unreadable
             .iter()

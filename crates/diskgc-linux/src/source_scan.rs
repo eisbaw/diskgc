@@ -972,6 +972,14 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
+        function: "same_fd_table",
+        gate: Gate::Ungated(
+            "kcmp with KCMP_FILES only compares two tasks' fd tables; it changes nothing",
+        ),
+        matches: 3, // syscall plus libc at the call and the syscall number
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
         function: "unlinkat_permitted",
         gate: Gate::Permit,
         matches: 1,
@@ -1135,6 +1143,36 @@ mod tests {
         );
         assert_eq!(body.matches("libc::syscall(").count(), 1);
         assert_eq!(body.matches("libc::SYS_pidfd_send_signal").count(), 1);
+    }
+
+    /// The fd-table comparison of the in-use scan (TASK-115) is one `kcmp`
+    /// of type `KCMP_FILES` (2) and nothing else.
+    #[test]
+    fn fd_table_comparison_is_kcmp_files_only() {
+        let scanned = production_sources();
+        let file = scanned
+            .iter()
+            .find(|s| s.path == Path::new("crates/diskgc-linux/src/host.rs"))
+            .expect("Linux host scanned");
+        let spans: Vec<_> = file
+            .fns
+            .iter()
+            .filter(|f| f.name == "same_fd_table")
+            .collect();
+        let [span] = spans[..] else {
+            panic!("expected one same_fd_table function, got {}", spans.len());
+        };
+        let body: String = file.source.code[span.body..=span.end]
+            .iter()
+            .copied()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            body.contains("libc::syscall(libc::SYS_kcmp,reference,tid,KCMP_FILES,0_u64,0_u64)"),
+            "kcmp call changed; review its type and arguments"
+        );
+        assert!(body.contains("constKCMP_FILES:i32=2;"), "KCMP_FILES is 2");
+        assert_eq!(body.matches("libc::syscall(").count(), 1);
     }
 
     /// Every production crate's code is under `src/`, where the walk reads

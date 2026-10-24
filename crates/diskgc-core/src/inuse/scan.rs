@@ -314,13 +314,21 @@ impl Read {
         self.uses.dedup();
         // One environment can name thousands of paths. `Vec::contains` here
         // made even the first process read quadratic in that path count and
-        // could exhaust the one-second deletion scan freshness window.
-        let mut seen: HashSet<_> = self.environ.iter().cloned().collect();
-        for e in other.environ {
-            if seen.insert(e.clone()) {
-                self.environ.push(e);
-            }
-        }
+        // could exhaust the one-second deletion scan freshness window; a set
+        // of copies cost two allocations per path on every merge (TASK-115).
+        // So: a set of borrows decides which of `other`'s to keep, then they
+        // are moved.
+        let keep: Vec<bool> = {
+            let mut seen: HashSet<&(OsString, PathBuf)> = self.environ.iter().collect();
+            other.environ.iter().map(|e| seen.insert(e)).collect()
+        };
+        self.environ.extend(
+            other
+                .environ
+                .into_iter()
+                .zip(keep)
+                .filter_map(|(e, keep)| keep.then_some(e)),
+        );
         for d in other.deleted {
             if !self.deleted.iter().any(|(id, _, _)| *id == d.0) {
                 self.deleted.push(d);

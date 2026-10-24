@@ -1358,7 +1358,6 @@ impl Host for ModelHost {
                     .map(|r| MapEntry {
                         dev: state.mount(r.loc.mnt).dev,
                         ino: r.loc.ino,
-                        path: Some(link_target(state, r).text),
                     })
                     .collect()
             },

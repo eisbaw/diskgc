@@ -171,6 +171,14 @@ ci:
     nix flake check -L
     just e2e-full
 
+# Time the in-use process scan on this host, read-only (docs/safety.md,
+# Freshness), with the host (gnu) build and the shipped static musl target.
+scan-timing SCANS="20" *ARGS="":
+    cargo build --release --locked -p diskgc-linux --example scan_timing
+    cargo build --release --locked -p diskgc-linux --example scan_timing --target x86_64-unknown-linux-musl
+    "$CARGO_TARGET_DIR/release/examples/scan_timing" {{SCANS}} {{ARGS}}
+    "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/examples/scan_timing" {{SCANS}} {{ARGS}}
+
 # Build the static musl package into ./result.
 build:
     nix build -L

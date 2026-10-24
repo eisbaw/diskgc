@@ -536,6 +536,9 @@ pub enum ProcLink {
 }
 
 impl ProcLink {
+    /// Every link, in the order of [`Host::proc_links_all`].
+    pub const ALL: [Self; 3] = [Self::Cwd, Self::Root, Self::Exe];
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Cwd => "cwd",
@@ -564,13 +567,14 @@ pub struct ProcFd {
 }
 
 /// One line of `/proc/<pid>/maps`, reduced to its object: the `dev` and
-/// `inode` columns (inode 0 for anonymous mappings) and the path column.
+/// `inode` columns (inode 0 for anonymous mappings). The path column is not
+/// kept: matching is by (device, inode) only, and path text is wrong in
+/// other mount namespaces (docs/safety.md, In use); not copying it saves an
+/// allocation per mapping, of which a desktop has some 10^5 (TASK-115).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapEntry {
     pub dev: Dev,
     pub ino: u64,
-    /// The path column (may end in ` (deleted)`; `None` if empty).
-    pub path: Option<OsString>,
 }
 
 /// A process's initial environment (`/proc/<pid>/environ`, the environment
@@ -780,9 +784,7 @@ pub fn read_proc_view<H: Host + ?Sized>(
 ) -> Result<ProcView, ProcError> {
     let fds = host.proc_fds(pid)?;
     let maps = host.proc_maps(pid)?;
-    let cwd = host.proc_links(pid, ProcLink::Cwd)?;
-    let root = host.proc_links(pid, ProcLink::Root)?;
-    let exe = host.proc_links(pid, ProcLink::Exe)?;
+    let [cwd, root, exe] = host.proc_links_all(pid)?;
     let environ = host.proc_environ(pid);
     if is_gone(&environ) {
         return Err(ProcError::Gone);
@@ -1047,6 +1049,19 @@ pub trait Host {
     /// without duplicates.
     fn proc_links(&self, pid: Pid, which: ProcLink) -> Result<Vec<LinkTarget>, ProcError>;
 
+    /// [`Host::proc_links`] of `cwd`, `root` and `exe`, in that order (the
+    /// order of [`ProcLink::ALL`]). The provided method makes the three
+    /// calls; `LinuxHost` reads the three links of every task in the same
+    /// rounds, which lists the tasks once instead of three times.
+    fn proc_links_all(&self, pid: Pid) -> Result<[Vec<LinkTarget>; 3], ProcError> {
+        let [cwd, root, exe] = ProcLink::ALL;
+        Ok([
+            self.proc_links(pid, cwd)?,
+            self.proc_links(pid, root)?,
+            self.proc_links(pid, exe)?,
+        ])
+    }
+
     /// The process's memory mappings, read through a live task.
     fn proc_maps(&self, pid: Pid) -> Result<Vec<MapEntry>, ProcError>;
 
@@ -1064,6 +1079,14 @@ pub trait Host {
         pids.iter()
             .map(|pid| read_proc_view(self, *pid, facts))
             .collect()
+    }
+
+    /// What the `/proc` readers have to report since the last call, once:
+    /// conditions that cost time but change no answer (a refused fd-table
+    /// comparison, TASK-115). [`crate::inuse::scan`] takes them into its
+    /// [`crate::inuse::Scan::notes`]. The provided method has none.
+    fn take_proc_read_notes(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// diskgc's own process id (`getpid`), as [`Host::pids`] lists it.

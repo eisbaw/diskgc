@@ -59,7 +59,7 @@ use crate::sockdiag;
 use crate::stat::{STATX_MASK, stat_from_statx};
 use crate::tasks::{
     Listed, Listing, PidfdPoll, Polled, Process, StatusRead, TaskStat, Tasks, Want, collect,
-    is_vanished, owner_through_live_task, parse_task_stat,
+    is_vanished, never_shared, owner_through_live_task, parse_task_stat,
 };
 
 /// Where procfs is expected. Named only where [`LinuxHost::new`] opens it
@@ -129,6 +129,11 @@ impl AsFd for LinuxFd {
 pub struct LinuxHost {
     /// The procfs mount checked at construction (`O_PATH` directory).
     proc: OwnedFd,
+    /// `kcmp` refusals since the last [`Host::take_proc_read_notes`], and
+    /// the errno of the latest: each one cost a full fd-table read that a
+    /// comparison would have spared (TASK-115). Reported, never an error.
+    kcmp_refused: std::sync::atomic::AtomicU64,
+    kcmp_refused_errno: AtomicI32,
     #[cfg(not(feature = "release-without-sandbox-gate"))]
     clock_offset_seconds: u64,
 }
@@ -207,6 +212,8 @@ impl LinuxHost {
         })?;
         Ok(Self {
             proc,
+            kcmp_refused: std::sync::atomic::AtomicU64::new(0),
+            kcmp_refused_errno: AtomicI32::new(0),
             #[cfg(not(feature = "release-without-sandbox-gate"))]
             clock_offset_seconds,
         })
@@ -650,9 +657,66 @@ fn flock_operation(mode: LockMode) -> FlockOperation {
     }
 }
 
+/// A path relative to the procfs root, formatted without allocating: the
+/// in-use scan names some 10^5 of them per scan, and on the static musl
+/// build every allocation takes the allocator's one global lock (TASK-115).
+/// The longest, `<pid>/task/<tid>/fd/<fd>` with 10-digit numbers, is 41
+/// bytes.
+#[derive(Clone, Copy)]
+struct ProcPath {
+    len: usize,
+    buf: [u8; PROC_PATH_MAX],
+}
+
+/// The capacity of a [`ProcPath`].
+const PROC_PATH_MAX: usize = 64;
+
+impl ProcPath {
+    /// `args` formatted; a path that does not fit is a bug (every caller
+    /// formats numbers and fixed names) and panics.
+    fn of(args: std::fmt::Arguments<'_>) -> Self {
+        let mut path = Self {
+            len: 0,
+            buf: [0; PROC_PATH_MAX],
+        };
+        std::fmt::Write::write_fmt(&mut path, args)
+            .unwrap_or_else(|_| panic!("a /proc path longer than {PROC_PATH_MAX} bytes: {args}"));
+        path
+    }
+}
+
+impl std::fmt::Write for ProcPath {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        let room = self.buf.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        room.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for ProcPath {
+    type Target = str;
+    fn deref(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).expect("formatted from str pieces")
+    }
+}
+
+impl std::fmt::Display for ProcPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+impl std::fmt::Debug for ProcPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 /// `<pid>/task/<tid>/<rest>`, relative to the procfs root.
-fn task_path(pid: Pid, tid: u32, rest: &str) -> String {
-    format!("{pid}/task/{tid}/{rest}")
+fn task_path(pid: Pid, tid: u32, rest: &str) -> ProcPath {
+    ProcPath::of(format_args!("{pid}/task/{tid}/{rest}"))
 }
 
 /// `None` for an entry that vanished (`ENOENT`, `ESRCH`), which alone
@@ -669,31 +733,35 @@ fn vanished_as_none<T>(result: Result<T, HostError>) -> Result<Option<T>, ProcEr
 /// The task ids of thread group `pid`; `None` when a lookup said `ENOENT`
 /// ([`crate::tasks::collect`] decides whether the process is gone).
 fn task_ids(proc: ProcRoot<'_>, pid: Pid) -> Result<Option<Vec<u32>>, ProcError> {
-    let dir = format!("{pid}/task");
-    let listed = proc.names(&dir).and_then(|names| {
-        names
-            .iter()
-            .map(|name| {
-                std::str::from_utf8(name)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| {
-                        HostError::invalid(
-                            "getdents",
-                            ProcRoot::shown(&dir),
-                            format!("unexpected entry {:?}", String::from_utf8_lossy(name)),
-                        )
-                    })
-            })
-            .collect()
-    });
+    let dir = ProcPath::of(format_args!("{pid}/task"));
+    let listed = (|| {
+        let fd = proc.open(&dir, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        let mut tids = Vec::new();
+        let mut unexpected = None;
+        for_each_name(&fd, |name| {
+            match std::str::from_utf8(name).ok().and_then(|s| s.parse().ok()) {
+                Some(tid) => tids.push(tid),
+                None => unexpected = Some(String::from_utf8_lossy(name).into_owned()),
+            }
+            unexpected.is_none()
+        })
+        .map_err(|e| HostError::errno("getdents", ProcRoot::shown(&dir), errno_of(e)))?;
+        match unexpected {
+            None => Ok(tids),
+            Some(name) => Err(HostError::invalid(
+                "getdents",
+                ProcRoot::shown(&dir),
+                format!("unexpected entry {name:?}"),
+            )),
+        }
+    })();
     vanished_as_none(listed)
 }
 
 /// One read of `/proc/<pid>/status` (see [`StatusFields`]); `None` when it
 /// said `ENOENT`.
 fn group_status(proc: ProcRoot<'_>, pid: Pid) -> Result<Option<StatusFields>, ProcError> {
-    let path = format!("{pid}/status");
+    let path = ProcPath::of(format_args!("{pid}/status"));
     let Some(text) = vanished_as_none(proc.read(&path))? else {
         return Ok(None);
     };
@@ -761,7 +829,7 @@ fn anchored_task_listing_with_count(
         || task_ids(proc, pid),
         count,
         |tid| {
-            let path = format!("{pid}/task/{tid}");
+            let path = ProcPath::of(format_args!("{pid}/task/{tid}"));
             match proc.open(&path, OFlags::PATH | OFlags::DIRECTORY) {
                 Ok(fd) => Ok(Some(fd)),
                 Err(e) if is_vanished(&e) => Ok(None),
@@ -769,7 +837,7 @@ fn anchored_task_listing_with_count(
             }
         },
         |tid, old| {
-            let path = format!("{pid}/task/{tid}");
+            let path = ProcPath::of(format_args!("{pid}/task/{tid}"));
             let fresh = match proc.open(&path, OFlags::PATH | OFlags::DIRECTORY) {
                 Ok(fd) => fd,
                 Err(e) if is_vanished(&e) => return Ok(false),
@@ -791,10 +859,20 @@ fn anchored_task_listing_with_count(
                     )));
                 }
             }
-            let old_stat = rustix::fs::fstat(old)
-                .map_err(|e| ProcError::from_host(HostError::errno("fstat", &path, errno_of(e))))?;
-            let fresh_stat = rustix::fs::fstat(&fresh)
-                .map_err(|e| ProcError::from_host(HostError::errno("fstat", &path, errno_of(e))))?;
+            let old_stat = rustix::fs::fstat(old).map_err(|e| {
+                ProcError::from_host(HostError::errno(
+                    "fstat",
+                    ProcRoot::shown(&path),
+                    errno_of(e),
+                ))
+            })?;
+            let fresh_stat = rustix::fs::fstat(&fresh).map_err(|e| {
+                ProcError::from_host(HostError::errno(
+                    "fstat",
+                    ProcRoot::shown(&path),
+                    errno_of(e),
+                ))
+            })?;
             Ok((old_stat.st_dev, old_stat.st_ino) == (fresh_stat.st_dev, fresh_stat.st_ino))
         },
     )
@@ -908,11 +986,16 @@ fn poll_pidfd(pid: Pid, pidfd: &OwnedFd, timeout: Duration) -> Result<PidfdPoll,
 }
 
 /// How the readers reach process `pid`: its task listings, its pidfd and
-/// its `status` (for the rule, see [`crate::tasks::has_exited`]).
+/// its `status` (for the rule, see [`crate::tasks::has_exited`]). The
+/// listing is anchored ([`anchored_task_listing`]) for [`Want::EveryTask`];
+/// [`Want::FirstLiveTask`] needs only the tids to try
+/// ([`Listing::candidates`]), which saves pinning and confirming every task
+/// of the process for each of the memory map and the environment.
 fn process<'a>(
     proc: ProcRoot<'a>,
     pid: Pid,
     pidfd: &'a OwnedFd,
+    want: Want,
 ) -> Process<
     impl FnMut() -> Listed + 'a,
     impl FnMut() -> Polled + 'a,
@@ -921,7 +1004,10 @@ fn process<'a>(
     let mut polls = 0;
     Process {
         pid: pid.0,
-        list: move || anchored_task_listing(proc, pid),
+        list: move || match want {
+            Want::EveryTask => anchored_task_listing(proc, pid),
+            Want::FirstLiveTask => Ok(task_ids(proc, pid)?.map(Listing::candidates)),
+        },
         poll: move || {
             let timeout = if polls == 0 {
                 Duration::ZERO
@@ -944,16 +1030,24 @@ fn process<'a>(
     }
 }
 
-/// Holds the procfs inode for each task whose `stat` is read. A procfs task
-/// inode holds its `struct pid`, so a later read through the directory fd
-/// cannot silently follow a reused numeric tid to another `struct pid`.
-/// Keep the handle through all rounds: a vanished incarnation must make the
-/// read untrustworthy, even when the replacement has the same start tick.
+/// Holds the `stat` file of each task whose `stat` is read, open, and reads
+/// it again with one `pread` at offset 0 (which makes the kernel generate
+/// it afresh). A procfs inode holds its task's `struct pid`, so a later
+/// read of the held file cannot silently follow a reused numeric tid to
+/// another `struct pid`: once that task is released, the read says
+/// `ESRCH` (`proc_single_show`). Keep the handle through all rounds: a
+/// vanished incarnation must make the read untrustworthy, even when the
+/// replacement has the same start tick.
 struct TaskStats<'a> {
     proc: ProcRoot<'a>,
     pid: Pid,
     pins: BTreeMap<u32, OwnedFd>,
 }
+
+/// The buffer of one `stat` read. The line is one `seq_file` record: 52
+/// fields of at most 20 digits and a command name of at most 64 bytes, so
+/// well under this; a read that fills it is refused, never parsed.
+const TASK_STAT_MAX: usize = 4096;
 
 impl<'a> TaskStats<'a> {
     fn new(proc: ProcRoot<'a>, pid: Pid) -> Self {
@@ -965,20 +1059,24 @@ impl<'a> TaskStats<'a> {
     }
 
     fn read(&mut self, tid: u32) -> Result<TaskStat, HostError> {
-        let dir = format!("{}/task/{tid}", self.pid);
+        let path = || task_path(self.pid, tid, "stat");
         if !self.pins.contains_key(&tid) {
-            let pin = self.proc.open(&dir, OFlags::PATH | OFlags::DIRECTORY)?;
+            let pin = self.proc.open(&path(), OFlags::RDONLY)?;
             self.pins.insert(tid, pin);
         }
-        let path = task_path(self.pid, tid, "stat");
-        let pin = self.pins.get(&tid).expect("task directory was just pinned");
-        let fd = rustix::fs::openat(pin, "stat", OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|e| HostError::errno("open", ProcRoot::shown(&path), errno_of(e)))?;
-        let mut text = Vec::new();
-        std::fs::File::from(fd)
-            .read_to_end(&mut text)
-            .map_err(|e| io_error("read", ProcRoot::shown(&path), &e))?;
-        parse_task_stat(&text).map_err(|e| HostError::invalid("parse", ProcRoot::shown(&path), e))
+        let pin = self.pins.get(&tid).expect("task stat was just pinned");
+        let mut text = [0; TASK_STAT_MAX];
+        let n = rustix::io::pread(pin, &mut text, 0)
+            .map_err(|e| HostError::errno("read", ProcRoot::shown(&path()), errno_of(e)))?;
+        if n == text.len() {
+            return Err(HostError::invalid(
+                "read",
+                ProcRoot::shown(&path()),
+                format!("longer than {TASK_STAT_MAX} bytes"),
+            ));
+        }
+        parse_task_stat(&text[..n])
+            .map_err(|e| HostError::invalid("parse", ProcRoot::shown(&path()), e))
     }
 }
 
@@ -988,6 +1086,9 @@ impl<'a> TaskStats<'a> {
 const FIRST_BUFFER: usize = 64 * 1024;
 const MAX_FD_LISTING: usize = 16 * 1024 * 1024;
 const MAX_ENVIRON: usize = 64 * 1024 * 1024;
+/// The bounds of the buffer of one `read` call of `maps`.
+const MAPS_READ_MIN: usize = 16 * 1024;
+const MAPS_READ_MAX: usize = 1024 * 1024;
 
 /// The file operations of the `/proc` readers, so tests can script what the
 /// kernel returns and pin the reading rules at their call sites.
@@ -1089,13 +1190,55 @@ fn task_fds(proc: ProcRoot<'_>, pid: Pid, tid: u32) -> Result<Vec<ProcFd>, HostE
     let dir = task_path(pid, tid, "fd");
     let mut fds = Vec::new();
     for fd in fd_numbers(&Kernel(proc), &dir)? {
-        match proc.link_target(&format!("{dir}/{fd}")) {
+        match proc.link_target(&ProcPath::of(format_args!("{pid}/task/{tid}/fd/{fd}"))) {
             Ok(target) => fds.push(ProcFd { fd, target }),
             Err(e) if e.is(Errno::ENOENT) => {}
             Err(e) => return Err(e),
         }
     }
     Ok(fds)
+}
+
+/// `kcmp(reference, tid, KCMP_FILES, 0, 0)`: whether the two tasks hold
+/// the same fd table now (`Ok(true)`: 0), or not (`Ok(false)`: 1, 2 or 3,
+/// the kernel's ordering of two different tables), or the kernel's refusal
+/// (`ENOSYS` without `CONFIG_KCMP`; `EPERM` from a seccomp filter, such as
+/// a container runtime's default profile without `CAP_SYS_PTRACE`, or from
+/// the ptrace access check; `ESRCH`, a task gone, is `Ok(false)`, no
+/// refusal). Anything but `Ok(true)` is "not known
+/// to share": the caller then reads `tid`'s table in full, so nothing is
+/// lost but time ([`crate::tasks::collect`]). Note that the kernel reads
+/// the two tasks' table pointers without a lock that orders them (a
+/// documented limit, docs/safety.md, In use: Threads).
+fn same_fd_table(reference: u32, tid: u32) -> Result<bool, Errno> {
+    /// `KCMP_FILES` of include/uapi/linux/kcmp.h.
+    const KCMP_FILES: i32 = 2;
+    let (Ok(reference), Ok(tid)) = (i32::try_from(reference), i32::try_from(tid)) else {
+        return Ok(false);
+    };
+    // SAFETY: kcmp takes two pids, a comparison type and two unsigned
+    // longs that KCMP_FILES does not use; it dereferences no pointer.
+    let answer = unsafe { libc::syscall(libc::SYS_kcmp, reference, tid, KCMP_FILES, 0_u64, 0_u64) };
+    if answer < 0 {
+        let error = std::io::Error::last_os_error();
+        let errno = Errno(error.raw_os_error().expect("a failed syscall sets errno"));
+        // A task gone between its `stat` and the comparison is churn, not
+        // a refusal: the full read then decides about it.
+        return if errno == Errno::ESRCH {
+            Ok(false)
+        } else {
+            Err(errno)
+        };
+    }
+    Ok(answer == 0)
+}
+
+/// Whether a task's read of its three links lacks one ([`Host::proc_links_all`]).
+/// A link always names something, so one missing from a live task makes
+/// the read untrusted, as `ENOENT` from one [`Host::proc_links`] does; the
+/// links an exiting task still shows are kept all the same.
+fn links_incomplete(links: &[Option<LinkTarget>; 3]) -> bool {
+    links.iter().any(Option::is_none)
 }
 
 /// Reads `environ` of one task in one call (see [`read_in_one_call`]).
@@ -1129,12 +1272,18 @@ fn read_maps(files: &impl ProcFiles, path: &str) -> Result<Vec<u8>, HostError> {
         read_confirmed(
             || files.open(path),
             |file| {
+                // Calls that grow with the content: a desktop process maps
+                // up to some 10^3 objects (~10^5 bytes), and every call is
+                // a `read` and a resume; the buffer each call zeroes stays
+                // within the content read so far (TASK-115).
                 let mut content = Vec::new();
-                let mut chunk = [0; 4096];
                 loop {
-                    match files.read(file, &mut chunk)? {
-                        0 => return Ok(content),
-                        n => content.extend_from_slice(&chunk[..n]),
+                    let start = content.len();
+                    content.resize(start + start.clamp(MAPS_READ_MIN, MAPS_READ_MAX), 0);
+                    let n = files.read(file, &mut content[start..])?;
+                    content.truncate(start + n);
+                    if n == 0 {
+                        return Ok(content);
                     }
                 }
             },
@@ -1154,25 +1303,28 @@ fn read_through_live_task(
     pid: Pid,
     (name, what): (&str, &'static str),
     read: impl Fn(&str) -> Result<Vec<u8>, HostError>,
-) -> Result<(String, Vec<u8>), ProcError> {
+) -> Result<(ProcPath, Vec<u8>), ProcError> {
     let pidfd = open_pidfd(pid)?;
     let mut stats = TaskStats::new(proc, pid);
     let mut got = collect(
-        process(proc, pid, &pidfd),
+        process(proc, pid, &pidfd, Want::FirstLiveTask),
         Tasks {
             what,
             read: |tid| {
                 let path = task_path(pid, tid, name);
                 read(&path).map(|bytes| (path, bytes))
             },
-            is_empty: |(_, bytes): &(String, Vec<u8>)| bytes.is_empty(),
+            is_empty: |(_, bytes): &(ProcPath, Vec<u8>)| bytes.is_empty(),
             stat: |tid| stats.read(tid),
+            shares: never_shared,
         },
         Want::FirstLiveTask,
     )?;
     // Empty only when every live task is a kernel thread without the file:
     // no memory map, no environment.
-    Ok(got.pop().unwrap_or_default())
+    Ok(got
+        .pop()
+        .unwrap_or_else(|| (task_path(pid, pid.0, name), Vec::new())))
 }
 
 impl Host for LinuxHost {
@@ -1509,12 +1661,22 @@ impl Host for LinuxHost {
         let pidfd = open_pidfd(pid)?;
         let mut stats = TaskStats::new(proc, pid);
         let per_task = collect(
-            process(proc, pid, &pidfd),
+            process(proc, pid, &pidfd, Want::EveryTask),
             Tasks {
                 what: "fd table",
                 read: |tid| task_fds(proc, pid, tid),
                 is_empty: |fds: &Vec<ProcFd>| fds.is_empty(),
                 stat: |tid| stats.read(tid),
+                // Threads normally share one table (CLONE_FILES): read it
+                // once, not once per thread (TASK-115).
+                shares: |reference, tid| match same_fd_table(reference, tid) {
+                    Ok(shared) => shared,
+                    Err(errno) => {
+                        self.kcmp_refused.fetch_add(1, Ordering::Relaxed);
+                        self.kcmp_refused_errno.store(errno.0, Ordering::Relaxed);
+                        false
+                    }
+                },
             },
             Want::EveryTask,
         )?;
@@ -1534,13 +1696,14 @@ impl Host for LinuxHost {
         let pidfd = open_pidfd(pid)?;
         let mut stats = TaskStats::new(proc, pid);
         let per_task = collect(
-            process(proc, pid, &pidfd),
+            process(proc, pid, &pidfd, Want::EveryTask),
             Tasks {
                 what: which.name(),
                 read: |tid| proc.link_target(&task_path(pid, tid, which.name())),
                 // A link always names something; nothing is ENOENT.
                 is_empty: |_: &LinkTarget| false,
                 stat: |tid| stats.read(tid),
+                shares: never_shared,
             },
             Want::EveryTask,
         )?;
@@ -1549,6 +1712,54 @@ impl Host for LinuxHost {
             .into_iter()
             .filter(|t| seen.insert((t.stat.dev_ino(), t.text.clone())))
             .collect())
+    }
+
+    /// The three links of every task in the same rounds (one task listing
+    /// and one `stat` bracket per task, not three; TASK-115). Each link is
+    /// kept or found missing on its own: a task's links that are there are
+    /// kept also when another of them vanished (an exiting task), as three
+    /// [`Host::proc_links`] calls would keep them; one missing from a live
+    /// task makes the round untrusted, as a missing link (`ENOENT`) does
+    /// there.
+    fn proc_links_all(&self, pid: Pid) -> Result<[Vec<LinkTarget>; 3], ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let mut stats = TaskStats::new(proc, pid);
+        let per_task = collect(
+            process(proc, pid, &pidfd, Want::EveryTask),
+            Tasks {
+                // A missing link reads as an incomplete (empty) read: see
+                // `is_empty` below.
+                what: "set of cwd, root and exe links",
+                read: |tid| {
+                    let mut links: [Option<LinkTarget>; 3] = [None, None, None];
+                    for (link, which) in links.iter_mut().zip(ProcLink::ALL) {
+                        *link = match proc.link_target(&task_path(pid, tid, which.name())) {
+                            Ok(target) => Some(target),
+                            Err(e) if is_vanished(&e) => None,
+                            Err(e) => return Err(e),
+                        };
+                    }
+                    Ok(links)
+                },
+                is_empty: links_incomplete,
+                stat: |tid| stats.read(tid),
+                shares: never_shared,
+            },
+            Want::EveryTask,
+        )?;
+        let mut all: [Vec<LinkTarget>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut seen: [HashSet<_>; 3] = [HashSet::new(), HashSet::new(), HashSet::new()];
+        for links in per_task {
+            for ((kept, seen), link) in all.iter_mut().zip(&mut seen).zip(links) {
+                if let Some(t) = link
+                    && seen.insert((t.stat.dev_ino(), t.text.clone()))
+                {
+                    kept.push(t);
+                }
+            }
+        }
+        Ok(all)
     }
 
     fn proc_maps(&self, pid: Pid) -> Result<Vec<MapEntry>, ProcError> {
@@ -1574,6 +1785,22 @@ impl Host for LinuxHost {
     /// read (task-6 measured about 0.8 s for 480 processes on one thread).
     /// A helper thread that cannot be started leaves its share to the
     /// others; a reader that panics is a bug and panics here too.
+    /// One note when `kcmp` was refused since the last call: the scan then
+    /// read every thread's copy of shared fd tables, which on a busy host
+    /// can make it older than the Freshness bound (TASK-115).
+    fn take_proc_read_notes(&self) -> Vec<String> {
+        let refused = self.kcmp_refused.swap(0, Ordering::Relaxed);
+        if refused == 0 {
+            return Vec::new();
+        }
+        let errno = Errno(self.kcmp_refused_errno.load(Ordering::Relaxed));
+        vec![format!(
+            "kcmp was refused {refused} times (last: {errno}), so threads' shared fd tables were \
+             each read in full; the process scan is slower (a seccomp filter without \
+             CAP_SYS_PTRACE, or a kernel without CONFIG_KCMP)"
+        )]
+    }
+
     fn proc_views(&self, pids: &[Pid], facts: bool) -> Vec<Result<ProcView, ProcError>> {
         let threads = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get)
@@ -4154,6 +4381,176 @@ mod tests {
             cwds.iter().any(|c| c.stat.ino == Some(dir_id)),
             "the worker's cwd is missing: {cwds:?}"
         );
+        // The same through the scan's own reader, which reads the three
+        // links together and compares fd tables before reading them
+        // (TASK-115): the worker's table is not the leader's, so it is
+        // read, and its cwd is its own.
+        let view = read_proc_view(&host, pid, false).expect("view");
+        assert!(
+            view.fds.iter().any(|f| f.target.stat.ino == Some(file_id)),
+            "the worker's file is missing from the view: {:?}",
+            view.fds
+        );
+        assert!(
+            view.cwd.iter().any(|c| c.stat.ino == Some(dir_id)),
+            "the worker's cwd is missing from the view: {:?}",
+            view.cwd
+        );
+        let [cwd, root, exe] = host.proc_links_all(pid).expect("links");
+        assert_eq!(cwd, cwds);
+        assert_eq!(root, host.proc_links(pid, ProcLink::Root).expect("root"));
+        assert_eq!(exe, host.proc_links(pid, ProcLink::Exe).expect("exe"));
+    }
+
+    /// The combined links reader keeps what three separate ones keep: an
+    /// exiting task's surviving links are results of the round, and a live
+    /// task missing one makes the round untrusted (TASK-115).
+    #[test]
+    fn combined_links_keep_an_exiting_tasks_survivors_and_distrust_a_live_gap() {
+        let target = |n: u64| LinkTarget {
+            text: format!("/l{n}").into(),
+            stat: Stat {
+                dev: diskgc_core::host::Dev { major: 0, minor: 1 },
+                file_type: None,
+                perm: None,
+                nlink: None,
+                uid: None,
+                gid: None,
+                ino: Some(n),
+                size: None,
+                blocks: None,
+                mtime: None,
+                ctime: None,
+                btime: None,
+                mnt_id: None,
+                mount_root: None,
+            },
+        };
+        let stat = |exiting: bool| {
+            let flags = if exiting { 4_194_564 } else { 4_194_560 };
+            Ok(crate::tasks::parse_task_stat(
+                format!("11 (x) R 1 1 1 0 -1 {flags} {} 7", ["0"; 12].join(" ")).as_bytes(),
+            )
+            .expect("stat"))
+        };
+        let run = |exiting_11: bool| {
+            crate::tasks::collect(
+                Process {
+                    pid: 10,
+                    list: || Ok(Some(Listing::new(vec![10, 11], 2, &[10, 11]))),
+                    poll: || Ok(PidfdPoll::Running),
+                    status: || Ok(None),
+                },
+                Tasks {
+                    what: "set of cwd, root and exe links",
+                    read: |tid| {
+                        Ok(if tid == 10 {
+                            [Some(target(1)), Some(target(2)), Some(target(3))]
+                        } else {
+                            [Some(target(4)), Some(target(5)), None]
+                        })
+                    },
+                    is_empty: links_incomplete,
+                    stat: |tid| stat(tid == 11 && exiting_11),
+                    shares: never_shared,
+                },
+                crate::tasks::Want::EveryTask,
+            )
+        };
+        let kept = run(true).expect("an exiting task's gap is no shortfall");
+        assert!(
+            kept.iter()
+                .any(|links| links[0].as_ref().is_some_and(|t| t.stat.ino == Some(4))),
+            "the exiting task's cwd was dropped: {kept:?}"
+        );
+        let refused = run(false);
+        assert!(
+            matches!(&refused, Err(ProcError::Failed(e)) if e.detail.contains("task 11 is live but gave an empty or incomplete set of cwd, root and exe links")),
+            "{refused:?}"
+        );
+    }
+
+    /// A held `stat` file read again at offset 0 shows the task as it is
+    /// now, not as it was at the first read: every "live after" of a
+    /// bracket rests on it (TASK-115: [`TaskStats`] preads the held file
+    /// instead of opening it again).
+    #[test]
+    fn a_held_task_stat_read_again_is_fresh() {
+        let host = LinuxHost::new().expect("host setup");
+        let pid = Pid(std::process::id());
+        let (tid_sender, tid_receiver) = mpsc::channel();
+        let (go_sender, go_receiver) = mpsc::channel::<()>();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // SAFETY: gettid takes no pointer arguments and changes no state.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            tid_sender
+                .send(u32::try_from(tid).expect("positive tid"))
+                .expect("send tid");
+            go_receiver.recv().expect("go");
+            rustix::thread::set_name(c"t115-renamed").expect("rename thread");
+            done_sender.send(()).expect("done");
+            go_receiver.recv().expect("release");
+        });
+        let tid = tid_receiver.recv().expect("worker tid");
+        let mut stats = TaskStats::new(host.root(), pid);
+        let comm = |stats: &mut TaskStats<'_>| {
+            let _ = stats.read(tid).expect("stat");
+            let pin = stats.pins.get(&tid).expect("held");
+            let mut text = [0; TASK_STAT_MAX];
+            let n = rustix::io::pread(pin, &mut text, 0).expect("pread");
+            String::from_utf8_lossy(&text[..n]).into_owned()
+        };
+        let before = comm(&mut stats);
+        go_sender.send(()).expect("rename now");
+        done_receiver.recv().expect("renamed");
+        let after = comm(&mut stats);
+        go_sender.send(()).expect("release");
+        worker.join().expect("join");
+        assert!(!before.contains("t115-renamed"), "{before}");
+        assert!(
+            after.contains("(t115-renamed)"),
+            "a held stat read again was stale: {after}"
+        );
+    }
+
+    /// The kernel fact the fd-table comparison relies on (TASK-115):
+    /// `kcmp(KCMP_FILES)` says two threads of a process share their table,
+    /// and says they do not once one of them has its own
+    /// (`unshare(CLONE_FILES)`). Without the first the scan only loses
+    /// time; the second is what keeps a private table from being skipped.
+    #[test]
+    fn kcmp_tells_a_shared_fd_table_from_a_private_one() {
+        let gettid = || {
+            // SAFETY: gettid takes no pointer arguments and changes no state.
+            u32::try_from(unsafe { libc::syscall(libc::SYS_gettid) }).expect("positive tid")
+        };
+        let own = gettid();
+        let (tid_sender, tid_receiver) = mpsc::channel();
+        let (go_sender, go_receiver) = mpsc::channel::<()>();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            tid_sender.send(gettid()).expect("send tid");
+            go_receiver.recv().expect("go");
+            // SAFETY: this thread uses no fd another thread owns, and it
+            // exits right after the comparison.
+            unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::FILES) }
+                .expect("unshare");
+            done_sender.send(()).expect("send done");
+            go_receiver.recv().expect("release");
+        });
+        let tid = tid_receiver.recv().expect("worker tid");
+        let shared = same_fd_table(own, tid).expect("kcmp permitted here");
+        go_sender.send(()).expect("unshare now");
+        done_receiver.recv().expect("unshared");
+        let private = same_fd_table(own, tid).expect("kcmp permitted here");
+        go_sender.send(()).expect("release worker");
+        worker.join().expect("join worker");
+        assert!(
+            shared,
+            "threads sharing a table are not reported as sharing"
+        );
+        assert!(!private, "a thread's own table is reported as shared");
     }
 
     /// Owner PID's namespace facts agree with what the process sees of
@@ -4949,9 +5346,8 @@ mod tests {
     }
 
     /// The old and new tasks deliberately have the same clock-tick start
-    /// time. A directory fd must keep the first incarnation's inode even
-    /// after its numeric name is reused; when that inode goes away its
-    /// `stat` must fail instead of switching to the replacement.
+    /// time. A held `stat` file must keep reading the first incarnation
+    /// after its numeric name is reused, never the replacement.
     #[test]
     fn task_stat_pin_does_not_follow_a_reused_tid_within_one_tick() {
         let dir = TempDir::new();
@@ -4982,21 +5378,18 @@ mod tests {
             'R'
         );
         assert_eq!(stats.read(4243).expect("pinned old stat").state, 'S');
-
-        std::fs::rename(task_dir.join("old-task/stat"), task_dir.join("old-stat"))
-            .expect("simulate old task release");
-        assert!(
-            stats.read(4243).is_err_and(|e| is_vanished(&e)),
-            "pinned stat must disappear with its incarnation"
-        );
+        // That the held file then fails once its task is released is a
+        // procfs fact a plain directory cannot model: see
+        // held_task_stat_disappears_after_thread_exit.
     }
 
-    /// Procfs must stop resolving `stat` through an already open task
-    /// directory when that particular thread has exited. This is the kernel
-    /// fact the same-tick reuse check relies on, exercised without needing
-    /// to force a numeric tid recycle on the host.
+    /// An already open task `stat` file must stop reading (`ESRCH`) when
+    /// that particular thread has exited: its procfs inode holds the
+    /// thread's `struct pid`, which no other task takes. This is the kernel
+    /// fact the same-tick reuse check relies on ([`TaskStats`]), exercised
+    /// without needing to force a numeric tid recycle on the host.
     #[test]
-    fn held_task_directory_stat_disappears_after_thread_exit() {
+    fn held_task_stat_disappears_after_thread_exit() {
         let host = LinuxHost::new().expect("host setup");
         let pid = Pid(std::process::id());
         let (tid_sender, tid_receiver) = mpsc::channel();
@@ -5024,7 +5417,7 @@ mod tests {
         };
         assert!(
             after.as_ref().is_err_and(is_vanished),
-            "a held task directory must not remain readable after thread exit: {after:?}"
+            "a held task stat must not remain readable after thread exit: {after:?}"
         );
     }
 

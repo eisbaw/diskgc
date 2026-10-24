@@ -27,11 +27,16 @@ impl EnvPathIndex {
     pub(super) fn new(paths: &[EnvPath]) -> Self {
         let mut first = HashMap::new();
         for (i, entry) in paths.iter().enumerate() {
-            for ancestor in entry.path.ancestors() {
-                first.entry(ancestor.to_owned()).or_insert(i);
-            }
-            for ancestor in lexical(&entry.path).ancestors() {
-                first.entry(ancestor.to_owned()).or_insert(i);
+            insert_ancestors(&mut first, &entry.path, i);
+            // The lexical form differs only where `.` or `..` is a component
+            // (`components` already folds `//` and inner `.`), and building
+            // it costs an allocation per path: a desktop's scan has ~10^5.
+            if entry
+                .path
+                .components()
+                .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+            {
+                insert_ancestors(&mut first, &lexical(&entry.path), i);
             }
         }
         Self(first)
@@ -50,6 +55,21 @@ impl EnvPathIndex {
                 .keys()
                 .map(|path| path.as_os_str().len())
                 .sum::<usize>()
+    }
+}
+
+/// Indexes `path` and every ancestor of it under `i`, unless an earlier
+/// path already did. Ancestors come deepest first, and every key's
+/// ancestors are keys already (each insertion goes up to the root or to a
+/// present key, whose ancestors are present by the same argument), so the
+/// walk stops at the first present one: nothing above it would change, and
+/// no owned key is made for it.
+fn insert_ancestors(first: &mut HashMap<PathBuf, usize>, path: &Path, i: usize) {
+    for ancestor in path.ancestors() {
+        if first.contains_key(ancestor) {
+            return;
+        }
+        first.insert(ancestor.to_owned(), i);
     }
 }
 
@@ -95,6 +115,55 @@ fn lexical(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// A path of up to six components drawn from a small alphabet, with
+    /// `.`, `..` and empty components (`//`), so that paths share
+    /// ancestors, repeat, and differ only lexically.
+    fn path() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec!["a", "b", "c", ".", "..", ""]),
+            0..6,
+        )
+        .prop_map(|parts| format!("/{}", parts.join("/")))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// TASK-115: the index stops at the first ancestor already present
+        /// and builds the lexical form only for `.` and `..`; it must still
+        /// answer every candidate as the plain search over every path in
+        /// order does.
+        #[test]
+        fn indexed_lookup_is_the_first_path_inside(
+            paths in prop::collection::vec(path(), 0..12),
+            candidates in prop::collection::vec(path(), 1..8),
+        ) {
+            let entries: Vec<EnvPath> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| EnvPath {
+                    pid: crate::host::Pid(u32::try_from(i).expect("small")),
+                    var: "V".into(),
+                    path: path.into(),
+                })
+                .collect();
+            let index = EnvPathIndex::new(&entries);
+            for candidate in &candidates {
+                let candidate = Path::new(candidate);
+                // Candidates are walked paths: absolute, no `.` or `..`.
+                if candidate
+                    .components()
+                    .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+                {
+                    continue;
+                }
+                let expected = entries.iter().position(|e| inside(&e.path, candidate));
+                prop_assert_eq!(index.first_inside(candidate), expected, "{}", candidate.display());
+            }
+        }
+    }
 
     #[test]
     fn absolute_components_of_every_value_are_paths() {

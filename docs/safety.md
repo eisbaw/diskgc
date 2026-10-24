@@ -558,23 +558,51 @@ which the process is treated as unreadable. Only the answering round's
 reads are used; within it, results of tasks that exit meanwhile are kept. A
 task that is exiting (`PF_EXITING`) shows empty or missing entries while it
 releases them: it is never the source of the memory map or environment.
-A task read is bracketed by two `stat` reads through the same held task
-directory. The directory inode holds the kernel `struct pid`, so a recycled
-numeric tid cannot redirect the second read to another task. A different
-start time or a vanished held task discards that round. The start time's
-clock-tick resolution is no longer the sole identity check.
+A task read is bracketed by two `stat` reads through the same held `stat`
+file of the task. Its procfs inode holds the kernel `struct pid`, so a
+recycled numeric tid cannot redirect the second read to another task: once
+the task is released, the held file reads `ESRCH`. A different start time or
+a vanished held task discards that round. The start time's clock-tick
+resolution is no longer the sole identity check.
+**Shared fd tables** (threads made with `CLONE_FILES`, the usual case) are
+read once per round, not once per task: after one task's fd table was read
+in the round (a trusted read, from a task live after it), another task of
+the round counts as read by that read when, in this order, its own `stat`
+shows it live, the kernel says the two hold the same table
+(`kcmp(KCMP_FILES)`), the first task's `stat` shows it still live with its
+start time, and the task's own `stat` again shows it live with its start
+time. That read then stands for this task's table: a task only ever
+leaves a table it shares (`unshare(CLONE_FILES)` and `execve` give it a
+copy), never joins an existing one, and the first task was the same task
+from its read to the comparison. So the table they share is either the one
+that was read, which this task held then too or joined only as a task
+created since (limit 1), or a copy the first task made after its read,
+which only a task created since can share (limit 1); what was opened in it
+after the read is limit 5. An exec kills every other task before it swaps
+tids, so a task compared across it is not live at its second `stat`.
+Anything else, `kcmp` refused (no `CONFIG_KCMP`, or a
+seccomp filter such as a container runtime's default profile without
+`CAP_SYS_PTRACE`) included, reads the task's table in full, and the
+leader's extra read after a task was seen ended is always a full read. A
+desktop's threads share some 10^2 tables; reading every task's copy made
+the scan exceed Freshness below on a busy host (TASK-115).
+The `cwd`, `root` and `exe` links of a task are read together, in one round
+and one bracket. The memory map and the environment, which every task of a
+process shares, are read from the first task of a plain listing whose read
+is trusted and live after it: such a round needs no counted or confirmed
+listing, so those readers do not pin every task of the process.
 A task directory pinned in an unsuccessful round stays pinned for that
 process read. If its tid is recycled during a later round, that read may
 reach the 16-round bound and treat the process as unreadable; this can
 delay reclaim under heavy thread churn.
 The listing temporarily holds one directory fd per listed thread; the
-task reads also retain one fd per encountered tid until that process read
-ends. A highly threaded process can therefore reach `RLIMIT_NOFILE` and
+task reads also retain one fd (its `stat` file) per encountered tid until
+that process read ends. A highly threaded process can therefore reach `RLIMIT_NOFILE` and
 be treated as unreadable, delaying reclaim. This is an availability limit,
 not a measured threshold: other open fds and the thread count determine
 when it occurs.
 The fd-directory owner used to classify an unreadable process is accepted
-only when the task is live and the same held task directory returns the
+only when the task is live and the same held `stat` file returns the
 same start time before and after that owner read. A vanished held task is
 passed over, even if its numeric tid was reused within one clock tick.
 A tid can also change hands: when a non-leader thread execs, it takes over
@@ -637,7 +665,13 @@ once; none of them makes diskgc take a live process for gone):
 6. a file handed to a process that was already read (an fd passed over a
    Unix socket, `SCM_RIGHTS`) is a new use of the same kind, and an fd in
    flight in a socket's queue belongs to no process at all: neither is
-   seen.
+   seen;
+7. `kcmp(KCMP_FILES)` compares the two tasks' fd-table pointers without a
+   lock that orders the two loads, so in principle two tasks that both
+   leave a shared table (`unshare(CLONE_FILES)`) at that instant, with the
+   freed table's memory reused for the other's new one between the loads,
+   compare equal while holding different tables; the second task's table
+   is then not read (Threads, shared fd tables).
 
 **A process using a dead mount:** the scan `statx`es every visible
 process's fds, working directory and root through `/proc` (above). For

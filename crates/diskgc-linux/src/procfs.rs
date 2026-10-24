@@ -15,8 +15,9 @@ use diskgc_core::host::{Dev, Environ, Ids, MapEntry};
 /// ```
 ///
 /// `dev` is `major:minor` in hex, `inode` decimal (0 for anonymous
-/// mappings). The pathname is everything after the padding (it may hold
-/// spaces and end in ` (deleted)`). Any malformed line fails the parse.
+/// mappings). The pathname (everything after the padding; it may hold
+/// spaces and end in ` (deleted)`) is not kept ([`MapEntry`]). Any
+/// malformed line fails the parse.
 pub fn parse_maps(text: &[u8]) -> Result<Vec<MapEntry>, String> {
     text.split(|b| *b == b'\n')
         .filter(|line| !line.is_empty())
@@ -35,6 +36,9 @@ fn parse_maps_line(line: &[u8]) -> Result<MapEntry, String> {
         rest = &rest[end..];
     }
     let [_, _, _, dev, inode] = fields;
+    if inode.is_empty() {
+        return Err(format!("no inode column in maps line: {}", shown()));
+    }
     let text = |f| utf8(f, line);
     let (major, minor) = text(dev)?
         .split_once(':')
@@ -45,14 +49,12 @@ fn parse_maps_line(line: &[u8]) -> Result<MapEntry, String> {
     let ino = text(inode)?
         .parse()
         .map_err(|_| format!("bad inode column in maps line: {}", shown()))?;
-    let path = trim_spaces(rest);
     Ok(MapEntry {
         dev: Dev {
             major: hex(major)?,
             minor: hex(minor)?,
         },
         ino,
-        path: (!path.is_empty()).then(|| OsString::from_vec(path.to_vec())),
     })
 }
 
@@ -151,22 +153,26 @@ pub fn read_two_passes<E>(mut pass: impl FnMut() -> Result<Vec<u8>, E>) -> Resul
     if second.is_empty() {
         return Ok(second);
     }
-    let lines = |text: &[u8]| -> Vec<Vec<u8>> {
-        text.split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .map(<[u8]>::to_vec)
-            .collect()
+    // Borrowed lines, one output buffer: a desktop's maps are some 10^5
+    // lines per scan, and a copy per line made the static build's
+    // allocator lock the scan's bottleneck (TASK-115). Two equal passes
+    // (nearly always) have the first's lines as their union: no set.
+    fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+        text.split(|b| *b == b'\n').filter(|l| !l.is_empty())
+    }
+    let mut union = Vec::with_capacity(first.len() + 1);
+    let mut add = |line: &[u8]| {
+        union.extend_from_slice(line);
+        union.push(b'\n');
     };
-    let mut union = lines(&first);
-    let known: std::collections::HashSet<Vec<u8>> = union.iter().cloned().collect();
-    union.extend(lines(&second).into_iter().filter(|l| !known.contains(l)));
-    Ok(union
-        .into_iter()
-        .flat_map(|mut l| {
-            l.push(b'\n');
-            l
-        })
-        .collect())
+    lines(&first).for_each(&mut add);
+    if first != second {
+        let known: std::collections::HashSet<&[u8]> = lines(&first).collect();
+        lines(&second)
+            .filter(|l| !known.contains(l))
+            .for_each(&mut add);
+    }
+    Ok(union)
 }
 
 /// Lists a directory whose entries must come from one source in one
@@ -375,8 +381,7 @@ mod tests {
             }
         );
         assert_eq!(maps[0].ino, 1_314_792);
-        assert_eq!(maps[0].path.as_deref(), Some("/usr/bin/cat".as_ref()));
-        assert_eq!((maps[1].ino, maps[1].path.clone()), (0, None));
+        assert_eq!(maps[1].ino, 0);
         assert_eq!(
             maps[2].dev,
             Dev {
@@ -384,11 +389,9 @@ mod tests {
                 minor: 0xa2
             }
         );
-        assert_eq!(
-            maps[2].path.as_deref(),
-            Some("/tmp/a dir/lib.so (deleted)".as_ref())
-        );
-        assert_eq!(maps[3].path.as_deref(), Some("[stack]".as_ref()));
+        // A path with spaces and ` (deleted)` does not disturb the columns.
+        assert_eq!(maps[2].ino, 99);
+        assert_eq!(maps[3].ino, 0);
     }
 
     #[test]
@@ -398,6 +401,7 @@ mod tests {
             b"55d0-55d1 r--p 00000000 fd:01 x /x\n",
             b"55d0-55d1 r--p 00000000 zz:01 1 /x\n",
             b"55d0-55d1 r--p\n",
+            b"55d0-55d1 r--p 00000000 fd:01\n",
         ] {
             assert!(
                 parse_maps(bad).is_err(),
@@ -411,11 +415,14 @@ mod tests {
     fn own_maps_parse_and_include_the_executable() {
         let text = std::fs::read("/proc/self/maps").expect("read maps");
         let maps = parse_maps(&text).expect("parses");
-        let exe = std::fs::read_link("/proc/self/exe").expect("exe");
+        // By inode alone: on btrfs and overlayfs `maps` can show another
+        // device than `stat` (docs/safety.md, In use: Overlay and btrfs).
+        let exe = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata("/proc/self/exe").expect("stat exe"),
+        );
         assert!(
-            maps.iter()
-                .any(|m| m.ino != 0 && m.path.as_deref() == Some(exe.as_os_str())),
-            "{exe:?} not mapped"
+            maps.iter().any(|m| m.ino == exe),
+            "the executable (inode {exe}) is not mapped"
         );
     }
 
@@ -552,6 +559,19 @@ CapInh:\t0000000000000000\nCapPrm:\t0000000800000000\nCapEff:\t0000000000000020\
         assert_eq!(got, Ok(Some(vec![0, 1, 2])));
         let got = list_in_one_call::<u32, ()>(2, 4, |_| Ok((vec![0], false)));
         assert_eq!(got, Ok(None));
+    }
+
+    /// Two equal passes (the common case, taken without a set of lines)
+    /// give their lines once each, every one ended by a newline, as two
+    /// different passes would.
+    #[test]
+    fn equal_passes_give_their_lines_once() {
+        let pass = b"1000-2000 r--p 0 fd:01 7 /a\n\n3000-4000 r--p 0 fd:01 8 /b".to_vec();
+        let got = read_two_passes::<()>(|| Ok(pass.clone()));
+        assert_eq!(
+            got,
+            Ok(b"1000-2000 r--p 0 fd:01 7 /a\n3000-4000 r--p 0 fd:01 8 /b\n".to_vec())
+        );
     }
 
     #[test]
