@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:33'
+updated_date: '2026-10-24 01:04'
 labels:
   - profiles
   - design
@@ -26,3 +27,9 @@ Why: TASK-112's design (docs/safety.md Producer liveness) makes a liveness contr
 - [ ] #2 A test keeps the liveness table and builtin.yaml in sync (every source has exactly one row)
 - [ ] #3 Every row of class none is withdrawn from the built-in library or explicitly recorded as a Mark decision
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-24 from TASK-112 steps 0-3: the admission rule now has a mechanism. where.liveness_contract exists (only nix-shell judged; pytest/node-project/python-project refused at load until TASK-112 steps 5/6). containers-image-tmp is withdrawn from builtin.yaml (e7c0686; re-admission TASK-125). When classifying shipped built-ins, a contract-less /tmp or cache source cannot be given a contract other than nix-shell yet. Union rule: in a selection union, every admitted source with a contract that recognises the candidate must permit it (veto).
+<!-- SECTION:NOTES:END -->

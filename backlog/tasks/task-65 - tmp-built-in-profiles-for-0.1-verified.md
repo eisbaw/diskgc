@@ -4,7 +4,7 @@ title: /tmp built-in profiles for 0.1 (verified)
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-23 17:15'
+updated_date: '2026-10-24 01:04'
 labels:
   - wave-2
   - profiles
@@ -81,6 +81,8 @@ Final integrated nix develop -c just e2e passed 93/93 on 2026-10-20; QA and MPED
 Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). Mark chose the full product over a Cargo-only 0.1, so /tmp built-ins are re-admitted only with a verified liveness contract.
 
 2026-10-23 Mark (TASK-112 D1): pytest-tmp unit is one candidate per session dir pytest-of-*/pytest-* (under the temp-prefix v1 preset), superseding the 2026-10-18 per-test-dir decision recorded above. Reason: the liveness evidence (session .lock, session number) belongs to the session and pytest's own cleanup removes whole sessions; with checkouts: allow decided, the checkout-guard reason for the finer unit is gone; about a tenth as many candidates. pytest-tmp is admitted as a verified heuristic under liveness_contract: pytest (docs/safety.md Producer liveness). D2: containers-image-tmp withdrawn; re-admission via TASK-125.
+
+2026-10-24 from TASK-112 steps 0-1: containers-image-tmp withdrawn from the built-in library (e7c0686), its matching set kept as the user-probe vector containers-image-age. Lifecycle facts pinned by container tests (f27e71c, tier full): legacy nix-shell's rc dir IS the TMPDIR of the shell and its children, and its rc EXIT trap removes it on normal exit or SIGHUP, so nix-shell-<pid>-* leftovers come from SIGKILL; nix develop's nix-develop-<pid>-* is empty, referenced by nothing, and always left behind (Nix 2.34.9). pytest 9.1.1 lock/rank/keep0/--basetemp facts confirmed as designed.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
