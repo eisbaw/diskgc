@@ -47,7 +47,9 @@ use super::discover::check_deadline;
 use super::judge::{Judge, Reached, Tally, Walked, mountinfo, same_object};
 use crate::engine::{Checkouts, DeleteOptions, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{Base, Delete, Host, MonoTime};
-use crate::inuse::{Checker, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked};
+use crate::inuse::{
+    Checker, FreshAttempts, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked,
+};
 use crate::outcome::{Judged, ReclaimEnd, Stop};
 use std::path::Path;
 
@@ -413,8 +415,15 @@ fn protocol<H: Delete>(
         .enumerate()
         .filter(|(_, a)| a.admitted)
         .unzip();
-    let deletion =
-        match clear_and_delete(host, checker, &candidate, &record, options, &mut |scan| {
+    let mut attempts = FreshAttempts::new(deadline);
+    let deletion = match clear_and_delete(
+        host,
+        checker,
+        &candidate,
+        &record,
+        options,
+        &mut attempts,
+        &mut |scan| {
             if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
                 return Err(NotDeleted::Skipped(skip));
             }
@@ -444,15 +453,16 @@ fn protocol<H: Delete>(
                 return Err(NotDeleted::Skipped(skip));
             }
             Ok(())
-        }) {
-            Ok(deletion) => deletion,
-            Err(NotDeleted::Skipped(skip)) => {
-                check_deadline(host, deadline, path)?;
-                return Err(skip.into());
-            }
-            Err(NotDeleted::Failed(error)) => return Err(failed(error)),
-            Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
-        };
+        },
+    ) {
+        Ok(deletion) => deletion,
+        Err(NotDeleted::Skipped(skip)) => {
+            check_deadline(host, deadline, path)?;
+            return Err(skip.into());
+        }
+        Err(NotDeleted::Failed(error)) => return Err(failed(error)),
+        Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
+    };
     done.removed_entries = deletion.removed_entries;
     done.removed_bytes = deletion.removed_bytes;
     ReclaimEnd::of(deletion.end)

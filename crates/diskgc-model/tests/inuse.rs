@@ -1663,6 +1663,7 @@ fn clears_that_keep_expiring_share_the_budget() {
         &candidate,
         &record,
         DeleteOptions::default(),
+        &mut FreshAttempts::new(None),
         &mut |_| {
             caller_checks += 1;
             host.sleep(std::time::Duration::from_secs(2));
@@ -1676,5 +1677,50 @@ fn clears_that_keep_expiring_share_the_budget() {
     assert!(skip.detail.contains("expired"), "{skip}");
     assert_eq!(caller_checks, inuse::FRESH_ATTEMPTS);
     assert_eq!(scans(&host), inuse::FRESH_ATTEMPTS);
+    assert!(exists(&host, "/tmp/c/a"));
+}
+
+/// The checker's stale scans and the caller's expired clears spend one
+/// budget: a stale scan, then a clear that expires before the delete, then
+/// another stale scan is `in_use_unknown` after exactly `FRESH_ATTEMPTS`
+/// scans, not a fresh budget per kind of retry.
+#[test]
+fn stale_scans_and_expired_clears_spend_one_budget() {
+    let host = model(&format!(
+        "{}events:
+  - {{at: {{op: proc_environ, nth: 1, when: after}}, advance: 2s}}
+  - {{at: {{op: proc_environ, nth: 3, when: after}}, advance: 2s}}
+",
+        processes(&[process(10, &[])])
+    ));
+    let parent = dir(&host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("a name");
+    let rules = rules(true);
+    let record = walk(&host, &candidate, &rules, None).expect("walk");
+    let mut checker = Checker::new(&rules, REUSE_LIMIT);
+    let mut caller_checks = 0;
+    let result = inuse::clear_and_delete(
+        &host,
+        &mut checker,
+        &candidate,
+        &record,
+        DeleteOptions::default(),
+        &mut FreshAttempts::new(None),
+        &mut |_| {
+            // Only the second scan clears; its clear expires here.
+            caller_checks += 1;
+            host.sleep(std::time::Duration::from_secs(2));
+            Ok(())
+        },
+    );
+    let Err(inuse::NotDeleted::Skipped(skip)) = result else {
+        panic!("expected a skip, got {result:?}");
+    };
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
+    assert!(skip.detail.contains("3 attempt(s)"), "{skip}");
+    assert_eq!(caller_checks, 1);
+    assert_eq!(scans(&host), inuse::FRESH_ATTEMPTS);
+    assert!(host.unfired_events().is_empty());
     assert!(exists(&host, "/tmp/c/a"));
 }

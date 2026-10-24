@@ -64,7 +64,7 @@ use crate::engine::{Candidate, DeleteOptions, Identity, Reason, Rules, Skip, Wal
 use crate::host::{
     Access, Delete, Host, HostError, LockMode, Locked, MonoTime, Timestamp, TryLock,
 };
-use crate::inuse::{Checker, NotDeleted, clear_and_delete};
+use crate::inuse::{Checker, FreshAttempts, NotDeleted, clear_and_delete};
 use crate::profile::IdleWindow;
 use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath};
 
@@ -151,6 +151,7 @@ pub fn reclaim_checked<H: Delete>(
         removed_entries: 0,
         removed_bytes: 0,
         locked_at: None,
+        attempts: FreshAttempts::new(policy.deadline),
         guard,
     };
     let end = match run.protocol(policy.judged_last_build, policy.rules, policy.idle) {
@@ -179,6 +180,10 @@ struct Run<'r, 'c, H: Delete> {
     removed_bytes: u64,
     /// When the first lock was taken.
     locked_at: Option<MonoTime>,
+    /// The target's one budget of attempts at a fresh in-use verdict,
+    /// shared by all its parts: a busy host does not get a fresh budget
+    /// per part while the target's Cargo locks are held.
+    attempts: FreshAttempts,
     guard: &'r mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
 }
 
@@ -377,6 +382,7 @@ impl<H: Delete> Run<'_, '_, H> {
             candidate,
             record,
             options,
+            &mut self.attempts,
             &mut heuristics,
         ) {
             Ok(done) => done,

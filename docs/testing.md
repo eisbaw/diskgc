@@ -479,7 +479,8 @@ Model scenarios required by [safety.md](safety.md) and
   than the freshness bound): nothing is deleted on a stale scan, the
   candidate is skipped `in_use_unknown` after its three attempts and the
   next one is still tried, and after three in a row the tier's rest is
-  skipped unchecked (`vectors/inuse/busy-host-*`, TASK-144);
+  skipped unchecked, any other outcome resetting the count
+  (`vectors/inuse/busy-host-*`, TASK-144);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must;

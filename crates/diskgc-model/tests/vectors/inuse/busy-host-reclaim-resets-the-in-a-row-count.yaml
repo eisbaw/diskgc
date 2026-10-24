@@ -1,0 +1,55 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-144: the tier stops checking only after three candidates in a row
+# end `in_use_unknown`; any other outcome resets the count. Here 1 gets
+# no fresh scan, 2 is reclaimed, 3 and 4 get none (two in a row), so 5 is
+# still checked, gets a fresh scan, and is reclaimed. Each stale scan
+# finishes 2 s after it started, twice the freshness bound; the fresh one
+# for 2 is 600 ms old when checked, so 3 cannot reuse it (500 ms).
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /tmp/zephyr-1: {.: {mtime: 2026-10-01T00:00:00Z}, data: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+    /tmp/zephyr-2: {.: {mtime: 2026-10-02T00:00:00Z}, data: {size: 4K, mtime: 2026-10-02T00:00:00Z}}
+    /tmp/zephyr-3: {.: {mtime: 2026-10-03T00:00:00Z}, data: {size: 4K, mtime: 2026-10-03T00:00:00Z}}
+    /tmp/zephyr-4: {.: {mtime: 2026-10-04T00:00:00Z}, data: {size: 4K, mtime: 2026-10-04T00:00:00Z}}
+    /tmp/zephyr-5: {.: {mtime: 2026-10-05T00:00:00Z}, data: {size: 4K, mtime: 2026-10-05T00:00:00Z}}
+  processes:
+    - {pid: 601, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+  events:
+    - {at: {op: proc_environ, nth: 1, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 2, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 3, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 4, when: after}, advance: 600ms}
+    - {at: {op: proc_environ, nth: 5, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 6, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 7, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 8, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 9, when: after}, advance: 2s}
+    - {at: {op: proc_environ, nth: 10, when: after}, advance: 2s}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-1}
+    - {candidate: /tmp/zephyr-2}
+    - {candidate: /tmp/zephyr-3}
+    - {candidate: /tmp/zephyr-4}
+    - {candidate: /tmp/zephyr-5}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-2, /tmp/zephyr-5]
+  removed: [/tmp/zephyr-2, /tmp/zephyr-5]
+  skipped:
+    - {candidate: /tmp/zephyr-1, reason: in_use_unknown}
+    - {candidate: /tmp/zephyr-3, reason: in_use_unknown}
+    - {candidate: /tmp/zephyr-4, reason: in_use_unknown}
+  preserved: [/tmp/zephyr-1/data, /tmp/zephyr-3/data, /tmp/zephyr-4/data]

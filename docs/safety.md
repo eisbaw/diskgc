@@ -702,7 +702,9 @@ it, a scan slower than the bound on a busy host) never clears anything:
 it spends one of the candidate's three attempts, and the next attempt
 waits (250 ms, then 1 s; never to or past the deadline) and checks against
 a new scan. When the attempts are spent the candidate is skipped
-`in_use_unknown` and the run goes on with the next one; its exit code
+`in_use_unknown` and the run goes on with the next one (a Cargo target's
+parts share the target's three attempts, so its locks are not held for
+more); its exit code
 follows available space like any other skip (decided 2026-10-25 for
 TASK-144 on Mark's delegation: "never delete on a stale scan; retry with
 backoff a few times, then skip that candidate and carry on"). A part-way

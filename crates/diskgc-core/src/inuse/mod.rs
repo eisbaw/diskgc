@@ -809,7 +809,7 @@ impl<'a> Checker<'a> {
                 return Ok(Err(skip));
             }
         }
-        Ok(Err(attempts.spent(candidate.path())))
+        unreachable!("each pass decides or spends one of {FRESH_ATTEMPTS} attempts")
     }
 
     /// A scan younger than the reuse limit: the kept one, or a new one.
@@ -958,21 +958,23 @@ impl Checker<'_> {
 /// check on the same scan (`also`: the Cargo process heuristics; nothing
 /// for kind `fs`), then [`delete_cleared`]
 /// right away. A stale scan or a clear that expired before the delete could
-/// start spends one of the candidate's [`FRESH_ATTEMPTS`] (a pause, then a
-/// new scan); once they are spent it is skipped (`in_use_unknown`).
+/// start spends one of the candidate's `attempts` (a pause, then a new
+/// scan); once they are spent it is skipped (`in_use_unknown`). The
+/// candidate is what the caller reclaims as one: a Cargo target passes the
+/// same budget for each of its parts.
 pub fn clear_and_delete<H: Delete>(
     host: &H,
     checker: &mut Checker<'_>,
     candidate: &Candidate<'_, H::Fd>,
     record: &WalkRecord,
     options: DeleteOptions,
+    attempts: &mut FreshAttempts,
     also: &mut dyn FnMut(&Scan) -> Result<(), NotDeleted>,
 ) -> Result<Deletion, NotDeleted> {
-    let mut attempts = FreshAttempts::new(options.deadline);
     // Bounded by `attempts`: each pass deletes, refuses, or spends one.
     for _ in 0..FRESH_ATTEMPTS {
         let clear = checker
-            .check(host, candidate, record, &mut attempts)
+            .check(host, candidate, record, attempts)
             .map_err(NotDeleted::Failed)?
             .map_err(NotDeleted::Skipped)?;
         also(checker.latest().expect("the check made or kept one"))?;
@@ -987,7 +989,7 @@ pub fn clear_and_delete<H: Delete>(
             }
         }
     }
-    Err(NotDeleted::Skipped(attempts.spent(candidate.path())))
+    unreachable!("each pass deletes, refuses, or spends one of {FRESH_ATTEMPTS} attempts")
 }
 
 /// Why one attempt at a fresh verdict was spent, for the skip's detail.

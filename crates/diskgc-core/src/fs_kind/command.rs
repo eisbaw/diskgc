@@ -366,9 +366,10 @@ fn protocol<H: Delete>(
                 }),
             };
         }
-        if !retry_alternative {
-            return Err(attempts.spent(path).into());
-        }
+        assert!(
+            retry_alternative,
+            "each pass runs, refuses, or spends one of {FRESH_ATTEMPTS} attempts"
+        );
     }
 }
 

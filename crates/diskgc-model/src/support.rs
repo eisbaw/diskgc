@@ -8,7 +8,9 @@
 
 use diskgc_core::engine::{self, Candidate, DeleteOptions, Deletion, Rules, Skip, WalkStop};
 use diskgc_core::host::{Delete, HostError};
-use diskgc_core::inuse::{Checker, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked};
+use diskgc_core::inuse::{
+    Checker, FreshAttempts, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked,
+};
 
 /// Why [`delete_unused`] deleted nothing (or stopped).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,12 +47,21 @@ pub fn delete_unused<H: Delete>(
     locked_is_walked(host, candidate, &lock, &record)
         .map_err(Stop::Failed)?
         .map_err(Stop::Skipped)?;
-    let done = clear_and_delete(host, checker, candidate, &record, options, &mut |_| Ok(()))
-        .map_err(|e| match e {
-            NotDeleted::Skipped(skip) => Stop::Skipped(skip),
-            NotDeleted::Failed(error) => Stop::Failed(error),
-            NotDeleted::Stopped(stop) => Stop::Stopped(stop),
-        })?;
+    let mut attempts = FreshAttempts::new(options.deadline);
+    let done = clear_and_delete(
+        host,
+        checker,
+        candidate,
+        &record,
+        options,
+        &mut attempts,
+        &mut |_| Ok(()),
+    )
+    .map_err(|e| match e {
+        NotDeleted::Skipped(skip) => Stop::Skipped(skip),
+        NotDeleted::Failed(error) => Stop::Failed(error),
+        NotDeleted::Stopped(stop) => Stop::Stopped(stop),
+    })?;
     drop(lock);
     Ok(done)
 }
