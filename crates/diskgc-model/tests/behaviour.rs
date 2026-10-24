@@ -403,7 +403,7 @@ fn proc_readers_answer_from_the_process_table() {
     let env = host.proc_environ(pid).unwrap();
     assert_eq!(env.get("TMPDIR"), Some(OsStr::new("/tmp/a")));
     assert_eq!(env.get("A"), Some(OsStr::new("b=c")));
-    assert_eq!(env.without_equals, ["odd"]);
+    assert_eq!(env.without_equals().collect::<Vec<_>>(), ["odd"]);
     let maps = host.proc_maps(pid).unwrap();
     assert_eq!(
         Some((maps[0].dev, maps[0].ino)),
@@ -651,7 +651,7 @@ fn an_empty_proc_answer_is_failed_as_linuxhost_reports_it() {
     };
     failed(host.proc_fds(pid).map(|v| v.len()), "fds");
     failed(host.proc_maps(pid).map(|v| v.len()), "maps");
-    failed(host.proc_environ(pid).map(|e| e.vars.len()), "environ");
+    failed(host.proc_environ(pid).map(|e| e.vars().count()), "environ");
     failed(host.proc_links(pid, ProcLink::Exe).map(|v| v.len()), "exe");
     // cwd and root always exist (default /).
     assert_eq!(host.proc_links(pid, ProcLink::Cwd).unwrap().len(), 1);

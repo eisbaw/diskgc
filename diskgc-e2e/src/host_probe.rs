@@ -1016,7 +1016,7 @@ fn proc_readers(host: &LinuxHost, pid: &str) -> Result<(), String> {
         }
     }
     if let Some(env) = proc_result("environ", host.proc_environ(pid)) {
-        for (name, value) in &env.vars {
+        for (name, value) in env.vars() {
             println!("env {}={}", name.to_string_lossy(), value.to_string_lossy());
         }
     }

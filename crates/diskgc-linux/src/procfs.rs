@@ -68,23 +68,10 @@ fn trim_spaces(s: &[u8]) -> &[u8] {
     &s[start..]
 }
 
-/// Parses `environ`: NUL-terminated `NAME=value` entries.
+/// Parses `environ`: NUL-terminated `NAME=value` entries
+/// ([`Environ::from_block`]; the fuzz target's entry point).
 pub fn parse_environ(bytes: &[u8]) -> Environ {
-    let mut env = Environ::default();
-    let body = bytes.strip_suffix(b"\0").unwrap_or(bytes);
-    if body.is_empty() {
-        return env;
-    }
-    for entry in body.split(|b| *b == 0) {
-        match entry.iter().position(|b| *b == b'=') {
-            Some(eq) => env.vars.push((
-                OsString::from_vec(entry[..eq].to_vec()),
-                OsString::from_vec(entry[eq + 1..].to_vec()),
-            )),
-            None => env.without_equals.push(OsString::from_vec(entry.to_vec())),
-        }
-    }
-    env
+    Environ::from_block(bytes.to_vec())
 }
 
 /// Reads a file whose content must come from one source in one `read`
@@ -433,11 +420,26 @@ mod tests {
         assert_eq!(env.get("EQ"), Some("a=b".as_ref()));
         assert_eq!(env.get("EMPTY"), Some("".as_ref()));
         assert_eq!(env.get("NOEQUALS"), None);
-        assert_eq!(env.without_equals, vec![OsString::from("NOEQUALS")]);
+        assert_eq!(env.without_equals().collect::<Vec<_>>(), ["NOEQUALS"]);
+        assert_eq!(env.vars().count(), 3);
         assert_eq!(parse_environ(b""), Environ::default());
+        assert_eq!(parse_environ(b"\0").vars().count(), 0);
+        // An empty entry inside the block is kept, as text without `=`.
+        assert_eq!(
+            parse_environ(b"A=1\0\0B=2\0")
+                .without_equals()
+                .collect::<Vec<_>>(),
+            [""]
+        );
         // Non-UTF-8 values are kept byte for byte.
         let raw = parse_environ(b"P=/tmp/\xff\0");
-        assert_eq!(raw.vars[0].1.as_encoded_bytes(), b"/tmp/\xff");
+        let (_, value) = raw.vars().next().expect("one variable");
+        assert_eq!(value.as_encoded_bytes(), b"/tmp/\xff");
+        // The same entries make the same environment, however built.
+        assert_eq!(
+            Environ::from_entries(["TMPDIR=/tmp/x", "EQ=a=b", "EMPTY=", "NOEQUALS"]),
+            env
+        );
     }
 
     #[test]

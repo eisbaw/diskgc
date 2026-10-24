@@ -1371,7 +1371,7 @@ impl Host for ModelHost {
             pid,
             "environ",
             |_, proc| proc.environ.clone(),
-            |env| env.vars.is_empty() && env.without_equals.is_empty(),
+            Environ::is_empty,
         )
     }
 

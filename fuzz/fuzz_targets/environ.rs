@@ -11,5 +11,8 @@ fuzz_target!(|input: &[u8]| {
     } else {
         body.split(|byte| *byte == 0).count()
     };
-    assert_eq!(parsed.vars.len() + parsed.without_equals.len(), count);
+    assert_eq!(
+        parsed.vars().count() + parsed.without_equals().count(),
+        count
+    );
 });

@@ -350,10 +350,9 @@ pub fn names_path(text: &[u8], sought: &Path) -> Option<PathBuf> {
 /// ignores it.
 pub fn temp_root_values(environ: &Environ) -> Vec<OsString> {
     environ
-        .vars
-        .iter()
+        .vars()
         .filter(|(name, value)| TEMP_ROOT_VARS.iter().any(|var| name == var) && !value.is_empty())
-        .map(|(_, value)| value.clone())
+        .map(|(_, value)| value.to_owned())
         .collect()
 }
 
@@ -385,8 +384,8 @@ pub fn basetemp_values(
     }
     for value in environ
         .into_iter()
-        .flat_map(|e| e.vars.iter())
-        .filter(|(name, _)| name == "PYTEST_ADDOPTS")
+        .flat_map(Environ::vars)
+        .filter(|(name, _)| *name == "PYTEST_ADDOPTS")
         .map(|(_, value)| value)
     {
         scan(&shlex_split(value.as_bytes()), BasetempSource::Addopts);
@@ -498,7 +497,7 @@ pub fn shows_pytest(process: &ProcessFacts) -> bool {
     let by_bootstrap = cmdline
         .windows(2)
         .any(|pair| pair[0] == "-c" && pair[1].as_bytes() == EXECNET_BOOTSTRAP);
-    let by_environment = environ.vars.iter().any(|(name, _)| {
+    let by_environment = environ.vars().any(|(name, _)| {
         let name = name.as_bytes();
         name == b"PYTEST_ADDOPTS"
             || name == b"PYTEST_CURRENT_TEST"
@@ -539,7 +538,7 @@ fn naming(process: &ProcessFacts, facts: &Facts<'_>) -> Option<Evidence> {
     if process
         .environ
         .iter()
-        .flat_map(|e| e.vars.iter())
+        .flat_map(Environ::vars)
         .any(|(_, value)| by_text(value.as_bytes()))
         || resolved_into(BasetempSource::Addopts)
     {

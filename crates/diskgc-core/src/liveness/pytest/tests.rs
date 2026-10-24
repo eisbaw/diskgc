@@ -30,13 +30,7 @@ const ROOT: u64 = 2;
 const SESSION: u64 = 100;
 
 fn env(vars: &[(&str, &str)]) -> Environ {
-    Environ {
-        vars: vars
-            .iter()
-            .map(|(n, v)| (OsString::from(n), OsString::from(v)))
-            .collect(),
-        without_equals: Vec::new(),
-    }
+    Environ::from_entries(vars.iter().map(|(n, v)| format!("{n}={v}")))
 }
 
 /// A uid 1000 process with a readable command line and environment and
@@ -769,9 +763,17 @@ fn judge(g: &Generated) -> (Verdict, bool) {
                 }
             }
             if let Some(e) = &mut p.environ {
-                for (_, value) in &mut e.vars {
-                    *value = mark(value);
-                }
+                let marked: Vec<OsString> = e
+                    .vars()
+                    .map(|(name, value)| {
+                        let mut entry = name.to_owned();
+                        entry.push("=");
+                        entry.push(mark(value));
+                        entry
+                    })
+                    .chain(e.without_equals().map(OsStr::to_owned))
+                    .collect();
+                *e = Environ::from_entries(marked);
             }
             p
         })

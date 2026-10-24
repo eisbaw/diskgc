@@ -578,23 +578,82 @@ pub struct MapEntry {
 }
 
 /// A process's initial environment (`/proc/<pid>/environ`, the environment
-/// block as of `exec`).
+/// block as of `exec`): its NUL-separated entries, kept as the one block
+/// they were read as and split on demand. A desktop's scan reads some 10^5
+/// variables; an owned string per name and value made allocation the
+/// static build's bottleneck (TASK-115).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environ {
-    /// `NAME=value` entries, split at the first `=`, in order.
-    pub vars: Vec<(OsString, OsString)>,
-    /// Entries without `=` (execve does not forbid them); kept, not dropped.
-    pub without_equals: Vec<OsString>,
+    /// The entries, each ended by a NUL except the last (one trailing NUL
+    /// of the block is dropped; an empty block has no entries).
+    body: Vec<u8>,
 }
 
 impl Environ {
+    /// The environment of a block as `/proc/<pid>/environ` shows it:
+    /// NUL-terminated entries; one trailing NUL is dropped.
+    pub fn from_block(mut block: Vec<u8>) -> Self {
+        if block.last() == Some(&0) {
+            block.pop();
+        }
+        block.shrink_to_fit();
+        Self { body: block }
+    }
+
+    /// The environment with these entries (`NAME=value`, or text without
+    /// `=`), in order: the block the kernel shows for them, each entry
+    /// ended by a NUL ([`Environ::from_block`]), so `["A=1", ""]` keeps its
+    /// empty entry as the kernel's `A=1\0\0` does. An entry cannot hold a
+    /// NUL: that would be two.
+    pub fn from_entries<S: AsRef<OsStr>>(entries: impl IntoIterator<Item = S>) -> Self {
+        let mut block = Vec::new();
+        for entry in entries {
+            let entry = entry.as_ref().as_encoded_bytes();
+            assert!(
+                !entry.contains(&0),
+                "an environment entry holds a NUL: {entry:?}"
+            );
+            block.extend_from_slice(entry);
+            block.push(0);
+        }
+        Self::from_block(block)
+    }
+
+    /// Every entry, in order.
+    fn entries(&self) -> impl Iterator<Item = &[u8]> {
+        let none = self.body.is_empty();
+        self.body.split(|b| *b == 0).filter(move |_| !none)
+    }
+
+    /// `NAME=value` entries, split at the first `=`, in order.
+    pub fn vars(&self) -> impl Iterator<Item = (&OsStr, &OsStr)> {
+        self.entries().filter_map(|entry| {
+            let eq = entry.iter().position(|b| *b == b'=')?;
+            Some((os_str(&entry[..eq]), os_str(&entry[eq + 1..])))
+        })
+    }
+
+    /// Entries without `=` (execve does not forbid them); kept, not dropped.
+    pub fn without_equals(&self) -> impl Iterator<Item = &OsStr> {
+        self.entries()
+            .filter(|entry| !entry.contains(&b'='))
+            .map(os_str)
+    }
+
+    /// Whether the block has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.body.is_empty()
+    }
+
     /// The value of the first variable called `name`.
     pub fn get(&self, name: &str) -> Option<&OsStr> {
-        self.vars
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_os_str())
+        self.vars().find(|(n, _)| *n == name).map(|(_, v)| v)
     }
+}
+
+fn os_str(bytes: &[u8]) -> &OsStr {
+    use std::os::unix::ffi::OsStrExt;
+    OsStr::from_bytes(bytes)
 }
 
 /// The four user ids, or the four group ids, of a process: the `Uid:` or
@@ -1338,6 +1397,64 @@ pub trait Delete: Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use proptest::prelude::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// Environment entries without NUL, from a small alphabet so that `=`
+    /// and empty entries are common.
+    fn entries() -> impl Strategy<Value = Vec<Vec<u8>>> {
+        prop::collection::vec(
+            prop::collection::vec(prop::sample::select(vec![b'A', b'=', b'/', 0xff]), 0..4),
+            0..6,
+        )
+    }
+
+    /// The kernel's block for `entries`: each ended by a NUL.
+    fn kernel_block(entries: &[Vec<u8>]) -> Vec<u8> {
+        entries
+            .iter()
+            .flat_map(|e| e.iter().copied().chain([0]))
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1024))]
+
+        /// TASK-115: the byte-block [`Environ`] gives back exactly the
+        /// entries of the kernel's block (one trailing NUL dropped: so a
+        /// block of one empty entry has none, as the old parser read it),
+        /// [`Environ::from_entries`] builds that very block, and every
+        /// entry is in exactly one of `vars` and `without_equals`, in order.
+        #[test]
+        fn environ_round_trips_the_kernels_block(entries in entries()) {
+            let block = kernel_block(&entries);
+            let env = Environ::from_block(block.clone());
+            let expected: Vec<&[u8]> = if entries == [Vec::<u8>::new()] {
+                Vec::new()
+            } else {
+                entries.iter().map(Vec::as_slice).collect()
+            };
+            prop_assert_eq!(env.entries().collect::<Vec<_>>(), expected.clone());
+            let built = Environ::from_entries(
+                entries.iter().map(|e| OsStr::from_bytes(e)),
+            );
+            prop_assert_eq!(&built, &env);
+            // Split at the first `=`: a name never holds one.
+            prop_assert!(env.vars().all(|(n, _)| !n.as_bytes().contains(&b'=')));
+            let vars: Vec<Vec<u8>> = env
+                .vars()
+                .map(|(n, v)| [n.as_bytes(), b"=", v.as_bytes()].concat())
+                .collect();
+            let plain: Vec<&[u8]> = env.without_equals().map(OsStr::as_bytes).collect();
+            let want_vars: Vec<Vec<u8>> =
+                expected.iter().filter(|e| e.contains(&b'=')).map(|e| e.to_vec()).collect();
+            let want_plain: Vec<&[u8]> =
+                expected.iter().copied().filter(|e| !e.contains(&b'=')).collect();
+            prop_assert_eq!(vars, want_vars);
+            prop_assert_eq!(plain, want_plain);
+        }
+    }
 
     #[test]
     fn file_types_from_mode_bits() {

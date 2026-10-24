@@ -718,16 +718,10 @@ fn view(
     Ok(view.clone())
 }
 
-/// Splits `NAME=value` entries at the first `=`.
+/// The environment of these `NAME=value` entries (split at the first `=`
+/// when read).
 fn environ(entries: &[String]) -> Environ {
-    let mut env = Environ::default();
-    for entry in entries {
-        match entry.split_once('=') {
-            Some((name, value)) => env.vars.push((name.into(), value.into())),
-            None => env.without_equals.push(entry.into()),
-        }
-    }
-    env
+    Environ::from_entries(entries)
 }
 
 fn load_locks(state: &mut State, model: &HostModel) -> Result<(), LoadError> {

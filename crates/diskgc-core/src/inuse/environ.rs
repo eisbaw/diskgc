@@ -77,14 +77,13 @@ fn insert_ancestors(first: &mut HashMap<PathBuf, usize>, path: &Path, i: usize) 
 /// (so `PATH`-like lists count component by component), absolute
 /// components only, byte for byte, each with its variable's name.
 pub(crate) fn paths(env: &Environ) -> Vec<(OsString, PathBuf)> {
-    env.vars
-        .iter()
+    env.vars()
         .flat_map(|(name, value)| {
             value
                 .as_bytes()
                 .split(|b| *b == b':')
                 .filter(|part| part.first() == Some(&b'/'))
-                .map(move |part| (name.clone(), PathBuf::from(OsStr::from_bytes(part))))
+                .map(move |part| (name.to_owned(), PathBuf::from(OsStr::from_bytes(part))))
         })
         .collect()
 }
@@ -167,15 +166,13 @@ mod tests {
 
     #[test]
     fn absolute_components_of_every_value_are_paths() {
-        let env = Environ {
-            vars: vec![
-                ("TMPDIR".into(), "/tmp/c".into()),
-                ("PATH".into(), "/tmp/c/bin:relative:/usr/bin".into()),
-                ("WORD".into(), "hello".into()),
-                ("EMPTY".into(), "".into()),
-            ],
-            without_equals: vec!["/tmp/c".into()],
-        };
+        let env = Environ::from_entries([
+            "TMPDIR=/tmp/c",
+            "PATH=/tmp/c/bin:relative:/usr/bin",
+            "WORD=hello",
+            "EMPTY=",
+            "/tmp/c",
+        ]);
         let got: Vec<(String, String)> = paths(&env)
             .into_iter()
             .map(|(n, p)| (n.to_string_lossy().into(), p.display().to_string()))
@@ -190,10 +187,7 @@ mod tests {
         .collect();
         assert_eq!(got, want);
         // Non-UTF-8 values are kept byte for byte.
-        let raw = Environ {
-            vars: vec![("X".into(), OsStr::from_bytes(b"/tmp/\xff").into())],
-            without_equals: vec![],
-        };
+        let raw = Environ::from_block(b"X=/tmp/\xff\0".to_vec());
         assert_eq!(paths(&raw)[0].1.as_os_str().as_bytes(), b"/tmp/\xff");
     }
 

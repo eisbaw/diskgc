@@ -51,8 +51,8 @@ use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, R
 
 use crate::mountinfo::{hidepid_of, parse_mountinfo};
 use crate::procfs::{
-    StatusFields, list_in_one_call, parse_environ, parse_maps, parse_nspid, parse_nspid_levels,
-    parse_status, parse_status_ids, read_confirmed, read_in_one_call, read_two_passes,
+    StatusFields, list_in_one_call, parse_maps, parse_nspid, parse_nspid_levels, parse_status,
+    parse_status_ids, read_confirmed, read_in_one_call, read_two_passes,
 };
 use crate::sandbox::{self, Permit};
 use crate::sockdiag;
@@ -501,10 +501,21 @@ impl ProcRoot<'_> {
         )
         .map(|x| stat_from_statx(&x))
         .map_err(|e| HostError::errno("statx", Self::shown(rel), errno_of(e)))?;
-        let text = rustix::fs::readlinkat(self.0, rel, Vec::new())
+        // Into a stack buffer, then one exact allocation (TASK-115); a
+        // text that fills the buffer may be cut, so it is read again
+        // through the growing read.
+        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); LINK_TEXT_MAX];
+        let (text, _) = rustix::fs::readlinkat_raw(self.0, rel, &mut buf)
             .map_err(|e| HostError::errno("readlink", Self::shown(rel), errno_of(e)))?;
+        let text = if text.len() < LINK_TEXT_MAX {
+            text.to_vec()
+        } else {
+            rustix::fs::readlinkat(self.0, rel, Vec::new())
+                .map_err(|e| HostError::errno("readlink", Self::shown(rel), errno_of(e)))?
+                .into_bytes()
+        };
         Ok(LinkTarget {
-            text: OsString::from_vec(text.into_bytes()),
+            text: OsString::from_vec(text),
             stat,
         })
     }
@@ -667,6 +678,10 @@ struct ProcPath {
     len: usize,
     buf: [u8; PROC_PATH_MAX],
 }
+
+/// The stack buffer of one magic link's text ([`ProcRoot::link_target`]):
+/// `PATH_MAX`, which holds nearly every text in one call.
+const LINK_TEXT_MAX: usize = 4096;
 
 /// The capacity of a [`ProcPath`].
 const PROC_PATH_MAX: usize = 64;
@@ -1188,8 +1203,9 @@ fn fd_numbers(files: &impl ProcFiles, dir: &str) -> Result<Vec<u32>, HostError> 
 /// leader's tid again.)
 fn task_fds(proc: ProcRoot<'_>, pid: Pid, tid: u32) -> Result<Vec<ProcFd>, HostError> {
     let dir = task_path(pid, tid, "fd");
-    let mut fds = Vec::new();
-    for fd in fd_numbers(&Kernel(proc), &dir)? {
+    let numbers = fd_numbers(&Kernel(proc), &dir)?;
+    let mut fds = Vec::with_capacity(numbers.len());
+    for fd in numbers {
         match proc.link_target(&ProcPath::of(format_args!("{pid}/task/{tid}/fd/{fd}"))) {
             Ok(target) => fds.push(ProcFd { fd, target }),
             Err(e) if e.is(Errno::ENOENT) => {}
@@ -1680,14 +1696,16 @@ impl Host for LinuxHost {
             },
             Want::EveryTask,
         )?;
-        // Tasks sharing an fd table list the same fds: keep each once.
-        let mut seen = HashSet::new();
-        let mut fds: Vec<ProcFd> = per_task
-            .into_iter()
-            .flatten()
-            .filter(|f| seen.insert((f.fd, f.target.stat.dev_ino(), f.target.text.clone())))
-            .collect();
-        fds.sort_by_key(|f| f.fd);
+        // Tasks sharing an fd table list the same fds: keep each once, by
+        // sorting, not a set of copied link texts (an allocation per fd).
+        let key = |f: &ProcFd| (f.fd, f.target.stat.dev_ino());
+        let mut fds: Vec<ProcFd> = per_task.into_iter().flatten().collect();
+        fds.sort_by(|a, b| {
+            key(a)
+                .cmp(&key(b))
+                .then_with(|| a.target.text.cmp(&b.target.text))
+        });
+        fds.dedup_by(|a, b| key(a) == key(b) && a.target.text == b.target.text);
         Ok(fds)
     }
 
@@ -1748,12 +1766,16 @@ impl Host for LinuxHost {
             },
             Want::EveryTask,
         )?;
+        // Kept in first-seen order (the first `exe` names the command),
+        // each once; a process's tasks show few distinct links, so a scan of
+        // the kept ones costs less than a set of copied link texts.
         let mut all: [Vec<LinkTarget>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        let mut seen: [HashSet<_>; 3] = [HashSet::new(), HashSet::new(), HashSet::new()];
         for links in per_task {
-            for ((kept, seen), link) in all.iter_mut().zip(&mut seen).zip(links) {
+            for (kept, link) in all.iter_mut().zip(links) {
                 if let Some(t) = link
-                    && seen.insert((t.stat.dev_ino(), t.text.clone()))
+                    && !kept
+                        .iter()
+                        .any(|k| k.stat.dev_ino() == t.stat.dev_ino() && k.text == t.text)
                 {
                     kept.push(t);
                 }
@@ -1776,7 +1798,7 @@ impl Host for LinuxHost {
         let (_, bytes) = read_through_live_task(proc, pid, ("environ", "environment"), |path| {
             read_environ(&Kernel(proc), path)
         })?;
-        Ok(parse_environ(&bytes))
+        Ok(Environ::from_block(bytes))
     }
 
     /// Reads the processes on up to [`PROC_READERS`] threads (this one
