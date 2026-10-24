@@ -1,10 +1,10 @@
 ---
 id: TASK-65
-title: /tmp built-in profiles for 0.1 (verified)
-status: To Do
+title: '0.1 /tmp catalog: nix-shell-rc and pytest-tmp in the release'
+status: Done
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-24 13:02'
+updated_date: '2026-10-24 23:17'
 labels:
   - wave-2
   - profiles
@@ -18,29 +18,20 @@ references:
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Why: 0.1 ships "the verified /tmp and Cargo built-ins" (PRD Scope, Releases), for the /tmp laptop owner (task-22). Pulled out of task-39: the verified /tmp subset only, all with the plain delete action.
+Why: Mark ruled 2026-10-24 to cut 0.1 right after pytest-tmp landed (TASK-112 step 5), so that 0.1 frees real /tmp space for the /tmp laptop owner (task-22), not only Cargo targets. The two /tmp built-ins with a liveness contract are now shipped in the development library: nix-shell-rc (class sound, Owner PID contract nix-shell, TASK-112 step 4) and pytest-tmp (verified heuristic under the pytest contract, admitted by Mark himself 2026-10-23, so TASK-138 does not block it). This task puts exactly these two into the 0.1 catalog.
 
-Profiles (names from docs/reference.md, Built-in profile library):
-- pytest-tmp: one candidate per pytest test dir, pytest-of-*/pytest-*/* in /tmp, /var/tmp, and the same one level down (nix-shell.* / tmp.* dirs); type dir, so the *current symlinks, plain files in a session dir, the session dirs and pytest-of-<user> are never candidates (task-71)
-- nix-shell-rc: /tmp/nix-shell-*-*, /tmp/nix-develop-*-* (rc dirs left by every shell start)
-- nix-shell-tmpdir: /tmp/nix-shell.* (a shell's TMPDIR)
-- mktemp-dir: /tmp/tmp.*
-- tmp-entry: any top-level entry of /tmp, /var/tmp
-- containers-image-tmp (from the task-39 dogfooding note, 2026-10-17): /var/tmp/buildah*, /var/tmp/container_images_storage* (68.5G on the dogfood host, blobs left by buildah/podman). It is not yet in the reference.md table; adding the row is part of this task, and it ships only if verified like the others.
+What: builtin.yaml `releases: ["0.1"]` on nix-shell-rc and pytest-tmp (the catalog is derived from that data by Library::proposed_release_01, TASK-122); the release suites, catalog tests, release vectors (tests/vectors/release, catalog: proposed-release-01), reference.md (Liveness contracts verdicts, provisional 0.1 release notes) and docs/example.yaml follow. No check is weakened: the 0.1 scope check (kind fs with delete or cargo-target, admissible class) must admit them as is, and the release build must carry everything their contracts need.
 
-Dogfood findings to verify against (task-39 note): /tmp had 147,557 top-level entries (101k nix-shell rc dirs, 38k nix-shell.*), a full walk took 265 s at idle IO priority (the PRD's 100k-entry case); all pytest-tmp matches were nested inside nix-shell temp dirs.
-
-Stays in task-39: claude-code-tmp, chromium-tmp, playwright-tmp, node-compile-cache and nix-user-cache (~/.cache/nix, not /tmp scope).
+Out of scope (stay excluded, with their recorded counterexamples): nix-shell-tmpdir, mktemp-dir, tmp-entry (excluded), containers-image-tmp (withdrawn, TASK-125), claude-code-tmp/chromium-tmp/playwright-tmp/zephyr-tmp/renode-tmp (withdrawn, TASK-122). Gate lift and release approval remain TASK-67.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each profile ships in builtin.yaml with examples and golden match sets (per task-17)
-- [ ] #2 Each profile is verified against the dogfood findings and carries verified_with from a real system
-- [ ] #3 No profile depends on the Docker or Nix kinds, command actions or survey (task-37, task-38)
-- [x] #4 Dormant nix-shell and nix develop sessions keep their rc and TMPDIR dirs (container test), or nix-shell-rc and nix-shell-tmpdir do not ship in 0.1
-- [x] #5 pytest-tmp's checkouts setting is decided (survey 2026-10-19: all 75,253 leftover repos were test fixtures; recommendation: allow)
-- [x] #6 pytest-tmp's granularity (per session or per test dir) is decided before it ships: with checkouts allowed, per session costs about a tenth of the candidates; once shipped, a changed match set needs a new name
+- [x] #1 builtin.yaml lists nix-shell-rc and pytest-tmp in releases ["0.1"]; Library::proposed_release_01 admits them without any change to its scope check (kind fs with delete, admissible liveness class), and the release build carries their liveness contracts (no contract code is behind a feature the release lacks)
+- [x] #2 The release catalog is cargo-target, nix-shell-rc, pytest-tmp and the seven idle filters on every surface (profiles list/show, --help, --select, config tiers); the release_suite ADMITTED/EXCLUDED lists and the catalog unit tests expect exactly that, and every other built-in stays refused
+- [x] #3 reference.md Liveness contracts rows of both say they are in the proposed 0.1 catalog and the liveness/library/release sync test passes; the provisional 0.1 release notes and docs/example.yaml describe the two /tmp profiles with an example tier using them
+- [x] #4 Release vectors (tests/vectors/release, catalog: proposed-release-01): pytest-tmp and nix-shell-rc each reclaim an ended session (dead owner) and keep a live-owner one under the 0.1 catalog
+- [x] #5 Walked with the actual release artifact (release-01-candidate) in a disposable container: profiles list, profiles show pytest-tmp, ensure --dry-run and a real ensure over a generated /tmp with live and dead sessions; transcript under tmp/walks/2026-10-24-release-catalog/ in the main checkout
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -87,6 +78,16 @@ Orchestrator 2026-10-23: now depends on TASK-112 (producer liveness contracts). 
 2026-10-24 from TASK-112 step 4 (557db0e): nix-shell-rc is now a built-in with liveness_contract: nix-shell (Owner PID) and min_idle_for 1h; its private-PID-namespace counterexample is refused (vector nix-shell-rc-namespace-local-pid-refused; container test nix_shell_rc_shell_in_private_pid_namespace_is_kept), and it is excluded from the release-01 candidate catalog. Host dry run (read-only, 125,215 rc dirs, 29 s): 124,952 eligible, 837.6 MiB; 23 in_use owner_pid; 59 producer_unknown (thread ids, TASK-131). nix-shell-tmpdir, mktemp-dir, tmp-entry stay excluded.
 
 2026-10-24 TASK-112 step 5 (master dcfd410): pytest-tmp is shipped in the development library under liveness_contract: pytest, one candidate per session (temp-prefix v1 preset over pytest-of-*/pytest-*, min_idle_for 1h, checkouts: allow). The TASK-65 counterexample (live policy-none session, no fd, no lock) is refused by it: vector pytest-tmp-live-no-lock-newest-refused and container tests pytest_live_policy_none_session_in_shell_root_is_kept (--pid=host, row 10) and live_pytest_without_session_lock_is_unsafe_to_reclaim (own PID ns, producer_unknown row 8); the unsafe user-probe vector stays. Host dry run: 6401 sessions, 6051 eligible (17.5 GiB). Still excluded: nix-shell-tmpdir, mktemp-dir, tmp-entry, containers-image-tmp. The 0.1 release candidate still excludes pytest-tmp (release_suite EXCLUDED).
+
+2026-10-24 rewrite (orchestrator, on Mark's ruling 2026-10-24: cut 0.1 right after pytest-tmp lands, so 0.1 frees real /tmp space): the old ACs required "each profile ships" for the six proposed /tmp profiles, which contradicted the recorded exclusions (nix-shell-tmpdir, mktemp-dir and tmp-entry have checked-in counterexamples; containers-image-tmp is withdrawn) and old AC #4 itself. Old AC #4 (dormant shells keep rc/TMPDIR dirs or they do not ship), #5 (pytest-tmp checkouts: allow) and #6 (granularity: one candidate per session, TASK-112 D1) are decided and recorded in the notes above. The task is now the 0.1 /tmp catalog sign-off: nix-shell-rc (sound) and pytest-tmp (verified heuristic admitted by Mark 2026-10-23) into the release. started: 2026-10-24T20:56Z
+
+2026-10-25 implemented on branch release-catalog (worktree tmp/worktrees/release-catalog), not merged: 9d6a3d1 (builtin.yaml releases ["0.1"] on nix-shell-rc and pytest-tmp; catalog unit tests, release_suite ADMITTED/EXCLUDED; release vectors pytest-tmp-reclaims-ended-sessions-keeps-live and nix-shell-rc-reclaims-ended-shells-keeps-live under catalog proposed-release-01, checked to fail without the releases lines; reference.md verdicts/library/release notes, safety.md, testing.md; docs/example.yaml stale group pytest-tmp and nix-shell-rc (idle-1d) before cargo-target (idle-30d)) and 145847b (mped-architect safety round, verdict fix first, B1: a 0.1 profile_policies `checkouts: allow` on nix-shell-rc would widen a refusing built-in; now refused under the 0.1 catalog (unit + release-suite case); B2 doc evidence claim satisfied by the walk below; two more release vectors: pytest row 10 live shell root, nix-shell-rc nested PID namespace). Release build: only the sandbox gate and test clock offset are feature-gated; the contract judge, Owner PID preconditions and /proc reads are not, so the scope check admits both unchanged.
+
+Gate: nix develop -c just check exit 0 (twice, at 9d6a3d1 and 145847b); flake checks e2e-clippy, e2e-tests, release-01-package, release-excludes-e2e exit 0 at 145847b; release suites `just _runner e2e-runner-release-01 ... run --suite release` 8/8 PASS and the Debian variant 8/8 PASS at 145847b.
+
+Walk (release-01-candidate built at 145847b, /nix/store/rp38jvq0if2lkkjqxwd6wrf3n7fp9mzl-...; rootless Podman, e2e base image, --pid=host, tmpfs /tmp, diskgc run as tester via su; evidence tmp/walks/2026-10-24-release-catalog/): generated /tmp with real pinned pytest (ended sessions in /tmp and under 12 ended nix-shell.* roots, one live pytest sleeping in a live root, one SIGKILLed), real nix develop (3 ended) and legacy nix-shell (2 SIGKILLed, 1 live), one live nix develop, plus 4000 bulk rc dirs and 150 bulk sessions; 4186 candidates. Fresh: all not_idle. After 1h: dry run 3375 eligible; real ensure --min-free 100% exit 1 (target unreachable by design), 3374 actions, +167.7 MiB, 0 errors, 16.1 s; kept: live pytest session (row 4 lock), live nix-shell rc (fd 255) and live nix develop rc (owner pid), /tmp/pytest-of-tester/pytest-2..4 (row 10: owner processes could use /tmp), one bulk rc whose pid a host process took between dry run and reclaim (owner pid), 2 producer_unknown (pidfd ENOENT, TASK-131 shape), 803 filtered (bulk names above pid_max, a generator quirk). Live producers still running afterwards; unmatched /tmp entries untouched. Attempt 1 (container uid map 0:1:65536) reclaimed nothing: busy-loop processes of the parallel walk container mapped to the same host uid and could not be inspected, so diskgc treated them as using every candidate (correct fail-closed); rerun with --uidmap 0:30001:30000. DoD (docs/testing.md) not separately audited.
+
+Merged to master as cc1cc6f on 2026-10-24T23:17Z (rebased; just check exit 0, 1041 passed).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-24 13:04'
+updated_date: '2026-10-24 23:17'
 labels:
   - wave-2
   - release
@@ -69,6 +69,8 @@ Forward-carried from TASK-64 (2026-10-23): the kernel matrix now covers Linux 5.
 Orchestrator 2026-10-24 (COMPASS round 2): Mark ruled 2026-10-24: cut 0.1 RIGHT AFTER TASK-112 step 5 (pytest-tmp). Sequence: TASK-112 step 5 -> step 7 close-out -> TASK-122 (Mark signs off each withdrawal) -> 0.1 batch: TASK-60 (reconcile worktree), TASK-13 + TASK-27 mutation slice (smaller shards), TASK-130 (vectors on the product path, so the release catalog is testable), TASK-127/128, rewritten TASK-65 (0.1 /tmp catalog sign-off: nix-shell-rc + pytest-tmp + admitted TASK-122 rows), then this task. Consider making admission class and release channel data in builtin.yaml so the 0.1 allowlist cannot drift (Library::proposed_release_01 hard-coded ALLOWED vs reference.md table vs builtin.yaml).
 
 2026-10-24 from TASK-112 step 5 (master dcfd410), for the 0.1 cut: (1) pytest-tmp now ships in the development library (contract pytest; host dry run 17.5 GiB eligible of ~28 GiB of sessions) but the release candidate catalog still excludes it (release_suite EXCLUDED, release_candidate_catalog_refuses_every_excluded_builtin PASS) - admitting it to 0.1 is a release decision. (2) RISK: one in-use scan takes 1.6-2.0 s on Mark's laptop (glibc release build, ~660 processes, load ~10; the static musl package is 3-6x slower, TASK-115), above the 1 s deletion freshness bound, so a real reclaim of ANY fs candidate there would end with 'two scans in a row were older than the freshness bound' (error of the run), deleting nothing. Not measured with a reclaim (forbidden on the host); follows from inuse::Checker::check. TASK-115 must land (or the bound be revisited by design) before 0.1 can free space on that laptop. (3) Evidence value relative_path (also covers absolute unresolvable values and failed fallback lookups): rename to unresolved_path or split before the report format freezes (mped-architect + QA recommendation; needs Mark).
+
+From TASK-65 (2026-10-25): decide for 0.1 whether 'ipc: live-only' stays accepted now that it applies to /tmp; the host dry run found 137 pytest sessions with IPC objects.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
