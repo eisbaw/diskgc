@@ -386,6 +386,13 @@ they never override the Invariants.
   `nix develop -c just scratch-tally` before heavy work; share
   `tmp/target`; never create extra target dirs. A hook blocks `rm`;
   `git worktree remove` of merged clean worktrees is the cleanup path.
+- 2026-10-25: two walk containers whose users map to the same host uid
+  make each other's processes uninspectable, so diskgc (correctly)
+  treats them as using every candidate and reclaims nothing. Give each
+  walk container its own `--uidmap` range (TASK-65 walk, attempt1).
+- 2026-10-25: never `cd` into a worktree from the orchestrator's shell:
+  the session's primary directory follows it. Use `git -C` / absolute
+  paths (happened twice).
 - 2026-10-24: retitling a backlog task renames its file; commit with
   `git add -A -- backlog/tasks` rather than by old path.
 - 2026-10-24: never run a reclaiming diskgc on the host (CLAUDE.md);
