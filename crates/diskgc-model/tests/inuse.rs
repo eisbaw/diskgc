@@ -1724,3 +1724,15 @@ fn stale_scans_and_expired_clears_spend_one_budget() {
     assert!(host.unfired_events().is_empty());
     assert!(exists(&host, "/tmp/c/a"));
 }
+
+/// After an `in_use_unknown` skip the checker still has its last (stale)
+/// scan, so a caller can log its notes; it is never reused for a verdict.
+#[test]
+fn an_in_use_unknown_skip_keeps_the_stale_scan_as_latest() {
+    let host = model(&stale_scans(inuse::FRESH_ATTEMPTS as u32));
+    let mut checker = Checker::new(&rules(true), REUSE_LIMIT);
+    let skip = skip_of(reclaim_with(&host, &mut checker, "/tmp/c", true));
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
+    let latest = checker.latest().expect("the stale scan is kept");
+    assert!(!latest.is_fresh_at(host.now()));
+}

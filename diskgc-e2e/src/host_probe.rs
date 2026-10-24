@@ -221,7 +221,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
 
     use diskgc_core::engine::{Candidate, Rules, walk};
     use diskgc_core::host::MonoTime;
-    use diskgc_core::inuse::{Checker, Options, Scan, scan};
+    use diskgc_core::inuse::{Checker, FreshAttempts, Options, Scan, scan};
     use diskgc_core::resolve::{Want, resolve};
 
     /// The same CLOCK_BOOTTIME representation as LinuxHost::now, so these
@@ -336,7 +336,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
         );
-        let checked = checker.check(host, &candidate, &record);
+        let checked = checker.check(host, &candidate, &record, &mut FreshAttempts::new(None));
         let after_check = (
             launched.load(Ordering::SeqCst),
             completed.load(Ordering::SeqCst),
@@ -484,7 +484,7 @@ fn inuse_sustained_churn(host: &LinuxHost, candidate: &str) -> Result<(), String
     use std::sync::{Arc, Barrier};
 
     use diskgc_core::engine::{Candidate, Rules, walk};
-    use diskgc_core::inuse::{Checker, MAX_LISTINGS, Options, scan};
+    use diskgc_core::inuse::{Checker, FreshAttempts, MAX_LISTINGS, Options, scan};
     use diskgc_core::resolve::{Want, resolve};
 
     const WORKERS: usize = 8;
@@ -542,7 +542,7 @@ fn inuse_sustained_churn(host: &LinuxHost, candidate: &str) -> Result<(), String
         format!("after {MAX_LISTINGS} listings that brought new process incarnations");
     while Instant::now() < until {
         let before = completed.load(Ordering::Relaxed);
-        let result = checker.check(host, &candidate, &record);
+        let result = checker.check(host, &candidate, &record, &mut FreshAttempts::new(None));
         let after = completed.load(Ordering::Relaxed);
         match result {
             Ok(judgement) => {

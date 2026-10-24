@@ -1039,9 +1039,10 @@ impl FreshAttempts {
     }
 
     /// Spends one attempt on `stale`. With attempts left and the pause
-    /// ([`FRESH_RETRY_PAUSES`]) ending before the deadline: pauses, drops
-    /// the checker's scan so the next check scans afresh, and returns
-    /// `Ok`. Otherwise the candidate's `in_use_unknown` skip.
+    /// ([`FRESH_RETRY_PAUSES`]) ending before the deadline: drops the
+    /// checker's scan so the next check scans afresh, pauses, and returns
+    /// `Ok`. Otherwise the candidate's `in_use_unknown` skip, the stale
+    /// scan kept as the checker's latest.
     pub fn retry<H: Host>(
         &mut self,
         host: &H,
@@ -1052,7 +1053,6 @@ impl FreshAttempts {
         assert!(self.spent < FRESH_ATTEMPTS, "a spent budget is not retried");
         self.spent += 1;
         self.last = Some(stale);
-        checker.forget();
         let Some(pause) = FRESH_RETRY_PAUSES.get(self.spent - 1).copied() else {
             return Err(self.spent(path));
         };
@@ -1065,6 +1065,8 @@ impl FreshAttempts {
             self.cut_by_deadline = true;
             return Err(self.spent(path));
         }
+        // Only now: a skip keeps the last scan as `latest` (its notes).
+        checker.forget();
         host.sleep(pause);
         Ok(())
     }
