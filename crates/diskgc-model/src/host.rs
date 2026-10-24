@@ -1389,6 +1389,17 @@ impl Host for ModelHost {
         })
     }
 
+    fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
+        self.call(Op::AccountUid, None, None, |inner| {
+            let uid = inner.state.users.get(name).copied();
+            let text = uid.map_or_else(
+                || format!("{name:?}: none"),
+                |uid| format!("{name:?}: {uid}"),
+            );
+            (Ok(uid), None, text)
+        })
+    }
+
     /// Recorded on the trace, with the locked file's path. The model starts
     /// no children, so nothing else changes.
     fn inherit_lock(&self, lock: &Locked<ModelFd>) -> Result<(), HostError> {

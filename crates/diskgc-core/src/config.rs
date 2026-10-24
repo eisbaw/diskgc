@@ -274,6 +274,10 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// The first non-system uid: `owners:` entries, by number or by a name's
+/// account, must be at least this (docs/reference.md, Configuration file).
+pub const SYSTEM_UID_END: u32 = 1000;
+
 /// Parses and checks every static rule of the configuration. It does not
 /// access the machine beyond the already supplied bytes.
 pub fn parse(path: &Path, bytes: &[u8]) -> Result<Config, ConfigError> {
@@ -409,9 +413,9 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
                         "owners: numeric user name {name:?} is ambiguous; use {{uid: {name}}}"
                     )));
                 }
-                Owner::Uid(UidOwner { uid }) if *uid < 1000 => {
+                Owner::Uid(UidOwner { uid }) if *uid < SYSTEM_UID_END => {
                     return Err(error(format!(
-                        "owners: system uid {uid} (< 1000) is forbidden"
+                        "owners: system uid {uid} (< {SYSTEM_UID_END}) is forbidden"
                     )));
                 }
                 _ => {}

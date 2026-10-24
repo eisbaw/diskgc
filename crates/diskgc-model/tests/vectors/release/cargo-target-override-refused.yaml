@@ -1,0 +1,36 @@
+# An operator override of an admitted name (`cargo-target` with
+# `override: true`) cannot impersonate the reviewed built-in under the
+# proposed 0.1 catalog: refused at load, exit 2, the target untouched.
+profile_vector: 1
+catalog: proposed-release-01
+config: |
+  version: 1
+  profiles:
+    - {name: cargo-target, override: true, kind: cargo-target, find: {roots: required}}
+  groups:
+    - name: stale
+      tiers:
+        - {name: targets, select: "profile:cargo-target", roots: [/home/tester/src]}
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/idle/Cargo.toml: {}
+    /home/tester/src/idle/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {lib-1: {size: 1M}}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: "operator-authored profile `cargo-target`"}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: "operator-authored profile `cargo-target`"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/idle/target/debug/deps/lib-1]

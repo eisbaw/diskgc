@@ -33,15 +33,14 @@ use std::time::Duration;
 use diskgc_core::config::{self, Config, Env, Lookup, MAX_CONFIG_BYTES};
 use diskgc_core::executor;
 use diskgc_core::host::Errno;
-use diskgc_core::invocation::{self, EnsureOptions, Platform};
+use diskgc_core::invocation::{self, Catalog, ConfigFile, ConfigUse, EnsureOptions, Platform};
 use diskgc_core::kernel::KernelError;
 use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
-use diskgc_core::select;
 use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
-use diskgc_linux::host::{read_config_file, read_root_config_file, resolve_owner};
+use diskgc_linux::host::{read_config_file, read_root_config_file};
 
 /// Exit code for usage, config and provisioning errors, including a kernel
 /// older than the minimum (docs/reference.md, Exit codes).
@@ -462,16 +461,20 @@ fn failed_report(
     report
 }
 
+/// The catalog this build ships ([`Catalog`]): the opt-in feature builds
+/// the proposed 0.1 release's.
+const CATALOG: Catalog = if cfg!(feature = "proposed-release-01-catalog") {
+    Catalog::ProposedRelease01
+} else {
+    Catalog::Development
+};
+
 /// The configuration file (docs/reference.md, Configuration file), given
-/// by `flag` (`--config`), `$DISKGC_CONFIG` or found by the search: the
-/// lookup, and the configuration unless the search found no file (a
-/// given file that is missing is an error, never a fallback). Whether a
-/// missing configuration is an error is the command's choice.
-fn load_config(
-    flag: Option<&OsStr>,
-    for_profile_test: bool,
-    strict_modes: bool,
-) -> Result<(Lookup, Option<Config>), String> {
+/// by `flag` (`--config`), `$DISKGC_CONFIG` or found by the search: its
+/// bytes, or the paths tried when the search found none (a given file that
+/// is missing is an error, never a fallback). Parsing it, under
+/// [`CATALOG`], and whether a missing one is an error, are the command's.
+fn read_config(flag: Option<&OsStr>, strict_modes: bool) -> Result<ConfigFile, String> {
     let env = Env {
         diskgc_config: std::env::var_os("DISKGC_CONFIG"),
         xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
@@ -486,79 +489,29 @@ fn load_config(
     for path in lookup.paths() {
         match read(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
-                let mut config = if for_profile_test {
-                    config::parse_for_profile_test(path, &bytes)
-                } else {
-                    config::parse(path, &bytes)
-                }
-                .map_err(|e| e.to_string())?;
-                if cfg!(feature = "proposed-release-01-catalog") {
-                    enforce_proposed_release_01_config(&mut config)?;
-                }
-                return Ok((lookup, Some(config)));
+                return Ok(ConfigFile::Read {
+                    path: path.to_path_buf(),
+                    bytes,
+                });
             }
             Err(e) if matches!(lookup, Lookup::Search(_)) && is_absent(&e) => continue,
             Err(e) => return Err(format!("config {}: {e}", path.display())),
         }
     }
-    Ok((lookup, None))
+    Ok(ConfigFile::NotFound {
+        tried: lookup.paths().into_iter().map(Path::to_path_buf).collect(),
+    })
 }
 
-/// Recheck every configured tier against the narrowed catalog. Config
-/// parsing checked these expressions against the full embedded library;
-/// simply replacing that library would leave a previously checked Docker
-/// or command selection in a later tier. `--select` is checked separately
-/// against the same narrowed library by `Tier::select`.
-fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
-    let library = config.library.clone().proposed_release_01()?;
-    for policy in &config.profile_policies {
-        if library.get(&policy.profile).is_none() {
-            return Err(format!(
-                "proposed 0.1 catalog refuses checkout policy for excluded profile `{}`",
-                policy.profile
-            ));
-        }
-    }
-    for group in &config.groups {
-        for tier in &group.tiers {
-            select::check(tier.select.expr().clone(), &library).map_err(|e| {
-                format!(
-                    "proposed 0.1 catalog refuses group `{}` tier `{}`: {e}",
-                    group.name, tier.name
-                )
-            })?;
-        }
-    }
-    for protected in &config.protect {
-        if library.get(&protected.profile).is_none() {
-            return Err(format!(
-                "proposed 0.1 catalog refuses protect profile `{}`",
-                protected.profile
-            ));
-        }
-    }
-    config.library = library;
-    Ok(())
-}
-
-/// `ensure`'s configuration: `None` when none is found and `--select`
-/// makes one optional.
-fn ensure_config(args: &EnsureArgs) -> Result<Option<Config>, String> {
-    match load_config(args.config.as_deref(), false, args.options.allow_root)? {
-        (_, Some(config)) => Ok(Some(config)),
-        (_, None) if args.options.allow_root => {
-            Err("--allow-root requires a configuration file with an owners: list".to_owned())
-        }
-        (_, None) if args.options.select.is_some() => Ok(None),
-        (lookup, None) => Err(format!(
-            "no configuration file found (tried {}); ensure without --select needs one",
-            lookup
-                .paths()
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+/// [`read_config`], parsed under [`CATALOG`] for `profiles` and `check`:
+/// the configuration, or the paths tried when none was found.
+fn load_config(
+    flag: Option<&OsStr>,
+    use_: ConfigUse,
+) -> Result<Result<Config, Vec<PathBuf>>, String> {
+    match read_config(flag, false)? {
+        ConfigFile::Read { path, bytes } => CATALOG.config(&path, &bytes, use_).map(Ok),
+        ConfigFile::NotFound { tried } => Ok(Err(tried)),
     }
 }
 
@@ -594,7 +547,7 @@ fn draw_seed() -> Result<u64, String> {
 
 /// Runs `ensure`; every error is already in the report. The decisions are
 /// `diskgc_core::invocation::ensure`'s; this wires it to `LinuxHost`, the
-/// configuration file and the account resolver.
+/// configuration file's bytes and the build's catalog.
 fn ensure(args: &EnsureArgs) -> Report {
     // Every error is logged where it is recorded: here for those found
     // before the composition runs, by the composition for its own.
@@ -619,35 +572,34 @@ fn ensure(args: &EnsureArgs) -> Report {
         Err(StartupFailure::Host(why)) => return fail_host(why),
         Err(StartupFailure::UnsupportedKernel(why)) => return fail(ErrorCause::Usage, why),
     };
-    let config = match ensure_config(args) {
+    let config = match read_config(args.config.as_deref(), args.options.allow_root) {
         Ok(config) => config,
         Err(why) => return fail(ErrorCause::Config, why),
     };
+    let builtins = || {
+        Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
+    };
     let platform = Platform {
-        resolve_owner: &resolve_owner,
+        catalog: CATALOG,
         draw_seed: &draw_seed,
-        builtin_library: &builtin_library,
+        builtins: &builtins,
     };
     invocation::ensure(
         &host,
         &args.options,
-        config.as_ref(),
+        &config,
         &platform,
         &mut log,
         &mut |line| log(&operator_progress(line)),
     )
 }
 
-/// The built-in profiles alone; an error is a bug in the shipped YAML
-/// (the tests load it).
+/// The built-in profiles of [`CATALOG`] alone; an error is a bug in the
+/// shipped YAML (the tests load it).
 fn builtin_library() -> Result<Library, String> {
     let library = Library::builtin()
         .map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))?;
-    if cfg!(feature = "proposed-release-01-catalog") {
-        library.proposed_release_01()
-    } else {
-        Ok(library)
-    }
+    CATALOG.library(library)
 }
 
 /// `profiles list | show NAME | test`: the text or JSON for stdout, or why not
@@ -676,12 +628,14 @@ impl ProfilesFailure {
 }
 
 fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesFailure> {
-    let (_, config) = load_config(
-        args.config.as_deref(),
-        matches!(&args.command, ProfilesCommand::Test),
-        false,
-    )
-    .map_err(ProfilesFailure::Config)?;
+    let use_ = if matches!(&args.command, ProfilesCommand::Test) {
+        ConfigUse::ProfileTest
+    } else {
+        ConfigUse::Run
+    };
+    let config = load_config(args.config.as_deref(), use_)
+        .map_err(ProfilesFailure::Config)?
+        .ok();
     let config_path = config.as_ref().map(|c| c.path.as_path());
     if let Some(path) = config_path {
         log(&format!("config {}", path.display()));
@@ -756,18 +710,8 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesF
 /// Machine-independent policy validation. No `LinuxHost`, kernel version
 /// check, process scan, path traversal or backend invocation occurs here.
 fn check(flag: Option<&OsStr>) -> Result<String, String> {
-    let (lookup, config) = load_config(flag, false, false)?;
-    let config = config.ok_or_else(|| {
-        format!(
-            "no configuration file found (tried {})",
-            lookup
-                .paths()
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
+    let config =
+        load_config(flag, ConfigUse::Run)?.map_err(|tried| invocation::not_found(&tried))?;
     for warning in &config.warnings {
         log(&format!("warning: {warning}"));
     }
@@ -1167,101 +1111,6 @@ mod tests {
             1000,
         )
         .expect("Cargo remains selectable");
-    }
-
-    #[test]
-    fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
-        for excluded in ["docker-build-cache", "pip-cache", "pytest-cache"] {
-            let roots = if excluded == "docker-build-cache" {
-                ""
-            } else {
-                "        roots: [/tmp]\n"
-            };
-            let source = format!(
-                "version: 1\ngroups:\n  - name: first\n    tiers:\n      - name: safe\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: later\n    tiers:\n      - name: excluded\n        select: profile:{excluded}\n{roots}"
-            );
-            let mut config =
-                config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-                    .expect("valid full catalog policy");
-            let error = enforce_proposed_release_01_config(&mut config)
-                .expect_err("later tier must fail before execution");
-            assert!(
-                error.contains("later") && error.contains(excluded),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
-        let source = concat!(
-            "version: 1\nprofiles:\n",
-            "  - name: cargo-target\n    override: true\n",
-            "    kind: cargo-target\n    find: {roots: required}\n",
-            "groups:\n  - name: first\n    tiers:\n",
-            "      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n",
-        );
-        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("valid full catalog override");
-        let error = enforce_proposed_release_01_config(&mut config)
-            .expect_err("operator override must not impersonate approved Cargo");
-        assert!(
-            error.contains("operator-authored") && error.contains("cargo-target"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn proposed_catalog_accepts_only_checkout_policy_for_an_admitted_builtin() {
-        let source =
-            "version: 1\nprofile_policies:\n  - profile: cargo-target\n    checkouts: refuse\n";
-        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("narrow policy parses");
-        enforce_proposed_release_01_config(&mut config).expect("Cargo remains admitted");
-        assert_eq!(
-            config.library.checkouts("cargo-target"),
-            Some(diskgc_core::engine::Checkouts::Refuse)
-        );
-        assert_eq!(
-            config.library.get("cargo-target").unwrap().origin,
-            diskgc_core::profile::Origin::BuiltIn
-        );
-
-        for excluded in ["npm-cache", "uv-cache"] {
-            let source = format!(
-                "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
-            );
-            let mut config =
-                config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-                    .expect("full library accepts policy");
-            let error = enforce_proposed_release_01_config(&mut config)
-                .expect_err("excluded profile policy must not pass release gate");
-            assert!(
-                error.contains(excluded) && error.contains("excluded profile"),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn proposed_catalog_refuses_user_command_action_before_selection() {
-        let source = concat!(
-            "version: 1\nprofiles:\n",
-            "  - name: custom-cleaner\n",
-            "    find: {roots: required, paths: [.cache/tool], type: dir}\n",
-            "    action: {command: [tool, clean, '{path}']}\n",
-            "    examples: {match: [/tmp/.cache/tool]}\n",
-            "groups:\n  - name: first\n    tiers:\n",
-            "      - name: cleaner\n        select: profile:custom-cleaner\n        roots: [/tmp]\n",
-        );
-        let mut config = config::parse(std::path::Path::new("/tmp/policy.yaml"), source.as_bytes())
-            .expect("valid full catalog command policy");
-        let error = enforce_proposed_release_01_config(&mut config)
-            .expect_err("user command action must be refused before any backend");
-        assert!(
-            error.contains("operator-authored") && error.contains("custom-cleaner"),
-            "{error}"
-        );
     }
 
     #[cfg(feature = "proposed-release-01-catalog")]

@@ -1,0 +1,34 @@
+# The proposed 0.1 catalog admits no operator-authored profile: a user
+# profile in the configuration (the zephyr-tmp-probe the config/ vectors
+# run under the development catalog) is refused at load, exit 2, nothing
+# touched.
+profile_vector: 1
+catalog: proposed-release-01
+config: |
+  version: 1
+  profiles:
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+  groups:
+    - name: stale
+      tiers:
+        - {name: zephyr, select: profile:zephyr-tmp-probe}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: "operator-authored profile `zephyr-tmp-probe`"}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: "operator-authored profile `zephyr-tmp-probe`"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

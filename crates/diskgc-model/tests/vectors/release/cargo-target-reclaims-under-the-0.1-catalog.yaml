@@ -1,0 +1,41 @@
+# The proposed 0.1 catalog (the release-01 build's) keeps cargo-target:
+# `--select profile:cargo-target` under it plans and reclaims as the
+# development catalog does (builtins/cargo-target-in-use.yaml): the target
+# a running program uses is kept, the idle one's contents go.
+profile_vector: 1
+catalog: proposed-release-01
+profile: cargo-target
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/src/running/Cargo.toml: {}
+    /home/tester/src/running/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, server: {size: 1M, mode: "0755"}, deps: {server-1: {size: 1M}}}
+    /home/tester/src/idle/Cargo.toml: {}
+    /home/tester/src/idle/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {lib-1: {size: 1M}}}
+  processes:
+    - {pid: 901, exe: /home/tester/src/running/target/debug/server, cwd: /, maps: [/home/tester/src/running/target/debug/server], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/running/target, reason: in_use}
+    - {candidate: /home/tester/src/idle/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/idle/target]
+  removed: [/home/tester/src/idle/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/src/running/target, reason: in_use, process_blockers: [{pid: 901, evidence: exe}, {pid: 901, evidence: target_exe}]}
+  preserved:
+    - /home/tester/src/running/target/debug/server
+    - /home/tester/src/idle/target/debug/.cargo-lock

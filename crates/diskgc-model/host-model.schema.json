@@ -125,6 +125,15 @@
       "additionalProperties": {
         "$ref": "#/$defs/Node"
       }
+    },
+    "users": {
+      "description": "The account database (`account_uid`, through which `owners:` names\nresolve): user name to uid. A name not listed has no account.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0
+      }
     }
   },
   "additionalProperties": false,
@@ -959,6 +968,7 @@
         "proc_environ",
         "own_pid",
         "effective_uid",
+        "account_uid",
         "inherit_lock",
         "proc_status",
         "bound_unix_sockets",

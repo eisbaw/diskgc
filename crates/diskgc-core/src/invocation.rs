@@ -1,24 +1,132 @@
 //! `ensure`'s composition, after the command line is parsed and the
-//! configuration file read: static checks of the configuration and the
-//! selection, privileges, owners, protections, the tiers in policy order,
-//! then the executor. Generic over the `Host` port so the binary
-//! (`LinuxHost`) and the model tests (`ModelHost`) run the same decisions;
-//! before TASK-121 this lived in the binary and each model test that needed
-//! a configuration re-assembled a copy of it.
+//! configuration file read: the configuration's text under the build's
+//! catalog, static checks of the configuration and the selection,
+//! privileges, owners, protections, the tiers in policy order, then the
+//! executor. Generic over the `Host` port so the binary (`LinuxHost`) and
+//! the model tests (`ModelHost`) run the same decisions; before TASK-121
+//! this lived in the binary and each model test that needed a
+//! configuration re-assembled a copy of it.
 //!
 //! What stays in the binary: argument syntax, host startup (the kernel
-//! check), the configuration lookup and its file read, and what only a real
-//! machine has, passed in as [`Platform`].
+//! check), the configuration lookup and its file read (passed in as
+//! [`ConfigFile`]), and the build's [`Catalog`] and random seed, passed in
+//! as [`Platform`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{Config, IpcPolicy, Owner, Ranking};
+use crate::config::{self, Config, IpcPolicy, Owner, Ranking};
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::Delete;
 use crate::profile::{Body, Finds, Library, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
+use crate::select;
 use crate::units::Size;
+
+/// The built-in catalog a build ships: every built-in (development
+/// builds), or the proposed 0.1 release's, derived from builtin.yaml's
+/// `releases:` ([`Library::proposed_release_01`]). A build-time fact of
+/// the binary (its `proposed-release-01-catalog` feature), never an
+/// operator's choice; explicit here so a model vector can run either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Catalog {
+    Development,
+    ProposedRelease01,
+}
+
+/// What a configuration is parsed for: `profiles test` reports example
+/// mismatches as test failures instead of refusing the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigUse {
+    Run,
+    ProfileTest,
+}
+
+impl Catalog {
+    /// `builtins` narrowed to this catalog.
+    pub fn library(self, builtins: Library) -> Result<Library, String> {
+        match self {
+            Self::Development => Ok(builtins),
+            Self::ProposedRelease01 => builtins.proposed_release_01(),
+        }
+    }
+
+    /// A configuration file's text under this catalog: what `ensure`,
+    /// `profiles` and `check` all load. The one place a configuration is
+    /// held to the catalog.
+    pub fn config(self, path: &Path, bytes: &[u8], use_: ConfigUse) -> Result<Config, String> {
+        let mut config = match use_ {
+            ConfigUse::Run => config::parse(path, bytes),
+            ConfigUse::ProfileTest => config::parse_for_profile_test(path, bytes),
+        }
+        .map_err(|e| e.to_string())?;
+        if self == Self::ProposedRelease01 {
+            enforce_proposed_release_01_config(&mut config)?;
+        }
+        Ok(config)
+    }
+}
+
+/// Recheck every configured tier against the narrowed catalog. Config
+/// parsing checked these expressions against the full embedded library;
+/// simply replacing that library would leave a previously checked Docker
+/// or command selection in a later tier. `--select` is checked separately
+/// against the same narrowed library by `Tier::select`.
+fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
+    let library = config.library.clone().proposed_release_01()?;
+    for policy in &config.profile_policies {
+        if library.get(&policy.profile).is_none() {
+            return Err(format!(
+                "proposed 0.1 catalog refuses checkout policy for excluded profile `{}`",
+                policy.profile
+            ));
+        }
+    }
+    for group in &config.groups {
+        for tier in &group.tiers {
+            select::check(tier.select.expr().clone(), &library).map_err(|e| {
+                format!(
+                    "proposed 0.1 catalog refuses group `{}` tier `{}`: {e}",
+                    group.name, tier.name
+                )
+            })?;
+        }
+    }
+    for protected in &config.protect {
+        if library.get(&protected.profile).is_none() {
+            return Err(format!(
+                "proposed 0.1 catalog refuses protect profile `{}`",
+                protected.profile
+            ));
+        }
+    }
+    config.library = library;
+    Ok(())
+}
+
+/// The configuration file as the binary's lookup left it (docs/reference.md,
+/// Configuration file). A file that was given but is missing, or that
+/// cannot be read, is the lookup's error, never `NotFound`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigFile {
+    /// Read: its path and its bytes, not yet parsed.
+    Read { path: PathBuf, bytes: Vec<u8> },
+    /// The search found none; the paths it tried, for the refusal.
+    NotFound { tried: Vec<PathBuf> },
+}
+
+/// "no configuration file found (tried ...)": `check`'s refusal, and the
+/// start of `ensure`'s.
+pub fn not_found(tried: &[PathBuf]) -> String {
+    format!(
+        "no configuration file found (tried {})",
+        tried
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 /// `ensure`'s arguments, checked for syntax (docs/reference.md, `ensure`),
 /// without the configuration lookup and output flags.
@@ -43,27 +151,30 @@ pub struct EnsureOptions {
     pub test_entry_budget: Option<usize>,
 }
 
-/// What `ensure` needs from the machine besides the `Host` port. Each is
-/// called only when the run needs it.
+/// What `ensure` needs from the build and its environment besides the
+/// `Host` port. Each function is called only when the run needs it.
 pub struct Platform<'a> {
-    /// An `owners:` user name to its uid (the account resolver).
-    pub resolve_owner: &'a dyn Fn(&str) -> Result<u32, String>,
+    /// The build's catalog: the configuration and the built-ins are held
+    /// to it here, so a model vector runs what a release build runs.
+    pub catalog: Catalog,
     /// The seed of a `ranking: random` run (`DISKGC_SEED` or fresh).
     pub draw_seed: &'a dyn Fn() -> Result<u64, String>,
-    /// The library `--select` uses when no configuration file was found.
-    pub builtin_library: &'a dyn Fn() -> Result<Library, String>,
+    /// The built-in profiles before [`Self::catalog`] narrows them: the
+    /// library `--select` uses when no configuration file was found. The
+    /// binary's is the embedded builtin.yaml; a model test may add or
+    /// mutate profiles (`user_profiles`, mutation tests).
+    pub builtins: &'a dyn Fn() -> Result<Library, String>,
 }
 
-/// Runs `ensure` (or its dry run); every error is in the report. `config`
-/// is `None` only when no configuration file was found; the caller has
-/// already refused that unless `--select` is given and `--allow-root` is
-/// not, and so does this function (fail closed, exit 2). `log` receives
-/// the diagnostics (`error: ...`, `warning: ...`), `progress` the
-/// executor's progress lines.
+/// Runs `ensure` (or its dry run); every error is in the report. Every
+/// refusal before the executor (a configuration that does not load under
+/// the catalog, none found where one is needed, a static check) is exit 2
+/// and deletes nothing. `log` receives the diagnostics (`error: ...`,
+/// `warning: ...`), `progress` the executor's progress lines.
 pub fn ensure<H: Delete>(
     host: &H,
     options: &EnsureOptions,
-    config: Option<&Config>,
+    config: &ConfigFile,
     platform: &Platform<'_>,
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
@@ -82,27 +193,34 @@ pub fn ensure<H: Delete>(
 fn run<H: Delete>(
     host: &H,
     options: &EnsureOptions,
-    config: Option<&Config>,
+    config_file: &ConfigFile,
     platform: &Platform<'_>,
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
     let fail = |cause: ErrorCause, why: String| Err((cause, why));
-    match (config, options.allow_root, options.select.is_some()) {
-        (None, true, _) => {
+    let loaded = match config_file {
+        ConfigFile::Read { path, bytes } => Some(
+            platform
+                .catalog
+                .config(path, bytes, ConfigUse::Run)
+                .map_err(|why| (ErrorCause::Config, why))?,
+        ),
+        ConfigFile::NotFound { .. } if options.allow_root => {
             return fail(
                 ErrorCause::Config,
                 "--allow-root requires a configuration file with an owners: list".to_owned(),
             );
         }
-        (None, false, false) => {
+        ConfigFile::NotFound { tried } if options.select.is_none() => {
             return fail(
                 ErrorCause::Config,
-                "no configuration file found; ensure without --select needs one".to_owned(),
+                format!("{}; ensure without --select needs one", not_found(tried)),
             );
         }
-        _ => {}
-    }
+        ConfigFile::NotFound { .. } => None,
+    };
+    let config = loaded.as_ref();
     if let Some(config) = config {
         log(&format!("config {}", config.path.display()));
         for warning in &config.warnings {
@@ -123,7 +241,7 @@ fn run<H: Delete>(
         executor::privileges(host, options.allow_root).map_err(|why| (ErrorCause::Safety, why))?;
     let owners = if options.allow_root {
         let config = config.expect("root mode requires config (refused above)");
-        resolved_owners(config, platform.resolve_owner).map_err(|why| (ErrorCause::Config, why))?
+        resolved_owners(host, config).map_err(|why| (ErrorCause::Config, why))?
     } else {
         vec![uid]
     };
@@ -171,7 +289,9 @@ fn run<H: Delete>(
         let library = match config {
             Some(config) => &config.library,
             None => {
-                builtin = (platform.builtin_library)().map_err(|why| (ErrorCause::Config, why))?;
+                builtin = (platform.builtins)()
+                    .and_then(|builtins| platform.catalog.library(builtins))
+                    .map_err(|why| (ErrorCause::Config, why))?;
                 &builtin
             }
         };
@@ -209,10 +329,7 @@ fn run<H: Delete>(
 
 /// Translate configured owners once before any planning or deletion. Two
 /// names or entries resolving to the same uid hide a policy error.
-fn resolved_owners(
-    config: &Config,
-    resolve_owner: &dyn Fn(&str) -> Result<u32, String>,
-) -> Result<Vec<u32>, String> {
+fn resolved_owners<H: Delete>(host: &H, config: &Config) -> Result<Vec<u32>, String> {
     let entries = config
         .owners
         .as_ref()
@@ -220,7 +337,7 @@ fn resolved_owners(
     let mut ids = Vec::with_capacity(entries.len());
     for owner in entries {
         let uid = match owner {
-            Owner::Name(name) => resolve_owner(name)?,
+            Owner::Name(name) => resolve_owner(host, name)?,
             Owner::Uid(explicit) => explicit.uid,
         };
         if ids.contains(&uid) {
@@ -229,6 +346,29 @@ fn resolved_owners(
         ids.push(uid);
     }
     Ok(ids)
+}
+
+/// An `owners:` name to its uid through the host's account database. A
+/// name resolving to a system uid is refused as a `{uid: N}` entry is
+/// (docs/reference.md, Configuration file: `owners`).
+fn resolve_owner<H: Delete>(host: &H, name: &str) -> Result<u32, String> {
+    let uid = host
+        .account_uid(name)
+        .map_err(|e| format!("owners: cannot resolve {name:?}: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "owners: user {name:?} does not exist in this binary's account resolver \
+                 (static musl builds cannot load LDAP/sssd NSS modules; use a trusted \
+                 {{uid: N}} entry, a local passwd entry, or nscd)"
+            )
+        })?;
+    if uid < config::SYSTEM_UID_END {
+        return Err(format!(
+            "owners: user {name:?} resolves to system uid {uid} (< {})",
+            config::SYSTEM_UID_END
+        ));
+    }
+    Ok(uid)
 }
 
 /// The tier `--select` makes, against `library`.

@@ -3,7 +3,6 @@
 # refused before planning (exit 2, safety).
 profile_vector: 1
 allow_root: true
-users: {tester: 1000}
 config: |
   version: 1
   profiles:
@@ -19,6 +18,7 @@ path: /home
 min_free: 100%
 host:
   host_model: 1
+  users: {tester: 1000}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
   mounts:

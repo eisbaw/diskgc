@@ -1,0 +1,30 @@
+# pytest-cache is a development-catalog built-in (no `releases: ["0.1"]` in
+# builtin.yaml): under the proposed 0.1 catalog `--select
+# profile:pytest-cache` names no profile and is refused (exit 2) before
+# anything is read. The same scenario under the development catalog
+# reclaims the cache (select/roots-required-without-roots.yaml shows the
+# profile is otherwise selectable).
+profile_vector: 1
+catalog: proposed-release-01
+profile: pytest-cache
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/app/.pytest_cache: {CACHEDIR.TAG: {cachedir_tag: true}, v: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: parse, contains: pytest-cache}]
+  reclaim_exit: 2
+  errors: [{cause: parse, contains: pytest-cache}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/app/.pytest_cache/v]

@@ -191,3 +191,98 @@ fn configured_root_mode_checks_later_groups_before_execution() {
         "{error}"
     );
 }
+
+/// `source` under the proposed 0.1 catalog, after checking that the
+/// development catalog loads it (`expectation`): a refusal is the 0.1
+/// catalog's.
+fn under_both_catalogs(source: &[u8], expectation: &str) -> Result<Config, String> {
+    let path = Path::new("/tmp/policy.yaml");
+    Catalog::Development
+        .config(path, source, ConfigUse::Run)
+        .expect(expectation);
+    Catalog::ProposedRelease01.config(path, source, ConfigUse::Run)
+}
+
+#[test]
+fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
+    for excluded in ["docker-build-cache", "pip-cache", "pytest-cache"] {
+        let roots = if excluded == "docker-build-cache" {
+            ""
+        } else {
+            "        roots: [/tmp]\n"
+        };
+        let source = format!(
+            "version: 1\ngroups:\n  - name: first\n    tiers:\n      - name: safe\n        select: profile:cargo-target\n        roots: [/tmp]\n  - name: later\n    tiers:\n      - name: excluded\n        select: profile:{excluded}\n{roots}"
+        );
+        let error = under_both_catalogs(source.as_bytes(), "valid full catalog policy")
+            .expect_err("later tier must fail before execution");
+        assert!(
+            error.contains("later") && error.contains(excluded),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
+    let source = concat!(
+        "version: 1\nprofiles:\n",
+        "  - name: cargo-target\n    override: true\n",
+        "    kind: cargo-target\n    find: {roots: required}\n",
+        "groups:\n  - name: first\n    tiers:\n",
+        "      - name: cargo\n        select: profile:cargo-target\n        roots: [/tmp]\n",
+    );
+    let error = under_both_catalogs(source.as_bytes(), "valid full catalog override")
+        .expect_err("operator override must not impersonate approved Cargo");
+    assert!(
+        error.contains("operator-authored") && error.contains("cargo-target"),
+        "{error}"
+    );
+}
+
+#[test]
+fn proposed_catalog_accepts_only_checkout_policy_for_an_admitted_builtin() {
+    let source =
+        "version: 1\nprofile_policies:\n  - profile: cargo-target\n    checkouts: refuse\n";
+    let config = under_both_catalogs(source.as_bytes(), "narrow policy parses")
+        .expect("Cargo remains admitted");
+    assert_eq!(
+        config.library.checkouts("cargo-target"),
+        Some(crate::engine::Checkouts::Refuse)
+    );
+    assert_eq!(
+        config.library.get("cargo-target").unwrap().origin,
+        crate::profile::Origin::BuiltIn
+    );
+
+    for excluded in ["npm-cache", "uv-cache"] {
+        let source = format!(
+            "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
+        );
+        let error = under_both_catalogs(source.as_bytes(), "full library accepts policy")
+            .expect_err("excluded profile policy must not pass release gate");
+        assert!(
+            error.contains(excluded) && error.contains("excluded profile"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn proposed_catalog_refuses_user_command_action_before_selection() {
+    let source = concat!(
+        "version: 1\nprofiles:\n",
+        "  - name: custom-cleaner\n",
+        "    find: {roots: required, paths: [.cache/tool], type: dir}\n",
+        "    action: {command: [tool, clean, '{path}']}\n",
+        "    examples: {match: [/tmp/.cache/tool]}\n",
+        "groups:\n  - name: first\n    tiers:\n",
+        "      - name: cleaner\n        select: profile:custom-cleaner\n        roots: [/tmp]\n",
+    );
+    let error = under_both_catalogs(source.as_bytes(), "valid full catalog command policy")
+        .expect_err("user command action must be refused before any backend");
+    assert!(
+        error.contains("operator-authored") && error.contains("custom-cleaner"),
+        "{error}"
+    );
+}

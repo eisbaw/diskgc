@@ -5,7 +5,6 @@
 # so only the precondition keeps the directory.
 profile_vector: 1
 allow_root: true
-users: {tester: 1000}
 config: |
   version: 1
   owners: [tester]
@@ -17,6 +16,7 @@ path: /tmp
 min_free: 100%
 host:
   host_model: 1
+  users: {tester: 1000}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
   proc_hidepid: true

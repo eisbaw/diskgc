@@ -65,6 +65,10 @@ pub struct HostModel {
     /// default 1000. `0` models diskgc run as root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_uid: Option<u32>,
+    /// The account database (`account_uid`, through which `owners:` names
+    /// resolve): user name to uid. A name not listed has no account.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub users: BTreeMap<String, u32>,
     /// The answer of diskgc's held `/proc` to Owner PID's initial-namespace
     /// check (docs/safety.md, Producer liveness): `initial` (the default)
     /// or `nested`.
@@ -683,6 +687,7 @@ pub enum Op {
     ProcEnviron,
     OwnPid,
     EffectiveUid,
+    AccountUid,
     InheritLock,
     ProcStatus,
     BoundUnixSockets,
@@ -727,6 +732,7 @@ impl Op {
             Self::ProcEnviron => "proc_environ",
             Self::OwnPid => "own_pid",
             Self::EffectiveUid => "effective_uid",
+            Self::AccountUid => "account_uid",
             Self::InheritLock => "inherit_lock",
             Self::ProcStatus => "proc_status",
             Self::BoundUnixSockets => "bound_unix_sockets",

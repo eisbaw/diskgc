@@ -312,6 +312,8 @@ pub struct State {
     pub own_uid_map: Option<String>,
     /// diskgc's own (effective) user id.
     pub own_uid: u32,
+    /// The account database: user name to uid.
+    pub users: BTreeMap<String, u32>,
     /// Owner PID's preconditions as the held `/proc` answers them.
     pub pid_namespace_initial: bool,
     pub proc_hidepid: bool,
@@ -344,6 +346,7 @@ impl State {
             own_pid: DEFAULT_OWN_PID,
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
             own_uid: DEFAULT_ID,
+            users: BTreeMap::new(),
             pid_namespace_initial: true,
             proc_hidepid: false,
             sandbox_gate: crate::spec::GateSpec::Open,

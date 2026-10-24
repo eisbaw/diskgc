@@ -1,4 +1,5 @@
-# ensure without --select needs a configuration: exit 2, nothing touched.
+# ensure without --select needs a configuration: exit 2, nothing touched;
+# the refusal names the paths the search tried.
 profile_vector: 1
 path: /tmp
 min_free: 100%
@@ -13,9 +14,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: config}]
+  dry_run_errors: [{cause: config, contains: "no configuration file found (tried /etc/diskgc/config.yaml); ensure without --select needs one"}]
   reclaim_exit: 2
-  errors: [{cause: config}]
+  errors: [{cause: config, contains: "no configuration file found (tried /etc/diskgc/config.yaml); ensure without --select needs one"}]
   actions: []
   removed: []
   skipped: []

@@ -263,27 +263,32 @@ names every failing file:
   cases), `inuse`, `select` (filters, negation, unions, selection errors),
   `config` (protect, groups, owners and `--allow-root`, static errors),
   `exit` (exit codes and tier order), `races` (events between checks and
-  deletion), `backend` (Docker bindings and prunes) and `builtins` (each
-  built-in source in each role below).
+  deletion), `backend` (Docker bindings and prunes), `builtins` (each
+  built-in source in each role below) and `release` (the proposed 0.1
+  catalog: what it admits and what it refuses).
 
 The invocation keys: `profile` (shorthand for `select: profile:NAME`) or
 `select` (`--select`; neither: the configured groups run), `config` (the
-configuration file's text; absent: none was found), `user_profiles`
+configuration file's text; absent: none was found), `catalog` (the
+build's built-in catalog: `development`, the default, or
+`proposed-release-01`, what the release-01 build's
+`proposed-release-01-catalog` feature selects), `user_profiles`
 (without a `config`: added to the built-ins), `roots` (`--roots`), `path`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
-`tally_budget`, `allow_root`, `users` (the account resolver for `owners:`
-names), `seed` (`DISKGC_SEED`) and `entry_budget` (the walk's entry
-budget in place of the product's 2,000,000, so `too_many_entries` fits a
-small model: `EnsureOptions::test_entry_budget`, which the binary always
-leaves unset; `the_binary_never_sets_the_test_entry_budget` pins that no
-flag or configuration key reaches it). A configuration that does not parse
-gives an exit-2 config report before the host model is touched (the
-runner parses the text with `config::parse`, as `main.rs` does after its
-startup checks; the proposed 0.1 catalog's narrowing is not applied:
-TASK-130). Three keys are harness seams the binary does not have:
-`user_profiles` without a `config` (how a mutated built-in is tried
-against an unchanged vector) and `users` (the account resolver, which is
-not on the `Host` port yet) and `entry_budget`.
+`tally_budget`, `allow_root`, `seed` (`DISKGC_SEED`) and `entry_budget`
+(the walk's entry budget in place of the product's 2,000,000, so
+`too_many_entries` fits a small model: `EnsureOptions::test_entry_budget`,
+which the binary always leaves unset;
+`the_binary_never_sets_the_test_entry_budget` pins that no flag or
+configuration key reaches it). The account database `owners:` names
+resolve through is host-model state (`host.users`, read by the `Host`
+port's `account_uid`). The runner hands `invocation::ensure` the
+configuration's bytes, as `main.rs` does after its lookup and read: the
+parse, the catalog's checks (`Catalog::config`) and every refusal
+before the executor (exit 2) are the product's. Two keys are harness
+seams the binary does not have: `user_profiles` without a `config` (how a
+mutated built-in is tried against an unchanged vector) and
+`entry_budget`.
 
 `expect` holds: `plan` (the complete dry-run plan: `candidate`, `reason`,
 `source`), `dry_run_exit` (default 0), `dry_run_errors` and `errors`

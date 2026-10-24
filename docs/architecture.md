@@ -345,8 +345,10 @@ is accepted until measured otherwise.
   those methods.
 - **Who diskgc is, and what its children keep:** `effective_uid` (the
   ordinary-mode owner every entry must have, and what `{uid}` stands for;
-  root mode uses the resolved `owners:` IDs for entry ownership) and
-  `inherit_lock`, which makes a held lock inheritable by children by
+  root mode uses the resolved `owners:` IDs for entry ownership),
+  `account_uid` (an `owners:` name's uid in the account database, through
+  the name service; what uids are acceptable is the composition's policy)
+  and `inherit_lock`, which makes a held lock inheritable by children by
   clearing close-on-exec on that one fd (the host lock,
   [safety.md](safety.md#host-lock)).
 - **Listings are bounded**: `read_dir` takes a limit and stops past it

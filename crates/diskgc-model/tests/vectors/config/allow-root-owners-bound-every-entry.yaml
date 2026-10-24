@@ -4,7 +4,6 @@
 # the list are fine, one entry of anyone else (root included) is not_owner.
 profile_vector: 1
 allow_root: true
-users: {tester: 1000}
 config: |
   version: 1
   profiles:
@@ -18,6 +17,7 @@ path: /tmp
 min_free: 100%
 host:
   host_model: 1
+  users: {tester: 1000}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
   mounts:

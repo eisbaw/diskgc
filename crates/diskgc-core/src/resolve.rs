@@ -633,6 +633,9 @@ mod tests {
         fn effective_uid(&self) -> u32 {
             unreachable!()
         }
+        fn account_uid(&self, _: &str) -> Result<Option<u32>, HostError> {
+            unreachable!()
+        }
         fn inherit_lock(&self, _: &crate::host::Locked<Self::Fd>) -> Result<(), HostError> {
             unreachable!()
         }

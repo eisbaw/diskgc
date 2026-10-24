@@ -118,6 +118,9 @@ impl Host for Short {
     fn effective_uid(&self) -> u32 {
         self.0.effective_uid()
     }
+    fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
+        self.0.account_uid(name)
+    }
     fn inherit_lock(&self, lock: &Locked<ModelFd>) -> Result<(), HostError> {
         self.0.inherit_lock(lock)
     }

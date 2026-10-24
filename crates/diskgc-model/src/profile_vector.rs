@@ -11,15 +11,15 @@
 //! The format began as one built-in profile per file (`profile:`); every
 //! other key is optional, so those files are unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::config::{self, Config};
-use diskgc_core::invocation::{self, EnsureOptions, Platform};
+use diskgc_core::config::Config;
+use diskgc_core::invocation::{self, Catalog, ConfigFile, ConfigUse, EnsureOptions, Platform};
 use diskgc_core::profile::{Action, Body, Library, Origin, ProfileSpec};
-use diskgc_core::report::{ErrorCause, Report, Status};
+use diskgc_core::report::Report;
 use diskgc_core::units::{parse_duration, parse_size};
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,7 +27,8 @@ use serde_json::Value;
 use crate::ModelHost;
 use crate::spec::{HostModel, Op};
 
-/// Where a vector's `config:` text is said to come from (logs only).
+/// Where a vector's `config:` text is said to come from, and the path a
+/// search without one tried (messages only).
 const CONFIG_PATH: &str = "/etc/diskgc/config.yaml";
 
 /// `--timeout` when a vector gives none: long enough that no modelled
@@ -71,10 +72,11 @@ pub struct ProfileVector {
     pub tally_budget: Option<String>,
     #[serde(default)]
     pub allow_root: bool,
-    /// The account resolver for `owners:` names; a name not listed does
-    /// not exist.
+    /// The built-in catalog of the build under test (`development`, the
+    /// default, or `proposed-release-01`): what the binary's
+    /// `proposed-release-01-catalog` feature selects.
     #[serde(default)]
-    pub users: BTreeMap<String, u32>,
+    pub catalog: VectorCatalog,
     /// `DISKGC_SEED` for `ranking: random`; absent: drawing one fails.
     #[serde(default)]
     pub seed: Option<u64>,
@@ -85,6 +87,25 @@ pub struct ProfileVector {
     pub entry_budget: Option<usize>,
     pub host: HostModel,
     pub expect: Expected,
+}
+
+/// [`Catalog`], as a vector names it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum VectorCatalog {
+    #[default]
+    #[serde(rename = "development")]
+    Development,
+    #[serde(rename = "proposed-release-01")]
+    ProposedRelease01,
+}
+
+impl From<VectorCatalog> for Catalog {
+    fn from(catalog: VectorCatalog) -> Self {
+        match catalog {
+            VectorCatalog::Development => Catalog::Development,
+            VectorCatalog::ProposedRelease01 => Catalog::ProposedRelease01,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -250,60 +271,69 @@ impl ProfileVector {
         })
     }
 
-    /// The configuration, or the report the binary gives for one that does
-    /// not load (exit 2 before the host is touched; `main.rs` does the
-    /// same in two lines).
-    fn configuration(&self) -> Result<Option<Config>, Box<Report>> {
-        let Some(text) = &self.config else {
-            return Ok(None);
-        };
-        config::parse(Path::new(CONFIG_PATH), text.as_bytes())
-            .map(Some)
-            .map_err(|error| {
-                Box::new(
-                    Report::new(Status::UsageError, Some(&self.path))
-                        .usage_error_with_cause(ErrorCause::Config, error.to_string()),
-                )
-            })
-    }
-
-    /// The library the run selects from, for the per-action invariants.
-    fn library(&self, config: Option<&Config>) -> Result<Library, String> {
-        match config {
-            Some(config) => Ok(config.library.clone()),
-            None if self.user_profiles.is_empty() => {
-                Library::builtin().map_err(|e| format!("built-ins: {e}"))
-            }
-            None => Library::with_user_profiles(&self.user_profiles)
-                .map_err(|e| format!("vector user profiles: {e}")),
+    /// The configuration file as the binary's lookup would leave it.
+    fn config_file(&self) -> ConfigFile {
+        match &self.config {
+            Some(text) => ConfigFile::Read {
+                path: PathBuf::from(CONFIG_PATH),
+                bytes: text.as_bytes().to_vec(),
+            },
+            None => ConfigFile::NotFound {
+                tried: vec![PathBuf::from(CONFIG_PATH)],
+            },
         }
     }
 
-    fn run(&self, host: &ModelHost, dry_run: bool, library: &Library) -> Result<Report, String> {
-        let config = match self.configuration() {
-            Ok(config) => config,
-            Err(report) => return Ok(*report),
-        };
+    /// The configuration as the run loads it (through the product's
+    /// [`Catalog::config`]), for the invariants' library; `None` when
+    /// there is none or it does not load (the run then refuses, exit 2).
+    fn loaded_config(&self) -> Option<Config> {
+        let text = self.config.as_ref()?;
+        Catalog::from(self.catalog)
+            .config(Path::new(CONFIG_PATH), text.as_bytes(), ConfigUse::Run)
+            .ok()
+    }
+
+    /// The built-ins before the catalog narrows them: the embedded ones
+    /// plus the vector's `user_profiles`.
+    fn builtins(&self) -> Result<Library, String> {
+        if self.user_profiles.is_empty() {
+            Library::builtin().map_err(|e| format!("built-ins: {e}"))
+        } else {
+            Library::with_user_profiles(&self.user_profiles)
+                .map_err(|e| format!("vector user profiles: {e}"))
+        }
+    }
+
+    /// The library the run selects from, for the per-action invariants:
+    /// the configuration's, or `builtins` under the vector's catalog. A
+    /// catalog that refuses `builtins` (a user profile under the 0.1
+    /// catalog) leaves them unnarrowed here: the run refuses it.
+    fn library(&self, config: Option<&Config>, builtins: Library) -> Library {
+        match config {
+            Some(config) => config.library.clone(),
+            None => Catalog::from(self.catalog)
+                .library(builtins.clone())
+                .unwrap_or(builtins),
+        }
+    }
+
+    /// `builtins`: the built-ins the run's [`Platform`] offers (the
+    /// mutation seam of [`Self::check`]).
+    fn run(&self, host: &ModelHost, dry_run: bool, builtins: &Library) -> Result<Report, String> {
         let options = self.options(dry_run)?;
-        let users = &self.users;
-        let resolve_owner = |name: &str| {
-            users
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("owners: user {name:?} does not exist"))
-        };
         let seed = self.seed;
         let draw_seed = || seed.ok_or_else(|| "no DISKGC_SEED in this vector".to_owned());
-        let builtin_library = || Ok(library.clone());
+        let offered = || Ok(builtins.clone());
         let platform = Platform {
-            resolve_owner: &resolve_owner,
+            catalog: self.catalog.into(),
             draw_seed: &draw_seed,
-            builtin_library: &builtin_library,
+            builtins: &offered,
         };
         Ok(invocation::ensure(
             host,
             &options,
-            config.as_ref(),
+            &self.config_file(),
             &platform,
             &mut |_| {},
             &mut |_| {},
@@ -313,28 +343,27 @@ impl ProfileVector {
     /// Runs both modes against independent copies of the same inode graph
     /// with the built-in library (and the vector's own profiles).
     pub fn check_builtin(&self) -> Result<Checked, String> {
-        let config = self.configuration().ok().flatten();
-        let library = self.library(config.as_ref())?;
-        self.check_with(&library)
+        self.check_with(&self.builtins()?)
     }
 
     /// [`Self::check_builtin`] with `library` in place of the built-ins
     /// when no configuration is given: how a mutated profile is tried
     /// against an unchanged vector.
     pub fn check(&self, library: &Library) -> Result<(), String> {
-        let config = self.configuration().ok().flatten();
-        let library = match (&config, self.user_profiles.is_empty()) {
-            (None, true) => library.clone(),
-            _ => self.library(config.as_ref())?,
+        let builtins = if self.user_profiles.is_empty() {
+            library.clone()
+        } else {
+            self.builtins()?
         };
-        self.check_with(&library).map(|_| ())
+        self.check_with(&builtins).map(|_| ())
     }
 
     /// The expectations are independent data: no expected path is derived
     /// from diskgc's report.
-    fn check_with(&self, library: &Library) -> Result<Checked, String> {
+    fn check_with(&self, builtins: &Library) -> Result<Checked, String> {
+        let library = &self.library(self.loaded_config().as_ref(), builtins.clone());
         let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
-        let dry_run = self.run(&planning, true, library)?;
+        let dry_run = self.run(&planning, true, builtins)?;
         compare_plan(&dry_run, &self.expect.plan).map_err(|e| {
             format!(
                 "{e}\n(dry-run exit {}, errors {:?})",
@@ -372,7 +401,7 @@ impl ProfileVector {
                 }
             }
         }
-        let reclaim = self.run(&reclaiming, false, library)?;
+        let reclaim = self.run(&reclaiming, false, builtins)?;
         compare_exit("reclaim", &reclaim, self.expect.reclaim_exit)?;
         compare_errors("reclaim", &reclaim, &self.expect.errors)?;
         let actions = sorted(reclaim.actions.iter().map(|e| e.candidate.clone()));
@@ -425,10 +454,8 @@ impl ProfileVector {
     /// The reclaim run's call trace, one line per host call: for writing
     /// and debugging a vector's events (`VECTOR_TRACE`, docs/testing.md).
     pub fn reclaim_trace(&self) -> Result<Vec<String>, String> {
-        let config = self.configuration().ok().flatten();
-        let library = self.library(config.as_ref())?;
         let host = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
-        self.run(&host, false, &library)?;
+        self.run(&host, false, &self.builtins()?)?;
         Ok(host.trace().iter().map(ToString::to_string).collect())
     }
 

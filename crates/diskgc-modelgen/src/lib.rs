@@ -272,6 +272,7 @@ pub fn host_model(
                 own_pid: None,
                 own_uid_map: None,
                 own_uid: None,
+                users: BTreeMap::new(),
                 pid_namespace: Default::default(),
                 proc_hidepid: false,
                 sandbox_gate: diskgc_model::spec::GateSpec::Open,

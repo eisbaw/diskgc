@@ -956,7 +956,7 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
-        function: "resolve_owner",
+        function: "lookup_account",
         gate: Gate::Ungated(
             "getpwnam_r reads NSS user records; no filesystem mutation or child process",
         ),

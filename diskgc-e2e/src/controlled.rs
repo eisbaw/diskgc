@@ -561,6 +561,11 @@ impl<H: Host> Host for Controlled<H> {
         self.host.effective_uid()
     }
 
+    fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
+        self.before("account_uid");
+        self.host.account_uid(name)
+    }
+
     fn inherit_lock(&self, lock: &Locked<Self::Fd>) -> Result<(), HostError> {
         self.before("inherit_lock");
         self.host.inherit_lock(lock)

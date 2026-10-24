@@ -6,7 +6,6 @@
 # contract, since --allow-root refuses the built-in's {uid} prefixes.
 profile_vector: 1
 allow_root: true
-users: {tester: 1000, other: 2000}
 config: |
   version: 1
   owners: [tester, other]
@@ -20,6 +19,7 @@ path: /tmp
 min_free: 100%
 host:
   host_model: 1
+  users: {tester: 1000, other: 2000}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
   mounts:

@@ -1,0 +1,55 @@
+# A configuration that uses only what the proposed 0.1 catalog admits
+# (cargo-target and the idle filters, a checkout policy for cargo-target)
+# loads under it, and its groups run in order: the idle target goes in the
+# stale group, the fresh one is not idle enough for it (a `not_idle` skip)
+# and is taken by the pressure group.
+profile_vector: 1
+catalog: proposed-release-01
+config: |
+  version: 1
+  profile_policies:
+    - {profile: cargo-target, checkouts: refuse}
+  groups:
+    - name: stale
+      tiers:
+        - {name: old-targets, select: "profile:cargo-target && filter:idle-30d", roots: [/home/tester/src]}
+    - name: pressure
+      tiers:
+        - {name: any-target, select: "profile:cargo-target", roots: [/home/tester/src]}
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/old/Cargo.toml: {}
+    /home/tester/src/old/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug:
+        .: {mtime: 2026-08-01T00:00:00Z}
+        .cargo-lock: {mtime: 2026-08-01T00:00:00Z}
+        deps:
+          .: {mtime: 2026-08-01T00:00:00Z}
+          lib-1: {size: 1M, mtime: 2026-08-01T00:00:00Z}
+    /home/tester/src/fresh/Cargo.toml: {}
+    /home/tester/src/fresh/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {lib-1: {size: 1M}}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/old/target}
+    - {candidate: /home/tester/src/fresh/target, reason: not_idle}
+    - {candidate: /home/tester/src/old/target}
+    - {candidate: /home/tester/src/fresh/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/old/target, /home/tester/src/fresh/target]
+  removed: [/home/tester/src/old/target/debug/deps, /home/tester/src/fresh/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/src/fresh/target, reason: not_idle}
+  preserved:
+    - /home/tester/src/old/target/debug/.cargo-lock
+    - /home/tester/src/fresh/target/debug/.cargo-lock

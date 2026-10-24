@@ -1155,6 +1155,12 @@ pub trait Host {
     /// (docs/safety.md, Privileges), and what `{uid}` stands for in paths.
     fn effective_uid(&self) -> u32;
 
+    /// The uid of the account called `name` in this host's account
+    /// database (`getpwnam_r` through the name service), `None` when it
+    /// has no such account. Read only for `owners:` names under
+    /// `--allow-root`; what uids are acceptable is the caller's policy.
+    fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError>;
+
     /// Lets every child diskgc starts from now on inherit the held lock
     /// `lock` (clears close-on-exec on that one fd, `fcntl(F_SETFD)`), so
     /// the lock stays held until the last holder of a copy closes it (the

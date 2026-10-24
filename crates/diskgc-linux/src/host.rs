@@ -345,13 +345,14 @@ fn check_root_config_modes(path: &Path, dev: u64, ino: u64) -> Result<(), HostEr
     Ok(())
 }
 
-/// Resolve a configured user through the system name service. The system
-/// account cutoff comes from docs/reference.md; the caller also rejects
-/// duplicate resolved UIDs. Static musl builds inherit musl's local-account
-/// resolver limits (TASK91).
-pub fn resolve_owner(name: &str) -> Result<u32, String> {
-    let cname = std::ffi::CString::new(name)
-        .map_err(|_| format!("owners: name {name:?} contains a NUL byte"))?;
+/// The uid of the account `name` in the system name service
+/// ([`Host::account_uid`]); `None` when there is none. Static musl builds
+/// inherit musl's local-account resolver limits (TASK91). The policy (no
+/// system uids, no duplicates) is `diskgc_core::invocation`'s.
+fn lookup_account(name: &str) -> Result<Option<u32>, HostError> {
+    let cname = std::ffi::CString::new(name).map_err(|_| {
+        HostError::invalid("getpwnam_r", format!("{name:?}"), "contains a NUL byte")
+    })?;
     let mut storage = vec![0u8; 1024];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
@@ -367,31 +368,24 @@ pub fn resolve_owner(name: &str) -> Result<u32, String> {
                 &mut result,
             )
         };
+        // The buffer doubles up to 1 MiB: a passwd entry larger than that
+        // is an error, not an unbounded allocation.
         if code == libc::ERANGE && storage.len() < (1 << 20) {
             storage.resize(storage.len() * 2, 0);
             continue;
         }
         if code != 0 {
-            return Err(format!(
-                "owners: cannot resolve {name:?}: {}",
-                std::io::Error::from_raw_os_error(code)
+            return Err(HostError::errno(
+                "getpwnam_r",
+                format!("{name:?}"),
+                Errno(code),
             ));
         }
         if result.is_null() {
-            return Err(format!(
-                "owners: user {name:?} does not exist in this binary's account resolver \
-                 (static musl builds cannot load LDAP/sssd NSS modules; use a trusted \
-                 {{uid: N}} entry, a local passwd entry, or nscd)"
-            ));
+            return Ok(None);
         }
         // SAFETY: getpwnam_r returned success and a non-null pointer to entry.
-        let uid = unsafe { entry.assume_init().pw_uid };
-        if uid < 1000 {
-            return Err(format!(
-                "owners: user {name:?} resolves to system uid {uid} (< 1000)"
-            ));
-        }
-        return Ok(uid);
+        return Ok(Some(unsafe { entry.assume_init().pw_uid }));
     }
 }
 
@@ -1872,6 +1866,10 @@ impl Host for LinuxHost {
 
     fn effective_uid(&self) -> u32 {
         rustix::process::geteuid().as_raw()
+    }
+
+    fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
+        lookup_account(name)
     }
 
     /// `fcntl(F_SETFD)` without `FD_CLOEXEC`, on that one fd: every other fd

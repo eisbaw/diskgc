@@ -3,7 +3,6 @@
 # exit 2.
 profile_vector: 1
 allow_root: true
-users: {tester: 2001}
 config: |
   version: 1
   profiles:
@@ -17,6 +16,7 @@ path: /tmp
 min_free: 100%
 host:
   host_model: 1
+  users: {tester: 2001}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
   mounts:

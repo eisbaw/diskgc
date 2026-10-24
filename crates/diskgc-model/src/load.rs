@@ -169,6 +169,7 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     if let Some(uid) = model.own_uid {
         state.own_uid = uid;
     }
+    state.users = model.users.clone();
     state.pid_namespace_initial = model.pid_namespace == crate::spec::PidNamespaceSpec::Initial;
     state.proc_hidepid = model.proc_hidepid;
     state.sandbox_gate = model.sandbox_gate;
