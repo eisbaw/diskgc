@@ -47,6 +47,7 @@ fn full() -> Report {
         checkouts: Checkouts::Allow,
         build_evidence: None,
         detail: None,
+        process_blockers: None,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some(Reason::NotIdle), None)];
     r.actions = vec![ActionEntry {
@@ -817,7 +818,7 @@ fn human_summary_has_one_final_outcome_per_candidate_across_tiers() {
     assert!(!text.contains("kept /s/fw/target"), "{text}");
     assert_eq!(text.matches("/s/lib/target").count(), 1, "{text}");
     assert!(
-        text.contains("kept /s/web/target: in_use, held by pid 4269 (webapp) [recent]"),
+        text.contains("kept /s/web/target: in_use, used by pid 4269 (webapp) [recent]"),
         "{text}"
     );
     assert!(!text.contains("web/target: not_idle"), "{text}");
@@ -866,6 +867,7 @@ fn plan_row(tier: &str, candidate: &str, reason: Option<Reason>, bytes: Option<u
         checkouts: Checkouts::Allow,
         build_evidence: None,
         detail: reason.map(|_| "last build 1 h ago; idle_for 7d required".into()),
+        process_blockers: None,
     }
 }
 

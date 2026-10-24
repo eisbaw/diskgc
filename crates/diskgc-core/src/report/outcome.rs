@@ -232,6 +232,7 @@ mod tests {
             checkouts: Checkouts::Refuse,
             build_evidence: None,
             detail: None,
+            process_blockers: None,
         }
     }
 

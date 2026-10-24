@@ -205,9 +205,11 @@ pub struct PlanEntry {
     pub checkouts: Checkouts,
     /// Present only for a build output whose recorded source was verified.
     pub build_evidence: Option<BuildEvidence>,
-    /// The skip's human diagnostic, for the human plan only: the JSON plan
-    /// has no such field (programs branch on `reason`).
+    /// The skip's human diagnostic and attributed processes, as in
+    /// [`SkipEntry`], for the human plan only: the JSON plan has neither
+    /// (programs branch on `reason`).
     pub detail: Option<String>,
+    pub process_blockers: Option<Vec<ProcessBlocker>>,
 }
 
 /// Source evidence from discovery, with age only after an eligibility walk.

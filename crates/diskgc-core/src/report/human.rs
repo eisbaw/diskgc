@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use super::outcome::{self, Live, Planned, Verdict};
 use super::{HeldEntry, PlanEntry, Report, SkipEntry, Status, human_space_values, signed_bytes};
-use crate::engine::Reason;
+use crate::engine::{ProcessBlocker, Reason};
 use crate::units::{format_age, format_bytes};
 
 /// Kept candidates of one reason listed one per line up to this many;
@@ -213,18 +213,31 @@ fn kept_lines(kept: &[&SkipEntry], tier_label: &dyn Fn(&str) -> String) -> Vec<S
     lines
 }
 
-/// `REASON, DIAGNOSTIC` ([`skip_diagnostic`]).
+/// `REASON, DIAGNOSTIC` ([`diagnostic`]).
 fn skip_why(skip: &SkipEntry) -> String {
-    match skip_diagnostic(skip) {
-        Some(diagnostic) => format!("{}, {diagnostic}", skip.reason),
-        None => skip.reason.as_str().to_owned(),
+    why(
+        skip.reason.as_str(),
+        skip.detail.as_deref(),
+        skip.process_blockers.as_deref(),
+    )
+}
+
+fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
+    diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref())
+}
+
+fn why(reason: &str, detail: Option<&str>, blockers: Option<&[ProcessBlocker]>) -> String {
+    match diagnostic(detail, blockers) {
+        Some(diagnostic) => format!("{reason}, {diagnostic}"),
+        None => reason.to_owned(),
     }
 }
 
-/// The processes that hold an `in_use` candidate, when attributed, else
-/// the refusal's diagnostic cut to one bounded line.
-fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
-    if let Some(blockers) = skip.process_blockers.as_deref().filter(|b| !b.is_empty()) {
+/// The processes that hold a candidate, when attributed (the full
+/// evidence is in the JSON and on stderr), else the refusal's diagnostic
+/// cut to one bounded line.
+fn diagnostic(detail: Option<&str>, blockers: Option<&[ProcessBlocker]>) -> Option<String> {
+    if let Some(blockers) = blockers.filter(|b| !b.is_empty()) {
         let mut pids: Vec<(u32, Option<&str>)> = Vec::new();
         for blocker in blockers {
             if !pids.iter().any(|(pid, _)| *pid == blocker.pid) {
@@ -241,7 +254,7 @@ fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
             .collect();
         let more = pids.len().saturating_sub(BLOCKERS_MAX);
         return Some(format!(
-            "held by {}{}",
+            "used by {}{}",
             named.join(", "),
             if more == 0 {
                 String::new()
@@ -250,14 +263,7 @@ fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
             }
         ));
     }
-    skip.detail.as_deref().filter(|d| !d.is_empty()).map(brief)
-}
-
-fn with_detail(reason: &str, detail: Option<&str>) -> String {
-    match detail.filter(|d| !d.is_empty()) {
-        Some(detail) => format!("{reason}, {}", brief(detail)),
-        None => reason.to_owned(),
-    }
+    detail.filter(|d| !d.is_empty()).map(brief)
 }
 
 fn dry_run_text(report: &Report, held: Option<String>) -> String {
@@ -310,9 +316,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             }
             Verdict::Kept => format!(
                 "  kept {path}: {}{evidence}{tier}",
-                with_detail(
+                why(
                     entry.reason.map_or("eligible", Reason::as_str),
-                    entry.detail.as_deref()
+                    entry.detail.as_deref(),
+                    entry.process_blockers.as_deref()
                 )
             ),
         });
@@ -322,9 +329,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             "  skipped profile {} [{}]: {}",
             one_line(&entry.profile),
             one_line(&entry.tier),
-            with_detail(
+            why(
                 entry.reason.map_or("eligible", Reason::as_str),
-                entry.detail.as_deref()
+                entry.detail.as_deref(),
+                entry.process_blockers.as_deref()
             )
         )
     }));

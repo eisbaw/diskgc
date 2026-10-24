@@ -2558,6 +2558,7 @@ fn plan_entry(
         checkouts: tier.checkouts,
         build_evidence: None,
         detail: None,
+        process_blockers: None,
     }
 }
 
@@ -2566,6 +2567,7 @@ fn plan_entry(
 fn plan_skip(tier: &Tier, candidate: &Path, skip: &Skip) -> PlanEntry {
     PlanEntry {
         detail: Some(skip.detail.clone()),
+        process_blockers: skip.process_blockers.clone(),
         ..plan_entry(tier, candidate, Some(skip.reason), None)
     }
 }

@@ -952,10 +952,10 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: 
     );
     for target in busy {
         ensure!(
-            lines
-                .iter()
-                .any(|l| l.trim_start().starts_with("kept ") && mentions(l, target)),
-            "{} is not skipped in the plan:\n{}",
+            lines.iter().any(|l| l.trim_start().starts_with("kept ")
+                && mentions(l, target)
+                && l.contains(": in_use, used by pid ")),
+            "{} is not kept in the plan, naming the process using it:\n{}",
             target.display(),
             run.stdout
         );
@@ -981,7 +981,13 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: 
         "dry run did not include the persistent deleted file: {}",
         run.stdout
     );
-    ensure!(lines.len() == 2 + idle.len() + busy.len(), "{}", run.stdout);
+    // The header, one line per candidate, the operations and the held line.
+    ensure!(
+        lines.len() == 3 + idle.len() + busy.len()
+            && lines.contains(&"  operations: cargo-target: cargo lock protocol"),
+        "{}",
+        run.stdout
+    );
     Ok(())
 }
 
