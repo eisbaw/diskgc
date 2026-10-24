@@ -32,6 +32,7 @@ mod app;
 mod command;
 mod discover;
 mod judge;
+mod liveness;
 mod pattern;
 mod plan;
 mod reclaim;
@@ -47,7 +48,7 @@ pub use command::{
 pub use discover::{Discovery, Found, discover, discover_union};
 pub use judge::{Judge, Reached, Tally, Walked};
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
-pub use plan::{Planned, judge_one, plan};
+pub use plan::{Planned, contract_veto, judge_one, plan};
 pub use reclaim::{
     Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked,
     retention_guard_veto, tally, tally_for_union,
@@ -82,6 +83,9 @@ pub struct Find {
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
     pub source_anchor: Option<crate::profile::SourceAnchor>,
+    /// The producer liveness contract its candidates must pass
+    /// ([`liveness`], judged from the in-use check's scan).
+    pub liveness_contract: Option<crate::profile::LivenessContract>,
     pub keep_newest: Option<usize>,
     pub newest_group: Option<crate::profile::NewestGroup>,
     pub protect_links: Vec<String>,
@@ -223,6 +227,7 @@ impl Find {
                 .map(|path| std::path::PathBuf::from(path.replace("{uid}", &uid.to_string()))),
             lacks_entry: where_.lacks_entry.clone(),
             source_anchor: where_.source_anchor,
+            liveness_contract: where_.liveness_contract,
             keep_newest: where_.keep_newest,
             newest_group: where_.newest_group,
             protect_links: where_.protect_links.clone(),

@@ -503,13 +503,41 @@ Model scenarios required by [safety.md](safety.md) and
 - `command_action_closed_pipe_descendant_is_killed`: a descendant closes both
   output pipes and still gets killed before the successful leader is reaped.
 
-### Producer liveness vectors (planned)
+### Producer liveness vectors
 
 Status: specified by TASK-112's design; they land with its implementation.
+Landed with step 3: the Owner PID cases below, written against a user
+profile with `liveness_contract: nix-shell` (`nix-shell-probe`) in
+`crates/diskgc-model/tests/vectors/liveness/`, named after the rows
+(`nix-shell-...`; the unlisted-filesystem row as one file each for
+`overlay` and `zfs`, since `virtiofs` and `9p` are refused before any
+contract as filesystems that may block; the hidepid-as-root row waits for
+the vector runner's `--allow-root` support), plus
+`nix-shell-owner-pid-taken-after-listing-refused` (the pidfd probe),
+`nix-shell-union-contract-vetoes` (the union rule),
+`nix-shell-command-action-live-owner-refused` (a command action is judged
+too), and the load-time cases and properties as Rust tests. Row names
+here say `nix-shell-rc-`; the step-3 files drop the `rc-` (their profile
+is a user profile, not the built-in). The model has no parent links, so
+the "setsid" and "nohup" children of the orphan and detached-child rows
+are plain processes with or without the reference. The `nix-shell-rc`
+built-in's own vectors land with step 4, the pytest and project ones with
+steps 5 and 6. Mutation record (step 3, each vector-corpus run red):
+skipping the namespace, `hidepid` or filesystem precondition; tabling only
+the first `NSpid` level; ignoring unreadable processes; ignoring the
+probe; dropping the contract check in the plan, before the delete or
+before a command action; checking only the selected union term in the
+reclaim; dropping the union veto in the plan; letting a name that is no
+instance veto a union. The name rule before the
+walk is a cheaper copy of the contract's own check (equivalent at vector
+level).
+Tabling only the innermost level is equivalent at vector level (the probe
+finds every outer level, which is in diskgc's namespace); the model test
+`the_scan_tables_every_level_and_drops_gone_processes` pins it.
 The contracts are in [safety.md](safety.md#producer-liveness), the schema
-in [reference.md](reference.md#liveness-contract-predicate-planned). Every
+in [reference.md](reference.md#liveness-contract-predicate). Every
 case below is a checked-in profile vector
-(`crates/diskgc-model/tests/models/profiles/<name>.yaml`, `profile_vector:
+(`crates/diskgc-model/tests/vectors/liveness/<name>.yaml`, `profile_vector:
 1`) run by `tests/profile_vectors.rs`, dry run and reclaim, with candidates
 older than the source's `min_idle_for` unless the case says otherwise. A
 case's "Expected" column gives the plan reason (none: eligible and
@@ -520,8 +548,9 @@ TASK-121's corner-case corpus takes these as its liveness part.
 
 Extensions they need. Of the profile-vector file:
 
-- `expect.plan[].evidence` and `expect.skipped[].evidence`, optional
-  lists of `process_blockers` evidence values, compared as sets.
+- none so far: expected evidence is `expect.skipped[].process_blockers`
+  (TASK-121's runner); plan rows carry no evidence in the report, so a
+  plan expectation checks the reason only.
 
 Of the host model (the test-model schema, tentative). `pid_namespace`,
 `proc_hidepid`, `nspid` and `zombie` landed with Owner PID (TASK-112 step

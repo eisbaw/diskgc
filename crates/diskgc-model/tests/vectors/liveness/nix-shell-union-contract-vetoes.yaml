@@ -1,0 +1,48 @@
+# Union semantics (reference.md, Liveness contract predicate): every source
+# that discovered a candidate and has a contract must permit it. tmp-shell-
+# dirs alone would delete the live shell's directory; nix-shell-probe also
+# found it and its owner lives, so plan and reclaim both retain it. The
+# ended owner's directory goes. nix-shell-0042-x is no instance of the
+# contract (a leading zero): it carries no fact about a producer, so it does
+# not veto, and tmp-shell-dirs alone decides.
+profile_vector: 1
+user_profiles:
+  - name: nix-shell-probe
+    find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
+    where: {liveness_contract: nix-shell}
+    min_idle_for: 1h
+    action: delete
+    examples: {match: [/tmp/nix-shell-4242-17]}
+  - name: tmp-shell-dirs
+    find: {roots: [/tmp], paths: ["nix-shell-*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/nix-shell-4242-17]}
+select: "profile:tmp-shell-dirs || profile:nix-shell-probe"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/nix-shell-4242-17: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-4300-18: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-0042-x: {.: {mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+    - {pid: 4242, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell-0042-x}
+    - {candidate: /tmp/nix-shell-4242-17, reason: in_use}
+    - {candidate: /tmp/nix-shell-4300-18}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell-0042-x, /tmp/nix-shell-4300-18]
+  removed: [/tmp/nix-shell-0042-x, /tmp/nix-shell-4300-18]
+  skipped:
+    - {candidate: /tmp/nix-shell-4242-17, reason: in_use, process_blockers: [{pid: 4242, evidence: owner_pid}]}
+  preserved: [/tmp/nix-shell-4242-17/rc]

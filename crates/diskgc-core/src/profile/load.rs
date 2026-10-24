@@ -9,8 +9,8 @@ use std::fmt;
 
 use super::roots::validate_root_list;
 use super::spec::{
-    ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, ProfileSpec, RootsSpec, WhereSpec,
-    parse_profiles,
+    ActionSpec, Cwd, EntryType, ExamplesSpec, FindSpec, LivenessContract, ProfileSpec, RootsSpec,
+    WhereSpec, parse_profiles,
 };
 use super::temp_roots;
 use super::{Action, Body, Examples, Finds, IdleFor, Origin, Profile, Roots, Source, Where};
@@ -241,6 +241,13 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
     if where_.source_anchor.is_some() {
         problems.push("`where.source_anchor` is a source predicate, not a tier filter".to_owned());
     }
+    if where_.liveness_contract.is_some() {
+        problems.push(
+            "`where.liveness_contract` is a source predicate (the producer belongs to what the \
+             source finds), not a tier filter"
+                .to_owned(),
+        );
+    }
     for (field, present, why) in [
         (
             "kind",
@@ -403,6 +410,9 @@ fn source(
             return None;
         }
     };
+    if let Some(contract) = where_.liveness_contract {
+        liveness_contract(contract, find, problems);
+    }
     if let Finds::Paths { patterns, .. } = &mut finds {
         match temp_roots::effective(origin, &spec.name, patterns.clone()) {
             Ok(effective) => *patterns = effective,
@@ -423,6 +433,47 @@ fn source(
         examples,
         verified_with: spec.verified_with.clone(),
     })
+}
+
+/// The load-time rules of `where.liveness_contract` on a kind `fs` source
+/// (docs/reference.md, Liveness contract predicate); the kind rule is the
+/// generic predicate check above. A contract this version does not judge
+/// is refused outright.
+fn liveness_contract(contract: LivenessContract, find: &FindSpec, problems: &mut Vec<String>) {
+    let name = contract.name();
+    if !contract.implemented() {
+        problems.push(format!(
+            "`liveness_contract: {name}` is not supported by this version of diskgc \
+             (supported: {})",
+            LivenessContract::ALL
+                .iter()
+                .filter(|c| c.implemented())
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        return;
+    }
+    if find.r#type != Some(EntryType::Dir) {
+        problems.push(format!(
+            "`liveness_contract: {name}` judges directories: it needs `find.type: dir`"
+        ));
+    }
+    let shapes = contract.name_shapes();
+    for path in find.paths.iter().flatten() {
+        let last = path.rsplit('/').next().unwrap_or(path);
+        if !shapes.contains(&last) {
+            problems.push(format!(
+                "`liveness_contract: {name}` recognises only names shaped {}: the \
+                 pattern `{path}` must end in one of them",
+                shapes
+                    .iter()
+                    .map(|shape| format!("`{shape}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ));
+        }
+    }
 }
 
 /// The parts of a kind `fs` source.
@@ -666,6 +717,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         app_not_running: spec.app_not_running.clone(),
         lacks_entry: spec.lacks_entry.clone(),
         source_anchor: spec.source_anchor,
+        liveness_contract: spec.liveness_contract,
         keep_newest: spec.keep_newest,
         newest_group: spec.newest_group,
         protect_links: spec.protect_links.clone(),

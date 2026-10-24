@@ -669,6 +669,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// This checker, its scans also reading what Owner PID needs when
+    /// `pid_lookup` ([`Options::with_pid_lookup`]): set when a source it
+    /// serves has a liveness contract.
+    #[must_use]
+    pub fn with_pid_lookup(mut self, pid_lookup: bool) -> Self {
+        self.options = self.options.with_pid_lookup(pid_lookup);
+        self.latest = None;
+        self
+    }
+
     /// The scan the last check used.
     pub fn latest(&self) -> Option<&Scan> {
         self.latest.as_ref()

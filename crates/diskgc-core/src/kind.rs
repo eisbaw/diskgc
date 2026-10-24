@@ -59,13 +59,14 @@ pub enum PredicateName {
     AppNotRunning,
     LacksEntry,
     SourceAnchor,
+    LivenessContract,
     KeepNewest,
     ProtectLinks,
     ProtectCursorExtensions,
 }
 
 impl PredicateName {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::IdleFor,
         Self::Has,
         Self::HasDir,
@@ -73,6 +74,7 @@ impl PredicateName {
         Self::AppNotRunning,
         Self::LacksEntry,
         Self::SourceAnchor,
+        Self::LivenessContract,
         Self::KeepNewest,
         Self::ProtectLinks,
         Self::ProtectCursorExtensions,
@@ -89,7 +91,8 @@ impl PredicateName {
             | Self::HasNot
             | Self::AppNotRunning
             | Self::LacksEntry
-            | Self::SourceAnchor => false,
+            | Self::SourceAnchor
+            | Self::LivenessContract => false,
         }
     }
 
@@ -103,6 +106,7 @@ impl PredicateName {
             Self::AppNotRunning => "app_not_running",
             Self::LacksEntry => "lacks_entry",
             Self::SourceAnchor => "source_anchor",
+            Self::LivenessContract => "liveness_contract",
             Self::KeepNewest => "keep_newest",
             Self::ProtectLinks => "protect_links",
             Self::ProtectCursorExtensions => "protect_cursor_extensions",
@@ -119,6 +123,7 @@ impl PredicateName {
             | Self::AppNotRunning
             | Self::LacksEntry
             | Self::SourceAnchor
+            | Self::LivenessContract
             | Self::KeepNewest
             | Self::ProtectLinks
             | Self::ProtectCursorExtensions => &[Kind::Fs],

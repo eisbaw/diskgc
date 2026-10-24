@@ -16,11 +16,12 @@ use super::discover::{Discovery, check_deadline, discover};
 use super::judge::{Judge, Tally, mountinfo};
 use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
-use crate::engine::{Rules, Skip};
+use crate::engine::{Reason, Rules, Skip};
 use crate::host::{Dev, Host, MonoTime};
 use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleWindow;
+use crate::resolve::{Want, resolve_in};
 
 /// What [`plan`] found.
 #[derive(Debug, Default)]
@@ -88,7 +89,7 @@ pub fn plan<H: Host>(
         idle,
         dev,
     };
-    let mut checker = Checker::for_plan(rules);
+    let mut checker = Checker::for_plan(rules).with_pid_lookup(find.liveness_contract.is_some());
     let total = candidates.len();
     for (path, candidate) in candidates {
         if host.interrupted().is_some() {
@@ -155,5 +156,62 @@ pub fn judge_one<H: Host>(
     if let Err(skip) = scan.check(&candidate, &walked.record) {
         return Ok(Err(skip));
     }
+    judged!(super::liveness::check(
+        host,
+        scan,
+        judge.find,
+        found,
+        candidate.parent()
+    ));
     Ok(Ok(walked.tally()))
+}
+
+/// The union rule of liveness contracts for the plan: every admitted
+/// source that found the candidate and whose contract recognises it must
+/// permit it (the refusing source's index in `sources` comes back), judged from
+/// the plan's scan ([`super::liveness::veto`]; the reclaim applies the
+/// same rule on its last scan). The candidate's parent is reached again
+/// safely; one that cannot be is `unsafe_path`.
+pub fn contract_veto<'a, H: Host>(
+    host: &H,
+    sources: &[(&'a Find, &'a Found)],
+    checker: &mut Checker<'_>,
+    deadline: Option<MonoTime>,
+) -> Result<Result<(), (usize, Skip)>, Stop> {
+    let Some((_, first)) = sources
+        .iter()
+        .find(|(find, _)| find.liveness_contract.is_some())
+    else {
+        return Ok(Ok(()));
+    };
+    check_deadline(host, deadline, &first.path)?;
+    let mounts = mountinfo(host)?;
+    let Some(parent) = first.path.parent() else {
+        return Ok(Err((
+            0,
+            Skip::new(
+                Reason::UnsafePath,
+                first.path.clone(),
+                "the candidate has no parent directory",
+            ),
+        )));
+    };
+    let parent = match resolve_in(host, &mounts, parent, Want::Directory) {
+        Ok(parent) => parent,
+        Err(e) => {
+            return Ok(Err((
+                0,
+                Skip::new(
+                    Reason::UnsafePath,
+                    first.path.clone(),
+                    format!("cannot safely reach the candidate's parent: {e}"),
+                ),
+            )));
+        }
+    };
+    let scan = checker.current(host).map_err(|error| Stop::Failed {
+        path: first.path.clone(),
+        error,
+    })?;
+    super::liveness::veto(host, scan, sources.iter().copied(), &parent.fd)
 }

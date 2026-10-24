@@ -295,7 +295,7 @@ under `profile`:
     "kind": "fs",
     "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
-    "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "source_anchor": null},
+    "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "source_anchor": null, "liveness_contract": null},
     "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
@@ -443,7 +443,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir"}], "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage", "message": ""}]
@@ -907,6 +907,7 @@ the built-in profile has no implicit or fixed temp root.
 | `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; `meson`: require regular generated `meson-info/meson-info.json` with matching build and info paths, a normalized strict-ancestor source under the root, regular `meson-private/coredata.dat` and surviving regular source `meson.build`; `autotools`: require regular `config.status`, `config.log`, and `Makefile`, with the status script recording the exact build path and a strict-ancestor source that still contains regular `configure.ac`. Source identity and metadata are rechecked under the candidate lock. | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in literal directories relative to the bound root, and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
+| `liveness_contract` | a code-backed producer liveness contract (`nix-shell`; designed: `pytest`, `node-project`, `python-project`): the candidate is eligible only when the contract permits it, judged from the same process scan as the in-use check, in the plan and again immediately before deletion ([Liveness contract predicate](#liveness-contract-predicate)) | `fs` source only |
 | `protect_cursor_extensions` | a literal path relative to the bound root to Cursor's `extensions.json`, beside extension candidates. Every `relativeLocation` listed as installed is kept, even if older than the newest N. The JSON array and each entry's `location.path` must agree with that one directory name. A missing, unreadable, malformed, oversized (over 1 MiB) or changing manifest retains all candidates. | `fs` |
 
 In YAML, `where: {idle_for: 3d}` (a nonzero duration), `where: {has: CACHEDIR.TAG}`
@@ -947,10 +948,13 @@ passes neither polarity.
 
 The report always names the measure used.
 
-### Liveness contract predicate (planned)
+### Liveness contract predicate
 
-Status: designed (TASK-112), not implemented. Until it ships the loader
-rejects `liveness_contract` as an unknown key. What each contract shows,
+Status (TASK-112 step 3): `nix-shell` is implemented and judged; `pytest`,
+`node-project` and `python-project` are designed below and refused at
+load ("designed but not implemented yet", naming the step) until they
+land, so nothing half-built can be selected. No built-in uses a contract
+yet. What each contract shows,
 and when it cannot decide, is in
 [safety.md](safety.md#producer-liveness); which built-in uses which
 contract is in [Liveness contracts](#liveness-contracts).
@@ -986,6 +990,10 @@ touching the machine):
   guard);
 - a value that is not one of the contract names, the message naming them
   (`liveness_contract: pytset`); a mapping or a list;
+- a contract this version does not judge yet (`pytest`, `node-project`,
+  `python-project` until they land), the message naming the supported
+  ones, so nothing half-built can be selected; the find-shape and
+  checkout rules below apply to each from the version that judges it;
 - `liveness_contract` on a filter profile: it is a source predicate, since
   the producer belongs to what the source finds; on a kind other than
   `fs`: the existing "predicate on a kind that does not support it" error;
@@ -998,14 +1006,21 @@ touching the machine):
 
 Each predicate appears at most once per profile, so a source has at most
 one contract; `liveness_contract` combines by `&&` with the source's other
-predicates (`app_not_running` included). `profile_policies` cannot change
-it. A user profile may use it like any predicate. A new contract is a new
+predicates (`app_not_running` included). In a union (`profile:a ||
+profile:b`), every admitted source that found the candidate and whose
+contract recognises it as an instance must permit it, whichever term
+selects it: a contract states a fact about the candidate's producer,
+which another term's admission does not change (a veto, as retention
+guards veto). A name the contract does not recognise carries no such
+fact and vetoes nothing; that term alone filters it. The plan and the reclaim
+apply the same rule. `profile_policies` cannot change it. A user profile may use it like any predicate. A new contract is a new
 value, added with the producer it was verified for; a generic form (a pid
 pattern, a producer lock) is added only when a second producer needs the
 same evidence.
 
-Report additions, made together with the implementation (they extend the
-JSON enums of Output):
+Report additions (they extend the JSON enums of Output). Landed with
+`nix-shell`: `producer_unknown` and `owner_pid`; `temp_root`,
+`command_line` and `relative_path` land with `pytest`:
 
 - skip reason `producer_unknown`, used only for a recognised instance of
   a contract whose producer state cannot be determined. Its detail names

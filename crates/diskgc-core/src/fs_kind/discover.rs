@@ -63,6 +63,9 @@ pub struct Found {
     pub identity: Identity,
     /// The recorded source that proved this output rebuildable when found.
     pub source_evidence: Option<SourceEvidence>,
+    /// When it was found (after its `statx`): a liveness contract's scan
+    /// must start no earlier (Owner PID's ordering).
+    pub found_at: MonoTime,
 }
 
 /// What [`discover`] found.
@@ -451,6 +454,7 @@ impl<H: Host> Walk<'_, H> {
                 path: at.to_owned(),
                 identity,
                 source_evidence: None,
+                found_at: self.host.now(),
             });
         }
         match source_where(
@@ -500,6 +504,7 @@ impl<H: Host> Walk<'_, H> {
                 path: at.to_owned(),
                 identity,
                 source_evidence,
+                found_at: self.host.now(),
             }),
         ));
         Ok(true)

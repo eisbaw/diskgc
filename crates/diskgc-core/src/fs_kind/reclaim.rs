@@ -407,32 +407,51 @@ fn protocol<H: Delete>(
         make_writable,
         deadline,
     };
-    let deletion = match clear_and_delete(host, checker, &candidate, &record, options, &mut |_| {
-        if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
-            return Err(NotDeleted::Skipped(skip));
-        }
-        if let Some(app_lock) = &judge.find.app_not_running {
-            super::app::check(host, &found.root, app_lock, deadline)
-                .map_err(NotDeleted::Stopped)?
-                .map_err(NotDeleted::Skipped)?;
-        }
-        if let Some((guard_index, skip)) =
-            runtime_retention_guard_veto(host, alternatives, deadline)
-                .map_err(NotDeleted::Stopped)?
-        {
-            done.selected = Some(guard_index);
-            return Err(NotDeleted::Skipped(skip));
-        }
-        Ok(())
-    }) {
-        Ok(deletion) => deletion,
-        Err(NotDeleted::Skipped(skip)) => {
-            check_deadline(host, deadline, path)?;
-            return Err(skip.into());
-        }
-        Err(NotDeleted::Failed(error)) => return Err(failed(error)),
-        Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
-    };
+    // The union rule's sources: the admitted ones, which claimed it.
+    let (admitted_index, admitted): (Vec<usize>, Vec<&Alternative<'_>>) = alternatives
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.admitted)
+        .unzip();
+    let deletion =
+        match clear_and_delete(host, checker, &candidate, &record, options, &mut |scan| {
+            if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
+                return Err(NotDeleted::Skipped(skip));
+            }
+            // Every discovering source's contract, on this same scan.
+            if let Err((veto_index, skip)) = super::liveness::veto(
+                host,
+                scan,
+                admitted.iter().map(|a| (a.judge.find, a.found)),
+                candidate.parent(),
+            )
+            .map_err(NotDeleted::Stopped)?
+            {
+                done.selected = Some(admitted_index[veto_index]);
+                return Err(NotDeleted::Skipped(skip));
+            }
+            if let Some(app_lock) = &judge.find.app_not_running {
+                super::app::check(host, &found.root, app_lock, deadline)
+                    .map_err(NotDeleted::Stopped)?
+                    .map_err(NotDeleted::Skipped)?;
+            }
+            if let Some((guard_index, skip)) =
+                runtime_retention_guard_veto(host, alternatives, deadline)
+                    .map_err(NotDeleted::Stopped)?
+            {
+                done.selected = Some(guard_index);
+                return Err(NotDeleted::Skipped(skip));
+            }
+            Ok(())
+        }) {
+            Ok(deletion) => deletion,
+            Err(NotDeleted::Skipped(skip)) => {
+                check_deadline(host, deadline, path)?;
+                return Err(skip.into());
+            }
+            Err(NotDeleted::Failed(error)) => return Err(failed(error)),
+            Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
+        };
     done.removed_entries = deletion.removed_entries;
     done.removed_bytes = deletion.removed_bytes;
     ReclaimEnd::of(deletion.end)

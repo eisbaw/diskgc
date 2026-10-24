@@ -215,6 +215,9 @@ impl Judge<'_> {
         if let Some(lock) = &self.find.app_not_running {
             judged!(super::app::check(host, &found.root, lock, deadline));
         }
+        if let Err(skip) = super::liveness::name_filter(self.find, found) {
+            return Ok(Err(skip));
+        }
         judged!(self.version_where(host, reached.parent(), found, deadline));
         let mut walked = judged!(self.walk(host, candidate_view.candidate, found, idle, deadline));
         judged!(self.negated_mixed_filters(

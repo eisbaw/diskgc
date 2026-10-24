@@ -130,6 +130,11 @@ pub struct WhereSpec {
     /// source file to survive outside the candidate.
     #[serde(default, deserialize_with = "present_non_null_source_anchor")]
     pub source_anchor: Option<SourceAnchor>,
+    /// A code-backed producer liveness contract the candidate must pass
+    /// (docs/reference.md, Liveness contract predicate). A written null
+    /// must not remove the guard.
+    #[serde(default, deserialize_with = "present_non_null_liveness_contract")]
+    pub liveness_contract: Option<LivenessContract>,
     #[serde(default, deserialize_with = "present_non_null_usize")]
     pub keep_newest: Option<usize>,
     #[serde(default, deserialize_with = "present_non_null_newest_group")]
@@ -150,6 +155,56 @@ pub struct WhereSpec {
 pub enum NewestGroup {
     Siblings,
     CursorExtension,
+}
+
+/// A producer liveness contract (docs/safety.md, Producer liveness): a
+/// closed set, each value code-backed and verified for its producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LivenessContract {
+    NixShell,
+    Pytest,
+    NodeProject,
+    PythonProject,
+}
+
+impl LivenessContract {
+    pub const ALL: [Self; 4] = [
+        Self::NixShell,
+        Self::Pytest,
+        Self::NodeProject,
+        Self::PythonProject,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NixShell => "nix-shell",
+            Self::Pytest => "pytest",
+            Self::NodeProject => "node-project",
+            Self::PythonProject => "python-project",
+        }
+    }
+
+    /// Whether this version judges the contract. The loader refuses the
+    /// others, so nothing half-built can be selected; their own load rules
+    /// (shapes, checkouts) land with them: `pytest` with TASK-112 step 5,
+    /// `node-project` and `python-project` with step 6.
+    pub fn implemented(self) -> bool {
+        match self {
+            Self::NixShell => true,
+            Self::Pytest | Self::NodeProject | Self::PythonProject => false,
+        }
+    }
+
+    /// The last segment every `find.paths` pattern of a source with this
+    /// implemented contract must have: the contract recognises only names
+    /// of these shapes.
+    pub fn name_shapes(self) -> &'static [&'static str] {
+        match self {
+            Self::NixShell => &["nix-shell-*-*", "nix-develop-*-*"],
+            Self::Pytest | Self::NodeProject | Self::PythonProject => &[],
+        }
+    }
 }
 
 /// A supported build system's source anchor format.
@@ -261,6 +316,12 @@ fn present_non_null_newest_group<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<NewestGroup>, D::Error> {
     NewestGroup::deserialize(deserializer).map(Some)
+}
+
+fn present_non_null_liveness_contract<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<LivenessContract>, D::Error> {
+    LivenessContract::deserialize(deserializer).map(Some)
 }
 
 fn present_non_null_source_anchor<'de, D: Deserializer<'de>>(

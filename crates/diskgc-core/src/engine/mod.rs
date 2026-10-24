@@ -530,12 +530,17 @@ pub enum Reason {
     InstalledExtension,
     /// The candidate overlaps a configured protected source match.
     Protected,
+    /// A recognised instance of a source's liveness contract whose
+    /// producer state cannot be determined (docs/safety.md, Producer
+    /// liveness): a precondition failed, a process stayed unreadable, a
+    /// marker is malformed. Retained, never eligible.
+    ProducerUnknown,
 }
 
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 26] = [
+    pub const ALL: [Reason; 27] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -562,6 +567,7 @@ impl Reason {
         Reason::LinkedCurrent,
         Reason::InstalledExtension,
         Reason::Protected,
+        Reason::ProducerUnknown,
     ];
 
     /// The skip reason's name in reports.
@@ -593,6 +599,7 @@ impl Reason {
             Self::LinkedCurrent => "linked_current",
             Self::InstalledExtension => "installed_extension",
             Self::Protected => "protected",
+            Self::ProducerUnknown => "producer_unknown",
         }
     }
 }
@@ -637,10 +644,13 @@ pub enum ProcessEvidence {
     ProjectCargo,
     DetachedCargo,
     CargoManifestDir,
+    /// A listed process carries the number a liveness contract recorded
+    /// as its producer's pid (a number match, not proof of identity).
+    OwnerPid,
 }
 
 impl ProcessEvidence {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Fd,
         Self::Cwd,
         Self::Root,
@@ -654,6 +664,7 @@ impl ProcessEvidence {
         Self::ProjectCargo,
         Self::DetachedCargo,
         Self::CargoManifestDir,
+        Self::OwnerPid,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -671,6 +682,7 @@ impl ProcessEvidence {
             Self::ProjectCargo => "project_cargo",
             Self::DetachedCargo => "detached_cargo",
             Self::CargoManifestDir => "cargo_manifest_dir",
+            Self::OwnerPid => "owner_pid",
         }
     }
 }

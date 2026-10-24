@@ -238,6 +238,12 @@ fn where_json(where_: &Where) -> Json {
             Json::opt(where_.source_anchor, |anchor| Json::str(anchor.name())),
         ),
         (
+            "liveness_contract",
+            Json::opt(where_.liveness_contract, |contract| {
+                Json::str(contract.name())
+            }),
+        ),
+        (
             "keep_newest",
             Json::opt(where_.keep_newest, |n| Json::U64(n as u64)),
         ),
@@ -437,6 +443,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
     }
     if let Some(anchor) = where_.source_anchor {
         parts.push(format!("source_anchor: {}", anchor.name()));
+    }
+    if let Some(contract) = where_.liveness_contract {
+        parts.push(format!("liveness_contract: {}", contract.name()));
     }
     if let Some(count) = where_.keep_newest {
         parts.push(format!("keep_newest: {count}"));

@@ -1238,11 +1238,9 @@ impl Host for ModelHost {
                         errno.to_string(),
                     );
                 }
+                // A zombie's pidfd opens and is not released until it is
+                // reaped, as on Linux; only its readers find it gone.
                 match inner.state.procs.get(&pid.0) {
-                    // A zombie has no live task: the pidfd says gone.
-                    Some(proc) if proc.zombie => {
-                        (Err(ProcError::Gone), None, "gone (zombie)".to_owned())
-                    }
                     Some(proc) => (
                         Ok((pid, proc.generation)),
                         None,

@@ -282,6 +282,25 @@ fn protocol<H: Delete>(
             if let Some(app_lock) = &judge.find.app_not_running {
                 super::app::check(host, &found.root, app_lock, deadline)??;
             }
+            // The contract is judged from the scan that just cleared it.
+            let scan = checker
+                .latest()
+                .expect("the in-use check above made or kept a scan");
+            // Every discovering source's contract, on this same scan.
+            let admitted: Vec<usize> = (0..alternatives.len())
+                .filter(|at| alternatives[*at].admitted)
+                .collect();
+            if let Err((veto_index, skip)) = super::liveness::veto(
+                host,
+                scan,
+                admitted
+                    .iter()
+                    .map(|at| (alternatives[*at].judge.find, alternatives[*at].found)),
+                candidate.parent(),
+            )? {
+                result.selected = Some(admitted[veto_index]);
+                return Err(skip.into());
+            }
             if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
                 boundary_skip = Some((index, skip));
                 refused_at_boundary[index] = true;

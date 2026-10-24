@@ -44,7 +44,7 @@ pub use load::{LoadError, LoadErrors};
 pub use roots::RootsError;
 pub use spec::{
     ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
-    NewestGroup, ProfileSpec, RootsSpec, SourceAnchor, WhereSpec, parse_profiles,
+    LivenessContract, NewestGroup, ProfileSpec, RootsSpec, SourceAnchor, WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -186,6 +186,8 @@ pub struct Where {
     pub lacks_entry: Option<String>,
     /// A build system's recorded source path and source file.
     pub source_anchor: Option<SourceAnchor>,
+    /// The producer liveness contract the candidate must pass.
+    pub liveness_contract: Option<LivenessContract>,
     /// Keep the N newest version directories in each parent/group.
     pub keep_newest: Option<usize>,
     pub newest_group: Option<spec::NewestGroup>,
@@ -210,6 +212,10 @@ impl Where {
             (PredicateName::AppNotRunning, self.app_not_running.is_some()),
             (PredicateName::LacksEntry, self.lacks_entry.is_some()),
             (PredicateName::SourceAnchor, self.source_anchor.is_some()),
+            (
+                PredicateName::LivenessContract,
+                self.liveness_contract.is_some(),
+            ),
             (PredicateName::KeepNewest, self.keep_newest.is_some()),
             (
                 PredicateName::ProtectLinks,

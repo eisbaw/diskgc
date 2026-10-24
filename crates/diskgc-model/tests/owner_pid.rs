@@ -47,7 +47,8 @@ fn the_port_answers_the_modelled_facts() {
     // the readers that need a live task.
     assert!(model.pids().expect("pids").contains(&Pid(8)));
     assert_eq!(model.pid_alive(Pid(8)), Ok(true));
-    assert!(matches!(model.proc_identity(Pid(8)), Err(ProcError::Gone)));
+    let identity = model.proc_identity(Pid(8)).expect("a zombie's pidfd opens");
+    assert_eq!(model.proc_identity_released(&identity), Ok(false));
     assert_eq!(model.proc_fds(Pid(8)), Err(ProcError::Gone));
     assert_eq!(model.pid_alive(Pid(10)), Ok(false));
     let tmp = dir(&model, "/tmp");

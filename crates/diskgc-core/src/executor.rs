@@ -291,6 +291,17 @@ impl Tier {
         self.action.to_string()
     }
 
+    /// Whether a source of this tier (its own or a union term) has a
+    /// liveness contract: its in-use scans then also read what Owner PID
+    /// needs (one more `status` read per process, docs/safety.md, Cost).
+    pub fn pid_lookup(&self) -> bool {
+        let own = matches!(&self.source, SourceKind::Fs(find) if find.liveness_contract.is_some());
+        own || self
+            .fs_union
+            .iter()
+            .any(|term| term.find.liveness_contract.is_some())
+    }
+
     fn fs_sources(&self) -> Vec<FsUnionSourceRef<'_>> {
         let SourceKind::Fs(find) = &self.source else {
             unreachable!("a filesystem union retains a filesystem first source")
@@ -2272,7 +2283,7 @@ fn dry_run_inner<H: Host>(
         }
     }
     let rules = rules(tier, owners, log);
-    let mut checker = Checker::for_plan(&rules);
+    let mut checker = Checker::for_plan(&rules).with_pid_lookup(tier.pid_lookup());
     let started = host.now();
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
@@ -3178,7 +3189,7 @@ fn plan_fs_union<H: Host>(
             return planned;
         }
     };
-    let mut checker = Checker::for_plan(rules);
+    let mut checker = Checker::for_plan(rules).with_pid_lookup(tier.pid_lookup());
     for candidate in &candidates {
         if host.interrupted().is_some() {
             return planned;
@@ -3247,6 +3258,37 @@ fn plan_fs_union<H: Host>(
                 }
                 Ok(Err(skip)) => {
                     first_skip.get_or_insert((*index, found.path.as_path(), skip));
+                }
+                Err(stop) => {
+                    planned.stopped = Some(stop);
+                    return planned;
+                }
+            }
+        }
+        if let Some((index, path, _)) = &selected {
+            // Liveness contracts veto across the union, as in the reclaim.
+            // The sources that found it by their own evidence (`found_by`;
+            // guard-only matches are `guard_by`), whatever each term's own
+            // judgement said: the reclaim's admitted alternatives.
+            let claimed: Vec<(usize, &fs_kind::Found)> = candidate
+                .found_by
+                .iter()
+                .map(|(source, found)| (*source, found))
+                .collect();
+            let contracts: Vec<(&Find, &fs_kind::Found)> = claimed
+                .iter()
+                .map(|(source, found)| (sources[*source].find, *found))
+                .collect();
+            match fs_kind::contract_veto(host, &contracts, &mut checker, deadline) {
+                Ok(Ok(())) => {}
+                Ok(Err((veto, skip))) => {
+                    log_skip(log, tier, &skip);
+                    let vetoing = claimed.get(veto).map_or(*index, |(source, _)| *source);
+                    let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                    entry.profile = sources[vetoing].profile.to_owned();
+                    entry.checkouts = sources[vetoing].checkouts;
+                    planned.skipped.push(entry);
+                    continue;
                 }
                 Err(stop) => {
                     planned.stopped = Some(stop);
@@ -3998,7 +4040,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             return;
         }
         let rules = rules(self.tier, owners, self.log);
-        let mut checker = Checker::new(&rules, REUSE_LIMIT);
+        let mut checker = Checker::new(&rules, REUSE_LIMIT).with_pid_lookup(self.tier.pid_lookup());
         // No `_` arm: a new source kind must decide here (and in `ensure`'s
         // allowlist) how it is reclaimed. Each kind runs its own protocol
         // only: an fs tier never reaches the Cargo reclaim, a Cargo tier

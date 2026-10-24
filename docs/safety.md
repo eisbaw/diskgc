@@ -682,9 +682,12 @@ Fine for one-user machines and runners; weaker on shared hosts.
 
 ### Producer liveness
 
-Status: designed (TASK-112), not implemented. The protocols below are
-normative for the implementation; until it lands, no source can require
-them and the profiles that depend on them stay unshipped.
+Status (TASK-112): Owner PID and the `nix-shell` contract are
+implemented (step 3) and any user profile can require them; no built-in
+uses a contract yet (`nix-shell-rc` lands with step 4). The pytest and
+project-dependency contracts below are designed, not implemented: the
+loader refuses them until their steps land (5 and 6). The protocols below
+are normative for the implementation.
 
 The in-use scan answers "does a visible process use this candidate now?".
 It cannot answer "has the program that made this candidate finished with
@@ -696,7 +699,7 @@ nothing; read-mostly trees such as `node_modules` change nothing even
 while in use. This section defines the evidence a source can require for
 that second question, how far each kind of evidence can be trusted, and
 the rule that decides which built-ins may ship. The schema is in
-[reference.md](reference.md#liveness-contract-predicate-planned); which
+[reference.md](reference.md#liveness-contract-predicate); which
 built-in has which contract is in
 [reference.md](reference.md#liveness-contracts).
 
@@ -861,7 +864,7 @@ the reported pid is the matching process's pid in diskgc's namespace (the
 first `NSpid` level), whichever level matched. An answer that cannot be
 reached is `producer_unknown`, its detail naming the failed rule; it
 carries a `process_blockers` entry (evidence `unreadable`) only when one
-process caused it ([reference.md](reference.md#liveness-contract-predicate-planned)).
+process caused it ([reference.md](reference.md#liveness-contract-predicate)).
 
 **A process's paths.** The pytest and project contracts ask whether a
 process uses a path inside a *sought tree* (a pytest session, a project).
@@ -1336,9 +1339,15 @@ schema only with its first producer.
 
 **With the other checks.**
 
-- *Order.* A contract is a source predicate: it runs where
-  `app_not_running` runs, before the eligibility walk, and again
-  immediately before deletion after the process scan.
+- *Order.* A contract is a source predicate in two parts. Its rule on the
+  candidate's name alone (no valid pid: `filtered`) runs where
+  `app_not_running` runs, before the eligibility walk. Its process
+  evidence (Owner PID) needs the process scan: it runs after the in-use
+  check, from that same scan, in the plan and again immediately before
+  deletion or a command action, under the candidate lock. In a union,
+  every admitted source that found the candidate and whose contract
+  recognises it must permit it
+  ([reference.md](reference.md#liveness-contract-predicate)).
 - *PID namespaces* are handled by the precondition and the any-level
   `NSpid` lookup. Neither the name nor the marker says which namespace the
   pid belongs to; the lookup does not need to know.

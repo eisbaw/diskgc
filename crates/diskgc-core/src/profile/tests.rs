@@ -1658,3 +1658,131 @@ fn the_documented_action_forms_load() {
     }
     assert_eq!(seen.len(), 6);
 }
+
+/// A `nix-shell` source as docs/reference.md (Liveness contract
+/// predicate) describes it, with `extra` replacing its `where` value.
+fn rc_source(contract: &str) -> String {
+    format!(
+        "- name: rc\n  find: {{roots: [/tmp], paths: [\"nix-shell-*-*\", \"nix-develop-*-*\"], type: dir}}\n  where: {{liveness_contract: {contract}}}\n  action: delete\n  examples: {{match: [/tmp/nix-shell-1-a]}}\n"
+    )
+}
+
+#[test]
+fn liveness_contract_loads_and_is_shown() {
+    let library = with_user(&rc_source("nix-shell")).unwrap_or_else(|e| panic!("{e}"));
+    let Body::Source(source) = &library.get("rc").expect("loaded").body else {
+        panic!("a source");
+    };
+    assert_eq!(
+        source.where_.liveness_contract,
+        Some(LivenessContract::NixShell)
+    );
+    assert_eq!(
+        source.where_.predicates(),
+        vec![PredicateName::LivenessContract]
+    );
+}
+
+/// A written null must not remove the guard; a blank value names no
+/// contract.
+#[test]
+fn liveness_contract_rejects_null_and_blank() {
+    for value in ["null", "~", "''", "\"\""] {
+        let yaml = rc_source(value);
+        let refused = parse_profiles(&yaml).is_err() || with_user(&yaml).is_err();
+        assert!(refused, "accepted liveness_contract: {value}");
+    }
+}
+
+#[test]
+fn liveness_contract_rejects_unknown_values_mappings_and_lists() {
+    let error = yaml_error(&rc_source("pytset"));
+    for name in ["nix-shell", "pytest", "node-project", "python-project"] {
+        assert!(error.contains(name), "the message names `{name}`: {error}");
+    }
+    for value in ["{nix-shell: true}", "[nix-shell]", "nix_shell", "NixShell"] {
+        assert!(
+            parse_profiles(&rc_source(value)).is_err(),
+            "accepted liveness_contract: {value}"
+        );
+    }
+}
+
+#[test]
+fn liveness_contract_is_source_and_fs_only() {
+    assert_has(
+        &user_errors("- name: only-filter\n  where: {liveness_contract: nix-shell}\n"),
+        "`where.liveness_contract` is a source predicate",
+    );
+    assert_has(
+        &user_errors(
+            "- name: t\n  kind: cargo-target\n  find: {roots: required}\n  where: {liveness_contract: nix-shell}\n",
+        ),
+        "which kind cargo-target does not support",
+    );
+}
+
+#[test]
+fn nix_shell_contract_requires_the_rc_name_shape() {
+    for (paths, example, ok) in [
+        ("[\"nix-shell-*-*\"]", "/tmp/nix-shell-1-a", true),
+        ("[\"nix-develop-*-*\"]", "/tmp/nix-develop-1-a", true),
+        ("[\"a/nix-shell-*-*\"]", "/tmp/a/nix-shell-1-a", true),
+        ("[\"nix-shell-*\"]", "/tmp/nix-shell-1", false),
+        ("[\"nix-shell.*\"]", "/tmp/nix-shell.a", false),
+        ("[\"*\"]", "/tmp/a", false),
+        ("[\"nix-shell-*-*\", \"tmp.*\"]", "/tmp/tmp.a", false),
+    ] {
+        let yaml = format!(
+            "- name: rc\n  find: {{roots: [/tmp], paths: {paths}, type: dir}}\n  where: {{liveness_contract: nix-shell}}\n  action: delete\n  examples: {{match: [{example}]}}\n"
+        );
+        match with_user(&yaml) {
+            Ok(_) => assert!(ok, "accepted {paths}"),
+            Err(errors) => {
+                assert!(!ok, "refused {paths}: {errors}");
+                assert!(errors.to_string().contains("recognises only names shaped"));
+            }
+        }
+    }
+    for entry_type in ["file", "any"] {
+        assert_has(
+            &user_errors(
+                &rc_source("nix-shell").replace("type: dir", &format!("type: {entry_type}")),
+            ),
+            "needs `find.type: dir`",
+        );
+    }
+}
+
+/// Designed but not implemented: refused at load, so nothing half-built
+/// can be selected. The session-layout rule lands with the contract
+/// (TASK-112 step 5); until then any pytest source with it is refused.
+#[test]
+fn pytest_contract_requires_the_session_layout() {
+    let yaml = "- name: p\n  find: {roots: [/tmp], paths: [\"pytest-of-*/pytest-*\"], type: dir}\n  where: {liveness_contract: pytest}\n  action: delete\n";
+    assert_has(
+        &user_errors(yaml),
+        "`liveness_contract: pytest` is not supported by this version of diskgc (supported: nix-shell)",
+    );
+}
+
+/// As for pytest: refused until TASK-112 step 6, whose rule this becomes.
+#[test]
+fn node_project_contract_requires_node_modules() {
+    let yaml = "- name: n\n  find: {roots: required, paths: [\"*/node_modules\"], type: dir}\n  where: {liveness_contract: node-project}\n  action: delete\n";
+    assert_has(&user_errors(yaml), "is not supported by this version");
+}
+
+/// The checkout rule of the project contracts lands with them (step 6);
+/// until then both are refused whatever `checkouts` says.
+#[test]
+fn project_contracts_refuse_checkouts_allow() {
+    for contract in ["node-project", "python-project"] {
+        for checkouts in ["allow", "refuse"] {
+            let yaml = format!(
+                "- name: n\n  find: {{roots: required, paths: [\"*/node_modules\"], type: dir}}\n  where: {{liveness_contract: {contract}}}\n  checkouts: {checkouts}\n  action: delete\n"
+            );
+            assert_has(&user_errors(&yaml), "is not supported by this version");
+        }
+    }
+}
