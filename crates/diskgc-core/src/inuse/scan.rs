@@ -213,6 +213,11 @@ pub(crate) struct Read {
     /// The latest read's facts lack its uids or command line (a reader
     /// failed): read again, as for a failed environment.
     pub facts_failed: bool,
+    /// Two reads' facts disagreed on the uids or the command line (or a
+    /// later one could not read what an earlier one did): neither stands,
+    /// both are unknown (the process changed between the reads; an earlier
+    /// value must not hide a later one, nor the reverse).
+    pub facts_unstable: bool,
 }
 
 /// One process's read.
@@ -325,14 +330,16 @@ impl Read {
         if other.environ_raw.is_some() {
             self.environ_raw = other.environ_raw;
         }
-        // The latest complete facts stand; an incomplete read only
-        // replaces facts that were incomplete too.
-        if other.facts.is_some()
-            && (!other.facts_failed || self.facts_failed || self.facts.is_none())
-        {
-            self.facts = other.facts;
+        // The latest read's facts stand; uids or a command line that
+        // differ from an earlier read's (a failure included) are unknown.
+        if let Some(new) = other.facts {
+            if let Some(old) = &self.facts {
+                self.facts_unstable |= old.uids != new.uids || old.cmdline != new.cmdline;
+            }
+            self.facts = Some(new);
             self.facts_failed = other.facts_failed;
         }
+        self.facts_unstable |= other.facts_unstable;
     }
 }
 
@@ -659,11 +666,21 @@ pub(crate) fn pytest_facts(gathered: &Gathered, users: &[u32]) -> Vec<ProcessFac
         .collect();
     let mut facts = Vec::new();
     for (pid, read) in &gathered.read {
-        let Some(view) = &read.facts else { continue };
         if blocking.contains(pid) {
             continue;
         }
-        let uids = view.uids.as_ref().ok().copied();
+        let Some(view) = &read.facts else {
+            // Facts come with every successful read when asked for; a read
+            // that found something without them would be a bug: fail
+            // closed (undecidable), never drop the process.
+            if !read.uses.is_empty() || read.environ_raw.is_some() {
+                debug_assert!(false, "pid {pid}: a successful read without facts");
+                facts.push(ProcessFacts::unreadable(*pid));
+            }
+            continue;
+        };
+        let stable = !read.facts_unstable;
+        let uids = view.uids.as_ref().ok().copied().filter(|_| stable);
         if uids.is_some_and(|ids| !is_users_ids(ids, users)) {
             continue;
         }
@@ -672,7 +689,7 @@ pub(crate) fn pytest_facts(gathered: &Gathered, users: &[u32]) -> Vec<ProcessFac
             .is_none()
             .then(|| read.environ_raw.clone())
             .flatten();
-        let cmdline = view.cmdline.as_ref().ok().cloned();
+        let cmdline = view.cmdline.as_ref().ok().cloned().filter(|_| stable);
         let answer = |path: &Path, climb: bool| -> Lookup {
             match view
                 .lookups
@@ -1212,6 +1229,53 @@ mod tests {
                 "case {i}: {st:?}"
             );
         }
+    }
+
+    /// Codex review of c8a0945: facts that two reads disagree on (or that a
+    /// later read failed to read) are unknown, never an earlier value.
+    #[test]
+    fn facts_that_change_between_reads_are_unknown() {
+        use crate::host::ViewFacts;
+        let read = |uid: u32, cmd: Result<Vec<OsString>, ProcError>| {
+            let facts = ViewFacts {
+                uids: Ok(Ids::same(uid)),
+                cmdline: cmd,
+                lookups: Vec::new(),
+            };
+            Read {
+                facts_failed: facts.cmdline.is_err(),
+                facts: Some(Box::new(facts)),
+                environ_raw: Some(Environ::default()),
+                ..Read::default()
+            }
+        };
+        let pytest = || Ok(vec![OsString::from("pytest")]);
+        let mut same = read(1000, pytest());
+        same.add(read(1000, pytest()));
+        assert!(!same.facts_unstable);
+        let mut changed_uid = read(0, pytest());
+        changed_uid.add(read(1000, pytest()));
+        assert!(changed_uid.facts_unstable);
+        let mut lost_cmdline = read(1000, pytest());
+        lost_cmdline.add(read(
+            1000,
+            Err(ProcError::Failed(HostError::invalid("read", "x", "y"))),
+        ));
+        assert!(lost_cmdline.facts_unstable);
+        let gathered = Gathered {
+            finished: MonoTime(Duration::ZERO),
+            listings: 1,
+            unsettled: None,
+            read: [(Pid(7), changed_uid)].into_iter().collect(),
+            unreadable: Vec::new(),
+            environ_failed: Vec::new(),
+            gone: 0,
+            listed: vec![Pid(7)],
+        };
+        let facts = pytest_facts(&gathered, &[2000]);
+        assert_eq!(facts.len(), 1, "an unstable uid is unknown: in every set");
+        assert_eq!(facts[0].uids, None);
+        assert_eq!(facts[0].cmdline, None);
     }
 
     /// C1: an excuse stands only if every status read gave it; one read

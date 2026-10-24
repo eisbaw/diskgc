@@ -1880,11 +1880,9 @@ impl Host for LinuxHost {
                     attempts += 1;
                 }
                 Err(e) => {
-                    return Err(ProcError::Failed(HostError::errno(
-                        "openat2",
-                        shown(),
-                        errno_of(e),
-                    )));
+                    let on_proc =
+                        || rustix::fs::fstatfs(&root).is_ok_and(|fs| fs.f_type == PROC_SUPER_MAGIC);
+                    return Err(root_lookup_error(errno_of(e), on_proc, shown()));
                 }
             }
         };
@@ -1936,6 +1934,27 @@ impl Host for LinuxHost {
             ),
         )))
     }
+}
+
+/// The error of a failed lookup in a process's root. `ESRCH` is kept (the
+/// path's absence, as `ENOENT` is) only where its origin is known: the root
+/// is a dead process's `/proc` directory (Chromium's sandbox chroots its
+/// renderers into one), where nothing resolves for the process either.
+/// Anywhere else it carries no errno: unresolvable, never absent.
+/// `root_on_proc` is asked only for `ESRCH`.
+fn root_lookup_error(
+    errno: Errno,
+    root_on_proc: impl FnOnce() -> bool,
+    shown: String,
+) -> ProcError {
+    if errno == Errno::ESRCH && !root_on_proc() {
+        return ProcError::Failed(HostError::invalid(
+            "openat2",
+            shown,
+            "ESRCH outside a /proc root: unexplained, so unresolvable",
+        ));
+    }
+    ProcError::Failed(HostError::errno("openat2", shown, errno))
 }
 
 /// `/proc/<pid>/cmdline`: the arguments, each ended by a NUL byte (the
@@ -4136,6 +4155,33 @@ mod tests {
             .expect("stat own pid namespace")
             .ino();
         assert_eq!(facts.initial, inode == PROC_PID_INIT_INO, "{facts:?}");
+    }
+
+    /// ESRCH is the absence of a path only below a `/proc` root; elsewhere
+    /// it carries no errno, and every other errno is kept.
+    #[test]
+    fn root_lookup_esrch_counts_as_absence_only_below_a_proc_root() {
+        let shown = || "x".to_owned();
+        let errno = |e: ProcError| match e {
+            ProcError::Failed(e) => e.kernel_errno(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            errno(root_lookup_error(Errno::ESRCH, || true, shown())),
+            Some(Errno::ESRCH)
+        );
+        assert_eq!(
+            errno(root_lookup_error(Errno::ESRCH, || false, shown())),
+            None
+        );
+        assert_eq!(
+            errno(root_lookup_error(
+                Errno::ENOENT,
+                || panic!("not asked"),
+                shown()
+            )),
+            Some(Errno::ENOENT)
+        );
     }
 
     /// The pytest contract's readers on our own process (read-only, the

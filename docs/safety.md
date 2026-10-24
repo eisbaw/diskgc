@@ -1136,11 +1136,13 @@ root (the parent of `P`):
   that can only retain). *Root use undecidable*: none of those, but one
   of the user's processes has a relative or unresolvable value of those
   variables, a fallback whose lookup in its root failed for another
-  reason than its absence (`ENOENT`, `ENOTDIR`, or `ESRCH`: the root is a
-  dead process's `/proc` directory, where nothing resolves for the process
+  reason than its absence (`ENOENT`, `ENOTDIR`, or `ESRCH` when the
+  process's root is on procfs, checked with `fstatfs`: the root is a dead
+  process's `/proc` directory, where nothing resolves for the process
   either; Chromium's sandbox chroots its renderers into one, 66 processes
-  on the development host), or an environment that cannot be read and is
-  not excused at a privilege boundary (In use).
+  on the development host; `ESRCH` anywhere else is unresolvable), or an
+  environment that cannot be read and is not excused at a privilege
+  boundary (In use).
 - *Every read only adds* (as in In use; step 5, 2026-10-24, after the
   step's Codex review): the facts above (uids, command line, initial
   environment, working directories and the lookups in the process's root)
@@ -1148,9 +1150,11 @@ root (the parent of `P`):
   rounds, never after its last listing, so a child a process forks before
   it ends is listed and read in a later round, as for its fds. A process
   that ends during its own read is gone, as In use takes it; the latest
-  read that gave its facts stands, also for a process found gone later. A
-  reader that fails leaves that fact unreadable or unresolvable (rows 8,
-  9), never harmless; a root that cannot be opened at all (a leader that
+  read that gave its facts stands, also for a process found gone later,
+  but uids or a command line that two reads disagree on (a failed read
+  included) are unknown, never an earlier value. A reader that fails
+  leaves that fact unreadable or unresolvable (rows 8, 9), never
+  harmless; a root that cannot be opened at all (a leader that
   called `pthread_exit`) is unresolvable too, never the absence of a path
   in it. (Read after the last listing, as first implemented, a process
   ending in that window either lost its evidence or made the scan
