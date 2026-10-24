@@ -255,6 +255,26 @@ fn proposed_catalog_accepts_only_checkout_policy_for_an_admitted_builtin() {
         crate::profile::Origin::BuiltIn
     );
 
+    // Narrowing and keeping a built-in's setting are accepted; widening a
+    // refusing built-in (nix-shell-rc) is not.
+    for (name, checkouts) in [
+        ("nix-shell-rc", "refuse"),
+        ("pytest-tmp", "refuse"),
+        ("pytest-tmp", "allow"),
+    ] {
+        let source = format!(
+            "version: 1\nprofile_policies:\n  - profile: {name}\n    checkouts: {checkouts}\n"
+        );
+        under_both_catalogs(source.as_bytes(), "policy parses").expect(name);
+    }
+    let source = "version: 1\nprofile_policies:\n  - profile: nix-shell-rc\n    checkouts: allow\n";
+    let error = under_both_catalogs(source.as_bytes(), "development accepts widening")
+        .expect_err("0.1 refuses widening a refusing built-in");
+    assert!(
+        error.contains("nix-shell-rc") && error.contains("may only narrow"),
+        "{error}"
+    );
+
     for excluded in ["npm-cache", "uv-cache"] {
         let source = format!(
             "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"

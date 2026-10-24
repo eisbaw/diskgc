@@ -1382,8 +1382,10 @@ operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
 `profiles show`, `check` and help use the same narrowed library.
-`profile_policies` for admitted `cargo-target` works, but policies for
-excluded sources, including `npm-cache` and `uv-cache`, are refused at load
+`profile_policies` for the admitted sources works only to narrow: `checkouts:
+refuse` on any of them, `allow` only where the built-in already allows
+(`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc` is refused, as are
+policies for excluded sources, including `npm-cache` and `uv-cache`, at load
 time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
 and `tmp-entry` have no owner evidence ([Liveness
 contracts](#liveness-contracts)). Operator-authored `fs` and delete policies
@@ -1641,8 +1643,10 @@ checkout policy narrowing. Both `/tmp` built-ins keep anything changed in
 the last hour (`min_idle_for: 1h`); their limits are their rows in [Liveness
 contracts](#liveness-contracts). Owner PID needs a complete process list in
 the initial PID namespace: diskgc in its own PID namespace (most
-containers) keeps every `nix-shell-rc` candidate and most `pytest-tmp`
-sessions as `producer_unknown` (safety.md, Producer liveness). The default development
+containers) keeps every `nix-shell-rc` candidate as `producer_unknown`, and
+every `pytest-tmp` session except those without a `.lock`, below pytest's
+retention rank and older than its dead-lock age (rank row; safety.md,
+Producer liveness). The default development
 package remains sandbox gated. The candidate's gate lift is tested only in
 disposable containers and does not constitute release approval.
 

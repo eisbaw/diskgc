@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::{self, Config, IpcPolicy, Owner, Ranking};
+use crate::engine::Checkouts;
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::Delete;
 use crate::profile::{Body, Finds, Library, Roots, Source};
@@ -72,12 +73,27 @@ impl Catalog {
 /// simply replacing that library would leave a previously checked Docker
 /// or command selection in a later tier. `--select` is checked separately
 /// against the same narrowed library by `Tier::select`.
+///
+/// A checkout policy may only narrow under the 0.1 catalog: `allow` on a
+/// built-in that refuses checkouts (nix-shell-rc: a legacy shell's rc
+/// directory is its TMPDIR, so a clone made there is what the guard
+/// protects) would widen what the reviewed built-in deletes.
 fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
     let library = config.library.clone().proposed_release_01()?;
+    let builtins = Library::builtin().map_err(|e| e.to_string())?;
     for policy in &config.profile_policies {
         if library.get(&policy.profile).is_none() {
             return Err(format!(
                 "proposed 0.1 catalog refuses checkout policy for excluded profile `{}`",
+                policy.profile
+            ));
+        }
+        if policy.checkouts.0 == Checkouts::Allow
+            && builtins.checkouts(&policy.profile) == Some(Checkouts::Refuse)
+        {
+            return Err(format!(
+                "proposed 0.1 catalog refuses `checkouts: allow` for `{}`: the built-in \
+                 refuses checkouts, and a 0.1 checkout policy may only narrow",
                 policy.profile
             ));
         }

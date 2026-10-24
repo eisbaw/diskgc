@@ -319,6 +319,27 @@ pub fn candidate_checkout_policy_accepts_only_admitted_builtin(ctx: &Ctx) -> Tes
         TESTER,
     )?;
     run(ctx, &["check", "--config", explicit_allow], 0)?;
+    // A 0.1 checkout policy may only narrow: allowing checkouts for
+    // nix-shell-rc, whose built-in refuses them, is refused.
+    ctx.home.write_file(
+        "release-checkouts-nix-shell-rc-allow.yaml",
+        b"version: 1\nprofile_policies:\n  - profile: nix-shell-rc\n    checkouts: allow\n",
+        0o600,
+        TESTER,
+    )?;
+    let widened = run(
+        ctx,
+        &[
+            "check",
+            "--config",
+            "/home/tester/release-checkouts-nix-shell-rc-allow.yaml",
+        ],
+        2,
+    )?;
+    ensure!(
+        widened.stderr.contains("may only narrow") || widened.stdout.contains("may only narrow"),
+        "widening checkout policy was not refused as such: {widened:?}"
+    );
     // The built-in allows vendored checkout content; an operator may narrow
     // it without replacing its matcher, kind or action.
     let built_in = run(ctx, &["profiles", "show", "cargo-target", "--json"], 0)?;
