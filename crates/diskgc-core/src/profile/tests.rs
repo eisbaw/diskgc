@@ -240,6 +240,7 @@ fn the_built_in_library_loads() {
         "playwright-tmp",
         "zephyr-tmp",
         "renode-tmp",
+        "nix-shell-rc",
         "west-build-anchored",
         "xdg-cache-entry-v2",
         "ccache",

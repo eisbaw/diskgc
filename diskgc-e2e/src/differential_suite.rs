@@ -2217,14 +2217,18 @@ fn replay_single_cohort_vector(ctx: &Ctx, yaml: &str) -> TestResult {
     let mut vector = ProfileVector::parse(yaml)?;
     vector.check(&Library::builtin().map_err(|error| error.to_string())?)?;
     let offset_seconds = rebase_single_cohort(&mut vector)?;
-    let _clock_offset = DifferentialClockOffset::install(offset_seconds)?;
+    let _clock_offset = SandboxClockOffset::install(offset_seconds)?;
     replay_model_with_profile(ctx, vector, false, None, None, true, projected_materialize)
 }
 
-struct DifferentialClockOffset;
+/// The development binary's test-only wall-clock advance
+/// (`diskgc_linux::sandbox::CLOCK_OFFSET_PATH`), written in the disposable
+/// container's overlay root and removed when dropped. Shared with the Owner
+/// PID tests, whose candidates are made now and must clear a floor.
+pub(crate) struct SandboxClockOffset;
 
-impl DifferentialClockOffset {
-    fn install(seconds: u64) -> Result<Self, String> {
+impl SandboxClockOffset {
+    pub(crate) fn install(seconds: u64) -> Result<Self, String> {
         let path = diskgc_linux::sandbox::CLOCK_OFFSET_PATH;
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -2239,10 +2243,10 @@ impl DifferentialClockOffset {
     }
 }
 
-impl Drop for DifferentialClockOffset {
+impl Drop for SandboxClockOffset {
     fn drop(&mut self) {
         fs::remove_file(diskgc_linux::sandbox::CLOCK_OFFSET_PATH)
-            .expect("remove differential clock offset from disposable container");
+            .expect("remove the sandbox clock offset from the disposable container");
     }
 }
 

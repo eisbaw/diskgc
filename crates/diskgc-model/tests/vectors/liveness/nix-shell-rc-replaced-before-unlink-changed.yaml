@@ -3,14 +3,7 @@
 # never deleted (changed). The contract does not bypass Deletion's identity
 # checks.
 profile_vector: 1
-profile: nix-shell-probe
-user_profiles:
-  - name: nix-shell-probe
-    find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
-    where: {liveness_contract: nix-shell}
-    min_idle_for: 1h
-    action: delete
-    examples: {match: [/tmp/nix-shell-4242-17, /tmp/nix-develop-4243-18]}
+profile: nix-shell-rc
 path: /tmp
 min_free: 100%
 host:

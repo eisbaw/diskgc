@@ -48,6 +48,9 @@ fn a_marker_is_a_pid_and_at_most_one_newline_in_sixteen_bytes() {
 }
 
 proptest! {
+    // No regression file: manual mutation sweeps would leave hash seeds of
+    // mutated code behind (TASK-112 step 4); named cases pin what matters.
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
     /// The grammar is exactly canonical decimal in range.
     #[test]
     fn parse_pid_accepts_only_canonical_decimal(text in proptest::collection::vec(any::<u8>(), 0..10)) {
@@ -87,6 +90,9 @@ fn generated() -> impl Strategy<Value = Generated> {
 }
 
 proptest! {
+    // No regression file: manual mutation sweeps would leave hash seeds of
+    // mutated code behind (TASK-112 step 4); named cases pin what matters.
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
     /// Owner PID's answer over generated process tables and host facts:
     /// "ended" exactly when every precondition holds, the scan settled, no
     /// listed process carries the number at any level, none stayed
@@ -220,5 +226,29 @@ fn namespace_facts_must_hold_over_the_whole_scan() {
         table.confirm_namespace(after.clone());
         let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false));
         assert_eq!(answer == OwnerPid::Ended, trusted, "{before:?} {after:?}");
+    }
+}
+
+/// Each failed precondition names itself; when `hidepid` and a nested
+/// namespace fail together, `hidepid` is named, so a rootless container
+/// (which cannot mount a `hidepid` `/proc` for the initial namespace) can
+/// still observe that rule by its detail.
+#[test]
+fn a_failed_precondition_names_its_rule_hidepid_first() {
+    for (initial, hidepid, rule) in [
+        (false, false, "diskgc is not in the initial PID namespace"),
+        (true, true, "the held /proc is mounted with hidepid"),
+        (false, true, "the held /proc is mounted with hidepid"),
+    ] {
+        let table = PidTable::new(Ok(PidNamespace { initial, hidepid }), true);
+        let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false));
+        assert_eq!(
+            answer,
+            OwnerPid::Unknown(Unknown {
+                rule: rule.to_owned(),
+                blockers: Vec::new(),
+            }),
+            "initial {initial} hidepid {hidepid}"
+        );
     }
 }

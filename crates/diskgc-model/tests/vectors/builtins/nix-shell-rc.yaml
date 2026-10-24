@@ -1,0 +1,64 @@
+# nix-shell-rc below its fixed root, one candidate per role (TASK-112 step
+# 4): both name shapes reclaimed once no process carries the pid in the
+# name; an rc directory another process holds open is in use whatever its
+# owner pid; one a protect entry overlaps is protected; one holding a
+# .diskgc-keep is kept; a name with no valid pid is not an instance
+# (filtered); nix-shell.XXXXXX and rc shapes below a shell temp directory
+# are not matched at all.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "pin", "find": {"roots": ["/tmp"], "paths": ["nix-shell-4245-1"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/nix-shell-4245-1"]}}
+  protect: [pin]
+  groups:
+    - name: g
+      tiers:
+        - {"name": "t", "select": "profile:nix-shell-rc"}
+select: "profile:nix-shell-rc"
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/tool: {mode: "0755"}
+    /tmp/nix-shell-4242-17: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-develop-4243-18: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-4244-1: {.: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-4245-1: {.: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-develop-4246-1: {.: {mtime: 2026-10-01T00:00:00Z}, .diskgc-keep: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell-abc-1: {.: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell.AB: {.: {mtime: 2026-10-01T00:00:00Z}, x: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell.AB/nix-shell-4247-1: {.: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /tmp/nix-shell-4244-1/rc}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-develop-4243-18}
+    - {candidate: /tmp/nix-develop-4246-1, reason: kept}
+    - {candidate: /tmp/nix-shell-4242-17}
+    - {candidate: /tmp/nix-shell-4244-1, reason: in_use}
+    - {candidate: /tmp/nix-shell-4245-1, reason: protected}
+    - {candidate: /tmp/nix-shell-abc-1, reason: filtered}
+  reclaim_exit: 1
+  actions: [/tmp/nix-develop-4243-18, /tmp/nix-shell-4242-17]
+  removed: [/tmp/nix-develop-4243-18, /tmp/nix-shell-4242-17]
+  skipped:
+    - {candidate: /tmp/nix-develop-4246-1, reason: kept}
+    - {candidate: /tmp/nix-shell-4244-1, reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: /tmp/nix-shell-4245-1, reason: protected}
+    - {candidate: /tmp/nix-shell-abc-1, reason: filtered}
+  preserved:
+    - /tmp/nix-develop-4246-1/.diskgc-keep
+    - /tmp/nix-shell-4244-1/rc
+    - /tmp/nix-shell-4245-1/rc
+    - /tmp/nix-shell-abc-1/rc
+    - /tmp/nix-shell.AB/x
+    - /tmp/nix-shell.AB/nix-shell-4247-1/rc

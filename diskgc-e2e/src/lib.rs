@@ -78,6 +78,7 @@ pub mod lock_release;
 pub mod meson_suite;
 pub mod model_materialize;
 pub mod oracle;
+pub mod owner_pid_suite;
 pub mod packaging_suite;
 pub mod probe;
 pub mod proc_locks;

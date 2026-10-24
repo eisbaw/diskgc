@@ -208,6 +208,7 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
     let started = Instant::now();
     check_canary_refuses_on_host(config)?;
     require_native_overlay_storage()?;
+    require_rootless()?;
     ensure_base_image(config)?;
     std::fs::create_dir_all(&config.log_dir)
         .map_err(|e| format!("create {}: {e}", config.log_dir.display()))?;
@@ -306,6 +307,41 @@ fn require_native_overlay_storage() -> Result<(), String> {
     info!("podman storage driver: native {driver}");
     Ok(())
 }
+
+/// Fails fast unless Podman runs rootless: the containers get
+/// `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`, which only a user namespace
+/// confines, and [`HOST_PID_NAMESPACE_ARGS`] would hand a rootful container
+/// the host's processes.
+fn require_rootless() -> Result<(), String> {
+    let out = Command::new("podman")
+        .args(["info", "--format", "{{.Host.Security.Rootless}}"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("spawn podman (rootless Podman is a host requirement): {e}"))?;
+    let answer = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || answer.trim() != "true" {
+        return Err(format!(
+            "the e2e harness needs rootless Podman; podman info says rootless={:?} ({}): {}",
+            answer.trim(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// What the Owner PID tests ([`crate::suite::HOST_PID_NAMESPACE_TESTS`])
+/// add: the host's PID namespace, with container uids and gids shifted by
+/// one into the subordinate range, so that no container uid (container
+/// root included) is the invoking user, whose host processes then show as
+/// another user's (docs/testing.md, Container setup).
+pub const HOST_PID_NAMESPACE_ARGS: &[&str] = &[
+    "--pid=host",
+    "--uidmap",
+    "0:1:65536",
+    "--gidmap",
+    "0:1:65536",
+];
 
 /// The decision of [`require_native_overlay_storage`] on `podman info`'s
 /// driver name and its graph options as JSON.
@@ -420,6 +456,9 @@ fn test_mounts(name: &str) -> Vec<String> {
         || name == crate::suite::PACKAGING_TEST
     {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
+    }
+    if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&name) {
+        extra.extend(HOST_PID_NAMESPACE_ARGS.iter().map(|a| (*a).to_owned()));
     }
     if crate::suite::DOCKER_ONLY_TESTS
         .iter()
@@ -575,13 +614,22 @@ fn run_parallel(
 ) -> Vec<TestRun> {
     let queue = Mutex::new(VecDeque::from(tests));
     let results = Mutex::new(Vec::new());
+    // The host-PID-namespace tests run one at a time: they pick a free
+    // namespace pid range by looking at every host process, check then use.
+    let host_pid_slot = Mutex::new(());
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             scope.spawn(|| {
                 loop {
                     let next = queue.lock().expect("queue lock").pop_front();
                     let Some(test) = next else { break };
-                    let result = run_container(config, &test, deadline, false);
+                    let result =
+                        if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&test.name.as_str()) {
+                            let _slot = host_pid_slot.lock().expect("host pid slot");
+                            run_container(config, &test, deadline, false)
+                        } else {
+                            run_container(config, &test, deadline, false)
+                        };
                     results.lock().expect("results lock").push(result);
                 }
             });
@@ -618,7 +666,15 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
         .and_then(|f| Ok((f.try_clone()?, f)))
         .map_err(|e| format!("create log {}: {e}", log.display()))
         .and_then(|(out, err)| {
-            Command::new("podman")
+            let mut podman = Command::new("podman");
+            if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&test.name.as_str()) {
+                // With a shifted uid map, crun runs as a subordinate uid in
+                // Podman's TMPDIR, which the dev shell points below the
+                // checkout in a 0700 home: "openat /proc/self/cwd:
+                // Permission denied". Podman's default works.
+                podman.env_remove("TMPDIR");
+            }
+            podman
                 .args(podman_run_args(
                     config,
                     &container,
@@ -807,6 +863,29 @@ mod tests {
             );
         }
         assert!(fuse_device("fs_reclaim_never_deletes_a_socket_or_fifo").is_empty());
+    }
+
+    /// Only the listed tests share the host's PID namespace, and every
+    /// listed name is a registered test.
+    #[test]
+    fn only_the_owner_pid_tests_share_the_host_pid_namespace() {
+        for name in crate::suite::HOST_PID_NAMESPACE_TESTS {
+            assert!(
+                crate::suite::TESTS.iter().any(|t| t.name == *name),
+                "{name} is not a registered test"
+            );
+            let args = test_mounts(name);
+            assert!(args.iter().any(|a| a == "--pid=host"), "{name}");
+            assert!(
+                args.windows(2).any(|w| w == ["--uidmap", "0:1:65536"]),
+                "{name}"
+            );
+        }
+        assert!(
+            !test_mounts("fs_reclaim_never_deletes_a_socket_or_fifo")
+                .iter()
+                .any(|a| a.starts_with("--pid"))
+        );
     }
 
     const GLOBAL: &[&str] = &[

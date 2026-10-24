@@ -37,18 +37,6 @@ profiles:
       match: [/tmp/anything, /var/tmp/.hidden, /tmp/claude-1000]
       no_match: [/tmp/a/b, /home/mark/x]
 
-  - name: nix-shell-rc
-    category: nix
-    description: rc dirs nix-shell and nix develop leave in /tmp at every shell start
-    find:
-      roots: [/tmp]
-      paths: ["nix-shell-*-*", "nix-develop-*-*"]
-      type: dir
-    action: delete
-    examples:
-      match: [/tmp/nix-shell-1144586-3257819220, /tmp/nix-develop-77-123]
-      no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586]
-
   - name: claude-code-tmp-star
     category: probes
     description: the earlier claude-code-tmp row, /tmp/claude-{uid}/*/*

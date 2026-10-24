@@ -216,6 +216,8 @@ mod tests {
     use crate::liveness::PID_MAX_LIMIT;
 
     proptest! {
+        // No regression file, as in liveness::tests.
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
         /// The rc-name split: a name built from either shape and a valid
         /// pid yields exactly that pid, whatever the suffix (dashes
         /// included).

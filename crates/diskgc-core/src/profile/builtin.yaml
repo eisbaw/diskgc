@@ -339,6 +339,23 @@
     no_match: [/tmp/a/playwright-x, /tmp/playwright-artifacts-0a3aQN/log.txt]
   verified_with: Playwright 1.56.1 (controlled browser TMPDIR probe 2026-10-20)
 
+# Admitted under the Owner PID contract (docs/safety.md, Producer liveness;
+# docs/reference.md, Liveness contracts): the pid in the name is the shell's,
+# so a listed pid at any NSpid level retains, and only a complete process
+# list in the initial PID namespace without hidepid permits. Why the 1h
+# floor: docs/reference.md, Liveness contracts (it narrows a residual).
+- name: nix-shell-rc
+  category: nix
+  description: rc directories nix-shell and nix develop leave directly in /tmp, once their shell has ended
+  find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
+  where: {liveness_contract: nix-shell}
+  min_idle_for: 1h
+  action: delete
+  examples:
+    match: [/tmp/nix-shell-1144586-3257819220, /tmp/nix-develop-77-123]
+    no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586, /tmp/nix-shell.AB/nix-shell-1-2]
+  verified_with: Nix 2.34.9 (nix_shell_rc_lifecycle_is_pinned 2026-10-24); Nix 2.34.8 (host dry run 2026-10-24)
+
 - name: zephyr-tmp
   category: embedded
   description: Zephyr scratch and run directories directly under /tmp

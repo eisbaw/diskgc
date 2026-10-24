@@ -342,7 +342,8 @@ container test (TASK-125).
 An idle-time filter cannot establish liveness. The rc names
 `nix-shell-<pid>-*` and `nix-develop-<pid>-*` also cannot use a host-only
 `/proc/<pid>` check: a shell can share `/tmp` from a different PID namespace
-and put its namespace-local PID in the name. `nix-shell-rc` remains unshipped.
+and put its namespace-local PID in the name. `nix-shell-rc` therefore
+ships only with Owner PID, which reads every `NSpid` level.
 [Producer liveness](#producer-liveness) designs the evidence these profiles
 need (Owner PID across PID namespaces) and records which of them have none.
 
@@ -683,8 +684,8 @@ Fine for one-user machines and runners; weaker on shared hosts.
 ### Producer liveness
 
 Status (TASK-112): Owner PID and the `nix-shell` contract are
-implemented (step 3) and any user profile can require them; no built-in
-uses a contract yet (`nix-shell-rc` lands with step 4). The pytest and
+implemented (step 3) and any user profile can require them; the
+`nix-shell-rc` built-in uses the `nix-shell` contract (step 4). The pytest and
 project-dependency contracts below are designed, not implemented: the
 loader refuses them until their steps land (5 and 6). The protocols below
 are normative for the implementation.
@@ -828,6 +829,11 @@ complete; every precondition below fails closed (`producer_unknown`).
    sees it, and a coincidence only retains. When no level matches, diskgc
    also opens a pidfd for the number in its own namespace: only `ESRCH`
    lets the answer stand, as In use requires the kernel's word for "gone".
+   A number that is a live thread's id but no thread-group leader's is
+   not listed (`/proc` lists leaders), and `pidfd_open` refuses it with
+   an error that is not `ESRCH` (`ENOENT` observed on Linux 7.2.9):
+   `producer_unknown`. The candidate is kept, as for a
+   reused pid, under the less precise reason (TASK-131).
    *No process carries the pid* then holds when the scan settled and every
    listed process, of any user, gave a readable `NSpid` line. A process
    whose status cannot be read goes through In use's re-reads and pidfd
@@ -862,7 +868,8 @@ complete; every precondition below fails closed (`producer_unknown`).
 A pid that may be in use is reported `in_use` with evidence `owner_pid`;
 the reported pid is the matching process's pid in diskgc's namespace (the
 first `NSpid` level), whichever level matched. An answer that cannot be
-reached is `producer_unknown`, its detail naming the failed rule; it
+reached is `producer_unknown`, its detail naming the failed rule (when
+both `hidepid` and the namespace fail, `hidepid`); it
 carries a `process_blockers` entry (evidence `unreadable`) only when one
 process caused it ([reference.md](reference.md#liveness-contract-predicate)).
 
@@ -1018,7 +1025,10 @@ producer itself deletes the directory under such a child when it exits
 normally. A detached child (`setsid`, `nohup`) that outlives the shell
 and uses the directory through a remembered path without it in its
 initial environment (started with a cleared environment) is Owner PID's
-scope limit. The bytes are small (about 350 MiB in 65,000 directories in TASK-68's dry run); the
+scope limit. A shell in a private PID namespace sharing `/tmp` names its
+directory after its namespace-local pid; Owner PID finds that pid at an
+inner `NSpid` level and keeps the directory while the shell lives
+(`nix_shell_rc_shell_in_private_pid_namespace_is_kept`, Nix 2.34.9). The bytes are small (about 350 MiB in 65,000 directories in TASK-68's dry run); the
 value is the directory count, and proving Owner PID on the simplest
 producer first.
 

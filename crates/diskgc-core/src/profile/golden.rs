@@ -6,7 +6,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{Action, Body, Cwd, EntryType, Finds, Library, Roots, Source, SourceAnchor};
+use super::{
+    Action, Body, Cwd, EntryType, Finds, IdleFor, Library, LivenessContract, Roots, Source,
+    SourceAnchor,
+};
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
 use std::collections::BTreeSet;
@@ -19,6 +22,7 @@ const TEMP_PROFILE_NAMES: &[&str] = &[
     "zephyr-tmp",
     "renode-tmp",
     "jest-cache",
+    "nix-shell-rc",
 ];
 
 #[test]
@@ -456,6 +460,14 @@ const TREE: &[(&str, Option<EntryType>)] = &[
         Some(EntryType::Dir),
     ),
     ("/tmp/nix-develop-1-2", Some(EntryType::Dir)),
+    // nix-shell-rc: a file of the rc shape (the type rule), a name the
+    // glob matches but the contract filters, and rc shapes below a shell
+    // temp directory (top level only).
+    ("/tmp/nix-shell-3-4", Some(EntryType::File)),
+    ("/tmp/nix-shell-abc-1", Some(EntryType::Dir)),
+    ("/tmp/nix-shell-1144586", Some(EntryType::Dir)),
+    ("/tmp/nix-shell.AbC123/nix-shell-5-6", Some(EntryType::Dir)),
+    ("/tmp/nix-develop-1-2/nix-develop-7-8", Some(EntryType::Dir)),
     (
         "/tmp/nix-develop-1-2/node-compile-cache",
         Some(EntryType::Dir),
@@ -592,6 +604,15 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
         let Body::Source(source) = &profile.body else {
             panic!("{name} is a source")
         };
+        // Only nix-shell-rc carries a liveness contract and a floor (TASK-112).
+        let (contract, floor) = if *name == "nix-shell-rc" {
+            (
+                Some(LivenessContract::NixShell),
+                Some(IdleFor(Duration::from_secs(3600))),
+            )
+        } else {
+            (None, None)
+        };
         let (roots, base, entry_type, preset, checkouts): (&[&str], &[&str], _, _, _) = match *name
         {
             "claude-code-tmp" => (
@@ -643,6 +664,13 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
                 true,
                 Checkouts::Refuse,
             ),
+            "nix-shell-rc" => (
+                &["/tmp"],
+                &["nix-shell-*-*", "nix-develop-*-*"],
+                EntryType::Dir,
+                false,
+                Checkouts::Refuse,
+            ),
             _ => panic!("unreviewed temporary profile {name}"),
         };
         assert_eq!(
@@ -673,8 +701,14 @@ fn every_shipped_tmp_source_has_its_exact_frozen_definition() {
             },
             "{name} patterns and type"
         );
-        assert!(source.where_.is_empty(), "{name} predicates");
-        assert_eq!(source.min_idle_for, None, "{name} minimum age");
+        let mut predicates = source.where_.clone();
+        assert_eq!(
+            predicates.liveness_contract.take(),
+            contract,
+            "{name} liveness contract"
+        );
+        assert!(predicates.is_empty(), "{name} predicates");
+        assert_eq!(source.min_idle_for, floor, "{name} minimum age");
         assert_eq!(source.checkouts, checkouts, "{name} checkout policy");
         let expected_action = if *name == "jest-cache" {
             Action::Command {
@@ -825,6 +859,11 @@ fn every_tmp_builtin_fs_source_has_an_unchanged_golden_set() {
                 "/tmp/nix-shell.AbC123/jest_app_hash",
                 "/tmp/jest_rs",
                 "/var/tmp/jest_project_hash",
+            ],
+            "nix-shell-rc" => &[
+                "/tmp/nix-shell-1-2",
+                "/tmp/nix-develop-1-2",
+                "/tmp/nix-shell-abc-1",
             ],
             name => panic!("built-in /tmp source `{name}` has no golden set"),
         };

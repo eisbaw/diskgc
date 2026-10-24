@@ -506,23 +506,27 @@ Model scenarios required by [safety.md](safety.md) and
 ### Producer liveness vectors
 
 Status: specified by TASK-112's design; they land with its implementation.
-Landed with step 3: the Owner PID cases below, written against a user
-profile with `liveness_contract: nix-shell` (`nix-shell-probe`) in
-`crates/diskgc-model/tests/vectors/liveness/`, named after the rows
-(`nix-shell-...`; the unlisted-filesystem row as one file each for
-`overlay` and `zfs`, since `virtiofs` and `9p` are refused before any
-contract as filesystems that may block; the hidepid-as-root row waits for
-the vector runner's `--allow-root` support), plus
-`nix-shell-owner-pid-taken-after-listing-refused` (the pidfd probe),
-`nix-shell-union-contract-vetoes` (the union rule),
+The Owner PID cases below are checked-in vectors against the
+`nix-shell-rc` built-in in `crates/diskgc-model/tests/vectors/liveness/`,
+one file per row and named after it (step 3 wrote them against a user
+profile, step 4 moved them to the built-in; the unlisted-filesystem row is
+one file each for `overlay` and `zfs`, since `virtiofs` and `9p` are
+refused before any contract as filesystems that may block), plus
+`nix-shell-rc-owner-pid-taken-after-listing-refused` (the pidfd probe).
+Two keep a user profile with `liveness_contract: nix-shell`
+(`nix-shell-probe`), since a user profile is their point:
+`nix-shell-union-contract-vetoes` (the union rule) and
 `nix-shell-command-action-live-owner-refused` (a command action is judged
-too), and the load-time cases and properties as Rust tests. Row names
-here say `nix-shell-rc-`; the step-3 files drop the `rc-` (their profile
-is a user profile, not the built-in). The model has no parent links, so
+too). The precondition rows assert the report's `detail`.
+`vectors/builtins/nix-shell-rc.yaml` covers the built-in's roles (both
+shapes reclaimed, `in_use` by an fd, `protected`, `kept` by
+`.diskgc-keep`, a name without a valid pid `filtered`, `nix-shell.XXXXXX`
+and rc shapes below a shell temp directory not matched). The load-time
+cases and properties are Rust tests. The model has no parent links, so
 the "setsid" and "nohup" children of the orphan and detached-child rows
-are plain processes with or without the reference. The `nix-shell-rc`
-built-in's own vectors land with step 4, the pytest and project ones with
-steps 5 and 6. Mutation record (step 3, each vector-corpus run red):
+are plain processes with or without the reference; nor process identity,
+so the reused-pid row differs from the live-owner row only in intent. The
+pytest and project vectors land with steps 5 and 6. Mutation record (step 3, each vector-corpus run red):
 skipping the namespace, `hidepid` or filesystem precondition; tabling only
 the first `NSpid` level; ignoring unreadable processes; ignoring the
 probe; dropping the contract check in the plan, before the delete or
@@ -534,6 +538,23 @@ level).
 Tabling only the innermost level is equivalent at vector level (the probe
 finds every outer level, which is in diskgc's namespace); the model test
 `the_scan_tables_every_level_and_drops_gone_processes` pins it.
+Mutation record (step 4, built-in; vector corpus, golden and unit tests):
+dropping `liveness_contract` from the built-in (the built-in live-owner,
+namespace, reused, zombie, nested and `hidepid` vectors and the frozen
+definition), dropping its `min_idle_for` (`nix-shell-rc-fresh-not-idle`,
+frozen definition), dropping the `nix-develop-*-*` pattern (its `examples`,
+golden set, `builtins/nix-shell-rc.yaml`), skipping `hidepid` (the three
+`hidepid` vectors), skipping the namespace (the nested vector), naming the
+namespace before `hidepid` (`a_failed_precondition_names_its_rule_hidepid_first`),
+tabling only the first level and ignoring a listed carrier
+(`nix-shell-rc-namespace-local-pid-refused`), skipping the filesystem,
+letting a live probe permit and ignoring unreadable `NSpid` (their vectors
+and the Owner PID property) all bite. Through the real binary: dropping the contract
+fails `nix_shell_rc_shell_in_private_pid_namespace_is_kept` (deletion
+oracle), skipping the namespace fails
+`owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
+(deletion oracle), naming the namespace first fails
+`owner_pid_is_unknown_under_hidepid` (its detail).
 The contracts are in [safety.md](safety.md#producer-liveness), the schema
 in [reference.md](reference.md#liveness-contract-predicate). Every
 case below is a checked-in profile vector
@@ -805,17 +826,32 @@ that print one fact per line, and require exactly the expected set. Nix
 runs against a chroot store in the tester's home, since the image's store
 is read-only and has no database: legacy `nix-shell` of a derivation
 without inputs, and `nix develop` of a ready dev environment, build
-nothing. The others land with the steps that use them.
+nothing. The others land with the steps that use them; the three Owner
+PID tests landed with step 4 (`diskgc-e2e/src/owner_pid_suite.rs`, tier
+`full`, `--pid=host`, Container setup).
 `nix_shell_rc_lifecycle_is_pinned` (pinned Nix: the directory's pid equals
 the shell's for legacy `nix-shell` and `nix develop`, interactive and
 `-c`; what remains after a normal exit, `SIGHUP` and `SIGKILL`; whether
 the shell or a `setsid` child holds or names the directory after start),
-`nix_shell_rc_shell_in_private_pid_namespace_is_kept` (a shell under
-`unshare --pid` sharing `/tmp`: kept while it lives, reclaimed with the
-deletion oracle after it is killed),
-`owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`,
-`owner_pid_is_unknown_under_hidepid` (a `/proc` with `hidepid=invisible`
-and a `newgrp` shell owning a directory: kept),
+`nix_shell_rc_shell_in_private_pid_namespace_is_kept` (Nix image: a
+pinned `nix develop -c` shell in a nested PID namespace sharing `/tmp`,
+its namespace-local pid moved by `ns_last_pid` into a range no host
+process carries, since small ones collide with other namespaces' and only
+retain: `in_use`, `owner_pid` with the shell's host pid, while it lives;
+reclaimed, judged by the deletion oracle, once it is killed and reaped),
+`owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
+(diskgc in a nested namespace: a dead and a live owner's directory both
+`producer_unknown` naming the namespace rule, nothing deleted; then from
+the initial namespace the dead one is reclaimed and the live one `in_use`),
+`owner_pid_is_unknown_under_hidepid` (diskgc in a nested namespace whose
+`/proc` has `hidepid=invisible`; a shell of tester's uid and another
+group, as after `newgrp`, owns a directory; tester cannot list it, root
+can; `producer_unknown` naming `hidepid` for tester and for root with
+`--allow-root`. Rootless Podman cannot mount a `hidepid` `/proc` for the
+initial namespace, so the rule is observed by its detail (safety.md, Owner
+PID). From the initial namespace without
+`hidepid` the shell is listed and its fd table is denied to tester, so In
+use keeps the directory first, evidence `unreadable`),
 `pytest_lifecycle_is_pinned` (pinned pytest: the lock by `keep`, holding
 the pid as text, removed at exit; the exit cleanup by rank; a killed
 session's lock below the rank kept while young and removed after three
@@ -1186,8 +1222,9 @@ filesystem, processes and mounts from the developer's system.
   disposable-container run reclaims an exact `node-compile-cache` entry
   inside that prefix and preserves the enclosing shell and neighboring
   file, checked by the deletion oracle. The container test requires
-  `mktemp-dir`, `nix-shell-tmpdir`, `nix-shell-rc` and `tmp-entry` to remain
-  absent from the built-in library. The user-configured probe is only run
+  `mktemp-dir`, `nix-shell-tmpdir` and `tmp-entry` to remain absent from
+  the built-in library (`nix-shell-rc` ships with its Owner PID contract,
+  TASK-112 step 4). The user-configured probe is only run
   with `--dry-run`. Protecting real dormant `nix-shell` and `nix develop`
   sessions remains a release blocker for those planned profiles.
 - **Live pytest without a session lock:** pinned pytest 9.1.1 in the
@@ -1548,7 +1585,29 @@ in the image). strace attaches first and the traced process then drops to
 uid 1000 (groups, gid, uid) before exec; with `--seccomp-bpf` it stops only
 at the traced calls, which the suite checks against a stated bound (a
 20,000-file create/stat/unlink churn: one seccomp filter more than the
-harness, at most 4 ptrace stops per file, at most 10 s). A second
+harness, at most 4 ptrace stops per file, at most 10 s). The Owner PID
+tests listed in `HOST_PID_NAMESPACE_TESTS` (`suite.rs`) also get
+`--pid=host`: Owner PID permits only in the initial PID namespace, so a
+test that shows a reclaim, or contrasts a nested namespace with the
+initial one, needs diskgc there. What that exposes, and how it is
+confined: every host process is visible in the container (its pid,
+`status` and command name; that is what Owner PID reads). The runner
+refuses rootful Podman, and these containers get `--uidmap 0:1:65536`
+(and the same `--gidmap`), so no container uid, root included, is the
+invoking user: the user's host processes appear as an unmapped user,
+whose environment, fds and `root` link the container cannot read and whose
+processes it cannot signal (probed: host processes show as `nobody`,
+`/proc/1/environ` is denied; each test requires its shifted `uid_map`). The filesystem is the container's scratch. The harness signals
+only processes it started, nested PID namespaces' init through a pidfd.
+The shifted map also makes in-container tester a different host uid from
+other containers' tester, so their processes are not the user's to
+diskgc; but it is the host uid of another container's uid 1001 (`OTHER`),
+so a test that keeps a uid 1001 process alive must not run beside them
+(none does today). Their `podman run` uses Podman's default `TMPDIR`, not the dev
+shell's (below the checkout in a 0700 home, which crun, running as a
+subordinate uid under the shifted map, cannot reach). The runner runs these tests one at a time (each picks a free
+namespace pid range by looking at every host process). Nested PID
+namespaces are made with `unshare -p -f -m` and entered with `nsenter`. A second
 mount namespace for the "other namespace" tests is made with an `unshare`
 helper that bind-mounts the scratch directory at a different path (nested
 Podman is not used). Toolchains, tools, users, markers and the mount points

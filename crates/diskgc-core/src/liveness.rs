@@ -198,8 +198,8 @@ impl Unknown {
 pub type Probe = Result<bool, String>;
 
 /// Owner PID steps 2 to 5 for `number`, in order: the candidate's
-/// filesystem must be local (`fs_magic`), diskgc in the initial PID
-/// namespace and the held `/proc` without `hidepid` (read before and after
+/// filesystem must be local (`fs_magic`), the held `/proc` without
+/// `hidepid` and diskgc in the initial PID namespace (read before and after
 /// the scan, unchanged); then a match at any level of the table retains; a process that stayed
 /// unreadable, or an unsettled scan, makes the answer unknown; last, only
 /// the probe's `ESRCH` (`Ok(false)`) lets "ended" stand. `probe` is called
@@ -221,10 +221,13 @@ pub fn owner_pid(
     }
     match &table.namespace {
         Err(why) => return Unknown::rule(format!("PID namespace unreadable: {why}")),
+        // hidepid before the namespace: both fail closed alike, and a
+        // rootless container can observe hidepid only by this detail
+        // (docs/safety.md, Owner PID; owner_pid_is_unknown_under_hidepid).
+        Ok(ns) if ns.hidepid => return Unknown::rule("the held /proc is mounted with hidepid"),
         Ok(ns) if !ns.initial => {
             return Unknown::rule("diskgc is not in the initial PID namespace");
         }
-        Ok(ns) if ns.hidepid => return Unknown::rule("the held /proc is mounted with hidepid"),
         Ok(_) => {}
     }
     if let Some(carrier) = table.carrier(number) {

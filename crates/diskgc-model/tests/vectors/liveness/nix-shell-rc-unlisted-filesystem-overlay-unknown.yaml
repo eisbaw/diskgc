@@ -1,23 +1,16 @@
-# A held /proc mounted with hidepid can hide the user's own processes (a
-# newgrp shell): no PID answer permits (Owner PID step 4).
+# A candidate on overlay, a filesystem off the local list: a pid written
+# there may name a process of another kernel (Owner PID step 2), so the
+# answer is unknown although no process carries it.
 profile_vector: 1
-profile: nix-shell-probe
-user_profiles:
-  - name: nix-shell-probe
-    find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
-    where: {liveness_contract: nix-shell}
-    min_idle_for: 1h
-    action: delete
-    examples: {match: [/tmp/nix-shell-4242-17, /tmp/nix-develop-4243-18]}
+profile: nix-shell-rc
 path: /tmp
 min_free: 100%
 host:
   host_model: 1
   clock: 2026-10-15T03:00:00Z
-  proc_hidepid: true
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
-    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+    - {id: 2, at: /tmp, fs: overlay, dev: "0:40", size: 4G, parent: 1}
   tree:
     /run/diskgc/lock: {uid: 0, gid: 0}
     /usr/bin/bash: {}

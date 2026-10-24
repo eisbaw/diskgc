@@ -42,8 +42,8 @@ use crate::{
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
-    lifecycle_suite, meson_suite, packaging_suite, profile_vector_suite, project_cache_suite,
-    release_suite, scale_suite, signal_suite, stdout_suite, temp_safety_suite,
+    lifecycle_suite, meson_suite, owner_pid_suite, packaging_suite, profile_vector_suite,
+    project_cache_suite, release_suite, scale_suite, signal_suite, stdout_suite, temp_safety_suite,
 };
 
 /// Which gate runs a test.
@@ -165,6 +165,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs pinned pytest in the Nix image",
     ),
     (
+        "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
+        "needs the pinned Nix and bash from the Nix image",
+    ),
+    (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
     ),
@@ -246,6 +250,15 @@ pub static FUSE_TESTS: &[&str] = &[
     "fs_reclaim_a_dead_fuse_mount_is_never_touched",
     "fs_protected_dead_fuse_root_is_refused_without_opening_it",
     "inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount",
+];
+
+/// The tests whose container shares the host's PID namespace
+/// (`crate::runner::HOST_PID_NAMESPACE_ARGS`); why, and what that exposes:
+/// docs/testing.md, Container setup.
+pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
+    "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
+    "owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace",
+    "owner_pid_is_unknown_under_hidepid",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -404,6 +417,24 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: lifecycle_suite::pytest_lifecycle_is_pinned,
+    },
+    Test {
+        name: "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: owner_pid_suite::nix_shell_rc_shell_in_private_pid_namespace_is_kept,
+    },
+    Test {
+        name: "owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: owner_pid_suite::owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace,
+    },
+    Test {
+        name: "owner_pid_is_unknown_under_hidepid",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: owner_pid_suite::owner_pid_is_unknown_under_hidepid,
     },
     Test {
         name: "nested_claude_shell_cache_reclaims_only_its_exact_entry",

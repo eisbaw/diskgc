@@ -1,15 +1,8 @@
-# A candidate on overlay, a filesystem off the local list: a pid written
-# there may name a process of another kernel (Owner PID step 2), so the
-# answer is unknown although no process carries it.
+# A candidate on zfs, a filesystem off the local list: a pid written there
+# may name a process of another kernel (Owner PID step 2), so the answer is
+# unknown although no process carries it.
 profile_vector: 1
-profile: nix-shell-probe
-user_profiles:
-  - name: nix-shell-probe
-    find: {roots: [/tmp], paths: ["nix-shell-*-*", "nix-develop-*-*"], type: dir}
-    where: {liveness_contract: nix-shell}
-    min_idle_for: 1h
-    action: delete
-    examples: {match: [/tmp/nix-shell-4242-17, /tmp/nix-develop-4243-18]}
+profile: nix-shell-rc
 path: /tmp
 min_free: 100%
 host:
@@ -17,7 +10,7 @@ host:
   clock: 2026-10-15T03:00:00Z
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
-    - {id: 2, at: /tmp, fs: overlay, dev: "0:40", size: 4G, parent: 1}
+    - {id: 2, at: /tmp, fs: zfs, dev: "0:40", size: 4G, parent: 1}
   tree:
     /run/diskgc/lock: {uid: 0, gid: 0}
     /usr/bin/bash: {}

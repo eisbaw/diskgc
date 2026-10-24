@@ -2526,7 +2526,6 @@ fn dormant_post_exec_tmpdir_is_a_known_process_scan_false_negative() {
     for name in [
         "mktemp-dir",
         "nix-shell-tmpdir",
-        "nix-shell-rc",
         "tmp-entry",
         "containers-image-tmp",
     ] {
