@@ -87,10 +87,11 @@ process runs, even if that Cargo works in an unrelated directory; see
 - `--min-free` (required): if available space is at least this, do nothing
   and exit 0, without taking the lock. `ensure` still checks that
   `/run/diskgc/lock` is a safely reachable, readable regular file. If it
-  is missing or unusable, stderr warns with the provisioning detail (and
-  the tmpfiles lines when missing); exit 0 and the JSON `met` report are
-  unchanged. A later run needing to reclaim exits 2 if the lock is still
-  unusable. This readiness check does not take a `flock`.
+  is missing or unusable, stderr warns with the provisioning detail and
+  the commands that provision it; exit 0 and the JSON `met` report are
+  unchanged. A later run needing to reclaim exits 2 (`cause:
+  provisioning`) if the lock is still missing or unusable. This readiness
+  check does not take a `flock`.
 - `--target-free` (default: same as `--min-free`): once triggered, keep
   reclaiming until this much is available. Setting it higher is the
   hysteresis: a fleet of CI jobs then does one larger cleanup instead of a
@@ -332,7 +333,7 @@ under `profile`:
   it is decided per candidate: `type: any` without `cwd`) for `command`;
   neither for `cargo_lock_protocol`. Later kinds add their own `type`.
 - On an invalid-input error: `{"status": "usage_error", "exit_code": 2,
-  "cause": "parse | config | safety | host | operation | usage", "error": "message"}`,
+  "cause": "parse | config | safety | host | operation | usage | provisioning", "error": "message"}`,
   the message as on stderr. Host I/O during startup has `status: error`
   and `exit_code: 3`; invalid input and configuration use exit 2.
   `status` is the field
@@ -412,7 +413,8 @@ kernel remains exit 2. A dry run with a host
 or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
-run as root, a missing host lock file when reclaim is needed and, in
+run as root, a missing host lock file when reclaim is needed, with
+`cause: provisioning`, and, in
 development builds, the pre-release sandbox gate,
 [safety.md](safety.md#pre-release-sandbox-gate)),
 130 / 143 `interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124
@@ -456,7 +458,7 @@ JSON result (field names are part of the contract):
     "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
-  "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage", "message": ""}]
+  "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage | provisioning", "message": ""}]
 }
 ```
 
@@ -469,7 +471,15 @@ precondition refused the run, `host` means a typed operating-system path,
 sampling or startup failure, `operation` means a tier planning, action or
 backend failure without a more specific typed cause, and `usage` covers
 other invalid caller inputs, including `--roots` binding and an unsupported
-kernel. An unsafe configured root is a `safety` refusal even when found
+kernel. `provisioning` means the host lacks what diskgc's installation
+must provide: the host lock `/run/diskgc/lock` is missing or is not the
+regular file its tmpfiles line makes, when a reclaim needs it (exit 2,
+status `usage_error`). The fix is the operator's, not the caller's: the
+message prints the commands that provision it (the package's tmpfiles.d
+drop-in, written out, installed in `/etc/tmpfiles.d` and applied with
+`systemd-tmpfiles --create`; or `mkdir`/`touch`/`chmod` until the next
+boot), so a harness alerts ops rather than retrying or rewriting its call
+(TASK-151). An unsafe configured root is a `safety` refusal even when found
 after initial root preflight; a host I/O failure while checking that root
 is `host`.
 

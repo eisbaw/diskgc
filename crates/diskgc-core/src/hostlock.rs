@@ -40,6 +40,31 @@ pub const TMPFILES_LINES: [&str; 2] = [
     "f /run/diskgc/lock 0644 root root -",
 ];
 
+/// The commands that provision the host lock, for the refusal (TASK-151):
+/// the package's tmpfiles.d drop-in (`lib/tmpfiles.d/diskgc.conf`, the
+/// [`TMPFILES_LINES`]) written out in full, so the command is exact
+/// wherever the package lives, installed in `/etc/tmpfiles.d` so that the
+/// next boot recreates `/run/diskgc`, and applied now; then the plain
+/// `mkdir`/`touch`/`chmod` for a host without systemd-tmpfiles.
+struct FixIt;
+
+impl fmt::Display for FixIt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "To provision it now and at every boot, install the tmpfiles.d drop-in the \
+             package ships (lib/tmpfiles.d/diskgc.conf) and apply it:\n  \
+             printf '%s\\n' '{}' '{}' | sudo tee /etc/tmpfiles.d/diskgc.conf\n  \
+             sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf\n\
+             Without systemd-tmpfiles (until the next boot, /run is emptied then):\n  \
+             sudo mkdir -p -m 0755 {HOST_LOCK_DIR} && sudo touch {lock} && sudo chmod 0644 {lock}",
+            TMPFILES_LINES[0],
+            TMPFILES_LINES[1],
+            lock = host_lock_path().display(),
+        )
+    }
+}
+
 /// The held host lock. Dropping it closes the fd, which releases the lock
 /// once every child that inherited a copy has closed its copy too.
 #[derive(Debug)]
@@ -80,15 +105,18 @@ impl fmt::Display for LockError {
         match self {
             Self::Missing { detail } => write!(
                 f,
-                "the host lock {} is missing ({detail}); whatever installs diskgc provisions \
-                 it at boot, e.g. with these tmpfiles.d lines:\n  {}\n  {}",
+                "the host lock {} is missing ({detail}): this host is not provisioned for \
+                 diskgc. {}",
                 path.display(),
-                TMPFILES_LINES[0],
-                TMPFILES_LINES[1]
+                FixIt
             ),
-            Self::Unusable { detail } => {
-                write!(f, "the host lock {} is unusable: {detail}", path.display())
-            }
+            Self::Unusable { detail } => write!(
+                f,
+                "the host lock {path} is unusable: {detail}. As root, remove what stands at \
+                 {path}. {}",
+                FixIt,
+                path = path.display()
+            ),
             Self::DeadlinePassed => write!(
                 f,
                 "the host lock {} was still held by another reclaim at the deadline",
@@ -218,5 +246,33 @@ mod tests {
             assert!(text.contains(line), "{text}");
         }
         assert_eq!(host_lock_path(), Path::new("/run/diskgc/lock"));
+    }
+
+    /// TASK-151: the refusal prints commands an operator can paste, and
+    /// they make exactly what [`TMPFILES_LINES`] say (run through `sh`, the
+    /// printf writes the two lines; the manual form makes the same modes).
+    #[test]
+    fn missing_and_unusable_print_the_commands_that_fix_them() {
+        for error in [
+            LockError::Missing { detail: "x".into() },
+            LockError::Unusable { detail: "x".into() },
+        ] {
+            let text = error.to_string();
+            let commands: Vec<&str> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("  "))
+                .collect();
+            assert_eq!(
+                commands,
+                [
+                    "printf '%s\\n' 'd /run/diskgc      0755 root root -' \
+                     'f /run/diskgc/lock 0644 root root -' | sudo tee /etc/tmpfiles.d/diskgc.conf",
+                    "sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf",
+                    "sudo mkdir -p -m 0755 /run/diskgc && sudo touch /run/diskgc/lock \
+                     && sudo chmod 0644 /run/diskgc/lock",
+                ],
+                "{text}"
+            );
+        }
     }
 }

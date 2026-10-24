@@ -305,16 +305,21 @@ pub enum ErrorCause {
     Host,
     Operation,
     Usage,
+    /// The host lacks what its installation must provide (the host lock
+    /// file): an operator's fix, not a caller's (TASK-151). A harness alerts
+    /// ops instead of retrying or rewriting its call.
+    Provisioning,
 }
 
 impl ErrorCause {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Parse,
         Self::Config,
         Self::Safety,
         Self::Host,
         Self::Operation,
         Self::Usage,
+        Self::Provisioning,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -325,6 +330,7 @@ impl ErrorCause {
             Self::Host => "host",
             Self::Operation => "operation",
             Self::Usage => "usage",
+            Self::Provisioning => "provisioning",
         }
     }
 }

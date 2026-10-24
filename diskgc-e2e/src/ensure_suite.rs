@@ -932,8 +932,8 @@ pub fn ensure_flag_errors_are_single_json_reports(ctx: &Ctx) -> TestResult {
 }
 
 /// AC #2 and exit 2: below `--min-free` without `/run/diskgc/lock`, exit 2
-/// printing the two tmpfiles lines (docs/safety.md, Host lock); nothing is
-/// deleted.
+/// with cause `provisioning`, printing the two tmpfiles lines (docs/safety.md,
+/// Host lock) and the commands that apply them; nothing is deleted.
 pub fn ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
     ctx: &Ctx,
 ) -> TestResult {
@@ -967,6 +967,18 @@ pub fn ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
     }
     let r = report(&run)?;
     ensure!(r["status"] == "usage_error" && r["mount"] == "/tmp", "{r}");
+    // TASK-151: its own cause, and the command that fixes it.
+    ensure!(
+        r["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|e| {
+                e["cause"] == "provisioning"
+                    && e["message"].as_str().is_some_and(|m| {
+                        m.contains("sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf")
+                    })
+            })),
+        "no provisioning error with the fix-it command: {r}"
+    );
     judged.assert_clean()
 }
 

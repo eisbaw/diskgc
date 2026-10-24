@@ -2940,7 +2940,10 @@ these features backported, and an unparseable release is refused too.
   f /run/diskgc/lock 0644 root root -
   ```
 
-  A reclaim that needs a missing lock exits 2, printing those two lines.
+  A reclaim that needs a missing lock exits 2 (JSON `cause:
+  provisioning`), printing those two lines in the commands that install
+  them in `/etc/tmpfiles.d` and apply them, and the `mkdir`/`touch`/`chmod`
+  equivalent for a host without systemd-tmpfiles.
   An `ensure` whose space goal is already met checks the same object
   without taking a `flock`; missing or unusable provisioning warns on
   stderr but preserves exit 0 and the `met` report. The file is reached

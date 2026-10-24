@@ -802,6 +802,26 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
     report.usage_error(message)
 }
 
+/// A host lock that could not be taken for a reason other than the
+/// deadline or a signal: exit 2. A lock the installation did not provide
+/// (missing, or not the regular file the tmpfiles line makes) is
+/// `provisioning`, so a harness tells "alert ops" from "my call is wrong"
+/// without parsing the message (TASK-151).
+fn lock_refusal(report: Report, log: &mut dyn FnMut(&str), error: LockError) -> Report {
+    let cause = match &error {
+        LockError::Missing { .. } | LockError::Unusable { .. } => ErrorCause::Provisioning,
+        // Unchanged contract (exit 2, `usage`) for a host failure while
+        // locking; a TASK-151 follow-up asks whether it should be `host`/3.
+        LockError::Failed(_) => ErrorCause::Usage,
+        LockError::DeadlinePassed | LockError::Interrupted(_) => {
+            unreachable!("the caller handles the deadline and signals: {error}")
+        }
+    };
+    let message = error.to_string();
+    log(&format!("error: {message}"));
+    report.usage_error_with_cause(cause, message)
+}
+
 enum MeasureFailure {
     Usage(String),
     Host(String),
@@ -1557,7 +1577,7 @@ fn ensure_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return usage(report, log, e.to_string());
+            return lock_refusal(report, log, e);
         }
     };
     log(&format!(
@@ -1803,7 +1823,7 @@ fn ensure_grouped_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return usage(report, log, error.to_string());
+            return lock_refusal(report, log, error);
         }
     };
     log(&format!(
