@@ -1097,7 +1097,7 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 candidate: root.clone(),
                 count: 1,
                 examples: Vec::new(),
-                reason: Reason::OtherFs.as_str(),
+                reason: Reason::OtherFs,
                 detail: None,
                 process_blockers: None,
                 estimated_bytes: None,
@@ -1457,7 +1457,7 @@ fn ensure_inner<H: Delete>(
                     candidate: PathBuf::new(),
                     count: 1,
                     examples: Vec::new(),
-                    reason: Reason::Missing.as_str(),
+                    reason: Reason::Missing,
                     detail: None,
                     process_blockers: None,
                     estimated_bytes: None,
@@ -1944,7 +1944,7 @@ fn ensure_grouped_inner<H: Delete>(
                         candidate: PathBuf::new(),
                         count: 1,
                         examples: Vec::new(),
-                        reason: Reason::Missing.as_str(),
+                        reason: Reason::Missing,
                         detail: None,
                         process_blockers: None,
                         estimated_bytes: None,
@@ -2225,7 +2225,7 @@ fn dry_run_inner<H: Host>(
                 report.plan.push(plan_entry(
                     tier,
                     &candidate,
-                    protected.then_some(Reason::Protected.as_str()),
+                    protected.then_some(Reason::Protected),
                     None,
                 ));
             }
@@ -2273,12 +2273,9 @@ fn dry_run_inner<H: Host>(
                     "{}: profile `{}` is missing executable {program:?}",
                     tier.name, tier.profile
                 ));
-                report.plan.push(plan_entry(
-                    tier,
-                    Path::new(""),
-                    Some(Reason::Missing.as_str()),
-                    None,
-                ));
+                report
+                    .plan
+                    .push(plan_entry(tier, Path::new(""), Some(Reason::Missing), None));
                 report.avail_after_bytes =
                     final_sample(host, &measured, deadline, &mut report, log, tier);
                 return report;
@@ -2395,7 +2392,7 @@ fn dry_run_inner<H: Host>(
                 candidate.display()
             ));
             let entry = &mut report.plan[index];
-            entry.reason = Some(Reason::Protected.as_str());
+            entry.reason = Some(Reason::Protected);
             entry.estimated_bytes = None;
         }
     }
@@ -2538,7 +2535,7 @@ struct Planned {
 fn plan_entry(
     tier: &Tier,
     candidate: &Path,
-    reason: Option<&'static str>,
+    reason: Option<Reason>,
     bytes: Option<u64>,
 ) -> PlanEntry {
     PlanEntry {
@@ -2583,7 +2580,7 @@ fn plan_cargo<H: Host>(
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> Planned {
-    let entry = |candidate: &Path, reason: Option<&'static str>, bytes: Option<u64>| {
+    let entry = |candidate: &Path, reason: Option<Reason>, bytes: Option<u64>| {
         plan_entry(tier, candidate, reason, bytes)
     };
     let mut eligible = Vec::new();
@@ -2597,7 +2594,7 @@ fn plan_cargo<H: Host>(
             let misconfigured = misconfigured_roots(tier, &found);
             for skip in &found.refused {
                 if !misconfigured.contains(&skip) {
-                    skipped.push(entry(&skip.path, Some(skip.reason.as_str()), None));
+                    skipped.push(entry(&skip.path, Some(skip.reason), None));
                 }
             }
             for skip in &misconfigured {
@@ -2636,7 +2633,7 @@ fn plan_cargo<H: Host>(
                         }
                     };
                 if let Some(profile) = excluded {
-                    skipped.push(entry(&target.path, Some(Reason::Excluded.as_str()), None));
+                    skipped.push(entry(&target.path, Some(Reason::Excluded), None));
                     log(&format!(
                         "{}: {} overlaps !profile:{profile}",
                         tier.name,
@@ -2646,7 +2643,7 @@ fn plan_cargo<H: Host>(
                 }
                 if let Some(skip) = other_fs(target, dev) {
                     log_skip(log, tier, &skip);
-                    skipped.push(entry(&target.path, Some(skip.reason.as_str()), None));
+                    skipped.push(entry(&target.path, Some(skip.reason), None));
                     continue;
                 }
                 match cargo_target::eligibility(
@@ -2674,7 +2671,7 @@ fn plan_cargo<H: Host>(
                     }
                     Ok(Err(skip)) => {
                         log_skip(log, tier, &skip);
-                        skipped.push(entry(&target.path, Some(skip.reason.as_str()), None));
+                        skipped.push(entry(&target.path, Some(skip.reason), None));
                     }
                     Err(stop) => {
                         stopped = Some(stop);
@@ -2756,12 +2753,9 @@ fn plan_fs<H: Host>(
     }
     for skip in found.refused.iter().filter(|s| !is_misconfigured(tier, s)) {
         log_skip(log, tier, skip);
-        planned.skipped.push(plan_entry(
-            tier,
-            &skip.path,
-            Some(skip.reason.as_str()),
-            None,
-        ));
+        planned
+            .skipped
+            .push(plan_entry(tier, &skip.path, Some(skip.reason), None));
     }
     if !misconfigured.is_empty() {
         return planned;
@@ -2796,7 +2790,7 @@ fn plan_fs<H: Host>(
             }
             Err(skip) => {
                 log(&format!("{} {}: skip {skip}", tier.name, path.display()));
-                let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                let mut entry = plan_entry(tier, path, Some(skip.reason), None);
                 if let Some(source) = source_evidence {
                     entry.build_evidence = Some(BuildEvidence {
                         marker: source.marker,
@@ -3185,7 +3179,7 @@ fn plan_fs_union<H: Host>(
         .iter()
         .filter(|(index, skip)| !is_misconfigured_source(&sources[*index], skip))
     {
-        let mut entry = plan_entry(tier, &skip.path, Some(skip.reason.as_str()), None);
+        let mut entry = plan_entry(tier, &skip.path, Some(skip.reason), None);
         entry.profile = sources[*index].profile.to_owned();
         entry.checkouts = sources[*index].checkouts;
         planned.skipped.push(entry);
@@ -3211,7 +3205,7 @@ fn plan_fs_union<H: Host>(
             Ok(Some((index, skip))) => {
                 let source_index = candidate.guard_by[index].0;
                 log_skip(log, tier, &skip);
-                let mut entry = plan_entry(tier, &skip.path, Some(skip.reason.as_str()), None);
+                let mut entry = plan_entry(tier, &skip.path, Some(skip.reason), None);
                 entry.profile = sources[source_index].profile.to_owned();
                 entry.checkouts = sources[source_index].checkouts;
                 planned.skipped.push(entry);
@@ -3302,7 +3296,7 @@ fn plan_fs_union<H: Host>(
                 Ok(Err((veto, skip))) => {
                     log_skip(log, tier, &skip);
                     let vetoing = claimed.get(veto).map_or(*index, |(source, _)| *source);
-                    let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                    let mut entry = plan_entry(tier, path, Some(skip.reason), None);
                     entry.profile = sources[vetoing].profile.to_owned();
                     entry.checkouts = sources[vetoing].checkouts;
                     planned.skipped.push(entry);
@@ -3329,7 +3323,7 @@ fn plan_fs_union<H: Host>(
                         ))
                     })
                 }) {
-                    let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+                    let mut entry = plan_entry(tier, path, Some(skip.reason), None);
                     entry.profile = sources[refusing_index].profile.to_owned();
                     entry.checkouts = checkouts;
                     planned.skipped.push(entry);
@@ -3352,7 +3346,7 @@ fn plan_fs_union<H: Host>(
             let (index, path, skip) =
                 first_skip.expect("a discovered union candidate has a verdict");
             log_skip(log, tier, &skip);
-            let mut entry = plan_entry(tier, path, Some(skip.reason.as_str()), None);
+            let mut entry = plan_entry(tier, path, Some(skip.reason), None);
             entry.profile = sources[index].profile.to_owned();
             entry.checkouts = sources[index].checkouts;
             planned.skipped.push(entry);
@@ -3757,7 +3751,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         }
     }
-    fn skip_docker(&mut self, candidate: &Path, reason: &'static str, detail: &str) {
+    fn skip_docker(&mut self, candidate: &Path, reason: Reason, detail: &str) {
         (self.log)(&format!(
             "{}: skip Docker backend: {reason}: {detail}",
             self.tier.name
@@ -3844,7 +3838,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Ok(Binding::Bound(_)) => {
                 self.skip_docker(
                     &candidate,
-                    "changed",
+                    Reason::Changed,
                     "Docker daemon, context, builder or storage changed before prune",
                 );
                 return;
@@ -4003,7 +3997,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             candidate: candidate.to_owned(),
             count: 1,
             examples: Vec::new(),
-            reason: skip.reason.as_str(),
+            reason: skip.reason,
             detail: Some(skip.detail.clone()),
             process_blockers: skip.process_blockers.clone(),
             estimated_bytes,
@@ -4122,7 +4116,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 candidate: skip.path.clone(),
                 count: 1,
                 examples: Vec::new(),
-                reason: skip.reason.as_str(),
+                reason: skip.reason,
                 detail: Some(skip.detail.clone()),
                 process_blockers: skip.process_blockers.clone(),
                 estimated_bytes: None,

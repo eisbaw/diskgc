@@ -20,7 +20,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::engine::{Checkouts, ProcessBlocker};
+use crate::engine::{Checkouts, ProcessBlocker, Reason};
 use crate::units::format_bytes;
 use json::Json;
 
@@ -204,7 +204,7 @@ pub struct PlanEntry {
     pub profile: String,
     pub candidate: PathBuf,
     /// The skip reason, `None` for an eligible candidate.
-    pub reason: Option<&'static str>,
+    pub reason: Option<Reason>,
     /// The candidate's estimated size; `None` for every skipped candidate
     /// (its checks stopped before its walk was complete, so a size would
     /// be a partial count).
@@ -250,7 +250,7 @@ pub struct SkipEntry {
     pub candidate: PathBuf,
     pub count: u64,
     pub examples: Vec<PathBuf>,
-    pub reason: &'static str,
+    pub reason: Reason,
     /// Human diagnostic from the refusal, when one was available.
     pub detail: Option<String>,
     /// Attributed scan-time process evidence, or `None` when attribution is
@@ -394,7 +394,7 @@ impl Report {
         let mut groups: BTreeMap<Key<'_>, (u64, Vec<PathBuf>)> = BTreeMap::new();
         for skip in &self.skipped {
             let group = groups
-                .entry((&skip.tier, &skip.profile, skip.reason))
+                .entry((&skip.tier, &skip.profile, skip.reason.as_str()))
                 .or_insert_with(|| (0, Vec::new()));
             group.0 = group.0.saturating_add(skip.count);
             if !skip.candidate.as_os_str().is_empty()
@@ -415,7 +415,11 @@ impl Report {
         let mut emitted = BTreeSet::new();
         let mut output = Vec::with_capacity(self.skipped.len());
         for skip in &self.skipped {
-            let key = (skip.tier.as_str(), skip.profile.as_str(), skip.reason);
+            let key = (
+                skip.tier.as_str(),
+                skip.profile.as_str(),
+                skip.reason.as_str(),
+            );
             let (count, examples) = &groups[&key];
             if *count > EXAMPLE_LIMIT as u64 {
                 if emitted.insert(key) {
@@ -525,7 +529,10 @@ impl Report {
                                 ("profile", Json::str(&p.profile)),
                                 ("candidate", path(&p.candidate)),
                                 ("eligible", Json::Bool(p.reason.is_none())),
-                                ("reason", Json::opt(p.reason, Json::str)),
+                                (
+                                    "reason",
+                                    Json::opt(p.reason, |reason| Json::str(reason.as_str())),
+                                ),
                                 ("estimated_bytes", opt_u64(p.estimated_bytes)),
                                 ("operation", Json::str(&p.operation)),
                                 ("checkouts", Json::str(p.checkouts.as_str())),
@@ -582,7 +589,7 @@ impl Report {
                                     "examples",
                                     Json::Arr(s.examples.iter().map(|e| path(e)).collect()),
                                 ),
-                                ("reason", Json::str(s.reason)),
+                                ("reason", Json::str(s.reason.as_str())),
                                 ("detail", Json::opt(s.detail.as_deref(), Json::str)),
                                 (
                                     "process_blockers",
@@ -677,7 +684,7 @@ impl Report {
                 if self.actions.is_empty()
                     && self.errors.is_empty()
                     && self.held_by_deleted_files.is_empty()
-                    && self.skipped.iter().all(|skip| skip.reason == "empty") =>
+                    && self.skipped.iter().all(|skip| skip.reason == Reason::Empty) =>
             {
                 None
             }
@@ -737,13 +744,17 @@ impl Report {
                 let kept: u64 = self
                     .skipped
                     .iter()
-                    .filter(|skip| skip.reason != "empty" && !skip.candidate.as_os_str().is_empty())
+                    .filter(|skip| {
+                        skip.reason != Reason::Empty && !skip.candidate.as_os_str().is_empty()
+                    })
                     .map(|skip| skip.count)
                     .fold(0, u64::saturating_add);
                 let preflight: u64 = self
                     .skipped
                     .iter()
-                    .filter(|skip| skip.reason != "empty" && skip.candidate.as_os_str().is_empty())
+                    .filter(|skip| {
+                        skip.reason != Reason::Empty && skip.candidate.as_os_str().is_empty()
+                    })
                     .map(|skip| skip.count)
                     .fold(0, u64::saturating_add);
                 let preflight_text = if preflight == 0 {
@@ -795,10 +806,10 @@ impl Report {
         const EXAMPLE_LIMIT: usize = 5;
         let mut groups: BTreeMap<&str, (u64, Vec<String>)> = BTreeMap::new();
         for skip in &self.skipped {
-            if skip.reason == "empty" || skip.candidate.as_os_str().is_empty() {
+            if skip.reason == Reason::Empty || skip.candidate.as_os_str().is_empty() {
                 continue;
             }
-            let (count, examples) = groups.entry(skip.reason).or_default();
+            let (count, examples) = groups.entry(skip.reason.as_str()).or_default();
             *count = count.saturating_add(skip.count);
             for path in std::iter::once(&skip.candidate).chain(skip.examples.iter()) {
                 if examples.len() == EXAMPLE_LIMIT {
@@ -838,10 +849,10 @@ impl Report {
         const EXAMPLE_LIMIT: usize = 5;
         let mut groups: BTreeMap<&str, (u64, Vec<String>)> = BTreeMap::new();
         for skip in &self.skipped {
-            if skip.reason == "empty" || !skip.candidate.as_os_str().is_empty() {
+            if skip.reason == Reason::Empty || !skip.candidate.as_os_str().is_empty() {
                 continue;
             }
-            let (count, examples) = groups.entry(skip.reason).or_default();
+            let (count, examples) = groups.entry(skip.reason.as_str()).or_default();
             *count = count.saturating_add(skip.count);
             if examples.len() < EXAMPLE_LIMIT {
                 let label = format!(

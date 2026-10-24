@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::engine::Reason;
 use crate::host::{Dev, DockerEnvironment, DockerQuery, Errno, Host, HostError};
 use crate::resolve::{self, ResolveError, Want};
 
@@ -119,7 +120,7 @@ pub struct Bound {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
-    pub reason: &'static str,
+    pub reason: Reason,
     pub detail: String,
 }
 
@@ -135,7 +136,7 @@ pub enum Storage {
     BuildCache,
 }
 
-fn skip(reason: &'static str, detail: impl Into<String>) -> Binding {
+fn skip(reason: Reason, detail: impl Into<String>) -> Binding {
     Binding::Skipped(Skipped {
         reason,
         detail: detail.into(),
@@ -146,7 +147,7 @@ fn query<H: Host>(host: &H, what: DockerQuery) -> Result<Result<String, Binding>
     match host.docker_query(what) {
         Ok(output) => Ok(Ok(output)),
         Err(error) if error.is(Errno::ENOENT) => {
-            Ok(Err(skip("missing", "Docker client is not installed")))
+            Ok(Err(skip(Reason::Missing, "Docker client is not installed")))
         }
         Err(error) => Err(error),
     }
@@ -171,9 +172,9 @@ pub fn inspect_backend<H: Host>(
             "unix:///var/run/docker.sock" | "unix:///run/docker.sock"
         ) {
             let reason = if host.starts_with("unix://") {
-                "unsupported_backend"
+                Reason::UnsupportedBackend
             } else {
-                "remote_backend"
+                Reason::RemoteBackend
             };
             return Ok(skip(
                 reason,
@@ -185,7 +186,7 @@ pub fn inspect_backend<H: Host>(
         && value != "default"
     {
         return Ok(skip(
-            "unsupported_backend",
+            Reason::UnsupportedBackend,
             format!("DOCKER_CONTEXT selects {value:?}, not default"),
         ));
     }
@@ -195,7 +196,7 @@ pub fn inspect_backend<H: Host>(
     };
     if context.trim() != "default" {
         return Ok(skip(
-            "unsupported_backend",
+            Reason::UnsupportedBackend,
             format!("active Docker context is {:?}, not default", context.trim()),
         ));
     }
@@ -207,7 +208,7 @@ pub fn inspect_backend<H: Host>(
         Ok(value) => value,
         Err(error) => {
             return Ok(skip(
-                "unsupported_backend",
+                Reason::UnsupportedBackend,
                 format!("Docker context endpoint is not JSON: {error}"),
             ));
         }
@@ -217,9 +218,9 @@ pub fn inspect_backend<H: Host>(
         "unix:///var/run/docker.sock" | "unix:///run/docker.sock"
     ) {
         let reason = if endpoint.starts_with("unix://") {
-            "unsupported_backend"
+            Reason::UnsupportedBackend
         } else {
-            "remote_backend"
+            Reason::RemoteBackend
         };
         return Ok(skip(
             reason,
@@ -234,7 +235,7 @@ pub fn inspect_backend<H: Host>(
         Ok(value) => value,
         Err(error) => {
             return Ok(skip(
-                "unsupported_backend",
+                Reason::UnsupportedBackend,
                 format!("Docker server identity is not JSON: {error}"),
             ));
         }
@@ -242,7 +243,7 @@ pub fn inspect_backend<H: Host>(
     let name = server["Platform"]["Name"].as_str().unwrap_or("");
     if !name.starts_with("Docker Engine") {
         return Ok(skip(
-            "unsupported_backend",
+            Reason::UnsupportedBackend,
             format!("server is {name:?}, not Docker Engine"),
         ));
     }
@@ -259,14 +260,14 @@ pub fn inspect_backend<H: Host>(
             Ok(value) => value,
             Err(error) => {
                 return Ok(skip(
-                    "unsupported_backend",
+                    Reason::UnsupportedBackend,
                     format!("Docker client identity is not JSON: {error}"),
                 ));
             }
         };
         if client["Version"].as_str() != Some("29.8.2") {
             return Ok(skip(
-                "unsupported_backend",
+                Reason::UnsupportedBackend,
                 format!(
                     "Docker client version {:?} has unverified builder dispatch; 29.8.2 required",
                     client["Version"]
@@ -280,7 +281,7 @@ pub fn inspect_backend<H: Host>(
     };
     let info = match DockerInfo::parse(&info_text) {
         Ok(info) => info,
-        Err(error) => return Ok(skip("unsupported_backend", error)),
+        Err(error) => return Ok(skip(Reason::UnsupportedBackend, error)),
     };
     let build_cache = info.docker_root.join("buildkit");
     let roots = match storage {
@@ -292,7 +293,7 @@ pub fn inspect_backend<H: Host>(
             Ok(resolved) if resolved.stat.dev == target => {}
             Ok(resolved) => {
                 return Ok(skip(
-                    "other_fs",
+                    Reason::OtherFs,
                     format!(
                         "Docker storage {} is on {}, requested filesystem is {target}",
                         path.display(),
@@ -303,7 +304,9 @@ pub fn inspect_backend<H: Host>(
             Err(ResolveError::Host(error)) => return Err(error),
             Err(error) => {
                 return Ok(skip(
-                    error.reason(),
+                    error
+                        .skip_reason()
+                        .expect("a host error returned above; every other one is a skip"),
                     format!(
                         "Docker storage {} cannot be safely resolved: {error}",
                         path.display()

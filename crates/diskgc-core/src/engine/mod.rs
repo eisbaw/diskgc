@@ -457,7 +457,7 @@ impl WalkRecord {
 
 /// Why a candidate is not deleted, by its skip reason (docs/reference.md,
 /// Output).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Reason {
     /// The candidate itself is gone.
     Missing,
@@ -535,12 +535,18 @@ pub enum Reason {
     /// liveness): a precondition failed, a process stayed unreadable, a
     /// marker is malformed. Retained, never eligible.
     ProducerUnknown,
+    /// A backend tier's client selects a remote endpoint or store
+    /// (docs/reference.md, Backend skips and errors).
+    RemoteBackend,
+    /// A backend tier's backend is one diskgc has not verified
+    /// (docs/reference.md, Backend skips and errors).
+    UnsupportedBackend,
 }
 
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 27] = [
+    pub const ALL: [Reason; 29] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -568,6 +574,8 @@ impl Reason {
         Reason::InstalledExtension,
         Reason::Protected,
         Reason::ProducerUnknown,
+        Reason::RemoteBackend,
+        Reason::UnsupportedBackend,
     ];
 
     /// The skip reason's name in reports.
@@ -600,9 +608,22 @@ impl Reason {
             Self::InstalledExtension => "installed_extension",
             Self::Protected => "protected",
             Self::ProducerUnknown => "producer_unknown",
+            Self::RemoteBackend => "remote_backend",
+            Self::UnsupportedBackend => "unsupported_backend",
         }
     }
 }
+
+/// Skip reasons the JSON contract documents (docs/reference.md, Output)
+/// that no code produces yet, each with the task that brings its producer.
+/// They are reserved: a consumer must accept them, and no other value can
+/// appear, because the report's reason is a [`Reason`]. The task that adds
+/// a producer adds the variant to [`Reason`] and removes the entry here
+/// (`every_skip_reason_has_a_vector` fails until it does).
+pub const RESERVED_REASONS: [(&str, &str); 2] = [
+    ("backend_unavailable", "TASK-36, TASK-113"),
+    ("stale", "TASK-31"),
+];
 
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

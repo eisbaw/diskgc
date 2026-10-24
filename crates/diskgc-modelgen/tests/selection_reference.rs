@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::config;
+use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, ProtectedKind, ProtectedSource, Request, Tier};
 use diskgc_core::fs_kind::Find;
 use diskgc_core::profile::{EntryType, Library, Where, parse_profiles};
@@ -763,7 +764,8 @@ fn user_profiles_keep_the_whole_claude_container_in_plan_and_reclaim() {
     assert!(plan.errors.is_empty(), "{plan:#?}");
     assert!(
         plan.plan.iter().any(|entry| {
-            entry.candidate == Path::new("/tmp/claude-1000") && entry.reason == Some("excluded")
+            entry.candidate == Path::new("/tmp/claude-1000")
+                && entry.reason == Some(Reason::Excluded)
         }),
         "{plan:#?}"
     );
@@ -1096,7 +1098,7 @@ proptest! {
             .map(|p| p.candidate.clone()).collect();
         prop_assert_eq!(actual, expected.clone(), "{}: {:#?}\n{}", selection, plan, replay);
         prop_assert!(plan.plan.iter().any(|p| p.candidate == newest_path
-            && p.reason == Some("newest_version")), "{selection}: {plan:#?}\n{}", replay);
+            && p.reason == Some(Reason::NewestVersion)), "{selection}: {plan:#?}\n{}", replay);
 
         let run_host = ModelHost::new(&model)
             .map_err(|e| TestCaseError::fail(format!("{e}\n{replay}")))?;

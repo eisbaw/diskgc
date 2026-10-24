@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::doc::{code_blocks, reference_md, section, table};
-use crate::engine::{Checkouts, Reason};
+use crate::engine::{Checkouts, RESERVED_REASONS, Reason};
 
 /// Documented object fields this build always emits as `null`, and why.
 const NULL_FOR_NOW: &[(&str, &str)] = &[("index", "no index before task-28/29")];
@@ -47,7 +47,7 @@ fn full() -> Report {
         checkouts: Checkouts::Allow,
         build_evidence: None,
     };
-    r.plan = vec![plan(None, Some(7)), plan(Some("not_idle"), None)];
+    r.plan = vec![plan(None, Some(7)), plan(Some(Reason::NotIdle), None)];
     r.actions = vec![ActionEntry {
         tier: "--select".into(),
         profile: "cargo-target".into(),
@@ -63,7 +63,7 @@ fn full() -> Report {
         candidate: "/u".into(),
         count: 1,
         examples: vec!["/u".into()],
-        reason: "in_use",
+        reason: Reason::InUse,
         detail: Some("pid 42 uses it".into()),
         process_blockers: Some(vec![crate::engine::ProcessBlocker {
             pid: 42,
@@ -190,19 +190,12 @@ fn every_status_and_reason_is_a_documented_value() {
         "plan checkouts values"
     );
     let reasons = alternatives(&doc["skipped"][0]["reason"]);
-    // These five reasons come from kind-specific backends and predicates,
-    // rather than the eligibility walk's Reason enum.
-    let backend_reasons = [
-        "remote_backend",
-        "unsupported_backend",
-        "backend_unavailable",
-        "has_not",
-        "stale",
-    ];
+    // Every reason the report can carry, and the reserved ones no code
+    // produces yet: exactly the documented enum.
     let all_reasons: BTreeSet<String> = Reason::ALL
         .iter()
         .map(|reason| reason.as_str())
-        .chain(backend_reasons)
+        .chain(RESERVED_REASONS.iter().map(|(reason, _)| *reason))
         .map(str::to_owned)
         .collect();
     assert_eq!(all_reasons, reasons, "the full documented skip enum");
@@ -212,17 +205,13 @@ fn every_status_and_reason_is_a_documented_value() {
         .map(|e| e.as_str().to_owned())
         .collect();
     assert_eq!(evidence_values, expected_evidence);
-    for reason in Reason::ALL
-        .iter()
-        .map(|reason| reason.as_str())
-        .chain(backend_reasons)
-    {
+    for reason in Reason::ALL {
         let mut r = full();
         r.skipped[0].reason = reason;
         r.plan[1].reason = Some(reason);
         let got = emitted(&r);
-        assert_eq!(got["skipped"][0]["reason"], reason);
-        assert_eq!(got["plan"][1]["reason"], reason);
+        assert_eq!(got["skipped"][0]["reason"], reason.as_str());
+        assert_eq!(got["plan"][1]["reason"], reason.as_str());
     }
     // Every status the report can carry shows up as that value.
     for status in Status::ALL {
@@ -232,12 +221,7 @@ fn every_status_and_reason_is_a_documented_value() {
     }
 }
 
-fn skip(
-    candidate: impl Into<PathBuf>,
-    tier: &str,
-    profile: &str,
-    reason: &'static str,
-) -> SkipEntry {
+fn skip(candidate: impl Into<PathBuf>, tier: &str, profile: &str, reason: Reason) -> SkipEntry {
     let candidate = candidate.into();
     SkipEntry {
         tier: tier.to_owned(),
@@ -256,12 +240,12 @@ fn skip(
 fn skips_aggregate_at_21_per_tier_profile_and_reason() {
     let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")));
     r.skipped = (0..20)
-        .map(|n| skip(format!("/p/{n}"), "tier-a", "profile-a", "locked"))
+        .map(|n| skip(format!("/p/{n}"), "tier-a", "profile-a", Reason::Locked))
         .collect();
     assert_eq!(emitted(&r)["skipped"].as_array().unwrap().len(), 20);
     assert_eq!(emitted(&r)["skipped"][0]["candidate"], "/p/0");
 
-    let mut last = skip("/p/20", "tier-a", "profile-a", "locked");
+    let mut last = skip("/p/20", "tier-a", "profile-a", Reason::Locked);
     last.detail = Some("a particular holder".into());
     last.estimated_bytes = Some(4096);
     r.skipped.push(last);
@@ -281,8 +265,10 @@ fn skips_aggregate_at_21_per_tier_profile_and_reason() {
 
     // Matching profiles in different tiers, and different reasons in the
     // same tier, retain their own rows and context.
-    r.skipped.push(skip("/q", "tier-b", "profile-a", "locked"));
-    r.skipped.push(skip("/r", "tier-a", "profile-a", "in_use"));
+    r.skipped
+        .push(skip("/q", "tier-b", "profile-a", Reason::Locked));
+    r.skipped
+        .push(skip("/r", "tier-a", "profile-a", Reason::InUse));
     let got = emitted(&r);
     assert_eq!(got["skipped"].as_array().unwrap().len(), 3);
     assert_eq!(got["skipped"][1]["tier"], "tier-b");
@@ -551,7 +537,7 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
         candidate: "/busy-build".into(),
         count: 1,
         examples: Vec::new(),
-        reason: "locked",
+        reason: Reason::Locked,
         detail: None,
         process_blockers: None,
         estimated_bytes: None,
@@ -562,7 +548,7 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
         candidate: "/already-empty".into(),
         count: 1,
         examples: Vec::new(),
-        reason: "empty",
+        reason: Reason::Empty,
         detail: None,
         process_blockers: None,
         estimated_bytes: None,
@@ -589,7 +575,7 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
             candidate: format!("/tmp/held-{index}").into(),
             count: 1,
             examples: Vec::new(),
-            reason: "in_use",
+            reason: Reason::InUse,
             detail: None,
             process_blockers: None,
             estimated_bytes: None,
@@ -613,7 +599,7 @@ fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
         candidate: PathBuf::new(),
         count: 1,
         examples: Vec::new(),
-        reason: "missing",
+        reason: Reason::Missing,
         detail: None,
         process_blockers: None,
         estimated_bytes: None,

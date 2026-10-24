@@ -43,7 +43,7 @@ fn ensure_below(host: &ModelHost, root: &Path) -> Outcome {
             .iter()
             .map(|s| Skipped {
                 candidate: s.candidate.clone(),
-                reason: s.reason.to_owned(),
+                reason: s.reason.as_str().to_owned(),
             })
             .collect(),
     }

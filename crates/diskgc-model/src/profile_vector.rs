@@ -667,7 +667,7 @@ fn compare_plan(report: &Report, expected: &[PlanVerdict]) -> Result<(), String>
         .iter()
         .map(|entry| PlanVerdict {
             candidate: entry.candidate.clone(),
-            reason: entry.reason.map(str::to_owned),
+            reason: entry.reason.map(|reason| reason.as_str().to_owned()),
             source: entry.build_evidence.as_ref().map(|e| e.source.clone()),
         })
         .collect();
@@ -702,7 +702,7 @@ fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String
         .iter()
         .map(|entry| SkipVerdict {
             candidate: entry.candidate.clone(),
-            reason: entry.reason.to_owned(),
+            reason: entry.reason.as_str().to_owned(),
             process_blockers: entry.process_blockers.as_ref().map(|blockers| {
                 sorted(blockers.iter().map(|blocker| BlockerVerdict {
                     pid: blocker.pid,

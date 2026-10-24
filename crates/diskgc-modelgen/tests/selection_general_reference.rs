@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use diskgc_core::config;
+use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::units::parse_size;
@@ -705,7 +706,7 @@ fn config_protect_uses_raw_outer_match_even_when_source_where_rejects_it() {
         plan.plan
             .iter()
             .any(|entry| entry.candidate == Path::new("/tmp/sel/a0/x0")
-                && entry.reason == Some("protected")),
+                && entry.reason == Some(Reason::Protected)),
         "raw outer protection did not cover the inner candidate: {plan:#?}"
     );
 }
@@ -904,7 +905,7 @@ fn unknown_type_below_selected_directory_refuses_whole_tree() {
         plan.plan
             .iter()
             .any(|entry| entry.candidate == Path::new("/tmp/sel/b1")
-                && entry.reason == Some("unsupported_fs")),
+                && entry.reason == Some(Reason::UnsupportedFs)),
         "unknown nested entry did not refuse outer candidate: {plan:#?}"
     );
 }

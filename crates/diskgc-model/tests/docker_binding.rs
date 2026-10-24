@@ -1,4 +1,5 @@
 use diskgc_core::docker_backend::{self, Binding, ImageStore, Storage};
+use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Dev;
 use diskgc_core::profile::Library;
@@ -21,7 +22,7 @@ fn bind(model: &str, target: Dev) -> (Binding, ModelHost) {
     (result, host)
 }
 
-fn skipped(model: &str, target: Dev, reason: &str) {
+fn skipped(model: &str, target: Dev, reason: Reason) {
     let (binding, _) = bind(model, target);
     match binding {
         Binding::Skipped(skip) => assert_eq!(skip.reason, reason, "{skip:?}"),
@@ -46,7 +47,7 @@ fn binds_only_the_real_bundled_image_root_on_the_requested_filesystem() {
             major: 254,
             minor: 1,
         },
-        "other_fs",
+        Reason::OtherFs,
     );
 }
 
@@ -60,7 +61,7 @@ fn build_cache_refuses_a_separate_buildkit_mount() {
     let binding = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::BuildCache)
         .expect("queries succeed");
     assert!(
-        matches!(binding, Binding::Skipped(ref skip) if skip.reason == "other_fs"),
+        matches!(binding, Binding::Skipped(ref skip) if skip.reason == Reason::OtherFs),
         "{binding:?}"
     );
     assert_eq!(host.trace_count(Op::RunCommand), 0);
@@ -86,7 +87,7 @@ fn build_cache_binding_does_not_require_the_image_store_mount() {
     ));
     assert!(matches!(
         docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap(),
-        Binding::Skipped(ref skip) if skip.reason == "other_fs"
+        Binding::Skipped(ref skip) if skip.reason == Reason::OtherFs
     ));
 }
 
@@ -98,7 +99,7 @@ fn remote_rootless_and_external_store_fail_closed() {
             "context_endpoint: '\"tcp://remote:2375\"'",
         ),
         DOCKER_FS,
-        "remote_backend",
+        Reason::RemoteBackend,
     );
     skipped(
         &BUNDLED.replace(
@@ -106,7 +107,7 @@ fn remote_rootless_and_external_store_fail_closed() {
             "context_endpoint: '\"unix:///run/user/1000/docker.sock\"'",
         ),
         DOCKER_FS,
-        "unsupported_backend",
+        Reason::UnsupportedBackend,
     );
     skipped(
         &BUNDLED.replace(
@@ -114,18 +115,18 @@ fn remote_rootless_and_external_store_fail_closed() {
             "/run/containerd/containerd.sock",
         ),
         DOCKER_FS,
-        "unsupported_backend",
+        Reason::UnsupportedBackend,
     );
     let model = format!("{BUNDLED}\n  host: tcp://remote:2375\n");
     let host = ModelHost::from_yaml(&model).expect("valid fake host");
     let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
-    assert!(matches!(result, Binding::Skipped(ref s) if s.reason == "remote_backend"));
+    assert!(matches!(result, Binding::Skipped(ref s) if s.reason == Reason::RemoteBackend));
     assert_eq!(host.trace_count(Op::DockerQuery), 0);
 
     let model = format!("{BUNDLED}\n  host: unix:///run/user/1000/docker.sock\n");
     let host = ModelHost::from_yaml(&model).expect("valid fake host");
     let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
-    assert!(matches!(result, Binding::Skipped(ref s) if s.reason == "unsupported_backend"));
+    assert!(matches!(result, Binding::Skipped(ref s) if s.reason == Reason::UnsupportedBackend));
     assert_eq!(host.trace_count(Op::DockerQuery), 0);
 }
 
@@ -138,7 +139,7 @@ fn unverified_docker_client_dispatch_refuses_build_cache_only() {
     let host = ModelHost::from_yaml(&model).unwrap();
     assert!(matches!(
         docker_backend::inspect_backend(&host, DOCKER_FS, Storage::BuildCache).unwrap(),
-        Binding::Skipped(ref skip) if skip.reason == "unsupported_backend"
+        Binding::Skipped(ref skip) if skip.reason == Reason::UnsupportedBackend
     ));
     assert_eq!(host.trace_count(Op::RunCommand), 0);
     assert!(matches!(
@@ -259,7 +260,7 @@ fn podman_compatibility_server_at_the_system_socket_is_unsupported() {
         let host = ModelHost::from_yaml(&model).expect("valid fake host");
         let binding = docker_backend::inspect_backend(&host, DOCKER_FS, storage).unwrap();
         assert!(
-            matches!(binding, Binding::Skipped(ref s) if s.reason == "unsupported_backend"
+            matches!(binding, Binding::Skipped(ref s) if s.reason == Reason::UnsupportedBackend
                 && s.detail.contains("not Docker Engine")),
             "{binding:?}"
         );
@@ -277,7 +278,7 @@ fn a_missing_docker_client_is_missing_after_one_query() {
     assert_ne!(model, BUNDLED, "fixture client line moved");
     let (binding, host) = bind(&model, DOCKER_FS);
     assert!(
-        matches!(binding, Binding::Skipped(ref s) if s.reason == "missing"),
+        matches!(binding, Binding::Skipped(ref s) if s.reason == Reason::Missing),
         "{binding:?}"
     );
     assert_eq!(host.trace_count(Op::DockerQuery), 1);

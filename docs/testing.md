@@ -313,13 +313,16 @@ its run, and no run is left over; no event is left unfired.
 `runner_invariants_reject_perturbed_vectors` shows these checks fail.
 
 Completeness is enforced by the results, not by tags in the files:
-`every_skip_reason_has_a_vector` needs, for each reason in `Reason::ALL`
-and in reference.md's JSON enum, a vector whose dry-run plan or reclaim
-skips show it. The only exemptions are documented reasons nothing
-produces yet, each naming the task that decides it (TASK-127); the test
-fails once such a reason enters `Reason::ALL`, is quoted as a reason in
-diskgc-core's sources, or is shown by a vector, so an exemption cannot
-outlive its fix;
+`every_skip_reason_has_a_vector` needs, for each reason in `Reason::ALL`,
+a vector whose dry-run plan or reclaim skips show it. The report's skip
+reason is a `Reason` (backend skips included), so `Reason::ALL` is every
+value the code can produce, and diskgc-core's
+`every_status_and_reason_is_a_documented_value` pins `Reason::ALL` plus
+`RESERVED_REASONS` to reference.md's enum exactly. `RESERVED_REASONS` are
+documented reasons nothing produces yet, each naming the task that adds
+its producer (`stale`: TASK-31; `backend_unavailable`: TASK-36, TASK-113);
+the test fails once one enters `Reason::ALL` or is shown by a vector, so a
+reservation cannot outlive its producer;
 `every_builtin_source_has_match_in_use_guarded_and_nested_vectors` needs,
 for each built-in source run unchanged, an action of it, an `in_use` or
 `locked` skip, a `protected` or `excluded` skip, and a nested-guard skip

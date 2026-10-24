@@ -24,7 +24,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::engine::{may_be_networked, path_in_private_tmp};
+use crate::engine::{Reason, may_be_networked, path_in_private_tmp};
 use crate::host::{
     Access, Base, Errno, FileType, Host, HostError, MountEntry, OpenHow, ResolveFlags, Stat,
 };
@@ -121,14 +121,20 @@ pub enum ResolveError {
 }
 
 impl ResolveError {
-    /// The skip reason (docs/reference.md, JSON output), or `error`.
-    pub fn reason(&self) -> &'static str {
+    /// The skip reason (docs/reference.md, JSON output); `None` for a
+    /// host error, which is an error of the run, never a skip.
+    pub fn skip_reason(&self) -> Option<Reason> {
         match self {
-            Self::UnsafePath { .. } => "unsafe_path",
-            Self::UnsupportedFs { .. } => "unsupported_fs",
-            Self::Missing { .. } => "missing",
-            Self::Host(_) => "error",
+            Self::UnsafePath { .. } => Some(Reason::UnsafePath),
+            Self::UnsupportedFs { .. } => Some(Reason::UnsupportedFs),
+            Self::Missing { .. } => Some(Reason::Missing),
+            Self::Host(_) => None,
         }
+    }
+
+    /// [`Self::skip_reason`]'s name, or `error` (messages and tests).
+    pub fn reason(&self) -> &'static str {
+        self.skip_reason().map_or("error", Reason::as_str)
     }
 }
 

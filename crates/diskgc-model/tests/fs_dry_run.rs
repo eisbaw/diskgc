@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{dir, host};
 use diskgc_core::config;
 use diskgc_core::engine::{
-    Candidate, Checkouts, DeleteOptions, End, Rules, delete_unchecked, walk,
+    Candidate, Checkouts, DeleteOptions, End, Reason, Rules, delete_unchecked, walk,
 };
 use diskgc_core::executor::{self, Request, SourceKind, Tier};
 use diskgc_core::inuse::MAX_LISTINGS;
@@ -227,9 +227,12 @@ processes:
     for (candidate, reason) in [
         ("/var/tmp/buildah-old", None),
         ("/var/tmp/container_images_storage-old", None),
-        ("/var/tmp/buildah-fresh", Some("not_idle")),
-        ("/var/tmp/container_images_storage-busy", Some("in_use")),
-        ("/var/tmp/buildah-future", Some("future_time")),
+        ("/var/tmp/buildah-fresh", Some(Reason::NotIdle)),
+        (
+            "/var/tmp/container_images_storage-busy",
+            Some(Reason::InUse),
+        ),
+        ("/var/tmp/buildah-future", Some(Reason::FutureTime)),
     ] {
         assert_eq!(reason_of(&report, candidate), Some(reason), "{candidate}");
     }
@@ -282,7 +285,7 @@ fn browser_cache_builtins_have_golden_sets_and_refuse_live_locks() {
 
     for (profile, cache, _) in browsers {
         let request = built_in_request(&format!("profile:{profile}"), "/home/mark");
-        let mut expected: Vec<(String, Option<&'static str>)> = [
+        let mut expected: Vec<(String, Option<Reason>)> = [
             "Default/Cache",
             "Default/Code Cache",
             "Profile 1/Cache",
@@ -301,7 +304,7 @@ fn browser_cache_builtins_have_golden_sets_and_refuse_live_locks() {
         guarded.sort();
         let blocked: Vec<_> = expected
             .iter()
-            .map(|(path, _)| (path.clone(), Some("in_use")))
+            .map(|(path, _)| (path.clone(), Some(Reason::InUse)))
             .collect();
         assert_eq!(guarded, blocked, "{profile} live lock");
     }
@@ -469,39 +472,39 @@ fn shipped_version_profiles_have_golden_judgements() {
             "cursor-agent-versions",
             vec![
                 ("v0", None),
-                ("v1", Some("linked_current")),
-                ("v2", Some("linked_current")),
-                ("v3", Some("newest_version")),
-                ("v4", Some("newest_version")),
+                ("v1", Some(Reason::LinkedCurrent)),
+                ("v2", Some(Reason::LinkedCurrent)),
+                ("v3", Some(Reason::NewestVersion)),
+                ("v4", Some(Reason::NewestVersion)),
             ],
         ),
         (
             "codex-releases",
             vec![
-                ("v1", Some("linked_current")),
+                ("v1", Some(Reason::LinkedCurrent)),
                 ("v2", None),
-                ("v3", Some("newest_version")),
-                ("v4", Some("newest_version")),
+                ("v3", Some(Reason::NewestVersion)),
+                ("v4", Some(Reason::NewestVersion)),
             ],
         ),
         (
             "claude-code-versions",
             vec![
-                ("1", Some("linked_current")),
+                ("1", Some(Reason::LinkedCurrent)),
                 ("2", None),
-                ("3", Some("newest_version")),
-                ("4", Some("newest_version")),
+                ("3", Some(Reason::NewestVersion)),
+                ("4", Some(Reason::NewestVersion)),
             ],
         ),
         (
             "cursor-extensions",
             vec![
-                ("a.ext-1.0.0", Some("installed_extension")),
+                ("a.ext-1.0.0", Some(Reason::InstalledExtension)),
                 ("a.ext-2.0.0", None),
-                ("a.ext-3.0.0", Some("newest_version")),
-                ("a.ext-4.0.0", Some("newest_version")),
-                ("b.ext-1.0.0", Some("installed_extension")),
-                ("unknown", Some("newest_version")),
+                ("a.ext-3.0.0", Some(Reason::NewestVersion)),
+                ("a.ext-4.0.0", Some(Reason::NewestVersion)),
+                ("b.ext-1.0.0", Some(Reason::InstalledExtension)),
+                ("unknown", Some(Reason::NewestVersion)),
             ],
         ),
     ] {
@@ -567,7 +570,7 @@ fn cursor_extension_groups_keep_each_id_newest_even_with_numeric_publisher() {
     ] {
         assert_eq!(
             reason_of(&report, &format!("{base}{name}")),
-            Some(Some("newest_version")),
+            Some(Some(Reason::NewestVersion)),
             "{name}: {:#?}",
             report.plan
         );
@@ -589,7 +592,7 @@ fn cursor_extension_groups_keep_each_id_newest_even_with_numeric_publisher() {
     for name in ["acme-3.tool-1.0.0", "acme-3.tool-3.0.0-2.0.0"] {
         assert_eq!(
             reason_of(&report, &format!("{base}{name}")),
-            Some(Some("newest_version")),
+            Some(Some(Reason::NewestVersion)),
             "{name}: {:#?}",
             report.plan
         );
@@ -636,9 +639,9 @@ fn version_profile_guard_mutations_expose_protected_old_candidates() {
         let mut request = built_in_request(&format!("profile:{profile}"), "/home/mark");
         let guarded = dry_run(&model, &request);
         let expected_reason = if profile == "cursor-extensions" {
-            "installed_extension"
+            Reason::InstalledExtension
         } else {
-            "linked_current"
+            Reason::LinkedCurrent
         };
         assert_eq!(
             reason_of(&guarded, candidate),
@@ -690,11 +693,11 @@ fn keep_newest_filter_really_narrows_a_source_term() {
     assert_eq!(reason_of(&filtered, "/home/mark/versions/v1"), Some(None));
     assert_eq!(
         reason_of(&filtered, "/home/mark/versions/v2"),
-        Some(Some("newest_version"))
+        Some(Some(Reason::NewestVersion))
     );
     assert_eq!(
         reason_of(&filtered, "/home/mark/versions/v3"),
-        Some(Some("newest_version"))
+        Some(Some(Reason::NewestVersion))
     );
     nothing_locked_or_deleted(&host);
 }
@@ -712,11 +715,11 @@ fn entry_and_version_filter_conjoin_in_dry_run() {
     assert_eq!(reason_of(&report, "/home/mark/versions/v1"), Some(None));
     assert_eq!(
         reason_of(&report, "/home/mark/versions/v2"),
-        Some(Some("filtered"))
+        Some(Some(Reason::Filtered))
     );
     assert_eq!(
         reason_of(&report, "/home/mark/versions/v3"),
-        Some(Some("newest_version"))
+        Some(Some(Reason::NewestVersion))
     );
     nothing_locked_or_deleted(&host);
 }
@@ -735,7 +738,7 @@ fn unresolvable_installed_link_retains_every_old_version() {
     for (target, expected) in [
         (
             "../share/cursor-agent/versions/missing",
-            Some("linked_current"),
+            Some(Reason::LinkedCurrent),
         ),
         ("/tmp/foreign", None),
     ] {
@@ -780,7 +783,7 @@ fn launcher_alias_outside_the_named_links_protects_an_old_version() {
     let guarded = dry_run(&host, &request);
     assert_eq!(
         reason_of(&guarded, "/home/mark/.local/share/cursor-agent/versions/v0"),
-        Some(Some("linked_current"))
+        Some(Some(Reason::LinkedCurrent))
     );
     assert_eq!(
         reason_of(&guarded, "/home/mark/.local/share/cursor-agent/versions/v1"),
@@ -812,12 +815,12 @@ fn absent_launcher_directory_is_empty_but_unsafe_or_unreadable_retains() {
         (
             "unsafe symlink directory",
             "  /home/mark/bin: {symlink: /tmp}\n".to_owned(),
-            Some("linked_current"),
+            Some(Reason::LinkedCurrent),
         ),
         (
             "unreadable",
             "  /home/mark/bin/other: {size: 1K}\nevents:\n  - {at: {op: read_dir, path: /home/mark/bin, when: before}, fail: EACCES}\n".to_owned(),
-            Some("linked_current"),
+            Some(Reason::LinkedCurrent),
         ),
     ] {
         let host = host(&yaml(&format!("{versions}{extra}")));
@@ -854,7 +857,7 @@ fn internal_dotdot_in_current_link_is_ambiguous_and_retains_old_release() {
     );
     assert_eq!(
         reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v0"),
-        Some(Some("linked_current")),
+        Some(Some(Reason::LinkedCurrent)),
         "internal .. can cross a symlink before it is evaluated: {:#?}",
         report.plan
     );
@@ -895,7 +898,7 @@ fn cursor_registry_missing_malformed_unsafe_or_unreadable_retains_versions() {
         );
         assert_eq!(
             reason_of(&report, "/home/mark/.cursor/extensions/a.ext-1.0.0"),
-            Some(Some("installed_extension")),
+            Some(Some(Reason::InstalledExtension)),
             "{case}: {:#?}",
             report.plan
         );
@@ -923,11 +926,11 @@ processes:
     );
     assert_eq!(
         reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v1"),
-        Some(Some("linked_current"))
+        Some(Some(Reason::LinkedCurrent))
     );
     assert_eq!(
         reason_of(&report, "/home/mark/.codex/packages/standalone/releases/v2"),
-        Some(Some("in_use"))
+        Some(Some(Reason::InUse))
     );
     nothing_locked_or_deleted(&host);
 }
@@ -1026,7 +1029,7 @@ fn nix_user_cache_keeps_an_eval_cache_with_an_open_sqlite_file() {
     let report = dry_run(&busy, &request);
     assert_eq!(
         reason_of(&report, "/home/mark/.cache/nix/eval-cache-v6"),
-        Some(Some("in_use"))
+        Some(Some(Reason::InUse))
     );
     assert_eq!(
         reason_of(&report, "/home/mark/.cache/nix/tarball-cache"),
@@ -1056,7 +1059,7 @@ fn dry_run_logged(host: &ModelHost, request: &Request) -> (Report, Vec<String>) 
 }
 
 /// The plan as (candidate, reason) pairs, in order.
-fn plan(report: &Report) -> Vec<(String, Option<&'static str>)> {
+fn plan(report: &Report) -> Vec<(String, Option<Reason>)> {
     report
         .plan
         .iter()
@@ -1064,7 +1067,7 @@ fn plan(report: &Report) -> Vec<(String, Option<&'static str>)> {
         .collect()
 }
 
-fn reason_of(report: &Report, candidate: &str) -> Option<Option<&'static str>> {
+fn reason_of(report: &Report, candidate: &str) -> Option<Option<Reason>> {
     report
         .plan
         .iter()
@@ -1087,7 +1090,7 @@ fn negated_profile_excludes_ancestor_even_when_its_own_where_fails() {
     );
     assert_eq!(
         reason_of(&report, "/tmp/neg-parent"),
-        Some(Some("excluded"))
+        Some(Some(Reason::Excluded))
     );
     assert_eq!(reason_of(&report, "/tmp/neg-free"), Some(None));
     nothing_locked_or_deleted(&host);
@@ -1164,16 +1167,25 @@ protect: [guard]
     };
     top.tier.protections = protections.clone();
     let report = dry_run(&host, &top);
-    assert_eq!(reason_of(&report, "/tmp/guarded"), Some(Some("protected")));
-    assert_eq!(reason_of(&report, "/tmp/parent"), Some(Some("protected")));
-    assert_ne!(reason_of(&report, "/tmp/other"), Some(Some("protected")));
+    assert_eq!(
+        reason_of(&report, "/tmp/guarded"),
+        Some(Some(Reason::Protected))
+    );
+    assert_eq!(
+        reason_of(&report, "/tmp/parent"),
+        Some(Some(Reason::Protected))
+    );
+    assert_ne!(
+        reason_of(&report, "/tmp/other"),
+        Some(Some(Reason::Protected))
+    );
 
     top.tier = Tier::select("profile:child", &config.library, None, 1000).unwrap();
     top.tier.protections = protections;
     let child_report = dry_run(&host, &top);
     assert_eq!(
         reason_of(&child_report, "/tmp/guarded/child"),
-        Some(Some("protected"))
+        Some(Some(Reason::Protected))
     );
     nothing_locked_or_deleted(&host);
 }
@@ -1380,7 +1392,7 @@ fn pytest_of_dir_plans_exactly_what_its_patterns_find() {
     // The eligible order is oldest first; /var/tmp is missing (a skip).
     assert_eq!(
         found.remove(found.len() - 1),
-        ("/var/tmp".to_owned(), Some("missing"))
+        ("/var/tmp".to_owned(), Some(Reason::Missing))
     );
     assert_eq!(
         found,
@@ -1429,16 +1441,16 @@ processes:
     );
     for (candidate, want) in [
         ("/tmp/pytest-of-ok", None),
-        ("/tmp/pytest-of-other", Some("not_owner")),
-        ("/tmp/pytest-of-inner-other", Some("not_owner")),
-        ("/tmp/pytest-of-kept", Some("kept")),
-        ("/tmp/tmp.K/pytest-of-x", Some("kept")),
-        ("/tmp/pytest-of-sock", Some("contains_ipc")),
-        ("/tmp/pytest-of-used", Some("in_use")),
-        ("/tmp/pytest-of-env", Some("in_use")),
-        ("/tmp/pytest-of-new", Some("not_idle")),
-        ("/tmp/pytest-of-future", Some("future_time")),
-        ("/tmp/pytest-of-mnt", Some("contains_mount")),
+        ("/tmp/pytest-of-other", Some(Reason::NotOwner)),
+        ("/tmp/pytest-of-inner-other", Some(Reason::NotOwner)),
+        ("/tmp/pytest-of-kept", Some(Reason::Kept)),
+        ("/tmp/tmp.K/pytest-of-x", Some(Reason::Kept)),
+        ("/tmp/pytest-of-sock", Some(Reason::ContainsIpc)),
+        ("/tmp/pytest-of-used", Some(Reason::InUse)),
+        ("/tmp/pytest-of-env", Some(Reason::InUse)),
+        ("/tmp/pytest-of-new", Some(Reason::NotIdle)),
+        ("/tmp/pytest-of-future", Some(Reason::FutureTime)),
+        ("/tmp/pytest-of-mnt", Some(Reason::ContainsMount)),
     ] {
         assert_eq!(
             reason_of(&report, candidate),
@@ -1493,7 +1505,7 @@ fn tmp_entry_takes_files_and_dirs_but_never_private_tmp_or_specials() {
     // reported as skipped before /tmp candidates are inspected.
     let host = common::host(&yaml("  /tmp/f: {}\n  /home/mark/x: {}\n"));
     let report = dry_run(&host, &request("profile:tmp-entry", &[], "/home/mark"));
-    assert_eq!(plan(&report), [("/tmp".to_owned(), Some("other_fs"))]);
+    assert_eq!(plan(&report), [("/tmp".to_owned(), Some(Reason::OtherFs))]);
     assert!(report.errors.is_empty(), "{:#?}", report.errors);
     assert!(
         host.trace()
@@ -1631,9 +1643,12 @@ fn anchored_cmake_needs_a_surviving_source_and_idle_output() {
             ("/home/mark/src/app/arbitrary-name".to_owned(), None),
             (
                 "/home/mark/src/checkout/output".to_owned(),
-                Some("contains_checkout")
+                Some(Reason::ContainsCheckout)
             ),
-            ("/home/mark/src/recent/output".to_owned(), Some("not_idle")),
+            (
+                "/home/mark/src/recent/output".to_owned(),
+                Some(Reason::NotIdle)
+            ),
         ],
         "{:#?}",
         report.plan
@@ -1711,9 +1726,12 @@ fn anchored_west_build_requires_source_and_zephyr_directory() {
     assert_eq!(
         actual,
         [
-            (deep.to_owned(), Some("not_idle")),
+            (deep.to_owned(), Some(Reason::NotIdle)),
             (format!("{root}/app/build"), None),
-            (format!("{root}/checkout/build"), Some("contains_checkout")),
+            (
+                format!("{root}/checkout/build"),
+                Some(Reason::ContainsCheckout)
+            ),
         ],
         "{:#?}",
         report.plan
@@ -1765,7 +1783,7 @@ fn shipped_project_python_caches_find_only_cache_directories() {
             ("/home/mark/src/app/pkg/__pycache__".to_owned(), None),
             (
                 "/home/mark/src/app/repo/__pycache__".to_owned(),
-                Some("contains_checkout")
+                Some(Reason::ContainsCheckout)
             ),
         ],
         "{:#?}",
@@ -1870,7 +1888,7 @@ fn entry_filters_have_known_and_unknown_verdicts() {
             report
                 .plan
                 .iter()
-                .any(|p| p.candidate == Path::new(filtered) && p.reason == Some("filtered")),
+                .any(|p| p.candidate == Path::new(filtered) && p.reason == Some(Reason::Filtered)),
             "{report:#?}"
         );
         nothing_locked_or_deleted(&host);
@@ -1888,7 +1906,7 @@ fn entry_filters_have_known_and_unknown_verdicts() {
                 .plan
                 .iter()
                 .any(|p| p.candidate == Path::new("/tmp/pytest-of-plain")
-                    && p.reason == Some("unreadable")),
+                    && p.reason == Some(Reason::Unreadable)),
             "{report:#?}"
         );
         assert!(host.unfired_events().is_empty());
@@ -1911,9 +1929,9 @@ fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
     let report = dry_run(&host, &request(selection, &[], "/tmp"));
     for (name, reason) in [
         ("good", None),
-        ("new", Some("not_idle")),
-        ("untagged", Some("filtered")),
-        ("kept", Some("filtered")),
+        ("new", Some(Reason::NotIdle)),
+        ("untagged", Some(Reason::Filtered)),
+        ("kept", Some(Reason::Filtered)),
     ] {
         let path = format!("/tmp/pytest-of-{name}");
         assert!(
@@ -1935,7 +1953,7 @@ fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
     let negated_host = common::host(&yaml(tree));
     let report = dry_run(&negated_host, &request(negated, &[], "/tmp"));
     for (name, reason) in [
-        ("good", Some("filtered")),
+        ("good", Some(Reason::Filtered)),
         ("new", None),
         ("untagged", None),
         ("kept", None),
@@ -1977,7 +1995,7 @@ fn unknown_marker_type_passes_neither_source_has_not_nor_term_has_not() {
                     } else {
                         "/tmp/pytest-of-a"
                     })
-                    && entry.reason == Some("unsupported_fs")
+                    && entry.reason == Some(Reason::UnsupportedFs)
             }),
             "{selection}: {report:#?}"
         );
@@ -1998,7 +2016,7 @@ fn negated_mixed_filter_unknown_second_entry_type_is_not_a_complement_match() {
             .plan
             .iter()
             .any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
-                && entry.reason == Some("unsupported_fs")),
+                && entry.reason == Some(Reason::UnsupportedFs)),
         "{report:#?}"
     );
     nothing_locked_or_deleted(&host);
@@ -2087,7 +2105,10 @@ fn a_blocking_scan_is_not_reused_past_the_reuse_limit() {
     )));
     let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
     assert!(host.unfired_events().is_empty());
-    assert_eq!(reason_of(&report, "/tmp/pytest-of-a"), Some(Some("in_use")));
+    assert_eq!(
+        reason_of(&report, "/tmp/pytest-of-a"),
+        Some(Some(Reason::InUse))
+    );
     assert_eq!(
         reason_of(&report, "/tmp/pytest-of-b"),
         Some(None),
@@ -2111,7 +2132,7 @@ fn a_mount_inside_is_refused_before_the_sources_where_looks_inside() {
     let report = dry_run(&host, &request("profile:unmounted", &[], "/tmp"));
     assert_eq!(
         plan(&report),
-        [("/tmp/pytest-of-m".to_owned(), Some("contains_mount"))],
+        [("/tmp/pytest-of-m".to_owned(), Some(Reason::ContainsMount))],
         "{:#?}",
         report.plan
     );
@@ -2290,12 +2311,12 @@ fn a_checkout_marker_anywhere_in_a_plain_delete_candidate_is_contains_checkout()
     assert_eq!(
         found,
         [
-            ("/tmp/gitlink".to_owned(), Some("contains_checkout")),
-            ("/tmp/hg".to_owned(), Some("contains_checkout")),
+            ("/tmp/gitlink".to_owned(), Some(Reason::ContainsCheckout)),
+            ("/tmp/hg".to_owned(), Some(Reason::ContainsCheckout)),
             ("/tmp/look-alike".to_owned(), None),
-            ("/tmp/svn".to_owned(), Some("contains_checkout")),
-            ("/tmp/two-repos".to_owned(), Some("contains_checkout")),
-            ("/tmp/worktree".to_owned(), Some("contains_checkout")),
+            ("/tmp/svn".to_owned(), Some(Reason::ContainsCheckout)),
+            ("/tmp/two-repos".to_owned(), Some(Reason::ContainsCheckout)),
+            ("/tmp/worktree".to_owned(), Some(Reason::ContainsCheckout)),
         ],
         "{:#?}",
         report.plan
@@ -2345,10 +2366,10 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
     assert_eq!(
         found,
         [
-            ("/tmp/hg".to_owned(), Some("contains_checkout")),
-            ("/tmp/kept-repo".to_owned(), Some("kept")),
+            ("/tmp/hg".to_owned(), Some(Reason::ContainsCheckout)),
+            ("/tmp/kept-repo".to_owned(), Some(Reason::Kept)),
             ("/tmp/plain".to_owned(), None),
-            ("/tmp/repo".to_owned(), Some("contains_checkout")),
+            ("/tmp/repo".to_owned(), Some(Reason::ContainsCheckout)),
         ],
         "{:#?}",
         report.plan
@@ -2385,7 +2406,7 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
         found,
         [
             ("/tmp/hg".to_owned(), None),
-            ("/tmp/kept-repo".to_owned(), Some("kept")),
+            ("/tmp/kept-repo".to_owned(), Some(Reason::Kept)),
             ("/tmp/plain".to_owned(), None),
             ("/tmp/repo".to_owned(), None),
         ],
@@ -2418,7 +2439,7 @@ fn the_checkout_path_rule_follows_the_profiles_setting() {
         )))
     };
     for (profile, metadata) in [
-        ("deep-dirs", Some("contains_checkout")),
+        ("deep-dirs", Some(Reason::ContainsCheckout)),
         ("deep-dirs-checkouts", None),
     ] {
         let host = host();
@@ -2462,7 +2483,10 @@ fn dormant_post_exec_tmpdir_is_a_known_process_scan_false_negative() {
     )));
     let report = dry_run(&host, &request("profile:tmp-entry", &[], "/tmp"));
     assert_eq!(reason_of(&report, "/tmp/tmp.post-exec"), Some(None));
-    assert_eq!(reason_of(&report, "/tmp/tmp.initial"), Some(Some("in_use")));
+    assert_eq!(
+        reason_of(&report, "/tmp/tmp.initial"),
+        Some(Some(Reason::InUse))
+    );
     assert_eq!(reason_of(&report, "/tmp/nix-shell.post-exec"), Some(None));
     assert_eq!(reason_of(&report, "/tmp/claude-1000"), Some(None));
     let shipped = Library::builtin().expect("built-ins");
@@ -2494,7 +2518,7 @@ fn jest_cache_finds_only_default_temp_directories_in_the_model() {
     )));
     let report = dry_run(&host, &request("profile:jest-cache", &[], "/tmp"));
     assert!(report.errors.is_empty(), "{report:#?}");
-    assert_eq!(reason_of(&report, "/var/tmp"), Some(Some("other_fs")));
+    assert_eq!(reason_of(&report, "/var/tmp"), Some(Some(Reason::OtherFs)));
     let mut actual: Vec<String> = plan(&report)
         .into_iter()
         .filter(|(_, reason)| reason.is_none())
@@ -2570,12 +2594,12 @@ fn a_candidate_inside_a_checkouts_metadata_is_contains_checkout_by_its_path() {
         [
             (
                 "/home/mark/src/proj/.git/objects".to_owned(),
-                Some("contains_checkout")
+                Some(Reason::ContainsCheckout)
             ),
             ("/home/mark/src/proj/.github/workflows".to_owned(), None),
             (
                 "/home/mark/src/proj/.hg/store".to_owned(),
-                Some("contains_checkout")
+                Some(Reason::ContainsCheckout)
             ),
             ("/home/mark/src/proj/build/out".to_owned(), None),
         ],

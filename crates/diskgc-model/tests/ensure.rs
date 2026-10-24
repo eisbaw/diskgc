@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use common::host;
 use diskgc_core::config;
+use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::hostlock::TMPFILES_LINES;
 use diskgc_core::profile::{Library, parse_profiles};
@@ -139,7 +140,7 @@ fn cargo_protect_uses_its_own_bound_roots_in_dry_run() {
                 .iter()
                 .find(|entry| entry.candidate == Path::new(path))
                 .map(|entry| entry.reason),
-            Some(Some("protected")),
+            Some(Some(Reason::Protected)),
             "{path}"
         );
     }
@@ -381,7 +382,7 @@ fn later_foreign_root_is_reported_before_earlier_tier_deletes() {
         report.skipped.iter().any(|skip| {
             skip.tier == "foreign-later"
                 && skip.candidate == Path::new("/home/mark/src/foreign")
-                && skip.reason == "other_fs"
+                && skip.reason == Reason::OtherFs
         }),
         "{report:#?}"
     );
@@ -703,14 +704,17 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
     );
     assert_eq!(report.status, Status::Exhausted, "{report:#?}");
     assert_eq!(report.exit_code(), 1);
-    let skipped: Vec<(&Path, &str)> = report
+    let skipped: Vec<(&Path, Reason)> = report
         .skipped
         .iter()
         .map(|s| (s.candidate.as_path(), s.reason))
         .collect();
     assert_eq!(
         skipped,
-        [(Path::new(OLD), "not_idle"), (Path::new(NEW), "not_idle")]
+        [
+            (Path::new(OLD), Reason::NotIdle),
+            (Path::new(NEW), Reason::NotIdle)
+        ]
     );
     assert!(calls(&host, Op::Unlinkat).is_empty());
     assert_eq!(report.held_by_deleted_files.len(), 1, "{report:#?}");
@@ -752,7 +756,7 @@ fn tallied_nonidle_cargo_targets_skip_before_any_target_flock() {
             .iter()
             .find(|entry| entry.candidate == Path::new(path))
             .expect("both tallied targets skipped");
-        assert_eq!(skip.reason, "not_idle", "{path}: {report:#?}");
+        assert_eq!(skip.reason, Reason::NotIdle, "{path}: {report:#?}");
         assert!(skip.estimated_bytes.is_some(), "{path}: {report:#?}");
         assert!(
             calls(&host, Op::Flock)
@@ -1515,7 +1519,7 @@ fn kept_old(extra: &str) -> String {
 }
 
 /// The skip reason `ensure` reported for `candidate`, if any.
-fn skip_reason<'r>(report: &'r Report, candidate: &str) -> Option<&'r str> {
+fn skip_reason(report: &Report, candidate: &str) -> Option<Reason> {
     report
         .skipped
         .iter()
@@ -1540,7 +1544,7 @@ fn a_tally_refusal_is_final_for_the_run_even_if_it_stops_being_true() {
         .map(|a| a.candidate.as_path())
         .collect();
     assert_eq!(order, [Path::new(NEW)], "{report:#?}");
-    assert_eq!(skip_reason(&report, OLD), Some("kept"));
+    assert_eq!(skip_reason(&report, OLD), Some(Reason::Kept));
     assert_eq!(
         report
             .skipped
@@ -1577,7 +1581,7 @@ fn a_kept_target_is_never_deleted_on_either_path() {
         let report = ensure(&host, &req);
         assert_eq!(
             skip_reason(&report, OLD),
-            Some("kept"),
+            Some(Reason::Kept),
             "{budget:?}: {report:#?}"
         );
         assert_eq!(unlinked_below(&host, OLD), 0, "{budget:?}");
@@ -1772,14 +1776,17 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     );
     assert_eq!(report.status, Status::DryRun, "{report:#?}");
     assert_eq!(report.exit_code(), 0);
-    let plan: Vec<(&Path, Option<&str>)> = report
+    let plan: Vec<(&Path, Option<Reason>)> = report
         .plan
         .iter()
         .map(|p| (p.candidate.as_path(), p.reason))
         .collect();
     assert_eq!(
         plan,
-        [(Path::new(OLD), None), (Path::new(NEW), Some("not_idle"))]
+        [
+            (Path::new(OLD), None),
+            (Path::new(NEW), Some(Reason::NotIdle))
+        ]
     );
     assert!(report.plan[0].estimated_bytes.expect("eligible: sized") >= 8 * GIB);
     assert_eq!(report.plan[1].estimated_bytes, None);
@@ -1848,7 +1855,7 @@ fn a_foreign_root_is_skipped_while_same_device_roots_reclaim() {
         report
             .skipped
             .iter()
-            .any(|skip| skip.candidate == Path::new("/tmp/w") && skip.reason == "other_fs"),
+            .any(|skip| skip.candidate == Path::new("/tmp/w") && skip.reason == Reason::OtherFs),
         "{report:#?}"
     );
     assert_eq!(report.actions.len(), 2, "{report:#?}");
@@ -1989,7 +1996,7 @@ fn same_cargo_source_positive_idle_union_uses_weakest_bound_once() {
         assert_eq!(plan.plan[0].candidate, Path::new(OLD));
         assert_eq!(plan.plan[0].reason, None);
         assert_eq!(plan.plan[1].candidate, Path::new(NEW));
-        assert_eq!(plan.plan[1].reason, Some("not_idle"));
+        assert_eq!(plan.plan[1].reason, Some(Reason::NotIdle));
         assert!(calls(&planning, Op::Unlinkat).is_empty());
 
         let reclaiming = host(&yaml(true, ""));
@@ -2055,7 +2062,7 @@ fn unfiltered_cargo_union_member_keeps_its_source_minimum_age() {
         assert_eq!(plan.plan[0].candidate, Path::new(OLD));
         assert_eq!(plan.plan[0].reason, None);
         assert_eq!(plan.plan[1].candidate, Path::new(NEW));
-        assert_eq!(plan.plan[1].reason, Some("not_idle"));
+        assert_eq!(plan.plan[1].reason, Some(Reason::NotIdle));
         assert!(calls(&planning, Op::Unlinkat).is_empty());
 
         let reclaiming = host(&yaml(true, ""));
@@ -2101,7 +2108,7 @@ fn negated_idle_filter_reclaims_only_recent_cargo_target() {
     assert!(
         plan.plan
             .iter()
-            .any(|e| e.candidate == Path::new(OLD) && e.reason == Some("too_idle")),
+            .any(|e| e.candidate == Path::new(OLD) && e.reason == Some(Reason::TooIdle)),
         "{plan:#?}"
     );
     let report = ensure(&host, &request);
@@ -2142,7 +2149,7 @@ fn negated_idle_filter_rechecks_cargo_target_after_lock_time_passes() {
         report
             .skipped
             .iter()
-            .any(|e| e.candidate == Path::new(NEW) && e.reason == "too_idle"),
+            .any(|e| e.candidate == Path::new(NEW) && e.reason == Reason::TooIdle),
         "{report:#?}"
     );
     let late_skip = report
@@ -2243,7 +2250,7 @@ fn allow_lines(lines: &[String]) -> Vec<&String> {
 }
 
 /// The plan's reason for `candidate` (`Some(None)`: eligible).
-fn plan_reason<'r>(report: &'r Report, candidate: &str) -> Option<Option<&'r str>> {
+fn plan_reason(report: &Report, candidate: &str) -> Option<Option<Reason>> {
     report
         .plan
         .iter()
@@ -2272,12 +2279,12 @@ fn a_cargo_target_tier_takes_its_checkout_setting_from_its_profile() {
     let (report, lines) = dry_run_logged(&host, &my_targets("1G"));
     assert_eq!(
         plan_reason(&report, OLD),
-        Some(Some("contains_checkout")),
+        Some(Some(Reason::ContainsCheckout)),
         "{report:#?}"
     );
     assert_eq!(
         plan_reason(&report, meta),
-        Some(Some("contains_checkout")),
+        Some(Some(Reason::ContainsCheckout)),
         "{report:#?}"
     );
     assert_eq!(plan_reason(&report, NEW), Some(None), "{report:#?}");
@@ -2316,12 +2323,12 @@ fn a_cargo_target_tier_reclaims_checkouts_only_when_its_profile_allows() {
         assert_eq!(report.status, Status::Exhausted, "{budget:?}: {report:#?}");
         assert_eq!(
             skip_reason(&report, OLD),
-            Some("contains_checkout"),
+            Some(Reason::ContainsCheckout),
             "{budget:?}: {report:#?}"
         );
         assert_eq!(
             skip_reason(&report, meta),
-            Some("contains_checkout"),
+            Some(Reason::ContainsCheckout),
             "{budget:?}: {report:#?}"
         );
         let order: Vec<&Path> = report
@@ -2380,7 +2387,7 @@ fn a_cargo_target_with_a_marker_between_root_and_its_entries_is_refused() {
         let report = dry_run(&host, &my_targets("1G"));
         assert_eq!(
             plan_reason(&report, &target),
-            Some(Some("contains_checkout")),
+            Some(Some(Reason::ContainsCheckout)),
             "{tree}: {report:#?}"
         );
         let host = common::host(&fixture);
@@ -2398,7 +2405,7 @@ fn a_cargo_target_with_a_marker_between_root_and_its_entries_is_refused() {
             let report = ensure(&host, &req);
             assert_eq!(
                 skip_reason(&report, &target),
-                Some("contains_checkout"),
+                Some(Reason::ContainsCheckout),
                 "{budget:?} {tree}: {report:#?}"
             );
             assert_eq!(unlinked_below(&host, &target), 0, "{budget:?} {tree}");
@@ -2433,7 +2440,7 @@ fn a_reclaimed_cargo_target_is_not_a_skip_on_later_ensures() {
         for target in [OLD, NEW] {
             assert_eq!(
                 plan_reason(&plan, target),
-                Some(Some("empty")),
+                Some(Some(Reason::Empty)),
                 "{budget:?}: {plan:#?}"
             );
         }
@@ -2455,14 +2462,14 @@ fn a_reclaimed_cargo_target_is_not_a_skip_on_later_ensures() {
 /// or `target/<M>/debug` next to a full `debug`. With the target's
 /// expected reason under the built-in `checkouts: allow` (`None`:
 /// eligible).
-fn empty_checkout_layouts() -> Vec<(String, String, Option<&'static str>)> {
+fn empty_checkout_layouts() -> Vec<(String, String, Option<Reason>)> {
     let at = "2026-10-02T00:00:00Z";
     let (full, empty) = (profile("1G", at), empty_profile(at));
     let tag = "CACHEDIR.TAG: {cachedir_tag: true}";
     let mut layouts = vec![(
         "/home/mark/src/x/.git/target".to_owned(),
         format!("  /home/mark/src/x/.git/target:\n    {tag}\n    debug: {empty}\n"),
-        Some("empty"),
+        Some(Reason::Empty),
     )];
     for marker in [".git", ".hg", ".svn"] {
         for inner in [empty.clone(), format!("{{debug: {empty}}}")] {
@@ -2496,7 +2503,7 @@ fn a_cargo_target_with_an_empty_profile_directory_in_checkout_metadata_is_refuse
         let report = dry_run(&host, &my_targets("1G"));
         assert_eq!(
             plan_reason(&report, &target),
-            Some(Some("contains_checkout")),
+            Some(Some(Reason::ContainsCheckout)),
             "{tree}: {report:#?}"
         );
         let host = common::host(&fixture);
@@ -2514,7 +2521,7 @@ fn a_cargo_target_with_an_empty_profile_directory_in_checkout_metadata_is_refuse
             let report = ensure(&host, &req);
             assert_eq!(
                 skip_reason(&report, &target),
-                Some("contains_checkout"),
+                Some(Reason::ContainsCheckout),
                 "{budget:?} {tree}: {report:#?}"
             );
             assert_eq!(unlinked_below(&host, &target), 0, "{budget:?} {tree}");

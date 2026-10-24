@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use diskgc_core::engine::{ProcessEvidence, Reason};
+use diskgc_core::engine::{ProcessEvidence, RESERVED_REASONS, Reason};
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_model::profile_vector::{Checked, ProfileVector, corpus_files};
 
@@ -85,112 +85,48 @@ fn every_vector_in_the_corpus_passes() {
     );
 }
 
-/// The skip reasons of the JSON contract (docs/reference.md, Output): the
-/// one `json` block's `skipped[0].reason` alternatives.
-fn documented_skip_reasons() -> BTreeSet<String> {
-    let reference = include_str!("../../../docs/reference.md");
-    let output = &reference[reference.find("\n## Output").expect("Output section")..];
-    let start = output.find("```json\n").expect("json block") + "```json\n".len();
-    let end = start + output[start..].find("\n```").expect("end of json block");
-    let doc: serde_json::Value = serde_json::from_str(&output[start..end]).expect("JSON parses");
-    doc["skipped"][0]["reason"]
-        .as_str()
-        .expect("reason enum")
-        .split('|')
-        .map(|reason| reason.trim().to_owned())
-        .collect()
-}
-
-/// Documented skip reasons nothing produces yet, each naming the task that
-/// decides it. The exemption shrinks itself: `every_skip_reason_has_a_vector`
-/// fails as soon as one of these is in `Reason::ALL`, is written as a
-/// string literal in diskgc-core's non-test sources (a producer), or is
-/// shown by a vector.
-const REASONS_WITHOUT_PRODUCER: [(&str, &str); 3] = [
-    ("backend_unavailable", "TASK-36, TASK-113"),
-    ("has_not", "TASK-127"),
-    ("stale", "TASK-127"),
-];
-
-/// diskgc-core's non-test sources that may produce `reason` outside the
-/// `Reason` enum: report skip reasons are `&'static str`, and the only
-/// other producers are backend skips (docker_backend.rs, executor.rs). A
-/// file counts when it is one of those and quotes the reason, or when one
-/// of its lines quotes it next to the word `reason` (a predicate or group
-/// named `has_not` or `stale` elsewhere is not a skip reason).
-fn core_sources_quoting(reason: &str) -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../diskgc-core/src");
-    let quoted = format!("\"{reason}\"");
-    let mut found = Vec::new();
-    let mut pending = vec![root];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).expect("diskgc-core sources") {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name().is_some_and(|name| name != "tests.rs")
-            {
-                let text = fs::read_to_string(&path).expect("readable source");
-                // The report's reason is a free `&'static str`; these files
-                // pass literals to it on lines that need not say `reason`
-                // (`skip_docker(.., "changed", ..)`). A closed report
-                // enum would make this scan unnecessary (TASK-127).
-                let backend = path
-                    .file_name()
-                    .is_some_and(|n| n == "docker_backend.rs" || n == "executor.rs");
-                let produces = if backend {
-                    text.contains(&quoted)
-                } else {
-                    text.lines()
-                        .any(|line| line.contains(&quoted) && line.contains("reason"))
-                };
-                if produces {
-                    found.push(path);
-                }
-            }
-        }
-    }
-    found
-}
-
-/// AC 2: every skip reason the code can report (`Reason::ALL`) and every
-/// one the JSON contract documents is shown by at least one vector, as a
-/// dry-run plan reason or a reclaim skip that matched its expectation.
+/// AC 2: every skip reason the report can carry (`Reason::ALL`) is shown
+/// by at least one vector, as a dry-run plan reason or a reclaim skip that
+/// matched its expectation. The report's reason is a `Reason`, so ALL is
+/// every value the code can produce; diskgc-core's
+/// `every_status_and_reason_is_a_documented_value` pins that ALL plus
+/// `RESERVED_REASONS` is exactly reference.md's enum. A reserved reason
+/// (documented, no producer yet) is exempt, and the exemption shrinks
+/// itself: this fails once one enters `Reason::ALL` or a vector shows it.
 #[test]
 fn every_skip_reason_has_a_vector() {
     let mut shown = BTreeSet::new();
     for (_, result) in corpus() {
         if let Ok(checked) = result {
-            shown.extend(checked.dry_run.plan.iter().filter_map(|row| row.reason));
-            shown.extend(checked.reclaim.skipped.iter().map(|row| row.reason));
+            shown.extend(
+                checked
+                    .dry_run
+                    .plan
+                    .iter()
+                    .filter_map(|row| row.reason.map(Reason::as_str)),
+            );
+            shown.extend(
+                checked
+                    .reclaim
+                    .skipped
+                    .iter()
+                    .map(|row| row.reason.as_str()),
+            );
         }
     }
     let in_enum: BTreeSet<&str> = Reason::ALL.iter().map(|reason| reason.as_str()).collect();
-    for (reason, task) in REASONS_WITHOUT_PRODUCER {
+    for (reason, task) in RESERVED_REASONS {
         assert!(
             !in_enum.contains(reason),
-            "`{reason}` is exempt ({task}: no producer) but is now in Reason::ALL: \
-             write its vector and drop the exemption"
-        );
-        let producers = core_sources_quoting(reason);
-        assert!(
-            producers.is_empty(),
-            "`{reason}` is exempt ({task}: no producer) but diskgc-core now quotes it in \
-             {producers:?}: write its vector and drop the exemption"
+            "`{reason}` is reserved ({task}: no producer) but is now in Reason::ALL: \
+             write its vector and drop it from RESERVED_REASONS"
         );
         assert!(
             !shown.contains(reason),
-            "`{reason}` is exempt ({task}) but a vector shows it: drop the exemption"
+            "`{reason}` is reserved ({task}) but a vector shows it: drop it from RESERVED_REASONS"
         );
     }
-    let mut required = documented_skip_reasons();
-    required.extend(in_enum.iter().map(|reason| (*reason).to_owned()));
-    let exempt: BTreeSet<&str> = REASONS_WITHOUT_PRODUCER.iter().map(|(r, _)| *r).collect();
-    let missing: Vec<_> = required
-        .iter()
-        .filter(|reason| !shown.contains(reason.as_str()) && !exempt.contains(reason.as_str()))
-        .collect();
+    let missing: Vec<_> = in_enum.difference(&shown).collect();
     assert!(
         missing.is_empty(),
         "skip reasons without a vector: {missing:?}"
@@ -249,7 +185,7 @@ fn every_builtin_source_has_match_in_use_guarded_and_nested_vectors() {
             .filter(|s| builtin(&s.profile))
         {
             for (category, reasons) in CATEGORIES {
-                if reasons.contains(&skip.reason) {
+                if reasons.contains(&skip.reason.as_str()) {
                     shown.insert((skip.profile.clone(), category));
                 }
             }

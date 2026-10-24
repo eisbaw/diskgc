@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
+use diskgc_core::engine::Reason;
 use diskgc_core::engine::{Checkouts, Rules};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::fs_kind::{self, EntryFilter, Find, Judge};
@@ -336,35 +337,35 @@ fn union_retention_guards_veto_even_when_their_term_fails_evidence_in_both_order
             "  /tmp/union-version/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-version/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n",
             "/tmp/union-version/v1",
             "/tmp/union-version/v2",
-            "newest_version",
+            Reason::NewestVersion,
         ),
         (
             "link",
             "  /tmp/union-link/releases/v1: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-01T00:00:00Z}}\n  /tmp/union-link/releases/v2: {.: {mtime: 2026-10-02T00:00:00Z}, payload: {size: 1M, mtime: 2026-10-02T00:00:00Z}}\n  /tmp/union-link/current: {symlink: releases/v1}\n",
             "/tmp/union-link/releases/v2",
             "/tmp/union-link/releases/v1",
-            "linked_current",
+            Reason::LinkedCurrent,
         ),
         (
             "extension",
             "  /tmp/union-extension/a.ext-1.0.0: {payload: {size: 1M}}\n  /tmp/union-extension/a.ext-2.0.0: {payload: {size: 1M}}\n  /tmp/union-extension/extensions.json: {content: '[{\"relativeLocation\":\"a.ext-1.0.0\",\"location\":{\"path\":\"/tmp/union-extension/a.ext-1.0.0\"}}]'}\n",
             "/tmp/union-extension/a.ext-2.0.0",
             "/tmp/union-extension/a.ext-1.0.0",
-            "installed_extension",
+            Reason::InstalledExtension,
         ),
         (
             "launcher",
             "  /tmp/union-launcher/releases/v1: {payload: {size: 1M}}\n  /tmp/union-launcher/releases/v2: {payload: {size: 1M}}\n  /tmp/union-launcher/current: {symlink: releases/v1}\n",
             "/tmp/union-launcher/releases/v2",
             "/tmp/union-launcher/releases/v1",
-            "linked_current",
+            Reason::LinkedCurrent,
         ),
         (
             "link-dir",
             "  /tmp/union-link-dir/releases/v1: {payload: {size: 1M}}\n  /tmp/union-link-dir/releases/v2: {payload: {size: 1M}}\n  /tmp/union-link-dir/bin/launcher: {symlink: ../releases/v1}\n",
             "/tmp/union-link-dir/releases/v2",
             "/tmp/union-link-dir/releases/v1",
-            "linked_current",
+            Reason::LinkedCurrent,
         ),
     ];
     for (kind, tree, eligible, retained, reason) in cases {
@@ -454,7 +455,7 @@ fn positive_filter_retention_guard_vetoes_other_admitted_union_term() {
         assert!(
             plan.plan.iter().any(
                 |entry| entry.candidate == Path::new("/tmp/union-version/v2")
-                    && entry.reason == Some("newest_version")
+                    && entry.reason == Some(Reason::NewestVersion)
             ),
             "{selection}: {plan:#?}"
         );
@@ -462,7 +463,7 @@ fn positive_filter_retention_guard_vetoes_other_admitted_union_term() {
         let report = ensure(&run_host, &request);
         assert_eq!(
             skip_of(&report, "/tmp/union-version/v2"),
-            Some("newest_version"),
+            Some(Reason::NewestVersion),
             "{selection}: {report:#?}"
         );
         assert!(
@@ -500,7 +501,7 @@ fn source_where_failure_does_not_hide_raw_retention_guard() {
                     plan.plan
                         .iter()
                         .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
-                            && entry.reason == Some("newest_version")
+                            && entry.reason == Some(Reason::NewestVersion)
                             && entry.profile == profile),
                     "{evidence}, {selection}: {plan:#?}"
                 );
@@ -511,7 +512,7 @@ fn source_where_failure_does_not_hide_raw_retention_guard() {
                         .skipped
                         .iter()
                         .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
-                            && entry.reason == "newest_version"
+                            && entry.reason == Reason::NewestVersion
                             && entry.profile == profile),
                     "{evidence}, {selection}: {report:#?}"
                 );
@@ -537,7 +538,7 @@ fn union_guards_still_veto_with_zero_tally_budget() {
         let guarded = Path::new("/tmp/union-version/v2");
         assert_eq!(
             skip_of(&report, guarded.to_str().unwrap()),
-            Some("newest_version"),
+            Some(Reason::NewestVersion),
             "{selection}: {report:#?}"
         );
         assert!(
@@ -573,7 +574,7 @@ fn union_retention_guard_rechecks_unclassifiable_link_after_candidate_lock() {
         let report = ensure(&run_host, &tmp(selection));
         assert_eq!(
             skip_of(&report, candidate),
-            Some("linked_current"),
+            Some(Reason::LinkedCurrent),
             "{selection}: {report:#?}"
         );
         assert!(exists(&run_host, candidate));
@@ -595,7 +596,7 @@ fn union_keep_newest_guard_rechecks_rank_after_candidate_lock() {
         let report = ensure(&run_host, &tmp(selection));
         assert_eq!(
             skip_of(&report, candidate),
-            Some("newest_version"),
+            Some(Reason::NewestVersion),
             "{selection}: {report:#?}"
         );
         assert!(exists(&run_host, candidate));
@@ -618,7 +619,7 @@ fn command_union_rechecks_every_retention_guard_at_final_boundary() {
         let report = ensure(&run_host, &tmp(selection));
         assert_eq!(
             skip_of(&report, candidate),
-            Some("linked_current"),
+            Some(Reason::LinkedCurrent),
             "{selection}: {report:#?}"
         );
         assert!(exists(&run_host, candidate));
@@ -676,7 +677,7 @@ fn command_union_plans_and_invokes_once_per_inode_with_source_profile() {
         assert!(
             plan.plan.iter().any(|entry| entry.candidate
                 == Path::new("/tmp/command-shared-checkout")
-                && entry.reason == Some("contains_checkout")),
+                && entry.reason == Some(Reason::ContainsCheckout)),
             "{plan:#?}"
         );
         let run_host = host(&yaml("", &tree, ""));
@@ -693,7 +694,7 @@ fn command_union_plans_and_invokes_once_per_inode_with_source_profile() {
         );
         assert_eq!(
             skip_of(&report, "/tmp/command-shared-checkout"),
-            Some("contains_checkout")
+            Some(Reason::ContainsCheckout)
         );
         for call in calls(&run_host, Op::RunCommand) {
             let run = call.command.as_ref().expect("command trace");
@@ -766,7 +767,7 @@ fn command_union_rechecks_all_checkout_policies_under_one_lock() {
         assert!(report.actions.is_empty(), "{selection}: {report:#?}");
         assert_eq!(
             skip_of(&report, "/tmp/command-shared-clear"),
-            Some("contains_checkout")
+            Some(Reason::ContainsCheckout)
         );
         assert!(calls(&run_host, Op::RunCommand).is_empty());
         assert_eq!(
@@ -796,7 +797,7 @@ fn command_union_checkout_veto_follows_newly_admitted_filter_term() {
     assert!(report.actions.is_empty(), "{report:#?}");
     assert_eq!(
         skip_of(&report, "/tmp/command-shared-checkout"),
-        Some("contains_checkout")
+        Some(Reason::ContainsCheckout)
     );
     assert!(calls(&run_host, Op::RunCommand).is_empty());
     assert!(run_host.unfired_events().is_empty());
@@ -857,7 +858,7 @@ fn command_union_rechecks_new_negated_match_just_before_invocation() {
     assert!(report.actions.is_empty(), "{report:#?}");
     assert_eq!(
         skip_of(&report, "/tmp/command-shared-clear"),
-        Some("excluded")
+        Some(Reason::Excluded)
     );
     assert!(calls(&run_host, Op::RunCommand).is_empty());
     assert!(run_host.unfired_events().is_empty());
@@ -876,7 +877,7 @@ fn command_union_reports_final_refusal_after_an_earlier_filtered_term() {
         .iter()
         .find(|entry| entry.candidate == Path::new("/tmp/command-shared-clear"))
         .expect("candidate refusal");
-    assert_eq!(skipped.reason, "excluded", "{report:#?}");
+    assert_eq!(skipped.reason, Reason::Excluded, "{report:#?}");
     assert_eq!(skipped.profile, "command-union-refuse", "{report:#?}");
     assert!(calls(&run_host, Op::RunCommand).is_empty());
     assert_eq!(run_host.trace_count(Op::Flock), 2, "one candidate lock");
@@ -930,7 +931,7 @@ fn command_union_late_fallback_rejudges_new_checkout_veto() {
     assert!(report.actions.is_empty(), "{report:#?}");
     assert_eq!(
         skip_of(&report, "/tmp/command-shared-clear"),
-        Some("contains_checkout")
+        Some(Reason::ContainsCheckout)
     );
     assert!(calls(&run_host, Op::RunCommand).is_empty());
     assert_eq!(run_host.trace_count(Op::Flock), 2, "one candidate lock");
@@ -978,7 +979,7 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
         plan.plan
             .iter()
             .any(|e| e.candidate == Path::new("/tmp/pytest-of-ancient")
-                && e.reason == Some("too_idle")),
+                && e.reason == Some(Reason::TooIdle)),
         "{plan:#?}"
     );
 
@@ -991,7 +992,8 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
         report
             .skipped
             .iter()
-            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent") && e.reason == "too_idle"),
+            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent")
+                && e.reason == Reason::TooIdle),
         "{report:#?}"
     );
     assert!(
@@ -1035,7 +1037,7 @@ fn entry_filters_are_rechecked_after_candidate_lock() {
             report
                 .skipped
                 .iter()
-                .any(|s| s.candidate == Path::new(candidate) && s.reason == "filtered"),
+                .any(|s| s.candidate == Path::new(candidate) && s.reason == Reason::Filtered),
             "{report:#?}"
         );
         assert!(exists(&host, candidate));
@@ -1050,9 +1052,9 @@ fn mixed_entry_and_idle_filter_rechecks_under_candidate_lock() {
         "  /tmp/pytest-of-a: {{.: {{mtime: {OLD}}}, CACHEDIR.TAG: {{size: 1K, mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}}}\n"
     );
     for (event, expected) in [
-        ("create: /tmp/pytest-of-a/.keep", "filtered"),
-        ("remove: /tmp/pytest-of-a/CACHEDIR.TAG", "filtered"),
-        ("create: /tmp/pytest-of-a/newer", "not_idle"),
+        ("create: /tmp/pytest-of-a/.keep", Reason::Filtered),
+        ("remove: /tmp/pytest-of-a/CACHEDIR.TAG", Reason::Filtered),
+        ("create: /tmp/pytest-of-a/newer", Reason::NotIdle),
     ] {
         let event = format!(
             "events:\n  - {{at: {{op: flock, path: /tmp/pytest-of-a, when: after}}, {event}}}\n"
@@ -1092,7 +1094,7 @@ fn negated_mixed_filter_complements_the_whole_conjunction() {
     let plan_host = host(&yaml("", &tree, ""));
     let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
     for (name, reason) in [
-        ("matches", Some("filtered")),
+        ("matches", Some(Reason::Filtered)),
         ("no-tag", None),
         ("marked", None),
         ("recent", None),
@@ -1150,7 +1152,7 @@ fn negated_mixed_filter_is_rechecked_under_candidate_lock() {
         assert!(report.actions.is_empty(), "{event}: {report:#?}");
         assert!(
             report.skipped.iter().any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
-                && entry.reason == "filtered"),
+                && entry.reason == Reason::Filtered),
             "{event}: {report:#?}"
         );
         assert!(exists(&reclaim_host, "/tmp/pytest-of-a"));
@@ -1178,7 +1180,7 @@ fn negated_mixed_filter_unknown_age_passes_neither_polarity() {
     assert!(
         plan.plan.iter().any(
             |entry| entry.candidate == Path::new("/tmp/pytest-of-unknown")
-                && entry.reason == Some("unsupported_fs")
+                && entry.reason == Some(Reason::UnsupportedFs)
         ),
         "{plan:#?}"
     );
@@ -1197,7 +1199,7 @@ fn negated_mixed_filter_future_age_does_not_admit_a_known_entry_mismatch() {
     assert!(
         plan.plan.iter().any(
             |entry| entry.candidate == Path::new("/tmp/pytest-of-future")
-                && entry.reason == Some("future_time")
+                && entry.reason == Some(Reason::FutureTime)
         ),
         "{plan:#?}"
     );
@@ -1215,7 +1217,7 @@ fn negated_mixed_filter_union_checkout_policy_uses_admitted_terms() {
         let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
         for (name, reason, checkouts) in [
             ("old", None, Checkouts::Allow),
-            ("recent", Some("contains_checkout"), Checkouts::Refuse),
+            ("recent", Some(Reason::ContainsCheckout), Checkouts::Refuse),
         ] {
             let path = format!("/tmp/union-shared-{name}");
             assert!(
@@ -1288,7 +1290,7 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
         assert!(
             plan.plan.iter().any(|entry| {
                 entry.candidate == Path::new("/tmp/union-shared-tagged")
-                    && entry.reason == Some("contains_checkout")
+                    && entry.reason == Some(Reason::ContainsCheckout)
             }),
             "{selection}: {plan:#?}"
         );
@@ -1324,7 +1326,7 @@ fn mixed_filter_union_uses_only_admitted_terms_in_plan_and_prequeue_tally() {
         let planned_host = host(&yaml("", &tree, ""));
         let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
         for (name, reason, checkouts) in [
-            ("old", Some("contains_checkout"), Checkouts::Refuse),
+            ("old", Some(Reason::ContainsCheckout), Checkouts::Refuse),
             ("recent", None, Checkouts::Allow),
             ("untagged", None, Checkouts::Allow),
             ("marked", None, Checkouts::Allow),
@@ -1390,7 +1392,7 @@ fn mixed_filter_union_rechecks_newly_admitted_term_under_candidate_lock() {
         assert!(
             report.skipped.iter().any(|entry| entry.candidate
                 == Path::new("/tmp/union-shared-clear")
-                && entry.reason == "contains_checkout"),
+                && entry.reason == Reason::ContainsCheckout),
             "{selection}: {report:#?}"
         );
         assert!(exists(&host, "/tmp/union-shared-clear"));
@@ -1413,7 +1415,7 @@ fn union_checkout_policy_rechecks_filter_under_candidate_lock() {
         assert!(
             report.skipped.iter().any(|entry| {
                 entry.candidate == Path::new("/tmp/union-shared-clear")
-                    && entry.reason == "contains_checkout"
+                    && entry.reason == Reason::ContainsCheckout
             }),
             "{selection}: {report:#?}"
         );
@@ -1484,7 +1486,7 @@ fn union_checkout_marker_uses_every_admitted_refusing_hardlink_alias() {
         assert_eq!(plan.plan.len(), 1, "{selection}: {plan:#?}");
         assert_eq!(
             plan.plan[0].reason,
-            Some("contains_checkout"),
+            Some(Reason::ContainsCheckout),
             "{selection}: {plan:#?}"
         );
         assert_eq!(plan.plan[0].profile, "alias-marker-refuse");
@@ -1493,7 +1495,7 @@ fn union_checkout_marker_uses_every_admitted_refusing_hardlink_alias() {
         let report = ensure(&reclaim_host, &request);
         assert!(report.actions.is_empty(), "{selection}: {report:#?}");
         assert_eq!(report.skipped.len(), 1, "{selection}: {report:#?}");
-        assert_eq!(report.skipped[0].reason, "contains_checkout");
+        assert_eq!(report.skipped[0].reason, Reason::ContainsCheckout);
         assert_eq!(report.skipped[0].profile, "alias-marker-refuse");
         assert!(exists(&reclaim_host, "/tmp/cache-file"));
         assert!(exists(&reclaim_host, "/tmp/.git"));
@@ -1687,7 +1689,7 @@ fn filesystem_union_dedupes_identity_and_refusal_wins_in_both_orders() {
         assert!(
             plan.plan.iter().any(|entry| entry.candidate
                 == Path::new("/tmp/union-shared-checkout")
-                && entry.reason == Some("contains_checkout")),
+                && entry.reason == Some(Reason::ContainsCheckout)),
             "{selection}: {plan:#?}"
         );
         let report = ensure(&host, &request);
@@ -1760,7 +1762,7 @@ fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
     assert_eq!(plan.errors[0].profile, "union-bad-root");
     assert_eq!(plan.plan.len(), 1, "{plan:#?}");
     assert_eq!(plan.plan[0].candidate, Path::new("/home"));
-    assert_eq!(plan.plan[0].reason, Some("other_fs"));
+    assert_eq!(plan.plan[0].reason, Some(Reason::OtherFs));
 
     let reclaim_host = host(&yaml("", tree, ""));
     let report = ensure(&reclaim_host, &request);
@@ -1770,7 +1772,7 @@ fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
         report
             .skipped
             .iter()
-            .any(|skip| skip.candidate == Path::new("/home") && skip.reason == "other_fs"),
+            .any(|skip| skip.candidate == Path::new("/home") && skip.reason == Reason::OtherFs),
         "{report:#?}"
     );
     assert!(report.actions.is_empty(), "{report:#?}");
@@ -1791,7 +1793,7 @@ fn filesystem_union_skips_foreign_second_source_and_reclaims_same_device_source(
         plan.plan.iter().any(|entry| {
             entry.profile == "union-bad-root"
                 && entry.candidate == Path::new("/home")
-                && entry.reason == Some("other_fs")
+                && entry.reason == Some(Reason::OtherFs)
         }),
         "{plan:#?}"
     );
@@ -1820,7 +1822,7 @@ fn filesystem_union_skips_foreign_second_source_and_reclaims_same_device_source(
             .iter()
             .any(|skip| skip.profile == "union-bad-root"
                 && skip.candidate == Path::new("/home")
-                && skip.reason == "other_fs"),
+                && skip.reason == Reason::OtherFs),
         "{report:#?}"
     );
     assert!(exists(&reclaim_host, "/home/union-foreign"));
@@ -1882,7 +1884,7 @@ fn root_mode_reclaims_only_named_owners_tree() {
         plan.plan
             .iter()
             .any(|item| item.candidate == Path::new("/tmp/pytest-of-other")
-                && item.reason == Some("not_owner")),
+                && item.reason == Some(Reason::NotOwner)),
         "{plan:?}"
     );
     let report = executor::ensure(&host, &request, &[1000], &mut |_| {});
@@ -2089,7 +2091,7 @@ fn entry_and_version_filter_conjoin_under_reclaim_lock() {
     assert!(report.actions.is_empty(), "{report:#?}");
     assert!(
         report.skipped.iter().any(|skip| {
-            skip.candidate == Path::new("/tmp/versions/v1") && skip.reason == "filtered"
+            skip.candidate == Path::new("/tmp/versions/v1") && skip.reason == Reason::Filtered
         }),
         "{report:#?}"
     );
@@ -2106,7 +2108,7 @@ fn actions(report: &Report) -> Vec<String> {
         .collect()
 }
 
-fn skip_of(report: &Report, candidate: &str) -> Option<&'static str> {
+fn skip_of(report: &Report, candidate: &str) -> Option<Reason> {
     report
         .skipped
         .iter()
@@ -2176,14 +2178,14 @@ fn an_fs_reclaim_deletes_every_eligible_candidate_oldest_first_and_nothing_else(
         assert!(!exists(&host, gone), "{gone} is still there");
     }
     let refused = [
-        ("/tmp/pytest-of-fresh", "not_idle"),
-        ("/tmp/pytest-of-kept", "kept"),
-        ("/tmp/nix-shell.K/pytest-of-d", "kept"),
-        ("/tmp/pytest-of-other", "not_owner"),
-        ("/tmp/pytest-of-sock", "contains_ipc"),
-        ("/tmp/pytest-of-fifo", "contains_ipc"),
-        ("/tmp/pytest-of-git", "contains_checkout"),
-        ("/tmp/pytest-of-used", "in_use"),
+        ("/tmp/pytest-of-fresh", Reason::NotIdle),
+        ("/tmp/pytest-of-kept", Reason::Kept),
+        ("/tmp/nix-shell.K/pytest-of-d", Reason::Kept),
+        ("/tmp/pytest-of-other", Reason::NotOwner),
+        ("/tmp/pytest-of-sock", Reason::ContainsIpc),
+        ("/tmp/pytest-of-fifo", Reason::ContainsIpc),
+        ("/tmp/pytest-of-git", Reason::ContainsCheckout),
+        ("/tmp/pytest-of-used", Reason::InUse),
     ];
     for (candidate, reason) in refused {
         assert_eq!(skip_of(&report, candidate), Some(reason), "{candidate}");
@@ -2386,7 +2388,7 @@ fn a_plain_delete_candidate_containing_private_tmp_is_kept() {
     let host = host(&yaml("", &tree, ""));
     let report = ensure(&host, &tmp("profile:tmp-entry"));
     assert_eq!(actions(&report), ["/tmp/good"], "{report:#?}");
-    assert_eq!(skip_of(&report, "/tmp/old"), Some("contains_special"));
+    assert_eq!(skip_of(&report, "/tmp/old"), Some(Reason::ContainsSpecial));
     assert!(exists(&host, &format!("{private}/tmp/f")));
     assert!(
         touching(&host, private).is_empty(),
@@ -2466,11 +2468,11 @@ fn a_network_filesystem_is_never_reclaimed_or_touched() {
     assert_eq!(actions(&report), ["/tmp/pytest-of-a"], "{report:#?}");
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-net"),
-        Some("contains_mount")
+        Some(Reason::ContainsMount)
     );
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-holder"),
-        Some("contains_mount")
+        Some(Reason::ContainsMount)
     );
     for mount in ["/tmp/pytest-of-net", "/tmp/pytest-of-holder/mnt"] {
         assert!(
@@ -2542,7 +2544,7 @@ fn every_fuse_filesystem_is_refused() {
 #[test]
 fn every_check_is_made_again_under_the_candidates_lock() {
     let flocked = |path: &str| format!("{{op: flock, path: {path}, when: after}}");
-    let cases: [(&str, String, String, &str, &str); 5] = [
+    let cases: [(&str, String, String, &str, Reason); 5] = [
         (
             "profile:pytest-of-dir",
             "/tmp/nix-shell.X/pytest-of-c".to_owned(),
@@ -2551,7 +2553,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/tmp/nix-shell.X/pytest-of-c")
             ),
             "/tmp/nix-shell.X/pytest-of-c",
-            "kept",
+            Reason::Kept,
         ),
         (
             "profile:marker-build-fixture",
@@ -2561,7 +2563,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/home/mark/src/build")
             ),
             "/home/mark/src/build",
-            "changed",
+            Reason::Changed,
         ),
         (
             "profile:marker-build-fixture",
@@ -2571,7 +2573,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/home/mark/src/build")
             ),
             "/home/mark/src/build",
-            "changed",
+            Reason::Changed,
         ),
         (
             "profile:pytest-of-dir",
@@ -2581,7 +2583,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/tmp/pytest-of-b")
             ),
             "/tmp/pytest-of-b",
-            "not_owner",
+            Reason::NotOwner,
         ),
         (
             "profile:pytest-of-dir",
@@ -2591,7 +2593,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/tmp/pytest-of-b")
             ),
             "/tmp/pytest-of-b",
-            "not_idle",
+            Reason::NotIdle,
         ),
     ];
     for (select, candidate, event, skipped, reason) in cases {
@@ -2657,7 +2659,11 @@ fn anchored_west_build_directory_marker_is_rechecked_under_lock() {
     };
     let report = ensure(&host, &request);
     assert!(host.unfired_events().is_empty(), "{report:#?}");
-    assert_eq!(skip_of(&report, candidate), Some("changed"), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, candidate),
+        Some(Reason::Changed),
+        "{report:#?}"
+    );
     assert_eq!(unlinked_below(&host, candidate), 0, "{report:#?}");
     assert!(exists(&host, &format!("{candidate}/CMakeCache.txt")));
 }
@@ -2694,7 +2700,7 @@ fn anchored_cmake_source_identity_is_rechecked_under_lock() {
         assert!(host.unfired_events().is_empty(), "{action}: {report:#?}");
         assert_eq!(
             skip_of(&report, candidate),
-            Some("changed"),
+            Some(Reason::Changed),
             "{action}: {report:#?}"
         );
         assert_eq!(unlinked_below(&host, candidate), 0, "{action}: {report:#?}");
@@ -2740,7 +2746,11 @@ fn anchored_cmake_reads_the_locked_candidate_after_its_path_is_swapped() {
     };
     let report = ensure(&host, &request);
     assert!(host.unfired_events().is_empty(), "{report:#?}");
-    assert_eq!(skip_of(&report, candidate), Some("changed"), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, candidate),
+        Some(Reason::Changed),
+        "{report:#?}"
+    );
     assert!(exists(&host, &format!("{moved}/original.o")));
     assert!(exists(&host, &format!("{candidate}/precious")));
     assert_eq!(unlinked_below(&host, moved), 0);
@@ -2813,7 +2823,7 @@ fn a_candidate_replaced_after_discovery_is_changed_and_nothing_is_deleted() {
         assert!(host.unfired_events().is_empty(), "{name}");
         assert_eq!(
             skip_of(&report, "/tmp/pytest-of-b"),
-            Some("changed"),
+            Some(Reason::Changed),
             "{name}: {report:#?}"
         );
         assert!(report.actions.is_empty(), "{name}: {report:#?}");
@@ -2843,7 +2853,7 @@ fn a_process_that_opens_a_candidate_after_an_earlier_scan_keeps_it() {
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert!(host.unfired_events().is_empty());
     assert_eq!(actions(&report), ["/tmp/pytest-of-b"], "{report:#?}");
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some("in_use"));
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some(Reason::InUse));
     assert!(exists(&host, "/tmp/pytest-of-a/f"));
 }
 
@@ -2864,7 +2874,7 @@ fn a_blocking_scan_is_replaced_at_the_short_limit() {
     let host = host(&yaml("", &tree, rest));
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert!(host.unfired_events().is_empty());
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some("in_use"));
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some(Reason::InUse));
     assert_eq!(actions(&report), ["/tmp/pytest-of-a"], "{report:#?}");
 }
 
@@ -2877,7 +2887,7 @@ fn an_unreadable_process_without_a_name_has_null_command_on_the_wire() {
         "  - {pid: 9, exe: /usr/bin/tool, name: '', proc: failed}\n",
     ));
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some("in_use"));
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some(Reason::InUse));
     let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("report JSON");
     assert_eq!(
         wire["skipped"][0]["process_blockers"],
@@ -2934,7 +2944,7 @@ fn a_flocked_candidate_is_locked() {
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-b"),
-        Some("locked"),
+        Some(Reason::Locked),
         "{report:#?}"
     );
     assert_eq!(unlinked_below(&host, "/tmp/pytest-of-b"), 0);
@@ -3031,7 +3041,7 @@ fn a_mount_made_after_the_flock_is_contains_mount_and_never_touched() {
     assert!(host.unfired_events().is_empty());
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-b"),
-        Some("contains_mount"),
+        Some(Reason::ContainsMount),
         "{report:#?}"
     );
     let trace = host.trace();
@@ -3080,7 +3090,7 @@ fn a_candidate_replaced_before_its_reach_is_never_opened_or_locked() {
     assert!(host.unfired_events().is_empty());
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-b"),
-        Some("changed"),
+        Some(Reason::Changed),
         "{report:#?}"
     );
     let after: Vec<_> = host
@@ -3177,7 +3187,7 @@ fn a_reclaiming_fs_run_never_deletes_proj_git_objects_unless_the_profile_allows_
     );
     assert_eq!(
         skip_of(&report, "/home/mark/src/proj/.git/objects"),
-        Some("contains_checkout"),
+        Some(Reason::ContainsCheckout),
         "{report:#?}"
     );
     assert!(exists(&host, "/home/mark/src/proj/.git/objects/f"));
@@ -3227,7 +3237,7 @@ fn an_in_use_command_candidate_never_runs_the_cleaner() {
     let host = host(&yaml("", &tree, held));
     let request = tmp("profile:cleaner");
     let report = ensure(&host, &request);
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some("in_use"));
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some(Reason::InUse));
     assert_eq!(calls(&host, Op::RunCommand).len(), 0);
     assert!(exists(&host, "/tmp/pytest-of-b/f"));
     let plan = dry_run(&host, &request);
@@ -3247,7 +3257,7 @@ fn a_browser_lock_created_before_command_start_blocks_the_cleaner() {
     let report = ensure(&host, &tmp("profile:guarded-cleaner"));
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-b"),
-        Some("in_use"),
+        Some(Reason::InUse),
         "{report:#?}\n{:#?}",
         host.trace()
     );
@@ -3267,7 +3277,7 @@ fn a_command_candidate_with_a_checkout_is_refused_before_exec() {
     let report = ensure(&host, &tmp("profile:cleaner"));
     assert_eq!(
         skip_of(&report, "/tmp/pytest-of-b"),
-        Some("contains_checkout"),
+        Some(Reason::ContainsCheckout),
         "{report:#?}"
     );
     assert!(calls(&host, Op::RunCommand).is_empty());
@@ -3281,7 +3291,7 @@ fn a_missing_command_tool_skips_the_profile_without_starting_a_child() {
     let report = ensure(&host, &tmp("profile:missing-cleaner"));
     assert_eq!(report.status, Status::Exhausted, "{report:#?}");
     assert_eq!(report.skipped.len(), 1, "{report:#?}");
-    assert_eq!(report.skipped[0].reason, "missing");
+    assert_eq!(report.skipped[0].reason, Reason::Missing);
     assert!(report.errors.is_empty(), "{report:#?}");
     assert!(calls(&host, Op::RunCommand).is_empty());
     assert!(exists(&host, "/tmp/pytest-of-b/f"));
@@ -3290,7 +3300,7 @@ fn a_missing_command_tool_skips_the_profile_without_starting_a_child() {
         &tmp("profile:missing-cleaner"),
     );
     assert_eq!(plan.plan.len(), 1, "{plan:#?}");
-    assert_eq!(plan.plan[0].reason, Some("missing"));
+    assert_eq!(plan.plan[0].reason, Some(Reason::Missing));
 }
 
 #[test]
@@ -3478,7 +3488,7 @@ fn cargo_report_json_keeps_multiple_attributed_processes() {
     );
     assert_eq!(
         skip_of(&report, "/home/mark/src/proj/target"),
-        Some("in_use"),
+        Some(Reason::InUse),
         "{report:#?}"
     );
     let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("report JSON");
