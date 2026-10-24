@@ -179,6 +179,26 @@ scan-timing SCANS="20" *ARGS="":
     "$CARGO_TARGET_DIR/release/examples/scan_timing" {{SCANS}} {{ARGS}}
     "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/examples/scan_timing" {{SCANS}} {{ARGS}}
 
+# Walkthrough driver (tools/walk, phase3.1 skill): a disposable rootless
+# Podman container from the e2e base image with the 0.1 release package on
+# PATH, seeded data on size-limited tmpfs and a host-shaped process load,
+# driven through tmux session walk-diskgc-ENV. Reclaiming runs belong there.
+# Bring up the walk container and its tmux session.
+walk-up ENV="podman":
+    bash tools/walk/up.sh {{ENV}}
+
+# Regenerate the walk container's data in place from WALK_SEED (default 1).
+walk-reset ENV="podman":
+    podman exec -e WALK_SEED="${WALK_SEED:-1}" walk-diskgc-{{ENV}} sh /opt/walk/reset.sh
+
+# Remove the walk container and its tmux session.
+walk-down ENV="podman":
+    bash tools/walk/down.sh {{ENV}}
+
+# Print the retro table from the verification notes' retro lines.
+retro:
+    python3 tools/retro.py
+
 # Build the static musl package into ./result.
 build:
     nix build -L

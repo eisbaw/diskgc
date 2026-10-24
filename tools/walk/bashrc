@@ -1,0 +1,7 @@
+# The walker's shell inside the walk container (tools/walk/up.sh): the
+# user's PATH with the installed diskgc and a Cargo, nothing else set up.
+export PATH=/usr/local/bin:/opt/cargo-under-test/1.99.1/bin:/opt/cargo-under-test/cc/bin:/bin
+export CARGO_NET_OFFLINE=true
+export TZ=UTC
+PS1='tester@walk:\w\$ '
+cd "$HOME"
