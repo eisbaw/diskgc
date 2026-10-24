@@ -2626,7 +2626,7 @@ fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
             .iter()
             .map(|entry| PlanVerdict {
                 candidate: entry.candidate.clone(),
-                reason: entry.reason.map(str::to_owned),
+                reason: entry.reason.map(|reason| reason.as_str().to_owned()),
                 source: entry.build_evidence.as_ref().map(|e| e.source.clone()),
             })
             .collect(),
@@ -2641,7 +2641,7 @@ fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
             .iter()
             .map(|entry| SkipVerdict {
                 candidate: entry.candidate.clone(),
-                reason: entry.reason.to_owned(),
+                reason: entry.reason.as_str().to_owned(),
                 process_blockers: None,
             })
             .collect(),
