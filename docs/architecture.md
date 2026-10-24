@@ -120,8 +120,23 @@ Unit {
   and hash match and it is younger than an hour, otherwise they tally
   synchronously; a snapshot of another user is unreadable, and the report
   says so. A mismatched or corrupt snapshot is ignored with a log line.
-- **Docker and Nix units** carry the reclaimable size the bound backend
-  reports (`docker buildx du`, `docker system df`), or no size if unknown.
+- **Docker units** carry the reclaimable size the bound backend reports
+  (`docker buildx du`, `docker system df`), or no size if unknown; TASK-120
+  settles which query, since Buildx writes client configuration.
+- **Nix units carry no size: Nix is sized only by its action.** The only
+  way to learn what a GC would free is Nix's own liveness computation
+  (`--print-dead`), which takes as long as the root discovery of a real GC,
+  reports no sizes, and unlinks stale `gcroots/auto` registrations, so it
+  is neither read-only nor cheap enough for a tally or a dry run. The
+  consequences: a `nix-store` tier is one unit with `estimated_bytes:
+  null`; its place in the policy is decided by its group and tier alone,
+  never by size (`best-fit` has nothing to compare, and a tier holds one
+  Nix unit); a dry run cannot say whether the GC would free anything; and
+  a reclaim runs the GC whenever earlier tiers left the goal unmet, even
+  when little is dead, costing the GC's fixed time (root discovery and the
+  `.links` scan, [safety.md](safety.md#nix-store)). Put the Nix tier after
+  cheaper tiers that free comparable space. TASK-98's out-link estimate
+  is a separate, hypothetical-root analysis, not this tally.
 
 ## The reclaim walk
 
@@ -200,7 +215,10 @@ reclaim(min, goal, filesystem, deadline):
   It does not bound eventual reclamation: if a filesystem frees blocks later
   than the re-sampling window, further candidates may already have been
   deleted by the time the space appears. Docker and Nix actions are whole
-  operations and can overshoot by design.
+  operations and can overshoot by design; a Nix GC's `--max-freed` is a
+  lower bound on Nix's own byte count, not on available space, and in an
+  optimised store its space appears only at the end of the GC
+  ([safety.md](safety.md#nix-store)).
 - **Tallies** count allocated blocks and each inode once (Cargo hard-links
   binaries from `deps/`), and are estimates; they order work and are never
   used to decide success.
@@ -209,7 +227,8 @@ reclaim(min, goal, filesystem, deadline):
 
 Before any tier runs: filesystem candidates (including Cargo targets) by
 device and mount ([safety.md](safety.md#path-traversal)); Docker by its
-bound backend's storage root; Nix by the store it will actually collect.
+bound backend's storage root; Nix by the device of `/nix/store`, the only
+store it collects ([safety.md](safety.md#nix-store)).
 A tier whose backend is elsewhere is skipped and reported (`other_fs`,
 `remote_backend`): deleting there would hurt a cache and free nothing here.
 

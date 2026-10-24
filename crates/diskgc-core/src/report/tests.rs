@@ -194,8 +194,8 @@ fn every_status_and_reason_is_a_documented_value() {
     // rather than the eligibility walk's Reason enum.
     let backend_reasons = [
         "remote_backend",
-        "unsupported_store",
         "unsupported_backend",
+        "backend_unavailable",
         "has_not",
         "stale",
     ];

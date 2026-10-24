@@ -176,7 +176,9 @@ diskgc watch --tally-only [--config FILE] PATH
   is in use (`exhausted`) or with misconfiguration errors, the next one
   starts only after available space has dropped by a further
   `max(1 GiB, 1% of the filesystem)` or 15 minutes have passed. Backend
-  errors (a Docker or Nix daemon unreachable) shorten the wait to 1 minute,
+  errors and `backend_unavailable` skips (a Docker or Nix daemon
+  unreachable, [Backend skips and errors](#backend-skips-and-errors))
+  shorten the wait to 1 minute,
   since backends often recover quickly. One log line per back-off. These
   values are fixed in code.
 - On SIGTERM/SIGINT: stop as described under Signals, exit 0.
@@ -443,7 +445,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_store | unsupported_backend | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid"}], "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | has_not | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage", "message": ""}]
@@ -560,6 +562,74 @@ is `host`.
   sizes, `target_met`) are `null`; `errors` says why. In `errors`, `tier`,
   `profile` and `candidate` are empty where they do not apply (a usage
   error, an error of the whole run).
+
+### Backend skips and errors
+
+Docker and Nix tiers act through a backend that diskgc binds first
+([safety.md](safety.md#docker-kinds), [safety.md](safety.md#nix-store)).
+One rule holds for every backend kind, at preflight and at the recheck
+right before acting:
+
+- **Skip** (the tier is excluded, reported in `skipped` with candidate
+  `""`, the other tiers run, and the exit code follows available space:
+  0, or 1 when nothing else failed): the host does not offer a supported,
+  reachable backend of that kind, identified from a specific signal, never
+  by turning failures into skips wholesale.
+
+  | Reason | When |
+  |---|---|
+  | `missing` | the client is not installed, or the backend's store is absent |
+  | `other_fs` | the backend's storage is not on the requested filesystem |
+  | `remote_backend` | the caller's client selects a remote endpoint or store |
+  | `unsupported_backend` | a backend diskgc has not verified: another local endpoint, context or store, single-user Nix, a client or daemon off the [allowlist](#backend-version-allowlist) or of another variant, an unverified storage layout or server identity, or a Nix daemon whose roots lack the system's generations |
+  | `backend_unavailable` | installed and selected, but not serving diskgc's user: the socket absent, connection refused, `EACCES` on the socket, the daemon not answering or refusing the user (Nix `allowed-users`) |
+  | `changed` | the backend bound at preflight differs at the recheck before acting (socket inode, versions, daemon identity) |
+
+- **Error** (`errors[]`, exit 3 when below `--min-free`): every other
+  failure. A query failing in a way not identified above, unparseable
+  output from an allowlisted version, a host I/O error, the sandbox gate,
+  and any failure once the deleting child has started
+  (nonzero exit, signal). A deadline during the child is 124.
+- Why: a host without a working backend of some kind is a configuration
+  fact, not a failure of this run; reporting it as an error would make
+  every timer-driven run on such a host exit 3 (TASK-113's Podman shim).
+  Narrow identification keeps a real failure of a supported backend loud.
+- `unsupported_store` is not a reason: store selection is part of binding
+  a backend and reports `unsupported_backend` or `remote_backend`.
+- Status: the Nix kind is specified this way (TASK-36). Docker's code
+  still reports a stopped daemon, `EACCES` and the Podman CLI shim as
+  errors; TASK-113 brings it to this rule.
+
+### Backend version allowlist
+
+Backend clients and daemons whose behaviour diskgc relies on are admitted
+by exact version, in a constant table in `diskgc-core`: code, not
+configuration, so a version is admitted by a reviewed change with its
+evidence, never by an operator's config.
+
+| Backend | Admitted | Evidence |
+|---|---|---|
+| Docker CLI (`docker-build-cache` builder dispatch) | client 29.8.2 | native dind fixture ([safety.md](safety.md#docker-kinds)) |
+| Nix daemon (`nix-store`: GC and root semantics) | none yet; TASK-36 admits `2.34.8` when its container scenarios pass | [testing.md](testing.md#nix-store-backend-vectors) |
+| Nix client (`nix-store`: command line, `--query --roots` output) | none yet; TASK-36 admits `nix-store (Nix) 2.34.8` with that daemon | same |
+
+- Nix has two lists, because the GC's semantics live in the daemon and
+  the client contributes only its command line and output format: the
+  daemon version that `nix store info --json` reports, and the client's
+  exact `nix-store --version` line. A version is admitted on one list by
+  running the scenarios against an end already admitted on the other, so
+  every admitted version has been run, though not every pairing; a host
+  upgraded without restarting its daemon runs an untested pairing of two
+  admitted versions. A host whose Nix is not admitted skips its Nix tier
+  (`unsupported_backend`), which a dry run shows; the run's exit code
+  follows space as for any skip.
+- Admitting a version: pin it in the flake's test image, run every
+  scenario of its kind on it, and add the entry and the evidence (command,
+  exit code, date) in one commit. Variants (Lix, Determinate Nix) need
+  their own verification task first; until then they are
+  `unsupported_backend`.
+- Removing an entry narrows what diskgc acts on and is noted in the
+  release notes.
 
 ## Signals
 
@@ -854,17 +924,34 @@ profiles apply and when.
 
 Fields (an unknown key anywhere in a profile is a load-time error):
 
-The `command` action and Docker and Nix kind schema fields in this table
-(`kind`, `find.roots: daemon`, their `action` forms and kind-specific
-constraints) are **provisional until the release review (task-49)**. The
-schema v1 freeze covers the other fields and the `delete` and Cargo actions.
+The `command` action and Docker kind schema fields in this table
+(their `kind` names, `action` forms and kind-specific constraints) are
+**provisional until the release review (task-49)**. The
+schema v1 freeze covers the other fields, the `delete` and Cargo actions,
+the `nix-store` profile shape below, and `find.roots: daemon` as the
+spelling for a root the bound backend supplies, in every backend kind
+(final, TASK-118).
+
+A `nix-store` source profile is exactly `name`, `category`, `description`,
+`kind: nix-store`, `find: {roots: daemon}` and, on a built-in,
+`verified_with`; any other field (`action`, `find.paths`, `where`,
+`min_idle_for`, `examples`, `checkouts`) is a load-time error. The store
+is not configurable: it is `/nix/store` of the bound system daemon
+([safety.md](safety.md#nix-store)). Selected alone as `profile:NAME` (no
+filters, no union), it reports one plan row and one action with candidate
+`/nix/store`, or one skip with candidate `""`, and `estimated_bytes:
+null`. Its skip reasons are those of [Backend skips and
+errors](#backend-skips-and-errors) plus `changed`; the human `detail`
+names the evidence (the client's canonical path, both versions, the
+store URL seen, the generation link the daemon did not report) and is not
+part of the contract.
 
 | Field | On | Meaning |
 |---|---|---|
 | `name` | every profile | A `NAME` (see Selection grammar), unique among built-in and user profiles. |
 | `category`, `description` | every profile; required on built-ins | Free text, shown by `profiles list`. |
 | `kind` | sources | Default `fs`. |
-| `find.roots` | sources | A list of absolute directories, `required`, or `daemon` for Docker kinds. |
+| `find.roots` | sources | A list of absolute directories, `required`, or `daemon` for Docker kinds and `nix-store`. |
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
@@ -1198,7 +1285,7 @@ action `delete`) and `f` (`idle_for`):
 | `docker-builder-prune` (provisional) | Prune the bound Docker Engine's built-in BuildKit cache with `--all`, adding `--filter until=...` when the tier selects `idle_for`. One action covers the daemon cache. |
 | `docker-image-prune` (provisional) | Prune dangling images in the bound Docker daemon. |
 | `docker-image-prune-all` (provisional) | Prune all images unused by containers in the bound Docker daemon. |
-| kind actions | Cargo lock protocol is fixed by its kind. Nix GC is provisional ([safety.md](safety.md#cargo-target)). |
+| kind actions | Fixed by the kind: the Cargo lock protocol ([safety.md](safety.md#cargo-target)); for `nix-store`, one bounded GC through the bound Nix daemon ([safety.md](safety.md#nix-store)). |
 
 In YAML:
 
@@ -1270,7 +1357,7 @@ operator-authored `fs` and delete policies remain release decisions under TASK67
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | rc directories `nix-shell-*-*` and `nix-develop-*-*` directly in `/tmp` (not below shell temp directories); `liveness_contract: nix-shell`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)) | `delete` |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
-| nix | `nix-garbage` | planned: dead store paths; safe store and root-database binding remains unverified (TASK36) | no shipped action yet |
+| nix | `nix-garbage` | planned: dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`); protocol designed (TASK-118), unshipped until TASK-36 | no shipped action yet |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |

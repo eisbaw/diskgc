@@ -107,7 +107,7 @@ fn documented_skip_reasons() -> BTreeSet<String> {
 /// string literal in diskgc-core's non-test sources (a producer), or is
 /// shown by a vector.
 const REASONS_WITHOUT_PRODUCER: [(&str, &str); 3] = [
-    ("unsupported_store", "TASK-127"),
+    ("backend_unavailable", "TASK-36, TASK-113"),
     ("has_not", "TASK-127"),
     ("stale", "TASK-127"),
 ];
