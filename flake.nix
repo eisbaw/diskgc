@@ -227,7 +227,7 @@
       # reference.md and safety.md ship beside them so that their links
       # resolve; links into architecture.md and testing.md do not.
       diskgcRelease01 = pkgs.runCommand "diskgc-release-01-candidate-${version}"
-        { meta.mainProgram = "diskgc"; }
+        { inherit version; meta.mainProgram = "diskgc"; }
         ''
           cp -R ${diskgcRelease01Build}/. $out
           chmod -R u+w $out
