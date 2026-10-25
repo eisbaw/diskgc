@@ -162,7 +162,9 @@ process runs, even if that Cargo works in an unrelated directory; see
   plan and `errors` (2 on usage errors, 124 at the deadline, 130/143 when
   interrupted). A dry run that reaches the deadline (124, `status:
   deadline`) keeps the work it did: `plan` has a row for every candidate
-  judged before it, and `errors` says the plan is incomplete. Left out
+  judged before it, and when the deadline cut the plan short, `errors`
+  says so (a plan completed before a later step crossed the deadline has
+  no such error). Left out
   are the candidates it found but had not judged, the one it was judging,
   and, when protect matches apply, eligible candidates not yet checked
   against them (an eligible row is never a guess). If one configured tier

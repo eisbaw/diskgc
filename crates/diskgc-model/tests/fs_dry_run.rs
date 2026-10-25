@@ -2355,6 +2355,15 @@ protect: [guard]
     let report = dry_run(&host, &request);
     assert!(host.unfired_events().is_empty());
     assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.message == "deadline passed before the plan was complete"),
+        "{:#?}",
+        report.errors
+    );
     let mut rows = plan(&report);
     rows.sort_by(by_candidate_then_reason);
     assert_eq!(
