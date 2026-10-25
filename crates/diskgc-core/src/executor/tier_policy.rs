@@ -34,9 +34,10 @@ use crate::outcome::{PolicyAt, Stop};
 /// still count as made after it began. A filesystem records a change at or
 /// below the time it was made: the kernel's coarse clock lags by up to a
 /// tick (1 to 10 ms), and a filesystem with whole-second (ext4 with
-/// 128-byte inodes) or two-second (FAT) times truncates. Two seconds covers
-/// both; a change it wrongly counts as new only costs one enumeration.
-pub(super) const TIMESTAMP_SLACK: Duration = Duration::from_secs(2);
+/// 128-byte inodes) or two-second (FAT) times truncates on top of that, so
+/// up to 2 s plus a tick. Three seconds covers both with margin; a change
+/// it wrongly counts as new only costs one enumeration.
+pub(super) const TIMESTAMP_SLACK: Duration = Duration::from_secs(3);
 
 /// One instant on both clocks: the wall clock the filesystem stamps changes
 /// with, and the monotonic one (including suspend) that tells whether the
@@ -96,9 +97,10 @@ pub(super) struct DeletePolicy<'p> {
 
 impl DeletePolicy<'_> {
     /// `path` judged against the enumerated matches; after the walk, if it
-    /// saw a change made since they were enumerated (or cannot tell),
-    /// against matches enumerated now (`policy_skip`). Uncertain discovery
-    /// or identity stops the run.
+    /// saw a change made since they were enumerated (or cannot tell), or
+    /// when an enumerated match cannot be proven any more, against matches
+    /// enumerated now (`policy_skip`). Uncertain discovery or identity
+    /// there stops the run.
     pub fn skip<H: Host>(
         &self,
         host: &H,
@@ -116,6 +118,10 @@ impl DeletePolicy<'_> {
         {
             return policy_skip(host, self.protections, self.negated, deadline, path);
         }
+        // A match enumerated earlier whose identity cannot be proven now
+        // (removed or moved since: a `cargo clean` of a protected target)
+        // says nothing about this candidate: judge it against matches
+        // enumerated now, as before TASK-200, rather than stop the run.
         policy_verdict(
             host,
             self.protected,
@@ -124,6 +130,7 @@ impl DeletePolicy<'_> {
             deadline,
             path,
         )
+        .or_else(|_| policy_skip(host, self.protections, self.negated, deadline, path))
     }
 }
 
@@ -201,11 +208,11 @@ mod tests {
     fn a_stepped_wall_clock_is_doubted_whatever_the_time() {
         let s = since();
         let old = Some(timestamp(nanos(s.wall) - 86_400_000_000_000));
-        // One hour on the monotonic clock, an hour minus 3 s on the wall
-        // clock: stepped back by 3 s.
+        // One hour on the monotonic clock, an hour minus 4 s on the wall
+        // clock: stepped back by 4 s, more than the slack.
         let hour = 3_600_000_000_000_u64;
         let back = at(
-            nanos(s.wall) + i128::from(hour) - 3_000_000_000,
+            nanos(s.wall) + i128::from(hour) - 4_000_000_000,
             3_600_000_000_000 + hour,
         );
         assert!(changed_since(s, back, old));
@@ -227,13 +234,19 @@ mod tests {
         /// the check runs, as long as the wall clock was not stepped.
         #[test]
         fn a_change_after_the_enumeration_is_always_seen(
-            made_after_ns in 0_i128..10_000_000_000_000,
+            // Half the cases just after the enumeration began, where
+            // truncation and the clock's lag matter most.
+            made_after_ns in prop_oneof![0_i128..5_000_000, 0_i128..10_000_000_000_000],
             lag_ns in 0_i128..10_000_000,
             granularity_ns in prop::sample::select(vec![1_i128, 1_000_000_000, 2_000_000_000]),
             checked_after_ns in 0_u64..10_000_000_000_000,
             drift_ns in -1_000_000_000_i128..1_000_000_000,
+            // Half the cases just after a 2 s granule's start.
+            phase_ns in prop_oneof![0_i128..5_000_000, 0_i128..2_000_000_000],
         ) {
-            let s = since();
+            // The enumeration may begin anywhere in a 2 s granule.
+            let base = since();
+            let s = at(nanos(base.wall) + phase_ns, 3_600_000_000_000);
             let made = nanos(s.wall) + made_after_ns;
             let recorded = (made - lag_ns).div_euclid(granularity_ns) * granularity_ns;
             let now = at(

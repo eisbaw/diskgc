@@ -274,16 +274,20 @@ Immediately before acting, diskgc walks the candidate's whole tree
     match made inside the candidate after the walk is never unlinked (its
     directory fails `ENOTEMPTY`). One made inside it between the
     enumeration and the walk is in the walk and changes a time the walk
-    reads: the entry's ctime, and its directory's mtime and ctime. When the
-    walk's newest mtime or ctime (for a Cargo target, its last build: the
-    profile directories, lock files and walked entries) is unknown, or no
-    more than 2 s older than the start of the enumeration, or later, the
-    check after the walk enumerates every match again, as before a
-    command. The 2 s cover the kernel's coarse timestamp clock (a tick
-    behind) and filesystems with whole- or two-second times. A wall clock
-    that moved more than 2 s away from the monotonic one (including
-    suspend) since the enumeration makes every time doubtful: the check
-    enumerates again. Before TASK-200 every check enumerated every
+    reads: creating or renaming an entry into a directory moves the
+    directory's mtime and ctime (POSIX), and the walk reads every
+    directory's times again once it has listed it (the stat that found it,
+    made while its parent was listed, can be older than such a change; a
+    moved entry's own ctime is not relied on: vfat and some FUSE servers
+    keep it). When the walk's newest mtime or ctime (for a Cargo target,
+    its last build: the profile directories, lock files and walked entries)
+    is unknown, or no more than 3 s older than the start of the
+    enumeration, or later, the check after the walk enumerates every match
+    again, as before a command. The 3 s cover the kernel's coarse timestamp
+    clock (a tick behind) on top of filesystems with whole- or two-second
+    times. A wall clock that moved more than 3 s away from the monotonic one
+    (including suspend) since the enumeration makes every time doubtful:
+    the check enumerates again. Before TASK-200 every check enumerated every
     protected and negated tree again, three full enumerations per
     candidate: with a 61,000-directory protect, 2.2 to 3.3 s per candidate
     and clears expiring before their deletion (`in_use_unknown`), against
@@ -292,14 +296,24 @@ Immediately before acting, diskgc walks the candidate's whole tree
     immediately before its program runs: the program may act on anything
     in the candidate, walked or not.
 
-  Limits: a directory on the candidate's path, outside it, that becomes a
-  match after the enumeration (a new `CACHEDIR.TAG` making an ancestor a
-  Cargo target) is not seen by a delete until the next tier or run; nor is
-  a match made inside a candidate whose times a wall-clock step set back
-  past the enumeration, when the step was undone before the check; and for
-  every action, a separately writable protected tree can change between
-  the last enumeration and the deletion. None of this is an atomic
-  cross-tree exclusion.
+  Limits (delete actions): a directory on the candidate's path, outside
+  it, that becomes a match after the enumeration (a new `CACHEDIR.TAG`
+  making an ancestor a Cargo target) is not seen until the next tier or
+  run; a walked directory inside the candidate that becomes a match only
+  by a marker made after the walk (a `CACHEDIR.TAG` or `.cargo-lock`
+  making it a Cargo target) loses its walked entries, where the per-check
+  enumeration saw such a marker until the final check (the window grew
+  from the final check to the unlink to the walk to the unlink, which
+  includes the in-use scan); a bind mount made after the enumeration that
+  shows part of the candidate under a protected match changes no time
+  inside it and is not seen; a match made inside a candidate whose times
+  a wall-clock step set back past the enumeration is not seen when the
+  step was undone before the check. A match made in the candidate after
+  its walk is never unlinked, but its directory then fails `ENOTEMPTY`:
+  an error of that candidate in the report, where the per-check
+  enumeration could skip it `protected`. For every action, a separately
+  writable protected tree can change between the last enumeration and
+  the deletion. None of this is an atomic cross-tree exclusion.
 
 - **Fail closed on anything unreadable**, never treating it as empty or as
   nothing to check. A listing that fails part-way is that error, never a

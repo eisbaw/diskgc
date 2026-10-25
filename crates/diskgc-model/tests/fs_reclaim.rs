@@ -3601,7 +3601,7 @@ fn protect_keep_me() -> Vec<executor::ProtectedSource> {
         br#"version: 1
 profiles:
   - name: keep-me
-    find: {roots: [/tmp], paths: ["*/keep-me"], type: any}
+    find: {roots: [/tmp], paths: ["*/keep-me", "*/*/keep-me"], type: any}
     action: delete
     examples: {match: [/tmp/pytest-of-mark/keep-me]}
 protect: [keep-me]
@@ -3633,6 +3633,37 @@ fn a_protected_match_made_in_a_candidate_before_its_walk_keeps_it() {
     );
     assert!(exists(&host, "/tmp/pytest-of-u0/keep-me"));
     assert!(exists(&host, "/tmp/pytest-of-u0/f"));
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+/// TASK-200 review: an old file renamed, as a protected match, into a subdirectory of
+/// the candidate after that subdirectory was statted (while its parent was
+/// listed) and before it is listed by the eligibility walk under the lock
+/// (its second listing; the tally made the first). The model, like vfat, leaves a moved
+/// inode's ctime alone, so only the subdirectory's own times, read again
+/// once it has been listed, show the change: the matches are enumerated
+/// again and the candidate is kept.
+#[test]
+fn an_old_protected_match_renamed_in_during_the_walk_keeps_the_candidate() {
+    let tree = format!(
+        "  /tmp/pytest-of-u0: {{.: {{mtime: {OLD}}}, f: {{size: 1M, mtime: {OLD}}}, \
+         sub: {{.: {{mtime: {OLD}}}, g: {{size: 1K, mtime: {OLD}}}}}}}\n  \
+         /tmp/stash: {{.: {{mtime: {OLD}}}, old-file: {{size: 1K, mtime: {OLD}}}}}\n"
+    );
+    let event = "events:\n  - {at: {op: read_dir, path: /tmp/pytest-of-u0/sub, nth: 2, when: before}, \
+                 rename: {from: /tmp/stash/old-file, to: /tmp/pytest-of-u0/sub/keep-me}}\n";
+    let host = host(&yaml("", &tree, event));
+    let mut request = tmp("profile:pytest-of-dir");
+    request.tier.protections = protect_keep_me();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty(), "{report:#?}");
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-u0"),
+        Some(Reason::Protected),
+        "{report:#?}"
+    );
+    assert!(exists(&host, "/tmp/pytest-of-u0/sub/keep-me"));
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
@@ -3699,4 +3730,25 @@ fn a_negated_match_made_in_a_union_candidate_is_seen_or_never_unlinked() {
             .any(|e| e.message.contains("ENOTEMPTY")),
         "{report:#?}"
     );
+}
+
+/// TASK-200: a match the tier enumerated that is gone by a candidate's
+/// check (a protected tree cleaned meanwhile) cannot be proven by identity
+/// any more; that says nothing about the candidate, so the check judges it
+/// against matches enumerated now instead of stopping the run.
+#[test]
+fn a_protected_match_removed_after_the_enumeration_does_not_stop_the_run() {
+    let tree = format!(
+        "  /tmp/pytest-of-u0: {}\n  /tmp/stash: {{.: {{mtime: {OLD}}}, keep-me: {{size: 1K, mtime: {OLD}}}}}\n",
+        old_dir("1M")
+    );
+    let event = "events:\n  - {at: {op: flock, path: /tmp/pytest-of-u0, when: after}, \
+                 remove: /tmp/stash/keep-me}\n";
+    let host = host(&yaml("", &tree, event));
+    let mut request = tmp("profile:pytest-of-dir");
+    request.tier.protections = protect_keep_me();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(actions(&report), ["/tmp/pytest-of-u0"], "{report:#?}");
 }

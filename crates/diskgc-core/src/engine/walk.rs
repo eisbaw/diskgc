@@ -416,9 +416,30 @@ impl<H: Host> Walker<'_, H> {
             let entry = self.admit(name.clone(), &stat, path)?;
             entries.push(entry);
         }
+        // The directory's own times once it has been listed: an entry
+        // created in it or renamed into it before or while it was listed
+        // moved them (POSIX), whatever the moved entry's own ctime does on
+        // this filesystem. The stat that admitted it, made while its parent
+        // was listed, can predate such a change; the newest change must not
+        // (protect and !profile rely on it, TASK-200).
+        match self.host.statx(Base::Dir(stack.fd(i)), Path::new("")) {
+            Ok(after) => self.note_times(&after),
+            Err(e) => return Err(host_failure(stack.path(i, None), "stat", &e)),
+        }
         let listing = stack.frame(i).listing;
         self.listings[listing] = entries;
         Ok(())
+    }
+
+    /// Folds an mtime and ctime into the newest change (unknown: the
+    /// record's newest change is unknown).
+    fn note_times(&mut self, stat: &Stat) {
+        match (stat.mtime, stat.ctime) {
+            (Some(m), Some(c)) => {
+                self.newest_change = self.newest_change.max(Some(m.max(c)));
+            }
+            _ => self.times_unknown = true,
+        }
     }
 
     /// Checks one entry (the rules in the module docs) and counts it.
@@ -519,12 +540,7 @@ impl<H: Host> Walker<'_, H> {
         let bytes = stat.blocks.map_or(0, |b| b.saturating_mul(512));
         self.entries += 1;
         self.bytes = self.bytes.saturating_add(bytes);
-        match (stat.mtime, stat.ctime) {
-            (Some(m), Some(c)) => {
-                self.newest_change = self.newest_change.max(Some(m.max(c)));
-            }
-            _ => self.times_unknown = true,
-        }
+        self.note_times(stat);
         Ok(Entry {
             name,
             identity,

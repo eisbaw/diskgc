@@ -3870,17 +3870,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 );
                 return true;
             }
-            Ok(false) => {}
-            Err(error) => {
-                self.run_error(error);
-                return true;
+            Ok(false) => {
+                if self.unlinks_only_walked_entries() {
+                    // Judged against the tier's matches again under the
+                    // lock and after the walk ([`DeletePolicy`]):
+                    // enumerating them here too would only repeat the
+                    // tier's enumeration per candidate.
+                    return false;
+                }
             }
-        }
-        if self.unlinks_only_walked_entries() {
-            // Judged against the tier's matches again under the lock and
-            // after the walk ([`DeletePolicy`]): enumerating them here too
-            // would only repeat the tier's enumeration per candidate.
-            return false;
+            // An enumerated match removed or moved since: the enumeration
+            // below decides (TASK-200).
+            Err(_) => {}
         }
         match scan_protections(self.host, &self.tier.protections, self.deadline) {
             Ok(matches) => {
