@@ -695,7 +695,7 @@ fn a_new_profile_or_a_replaced_target_after_discovery_is_changed() {
 }
 
 /// What the walks refuse refuses the target: a nested Cargo target inside
-/// an entry (the structural recogniser) is `contains_special`, a mount in
+/// an entry (its lock file's name) is `contains_special`, a mount in
 /// the target `contains_mount`.
 #[test]
 fn walk_refusals_and_mounts_refuse_the_target() {

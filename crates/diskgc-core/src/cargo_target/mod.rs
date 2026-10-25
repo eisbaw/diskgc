@@ -10,7 +10,7 @@
 //!   in it ([`Inspected`]);
 //! - an [`Inspected`] lists the target's **profile directories**
 //!   (`<t>/<p>/` and `<t>/<triple>/<p>/` holding a `.cargo-*lock*` name,
-//!   the structural recogniser's shape), each with its lock files (name and
+//!   discovery's shape), each with its lock files (name and
 //!   identity, type included) and everything else in it (name and type,
 //!   [`ProfileEntry`]), plus the other directories directly in the target.
 //!   Everything else is derived from it on demand: whether a lock name is

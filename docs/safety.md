@@ -102,16 +102,21 @@ Immediately before acting, diskgc walks the candidate's whole tree
     even when every entry belongs to the caller; its name is refused before
     it is `statx`ed;
   - no entry anywhere in the candidate, the candidate itself included, has
-    a known Cargo lock file name (`.cargo-lock`, `.cargo-build-lock`,
-    `.cargo-artifact-lock`, the allowlist of `cargo-target` below),
-    whatever directory holds it: no Cargo lock file is ever deleted, also
-    when the candidate is a profile directory or lies inside a target;
-  - nothing inside matches diskgc's fixed **structural recogniser** for
-    Cargo targets: a directory with `CACHEDIR.TAG` whose profile
-    directories (`<t>/<p>/` or `<t>/<triple>/<p>/`) hold any file matching
-    `.cargo-*lock*`, known or unknown name alike. `<t>` is the candidate
-    itself or a directory inside it; any entry named `CACHEDIR.TAG` counts
-    (its signature is not read, which errs on the side of keeping);
+    a Cargo lock file name: any name matching `.cargo-*lock*`, the known
+    ones (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`, the
+    allowlist of `cargo-target` below) and unknown ones alike, of any
+    type, whatever directory holds it and whether or not a `CACHEDIR.TAG`
+    is near: no Cargo lock file is ever deleted, also when the candidate is
+    a profile directory, lies inside a target, or is an entry deep inside
+    one (a hypothetical finer-grained lock below `build/<package>/<hash>/`:
+    no measured Cargo makes one, and a future lock named outside this
+    pattern would not be recognised). This name rule is diskgc's fixed
+    **structural recogniser** for Cargo targets: every profile directory a
+    Cargo has built in holds a lock file, so any target inside a candidate
+    refuses it. A name that only resembles one (`.cargo-ok`, `cargo-lock`)
+    is a plain file. Refusing a non-Cargo file that has such a name only
+    keeps its candidate. (A socket or FIFO of such a name is refused
+    earlier, as `contains_ipc`, when the profile blocks IPC);
   - no device node and no object of a type Linux does not define: never
     deleted.
 
@@ -1991,7 +1996,9 @@ any other `.cargo-*lock*` file is an unknown layout: the target is skipped
 followed): a directory, symlink, FIFO, socket or device with a lock-like
 name is no Cargo's and makes the target `unsupported_layout` too, and a
 lock file of another type at a later check than when found is `changed`.
-Lock files are never deleted or moved.
+A `.cargo-*lock*` name anywhere deeper in a profile directory (not a lock
+file the protocol takes) refuses the target as `contains_special`
+(eligibility walk). Lock files are never deleted or moved.
 
 **Lock sets.** Only the measured whole sets are reclaimed: `.cargo-lock`
 alone, with `.cargo-build-lock`, or with both newer locks. A profile
@@ -2030,9 +2037,8 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   (a regular file starting with the specification's signature, read
   through the descriptor of the object checked) and at least one profile
   directory, `<target>/<profile>/` or `<target>/<triple>/<profile>/`
-  holding a `.cargo-*lock*` file, known name or not (the recogniser's
-  shape: a target whose only lock name is unknown is listed as
-  `unsupported_layout`, not missed). A target is at most six directories
+  holding a `.cargo-*lock*` file, known name or not (a target whose only
+  lock name is unknown is listed as `unsupported_layout`, not missed). A target is at most six directories
   below its root (the root itself is depth 0). Do not descend into a found
   target. Hidden directories are walked like any other (agent worktrees
   hold targets). Never follow symlinks or cross mounts: a mount below a
@@ -2211,10 +2217,20 @@ The step that deletes (`cargo_target::reclaim` in the core).
    replaced since, a `cargo build --release` or a newer Cargo's lock file
    started meanwhile: `changed`), no keep marker, ownership, the layout.
    Walk every entry of the locked profile directories (the eligibility
-   walk, one entry budget for the target). Measure the last build: newer
-   than the one the caller chose the target by (its eligibility check, a
-   plan), or no longer known: `changed`; then apply the idle requirement
-   again even if the tally's earlier measurement passed. Then
+   walk, one entry budget for the target). Measure the last build and
+   apply the tier's idle requirement to it again, if it has one, even if
+   the tally's earlier measurement passed (with a requirement, an unknown
+   age is never idle). `ensure` hands the protocol no earlier last build
+   (TASK-168), so a target rebuilt between its tally and its locks is
+   caught by this idle check only when the tier has an idle requirement (a
+   rebuild inside it is `not_idle`); without one, only the in-use check
+   below guards it. A target rebuilt but still idle enough is reclaimed
+   like a target first found in that state: under the locks no Cargo of
+   its lock set builds, so what is measured here is what is deleted. The
+   core can also be given the last build the caller chose the target by
+   (`ReclaimPolicy::judged_last_build`); a newer one or none is then
+   `changed`, but no production caller passes one (a model test does).
+   Then
    the in-use check of the whole target against a scan made now, under
    the locks (a scan from before could miss a process started meanwhile):
    every entry's record and the Cargo process checks (In use). Then the
@@ -2307,8 +2323,10 @@ The step that deletes (`cargo_target::reclaim` in the core).
    be a write into the target, and the invariant does not need it.
    A part that stops part-way (`changed`, an
    error, the deadline) stops the target; what was deleted stays deleted,
-   fingerprints first. Lock files are never in a record (every walk
-   refuses every Cargo lock name), so they are never unlinked, replaced or
+   fingerprints first. Lock files are never in a record: the profile
+   directory's own are not walked, and every walk refuses any
+   `.cargo-*lock*` name, known or not, at any depth (`contains_special`,
+   Filesystem candidates), so no lock file is ever unlinked, replaced or
    moved; the profile directories themselves are never deleted.
 4. **Release** by closing the lock files' descriptors, whatever the
    outcome (never `LOCK_UN`, Host lock).

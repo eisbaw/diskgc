@@ -1,9 +1,13 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # The structural Cargo recogniser (docs/safety.md, No special content): a
-# directory with CACHEDIR.TAG whose profile directory holds a .cargo-*lock*
-# file, known or unknown name, at <t>/<p>/ or <t>/<triple>/<p>/, refuses
-# the enclosing plain-delete candidate. A CACHEDIR.TAG without any lock
-# file is no Cargo target, so that candidate is deleted.
+# `.cargo-*lock*` name, known or unknown, anywhere in a candidate refuses
+# it (`contains_special`), so a nested target (<t>/<p>/ or
+# <t>/<triple>/<p>/ holding a lock file) does, and so does a lock name
+# with no CACHEDIR.TAG inside the candidate (TASK-167): a candidate that is
+# itself a profile directory (`zephyr-profile-dir`, the shape of a
+# `*/target/debug` profile) or holds a lock name deep inside a unit
+# directory (`zephyr-unit`) has the target's tag outside it. A CACHEDIR.TAG
+# without any lock file is no Cargo target, so that candidate is deleted.
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -30,10 +34,14 @@ host:
     /tmp/zephyr-tag-only/t:
       CACHEDIR.TAG: {cachedir_tag: true}
       debug: {deps: {app: {size: 1M}}}
+    /tmp/zephyr-profile-dir: {.cargo-future-lock: {}, deps: {app: {size: 1M}}}
+    /tmp/zephyr-unit/build/app/abc123: {.cargo-unit-lock: {}, out: {app: {size: 1M}}}
 expect:
   plan:
     - {candidate: /tmp/zephyr-known, reason: contains_special}
+    - {candidate: /tmp/zephyr-profile-dir, reason: contains_special}
     - {candidate: /tmp/zephyr-unknown-name, reason: contains_special}
+    - {candidate: /tmp/zephyr-unit, reason: contains_special}
     - {candidate: /tmp/zephyr-triple, reason: contains_special}
     - {candidate: /tmp/zephyr-tag-only}
   reclaim_exit: 1
@@ -41,9 +49,13 @@ expect:
   removed: [/tmp/zephyr-tag-only]
   skipped:
     - {candidate: /tmp/zephyr-known, reason: contains_special}
+    - {candidate: /tmp/zephyr-profile-dir, reason: contains_special}
     - {candidate: /tmp/zephyr-unknown-name, reason: contains_special}
+    - {candidate: /tmp/zephyr-unit, reason: contains_special}
     - {candidate: /tmp/zephyr-triple, reason: contains_special}
   preserved:
+    - /tmp/zephyr-profile-dir/.cargo-future-lock
+    - /tmp/zephyr-unit/build/app/abc123/.cargo-unit-lock
     - /tmp/zephyr-known/proj/target/debug/.cargo-lock
     - /tmp/zephyr-unknown-name/proj/target/release/.cargo-future-lock
     - /tmp/zephyr-triple/t/x86_64-unknown-linux-gnu/debug/.cargo-build-lock

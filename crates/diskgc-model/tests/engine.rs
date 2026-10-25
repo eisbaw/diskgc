@@ -8,13 +8,14 @@
 
 mod common;
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{dir, host};
 use diskgc_core::engine::{
-    Candidate, Checkouts, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind, Reason, Rules, Skip,
-    WalkRecord, WalkStop, delete_unchecked, walk,
+    CARGO_LOCK_NAMES, Candidate, Checkouts, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind,
+    Reason, Rules, Skip, WalkRecord, WalkStop, delete_unchecked, is_cargo_lock_name, walk,
 };
 use diskgc_core::host::{Errno, FileType, Host, MonoTime};
 use diskgc_core::resolve::Resolved;
@@ -284,7 +285,10 @@ fn a_cargo_target_inside_is_contains_special() {
     ] {
         let host = model(&format!("{layout}  {lock}: {{}}\n"));
         let skip = assert_skipped(&host, &rules(), Reason::ContainsSpecial, lock);
-        assert!(skip.detail.contains("CACHEDIR.TAG"), "{skip}");
+        assert!(
+            skip.detail.contains("an unknown Cargo lock file name"),
+            "{skip}"
+        );
     }
 }
 
@@ -294,6 +298,10 @@ fn a_cargo_target_inside_is_contains_special() {
 /// directory (`target/debug`) keeps its `.cargo-lock`.
 #[test]
 fn a_known_cargo_lock_name_anywhere_is_contains_special() {
+    // The known names are a subset of the walk's rule.
+    for known in CARGO_LOCK_NAMES {
+        assert!(is_cargo_lock_name(OsStr::new(known)), "{known}");
+    }
     for lock in [
         "/tmp/c/.cargo-lock",
         "/tmp/c/sub/deeper/.cargo-build-lock",
@@ -301,7 +309,10 @@ fn a_known_cargo_lock_name_anywhere_is_contains_special() {
     ] {
         let host = model(&format!("  {lock}: {{}}\n"));
         let skip = assert_skipped(&host, &rules(), Reason::ContainsSpecial, lock);
-        assert!(skip.detail.contains("Cargo lock file name"), "{skip}");
+        assert!(
+            skip.detail.contains("a known Cargo lock file name"),
+            "{skip}"
+        );
     }
     // The candidate itself is a lock file.
     let host = model("  /tmp/.cargo-lock: {}\n");
@@ -397,20 +408,66 @@ fn checkouts_are_refused_unless_the_rules_allow_them() {
     assert!(!exists(&host, "/tmp/c"));
 }
 
+/// An unknown `.cargo-*lock*` name refuses the candidate by its name
+/// alone, wherever the target's CACHEDIR.TAG is (TASK-167): Cargo may add
+/// finer-grained locks below a profile directory's top level, and a
+/// candidate that is itself a profile directory (`*/target/debug`), or a
+/// unit directory deep inside one, has the tag outside it.
 #[test]
-fn unknown_lock_names_without_the_target_layout_are_plain_files() {
-    for tree in [
+fn an_unknown_cargo_lock_name_without_a_target_around_it_is_contains_special() {
+    for (tree, lock) in [
         // No CACHEDIR.TAG.
-        "  /tmp/c/sub/target/debug/.cargo-future-lock: {}\n",
+        ("", "/tmp/c/sub/target/debug/.cargo-future-lock"),
         // CACHEDIR.TAG three levels up: not a profile directory.
-        "  /tmp/c/sub/target/CACHEDIR.TAG: {}\n  /tmp/c/sub/target/a/b/c/.cargo-future-lock: {}\n",
-        // Not a lock name.
-        "  /tmp/c/sub/target/CACHEDIR.TAG: {}\n  /tmp/c/sub/target/debug/.cargo-ok: {}\n",
-        "  /tmp/c/sub/target/CACHEDIR.TAG: {}\n  /tmp/c/sub/target/debug/cargo-lock: {}\n",
-        // The tag outside the candidate.
-        "  /tmp/CACHEDIR.TAG: {}\n  /tmp/c/.cargo-future-lock: {}\n",
+        (
+            "  /tmp/c/sub/target/CACHEDIR.TAG: {}\n",
+            "/tmp/c/sub/target/a/b/c/.cargo-future-lock",
+        ),
+        // The tag outside the candidate: the candidate is a profile
+        // directory, or a unit directory of one.
+        ("  /tmp/CACHEDIR.TAG: {}\n", "/tmp/c/.cargo-future-lock"),
+        ("", "/tmp/c/build/app/abc123/.cargo-unit-lock"),
+        ("", "/tmp/c/.fingerprint/app-1/.cargo-lock.bak"),
     ] {
-        let host = model(tree);
+        let host = model(&format!("{tree}  {lock}: {{}}\n"));
+        let skip = assert_skipped(&host, &rules(), Reason::ContainsSpecial, lock);
+        assert!(
+            skip.detail.contains("an unknown Cargo lock file name"),
+            "{skip}"
+        );
+    }
+    // A directory of such a name, deep inside: the rule is by name, any
+    // type.
+    let host = model("  /tmp/c/sub/.cargo-future-lock/x: {}\n");
+    assert_skipped(
+        &host,
+        &rules(),
+        Reason::ContainsSpecial,
+        "/tmp/c/sub/.cargo-future-lock",
+    );
+    // The candidate itself has an unknown lock name.
+    let host = model("  /tmp/.cargo-future-lock: {}\n");
+    let target = Target::new(&host, "/tmp/.cargo-future-lock");
+    assert_eq!(
+        skipped(&host, &target, &rules()).reason,
+        Reason::ContainsSpecial
+    );
+}
+
+/// Names that only look like Cargo's are plain files: the rule is
+/// `.cargo-*lock*`, no wider.
+#[test]
+fn names_that_are_not_cargo_lock_names_are_plain_files() {
+    for name in [
+        ".cargo-ok",
+        "cargo-lock",
+        ".cargo_lock",
+        ".cargo-",
+        "x.cargo-lock",
+    ] {
+        let host = model(&format!(
+            "  /tmp/c/sub/target/CACHEDIR.TAG: {{}}\n  /tmp/c/sub/target/debug/{name}: {{}}\n"
+        ));
         let target = Target::new(&host, "/tmp/c");
         walked(&host, &target, &rules());
     }

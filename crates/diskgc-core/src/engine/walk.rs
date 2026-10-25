@@ -15,10 +15,10 @@
 //! 3. it is not a `.diskgc-keep` (`kept`);
 //! 4. its owner is one of [`Rules::owners`] (`not_owner`);
 //! 5. it is not a socket or FIFO, if [`Rules::block_ipc`] (`contains_ipc`);
-//! 6. it is not a device node or of unknown type, does not have a Cargo
-//!    lock file's name ([`CARGO_LOCK_NAMES`], anywhere), and is not a lock
-//!    file of a Cargo target inside the candidate (the structural
-//!    recogniser) (`contains_special`);
+//! 6. it is not a device node or of unknown type, and does not have a
+//!    Cargo lock file's name (`.cargo-*lock*`, [`is_cargo_lock_name`]:
+//!    the known [`CARGO_LOCK_NAMES`] and any unknown one, anywhere)
+//!    (`contains_special`);
 //! 7. unless [`Rules::checkouts`] is [`Checkouts::Allow`] (a profile
 //!    that says `checkouts: allow`), it does not have a VCS checkout
 //!    marker's name ([`CHECKOUT_MARKERS`], whatever its type, anywhere, the
@@ -70,13 +70,13 @@ fn mounted(path: PathBuf) -> Skip {
     )
 }
 
-/// The file that marks a Cargo target directory for the recogniser.
+/// The file that marks a Cargo target directory (Cargo discovery).
 pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 
 /// The known Cargo lock file names (docs/safety.md, `cargo-target`, Lock
-/// files). An entry of one of these names anywhere in a candidate, the
-/// candidate itself included, refuses it: no Cargo lock file is ever
-/// deleted (the PRD), whatever directory the candidate is.
+/// files): the lock set the Cargo protocol takes. Each matches
+/// [`is_cargo_lock_name`], so the walk refuses it anywhere like any other
+/// lock name.
 pub const CARGO_LOCK_NAMES: &[&str] = &[".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
 
 /// The names that mark a version-control checkout (docs/safety.md, The
@@ -301,7 +301,7 @@ pub fn walk<H: Host>(
         newest_change: None,
         times_unknown: false,
     };
-    let root = walker.admit(None, candidate.name.to_owned(), &stat, path)?;
+    let root = walker.admit(candidate.name.to_owned(), &stat, path)?;
     let mut stack = Stack::new(host, candidate, deadline);
     if let Some(listing) = root.listing {
         stack.push(listing, root.name.clone(), root.identity, root.bytes);
@@ -413,12 +413,7 @@ impl<H: Host> Walker<'_, H> {
                 Ok(stat) => stat,
                 Err(e) => return Err(host_failure(path(), "stat", &e)),
             };
-            // Where a Cargo target holding this directory as a profile
-            // directory would be: its parent, or its grandparent (a target
-            // triple between), inside the candidate.
-            let targets =
-                [i.checked_sub(1), i.checked_sub(2)].map(|k| k.map(|k| stack.frame(k).listing));
-            let entry = self.admit(Some(targets), name.clone(), &stat, path)?;
+            let entry = self.admit(name.clone(), &stat, path)?;
             entries.push(entry);
         }
         let listing = stack.frame(i).listing;
@@ -427,13 +422,8 @@ impl<H: Host> Walker<'_, H> {
     }
 
     /// Checks one entry (the rules in the module docs) and counts it.
-    /// `targets` are the listings of its directory's parent and grandparent
-    /// inside the candidate, where a Cargo target would be if the entry is
-    /// a lock file (`None` for the candidate itself, which is in no
-    /// directory of the candidate).
     fn admit(
         &mut self,
-        targets: Option<[Option<usize>; 2]>,
         name: OsString,
         stat: &Stat,
         path: impl Fn() -> PathBuf,
@@ -491,25 +481,23 @@ impl<H: Host> Walker<'_, H> {
             | FileType::Socket
             | FileType::Fifo => {}
         }
-        if CARGO_LOCK_NAMES.iter().any(|lock| name == *lock) {
-            return Err(skip(
-                Reason::ContainsSpecial,
-                "a Cargo lock file name (no Cargo lock file is ever deleted, wherever it is)"
-                    .to_owned(),
-            ));
-        }
-        if let Some(targets) = targets
-            && is_cargo_lock_name(&name)
-            && let Some(up) = targets
-                .iter()
-                .position(|t| t.is_some_and(|listing| self.has_tag(listing)))
-        {
-            let target = ["parent", "grandparent"][up];
+        // By name alone, at any depth, tag or no tag (TASK-167): a lock
+        // file Cargo holds is protected only while it stays where Cargo
+        // opens it, and a lock below a profile directory's top level, or
+        // in a target whose CACHEDIR.TAG is outside the candidate, has no
+        // structure here to recognise it by. Refusing a non-Cargo file
+        // that happens to have such a name only keeps a candidate.
+        if is_cargo_lock_name(&name) {
+            let known = if CARGO_LOCK_NAMES.iter().any(|lock| name == *lock) {
+                "a known"
+            } else {
+                "an unknown"
+            };
             return Err(skip(
                 Reason::ContainsSpecial,
                 format!(
-                    "a Cargo lock file in a profile directory of a Cargo target (its directory's \
-                     {target} holds {CACHEDIR_TAG})"
+                    "{known} Cargo lock file name (`.cargo-*lock*`): no Cargo lock file is ever \
+                     deleted, wherever it is"
                 ),
             ));
         }
@@ -544,20 +532,11 @@ impl<H: Host> Walker<'_, H> {
             listing,
         })
     }
-
-    /// Whether the listed directory holds `CACHEDIR.TAG`: with a lock file
-    /// in a directory one or two levels below, it is a Cargo target for the
-    /// structural recogniser (docs/safety.md: `<t>/<p>/` or
-    /// `<t>/<triple>/<p>/`). The tag's content is not read: any entry of
-    /// that name counts, which errs on the side of keeping.
-    fn has_tag(&self, listing: usize) -> bool {
-        self.listings[listing]
-            .iter()
-            .any(|e| e.name == CACHEDIR_TAG)
-    }
 }
 
-/// Whether `name` matches `.cargo-*lock*` (any lock name, known or not).
+/// Whether `name` matches `.cargo-*lock*` (any lock name, known or not):
+/// what the walk refuses anywhere, and what marks a profile directory for
+/// Cargo discovery.
 pub fn is_cargo_lock_name(name: &OsStr) -> bool {
     use std::os::unix::ffi::OsStrExt;
     name.as_bytes()

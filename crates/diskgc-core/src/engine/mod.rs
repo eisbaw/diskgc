@@ -470,9 +470,8 @@ pub enum Reason {
     /// A `.diskgc-keep` file is inside the candidate or between its root
     /// and it (`keep_marker`; named `kept` before 0.1, TASK-192).
     KeepMarker,
-    /// A PrivateTmp entry, a Cargo lock file name anywhere, a Cargo
-    /// target inside (the structural recogniser), or a device node or an
-    /// object of unknown type.
+    /// A PrivateTmp entry, a Cargo lock file name (`.cargo-*lock*`, known
+    /// or not) anywhere, or a device node or an object of unknown type.
     ContainsSpecial,
     /// A version-control checkout is inside ([`CHECKOUT_MARKERS`]
     /// anywhere, the candidate itself included), or the candidate lies
