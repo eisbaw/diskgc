@@ -1276,6 +1276,29 @@ reads its host clock while the guest is held at the old wall time, comparing
 it against a monotonic baseline before restoring the guest clock. Destructive diskgc runs remain
 inside the guest Podman containers.
 
+The `vm-release-tmp-reclaim` flake check (in `just e2e`) runs
+the 0.1 release package, not a development build, through real `/tmp`
+reclaims past the 1 h floor, which no container can: the release binary
+has no test clock offset and rootless containers cannot backdate ctime. A
+NixOS guest installs the package as a user would (binary on `PATH`, its
+tmpfiles.d drop-in provisioning `/run/diskgc/lock` at boot, its example
+config) on a tmpfs `/tmp`. With the guest clock held five days back, two
+users each make, with the pinned pytest and Nix, two SIGKILLed and three
+ended pytest sessions, one live session, a SIGKILLed legacy `nix-shell`
+and an exited `nix develop` rc directory, a live one of each, and
+unrelated decoys (`diskgc-e2e/vm-release-tmp-reclaim-cohort.sh`). Then,
+as ordinary users, the plain binary runs `--select profile:pytest-tmp`,
+`--select profile:nix-shell-rc` and the example config (as shipped: exit
+2, `cause: config`; with its root pointed at an existing directory: the
+stale tier), human and JSON. The script asserts exit codes and statuses,
+that `idle-1d` passes and `idle-7d` fails (`not_idle`) on the genuine
+ctime, each reclaimed session's `idle_age_seconds` of about five days,
+the kept sessions' reasons and evidence (`owner_pid` with the live pid,
+`temp_root`, the live shell's `fd`), that exactly the reclaimed trees left
+`/tmp`, and that the live pytest then finishes its test. Every command,
+exit code, human summary, JSON report and stderr is kept in the check's
+output under `evidence/`.
+
 ## 5. End-to-end tests in containers
 
 The real binary in **rootless Podman containers**, built from images Nix

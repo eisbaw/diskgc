@@ -65,6 +65,7 @@ e2e: check _gcroot-dev
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-docker fast 300
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
+    nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
     nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
@@ -97,6 +98,7 @@ e2e-full: check _gcroot-dev
     just _e2e-debian
     just _e2e-docker full 900
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
+    nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
     nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12

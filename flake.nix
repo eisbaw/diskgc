@@ -809,6 +809,11 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
+      # TASK-156: the release package reclaims genuinely old /tmp sessions.
+      vmReleaseTmpReclaim = import ./diskgc-e2e/vm-release-tmp-reclaim.nix {
+        inherit pkgs;
+        release = diskgcRelease01;
+      };
       vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
         inherit pkgs;
         image = e2eVmImage;
@@ -855,6 +860,7 @@
       vmChecks = {
         vm-historical-ctime = vmHistoricalCtime;
         vm-cold-scale = vmColdScale;
+        vm-release-tmp-reclaim = vmReleaseTmpReclaim;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
