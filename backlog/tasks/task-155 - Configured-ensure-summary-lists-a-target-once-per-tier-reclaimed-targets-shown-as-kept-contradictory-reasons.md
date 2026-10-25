@@ -3,10 +3,10 @@ id: TASK-155
 title: >-
   Configured ensure summary lists a target once per tier: reclaimed targets
   shown as kept, contradictory reasons
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-24 22:12'
-updated_date: '2026-10-25 00:27'
+updated_date: '2026-10-25 01:02'
 labels:
   - shipping
 dependencies: []
@@ -27,4 +27,6 @@ Repro: just walk-up; wait an hour after walk-reset (idle-1h); write the two-tier
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented on branch t155 (04b7d8e..a372a43, not merged): report/outcome.rs folds actions/skipped (live) and plan (dry run) into one verdict per candidate; report/human.rs renders it. Walked 2026-10-25 in walk-diskgc-t155 (release-01-candidate of t155, seed 1): tmp/walks/2026-10-25-t155/ (11, 12, 15, 23, 24, 25, 26; *-before = 0.1 binary on the same data where the step is read-only). Follow-ups: TASK-160 (sizes for refused dry-run rows), TASK-161 (pid holding .cargo-build-lock).
+
+Merged to master as 1ee71fa on 2026-10-25T01:02Z (rebased twice; just check exit 0, 1061 passed).
 <!-- SECTION:NOTES:END -->

@@ -3,10 +3,10 @@ id: TASK-147
 title: >-
   Human ensure output: raw epoch seconds, each skip printed twice, no sizes or
   outcome in the dry run
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-24 21:10'
-updated_date: '2026-10-25 00:28'
+updated_date: '2026-10-25 01:02'
 labels:
   - shipping
 dependencies: []
@@ -32,4 +32,6 @@ Also (tmp/walks/2026-10-24/24-laptop-tmp.txt): the dry run's 'held by deleted fi
 Inconsistent: the 'checking' progress line says 'last build 1 h ago' (human) while skip lines say 'last build at 1792875820 s, 56 s before now' (tmp/walks/2026-10-24/15-ci-hook-reclaim.txt vs 11-ci-dryrun.txt).
 
 Implemented on branch t155 (04b7d8e..a372a43, not merged): report/outcome.rs folds actions/skipped (live) and plan (dry run) into one verdict per candidate; report/human.rs renders it. Walked 2026-10-25 in walk-diskgc-t155 (release-01-candidate of t155, seed 1): tmp/walks/2026-10-25-t155/ (11, 12, 15, 23, 24, 25, 26; *-before = 0.1 binary on the same data where the step is read-only). Follow-ups: TASK-160 (sizes for refused dry-run rows), TASK-161 (pid holding .cargo-build-lock).
+
+Merged to master as 1ee71fa on 2026-10-25T01:02Z (rebased twice; just check exit 0, 1061 passed).
 <!-- SECTION:NOTES:END -->
