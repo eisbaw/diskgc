@@ -10,7 +10,7 @@
 //! executor sees the policy. The checked data is retained for the planner;
 //! no machine paths are opened during static validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -126,6 +126,9 @@ pub struct Config {
     /// that does not exist is exit 2, TASK-152). `groups` and `protect`
     /// carry the same roots bound to their profiles.
     pub written_roots: Vec<WrittenRoot>,
+    /// Where each user profile (`profiles:`) is written, by name: for a
+    /// refusal that names one (diskgc 0.1 refuses them all).
+    pub user_profile_lines: BTreeMap<String, u64>,
 }
 
 /// A root the configuration supplies for a `roots: required` profile, and
@@ -167,6 +170,9 @@ impl fmt::Display for WrittenRoot {
 pub struct CheckoutPolicy {
     pub profile: String,
     pub checkouts: CheckoutsSpec,
+    /// Where it is written (1-based), for messages; never read from YAML.
+    #[serde(skip)]
+    pub line: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,12 +189,16 @@ pub struct Tier {
     pub roots: std::collections::BTreeMap<String, Vec<String>>,
     pub order: Order,
     pub timeout: Duration,
+    /// Where it is written (1-based), for messages.
+    pub line: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Protection {
     pub profile: String,
     pub roots: Vec<String>,
+    /// Where it is written (1-based), for messages.
+    pub line: Option<u64>,
 }
 
 /// A root-mode owner. The explicit mapping avoids treating a numeric-looking
@@ -232,19 +242,19 @@ pub enum IpcPolicy {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigSpec {
-    version: u64,
+    version: Spanned<u64>,
     #[serde(default)]
-    profiles: Vec<ProfileSpec>,
+    profiles: Vec<Spanned<ProfileSpec>>,
     #[serde(default)]
-    profile_policies: Vec<CheckoutPolicy>,
+    profile_policies: Vec<Spanned<CheckoutPolicy>>,
     #[serde(default)]
     // Spanned outside the untagged enum: inside it, serde buffers the
     // entry and its locations are lost.
     protect: Vec<Spanned<ProtectSpec>>,
     #[serde(default, deserialize_with = "present")]
-    owners: Option<Vec<Owner>>,
+    owners: Option<Spanned<Vec<Owner>>>,
     #[serde(default)]
-    groups: Vec<GroupSpec>,
+    groups: Vec<Spanned<GroupSpec>>,
     #[serde(default, deserialize_with = "present")]
     ipc: Option<IpcPolicy>,
 }
@@ -255,14 +265,14 @@ struct GroupSpec {
     name: String,
     #[serde(default, deserialize_with = "present")]
     ranking: Option<Ranking>,
-    tiers: Vec<TierSpec>,
+    tiers: Vec<Spanned<TierSpec>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TierSpec {
     name: String,
-    select: String,
+    select: Spanned<String>,
     #[serde(default, deserialize_with = "present")]
     roots: Option<Vec<Spanned<String>>>,
     #[serde(default, deserialize_with = "present")]
@@ -295,26 +305,173 @@ struct ProtectWithRoots {
     roots: Vec<String>,
 }
 
+/// One thing wrong with a configuration file, and where: what a user
+/// fixes in one edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// 1-based line in the file; `None` for the file as a whole or when
+    /// the YAML parser reported none.
+    pub line: Option<u64>,
+    pub message: String,
+    /// The YAML parser's excerpt of the file around the error, its header
+    /// naming the file (`--> PATH:LINE:COLUMN`). Only a syntax or schema
+    /// error has one.
+    pub excerpt: Option<String>,
+}
+
+/// The most problems one refusal lists. A configuration is at most
+/// [`MAX_CONFIG_BYTES`], so the count is bounded anyway; this bounds what a
+/// user reads (a screenful) when a whole file is wrong. The rest are
+/// counted, and listed by the next run once these are fixed.
+pub const MAX_PROBLEMS: usize = 20;
+
+/// The problems of one file, collected so that one run reports every
+/// independent one (PRD: "the config is validated completely at load").
+/// Bounded by [`MAX_PROBLEMS`].
+#[derive(Debug, Default)]
+pub struct Problems {
+    list: Vec<Problem>,
+    omitted: usize,
+}
+
+impl Problems {
+    pub fn push(&mut self, line: Option<u64>, message: impl Into<String>) {
+        self.push_problem(Problem {
+            line,
+            message: message.into(),
+            excerpt: None,
+        });
+    }
+
+    fn push_problem(&mut self, problem: Problem) {
+        if self.list.len() < MAX_PROBLEMS {
+            self.list.push(problem);
+        } else {
+            self.omitted += 1;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// `Ok` when nothing was found; else the refusal, its problems in file
+    /// order (those of the file as a whole first), then `note`, said once.
+    pub fn into_result(mut self, path: &Path, note: Option<String>) -> Result<(), ConfigError> {
+        if self.list.is_empty() {
+            return Ok(());
+        }
+        self.list.sort_by_key(|problem| problem.line);
+        Err(ConfigError {
+            path: path.to_owned(),
+            problems: self.list,
+            omitted: self.omitted,
+            note,
+        })
+    }
+}
+
 /// Why a configuration file was refused: a load-time error, exit 2,
-/// nothing deleted. The message names the file.
+/// nothing deleted. Every line names the file, with the line where known
+/// (`PATH:LINE: message`, as compilers and editors read it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     pub path: PathBuf,
-    pub message: String,
+    /// Never empty; at most [`MAX_PROBLEMS`], in file order.
+    pub problems: Vec<Problem>,
+    /// Problems found beyond [`MAX_PROBLEMS`]: counted, not listed.
+    pub omitted: usize,
+    /// Said once after the problems (what the release ships instead).
+    pub note: Option<String>,
+}
+
+impl ConfigError {
+    /// A refusal with one problem of the file as a whole.
+    pub fn whole_file(path: &Path, message: impl Into<String>) -> Self {
+        let mut problems = Problems::default();
+        problems.push(None, message);
+        problems
+            .into_result(path, None)
+            .expect_err("one problem was pushed")
+    }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid config {}: {}",
-            self.path.display(),
-            self.message
-        )
+        assert!(!self.problems.is_empty(), "a refusal names a problem");
+        let path = self.path.display();
+        let at = |problem: &Problem| match problem.line {
+            Some(line) => format!("{path}:{line}"),
+            None => path.to_string(),
+        };
+        match self.problems.as_slice() {
+            [one] if self.omitted == 0 => {
+                write!(f, "invalid config {}: {}", at(one), one.message)?;
+                if let Some(excerpt) = &one.excerpt {
+                    write!(f, "\n{excerpt}")?;
+                }
+            }
+            all => {
+                write!(
+                    f,
+                    "invalid config {path}: {} errors:",
+                    all.len() + self.omitted
+                )?;
+                for problem in all {
+                    write!(f, "\n  {}: {}", at(problem), problem.message)?;
+                }
+                if self.omitted > 0 {
+                    write!(
+                        f,
+                        "\n  ... and {} more, listed once these are fixed",
+                        self.omitted
+                    )?;
+                }
+            }
+        }
+        if let Some(note) = &self.note {
+            write!(f, "\n{note}")?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for ConfigError {}
+
+/// A YAML syntax or schema error (an unknown or missing key, a wrong type)
+/// as a [`Problem`]: the parser's message without its own "error: line N
+/// column M:" prefix (the refusal says where), and its excerpt with the
+/// file's path in place of the parser's `<input>`.
+fn yaml_problem(path: &Path, error: &serde_saphyr::Error) -> Problem {
+    use serde_saphyr::MessageFormatter;
+    let message = serde_saphyr::UserMessageFormatter.format_message(error.without_snippet());
+    // The formatter's text is not sanitised by the renderer here: a key
+    // the user wrote can hold control characters.
+    let message: String = message
+        .chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    let path_name = path.display().to_string();
+    let rendered = error.render_with_options(serde_saphyr::render_options! {
+        source_name: Some(path_name.as_str()),
+    });
+    // The excerpt starts at its ` --> PATH:LINE:COLUMN` header; the line
+    // before it repeats the message.
+    let excerpt = rendered
+        .find("\n --> ")
+        .map(|start| rendered[start + 1..].trim_end().to_owned());
+    Problem {
+        line: error.location().map(|l| l.line()).filter(|line| *line > 0),
+        message,
+        excerpt,
+    }
+}
 
 /// The first non-system uid: `owners:` entries, by number or by a name's
 /// account, must be at least this (docs/reference.md, Configuration file).
@@ -334,44 +491,90 @@ pub fn parse_for_profile_test(path: &Path, bytes: &[u8]) -> Result<Config, Confi
 }
 
 fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config, ConfigError> {
-    let error = |message: String| ConfigError {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| ConfigError::whole_file(path, format!("not UTF-8: {e}")))?;
+    // A syntax or schema error stops here: nothing after it can be read.
+    let spec: ConfigSpec = serde_saphyr::from_str(text).map_err(|e| ConfigError {
         path: path.to_owned(),
-        message,
+        problems: vec![yaml_problem(path, &e)],
+        omitted: 0,
+        note: None,
+    })?;
+    if spec.version.value != 1 {
+        let mut problems = Problems::default();
+        problems.push(
+            located(&spec.version.referenced),
+            format!(
+                "version: {} is not supported; this build reads version: 1",
+                spec.version.value
+            ),
+        );
+        return Err(problems
+            .into_result(path, None)
+            .expect_err("one problem was pushed"));
+    }
+    // From here on every rule is checked and every problem collected, so
+    // one run lists them all. A rule that needs what an earlier one refused
+    // (a selection needs the profile library) is skipped rather than
+    // reported as a second, derived problem.
+    let mut problems = Problems::default();
+    let user_profile_lines: BTreeMap<String, u64> = spec
+        .profiles
+        .iter()
+        .filter_map(|p| Some((p.value.name.clone(), located(&p.referenced)?)))
+        .collect();
+    let profile_specs: Vec<ProfileSpec> = spec.profiles.into_iter().map(|p| p.value).collect();
+    let profile_line = |index: Option<usize>| {
+        index
+            .and_then(|i| profile_specs.get(i))
+            .and_then(|p| user_profile_lines.get(&p.name).copied())
     };
-    let text = std::str::from_utf8(bytes).map_err(|e| error(format!("not UTF-8: {e}")))?;
-    let spec: ConfigSpec = serde_saphyr::from_str(text).map_err(|e| error(e.to_string()))?;
-    if spec.version != 1 {
-        return Err(error(format!(
-            "version: {} is not supported; this build reads version: 1",
-            spec.version
-        )));
-    }
-    let mut library =
-        Library::with_user_profiles(&spec.profiles).map_err(|e| error(e.to_string()))?;
+    let mut library = match Library::with_user_profiles(&profile_specs) {
+        Ok(library) => Some(library),
+        Err(errors) => {
+            for error in &errors.0 {
+                problems.push(profile_line(error.user_index), error.to_string());
+            }
+            None
+        }
+    };
     let mut policy_names = BTreeSet::new();
-    for policy in &spec.profile_policies {
-        if !policy_names.insert(policy.profile.as_str()) {
-            return Err(error(format!(
-                "profile_policies: duplicate policy for `{}`",
-                policy.profile
-            )));
-        }
-        if spec
-            .profiles
-            .iter()
-            .any(|profile| profile.name == policy.profile)
+    let mut profile_policies = Vec::new();
+    for spanned in spec.profile_policies {
+        let line = located(&spanned.referenced);
+        let policy = CheckoutPolicy {
+            line,
+            ..spanned.value
+        };
+        if !policy_names.insert(policy.profile.clone()) {
+            problems.push(
+                line,
+                format!(
+                    "profile_policies: duplicate policy for `{}`",
+                    policy.profile
+                ),
+            );
+        } else if profile_specs.iter().any(|p| p.name == policy.profile) {
+            problems.push(
+                line,
+                format!(
+                    "profile_policies: `{}` is also defined in profiles; specify checkouts in \
+                     one place",
+                    policy.profile
+                ),
+            );
+        } else if let Some(library) = &mut library
+            && let Err(message) = library.set_checkouts(&policy.profile, policy.checkouts.0)
         {
-            return Err(error(format!(
-                "profile_policies: `{}` is also defined in profiles; specify checkouts in one place",
-                policy.profile
-            )));
+            problems.push(line, format!("profile_policies: {message}"));
         }
-        library
-            .set_checkouts(&policy.profile, policy.checkouts.0)
-            .map_err(|message| error(format!("profile_policies: {message}")))?;
+        profile_policies.push(policy);
     }
-    if check_examples && let Some(first) = crate::profile::examples::failures(&library).first() {
-        return Err(error(first.clone()));
+    if check_examples && let Some(library) = &library {
+        for failure in crate::profile::examples::run(library).failures {
+            let line = user_profile_lines.get(&failure.profile).copied();
+            problems.push(line, failure.to_string());
+        }
     }
     let mut root_lines = Vec::new();
     let mut tier_names = BTreeSet::new();
@@ -379,37 +582,68 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
     let mut groups = Vec::new();
     let mut selection_warnings = Vec::new();
     for group in spec.groups {
-        valid_name(&group.name, "group").map_err(error)?;
+        let group_line = located(&group.referenced);
+        let group = group.value;
+        if let Err(message) = valid_name(&group.name, "group") {
+            problems.push(group_line, message);
+        }
         if !group_names.insert(group.name.clone()) {
-            return Err(error(format!("duplicate group name `{}`", group.name)));
+            problems.push(group_line, format!("duplicate group name `{}`", group.name));
         }
         let mut tiers = Vec::new();
         for tier in group.tiers {
-            valid_name(&tier.name, "tier").map_err(error)?;
-            if !tier_names.insert(tier.name.clone()) {
-                return Err(error(format!("duplicate tier name `{}`", tier.name)));
+            let tier_line = located(&tier.referenced);
+            let tier = tier.value;
+            if let Err(message) = valid_name(&tier.name, "tier") {
+                problems.push(tier_line, message);
             }
-            let checked = select::compile(&tier.select, &library)
-                .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
+            if !tier_names.insert(tier.name.clone()) {
+                problems.push(tier_line, format!("duplicate tier name `{}`", tier.name));
+            }
+            let roots_line = tier
+                .roots
+                .as_ref()
+                .and_then(|roots| roots.first())
+                .and_then(|root| located(&root.referenced))
+                .or(tier_line);
+            let written = tier.roots.map(|roots| {
+                written_roots(&roots, &RootEntry::Tier(tier.name.clone()), &mut root_lines)
+            });
+            let Some(library) = &library else {
+                continue;
+            };
+            let select_line = located(&tier.select.referenced).or(tier_line);
+            let checked = match select::compile(&tier.select.value, library) {
+                Ok(checked) => checked,
+                Err(e) => {
+                    problems.push(select_line, format!("tier `{}`: {e}", tier.name));
+                    // The roots' own spelling does not depend on the
+                    // selection: still say what is wrong with them.
+                    if let Some(written) = &written
+                        && let Err(e) = Library::check_root_list(written)
+                    {
+                        problems.push(roots_line, format!("tier `{}`: {e}", tier.name));
+                    }
+                    continue;
+                }
+            };
             selection_warnings.extend(
                 checked
                     .warnings()
                     .iter()
                     .map(|warning| format!("tier `{}`: {warning}", tier.name)),
             );
-            let written = tier.roots.map(|roots| {
-                written_roots(&roots, &RootEntry::Tier(tier.name.clone()), &mut root_lines)
-            });
-            let roots = library
-                .bind_roots(&checked, written.as_deref())
-                .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
-            tiers.push(Tier {
-                name: tier.name,
-                select: checked,
-                roots,
-                order: tier.order.unwrap_or(Order::Oldest),
-                timeout: tier.timeout.map_or(Duration::from_secs(600), |t| t.0),
-            });
+            match library.bind_roots(&checked, written.as_deref()) {
+                Ok(roots) => tiers.push(Tier {
+                    name: tier.name,
+                    select: checked,
+                    roots,
+                    order: tier.order.unwrap_or(Order::Oldest),
+                    timeout: tier.timeout.map_or(Duration::from_secs(600), |t| t.0),
+                    line: tier_line,
+                }),
+                Err(e) => problems.push(roots_line, format!("tier `{}`: {e}", tier.name)),
+            }
         }
         groups.push(Group {
             name: group.name,
@@ -432,66 +666,61 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
                 (item.profile, Some(item.roots))
             }
         };
-        let profile = library
-            .get(&name)
-            .ok_or_else(|| error(format!("protect: unknown profile `{name}`")))?;
+        let Some(library) = &library else {
+            continue;
+        };
+        let Some(profile) = library.get(&name) else {
+            problems.push(line, format!("protect: unknown profile `{name}`"));
+            continue;
+        };
         let Body::Source(source) = &profile.body else {
-            return Err(error(format!(
-                "protect: `{name}` is a filter, not a source profile"
-            )));
+            problems.push(
+                line,
+                format!("protect: `{name}` is a filter, not a source profile"),
+            );
+            continue;
         };
         if !matches!(source.kind(), Kind::Fs | Kind::CargoTarget) {
-            return Err(error(format!(
-                "protect: `{name}` has kind {}, which cannot be protected",
-                source.kind()
-            )));
+            problems.push(
+                line,
+                format!(
+                    "protect: `{name}` has kind {}, which cannot be protected",
+                    source.kind()
+                ),
+            );
+            continue;
         }
-        let roots = library
-            .roots_of(&name, supplied.as_deref())
-            .map_err(|e| error(format!("protect `{name}`: {e}")))?;
-        protect.push(Protection {
-            profile: name,
-            roots,
-        });
-    }
-    if let Some(owners) = &spec.owners {
-        if owners.is_empty() {
-            return Err(error("owners: list must be non-empty".to_owned()));
-        }
-        for owner in owners {
-            match owner {
-                Owner::Name(name) if name.trim().is_empty() => {
-                    return Err(error("owners: names must be non-empty".to_owned()));
-                }
-                Owner::Name(name) if name.bytes().all(|byte| byte.is_ascii_digit()) => {
-                    return Err(error(format!(
-                        "owners: numeric user name {name:?} is ambiguous; use {{uid: {name}}}"
-                    )));
-                }
-                Owner::Uid(UidOwner { uid }) if *uid < SYSTEM_UID_END => {
-                    return Err(error(format!(
-                        "owners: system uid {uid} (< {SYSTEM_UID_END}) is forbidden"
-                    )));
-                }
-                _ => {}
-            }
-        }
-        let unique: BTreeSet<_> = owners.iter().collect();
-        if unique.len() != owners.len() {
-            return Err(error("owners: entries must be unique".to_owned()));
+        match library.roots_of(&name, supplied.as_deref()) {
+            Ok(roots) => protect.push(Protection {
+                profile: name,
+                roots,
+                line,
+            }),
+            Err(e) => problems.push(line, format!("protect `{name}`: {e}")),
         }
     }
+    let owners = spec.owners.map(|owners| {
+        check_owners(&owners.value, located(&owners.referenced), &mut problems);
+        owners.value
+    });
+    let Some(library) = library else {
+        return Err(problems
+            .into_result(path, None)
+            .expect_err("a library that did not load was reported"));
+    };
+    problems.into_result(path, None)?;
     let mut warnings = profile_warnings(&library, &groups, &protect);
     warnings.extend(selection_warnings);
     warnings.extend(
-        spec.profile_policies
+        profile_policies
             .iter()
             .filter(|policy| policy.checkouts.0 == Checkouts::Allow)
             .map(|policy| {
-            format!(
-                "profile `{}` allows VCS checkouts by profile_policies: candidates may contain uncommitted work",
-                policy.profile
-            )
+                format!(
+                    "profile `{}` allows VCS checkouts by profile_policies: candidates may \
+                     contain uncommitted work",
+                    policy.profile
+                )
             }),
     );
     Ok(Config {
@@ -499,12 +728,46 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         library,
         groups,
         protect,
-        owners: spec.owners,
+        owners,
         warnings,
         ipc: spec.ipc.unwrap_or(IpcPolicy::BlockAny),
-        profile_policies: spec.profile_policies,
+        profile_policies,
         written_roots: root_lines,
+        user_profile_lines,
     })
+}
+
+/// `owners:`'s shape (docs/reference.md, Configuration file): non-empty,
+/// unique, no empty or numeric-looking names, no system uids. Every
+/// problem is pushed, at the `owners:` line (the entries have no spans).
+fn check_owners(owners: &[Owner], line: Option<u64>, problems: &mut Problems) {
+    if owners.is_empty() {
+        problems.push(line, "owners: list must be non-empty");
+    }
+    for owner in owners {
+        match owner {
+            Owner::Name(name) if name.trim().is_empty() => {
+                problems.push(line, "owners: names must be non-empty");
+            }
+            Owner::Name(name) if name.bytes().all(|byte| byte.is_ascii_digit()) => {
+                problems.push(
+                    line,
+                    format!("owners: numeric user name {name:?} is ambiguous; use {{uid: {name}}}"),
+                );
+            }
+            Owner::Uid(UidOwner { uid }) if *uid < SYSTEM_UID_END => {
+                problems.push(
+                    line,
+                    format!("owners: system uid {uid} (< {SYSTEM_UID_END}) is forbidden"),
+                );
+            }
+            _ => {}
+        }
+    }
+    let unique: BTreeSet<_> = owners.iter().collect();
+    if unique.len() != owners.len() {
+        problems.push(line, "owners: entries must be unique");
+    }
 }
 
 /// A parser location's 1-based line; `None` when it reported none (0).
@@ -735,13 +998,97 @@ mod tests {
         ] {
             let error = parsed(text).expect_err(text);
             assert!(error.contains(needle), "{text:?}: {error}");
-            assert!(error.starts_with("invalid config /c.yaml: "), "{error}");
+            assert!(error.starts_with("invalid config /c.yaml"), "{error}");
         }
         assert!(
             parse(Path::new("/c.yaml"), b"version: 1\n\xff")
                 .unwrap_err()
+                .problems[0]
                 .message
                 .contains("UTF-8")
+        );
+    }
+
+    /// TASK-149: one run reports every independent problem, each at its
+    /// line, in file order: a selection typo, a `~` root in the same tier,
+    /// a duplicate tier, an unknown protected profile, a system uid.
+    #[test]
+    fn independent_problems_are_all_reported_each_at_its_line() {
+        let text = "version: 1\n\
+                    groups:\n\
+                    \x20 - name: stale\n\
+                    \x20   tiers:\n\
+                    \x20     - name: old\n\
+                    \x20       select: profile:cargo-target & filter:idle-7d\n\
+                    \x20       roots: [~/src]\n\
+                    \x20     - name: old\n\
+                    \x20       select: profile:cargo-target\n\
+                    \x20       roots: [/src]\n\
+                    protect: [nope]\n\
+                    owners: [{uid: 0}]\n";
+        let error = parse(Path::new("/c.yaml"), text.as_bytes()).expect_err("five problems");
+        let lines: Vec<Option<u64>> = error.problems.iter().map(|p| p.line).collect();
+        assert_eq!(
+            lines,
+            [Some(6), Some(7), Some(8), Some(11), Some(12)],
+            "{error}"
+        );
+        let shown = error.to_string();
+        for needle in [
+            "invalid config /c.yaml: 5 errors:\n",
+            "\n  /c.yaml:6: tier `old`: invalid selection",
+            "a single `&`",
+            "\n  /c.yaml:7: tier `old`: root `~/src`",
+            "\n  /c.yaml:8: duplicate tier name `old`",
+            "\n  /c.yaml:11: protect: unknown profile `nope`",
+            "\n  /c.yaml:12: owners: system uid 0",
+        ] {
+            assert!(shown.contains(needle), "{needle:?} missing from:\n{shown}");
+        }
+    }
+
+    /// One problem is one line, `PATH:LINE: message`; a YAML schema error
+    /// keeps its excerpt but names the file, not `<input>`, and says
+    /// "error" once (the caller's prefix).
+    #[test]
+    fn a_yaml_error_names_the_file_and_line_once() {
+        let text = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        \
+                    select: profile:cargo-target\n        root: [/a]\n";
+        let shown = parse(Path::new("/c.yaml"), text.as_bytes())
+            .expect_err("unknown field")
+            .to_string();
+        let first = shown.lines().next().expect("a line");
+        assert!(
+            first.starts_with("invalid config /c.yaml:7: unknown field `root`"),
+            "{shown}"
+        );
+        assert!(shown.contains(" --> /c.yaml:7:9"), "{shown}");
+        assert!(!shown.contains("<input>"), "{shown}");
+        assert!(!shown.contains("error"), "{shown}");
+    }
+
+    /// A file of nothing but mistakes lists at most [`MAX_PROBLEMS`] and
+    /// counts the rest.
+    #[test]
+    fn the_listed_problems_are_bounded() {
+        let mut text = "version: 1\ngroups:\n".to_owned();
+        for i in 0..MAX_PROBLEMS + 5 {
+            text.push_str(&format!("  - name: Bad{i}\n    tiers: []\n"));
+        }
+        let error = parse(Path::new("/c.yaml"), text.as_bytes()).expect_err("bad names");
+        assert_eq!(error.problems.len(), MAX_PROBLEMS);
+        assert_eq!(error.omitted, 5);
+        let shown = error.to_string();
+        assert!(
+            shown.starts_with(&format!(
+                "invalid config /c.yaml: {} errors:",
+                MAX_PROBLEMS + 5
+            )),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("... and 5 more, listed once these are fixed"),
+            "{shown}"
         );
     }
 

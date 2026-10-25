@@ -370,21 +370,48 @@ impl Library {
     /// `cargo-target` with its lock protocol, and of an admissible class (the
     /// loader already refuses `releases` on class none). A violation is a bug
     /// in builtin.yaml, which the tests load.
-    pub fn proposed_release_01(mut self) -> Result<Self, String> {
-        let release = Release::V0_1;
-        let user: Vec<String> = self
-            .profiles
+    pub fn proposed_release_01(self) -> Result<Self, String> {
+        let user = self.user_profile_names();
+        let library = self.release_01_built_ins()?;
+        if !user.is_empty() {
+            // Overrides too: a name-only allowlist would admit a command
+            // action or an arbitrary delete under `cargo-target`.
+            let quoted: Vec<String> = user.iter().map(|name| format!("`{name}`")).collect();
+            return Err(format!(
+                "user profiles are not available in diskgc {}: the configuration's \
+                 `profiles:` defines {} (an `override: true` of a built-in counts too); \
+                 remove them. {}",
+                Release::V0_1.name(),
+                quoted.join(", "),
+                library.release_scope()
+            ));
+        }
+        Ok(library)
+    }
+
+    /// The user profiles' names (overrides of a built-in included), by name.
+    pub fn user_profile_names(&self) -> Vec<String> {
+        self.profiles
             .values()
             .filter(|p| p.origin != Origin::BuiltIn)
-            .map(|p| format!("`{}`", p.name))
-            .collect();
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// [`Self::proposed_release_01`] without refusing user profiles: the
+    /// 0.1 built-ins alone, every user profile (and override) dropped. For
+    /// a caller that reports the user profiles itself, together with the
+    /// other parts the release refuses (TASK-164), instead of one refusal
+    /// per run.
+    pub fn release_01_built_ins(mut self) -> Result<Self, String> {
+        let release = Release::V0_1;
         let mut withheld = BTreeSet::new();
         self.profiles.retain(|name, profile| {
-            let kept = profile.releases.contains(&release);
-            if !kept && profile.origin == Origin::BuiltIn {
+            let built_in = profile.origin == Origin::BuiltIn;
+            if built_in && !profile.releases.contains(&release) {
                 withheld.insert(name.clone());
             }
-            kept
+            built_in && profile.releases.contains(&release)
         });
         self.withheld = Some((release, withheld));
         for profile in self.profiles.values() {
@@ -414,18 +441,6 @@ impl Library {
         {
             return Err("proposed 0.1 catalog has no source".to_owned());
         }
-        if !user.is_empty() {
-            // Overrides too: a name-only allowlist would admit a command
-            // action or an arbitrary delete under `cargo-target`.
-            return Err(format!(
-                "user profiles are not available in diskgc {}: the configuration's \
-                 `profiles:` defines {} (an `override: true` of a built-in counts too); \
-                 remove them. {}",
-                release.name(),
-                user.join(", "),
-                self.release_scope()
-            ));
-        }
         Ok(self)
     }
 
@@ -442,6 +457,12 @@ impl Library {
                 release.name()
             )
         })
+    }
+
+    /// The release whose catalog this library is (`0.1`); `None` for the
+    /// development library, which has every built-in and user profiles.
+    pub fn release_name(&self) -> Option<&'static str> {
+        self.withheld.as_ref().map(|(release, _)| release.name())
     }
 
     /// What this library offers, in a user's words: its sources and
@@ -463,7 +484,7 @@ impl Library {
             .map_or("this build", |(release, _)| release.name());
         format!(
             "diskgc {release} ships the sources {} and the filters {} (`diskgc profiles \
-             list`; the release notes in docs/reference.md)",
+             list` describes them)",
             names(&sources),
             names(&filters)
         )

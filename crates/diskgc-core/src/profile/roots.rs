@@ -93,16 +93,23 @@ impl Library {
         Ok(bound.remove(name).unwrap_or_default())
     }
 
+    /// The rules a supplied list of roots keeps whatever the profiles:
+    /// non-empty, absolute, normalized, each once. What a refusal can still
+    /// say about a tier whose selection it refused.
+    pub fn check_root_list(supplied: &[String]) -> Result<(), RootsError> {
+        if supplied.is_empty() {
+            return Err(RootsError::Empty);
+        }
+        validate_root_list(supplied).map_err(RootsError::Path)
+    }
+
     fn bind_names(
         &self,
         names: &[&str],
         supplied: Option<&[String]>,
     ) -> Result<BTreeMap<String, Vec<String>>, RootsError> {
         if let Some(supplied) = supplied {
-            if supplied.is_empty() {
-                return Err(RootsError::Empty);
-            }
-            validate_root_list(supplied).map_err(RootsError::Path)?;
+            Self::check_root_list(supplied)?;
         }
         let mut bound = BTreeMap::new();
         let mut required = Vec::new();

@@ -1086,7 +1086,7 @@ fn profiles_with_a_broken_or_missing_config_is_exit_2() {
         assert!(out.stdout.is_empty());
         let stderr = text(&out.stderr);
         assert!(
-            stderr.contains(&format!("invalid config {config}: profiles[0] (`x`)"))
+            stderr.contains(&format!("{config}:3: profiles[0] (`x`)"))
                 && stderr.contains("kind fs needs `find.type`"),
             "{stderr}"
         );

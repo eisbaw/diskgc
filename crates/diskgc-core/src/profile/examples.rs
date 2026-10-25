@@ -72,12 +72,46 @@ pub fn matches_entry(source: &Source, uid: u32, entry: &Entry<'_>) -> bool {
             .is_none_or(|name| !entry.files.contains(&name))
 }
 
-/// Each violated `match` or `no_match` example, with the owning profile.
+/// One violated `match` or `no_match` example.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The profile whose example it is.
+    pub profile: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.profile, self.message)
+    }
+}
+
+/// What checking a library's examples found: how many examples of how many
+/// profiles were checked (a profile without examples checks nothing, and
+/// `profiles test` must not claim it passed), and each that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub profiles: usize,
+    pub examples: usize,
+    pub failures: Vec<Failure>,
+}
+
+/// Each violated `match` or `no_match` example, as `PROFILE: message`.
+pub fn failures(library: &Library) -> Vec<String> {
+    run(library)
+        .failures
+        .iter()
+        .map(Failure::to_string)
+        .collect()
+}
+
+/// Checks every example of every `fs` source in `library`.
 /// The abstract uid is stable so `profiles test` gives the same result on
 /// every machine, including rootless test containers.
-pub fn failures(library: &Library) -> Vec<String> {
+pub fn run(library: &Library) -> Run {
     const EXAMPLE_UID: u32 = 1000;
     let mut failures = Vec::new();
+    let (mut profiles, mut examples) = (0, 0);
     for profile in library.profiles() {
         let Body::Source(source) = &profile.body else {
             continue;
@@ -90,6 +124,11 @@ pub fn failures(library: &Library) -> Vec<String> {
         } else {
             EntryType::Dir
         };
+        let count = source.examples.matches.len() + source.examples.no_match.len();
+        if count > 0 {
+            profiles += 1;
+            examples += count;
+        }
         let files: Vec<&str> = source.where_.has.as_deref().into_iter().collect();
         let dirs: Vec<&str> = source.where_.has_dir.as_deref().into_iter().collect();
         for (label, paths, expected) in [
@@ -105,20 +144,26 @@ pub fn failures(library: &Library) -> Vec<String> {
                     dirs: &dirs,
                 };
                 if matches_entry(source, EXAMPLE_UID, &entry) != expected {
-                    failures.push(format!(
-                        "{}: {label} example {path} {}",
-                        profile.name,
-                        if expected {
-                            "was not found"
-                        } else {
-                            "was found"
-                        }
-                    ));
+                    failures.push(Failure {
+                        profile: profile.name.clone(),
+                        message: format!(
+                            "{label} example {path} {}",
+                            if expected {
+                                "was not found"
+                            } else {
+                                "was found"
+                            }
+                        ),
+                    });
                 }
             }
         }
     }
-    failures
+    Run {
+        profiles,
+        examples,
+        failures,
+    }
 }
 
 #[cfg(test)]

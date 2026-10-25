@@ -235,8 +235,9 @@ fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
     let error = under_both_catalogs(source.as_bytes(), "valid full catalog override")
         .expect_err("operator override must not impersonate approved Cargo");
     assert!(
-        error.contains("user profiles are not available in diskgc 0.1")
-            && error.contains("`cargo-target`"),
+        error.contains(
+            "profiles: `cargo-target` is a user profile; diskgc 0.1 runs only its built-ins"
+        ) && error.contains("diskgc 0.1 ships the sources cargo-target,"),
         "{error}"
     );
 }
@@ -305,8 +306,9 @@ fn proposed_catalog_refuses_user_command_action_before_selection() {
     let error = under_both_catalogs(source.as_bytes(), "valid full catalog command policy")
         .expect_err("user command action must be refused before any backend");
     assert!(
-        error.contains("user profiles are not available in diskgc 0.1")
-            && error.contains("`custom-cleaner`"),
+        error.contains(
+            "profiles: `custom-cleaner` is a user profile; diskgc 0.1 runs only its built-ins"
+        ) && error.contains("`custom-cleaner` is a user profile, which diskgc 0.1 refuses"),
         "{error}"
     );
 }
@@ -331,7 +333,11 @@ fn proposed_catalog_names_every_refusal_at_once_in_user_words() {
     let error = under_both_catalogs(source.as_bytes(), "the development library loads it")
         .expect_err("0.1 refuses it");
     for part in [
-        "4 part(s) are not available in this release",
+        "invalid config /tmp/policy.yaml: 4 errors:",
+        "/tmp/policy.yaml:3: profile_policies:",
+        "/tmp/policy.yaml:6: protect:",
+        "/tmp/policy.yaml:10: group `stale` tier `node`",
+        "/tmp/policy.yaml:17: group `pressure` tier `docker`",
         "profile_policies: `npm-cache` is a built-in that diskgc 0.1 does not ship",
         "group `stale` tier `node`",
         "`node-compile-cache` is a built-in that diskgc 0.1 does not ship",
@@ -348,6 +354,68 @@ fn proposed_catalog_names_every_refusal_at_once_in_user_words() {
     ] {
         assert!(!error.contains(jargon), "{jargon:?} in: {error}");
     }
+}
+
+/// TASK-164: adapting the development example to 0.1 takes one run, not
+/// three: its user profiles (each at its line), every tier that names one
+/// or a built-in 0.1 does not ship, and the other refused parts are
+/// reported together.
+#[test]
+fn proposed_catalog_reports_user_profiles_with_every_other_refusal_in_one_run() {
+    let doc = crate::doc::reference_md();
+    let section = crate::doc::section(&doc, "## Configuration file");
+    let block = crate::doc::code_blocks(&section, "yaml")
+        .into_iter()
+        .find(|block| block.starts_with("# Development build only"))
+        .expect("reference.md has a development example");
+    let path = Path::new("/c.yaml");
+    let development = Catalog::Development
+        .config(path, block.as_bytes(), ConfigUse::Run)
+        .expect("the development build loads it");
+    let error = Catalog::ProposedRelease01
+        .config(path, block.as_bytes(), ConfigUse::Run)
+        .expect_err("0.1 refuses it");
+    let user = development.library.user_profile_names();
+    assert!(!user.is_empty(), "the example has user profiles");
+    for name in &user {
+        let line = development.user_profile_lines[name];
+        let refusal = format!("/c.yaml:{line}: profiles: `{name}` is a user profile");
+        assert!(
+            error.contains(&refusal),
+            "{refusal:?} missing from: {error}"
+        );
+    }
+    let release = Catalog::ProposedRelease01
+        .library(Library::builtin().expect("built-ins"))
+        .expect("0.1 catalog");
+    let mut refused_tiers = 0;
+    for group in &development.groups {
+        for tier in &group.tiers {
+            let names_unshipped = tier
+                .select
+                .expr()
+                .terms
+                .iter()
+                .any(|term| release.get(&term.source).is_none());
+            if names_unshipped {
+                refused_tiers += 1;
+                let at = format!(
+                    "/c.yaml:{}: group `{}` tier `{}`",
+                    tier.line.expect("a tier's line"),
+                    group.name,
+                    tier.name
+                );
+                assert!(error.contains(&at), "{at:?} missing from: {error}");
+            }
+        }
+    }
+    assert!(refused_tiers > 0, "the example selects what 0.1 lacks");
+    assert!(!error.contains("no profile or filter is named"), "{error}");
+    assert_eq!(
+        error.matches("diskgc 0.1 ships the sources").count(),
+        1,
+        "the scope is said once: {error}"
+    );
 }
 
 /// TASK-139 (the same class as TASK-146): `--select` of a built-in the

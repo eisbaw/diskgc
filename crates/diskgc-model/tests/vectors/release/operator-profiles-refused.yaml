@@ -25,9 +25,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: config, contains: "user profiles are not available in diskgc 0.1: the configuration's `profiles:` defines `zephyr-tmp-probe`"}]
+  dry_run_errors: [{cause: config, contains: "profiles: `zephyr-tmp-probe` is a user profile; diskgc 0.1 runs only its built-ins"}]
   reclaim_exit: 2
-  errors: [{cause: config, contains: "user profiles are not available in diskgc 0.1: the configuration's `profiles:` defines `zephyr-tmp-probe`"}]
+  errors: [{cause: config, contains: "profiles: `zephyr-tmp-probe` is a user profile; diskgc 0.1 runs only its built-ins"}]
   actions: []
   removed: []
   skipped: []

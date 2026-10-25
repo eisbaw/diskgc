@@ -15,11 +15,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{self, Config, IpcPolicy, Owner, Ranking, RootEntry};
+use crate::config::{self, Config, ConfigError, IpcPolicy, Owner, Problems, Ranking, RootEntry};
 use crate::engine::Checkouts;
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::Delete;
-use crate::profile::{Body, Finds, Library, Roots, Source};
+use crate::profile::{Body, Finds, Library, Release, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
 use crate::resolve::{ResolveError, Want, resolve_in};
 use crate::select;
@@ -63,7 +63,7 @@ impl Catalog {
         }
         .map_err(|e| e.to_string())?;
         if self == Self::ProposedRelease01 {
-            enforce_proposed_release_01_config(&mut config)?;
+            enforce_proposed_release_01_config(&mut config).map_err(|e| e.to_string())?;
         }
         Ok(config)
     }
@@ -79,82 +79,118 @@ impl Catalog {
 /// built-in that refuses checkouts (nix-shell-rc: a legacy shell's rc
 /// directory is its TMPDIR, so a clone made there is what the guard
 /// protects) would widen what the reviewed built-in deletes.
-fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String> {
-    let library = config
-        .library
-        .clone()
-        .proposed_release_01()
-        .map_err(|why| format!("invalid config {}: {why}", config.path.display()))?;
-    let builtins = Library::builtin().map_err(|e| e.to_string())?;
-    // Every refusal at once (TASK-146): an operator adapting a development
-    // example should not learn them one run at a time.
-    let mut refused = Vec::new();
-    let not_shipped = |name: &str| {
-        library
-            .not_shipped(name)
-            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog."))
-    };
+///
+/// Every refusal at once (TASK-146, TASK-164), each at its line: an
+/// operator adapting a development example should not learn them one run
+/// at a time. User profiles are refused here too, and the tiers are checked
+/// against the 0.1 built-ins alone, so a tier that names a user profile is
+/// reported in the same run as the profile.
+fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigError> {
+    let builtins =
+        Library::builtin().map_err(|e| ConfigError::whole_file(&config.path, e.to_string()))?;
+    let user = config.library.user_profile_names();
+    // With user profiles the configuration is refused anyway; its tiers are
+    // then judged against the plain built-ins, so an `override: true` does
+    // not also hide the built-in it replaced (from the tiers and from the
+    // scope said below). Without, the configuration's library carries its
+    // `profile_policies`, which a release run keeps.
+    let library = if user.is_empty() {
+        config.library.clone()
+    } else {
+        builtins.clone()
+    }
+    .release_01_built_ins()
+    .map_err(|why| ConfigError::whole_file(&config.path, why))?;
+    let mut refused = Problems::default();
+    for name in &user {
+        refused.push(
+            config.user_profile_lines.get(name).copied(),
+            format!(
+                "profiles: `{name}` is a user profile; diskgc {} runs only its built-ins \
+                 (an `override: true` of a built-in counts too): remove it",
+                Release::V0_1.name()
+            ),
+        );
+    }
     // Tiers are checked through `ShortRefusals`, so the release's scope is
     // said once below instead of after every refused part (TASK-146 walk).
-    let short = ShortRefusals(&library);
+    let short = ShortRefusals {
+        library: &library,
+        user: &user,
+    };
+    let not_shipped = |name: &str| {
+        select::Catalog::withheld(&short, name)
+            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog."))
+    };
     for policy in &config.profile_policies {
         if library.get(&policy.profile).is_none() {
-            refused.push(format!(
-                "profile_policies: {}",
-                not_shipped(&policy.profile)
-            ));
+            refused.push(
+                policy.line,
+                format!("profile_policies: {}", not_shipped(&policy.profile)),
+            );
         } else if policy.checkouts.0 == Checkouts::Allow
             && builtins.checkouts(&policy.profile) == Some(Checkouts::Refuse)
         {
-            refused.push(format!(
-                "profile_policies: `checkouts: allow` for `{}` is refused: the built-in \
-                 refuses checkouts, and a policy may only narrow it in this release",
-                policy.profile
-            ));
+            refused.push(
+                policy.line,
+                format!(
+                    "profile_policies: `checkouts: allow` for `{}` is refused: the built-in \
+                     refuses checkouts, and a policy may only narrow it in this release",
+                    policy.profile
+                ),
+            );
         }
     }
     for group in &config.groups {
         for tier in &group.tiers {
             if let Err(e) = select::check(tier.select.expr().clone(), &short) {
-                refused.push(format!("group `{}` tier `{}`: {e}", group.name, tier.name));
+                refused.push(
+                    tier.line,
+                    format!("group `{}` tier `{}`: {e}", group.name, tier.name),
+                );
             }
         }
     }
     for protected in &config.protect {
         if library.get(&protected.profile).is_none() {
-            refused.push(format!("protect: {}", not_shipped(&protected.profile)));
+            refused.push(
+                protected.line,
+                format!("protect: {}", not_shipped(&protected.profile)),
+            );
         }
     }
-    if !refused.is_empty() {
-        return Err(format!(
-            "invalid config {}: {} part(s) are not available in this release:\n  {}\n{}",
-            config.path.display(),
-            refused.len(),
-            refused.join("\n  "),
-            library.release_scope()
-        ));
-    }
+    refused.into_result(&config.path, Some(library.release_scope()))?;
     config.library = library;
     Ok(())
 }
 
 /// A release library whose "not shipped" refusals leave out the release's
-/// scope, which the caller states once for all of them.
-struct ShortRefusals<'a>(&'a Library);
+/// scope, which the caller states once for all of them, and that names a
+/// configuration's user profiles as such rather than as unknown names.
+struct ShortRefusals<'a> {
+    library: &'a Library,
+    user: &'a [String],
+}
 
 impl select::Catalog for ShortRefusals<'_> {
     type Action = <Library as select::Catalog>::Action;
 
     fn lookup(&self, name: &str) -> Option<select::Entry<'_, Self::Action>> {
-        self.0.lookup(name)
+        self.library.lookup(name)
     }
 
     fn names(&self) -> Vec<&str> {
-        self.0.names()
+        self.library.names()
     }
 
     fn withheld(&self, name: &str) -> Option<String> {
-        self.0.not_shipped(name)
+        if self.user.iter().any(|u| u == name) {
+            return Some(format!(
+                "`{name}` is a user profile, which diskgc {} refuses.",
+                Release::V0_1.name()
+            ));
+        }
+        self.library.not_shipped(name)
     }
 }
 
@@ -286,7 +322,8 @@ fn run<H: Delete>(
         if config.ipc == IpcPolicy::LiveOnly {
             return fail(
                 ErrorCause::Safety,
-                "ipc: live-only is statically valid, but ensure cannot enforce it in this build yet (task-21)"
+                "ipc: live-only is valid in the configuration, but this version of ensure cannot \
+                 enforce it yet; remove `ipc:` to use the default, block-any"
                     .to_owned(),
             );
         }

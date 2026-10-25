@@ -24,6 +24,8 @@ use crate::select::{Syntax, is_name};
 pub struct LoadError {
     pub at: String,
     pub message: String,
+    /// The user profile's index in `profiles:`; `None` for a built-in.
+    pub user_index: Option<usize>,
 }
 
 impl fmt::Display for LoadError {
@@ -60,6 +62,7 @@ pub(super) fn library(
         LoadErrors(vec![LoadError {
             at: "built-in profiles".to_owned(),
             message,
+            user_index: None,
         }])
     })?;
     let builtin_names: BTreeSet<&str> = builtin.iter().map(|s| s.name.as_str()).collect();
@@ -69,6 +72,7 @@ pub(super) fn library(
             (
                 Origin::BuiltIn,
                 format!("built-in profile `{}`", spec.name),
+                None,
                 spec,
             )
         })
@@ -76,6 +80,7 @@ pub(super) fn library(
             (
                 Origin::User,
                 format!("profiles[{i}] (`{}`)", spec.name),
+                Some(i),
                 spec,
             )
         }));
@@ -83,7 +88,7 @@ pub(super) fn library(
     let mut profiles: BTreeMap<String, Profile> = BTreeMap::new();
     let mut defined_at: BTreeMap<&str, String> = BTreeMap::new();
     let mut user_names = BTreeSet::new();
-    for (origin, at, spec) in specs {
+    for (origin, at, user_index, spec) in specs {
         let mut problems = Vec::new();
         let origin = match origin {
             Origin::BuiltIn => {
@@ -142,6 +147,7 @@ pub(super) fn library(
         errors.extend(problems.into_iter().map(|message| LoadError {
             at: at.clone(),
             message,
+            user_index,
         }));
     }
     if errors.is_empty() {

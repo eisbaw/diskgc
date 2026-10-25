@@ -391,6 +391,15 @@ fixed or tier-bound root lies outside `/tmp` and `/var/tmp`. Warnings do
 not make the configuration invalid. Selection warnings are described under
 Selection grammar.
 
+An invalid configuration is reported completely in one run, by `check`
+and by every command that loads it: each problem on its own line as
+`PATH:LINE: message` (the line where it is written, when known), in file
+order, at most 20 listed and the rest counted. A YAML syntax or schema
+error (malformed YAML, an unknown or missing key, a wrong type) ends the
+reading, so it is reported alone, with an excerpt of the file around it. A
+rule that needs a part already refused (a tier's selection, when a user
+profile does not load) is not checked, so one mistake is reported once.
+
 `check` validates an `owners:` list's shape and rejects system UIDs; whether
 it is permitted is checked when `ensure` is invoked with or without
 `--allow-root`. User-name resolution remains a run-time check.
@@ -752,11 +761,12 @@ groups:
 ```
 
 **Development build only.** The example below shows the whole schema
-`version: 1`; diskgc 0.1 refuses it, naming each part it does not ship:
-user `profiles:` (including overrides), `profile_policies` for built-ins
-outside 0.1 (`npm-cache`), `protect` of a user profile, and tiers that
-select built-ins outside 0.1 (`node-compile-cache`, `docker-build-cache`,
-`docker-dangling`). Every key keeps its meaning in a later release.
+`version: 1`; diskgc 0.1 refuses it, naming in one run each part it does
+not ship: user `profiles:` (including overrides), `profile_policies` for
+built-ins outside 0.1 (`npm-cache`), `protect` of a user profile, and tiers
+that select a user profile or a built-in outside 0.1 (`node-compile-cache`,
+`docker-build-cache`, `docker-dangling`). Every key keeps its meaning in a
+later release.
 
 ```yaml
 # Development build only: diskgc 0.1 refuses this configuration.
