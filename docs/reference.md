@@ -32,7 +32,10 @@ supplies roots for `roots: required` profiles in that selection, and is
 only valid together with `--select`. A root that cannot be reached safely
 (`unsafe_path`: a symlink or a mount crossing on the way) is a
 misconfiguration, reported once as an error that excludes the tier
-([safety.md](safety.md#validation)). Example for a CI runner:
+([safety.md](safety.md#validation)). A supplied root that does not exist
+(here, in `--roots`, or in the configuration, see Roots under
+Configuration file) refuses the whole run: exit 2, before anything is
+planned. Example for a CI runner:
 
 ```
 diskgc ensure --min-free 50G \
@@ -367,13 +370,18 @@ with `--json`). It reads no configuration. `--help` and `--version` exit
 
 Static validation only, machine-independent: load the config, print the
 resolved config path and each tier's expression normalised with the
-profiles it resolves to, exit 0 or 2 (3 if writing stdout fails). It needs
-nothing from the deployment machine (no `PATH` lookups, no filesystem access
-beyond reading the config), so packaging and configuration tools run it
-before deploying (the NixOS
-module at build time, also when cross-building). Everything that depends on
-the machine is checked at run time; see
-[safety.md](safety.md#validation).
+profiles it resolves to, exit 0 or 2 (3 if writing stdout fails). Its exit
+code needs nothing from the deployment machine (no `PATH` lookups, no
+filesystem access beyond reading the config and a `stat` of each supplied
+root), so packaging and configuration tools run it before deploying (the
+NixOS module at build time, also when cross-building). Everything that
+depends on the machine is checked at run time; see
+[safety.md](safety.md#validation). One run-time refusal is previewed: a
+supplied root (a tier's or a `protect` entry's `roots:`) that does not
+exist where `check` runs is a stderr warning naming the root, the config
+line and the entry, saying that `ensure` refuses the configuration there;
+the exit code is unchanged, since a build sandbox has none of the
+deployment's roots.
 
 The text output starts with `config PATH`, then one line per tier in policy
 order: `GROUP.TIER: NORMALIZED_EXPRESSION => [source profiles]`. Advisory
@@ -803,7 +811,18 @@ Rules:
   profiles in its expression; fixed-root profiles in the same expression
   keep their own roots. A `roots: required` profile without roots, or
   `roots:` on a tier with no `roots: required` profile, is a load-time
-  error.
+  error. A root you supply (a tier's `roots:`, a `protect` entry's
+  `roots:`, or `--roots`) must exist on the machine `ensure` runs on: one
+  that does not (ENOENT or ENOTDIR) is exit 2 before anything is planned
+  or deleted, also in a dry run and when space is already met, with every
+  such root named with where it was written (`config PATH: line N, tier
+  `NAME``, `protect `PROFILE``, or `--roots`; JSON `cause: config`, or
+  `usage` when only `--roots` are missing). Under `--select` the
+  configured tiers' roots are not used and not checked; `protect` roots
+  are. A missing `PATH` is reported first. Roots a profile fixes itself
+  (`/tmp` for the `/tmp` built-ins, a user profile's `find.roots`) may be
+  absent: such a root is a `missing` plan row and skip, not an error. A
+  root removed after this check is likewise a `missing` skip (TASK-152).
 - **`owners:`** is required with `--allow-root` and forbidden otherwise.
   Entries are user names or explicit UID mappings, for example
   `owners: [tester, {uid: 2001}]`. Names resolve at run time; an unknown

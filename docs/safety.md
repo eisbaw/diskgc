@@ -2906,6 +2906,14 @@ these features backported, and an unparseable release is refused too.
   `check` has no space goal, `--select`, or `--allow-root` option, so it
   cannot validate those invocation-specific rules. Failure in either static
   phase: exit 2, nothing deleted.
+- **Supplied roots exist** (`ensure`, after the static phases, before
+  planning or deletion, also in a dry run and when space is already met):
+  every root the operator supplied (tier and `protect` `roots:`,
+  `--roots`) exists; one that does not is exit 2 naming it and where it
+  was written (TASK-152), because a typo or an unedited example root
+  otherwise reads as one skipped candidate and exit 0. `check` warns about
+  them without changing its exit code. Roots a profile fixes itself are
+  not held to this: their absence is normal (`missing` below).
 - **Environmental** (at the start of every reclaim, for *all* tiers, before
   the first deletion): roots and paths exist, contain no symlinks, resolve
   to a device and mount; `owners:` names resolve to non-system users;

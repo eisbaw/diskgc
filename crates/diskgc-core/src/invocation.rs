@@ -15,12 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{self, Config, IpcPolicy, Owner, Ranking};
+use crate::config::{self, Config, IpcPolicy, Owner, Ranking, RootEntry};
 use crate::engine::Checkouts;
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::Delete;
 use crate::profile::{Body, Finds, Library, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
+use crate::resolve::{ResolveError, Want, resolve_in};
 use crate::select;
 use crate::units::Size;
 
@@ -331,6 +332,7 @@ fn run<H: Delete>(
     };
     tier.protections = protections;
     tier.max_entries = max_entries;
+    refuse_missing_roots(host, config, options, uid)?;
     let request = Request {
         path: options.path.clone(),
         min_free: options.min_free,
@@ -354,6 +356,100 @@ fn run<H: Delete>(
     };
     report.seed = configured.as_ref().and_then(|(_, _, seed)| *seed);
     Ok(report)
+}
+
+/// A root the operator supplied (a tier's or a protect entry's `roots:`,
+/// or `--roots`) that does not exist on this machine is a configuration
+/// error (TASK-152, mark-emulator for Mark): exit 2 before anything is
+/// planned or deleted, naming each such root and where it was written. A
+/// forgotten `/home/example/src` used to read as one skipped candidate and
+/// exit 0. Roots a profile fixes itself (`/tmp`, a user profile's
+/// `find.roots`) may legitimately be absent and stay an empty match set.
+///
+/// Only "does not exist" (ENOENT or ENOTDIR on the safe resolution the
+/// executor uses) refuses here. An unsafe, foreign or unreadable root
+/// stays the executor's per-tier report, and a mount table that cannot be
+/// read is left to the executor's own host error (exit 3), not turned
+/// into a usage error. A root removed after this check is still the
+/// executor's `missing` skip.
+fn refuse_missing_roots<H: Delete>(
+    host: &H,
+    config: Option<&Config>,
+    options: &EnsureOptions,
+    uid: u32,
+) -> Result<(), (ErrorCause, String)> {
+    // (root as written, where), in the order the operator wrote them.
+    let mut supplied: Vec<(&str, String)> = Vec::new();
+    if let Some(config) = config {
+        for written in &config.written_roots {
+            // `--select` replaces the configured tiers, not `protect`.
+            if options.select.is_some() && matches!(written.entry, RootEntry::Tier(_)) {
+                continue;
+            }
+            supplied.push((
+                &written.root,
+                format!("config {}: {written}", config.path.display()),
+            ));
+        }
+    }
+    supplied.extend(
+        options
+            .roots
+            .iter()
+            .map(|root| (root.as_str(), "--roots".to_owned())),
+    );
+    if supplied.is_empty() {
+        return Ok(());
+    }
+    let Ok(mounts) = host.mountinfo() else {
+        return Ok(());
+    };
+    // A missing PATH is the executor's first refusal (`PATH ...:
+    // missing`): the more basic mistake is reported first.
+    if matches!(
+        resolve_in(host, &mounts, &options.path, Want::Directory),
+        Err(ResolveError::Missing { .. })
+    ) {
+        return Ok(());
+    }
+    let uid = uid.to_string();
+    let mut from_config = false;
+    let missing: Vec<String> = supplied
+        .into_iter()
+        .filter_map(|(root, at)| {
+            let path = PathBuf::from(root.replace("{uid}", &uid));
+            let gone = matches!(
+                resolve_in(host, &mounts, &path, Want::Directory),
+                Err(ResolveError::Missing { .. })
+            );
+            from_config |= gone && at != "--roots";
+            gone.then(|| format!("{} ({at})", path.display()))
+        })
+        .collect();
+    let cause = if from_config {
+        ErrorCause::Config
+    } else {
+        ErrorCause::Usage
+    };
+    match missing.as_slice() {
+        [] => Ok(()),
+        [one] => Err((
+            cause,
+            format!(
+                "root {one} does not exist on this machine: set it to a directory that \
+                 exists here, or remove it"
+            ),
+        )),
+        many => Err((
+            cause,
+            format!(
+                "{} roots do not exist on this machine (set each to a directory that exists \
+                 here, or remove it):\n  {}",
+                many.len(),
+                many.join("\n  ")
+            ),
+        )),
+    }
 }
 
 /// Translate configured owners once before any planning or deletion. Two

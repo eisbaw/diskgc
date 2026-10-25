@@ -1,0 +1,40 @@
+# TASK-152: a tier root that does not exist (a typo, or the example's
+# /home/example/src left unedited) is a configuration error found before
+# anything is planned: exit 2, cause config, naming the root, the config
+# line and the tier. The eligible target under the tier's other root is
+# untouched, so nothing runs on half a policy.
+profile_vector: 1
+config: |
+  version: 1
+  groups:
+    - name: g
+      tiers:
+        - name: cargo
+          select: profile:cargo-target
+          roots:
+            - /home/tester/src
+            - /home/tester/scr
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/app/Cargo.toml: {}
+    /home/tester/src/app/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: config, contains: "root /home/tester/scr (config "}]
+  reclaim_exit: 2
+  errors: [{cause: config, contains: "line 9, tier `cargo`) does not exist"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/app/target/debug/deps/app]

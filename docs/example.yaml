@@ -1,6 +1,7 @@
 # Example policy. Adjust roots to the directories whose Cargo targets you
-# own. `diskgc check --config /absolute/path/to/example.yaml` validates it
-# without accessing those roots.
+# own: `diskgc ensure` refuses a root that does not exist (exit 2), and
+# `diskgc check --config /absolute/path/to/example.yaml` validates the
+# policy and warns about such roots.
 #
 # The stale group runs its tiers in order and stops once the free-space
 # target is met: first what is cheapest to lose, ended pytest sessions and

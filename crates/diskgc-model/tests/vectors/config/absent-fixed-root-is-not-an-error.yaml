@@ -1,0 +1,26 @@
+# TASK-152 applies to roots the operator supplies, not to the roots a
+# profile fixes itself: pytest-tmp looks in /tmp, which this host does
+# not have. That stays what it was: a `missing` row for the root (plan
+# and skipped), not a refusal; exit 1 below the goal.
+profile_vector: 1
+profile: pytest-tmp
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/file: {size: 4K}
+expect:
+  plan:
+    - {candidate: /tmp, reason: missing}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp, reason: missing}
+  preserved: [/home/tester/file]

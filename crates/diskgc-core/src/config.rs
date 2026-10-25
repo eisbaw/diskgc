@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::Deserializer;
+use serde_saphyr::Spanned;
 
 use crate::engine::Checkouts;
 use crate::kind::Kind;
@@ -120,6 +121,45 @@ pub struct Config {
     pub ipc: IpcPolicy,
     /// Narrow operator policies checked against the active release catalog.
     pub profile_policies: Vec<CheckoutPolicy>,
+    /// Every root written under a tier's or a protect entry's `roots:`, in
+    /// file order, with where: what `ensure` holds to the machine (a root
+    /// that does not exist is exit 2, TASK-152). `groups` and `protect`
+    /// carry the same roots bound to their profiles.
+    pub written_roots: Vec<WrittenRoot>,
+}
+
+/// A root the configuration supplies for a `roots: required` profile, and
+/// where it was written, so a refusal can point at the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenRoot {
+    pub root: String,
+    pub entry: RootEntry,
+    /// 1-based line in the configuration file; `None` when the YAML parser
+    /// did not report one.
+    pub line: Option<u64>,
+}
+
+/// The configuration entry whose `roots:` holds a [`WrittenRoot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootEntry {
+    /// A tier, by name: replaced by `--select`, with its roots.
+    Tier(String),
+    /// A `protect` entry, by profile: applies with or without `--select`.
+    Protect(String),
+}
+
+impl fmt::Display for WrittenRoot {
+    /// "config PATH line N, tier `T`": where to fix it. The path is the
+    /// caller's to add; this is the part after it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(line) = self.line {
+            write!(f, "line {line}, ")?;
+        }
+        match &self.entry {
+            RootEntry::Tier(name) => write!(f, "tier `{name}`"),
+            RootEntry::Protect(profile) => write!(f, "protect `{profile}`"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -198,7 +238,9 @@ struct ConfigSpec {
     #[serde(default)]
     profile_policies: Vec<CheckoutPolicy>,
     #[serde(default)]
-    protect: Vec<ProtectSpec>,
+    // Spanned outside the untagged enum: inside it, serde buffers the
+    // entry and its locations are lost.
+    protect: Vec<Spanned<ProtectSpec>>,
     #[serde(default, deserialize_with = "present")]
     owners: Option<Vec<Owner>>,
     #[serde(default)]
@@ -222,7 +264,7 @@ struct TierSpec {
     name: String,
     select: String,
     #[serde(default, deserialize_with = "present")]
-    roots: Option<Vec<String>>,
+    roots: Option<Vec<Spanned<String>>>,
     #[serde(default, deserialize_with = "present")]
     order: Option<Order>,
     #[serde(default, deserialize_with = "present")]
@@ -331,6 +373,7 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
     if check_examples && let Some(first) = crate::profile::examples::failures(&library).first() {
         return Err(error(first.clone()));
     }
+    let mut root_lines = Vec::new();
     let mut tier_names = BTreeSet::new();
     let mut group_names = BTreeSet::new();
     let mut groups = Vec::new();
@@ -354,8 +397,11 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
                     .iter()
                     .map(|warning| format!("tier `{}`: {warning}", tier.name)),
             );
+            let written = tier.roots.map(|roots| {
+                written_roots(&roots, &RootEntry::Tier(tier.name.clone()), &mut root_lines)
+            });
             let roots = library
-                .bind_roots(&checked, tier.roots.as_deref())
+                .bind_roots(&checked, written.as_deref())
                 .map_err(|e| error(format!("tier `{}`: {e}", tier.name)))?;
             tiers.push(Tier {
                 name: tier.name,
@@ -372,10 +418,19 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         });
     }
     let mut protect = Vec::new();
-    for item in spec.protect {
-        let (name, supplied) = match item {
+    for spanned in spec.protect {
+        let line = located(&spanned.referenced);
+        let (name, supplied) = match spanned.value {
             ProtectSpec::Bare(name) => (name, None),
-            ProtectSpec::WithRoots(item) => (item.profile, Some(item.roots)),
+            ProtectSpec::WithRoots(item) => {
+                // The entry's line: its roots have no spans of their own.
+                root_lines.extend(item.roots.iter().map(|root| WrittenRoot {
+                    root: root.clone(),
+                    entry: RootEntry::Protect(item.profile.clone()),
+                    line,
+                }));
+                (item.profile, Some(item.roots))
+            }
         };
         let profile = library
             .get(&name)
@@ -448,7 +503,34 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
         warnings,
         ipc: spec.ipc.unwrap_or(IpcPolicy::BlockAny),
         profile_policies: spec.profile_policies,
+        written_roots: root_lines,
     })
+}
+
+/// A parser location's 1-based line; `None` when it reported none (0).
+fn located(location: &serde_saphyr::Location) -> Option<u64> {
+    let line = location.line();
+    (line > 0).then_some(line)
+}
+
+/// The values of a spanned `roots:` list, recording each with its entry
+/// and line in `out`.
+fn written_roots(
+    roots: &[Spanned<String>],
+    entry: &RootEntry,
+    out: &mut Vec<WrittenRoot>,
+) -> Vec<String> {
+    roots
+        .iter()
+        .map(|root| {
+            out.push(WrittenRoot {
+                root: root.value.clone(),
+                entry: entry.clone(),
+                line: located(&root.referenced),
+            });
+            root.value.clone()
+        })
+        .collect()
 }
 
 impl Config {

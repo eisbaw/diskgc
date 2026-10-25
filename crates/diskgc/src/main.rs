@@ -715,6 +715,7 @@ fn check(flag: Option<&OsStr>) -> Result<String, String> {
     for warning in &config.warnings {
         log(&format!("warning: {warning}"));
     }
+    warn_missing_roots(&config);
     let mut out = format!("config {}\n", config.path.display());
     for group in &config.groups {
         for tier in &group.tiers {
@@ -736,6 +737,28 @@ fn check(flag: Option<&OsStr>) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// TASK-152: a configured root that does not exist here is an `ensure`
+/// refusal (exit 2); `check` says so as an advisory warning and keeps its
+/// exit code, because packagers run it where the deployment's roots do not
+/// exist (the NixOS module at build time, the flake's sandbox check). A
+/// read-only `stat` per root, following symlinks
+/// ([`diskgc_linux::host::path_is_absent`]): the hint only needs "absent",
+/// and `ensure` decides with its own safe resolution. `{uid}` is
+/// the caller's, as `ensure` will expand it.
+fn warn_missing_roots(config: &Config) {
+    let uid = diskgc_linux::host::effective_uid().to_string();
+    for written in &config.written_roots {
+        let root = written.root.replace("{uid}", &uid);
+        if diskgc_linux::host::path_is_absent(Path::new(&root)) {
+            log(&format!(
+                "warning: root {root} does not exist on this machine (config {}: {written}); \
+                 ensure refuses this configuration here (exit 2)",
+                config.path.display()
+            ));
+        }
+    }
 }
 
 /// The one JSON object of a failed command other than `ensure` (whose

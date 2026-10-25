@@ -238,6 +238,27 @@ impl LinuxHost {
     }
 }
 
+/// The process's effective uid: what `{uid}` expands to. For callers
+/// without a [`LinuxHost`] (`check`'s advisory root warning).
+pub fn effective_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// Whether nothing exists at `path` (`stat` fails with ENOENT or
+/// ENOTDIR), following symlinks. For `check`'s advisory warning about a
+/// configured root (TASK-152), which needs no [`LinuxHost`]; any other
+/// outcome, an error included, is "not known to be absent".
+pub fn path_is_absent(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.raw_os_error(),
+            Some(code) if code == rustix::io::Errno::NOENT.raw_os_error()
+                || code == rustix::io::Errno::NOTDIR.raw_os_error()
+        ),
+    }
+}
+
 /// Read a configuration without constructing `LinuxHost`. `diskgc check`
 /// uses this in Nix build sandboxes where process inspection and a minimum
 /// kernel are irrelevant. The O_PATH/fstat/reopen sequence keeps FIFO and
@@ -1865,7 +1886,7 @@ impl Host for LinuxHost {
     }
 
     fn effective_uid(&self) -> u32 {
-        rustix::process::geteuid().as_raw()
+        effective_uid()
     }
 
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
