@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-25 00:55'
+updated_date: '2026-10-25 03:25'
 labels:
   - wave-1
   - hardening
@@ -69,6 +69,13 @@ From TASK-121 (2026-10-24): express deletion-path hardening as vectors in crates
 Orchestrator 2026-10-24 (COMPASS round 2): Mark ruled 2026-10-24: mutation runs use smaller shards with the guard unchanged. TASK-60 has 644 lines of uncommitted work in tmp/worktrees/task60-harness on a base ~40 commits behind master: reconcile it with HEAD before restarting TASK-60.
 
 Under phase3.1 (2026-10-25): runs as async QA alongside the 0.1 release work, not as a gate; a confirmed deletion-path hole becomes a release blocker task.
+
+QA13 async run (2026-10-25 00:50-03:30 UTC, pinned b009e59 in detached worktree tmp/worktrees/qa13, since removed; no product code edited; no reclaiming diskgc run on the host).
+1. Deep review (three read-only mped-architect reviewers: fs path, cargo-target path, in-use/liveness; I checked the key findings against the code). No sequence was found that deletes an unchecked entry, an entry owned by another user, something through a symlink or across a mount (own namespace), a Cargo lock file of a measured Cargo, a Cargo target under a held lock, or a candidate cleared by a stale, failed or unsettled scan (TASK-144's FRESH_ATTEMPTS budget holds on both paths). One contract hole: TASK-165 (release-blocker). An ancestor renamed after reach is never re-reached, so the step-4 keep-marker, place and checkout rechecks judge stale fds and paths, and the candidate is deleted from under a .diskgc-keep or from outside its root. Confirmed by reading only; no vector was written.
+Filed: TASK-165 (release-blocker); TASK-166 (fd limit: measured on the host, see 3); TASK-167 (unknown .cargo-*lock* names deep in a profile dir are deleted; safety.md claims otherwise); TASK-168 (judged_last_build is None in production); TASK-169 (blind spots: io_uring/loop/overlay references, mounts in other namespaces, hidepid, non-initial pid ns, btrfs subvolumes, NFS); TASK-170 (guards with no killing test); TASK-171 (17 safety.md drift items plus one PRD wording item for Mark; AC #2 material); TASK-172 (Cargo per-fingerprint part cost); TASK-177 (mutation runner scope). TASK-129 note: M7 is not redundant for file mounts; M17 matters on btrfs.
+2. Mutation (cargo-mutants 27.1.0, container with the unchanged guards, see TASK-177): engine/delete.rs 25 = 21 caught, 4 unviable, 0 missed; hostlock.rs 14 = 4 caught, 10 unviable, 0 missed. engine/walk.rs 0/4: the baseline passed, then the 4 GiB RAM floor stopped the run before any outcome. MemAvailable stayed below the 12 GiB start guard for 80 of the ~150 minutes. Not run: the other ~1190 deletion-path mutants and the diskgc-linux mountinfo//proc code.
+3. Limits. Entry budget: DEFAULT_MAX_ENTRIES 2,000,000, enforced in each listing (read_dir stops at the remaining budget) and per Cargo target; covered by model tests plus walk/too-many-entries.yaml. FD_WINDOW 16 (at most FD_WINDOW+3 engine fds), model test at depth 60. e2e: engine_deletes_a_100k_entry_30_deep_tree_under_rlimit_nofile_32 and engine_deletes_a_tree_deeper_than_path_max (not run here). Walk EMFILE is an error of the run (model test). Cargo DISCOVERY_DEPTH 6 is pinned by a model test. Gap (TASK-166): the in-use scan holds one pidfd per process, and the binary never raises its soft NOFILE. Measured with a read-only dry run (tmp/target/debug/diskgc, host with 1911 processes): `ulimit -n 1024` (also 512 and 40) made every pytest-tmp candidate skip as in_use with 'pidfd_open <pid>: EMFILE', which is quiet and the opposite of the walk's loud-EMFILE rule. ulimit 2048 was inconclusive in its 40 s window.
+AC status: #1 findings are filed (not fixed); #2 is not met (TASK-171, TASK-165); #3 is not met (2 of ~15 files swept); #4 was not assessed. Leave TASK-13 open.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
