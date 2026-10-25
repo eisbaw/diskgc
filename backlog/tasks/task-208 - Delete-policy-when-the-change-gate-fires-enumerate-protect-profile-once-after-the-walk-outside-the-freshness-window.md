@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 11:37'
+updated_date: '2026-10-25 12:44'
 labels:
   - shipping
   - performance
@@ -19,3 +20,9 @@ priority: low
 <!-- SECTION:DESCRIPTION:BEGIN -->
 From TASK-200 review (finding 4). When a candidate's walk shows a change since the tier's enumeration (or the wall clock drifted > 3 s vs monotonic), DeletePolicy::skip re-enumerates every protect and negated tree inside clear_and_delete's freshness window. With a large protect (61k dirs: 2-3 s) that expires the clear on every attempt: such a candidate costs three full enumerations and ends in_use_unknown, as every candidate did before TASK-200. Sound alternative: enumerate once after the walk and before the in-use check, and judge the final check against that set (any match made before the walk ended is in it). For a drifted clock, refresh the tier's Protection once rather than per candidate.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-25 inuse2: looked at, not done. Moving the after-walk policy enumeration out of clear_and_delete's 'also' changes the policy protocol of both the fs and Cargo kinds (PolicyAt, DeletePolicy::skip, both reclaim paths) and needs its own safety argument; not small. Left for its own task.
+<!-- SECTION:NOTES:END -->

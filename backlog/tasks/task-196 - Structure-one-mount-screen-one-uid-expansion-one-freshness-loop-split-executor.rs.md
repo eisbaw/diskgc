@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 06:00'
-updated_date: '2026-10-25 08:38'
+updated_date: '2026-10-25 12:44'
 labels:
   - structure
 dependencies: []
@@ -23,4 +23,6 @@ From the 10-task codebase review at 72b376c (2026-10-25). (1) Mount screening wr
 
 <!-- SECTION:NOTES:BEGIN -->
 COMPASS round 3 (2026-10-25): item (1) absorbs TASK-182 (one mount screen); do after 0.1 and BEFORE TASK-31 adds index-driven walking to executor.rs.
+
+2026-10-25 inuse2 ee643a6 on branch inuse2 (not merged; base master 28e9456). See commit message for the change. Item 3 (one freshness loop) done on branch inuse2: Checker::with_fresh_clear replaces the loops in Checker::check, clear_and_delete and the command action.
 <!-- SECTION:NOTES:END -->
