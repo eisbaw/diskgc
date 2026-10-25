@@ -123,15 +123,27 @@ Immediately before acting, diskgc walks the candidate's whole tree
     type, whatever directory holds it and whether or not a `CACHEDIR.TAG`
     is near: no Cargo lock file is ever deleted, also when the candidate is
     a profile directory, lies inside a target, or is an entry deep inside
-    one (a hypothetical finer-grained lock below `build/<package>/<hash>/`:
-    no measured Cargo makes one, and a future lock named outside this
-    pattern would not be recognised). This name rule is diskgc's fixed
+    one. A future Cargo lock named outside this pattern would not be
+    recognised by it, which is why the one measured so far has its own
+    rule (next item). This name rule is diskgc's fixed
     **structural recogniser** for Cargo targets: every profile directory a
     Cargo has built in holds a lock file, so any target inside a candidate
     refuses it. A name that only resembles one (`.cargo-ok`, `cargo-lock`)
     is a plain file. Refusing a non-Cargo file that has such a name only
     keeps its candidate. (A socket or FIFO of such a name is refused
     earlier, as `contains_ipc`, when the profile blocks IPC);
+  - no entry anywhere in the candidate, the candidate itself included, is
+    a fine-grain Cargo unit lock: named `.lock`, with a directory named
+    `build` two levels above its parent (`build/<package>/<hash>/.lock`,
+    judged on the absolute path, so also when the candidate is the unit
+    or package directory itself), of any type. Nightly Cargo's
+    `-Zfine-grain-locking` creates and holds one per unit (Lock files,
+    TASK-205). The rule is by place, not by name alone: `.lock` is also
+    pytest's pid marker in every `pytest-<N>/` session that `pytest-tmp`
+    deletes. The package and hash names are not checked, so a Cargo that
+    changes its hash format still fails closed; a non-Cargo `.lock` that
+    happens to sit at this shape (a pytest temp root named `build`) only
+    keeps its candidate;
   - no device node and no object of a type Linux does not define: never
     deleted.
 
@@ -2016,6 +2028,40 @@ Cargo toolchain tests in the containers ([testing.md](testing.md#cargo-toolchain
   and the start of the binary and while a `cargo test` binary runs (race
   tests 4 and 8); their locks during a `cargo run` binary's runtime were
   not sampled.
+- **Fine-grain locking** (`-Zfine-grain-locking`, nightly only; measured
+  2026-10-25 on the 2026-10-16 nightly in the e2e image with `strace -f -y
+  -e trace=flock,openat` and `/proc/locks` while a build script was paused
+  and after, on a two-crate workspace, also with `CARGO_BUILD_BUILD_DIR`;
+  TASK-205): besides the three profile lock files, Cargo creates
+  (`O_RDWR|O_CREAT`, mode 0666, empty) one lock file per unit in the build
+  directory, **`<profile>/build/<package>/<hash>/.lock`**, for the build
+  script's compile, its run, the library and the binary alike, and locks it
+  exclusive and shared at different points of the build (`LOCK_EX`,
+  `LOCK_SH`, `LOCK_SH|LOCK_NB`, released with `LOCK_UN`; while the build
+  script was paused its compiled unit's lock was held exclusive or shared
+  and its run's shared). The
+  profile's `.cargo-build-lock` is held **shared** for the whole build
+  (exclusive without the flag), `.cargo-lock` shared, `.cargo-artifact-lock`
+  exclusive. With a split build directory the unit locks and
+  `.cargo-build-lock` are in the build directory, `.cargo-lock` and
+  `.cargo-artifact-lock` in the target's profile. `check`, `test --no-run`
+  and `--release` add unit locks of the same name, nothing else. No other
+  new name: every other name containing `lock` below the target was
+  rustc's incremental session lock `incremental/<crate>/s-<id>.lock`, which
+  exists without the flag too (rustc holds it exclusively while it
+  compiles, under Cargo's profile locks). The unit `.lock` is outside
+  `.cargo-*lock*`: before TASK-205 a walk recorded it and the reclaim
+  unlinked it (the container test below, run with the rule disabled,
+  reclaimed the whole target, its unit locks included). Every walk now
+  refuses it by its place (Filesystem candidates: No special content), so a
+  target a fine-grain Cargo built is `contains_special` under the locks,
+  before any deletion: never reclaimed. While such a build runs, the
+  target is `locked` at `.cargo-build-lock` (diskgc's exclusive try fails
+  on the shared hold). Pinned by the container test
+  `cargo_reclaim_keeps_a_fine_grain_locked_target` ([testing.md](testing.md#cargo-race-tests)),
+  which also fails on any lock-like name below a fine-grain target other
+  than these. The rule matches this one depth only: bumping the pinned
+  nightly is the step that measures it again (that test runs on it).
 - `.cargo-artifact-lock` exists in some targets on the development machine;
   1.90 and the 1.96 nightly did not create it with plain `build` / `run` /
   `test`.
@@ -2117,7 +2163,8 @@ followed): a directory, symlink, FIFO, socket or device with a lock-like
 name is no Cargo's and makes the target `unsupported_layout` too, and a
 lock file of another type at a later check than when found is `changed`.
 A `.cargo-*lock*` name anywhere deeper in a profile directory (not a lock
-file the protocol takes) refuses the target as `contains_special`
+file the protocol takes), or a fine-grain unit lock
+`build/<package>/<hash>/.lock`, refuses the target as `contains_special`
 (eligibility walk). Lock files are never deleted or moved.
 
 **Lock sets.** Only the measured whole sets are reclaimed: `.cargo-lock`
@@ -2448,8 +2495,9 @@ The step that deletes (`cargo_target::reclaim` in the core).
    error, the deadline) stops the target; what was deleted stays deleted,
    fingerprints first. Lock files are never in a record: the profile
    directory's own are not walked, and every walk refuses any
-   `.cargo-*lock*` name, known or not, at any depth (`contains_special`,
-   Filesystem candidates), so no lock file is ever unlinked, replaced or
+   `.cargo-*lock*` name, known or not, at any depth, and a fine-grain unit
+   lock (`build/<package>/<hash>/.lock`) (`contains_special`, Filesystem
+   candidates), so no lock file is ever unlinked, replaced or
    moved; the profile directories themselves are never deleted.
 4. **Release** by closing the lock files' descriptors, whatever the
    outcome (never `LOCK_UN`, Host lock).

@@ -2,10 +2,11 @@
 # its depth in a profile directory (TASK-167). A `.cargo-*lock*` name below
 # a profile directory's top level, known or unknown, is no lock file the
 # protocol takes, so the walk refuses the target (`contains_special`)
-# instead of recording and unlinking it. `.cargo-unit-lock` in
-# `build/<package>/<hash>/` is hypothetical (no measured Cargo makes it):
-# a Cargo with finer-grained locks of this pattern leaves its targets
-# whole rather than losing a held lock. The `plain` target, the same shape
+# instead of recording and unlinking it. So does the lock nightly Cargo's
+# -Zfine-grain-locking creates and holds in every unit directory,
+# `build/<package>/<hash>/.lock` (measured on nightly-2026-10-16,
+# TASK-205): outside `.cargo-*lock*`, refused by its place. A target such a
+# Cargo built stays whole rather than losing a held lock. The `plain` target, the same shape
 # without such a name, is reclaimed. An unknown name directly in the
 # profile directory stays `unsupported_layout` (cargo-target-layouts).
 profile_vector: 1
@@ -28,7 +29,7 @@ host:
         .cargo-build-lock: {}
         .cargo-lock: {}
         .cargo-artifact-lock: {}
-        build: {app: {abc123: {.cargo-unit-lock: {}, fingerprint: {f: {}}, out: {app: {size: 1M}}}}}
+        build: {app: {abc123: {.lock: {}, fingerprint: {f: {}}, out: {app: {size: 1M}}}}}
     /home/tester/src/fingerprint-lock/Cargo.toml: {}
     /home/tester/src/fingerprint-lock/target:
       CACHEDIR.TAG: {cachedir_tag: true}
@@ -55,7 +56,7 @@ expect:
     - {candidate: /home/tester/src/known-deep/target, reason: contains_special}
     - {candidate: /home/tester/src/unit-lock/target, reason: contains_special}
   preserved:
-    - /home/tester/src/unit-lock/target/debug/build/app/abc123/.cargo-unit-lock
+    - /home/tester/src/unit-lock/target/debug/build/app/abc123/.lock
     - /home/tester/src/unit-lock/target/debug/build/app/abc123/fingerprint/f
     - /home/tester/src/unit-lock/target/debug/build/app/abc123/out/app
     - /home/tester/src/fingerprint-lock/target/debug/.fingerprint/app-1/.cargo-lock.bak

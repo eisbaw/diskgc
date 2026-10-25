@@ -15,7 +15,8 @@ use std::time::Duration;
 use common::{dir, host};
 use diskgc_core::engine::{
     CARGO_LOCK_NAMES, Candidate, Checkouts, DeleteOptions, Deletion, End, FD_WINDOW, IpcKind,
-    Reason, Rules, Skip, WalkRecord, WalkStop, delete_unchecked, is_cargo_lock_name, walk,
+    Reason, Rules, Skip, WalkRecord, WalkStop, delete_unchecked, is_cargo_lock_name,
+    is_cargo_unit_lock_path, walk,
 };
 use diskgc_core::host::{Errno, FileType, Host, MonoTime};
 use diskgc_core::resolve::Resolved;
@@ -426,7 +427,6 @@ fn an_unknown_cargo_lock_name_without_a_target_around_it_is_contains_special() {
         // The tag outside the candidate: the candidate is a profile
         // directory, or a unit directory of one.
         ("  /tmp/CACHEDIR.TAG: {}\n", "/tmp/c/.cargo-future-lock"),
-        ("", "/tmp/c/build/app/abc123/.cargo-unit-lock"),
         ("", "/tmp/c/.fingerprint/app-1/.cargo-lock.bak"),
     ] {
         let host = model(&format!("{tree}  {lock}: {{}}\n"));
@@ -452,6 +452,48 @@ fn an_unknown_cargo_lock_name_without_a_target_around_it_is_contains_special() {
         skipped(&host, &target, &rules()).reason,
         Reason::ContainsSpecial
     );
+}
+
+/// Nightly Cargo's `-Zfine-grain-locking` lock in each unit directory,
+/// `build/<package>/<hash>/.lock` (measured, TASK-205), refuses the
+/// candidate by its place, wherever the candidate starts: the target
+/// around it, the unit directory itself, or a split build directory with
+/// no CACHEDIR.TAG in reach. `.lock` elsewhere (pytest's pid marker in
+/// `pytest-<N>/`) is a plain file, and so is a `build/` three levels up
+/// of another name.
+#[test]
+fn a_fine_grain_cargo_unit_lock_is_contains_special_by_its_place() {
+    for (candidate, lock) in [
+        (
+            "/tmp/c",
+            "/tmp/c/target/debug/build/app/0123456789abcdef/.lock",
+        ),
+        ("/tmp/c", "/tmp/c/build/app/abc123/.lock"),
+        // The candidate is the unit directory, or its package directory.
+        ("/tmp/build/app/abc123", "/tmp/build/app/abc123/.lock"),
+        ("/tmp/build/app", "/tmp/build/app/abc123/.lock"),
+    ] {
+        let host = model(&format!("  {lock}: {{}}\n  {candidate}/x: {{}}\n"));
+        let target = Target::new(&host, candidate);
+        let skip = skipped(&host, &target, &rules());
+        assert_eq!(skip.reason, Reason::ContainsSpecial, "{skip}");
+        assert_eq!(skip.path, PathBuf::from(lock), "{skip}");
+        assert!(skip.detail.contains("fine-grain Cargo unit lock"), "{skip}");
+    }
+    assert!(is_cargo_unit_lock_path(Path::new("/b/build/p/h/.lock")));
+    for plain in [
+        "/tmp/c/pytest-of-tester/pytest-0/.lock",
+        "/tmp/c/build/app/.lock",
+        "/tmp/c/build/app/abc123/x/.lock",
+        "/tmp/c/builds/app/abc123/.lock",
+        "/tmp/c/build/app/abc123/.lock2",
+        "/tmp/c/build/app/abc123/lock",
+    ] {
+        assert!(!is_cargo_unit_lock_path(Path::new(plain)), "{plain}");
+        let host = model(&format!("  {plain}: {{}}\n"));
+        let target = Target::new(&host, "/tmp/c");
+        walked(&host, &target, &rules());
+    }
 }
 
 /// Names that only look like Cargo's are plain files: the rule is

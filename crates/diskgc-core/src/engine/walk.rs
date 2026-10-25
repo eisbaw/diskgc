@@ -17,7 +17,9 @@
 //! 5. it is not a socket or FIFO, if [`Rules::block_ipc`] (`contains_ipc`);
 //! 6. it is not a device node or of unknown type, and does not have a
 //!    Cargo lock file's name (`.cargo-*lock*`, [`is_cargo_lock_name`]:
-//!    the known [`CARGO_LOCK_NAMES`] and any unknown one, anywhere)
+//!    the known [`CARGO_LOCK_NAMES`] and any unknown one, anywhere), and
+//!    is not at a fine-grain Cargo unit lock's place
+//!    (`build/<package>/<hash>/.lock`, [`is_cargo_unit_lock_path`])
 //!    (`contains_special`);
 //! 7. unless [`Rules::checkouts`] is [`Checkouts::Allow`] (a profile
 //!    that says `checkouts: allow`), it does not have a VCS checkout
@@ -78,6 +80,30 @@ pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 /// [`is_cargo_lock_name`], so the walk refuses it anywhere like any other
 /// lock name.
 pub const CARGO_LOCK_NAMES: &[&str] = &[".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+
+/// The name of the per-unit lock file nightly Cargo's `-Zfine-grain-locking`
+/// creates and holds in each unit directory of the build directory,
+/// `<profile>/build/<package>/<hash>/.lock` (measured on
+/// `nightly-2026-10-16`, TASK-205; docs/safety.md, `cargo-target`, Lock
+/// files). It is outside `.cargo-*lock*`, so [`is_cargo_lock_name`] does
+/// not cover it: [`is_cargo_unit_lock_path`] does.
+pub const CARGO_UNIT_LOCK_NAME: &str = ".lock";
+
+/// Whether `path` is where fine-grain Cargo keeps a unit's lock: named
+/// [`CARGO_UNIT_LOCK_NAME`] with a directory named `build` two levels above
+/// its parent (`build/<package>/<hash>/.lock`). By the absolute path, not
+/// by a target around it: the candidate may be the unit directory itself,
+/// with the target's CACHEDIR.TAG and lock set outside it (TASK-167).
+/// Neither the package nor the hash is checked, so a Cargo that changes
+/// its hash format still fails closed. The name alone would be too wide:
+/// pytest's `pytest-<N>/.lock` is the pid marker the `pytest-tmp` liveness
+/// reads, in directories that profile deletes; one that happens to sit at
+/// this shape (a basetemp in a `build/` directory) only keeps its
+/// candidate.
+pub fn is_cargo_unit_lock_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(CARGO_UNIT_LOCK_NAME))
+        && path.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
+}
 
 /// The names that mark a version-control checkout (docs/safety.md, The
 /// eligibility walk: no source checkout): Git's directory, or its file in
@@ -517,6 +543,18 @@ impl<H: Host> Walker<'_, H> {
                     "{known} Cargo lock file name (`.cargo-*lock*`): no Cargo lock file is ever \
                      deleted, wherever it is"
                 ),
+            ));
+        }
+        // Fine-grain Cargo holds this lock while it builds the unit and
+        // takes it again on the next build: unlinked, a later Cargo would
+        // lock a new inode while an earlier one holds the old. Fail closed
+        // (TASK-205). Its path is only built for this one name.
+        if name == CARGO_UNIT_LOCK_NAME && is_cargo_unit_lock_path(&path()) {
+            return Err(skip(
+                Reason::ContainsSpecial,
+                "a fine-grain Cargo unit lock (`build/<package>/<hash>/.lock`): no Cargo lock \
+                 file is ever deleted, wherever it is"
+                    .to_owned(),
             ));
         }
         if self.rules.checkouts == Checkouts::Refuse && is_checkout_marker(&name) {

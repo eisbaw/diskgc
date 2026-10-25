@@ -9,7 +9,10 @@
 //! classic layout on 1.90.0 and 1.99.1, the per-unit layout on the
 //! nightly.
 
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+
+use diskgc_core::engine::CARGO_LOCK_NAMES;
 
 use crate::cargo_harness::{
     HOST_TRIPLE, build, cargo_reclaim, deletable, edit_main, lock_inodes, part_of, path_str,
@@ -422,4 +425,193 @@ pub fn cargo_reclaim_lock_hold_time_on_a_large_target(ctx: &Ctx) -> TestResult {
     );
     ensure!(held_us < 120_000_000, "the locks were held {held_us} µs");
     judged.assert_clean()
+}
+
+/// Nightly Cargo's `-Zfine-grain-locking` (TASK-205; docs/safety.md,
+/// `cargo-target`, Lock files): measured, it adds one lock file per unit,
+/// `build/<package>/<hash>/.lock`, outside `.cargo-*lock*`. The test pins
+/// the measured lock names on a real fine-grain build (every name with
+/// "lock" in it below the target is a profile directory's `.cargo-*lock*`,
+/// a unit's `.lock` or rustc's incremental session lock, and every unit
+/// directory has its `.lock`), then the protocol on it: while a
+/// fine-grain build is paused in its build script, holding
+/// `.cargo-build-lock` and a unit `.lock` (`/proc/locks`), the target is
+/// `locked`; with no build, the walk under the locks refuses the target
+/// at a unit `.lock` (`contains_special`). Either way nothing is unlinked
+/// (oracle: nothing eligible), every lock file keeps its inode, and the
+/// next fine-grain build succeeds. Stable toolchains reject `-Z`: not
+/// applicable there (logged).
+pub fn cargo_reclaim_keeps_a_fine_grain_locked_target(
+    ctx: &Ctx,
+    toolchain: &Toolchain,
+) -> TestResult {
+    if !toolchain.version.contains("-nightly") {
+        info!(
+            "{}: -Zfine-grain-locking is nightly-only: not applicable",
+            toolchain.name
+        );
+        return Ok(());
+    }
+    const FINE: &str = "-Zfine-grain-locking";
+    let s = &ctx.scratch;
+    s.mkdir("w", 0o755, TESTER)?;
+    let p = RACE.write(s, "w/p")?;
+    build(ctx, toolchain, &p, &[FINE, "build"])?;
+    let target = p.join("target");
+    let debug = target.join("debug");
+    pin_fine_grain_lock_names(&target, &fine_grain_unit_locks(&debug, true)?)?;
+    // Every lock file of the profile: its `.cargo-*lock*` and the units'.
+    let all_locks = |every_unit: bool| -> Result<Vec<PathBuf>, String> {
+        let mut locks = cargo_under_test::lock_files(&debug)?;
+        locks.extend(fine_grain_unit_locks(&debug, every_unit)?);
+        Ok(locks)
+    };
+    let inodes = |locks: &[PathBuf]| -> Result<Vec<u64>, String> {
+        locks
+            .iter()
+            .map(|l| {
+                std::fs::symlink_metadata(l)
+                    .map(|m| m.ino())
+                    .map_err(|e| format!("lstat {l:?}: {e}"))
+            })
+            .collect()
+    };
+    let expect_skip = |reason: &str, detail: &str, case: &str| -> TestResult {
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = cargo_reclaim(ctx, &[], &["/tmp/w"])?;
+        let judged = oracle.judge(&run)?;
+        run.expect_code(0)?;
+        let got = verdict(&results(&run)?, &target)?;
+        ensure!(
+            got.starts_with(&format!("skip {reason} {target:?} entries=0 "))
+                && got.contains(detail),
+            "{case}: expected {reason} naming {detail:?}, got {got}"
+        );
+        ensure!(
+            unlinked(&run).is_empty(),
+            "{case}: unlinked {:?}",
+            unlinked(&run)
+        );
+        info!("{case}: {got}");
+        judged.assert_clean()
+    };
+
+    let gate = Gate::new(&ctx.scratch, "build")?;
+    let cargo = Cargo::new(toolchain, &p, &[FINE, "build"])
+        .build_gate(&gate)
+        .spawn(ctx)?;
+    gate.wait_until_waiting(REACH_TIMEOUT)?;
+    // Mid-build a unit directory may not have its lock yet: watch those
+    // there are.
+    let paused = all_locks(false)?;
+    let usage = Watched::files(&paused)?.usage(&proc_locks::sample()?, cargo.pid());
+    ensure!(
+        usage.holds(&debug.join(".cargo-build-lock"))
+            && usage
+                .holds
+                .iter()
+                .any(|(path, _)| path.file_name() == Some(".lock".as_ref())),
+        "the paused fine-grain build does not hold .cargo-build-lock and a unit .lock: {usage}"
+    );
+    info!("the paused fine-grain build: {usage}");
+    let before = inodes(&paused)?;
+    expect_skip(
+        "locked",
+        "",
+        "a fine-grain build paused in its build script",
+    )?;
+    ensure!(
+        inodes(&paused)? == before,
+        "lock files replaced while the build was paused: {paused:?}"
+    );
+    gate.open(&ctx.scratch)?;
+    cargo.wait()?.expect_success()?;
+
+    let locks = all_locks(true)?;
+    pin_fine_grain_lock_names(&target, &fine_grain_unit_locks(&debug, true)?)?;
+    let before = inodes(&locks)?;
+    expect_skip(
+        "contains_special",
+        "fine-grain Cargo unit lock",
+        "no build running",
+    )?;
+    ensure!(
+        inodes(&locks)? == before,
+        "lock files gone or replaced: {locks:?}"
+    );
+    build(ctx, toolchain, &p, &[FINE, "build"])
+}
+
+/// Every `build/<package>/<hash>/.lock` of a per-unit profile directory.
+/// With `every_unit` (a finished build), fails unless every unit
+/// directory has one (what was measured).
+fn fine_grain_unit_locks(profile: &Path, every_unit: bool) -> Result<Vec<PathBuf>, String> {
+    let children = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        let mut found = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir {dir:?}: {e}"))?
+            .map(|e| {
+                e.map(|e| e.path())
+                    .map_err(|e| format!("read_dir {dir:?}: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        found.sort();
+        Ok(found)
+    };
+    let mut locks = Vec::new();
+    for package in children(&profile.join("build"))? {
+        for unit in children(&package)? {
+            let lock = unit.join(".lock");
+            let meta = match std::fs::symlink_metadata(&lock) {
+                Ok(meta) => meta,
+                Err(e) if !every_unit && e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("unit {unit:?} has no fine-grain .lock: {e}")),
+            };
+            ensure!(
+                meta.file_type().is_file() && meta.len() == 0,
+                "{lock:?} is not an empty regular file: {meta:?}"
+            );
+            locks.push(lock);
+        }
+    }
+    ensure!(!locks.is_empty(), "no unit directory in {profile:?}/build");
+    Ok(locks)
+}
+
+/// The measured lock names, pinned: a nightly that adds or renames a lock
+/// file below a target fails here, naming it, before the protocol is
+/// trusted with it.
+fn pin_fine_grain_lock_names(target: &Path, unit_locks: &[PathBuf]) -> TestResult {
+    let mut unknown = Vec::new();
+    let mut stack = vec![target.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir {dir:?}: {e}"))? {
+            let path = entry.map_err(|e| format!("read_dir {dir:?}: {e}"))?.path();
+            let meta =
+                std::fs::symlink_metadata(&path).map_err(|e| format!("lstat {path:?}: {e}"))?;
+            if meta.is_dir() {
+                stack.push(path.clone());
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if !name.to_ascii_lowercase().contains("lock") {
+                continue;
+            }
+            let grandparent = path.parent().and_then(Path::parent);
+            let known = CARGO_LOCK_NAMES.contains(&name.as_ref())
+                && path.parent() == Some(&target.join("debug"))
+                || unit_locks.contains(&path)
+                // rustc's incremental session lock (`incremental/<crate>/s-*.lock`),
+                // there without fine-grain locking too.
+                || name.starts_with("s-")
+                    && name.ends_with(".lock")
+                    && grandparent.and_then(Path::file_name) == Some("incremental".as_ref());
+            if !known {
+                unknown.push(path);
+            }
+        }
+    }
+    ensure!(
+        unknown.is_empty(),
+        "lock-like names below the target that were not measured (TASK-205): {unknown:?}"
+    );
+    Ok(())
 }

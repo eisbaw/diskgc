@@ -90,6 +90,10 @@ pub static CARGO_TESTS: &[CargoTest] = &[
         run: cargo_reclaim_suite::cargo_reclaim_skips_a_target_whose_lock_is_held,
     },
     CargoTest {
+        name: "cargo_reclaim_keeps_a_fine_grain_locked_target",
+        run: cargo_reclaim_suite::cargo_reclaim_keeps_a_fine_grain_locked_target,
+    },
+    CargoTest {
         name: "cargo_reclaim_changed_between_discovery_and_locking",
         run: cargo_reclaim_suite::cargo_reclaim_changed_between_discovery_and_locking,
     },

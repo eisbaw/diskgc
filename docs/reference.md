@@ -2235,6 +2235,11 @@ without a filter shows what a reclaim of Cargo targets would take now.
 A reclaimed Cargo target keeps its directory with `CACHEDIR.TAG`,
 `.rustc_info.json` and Cargo's lock files (a few KiB): diskgc never deletes
 a Cargo lock file, and Cargo builds into it again as usual.
+Measured for nightly Cargo's `-Zfine-grain-locking` (2026-10-16 nightly):
+it adds a lock file per unit, `<profile>/build/<package>/<hash>/.lock`, so
+diskgc never reclaims a target such a Cargo built (`contains_special`), and
+skips it as `locked` while such a build runs ([safety.md](safety.md),
+`cargo-target`, Lock files).
 
 **What `pytest-tmp` frees on a laptop.** Less than the size of
 `/tmp/pytest-of-<user>` suggests (TASK-65 walk, TASK-157):

@@ -55,9 +55,10 @@ use crate::resolve::Resolved;
 pub use delete::{DeleteOptions, Deletion, End, delete_unchecked};
 pub(crate) use walk::host_failure;
 pub use walk::{
-    CACHEDIR_TAG, CARGO_LOCK_NAMES, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER, PRIVATE_TMP_PREFIX,
-    Rules, WalkStop, checkout_metadata_below, checkout_metadata_down_to, is_cargo_lock_name,
-    is_checkout_marker, is_private_tmp, path_in_private_tmp, walk,
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, CARGO_UNIT_LOCK_NAME, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER,
+    PRIVATE_TMP_PREFIX, Rules, WalkStop, checkout_metadata_below, checkout_metadata_down_to,
+    is_cargo_lock_name, is_cargo_unit_lock_path, is_checkout_marker, is_private_tmp,
+    path_in_private_tmp, walk,
 };
 
 /// Frames below the candidate that hold an fd at the same time (see the
