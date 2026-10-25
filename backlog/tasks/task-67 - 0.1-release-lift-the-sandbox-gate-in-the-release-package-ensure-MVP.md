@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 16:44'
+updated_date: '2026-10-25 17:29'
 labels:
   - wave-2
   - release
@@ -22,6 +22,8 @@ dependencies:
   - TASK-157
   - TASK-140
   - TASK-227
+  - TASK-229
+  - TASK-232
 references:
   - PRD.md
   - docs/safety.md
