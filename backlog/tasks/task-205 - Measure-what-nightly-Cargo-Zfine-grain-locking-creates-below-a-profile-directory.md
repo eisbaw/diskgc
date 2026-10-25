@@ -6,11 +6,12 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 09:15'
+updated_date: '2026-10-25 20:17'
 labels:
   - hardening
   - safety
 dependencies: []
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -24,3 +25,9 @@ Follow-up of TASK-167 (mped-architect note). diskgc refuses any .cargo-*lock* na
 - [ ] #1 The lock files a pinned nightly with fine-grain locking creates are measured and recorded in docs/safety.md Lock files
 - [ ] #2 A model vector uses the real name; the walk or judge_layout refuses or takes it
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Decision 2026-10-25 by mark-emulator (Mark may veto): measure what nightly-2026-10-16 -Zfine-grain-locking creates below a profile directory BEFORE the 0.1 cut (it is in the test image, cheap); if it creates lock files outside .cargo-*lock*, fail closed on them; either way the release notes state what was measured.
+<!-- SECTION:NOTES:END -->

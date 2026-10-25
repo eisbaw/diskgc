@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 18:53'
+updated_date: '2026-10-25 20:17'
 labels:
   - wave-3
   - architecture
@@ -53,6 +53,8 @@ Mark's decisions 2026-10-25 (his own): background tally backs off on measured pr
 Mark's answers 2026-10-25 (his own) on TASK-28's open points: a complete discovery listing of a block's site recounts the block's members and estimates; partial listings leave them (TASK-28 open point 1).
 
 Implemented on branch t29 (not merged): 346751c (TASK-230), e1bf9a2 (engine), a87997e (VM test, built not run), 5ce3859 (review fixes). Module crates/diskgc-core/src/tally/ {budget,pace,schedule,size,listing,recount,sync,background}; Host::pressure + Host::lower_priority (LinuxHost, ModelHost scripted 'pressure:' steps and 'call_cost'); hostlock::held_by_another (shared flock probe, closed at once); Index::{set_cursor_bytes,drop_finder,recount_block}; engine::Seen on fs Found / cargo Target. Model tests crates/diskgc-model/tests/tally.rs (21). 22 manual mutations killed. One mped-architect round: fix first (stalled sizing cursor, unbounded host-error retries, unbounded background listing) -> fixed in 5ce3859, fixes not re-reviewed. Open for Mark: background listing is not resumable (bounded at 1 s; roots too large never complete in the background); 100,000-entry no-starvation model run not done (scaled down); AC #1 container test and AC #2 report field belong with watch/ensure wiring (TASK-32/31). VM test vm-tally-pressure ready, not run.
+
+Mark's decision 2026-10-25 (his own): background discovery is RESUMABLE (cursor across batches, within the 50 ms / 2,000-op bound); a complete listing is one whose cursor reached the end without refusals.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
