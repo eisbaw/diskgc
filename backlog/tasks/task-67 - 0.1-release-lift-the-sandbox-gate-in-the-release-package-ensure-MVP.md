@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 11:27'
+updated_date: '2026-10-25 12:50'
 labels:
   - wave-2
   - release
@@ -20,7 +20,7 @@ dependencies:
   - TASK-197
   - TASK-156
   - TASK-157
-  - TASK-171
+  - TASK-140
 references:
   - PRD.md
   - docs/safety.md
@@ -88,6 +88,8 @@ COMPASS round 3 (2026-10-25): AC2 rewritten to match the 2026-10-25 mark-emulato
 Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): ipc: live-only stays accepted in 0.1 only if its runtime check has a vector and a container test against /tmp candidates; otherwise refuse it in the 0.1 catalog with a clear message. PRD item 18 (TASK-171 AC2): surfaced by the TASK-171 implementer as a concrete wording diff for decision.
 
 2026-10-25 (release-docs 353eb7d, not merged): step 5b tool 'just docs-vs-binary BIN [--container NAME]'. On release-01-candidate 26xczdv8 (host read-only: 171 checks; walk container release-docs with /usr/local/bin/diskgc: 188 checks incl. exit 1/75/130/143 and actions/skipped fields) and the dev package x6mpr05x (host: 235 checks): 0 mismatches. Not checked by it: exit 124, host-error 3, unobservable defaults (--timeout 10m etc.), human text, most skip-reason/evidence enum values (only observed ones). Rerun both modes on the final artifact before closing AC2.
+
+2026-10-25: TASK-171 removed from the dependencies: its 0.1 subset (items 1, 11, 12, 18) is done (8eb95f3); the rest is post-0.1. TASK-140 added (debug text in the 0.1 summary).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
