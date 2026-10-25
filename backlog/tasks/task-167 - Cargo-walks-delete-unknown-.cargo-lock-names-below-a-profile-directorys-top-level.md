@@ -1,0 +1,32 @@
+---
+id: TASK-167
+title: >-
+  Cargo walks delete unknown .cargo-*lock* names below a profile directory's top
+  level
+status: To Do
+assignee: []
+created_date: '2026-10-25 01:12'
+labels:
+  - hardening
+  - safety
+dependencies: []
+references:
+  - crates/diskgc-core/src/engine/walk.rs
+  - docs/safety.md
+priority: high
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Found by TASK-13 async QA (b009e59, confirmed by reading engine::walk::admit, not reproduced).
+admit() refuses the three known CARGO_LOCK_NAMES at any depth, but an unknown is_cargo_lock_name() match (.cargo-*lock*) only when its parent or grandparent listing holds CACHEDIR.TAG (nested-target shape); cargo_target judge_layout refuses unknown names only directly in the profile directory. So e.g. target/debug/build/<pkg>/<hash>/.cargo-unit-lock or debug/.fingerprint/x/.cargo-lock.bak is recorded and unlinked in reclaim step 3.
+Today harmless (no measured Cargo creates such a name; the profile locks are held exclusively). It becomes a real lock-file deletion (PRD What bad looks like: "Any Cargo lock file deleted") the day Cargo adds finer-grained locks, silently. docs/safety.md cargo Reclaim step 3 claims "every walk refuses every Cargo lock name": false today.
+Fix the class: in Cargo walks (and arguably every walk) refuse any .cargo-*lock* name at any depth (contains_special). Same blind spot for a user fs profile whose candidate IS a profile/triple dir (e.g. */target/debug).
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 A model vector: unknown .cargo-*lock* name deep in a profile directory -> target skipped contains_special, nothing removed
+- [ ] #2 docs/safety.md step 3 and Filesystem candidates state the same rule as the code
+<!-- AC:END -->
