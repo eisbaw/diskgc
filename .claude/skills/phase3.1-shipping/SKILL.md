@@ -409,12 +409,13 @@ they never override the Invariants.
   fast suite (TASK-178) left release, Debian, Docker and VM results
   missing for that sha. A red async QA means "unknown" for every later
   stage, not "pass".
-- 2026-10-25: the flake dev shell's hook sets `CARGO_TARGET_DIR` to
-  `<git toplevel>/tmp/target`, overriding anything set before
-  `nix develop`; in a worktree that is the worktree's own 3+ GB target.
-  To share the main checkout's, use
-  `nix develop -c env CARGO_TARGET_DIR=<main>/tmp/target just check`
-  (TASK-178). Sharing serialises parallel builds on one cargo lock.
+- 2026-10-25: NEVER share one `CARGO_TARGET_DIR` between worktrees:
+  cargo hashes a workspace crate the same in every worktree, so parallel
+  builds overwrite each other and a gate can run another tree's test
+  binaries or link against another tree's crate (TASK-184, TASK-201).
+  Use each worktree's own target (the dev shell sets
+  `<worktree>/tmp/target`); budget ~3 GB per worktree. Gate results from
+  a shared target while others built are invalid.
 - 2026-10-25: walk environments run busy loops (host-shaped load) until
   `just walk-down NAME`; two forgotten ones burned ~4 cores for 6-10 h
   and skewed every timing and VM probe (TASK-197 flake). Tear a walk env
