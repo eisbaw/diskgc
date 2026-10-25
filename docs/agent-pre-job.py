@@ -48,6 +48,13 @@ def check_space(code, report):
     target = report.get("target_free_bytes")
     met = report.get("target_met")
     if not is_int(minimum) or not is_int(target):
+        # A run error before the first sample (exit 3 at startup) measured
+        # nothing, so a percentage goal has no bytes yet; anything else
+        # without a goal is not a report diskgc writes.
+        nothing_measured = (report.get("avail_before_bytes") is None
+                            and after is None and met is None)
+        if code == 3 and nothing_measured:
+            return
         raise ValueError("report has no space goal")
     if after is None:
         # Only a run error may lack its final sample, and then nothing is met.

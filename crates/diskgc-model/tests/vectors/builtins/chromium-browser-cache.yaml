@@ -39,12 +39,12 @@ expect:
     - {candidate: "/home/tester/.cache/chromium/Default/Cache"}
     - {candidate: "/home/tester/.cache/chromium/Default/Code Cache", reason: in_use}
     - {candidate: "/home/tester/.cache/chromium/Profile 1/Cache", reason: excluded}
-    - {candidate: "/home/tester/.cache/chromium/Profile 1/Code Cache", reason: kept}
+    - {candidate: "/home/tester/.cache/chromium/Profile 1/Code Cache", reason: keep_marker}
   reclaim_exit: 1
   actions: ["/home/tester/.cache/chromium/Default/Cache"]
   removed: ["/home/tester/.cache/chromium/Default/Cache"]
   skipped:
     - {candidate: "/home/tester/.cache/chromium/Default/Code Cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
     - {candidate: "/home/tester/.cache/chromium/Profile 1/Cache", reason: excluded}
-    - {candidate: "/home/tester/.cache/chromium/Profile 1/Code Cache", reason: kept}
+    - {candidate: "/home/tester/.cache/chromium/Profile 1/Code Cache", reason: keep_marker}
   preserved: ["/home/tester/.cache/chromium/Default/Code Cache/payload", "/home/tester/.cache/chromium/Profile 1/Cache/payload", "/home/tester/.cache/chromium/Profile 1/Code Cache/payload"]

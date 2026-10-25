@@ -193,7 +193,8 @@ fn a_blocking_candidate_operation_reports_overrun_and_starts_no_next_candidate()
     let plan = executor::dry_run(&plan_host, &request(), &[1000], &mut |_| {});
     assert!(
         plan.plan.iter().any(|entry| {
-            entry.candidate == Path::new("/home/mark/src/new/target") && entry.reason.is_none()
+            entry.candidate.as_deref() == Some(Path::new("/home/mark/src/new/target"))
+                && entry.reason.is_none()
         }),
         "the later candidate must be eligible: {plan:#?}"
     );

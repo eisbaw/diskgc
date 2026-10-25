@@ -226,7 +226,7 @@ fn each_docker_profile_uses_one_fixed_whole_backend_action() {
         let uid = executor::privileges(&host, false).unwrap();
         let plan = executor::dry_run(&host, &request(profile), &[uid], &mut |_| {});
         assert_eq!(plan.plan.len(), 1, "{profile}: {plan:?}");
-        assert_eq!(plan.plan[0].candidate, PathBuf::from(candidate));
+        assert_eq!(plan.plan[0].candidate, Some(PathBuf::from(candidate)));
         assert_eq!(host.trace_count(Op::RunCommand), 0);
 
         let report = executor::ensure(&host, &request(profile), &[uid], &mut |_| {});

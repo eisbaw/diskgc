@@ -37,7 +37,7 @@ use diskgc_core::invocation::{self, Catalog, ConfigFile, ConfigUse, EnsureOption
 use diskgc_core::kernel::KernelError;
 use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
-use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
+use diskgc_core::report::{self, ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::resolve::screen_mount_chain;
 use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
@@ -217,6 +217,12 @@ const NOT_YET: [&str; 2] = ["watch", "survey"];
 fn json_requested(args: &[OsString]) -> bool {
     args.iter()
         .any(|a| a == "--json" || a.as_encoded_bytes().starts_with(b"--json="))
+}
+
+/// Whether a command line that was not understood asked for a dry run, for
+/// its report's `dry_run`: decided like [`json_requested`].
+fn dry_run_requested(args: &[OsString]) -> bool {
+    args.iter().any(|a| a == "--dry-run")
 }
 
 fn parse(args: &[OsString]) -> Invocation {
@@ -538,23 +544,6 @@ fn kernel_failure(error: KernelError) -> StartupFailure {
     }
 }
 
-fn failed_report(
-    status: Status,
-    cause: ErrorCause,
-    message: String,
-    path: Option<&Path>,
-) -> Report {
-    let mut report = Report::new(status, path);
-    report.errors.push(ErrorEntry {
-        tier: String::new(),
-        profile: String::new(),
-        candidate: String::new(),
-        cause,
-        message,
-    });
-    report
-}
-
 /// The catalog this build ships ([`Catalog`]): the opt-in feature builds
 /// the proposed 0.1 release's.
 const CATALOG: Catalog = if cfg!(feature = "proposed-release-01-catalog") {
@@ -644,45 +633,36 @@ fn draw_seed() -> Result<u64, String> {
 /// configuration file's bytes and the build's catalog.
 fn ensure(args: &EnsureArgs) -> Report {
     // Every error is logged where it is recorded: here for those found
-    // before the composition runs, by the composition for its own.
-    let fail = |cause: ErrorCause, why: String| {
+    // before the composition runs, by the composition for its own. Each
+    // starts from the options' report, so it says what was asked for (the
+    // goal, `--dry-run`) even though nothing was measured (TASK-191).
+    let fail = |status: Status, cause: ErrorCause, why: String| {
         log(&format!("error: {why}"));
-        Report::new(Status::UsageError, Some(&args.options.path)).usage_error_with_cause(cause, why)
-    };
-    let fail_host = |why: String| {
-        log(&format!("error: {why}"));
-        failed_report(
-            Status::Error,
-            ErrorCause::Host,
-            why,
-            Some(&args.options.path),
-        )
+        let mut report = args.options.report(status);
+        report.errors.push(ErrorEntry::run(cause, why));
+        report
     };
     if let Err(error) = LinuxHost::install_interrupt_handlers() {
-        return fail_host(format!("install signal handlers: {error}"));
+        return fail(
+            Status::Error,
+            ErrorCause::Host,
+            format!("install signal handlers: {error}"),
+        );
     }
     let host = match startup() {
         Ok(host) => host,
-        Err(StartupFailure::Host(why)) => return fail_host(why),
-        Err(StartupFailure::UnsupportedKernel(why)) => return fail(ErrorCause::Usage, why),
+        Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
     };
     let config = match read_config(args.config.as_deref(), args.options.allow_root) {
         Ok(config) => config,
-        Err(why) => return fail(ErrorCause::Config, why),
+        Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
     };
     let platform = Platform {
         catalog: CATALOG,
         draw_seed: &draw_seed,
         builtins: &builtins,
     };
-    invocation::ensure(
-        &host,
-        &args.options,
-        &config,
-        &platform,
-        &mut log,
-        &mut |line| log(&operator_progress(line)),
-    )
+    invocation::ensure(&host, &args.options, &config, &platform, &mut log, &mut log)
 }
 
 /// The embedded built-in profiles, before [`CATALOG`] narrows them; an
@@ -888,38 +868,15 @@ fn warn_missing_roots(config: &Config) {
     }
 }
 
-/// The one JSON object of a failed command other than `ensure` (whose
-/// report says it): `status` as `ensure`'s usage-error report has it, the
-/// exit code (which `ensure`'s report does not carry: there it is only the
-/// process's), and the message (docs/reference.md, `profiles` command).
-fn error_json(cause: ErrorCause, why: &str) -> String {
-    error_json_status(Status::UsageError, cause, why)
-}
-
-fn error_json_status(status: Status, cause: ErrorCause, why: &str) -> String {
-    Json::Obj(vec![
-        ("status", Json::str(status.as_str())),
-        ("exit_code", Json::U64(status.exit_code().into())),
-        ("cause", Json::str(cause.as_str())),
-        ("error", Json::str(why)),
-    ])
-    .to_text()
+/// The one JSON object of a failed command other than `ensure`
+/// (docs/reference.md, Output, Errors): `ensure`'s envelope and `errors`
+/// list with the one error.
+fn error_json(status: Status, cause: ErrorCause, why: &str) -> String {
+    report::error_json(status, &[ErrorEntry::run(cause, why)]).to_text()
 }
 
 fn log(line: &str) {
     eprintln!("diskgc: {line}");
-}
-
-/// The JSON tier key stays `--select`; stderr names the work, so an operator
-/// does not read every line as a complaint about the command-line flag.
-fn operator_progress(line: &str) -> String {
-    if let Some(rest) = line.strip_prefix("--select")
-        && (rest.starts_with(':') || rest.starts_with(' '))
-    {
-        format!("selection{rest}")
-    } else {
-        line.to_owned()
-    }
 }
 
 /// Write the entire result, including any trailing newline. A failed write
@@ -992,7 +949,10 @@ fn main() -> ExitCode {
                 log(&format!("error: {why}"));
                 if json {
                     output(
-                        &format!("{}\n", error_json(ErrorCause::Config, &why)),
+                        &format!(
+                            "{}\n",
+                            error_json(Status::UsageError, ErrorCause::Config, &why)
+                        ),
                         EXIT_USAGE,
                     )
                 } else {
@@ -1007,7 +967,10 @@ fn main() -> ExitCode {
                 let why = failure.message();
                 log(&format!("error: {why}"));
                 if json {
-                    output(&format!("{}\n", error_json(cause, &why)), EXIT_USAGE)
+                    output(
+                        &format!("{}\n", error_json(Status::UsageError, cause, &why)),
+                        EXIT_USAGE,
+                    )
                 } else {
                     ExitCode::from(EXIT_USAGE)
                 }
@@ -1021,7 +984,10 @@ fn main() -> ExitCode {
             log(&format!("error: {why}"));
             if json {
                 output(
-                    &format!("{}\n", error_json(ErrorCause::Usage, &why)),
+                    &format!(
+                        "{}\n",
+                        error_json(Status::UsageError, ErrorCause::Usage, &why)
+                    ),
                     EXIT_USAGE,
                 )
             } else {
@@ -1049,15 +1015,16 @@ fn main() -> ExitCode {
             match (json, report) {
                 (true, true) => {
                     eprintln!("diskgc: error: {reason}");
-                    output(
-                        &format!("{}\n", failed_report(status, cause, reason, None).to_json()),
-                        status.exit_code(),
-                    )
+                    // The command line was not understood: no path or
+                    // goal to report, only whether a dry run was asked for.
+                    let mut report = Report::new(status, None, dry_run_requested(&args));
+                    report.errors.push(ErrorEntry::run(cause, reason));
+                    output(&format!("{}\n", report.to_json()), status.exit_code())
                 }
                 (true, false) => {
                     eprintln!("diskgc: error: {reason}");
                     output(
-                        &format!("{}\n", error_json_status(status, cause, &reason)),
+                        &format!("{}\n", error_json(status, cause, &reason)),
                         status.exit_code(),
                     )
                 }
@@ -1082,22 +1049,6 @@ mod tests {
     use super::*;
     use diskgc_core::executor::Tier;
     use diskgc_core::units::Size;
-
-    #[test]
-    fn selected_tier_has_a_readable_progress_label() {
-        assert_eq!(
-            operator_progress("--select: skip in_use /tmp/target"),
-            "selection: skip in_use /tmp/target"
-        );
-        assert_eq!(
-            operator_progress("--select /tmp: checking"),
-            "selection /tmp: checking"
-        );
-        assert_eq!(
-            operator_progress("builds: checking /tmp/target"),
-            "builds: checking /tmp/target"
-        );
-    }
 
     #[test]
     fn startup_classifies_kernel_io_separately_from_unsupported_versions() {

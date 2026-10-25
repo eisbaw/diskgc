@@ -467,8 +467,9 @@ pub enum Reason {
     /// statted, for lack of permission (`EACCES`, `EPERM`; e.g. a mode-000
     /// directory): fail closed, never treated as empty.
     Unreadable,
-    /// A `.diskgc-keep` file is inside.
-    Kept,
+    /// A `.diskgc-keep` file is inside the candidate or between its root
+    /// and it (`keep_marker`; named `kept` before 0.1, TASK-192).
+    KeepMarker,
     /// A PrivateTmp entry, a Cargo lock file name anywhere, a Cargo
     /// target inside (the structural recogniser), or a device node or an
     /// object of unknown type.
@@ -556,7 +557,7 @@ impl Reason {
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
-        Reason::Kept,
+        Reason::KeepMarker,
         Reason::ContainsSpecial,
         Reason::ContainsCheckout,
         Reason::ContainsIpc,
@@ -591,7 +592,7 @@ impl Reason {
             Self::Missing => "missing",
             Self::NotOwner => "not_owner",
             Self::Unreadable => "unreadable",
-            Self::Kept => "kept",
+            Self::KeepMarker => "keep_marker",
             Self::ContainsSpecial => "contains_special",
             Self::ContainsCheckout => "contains_checkout",
             Self::ContainsIpc => "contains_ipc",

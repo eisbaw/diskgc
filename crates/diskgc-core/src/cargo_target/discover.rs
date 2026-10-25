@@ -798,9 +798,9 @@ pub fn reach<H: Host>(
         let listing = judged!(list(host, &dir, &at, deadline));
         if listing.iter().any(|n| n == KEEP_MARKER) {
             return Ok(Err(Skip::new(
-                Reason::Kept,
+                Reason::KeepMarker,
                 at.join(KEEP_MARKER),
-                "a keep marker between the root and the target",
+                "between the root and the target",
             )));
         }
         at.push(name);

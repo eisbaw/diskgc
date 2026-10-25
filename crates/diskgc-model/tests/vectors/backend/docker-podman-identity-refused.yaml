@@ -24,11 +24,11 @@ host:
     info: '{"ID":"fake-daemon-1","DockerRootDir":"/var/lib/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}'
 expect:
   plan:
-    - {candidate: "", reason: unsupported_backend}
+    - {candidate: null, reason: unsupported_backend}
   reclaim_exit: 1
   actions: []
   removed: []
   skipped:
-    - {candidate: "", reason: unsupported_backend}
+    - {candidate: null, reason: unsupported_backend}
   preserved: [/var/lib/docker/containerd/daemon/io.containerd.content.v1.content]
   commands: []

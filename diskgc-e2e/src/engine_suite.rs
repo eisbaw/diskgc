@@ -144,7 +144,7 @@ pub fn engine_skips_a_nested_keep_marker_or_cargo_target(ctx: &Ctx) -> TestResul
     for (run, want) in [
         (
             &kept,
-            "0 skip kept \"/tmp/kept/sub/deeper/.diskgc-keep\" -- ",
+            "0 skip keep_marker \"/tmp/kept/sub/deeper/.diskgc-keep\" -- ",
         ),
         (
             &cargo,

@@ -1357,7 +1357,7 @@ pub fn fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_el
 /// deletion oracle; every decoy is kept with its reason: a test dir
 /// holding a `.git` (`contains_checkout`), one with a socket and one with a
 /// FIFO (`contains_ipc`), one holding another user's file and an rc dir of
-/// another user (`not_owner`), a session with a keep marker (`kept`), a
+/// another user (`not_owner`), a session with a keep marker (`keep_marker`), a
 /// test dir that is a mount point (`contains_mount`), one holding a file a
 /// process has open (`in_use`), a fresh one of each profile (`not_idle`);
 /// a pytest
@@ -1444,7 +1444,10 @@ fn tmp_fixture(ctx: &Ctx, scale: Scale) -> TestResult {
         0o644,
         TESTER,
     )?;
-    kept.push(("pytest-of-tester/pytest-kept/test_k".to_owned(), "kept"));
+    kept.push((
+        "pytest-of-tester/pytest-kept/test_k".to_owned(),
+        "keep_marker",
+    ));
     s.mkdir("nix-shell-1-theirs", 0o755, OTHER)?;
     s.write_file("nix-shell-1-theirs/rc", b"theirs", 0o644, OTHER)?;
     kept.push(("nix-shell-1-theirs".to_owned(), "not_owner"));

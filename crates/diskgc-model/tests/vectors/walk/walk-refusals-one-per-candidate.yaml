@@ -40,7 +40,7 @@ host:
 expect:
   plan:
     - {candidate: /tmp/zephyr-eligible}
-    - {candidate: /tmp/zephyr-kept, reason: kept}
+    - {candidate: /tmp/zephyr-kept, reason: keep_marker}
     - {candidate: /tmp/zephyr-checkout, reason: contains_checkout}
     - {candidate: /tmp/zephyr-foreign, reason: not_owner}
     - {candidate: /tmp/zephyr-socket, reason: contains_ipc}
@@ -52,7 +52,7 @@ expect:
   actions: [/tmp/zephyr-eligible]
   removed: [/tmp/zephyr-eligible]
   skipped:
-    - {candidate: /tmp/zephyr-kept, reason: kept}
+    - {candidate: /tmp/zephyr-kept, reason: keep_marker}
     - {candidate: /tmp/zephyr-checkout, reason: contains_checkout}
     - {candidate: /tmp/zephyr-foreign, reason: not_owner}
     - {candidate: /tmp/zephyr-socket, reason: contains_ipc}

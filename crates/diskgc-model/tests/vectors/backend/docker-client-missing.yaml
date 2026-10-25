@@ -16,11 +16,11 @@ host:
     /var/lib/docker/containerd/daemon: {.: {}}
 expect:
   plan:
-    - {candidate: "", reason: missing}
+    - {candidate: null, reason: missing}
   reclaim_exit: 1
   actions: []
   removed: []
   skipped:
-    - {candidate: "", reason: missing}
+    - {candidate: null, reason: missing}
   preserved: [/var/lib/docker/containerd/daemon]
   commands: []

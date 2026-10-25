@@ -138,7 +138,7 @@ fn cargo_protect_uses_its_own_bound_roots_in_dry_run() {
             report
                 .plan
                 .iter()
-                .find(|entry| entry.candidate == Path::new(path))
+                .find(|entry| entry.candidate.as_deref() == Some(Path::new(path)))
                 .map(|entry| entry.reason),
             Some(Some(Reason::Protected)),
             "{path}"
@@ -270,7 +270,8 @@ fn misconfigured_group_tier_is_reported_and_next_tier_runs() {
         report
             .errors
             .iter()
-            .any(|error| error.tier == "bad" && error.message.contains("misconfigured")),
+            .any(|error| error.tier.as_deref() == Some("bad")
+                && error.message.contains("misconfigured")),
         "{report:#?}"
     );
     assert!(
@@ -294,7 +295,12 @@ fn every_tier_environment_is_preflighted_before_the_first_deletion() {
     let report = grouped(&host, policy, "12G", Some("15G"));
     assert_eq!(report.status, Status::Met, "{report:#?}");
     assert_eq!(report.actions[0].tier, "old");
-    assert!(report.errors.iter().any(|error| error.tier == "bad-root"));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier.as_deref() == Some("bad-root"))
+    );
 
     let trace = host.trace();
     let first_delete = trace
@@ -349,7 +355,10 @@ fn later_unsafe_root_is_checked_before_earlier_tier_deletes() {
     let report = grouped(&host, policy, "12G", Some("15G"));
     assert_eq!(report.status, Status::Met, "{report:#?}");
     assert!(
-        report.errors.iter().any(|error| error.tier == "bad-later"),
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier.as_deref() == Some("bad-later")),
         "{report:#?}"
     );
     let trace = host.trace();
@@ -381,7 +390,7 @@ fn later_foreign_root_is_reported_before_earlier_tier_deletes() {
     assert!(
         report.skipped.iter().any(|skip| {
             skip.tier == "foreign-later"
-                && skip.candidate == Path::new("/home/mark/src/foreign")
+                && skip.candidate.as_deref() == Some(Path::new("/home/mark/src/foreign"))
                 && skip.reason == Reason::OtherFs
         }),
         "{report:#?}"
@@ -421,13 +430,13 @@ fn configured_dry_run_plans_each_tier_without_the_delete_port() {
     assert!(
         report.plan.iter().any(|entry| entry.group == "stale"
             && entry.tier == "old"
-            && entry.candidate == Path::new(OLD)),
+            && entry.candidate.as_deref() == Some(Path::new(OLD))),
         "{report:#?}"
     );
     assert!(
         report.plan.iter().any(|entry| entry.group == "pressure"
             && entry.tier == "recent"
-            && entry.candidate == Path::new(NEW)),
+            && entry.candidate.as_deref() == Some(Path::new(NEW))),
         "{report:#?}"
     );
     assert!(calls(&host, Op::MayDelete).is_empty());
@@ -450,7 +459,8 @@ fn configured_dry_run_continues_after_one_tier_budget_expires() {
         report
             .errors
             .iter()
-            .any(|error| error.tier == "quick" && error.message.contains("deadline")),
+            .any(|error| error.tier.as_deref() == Some("quick")
+                && error.message.contains("deadline")),
         "{report:#?}"
     );
     assert!(
@@ -481,7 +491,8 @@ fn configured_dry_run_reports_later_tier_budget_expiry_as_error() {
         report
             .errors
             .iter()
-            .any(|error| error.tier == "quick" && error.message.contains("deadline")),
+            .any(|error| error.tier.as_deref() == Some("quick")
+                && error.message.contains("deadline")),
         "{report:#?}"
     );
     assert!(
@@ -507,9 +518,11 @@ fn failed_space_sample_in_first_tier_stops_later_tiers_without_deletion() {
     let report = grouped(&host, policy, "12G", None);
     assert_eq!(report.status, Status::Error, "{report:#?}");
     assert!(
-        report.errors.iter().any(
-            |error| error.tier == "first" && error.message.contains("sampling available space")
-        ),
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier.as_deref() == Some("first")
+                && error.message.contains("sampling available space")),
         "{report:#?}"
     );
     assert!(report.actions.is_empty(), "{report:#?}");
@@ -707,7 +720,7 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
     let skipped: Vec<(&Path, Reason)> = report
         .skipped
         .iter()
-        .map(|s| (s.candidate.as_path(), s.reason))
+        .map(|s| (s.candidate.as_deref().expect("a candidate"), s.reason))
         .collect();
     assert_eq!(
         skipped,
@@ -754,7 +767,7 @@ fn tallied_nonidle_cargo_targets_skip_before_any_target_flock() {
         let skip = report
             .skipped
             .iter()
-            .find(|entry| entry.candidate == Path::new(path))
+            .find(|entry| entry.candidate.as_deref() == Some(Path::new(path)))
             .expect("both tallied targets skipped");
         assert_eq!(skip.reason, Reason::NotIdle, "{path}: {report:#?}");
         assert!(skip.estimated_bytes.is_some(), "{path}: {report:#?}");
@@ -826,7 +839,7 @@ fn a_failed_delete_is_an_error_exit_3_and_the_next_target_is_tried() {
     assert_eq!(report.status, Status::Error, "{report:#?}");
     assert_eq!(report.exit_code(), 3);
     assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
-    assert_eq!(report.errors[0].candidate, OLD);
+    assert_eq!(report.errors[0].candidate.as_deref(), Some(OLD));
     assert_eq!(report.errors[0].cause, ErrorCause::Operation);
     assert!(
         report.errors[0].message.contains("EACCES"),
@@ -1242,9 +1255,14 @@ fn grouped_dry_run_reports_later_tier_preflight_failure_with_a_partial_plan() {
     assert_eq!(report.status, Status::Error, "{report:#?}");
     assert_eq!(report.exit_code(), 3);
     assert!(report.plan.iter().any(|entry| entry.tier == "first"));
-    assert!(report.errors.iter().any(|error| error.tier == "unsafe"
-        && error.cause == ErrorCause::Safety
-        && error.message.contains("PrivateTmp")));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.tier.as_deref() == Some("unsafe")
+                && error.cause == ErrorCause::Safety
+                && error.message.contains("PrivateTmp"))
+    );
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
@@ -1346,7 +1364,11 @@ fn best_fit_cargo_recalculates_after_each_observed_sample() {
     let mut request = cargo("11G", None);
     request.tier = tiers[0].clone();
     let plan = dry_run(&host, &request);
-    let paths: Vec<_> = plan.plan.iter().map(|p| p.candidate.as_path()).collect();
+    let paths: Vec<_> = plan
+        .plan
+        .iter()
+        .map(|p| p.candidate.as_deref().expect("a candidate"))
+        .collect();
     assert_eq!(
         paths,
         [
@@ -1523,7 +1545,7 @@ fn skip_reason(report: &Report, candidate: &str) -> Option<Reason> {
     report
         .skipped
         .iter()
-        .find(|s| s.candidate == Path::new(candidate))
+        .find(|s| s.candidate.as_deref() == Some(Path::new(candidate)))
         .map(|s| s.reason)
 }
 
@@ -1544,12 +1566,12 @@ fn a_tally_refusal_is_final_for_the_run_even_if_it_stops_being_true() {
         .map(|a| a.candidate.as_path())
         .collect();
     assert_eq!(order, [Path::new(NEW)], "{report:#?}");
-    assert_eq!(skip_reason(&report, OLD), Some(Reason::Kept));
+    assert_eq!(skip_reason(&report, OLD), Some(Reason::KeepMarker));
     assert_eq!(
         report
             .skipped
             .iter()
-            .find(|entry| entry.candidate == Path::new(OLD))
+            .find(|entry| entry.candidate.as_deref() == Some(Path::new(OLD)))
             .and_then(|entry| entry.estimated_bytes),
         None,
         "a tally refused before completion cannot report a size"
@@ -1581,7 +1603,7 @@ fn a_kept_target_is_never_deleted_on_either_path() {
         let report = ensure(&host, &req);
         assert_eq!(
             skip_reason(&report, OLD),
-            Some(Reason::Kept),
+            Some(Reason::KeepMarker),
             "{budget:?}: {report:#?}"
         );
         assert_eq!(unlinked_below(&host, OLD), 0, "{budget:?}");
@@ -1779,7 +1801,7 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     let plan: Vec<(&Path, Option<Reason>)> = report
         .plan
         .iter()
-        .map(|p| (p.candidate.as_path(), p.reason))
+        .map(|p| (p.candidate.as_deref().expect("a candidate"), p.reason))
         .collect();
     assert_eq!(
         plan,
@@ -1814,7 +1836,11 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     // Without a filter, both eligible, oldest first.
     let host = common::host(&yaml(false, ""));
     let report = dry_run(&host, &cargo("1G", None));
-    let order: Vec<&Path> = report.plan.iter().map(|p| p.candidate.as_path()).collect();
+    let order: Vec<&Path> = report
+        .plan
+        .iter()
+        .map(|p| p.candidate.as_deref().expect("a candidate"))
+        .collect();
     assert_eq!(order, [Path::new(OLD), Path::new(NEW)]);
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
@@ -1855,10 +1881,10 @@ fn a_foreign_root_is_skipped_while_same_device_roots_reclaim() {
     );
     assert!(report.errors.is_empty(), "{report:#?}");
     assert!(
-        report
-            .skipped
-            .iter()
-            .any(|skip| skip.candidate == Path::new("/tmp/w") && skip.reason == Reason::OtherFs),
+        report.skipped.iter().any(
+            |skip| skip.candidate.as_deref() == Some(Path::new("/tmp/w"))
+                && skip.reason == Reason::OtherFs
+        ),
         "{report:#?}"
     );
     assert_eq!(report.actions.len(), 2, "{report:#?}");
@@ -1976,7 +2002,7 @@ fn selections_this_build_cannot_run_are_refused() {
         tier.idle_for.map(|i| i.0),
         Some(Duration::from_secs(7 * 86_400))
     );
-    assert_eq!(tier.name, "--select");
+    assert_eq!(tier.name, "select");
 }
 
 #[test]
@@ -1996,9 +2022,9 @@ fn same_cargo_source_positive_idle_union_uses_weakest_bound_once() {
         let plan = dry_run(&planning, &request);
         assert_eq!(plan.status, Status::DryRun, "{plan:#?}");
         assert_eq!(plan.plan.len(), 2, "{plan:#?}");
-        assert_eq!(plan.plan[0].candidate, Path::new(OLD));
+        assert_eq!(plan.plan[0].candidate.as_deref(), Some(Path::new(OLD)));
         assert_eq!(plan.plan[0].reason, None);
-        assert_eq!(plan.plan[1].candidate, Path::new(NEW));
+        assert_eq!(plan.plan[1].candidate.as_deref(), Some(Path::new(NEW)));
         assert_eq!(plan.plan[1].reason, Some(Reason::NotIdle));
         assert!(calls(&planning, Op::Unlinkat).is_empty());
 
@@ -2062,9 +2088,9 @@ fn unfiltered_cargo_union_member_keeps_its_source_minimum_age() {
         let plan = dry_run(&planning, &request);
         assert_eq!(plan.status, Status::DryRun, "{plan:#?}");
         assert_eq!(plan.plan.len(), 2, "{plan:#?}");
-        assert_eq!(plan.plan[0].candidate, Path::new(OLD));
+        assert_eq!(plan.plan[0].candidate.as_deref(), Some(Path::new(OLD)));
         assert_eq!(plan.plan[0].reason, None);
-        assert_eq!(plan.plan[1].candidate, Path::new(NEW));
+        assert_eq!(plan.plan[1].candidate.as_deref(), Some(Path::new(NEW)));
         assert_eq!(plan.plan[1].reason, Some(Reason::NotIdle));
         assert!(calls(&planning, Op::Unlinkat).is_empty());
 
@@ -2105,13 +2131,14 @@ fn negated_idle_filter_reclaims_only_recent_cargo_target() {
     assert!(
         plan.plan
             .iter()
-            .any(|e| e.candidate == Path::new(NEW) && e.reason.is_none()),
+            .any(|e| e.candidate.as_deref() == Some(Path::new(NEW)) && e.reason.is_none()),
         "{plan:#?}"
     );
     assert!(
         plan.plan
             .iter()
-            .any(|e| e.candidate == Path::new(OLD) && e.reason == Some(Reason::TooIdle)),
+            .any(|e| e.candidate.as_deref() == Some(Path::new(OLD))
+                && e.reason == Some(Reason::TooIdle)),
         "{plan:#?}"
     );
     let report = ensure(&host, &request);
@@ -2152,13 +2179,13 @@ fn negated_idle_filter_rechecks_cargo_target_after_lock_time_passes() {
         report
             .skipped
             .iter()
-            .any(|e| e.candidate == Path::new(NEW) && e.reason == Reason::TooIdle),
+            .any(|e| e.candidate.as_deref() == Some(Path::new(NEW)) && e.reason == Reason::TooIdle),
         "{report:#?}"
     );
     let late_skip = report
         .skipped
         .iter()
-        .find(|entry| entry.candidate == Path::new(NEW))
+        .find(|entry| entry.candidate.as_deref() == Some(Path::new(NEW)))
         .expect("late refusal after a completed tally");
     assert!(
         late_skip
@@ -2257,7 +2284,7 @@ fn plan_reason(report: &Report, candidate: &str) -> Option<Option<Reason>> {
     report
         .plan
         .iter()
-        .find(|p| p.candidate == Path::new(candidate))
+        .find(|p| p.candidate.as_deref() == Some(Path::new(candidate)))
         .map(|p| p.reason)
 }
 

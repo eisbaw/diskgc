@@ -23,15 +23,15 @@ host:
       sibling: {.diskgc-keep: {}}
 expect:
   plan:
-    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: kept}
-    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: kept}
+    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: keep_marker}
+    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: keep_marker}
     - {candidate: /tmp/nix-shell.Beside/node-compile-cache}
   reclaim_exit: 1
   actions: [/tmp/nix-shell.Beside/node-compile-cache]
   removed: [/tmp/nix-shell.Beside/node-compile-cache]
   skipped:
-    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: kept}
-    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: kept}
+    - {candidate: /tmp/nix-shell.Above/node-compile-cache, reason: keep_marker}
+    - {candidate: /tmp/nix-shell.Inside/node-compile-cache, reason: keep_marker}
   preserved:
     - /tmp/nix-shell.Above/node-compile-cache/v22/blob
     - /tmp/nix-shell.Inside/node-compile-cache/v22/blob

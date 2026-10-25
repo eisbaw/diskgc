@@ -26,7 +26,16 @@ def report(status, **fields):
 
 
 def error(cause):
-    return [{"tier": "", "profile": "", "candidate": "", "cause": cause, "message": "m"}]
+    return [{"tier": None, "profile": None, "candidate": None, "cause": cause, "message": "m"}]
+
+
+def startup_failure(**goal):
+    """What diskgc ensure --json prints when a host check fails at startup
+    (e.g. pidfd_open refused under seccomp, TASK-191): exit 3, nothing
+    measured, the goal as the command line gave it."""
+    return report("error", exit_code=3, dry_run=False, mount=None,
+                  avail_before_bytes=None, avail_after_bytes=None, target_met=None,
+                  errors=error("host"), **goal)
 
 
 class AgentPreJobTest(unittest.TestCase):
@@ -87,6 +96,18 @@ class AgentPreJobTest(unittest.TestCase):
             with self.subTest(code=code, body=body):
                 self.assertEqual(self.decision(code, body), (4, "abort_invalid_report"))
         self.assertEqual(self.run_script(2, "")[1]["decision"], "abort_invalid_report")
+
+    def test_a_startup_failure_is_abort_error_not_an_invalid_report(self):
+        # TASK-191: the report of a run that failed before its first sample.
+        # A byte goal is reported as given; a percentage goal cannot be in
+        # bytes before the filesystem was sampled, and then nothing was.
+        for goal in (SPACE, {"min_free_bytes": None, "target_free_bytes": None}):
+            with self.subTest(goal=goal):
+                self.assertEqual(self.decision(3, startup_failure(**goal)), (3, "abort_error"))
+        # Without a goal, a run that did measure is still invalid.
+        measured = startup_failure(min_free_bytes=None, target_free_bytes=None)
+        measured["avail_before_bytes"] = 10
+        self.assertEqual(self.decision(3, measured), (4, "abort_invalid_report"))
 
     def test_the_documented_example_keeps_an_idle_filter(self):
         doc = SCRIPT.read_text()

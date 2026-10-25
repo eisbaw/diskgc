@@ -150,7 +150,7 @@ pub fn named_checkout_policy_for_command_caches(ctx: &Ctx) -> TestResult {
         for (policy, kept, expected_reason, expected_checkouts) in [
             (false, false, Some("contains_checkout"), "refuse"),
             (true, false, None, "allow"),
-            (true, true, Some("kept"), "allow"),
+            (true, true, Some("keep_marker"), "allow"),
         ] {
             let config_file = format!("diskgc-{profile}-checkout-policy.yaml");
             let config_path = format!("/home/tester/{config_file}");

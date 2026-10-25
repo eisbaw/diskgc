@@ -1770,9 +1770,9 @@ pub(crate) fn no_keep_markers<H: Host>(
         let marker = path.join(KEEP_MARKER);
         let kept = || {
             Ok(Err(Skip::new(
-                Reason::Kept,
+                Reason::KeepMarker,
                 marker.clone(),
-                "a keep marker between the root and the candidate",
+                "between the root and the candidate",
             )))
         };
         if mounts.iter().any(|m| m.mount_point == marker) {

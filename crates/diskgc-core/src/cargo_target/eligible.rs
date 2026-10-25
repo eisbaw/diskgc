@@ -171,9 +171,9 @@ pub(super) fn judge_inspected(
     }
     if let Some(marker) = &inspected.keep_marker {
         return Err(Skip::new(
-            Reason::Kept,
+            Reason::KeepMarker,
             path.join(marker),
-            "a keep marker in the target",
+            "inside the target",
         ));
     }
     judge_owners(path, &target.identity, inspected, rules.owners)?;

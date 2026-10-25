@@ -26,5 +26,5 @@ expect:
   actions: []
   removed: []
   skipped:
-    - {candidate: /tmp/zephyr-a, reason: kept}
+    - {candidate: /tmp/zephyr-a, reason: keep_marker}
   preserved: [/tmp/zephyr-a/f, /tmp/zephyr-a/.diskgc-keep]

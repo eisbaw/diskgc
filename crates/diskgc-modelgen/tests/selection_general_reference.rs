@@ -543,7 +543,7 @@ fn excluded_leaf_and_other_root_negation_leave_only_first_root_y_file() {
         .plan
         .iter()
         .filter(|entry| entry.reason.is_none())
-        .map(|entry| entry.candidate.clone())
+        .map(|entry| entry.candidate.clone().expect("a candidate"))
         .collect::<BTreeSet<_>>();
     let only_y = BTreeSet::from([PathBuf::from("/tmp/sel/a0/y0")]);
     assert_eq!(expected(&case), only_y, "oracle fixture changed");
@@ -590,7 +590,7 @@ fn grouped_union_applies_its_factor_to_every_member() {
         .plan
         .iter()
         .filter(|entry| entry.reason.is_none())
-        .map(|entry| entry.candidate.clone())
+        .map(|entry| entry.candidate.clone().expect("a candidate"))
         .collect::<BTreeSet<_>>();
     // b0 is tagged, so the shared !filter:has-tag must keep it out.
     let only_a = BTreeSet::from([PathBuf::from("/tmp/sel/a0")]);
@@ -645,7 +645,7 @@ fn source_where_rejecting_outer_match_allows_its_second_pattern_to_find_child() 
         .plan
         .iter()
         .filter(|entry| entry.reason.is_none())
-        .map(|entry| entry.candidate.clone())
+        .map(|entry| entry.candidate.clone().expect("a candidate"))
         .collect::<BTreeSet<_>>();
     let child = BTreeSet::from([PathBuf::from("/tmp/sel/a0/x0")]);
     assert_eq!(expected(&case), child, "oracle fixture changed");
@@ -703,10 +703,9 @@ fn config_protect_uses_raw_outer_match_even_when_source_where_rejects_it() {
     assert!(plan.errors.is_empty(), "{plan:#?}");
     assert!(self::expected(&case).is_empty(), "oracle fixture changed");
     assert!(
-        plan.plan
-            .iter()
-            .any(|entry| entry.candidate == Path::new("/tmp/sel/a0/x0")
-                && entry.reason == Some(Reason::Protected)),
+        plan.plan.iter().any(|entry| entry.candidate.as_deref()
+            == Some(Path::new("/tmp/sel/a0/x0"))
+            && entry.reason == Some(Reason::Protected)),
         "raw outer protection did not cover the inner candidate: {plan:#?}"
     );
 }
@@ -748,7 +747,7 @@ fn mixed_marker_filter_complements_the_whole_known_conjunction() {
             .plan
             .iter()
             .filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone())
+            .map(|entry| entry.candidate.clone().expect("a candidate"))
             .collect::<BTreeSet<_>>();
         let only_selected = BTreeSet::from([PathBuf::from(selected)]);
         assert_eq!(
@@ -805,7 +804,7 @@ fn unknown_marker_type_passes_neither_filter_polarity_or_source_where() {
             .plan
             .iter()
             .filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone())
+            .map(|entry| entry.candidate.clone().expect("a candidate"))
             .collect::<BTreeSet<_>>();
         let expected = if admitted {
             BTreeSet::from([PathBuf::from("/tmp/sel/b0")])
@@ -902,10 +901,10 @@ fn unknown_type_below_selected_directory_refuses_whole_tree() {
     assert!(plan.errors.is_empty(), "{plan:#?}");
     assert!(self::expected(&case).is_empty(), "oracle fixture changed");
     assert!(
-        plan.plan
-            .iter()
-            .any(|entry| entry.candidate == Path::new("/tmp/sel/b1")
-                && entry.reason == Some(Reason::UnsupportedFs)),
+        plan.plan.iter().any(
+            |entry| entry.candidate.as_deref() == Some(Path::new("/tmp/sel/b1"))
+                && entry.reason == Some(Reason::UnsupportedFs)
+        ),
         "unknown nested entry did not refuse outer candidate: {plan:#?}"
     );
 }
@@ -967,7 +966,7 @@ proptest! {
         let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
         prop_assert!(plan.errors.is_empty(), "{plan:#?}\n{replay}");
         let actual = plan.plan.iter().filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone()).collect::<BTreeSet<_>>();
+            .map(|entry| entry.candidate.clone().expect("a candidate")).collect::<BTreeSet<_>>();
         prop_assert_eq!(actual, expected(&case), "{:#?}\n{}", plan, replay);
     }
 }

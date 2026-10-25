@@ -163,7 +163,7 @@ pub fn no_index_matches_reclaim_on_fresh_fixture(ctx: &Ctx) -> TestResult {
                 && result["actions"].as_array().is_some_and(|actions| {
                     actions.len() == 1
                         && actions[0]["candidate"] == candidate.to_string_lossy().as_ref()
-                        && actions[0]["tier"] == "--select"
+                        && actions[0]["tier"] == "select"
                         && actions[0]["profile"] == "cli-runtime-index"
                 })
                 && result["errors"].as_array().is_some_and(Vec::is_empty)

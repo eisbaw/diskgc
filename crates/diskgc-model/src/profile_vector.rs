@@ -148,7 +148,8 @@ pub struct Expected {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanVerdict {
-    pub candidate: PathBuf,
+    /// `null` for a row of the tier as a whole (no candidate).
+    pub candidate: Option<PathBuf>,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
@@ -158,7 +159,8 @@ pub struct PlanVerdict {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkipVerdict {
-    pub candidate: PathBuf,
+    /// `null` for a skip of the tier as a whole (no candidate).
+    pub candidate: Option<PathBuf>,
     pub reason: String,
     /// The complete `process_blockers` (pid and evidence); absent: not
     /// compared, `[]`: the report's must be `null`.
@@ -724,7 +726,11 @@ fn compare_skips(report: &Report, expected: &[SkipVerdict]) -> Result<(), String
     {
         return Err(format!(
             "{}: process_blockers is an empty list, not null",
-            empty.candidate.display()
+            empty
+                .candidate
+                .as_deref()
+                .unwrap_or(std::path::Path::new("(tier)"))
+                .display()
         ));
     }
     actual.sort_by(|a, b| a.candidate.cmp(&b.candidate));

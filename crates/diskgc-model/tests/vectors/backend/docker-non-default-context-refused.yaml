@@ -24,11 +24,11 @@ host:
     info: '{"ID":"fake-daemon-1","DockerRootDir":"/var/lib/docker","Driver":"overlayfs","DriverStatus":[],"Containerd":{"Address":""}}'
 expect:
   plan:
-    - {candidate: "", reason: unsupported_backend}
+    - {candidate: null, reason: unsupported_backend}
   reclaim_exit: 1
   actions: []
   removed: []
   skipped:
-    - {candidate: "", reason: unsupported_backend}
+    - {candidate: null, reason: unsupported_backend}
   preserved: [/var/lib/docker/buildkit]
   commands: []

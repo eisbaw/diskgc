@@ -244,6 +244,18 @@ pub struct EnsureOptions {
     pub test_entry_budget: Option<usize>,
 }
 
+impl EnsureOptions {
+    /// The report of a run of these options before anything ran: `PATH`,
+    /// `--dry-run` and the goal as far as the command line says it. Every
+    /// refusal before the executor (here and in the binary's startup)
+    /// starts from it, so a host failure at startup still carries the goal
+    /// a harness checks (TASK-191).
+    pub fn report(&self, status: Status) -> Report {
+        Report::new(status, Some(&self.path), self.dry_run)
+            .with_goal(self.min_free, self.target_free)
+    }
+}
+
 /// What `ensure` needs from the build and its environment besides the
 /// `Host` port. Each function is called only when the run needs it.
 pub struct Platform<'a> {
@@ -277,7 +289,9 @@ pub fn ensure<H: Delete>(
         Err((cause, why)) => {
             // Every refusal before the executor is exit 2 and deletes nothing.
             log(&format!("error: {why}"));
-            Report::new(Status::UsageError, Some(&options.path)).usage_error_with_cause(cause, why)
+            options
+                .report(Status::UsageError)
+                .usage_error_with_cause(cause, why)
         }
     }
 }

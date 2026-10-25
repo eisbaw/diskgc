@@ -386,7 +386,7 @@ fn union_retention_guards_veto_even_when_their_term_fails_evidence_in_both_order
             let retained_plan = plan
                 .plan
                 .iter()
-                .find(|entry| entry.candidate == Path::new(retained))
+                .find(|entry| entry.candidate.as_deref() == Some(Path::new(retained)))
                 .expect("retained plan entry");
             assert_eq!(retained_plan.reason, Some(reason), "{selection}: {plan:#?}");
             assert_eq!(
@@ -395,9 +395,9 @@ fn union_retention_guards_veto_even_when_their_term_fails_evidence_in_both_order
                 "{selection}: {plan:#?}"
             );
             assert!(
-                plan.plan
-                    .iter()
-                    .any(|entry| entry.candidate == Path::new(eligible) && entry.reason.is_none()),
+                plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                    == Some(Path::new(eligible))
+                    && entry.reason.is_none()),
                 "{selection}: {plan:#?}"
             );
             let run_host = host(&yaml("", tree, ""));
@@ -408,11 +408,9 @@ fn union_retention_guards_veto_even_when_their_term_fails_evidence_in_both_order
                 "{selection}: {report:#?}"
             );
             assert!(
-                report
-                    .skipped
-                    .iter()
-                    .any(|entry| entry.candidate == Path::new(retained)
-                        && entry.profile == format!("union-{kind}-guard")),
+                report.skipped.iter().any(|entry| entry.candidate.as_deref()
+                    == Some(Path::new(retained))
+                    && entry.profile == format!("union-{kind}-guard")),
                 "{selection}: {report:#?}"
             );
             assert!(
@@ -453,10 +451,9 @@ fn positive_filter_retention_guard_vetoes_other_admitted_union_term() {
         let plan_host = host(&yaml("", tree, ""));
         let plan = dry_run(&plan_host, &request);
         assert!(
-            plan.plan.iter().any(
-                |entry| entry.candidate == Path::new("/tmp/union-version/v2")
-                    && entry.reason == Some(Reason::NewestVersion)
-            ),
+            plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/union-version/v2"))
+                && entry.reason == Some(Reason::NewestVersion)),
             "{selection}: {plan:#?}"
         );
         let run_host = host(&yaml("", tree, ""));
@@ -467,8 +464,8 @@ fn positive_filter_retention_guard_vetoes_other_admitted_union_term() {
             "{selection}: {report:#?}"
         );
         assert!(
-            report.skipped.iter().any(|entry| entry.candidate
-                == Path::new("/tmp/union-version/v2")
+            report.skipped.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/union-version/v2"))
                 && entry.profile == "union-version-filter-guard"),
             "{selection}: {report:#?}"
         );
@@ -498,22 +495,19 @@ fn source_where_failure_does_not_hide_raw_retention_guard() {
                 let events = if evidence == "unknown" { unknown } else { "" };
                 let plan = dry_run(&host(&yaml("", tree, events)), &request);
                 assert!(
-                    plan.plan
-                        .iter()
-                        .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
-                            && entry.reason == Some(Reason::NewestVersion)
-                            && entry.profile == profile),
+                    plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                        == Some(Path::new("/tmp/union-raw/v2"))
+                        && entry.reason == Some(Reason::NewestVersion)
+                        && entry.profile == profile),
                     "{evidence}, {selection}: {plan:#?}"
                 );
                 let run_host = host(&yaml("", tree, events));
                 let report = ensure(&run_host, &request);
                 assert!(
-                    report
-                        .skipped
-                        .iter()
-                        .any(|entry| entry.candidate == Path::new("/tmp/union-raw/v2")
-                            && entry.reason == Reason::NewestVersion
-                            && entry.profile == profile),
+                    report.skipped.iter().any(|entry| entry.candidate.as_deref()
+                        == Some(Path::new("/tmp/union-raw/v2"))
+                        && entry.reason == Reason::NewestVersion
+                        && entry.profile == profile),
                     "{evidence}, {selection}: {report:#?}"
                 );
                 assert!(exists(&run_host, "/tmp/union-raw/v2"));
@@ -545,7 +539,7 @@ fn union_guards_still_veto_with_zero_tally_budget() {
             report
                 .skipped
                 .iter()
-                .any(|entry| entry.candidate == guarded
+                .any(|entry| entry.candidate.as_deref() == Some(guarded)
                     && entry.profile == "union-version-filter-guard"),
             "{selection}: {report:#?}"
         );
@@ -669,14 +663,15 @@ fn command_union_plans_and_invokes_once_per_inode_with_source_profile() {
         assert_eq!(
             plan.plan
                 .iter()
-                .filter(|entry| entry.candidate == Path::new("/tmp/command-shared-clear"))
+                .filter(|entry| entry.candidate.as_deref()
+                    == Some(Path::new("/tmp/command-shared-clear")))
                 .count(),
             1,
             "{plan:#?}"
         );
         assert!(
-            plan.plan.iter().any(|entry| entry.candidate
-                == Path::new("/tmp/command-shared-checkout")
+            plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/command-shared-checkout"))
                 && entry.reason == Some(Reason::ContainsCheckout)),
             "{plan:#?}"
         );
@@ -875,7 +870,7 @@ fn command_union_reports_final_refusal_after_an_earlier_filtered_term() {
     let skipped = report
         .skipped
         .iter()
-        .find(|entry| entry.candidate == Path::new("/tmp/command-shared-clear"))
+        .find(|entry| entry.candidate.as_deref() == Some(Path::new("/tmp/command-shared-clear")))
         .expect("candidate refusal");
     assert_eq!(skipped.reason, Reason::Excluded, "{report:#?}");
     assert_eq!(skipped.profile, "command-union-refuse", "{report:#?}");
@@ -970,16 +965,15 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
     let plan_host = host(&yaml("", tree, ""));
     let plan = executor::dry_run(&plan_host, &tmp(selection), &[1000], &mut |_| {});
     assert!(
-        plan.plan
-            .iter()
-            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent") && e.reason.is_none()),
+        plan.plan.iter().any(|e| e.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-recent"))
+            && e.reason.is_none()),
         "{plan:#?}"
     );
     assert!(
-        plan.plan
-            .iter()
-            .any(|e| e.candidate == Path::new("/tmp/pytest-of-ancient")
-                && e.reason == Some(Reason::TooIdle)),
+        plan.plan.iter().any(|e| e.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-ancient"))
+            && e.reason == Some(Reason::TooIdle)),
         "{plan:#?}"
     );
 
@@ -989,11 +983,9 @@ fn negated_idle_filter_uses_fresh_age_under_candidate_lock() {
     let report = executor::ensure(&host, &tmp(selection), &[1000], &mut |_| {});
     assert!(report.actions.is_empty(), "{report:#?}");
     assert!(
-        report
-            .skipped
-            .iter()
-            .any(|e| e.candidate == Path::new("/tmp/pytest-of-recent")
-                && e.reason == Reason::TooIdle),
+        report.skipped.iter().any(|e| e.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-recent"))
+            && e.reason == Reason::TooIdle),
         "{report:#?}"
     );
     assert!(
@@ -1037,7 +1029,8 @@ fn entry_filters_are_rechecked_after_candidate_lock() {
             report
                 .skipped
                 .iter()
-                .any(|s| s.candidate == Path::new(candidate) && s.reason == Reason::Filtered),
+                .any(|s| s.candidate.as_deref() == Some(Path::new(candidate))
+                    && s.reason == Reason::Filtered),
             "{report:#?}"
         );
         assert!(exists(&host, candidate));
@@ -1063,11 +1056,9 @@ fn mixed_entry_and_idle_filter_rechecks_under_candidate_lock() {
         let report = ensure(&host, &tmp(selection));
         assert!(report.actions.is_empty(), "{report:#?}");
         assert!(
-            report
-                .skipped
-                .iter()
-                .any(|skip| skip.candidate == Path::new("/tmp/pytest-of-a")
-                    && skip.reason == expected),
+            report.skipped.iter().any(|skip| skip.candidate.as_deref()
+                == Some(Path::new("/tmp/pytest-of-a"))
+                && skip.reason == expected),
             "{report:#?}"
         );
         assert!(exists(&host, "/tmp/pytest-of-a"));
@@ -1103,7 +1094,8 @@ fn negated_mixed_filter_complements_the_whole_conjunction() {
         assert!(
             plan.plan
                 .iter()
-                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+                .any(|entry| entry.candidate.as_deref() == Some(Path::new(&path))
+                    && entry.reason == reason),
             "{path}: {plan:#?}"
         );
     }
@@ -1151,7 +1143,7 @@ fn negated_mixed_filter_is_rechecked_under_candidate_lock() {
         let report = ensure(&reclaim_host, &request);
         assert!(report.actions.is_empty(), "{event}: {report:#?}");
         assert!(
-            report.skipped.iter().any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
+            report.skipped.iter().any(|entry| entry.candidate.as_deref() == Some(Path::new("/tmp/pytest-of-a"))
                 && entry.reason == Reason::Filtered),
             "{event}: {report:#?}"
         );
@@ -1178,10 +1170,9 @@ fn negated_mixed_filter_unknown_age_passes_neither_polarity() {
         &mut |_| {},
     );
     assert!(
-        plan.plan.iter().any(
-            |entry| entry.candidate == Path::new("/tmp/pytest-of-unknown")
-                && entry.reason == Some(Reason::UnsupportedFs)
-        ),
+        plan.plan.iter().any(|entry| entry.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-unknown"))
+            && entry.reason == Some(Reason::UnsupportedFs)),
         "{plan:#?}"
     );
 }
@@ -1197,10 +1188,9 @@ fn negated_mixed_filter_future_age_does_not_admit_a_known_entry_mismatch() {
         &mut |_| {},
     );
     assert!(
-        plan.plan.iter().any(
-            |entry| entry.candidate == Path::new("/tmp/pytest-of-future")
-                && entry.reason == Some(Reason::FutureTime)
-        ),
+        plan.plan.iter().any(|entry| entry.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-future"))
+            && entry.reason == Some(Reason::FutureTime)),
         "{plan:#?}"
     );
 }
@@ -1223,7 +1213,7 @@ fn negated_mixed_filter_union_checkout_policy_uses_admitted_terms() {
             assert!(
                 plan.plan
                     .iter()
-                    .any(|entry| entry.candidate == Path::new(&path)
+                    .any(|entry| entry.candidate.as_deref() == Some(Path::new(&path))
                         && entry.reason == reason
                         && entry.checkouts == checkouts),
                 "{selection}: {path}: {plan:#?}"
@@ -1259,7 +1249,8 @@ fn file_candidate_entry_filters_use_known_absence_during_reclaim() {
         assert!(
             plan.plan
                 .iter()
-                .any(|entry| entry.candidate == Path::new(path) && entry.reason.is_none()),
+                .any(|entry| entry.candidate.as_deref() == Some(Path::new(path))
+                    && entry.reason.is_none()),
             "{selection}: {plan:#?}"
         );
         let reclaim_host = host(&yaml("", tree, ""));
@@ -1281,7 +1272,7 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
         let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
         assert!(
             plan.plan.iter().any(|entry| {
-                entry.candidate == Path::new("/tmp/union-shared-clear")
+                entry.candidate.as_deref() == Some(Path::new("/tmp/union-shared-clear"))
                     && entry.reason.is_none()
                     && entry.checkouts == diskgc_core::engine::Checkouts::Allow
             }),
@@ -1289,7 +1280,7 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
         );
         assert!(
             plan.plan.iter().any(|entry| {
-                entry.candidate == Path::new("/tmp/union-shared-tagged")
+                entry.candidate.as_deref() == Some(Path::new("/tmp/union-shared-tagged"))
                     && entry.reason == Some(Reason::ContainsCheckout)
             }),
             "{selection}: {plan:#?}"
@@ -1335,7 +1326,7 @@ fn mixed_filter_union_uses_only_admitted_terms_in_plan_and_prequeue_tally() {
             assert!(
                 plan.plan
                     .iter()
-                    .any(|entry| entry.candidate == Path::new(&path)
+                    .any(|entry| entry.candidate.as_deref() == Some(Path::new(&path))
                         && entry.reason == reason
                         && entry.checkouts == checkouts),
                 "{selection}, {path}: {plan:#?}"
@@ -1378,11 +1369,10 @@ fn mixed_filter_union_rechecks_newly_admitted_term_under_candidate_lock() {
         let planned_host = host(&yaml("", &tree, ""));
         let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
         assert!(
-            plan.plan.iter().any(
-                |entry| entry.candidate == Path::new("/tmp/union-shared-clear")
-                    && entry.reason.is_none()
-                    && entry.checkouts == Checkouts::Allow
-            ),
+            plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/union-shared-clear"))
+                && entry.reason.is_none()
+                && entry.checkouts == Checkouts::Allow),
             "{selection}: {plan:#?}"
         );
 
@@ -1390,8 +1380,8 @@ fn mixed_filter_union_rechecks_newly_admitted_term_under_candidate_lock() {
         let report = ensure(&host, &request);
         assert!(report.actions.is_empty(), "{selection}: {report:#?}");
         assert!(
-            report.skipped.iter().any(|entry| entry.candidate
-                == Path::new("/tmp/union-shared-clear")
+            report.skipped.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/union-shared-clear"))
                 && entry.reason == Reason::ContainsCheckout),
             "{selection}: {report:#?}"
         );
@@ -1414,7 +1404,7 @@ fn union_checkout_policy_rechecks_filter_under_candidate_lock() {
         assert!(report.actions.is_empty(), "{selection}: {report:#?}");
         assert!(
             report.skipped.iter().any(|entry| {
-                entry.candidate == Path::new("/tmp/union-shared-clear")
+                entry.candidate.as_deref() == Some(Path::new("/tmp/union-shared-clear"))
                     && entry.reason == Reason::ContainsCheckout
             }),
             "{selection}: {report:#?}"
@@ -1455,7 +1445,7 @@ fn union_checkout_metadata_uses_only_admitted_refusing_source_roots() {
         let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
         assert!(
             plan.plan.iter().any(|entry| {
-                entry.candidate == Path::new("/tmp/repo/.git/cache-file")
+                entry.candidate.as_deref() == Some(Path::new("/tmp/repo/.git/cache-file"))
                     && entry.reason.is_none()
                     && entry.checkouts == Checkouts::Refuse
             }),
@@ -1682,13 +1672,15 @@ fn filesystem_union_dedupes_identity_and_refusal_wins_in_both_orders() {
         let shared: Vec<_> = plan
             .plan
             .iter()
-            .filter(|entry| entry.candidate == Path::new("/tmp/union-shared-clear"))
+            .filter(|entry| {
+                entry.candidate.as_deref() == Some(Path::new("/tmp/union-shared-clear"))
+            })
             .collect();
         assert_eq!(shared.len(), 1, "{selection}: {plan:#?}");
         assert_eq!(shared[0].checkouts, diskgc_core::engine::Checkouts::Refuse);
         assert!(
-            plan.plan.iter().any(|entry| entry.candidate
-                == Path::new("/tmp/union-shared-checkout")
+            plan.plan.iter().any(|entry| entry.candidate.as_deref()
+                == Some(Path::new("/tmp/union-shared-checkout"))
                 && entry.reason == Some(Reason::ContainsCheckout)),
             "{selection}: {plan:#?}"
         );
@@ -1759,20 +1751,21 @@ fn filesystem_union_attributes_second_source_root_refusal_and_excludes_tier() {
     let planned_host = host(&yaml("", tree, ""));
     let plan = executor::dry_run(&planned_host, &request, &[1000], &mut |_| {});
     assert_eq!(plan.errors.len(), 1, "{plan:#?}");
-    assert_eq!(plan.errors[0].profile, "union-bad-root");
+    assert_eq!(plan.errors[0].profile.as_deref(), Some("union-bad-root"));
     assert_eq!(plan.plan.len(), 1, "{plan:#?}");
-    assert_eq!(plan.plan[0].candidate, Path::new("/home"));
+    assert_eq!(plan.plan[0].candidate.as_deref(), Some(Path::new("/home")));
     assert_eq!(plan.plan[0].reason, Some(Reason::OtherFs));
 
     let reclaim_host = host(&yaml("", tree, ""));
     let report = ensure(&reclaim_host, &request);
     assert_eq!(report.errors.len(), 1, "{report:#?}");
-    assert_eq!(report.errors[0].profile, "union-bad-root");
+    assert_eq!(report.errors[0].profile.as_deref(), Some("union-bad-root"));
     assert!(
         report
             .skipped
             .iter()
-            .any(|skip| skip.candidate == Path::new("/home") && skip.reason == Reason::OtherFs),
+            .any(|skip| skip.candidate.as_deref() == Some(Path::new("/home"))
+                && skip.reason == Reason::OtherFs),
         "{report:#?}"
     );
     assert!(report.actions.is_empty(), "{report:#?}");
@@ -1792,15 +1785,16 @@ fn filesystem_union_skips_foreign_second_source_and_reclaims_same_device_source(
     assert!(
         plan.plan.iter().any(|entry| {
             entry.profile == "union-bad-root"
-                && entry.candidate == Path::new("/home")
+                && entry.candidate.as_deref() == Some(Path::new("/home"))
                 && entry.reason == Some(Reason::OtherFs)
         }),
         "{plan:#?}"
     );
     assert!(
-        plan.plan
-            .iter()
-            .any(|entry| entry.candidate == Path::new("/tmp/union-a") && entry.reason.is_none()),
+        plan.plan.iter().any(
+            |entry| entry.candidate.as_deref() == Some(Path::new("/tmp/union-a"))
+                && entry.reason.is_none()
+        ),
         "{plan:#?}"
     );
     assert_eq!(
@@ -1821,7 +1815,7 @@ fn filesystem_union_skips_foreign_second_source_and_reclaims_same_device_source(
             .skipped
             .iter()
             .any(|skip| skip.profile == "union-bad-root"
-                && skip.candidate == Path::new("/home")
+                && skip.candidate.as_deref() == Some(Path::new("/home"))
                 && skip.reason == Reason::OtherFs),
         "{report:#?}"
     );
@@ -1874,17 +1868,15 @@ fn root_mode_reclaims_only_named_owners_tree() {
     let request = tmp("profile:pytest-of-dir");
     let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});
     assert!(
-        plan.plan
-            .iter()
-            .any(|item| item.candidate == Path::new("/tmp/pytest-of-allowed")
-                && item.reason.is_none()),
+        plan.plan.iter().any(|item| item.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-allowed"))
+            && item.reason.is_none()),
         "{plan:?}"
     );
     assert!(
-        plan.plan
-            .iter()
-            .any(|item| item.candidate == Path::new("/tmp/pytest-of-other")
-                && item.reason == Some(Reason::NotOwner)),
+        plan.plan.iter().any(|item| item.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-other"))
+            && item.reason == Some(Reason::NotOwner)),
         "{plan:?}"
     );
     let report = executor::ensure(&host, &request, &[1000], &mut |_| {});
@@ -2091,7 +2083,8 @@ fn entry_and_version_filter_conjoin_under_reclaim_lock() {
     assert!(report.actions.is_empty(), "{report:#?}");
     assert!(
         report.skipped.iter().any(|skip| {
-            skip.candidate == Path::new("/tmp/versions/v1") && skip.reason == Reason::Filtered
+            skip.candidate.as_deref() == Some(Path::new("/tmp/versions/v1"))
+                && skip.reason == Reason::Filtered
         }),
         "{report:#?}"
     );
@@ -2112,7 +2105,7 @@ fn skip_of(report: &Report, candidate: &str) -> Option<Reason> {
     report
         .skipped
         .iter()
-        .find(|s| s.candidate == Path::new(candidate))
+        .find(|s| s.candidate.as_deref() == Some(Path::new(candidate)))
         .map(|s| s.reason)
 }
 
@@ -2179,8 +2172,8 @@ fn an_fs_reclaim_deletes_every_eligible_candidate_oldest_first_and_nothing_else(
     }
     let refused = [
         ("/tmp/pytest-of-fresh", Reason::NotIdle),
-        ("/tmp/pytest-of-kept", Reason::Kept),
-        ("/tmp/nix-shell.K/pytest-of-d", Reason::Kept),
+        ("/tmp/pytest-of-kept", Reason::KeepMarker),
+        ("/tmp/nix-shell.K/pytest-of-d", Reason::KeepMarker),
         ("/tmp/pytest-of-other", Reason::NotOwner),
         ("/tmp/pytest-of-sock", Reason::ContainsIpc),
         ("/tmp/pytest-of-fifo", Reason::ContainsIpc),
@@ -2236,14 +2229,20 @@ fn an_fs_reclaim_deletes_every_eligible_candidate_oldest_first_and_nothing_else(
         .plan
         .iter()
         .filter(|p| p.reason.is_none())
-        .map(|p| p.candidate.display().to_string())
+        .map(|p| {
+            p.candidate
+                .as_deref()
+                .expect("a candidate")
+                .display()
+                .to_string()
+        })
         .collect();
     assert_eq!(plan_eligible, actions(&report));
     for (candidate, reason) in refused {
         let planned_reason = planned
             .plan
             .iter()
-            .find(|p| p.candidate == Path::new(candidate))
+            .find(|p| p.candidate.as_deref() == Some(Path::new(candidate)))
             .and_then(|p| p.reason);
         assert_eq!(planned_reason, Some(reason), "{candidate} in the plan");
     }
@@ -2294,7 +2293,7 @@ fn a_file_created_mid_delete_is_an_enotempty_error_never_retried() {
     let errors: Vec<_> = report
         .errors
         .iter()
-        .filter(|e| e.candidate == "/tmp/pytest-of-b")
+        .filter(|e| e.candidate.as_deref() == Some("/tmp/pytest-of-b"))
         .collect();
     assert_eq!(errors.len(), 1, "{:#?}", report.errors);
     assert!(
@@ -2438,8 +2437,8 @@ fn a_network_filesystem_is_never_reclaimed_or_touched() {
         assert!(report.skipped.is_empty(), "{fs}: {report:#?}");
         assert!(
             report.errors.iter().any(|error| {
-                error.profile == "anything"
-                    && error.candidate == "/mnt/net/scratch"
+                error.profile.as_deref() == Some("anything")
+                    && error.candidate.as_deref() == Some("/mnt/net/scratch")
                     && error.message.contains(&format!("on {fs} mount /mnt/net"))
                     && error.message.contains("the tier is excluded")
             }),
@@ -2517,8 +2516,8 @@ fn every_fuse_filesystem_is_refused() {
         assert!(report.skipped.is_empty(), "{fs}: {report:#?}");
         assert!(
             report.errors.iter().any(|error| {
-                error.profile == "anything"
-                    && error.candidate == "/mnt/f/scratch"
+                error.profile.as_deref() == Some("anything")
+                    && error.candidate.as_deref() == Some("/mnt/f/scratch")
                     && error.message.contains(&format!("on {fs} mount /mnt/f"))
                     && error.message.contains("the tier is excluded")
             }),
@@ -2553,7 +2552,7 @@ fn every_check_is_made_again_under_the_candidates_lock() {
                 flocked("/tmp/nix-shell.X/pytest-of-c")
             ),
             "/tmp/nix-shell.X/pytest-of-c",
-            Reason::Kept,
+            Reason::KeepMarker,
         ),
         (
             "profile:marker-build-fixture",

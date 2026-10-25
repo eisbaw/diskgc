@@ -38,14 +38,14 @@ expect:
     - {candidate: "/home/a/.platformio/.cache"}
     - {candidate: "/home/b/.platformio/.cache", reason: in_use}
     - {candidate: "/home/c/.platformio/.cache", reason: excluded}
-    - {candidate: "/home/d/.platformio/.cache", reason: kept}
+    - {candidate: "/home/d/.platformio/.cache", reason: keep_marker}
   reclaim_exit: 1
   actions: ["/home/a/.platformio/.cache"]
   removed: []
   skipped:
     - {candidate: "/home/b/.platformio/.cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
     - {candidate: "/home/c/.platformio/.cache", reason: excluded}
-    - {candidate: "/home/d/.platformio/.cache", reason: kept}
+    - {candidate: "/home/d/.platformio/.cache", reason: keep_marker}
   preserved: ["/home/b/.platformio/.cache/payload", "/home/c/.platformio/.cache/payload", "/home/d/.platformio/.cache/payload", "/home/a/.platformio/.cache/payload"]
   commands:
     - {"cwd": "/home/a/.platformio", "argv": ["/usr/bin/env", "PLATFORMIO_CACHE_DIR=.cache", "/usr/bin/pio", "system", "prune", "--cache", "--force"]}

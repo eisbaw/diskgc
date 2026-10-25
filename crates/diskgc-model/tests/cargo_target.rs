@@ -646,7 +646,7 @@ fn keep_markers_keep_the_target() {
         "/tmp/w/p/target/debug/.fingerprint/p-1/.diskgc-keep",
     ] {
         let model = model(&format!("  {marker}: {{}}"), "");
-        let skip = assert_skip(only_target(&model), Reason::Kept, "");
+        let skip = assert_skip(only_target(&model), Reason::KeepMarker, "");
         assert_eq!(skip.path, PathBuf::from(marker));
     }
     let model = model("  /tmp/w/p/target/doc/x/.diskgc-keep: {}", "");
@@ -1029,7 +1029,11 @@ fn a_keep_marker_above_an_inner_root_counts_in_either_root_order() {
         let d = found(&model, &order);
         assert_eq!(d.targets.len(), 1, "{order:?}: {d:#?}");
         assert_eq!(d.targets[0].root, PathBuf::from("/tmp/w"), "{order:?}");
-        let skip = assert_skip(judged(&model, &d.targets[0], Some(1)), Reason::Kept, "");
+        let skip = assert_skip(
+            judged(&model, &d.targets[0], Some(1)),
+            Reason::KeepMarker,
+            "",
+        );
         assert_eq!(skip.path, PathBuf::from("/tmp/w/.diskgc-keep"), "{order:?}");
     }
 }

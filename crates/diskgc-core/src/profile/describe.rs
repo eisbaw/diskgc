@@ -306,14 +306,19 @@ fn find_json(source: &Source) -> Json {
         Finds::CargoTargets => (Json::Null, Json::Null, Json::Null),
         Finds::DockerBuildCache | Finds::DockerImages => (Json::Null, Json::Null, Json::Null),
     };
-    let (roots, required) = match &source.roots {
-        Roots::Fixed(list) => (strings(list), false),
-        Roots::Required => (Json::Null, true),
-        Roots::Backend => (Json::str("daemon"), false),
+    // `roots` is always a list (TASK-192): one type for a script to read;
+    // where the roots come from otherwise is its own field, spelled as in
+    // YAML (`roots: required`, `roots: daemon`).
+    let none: &[String] = &[];
+    let (roots, required, backend) = match &source.roots {
+        Roots::Fixed(list) => (list.as_slice(), false, None),
+        Roots::Required => (none, true, None),
+        Roots::Backend => (none, false, Some("daemon")),
     };
     Json::Obj(vec![
-        ("roots", roots),
+        ("roots", strings(roots)),
         ("roots_required", Json::Bool(required)),
+        ("backend", Json::opt(backend, Json::str)),
         ("paths", paths),
         ("exclude", exclude),
         ("type", entry_type),

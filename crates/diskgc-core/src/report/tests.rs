@@ -27,7 +27,11 @@ fn documented() -> Value {
 /// A report with every optional field set and every list holding an entry
 /// (two plan entries: one eligible, one skipped).
 fn full() -> Report {
-    let mut r = Report::new(Status::Met, Some(&PathBuf::from("/home/mark/src/app")));
+    let mut r = Report::new(
+        Status::Met,
+        Some(&PathBuf::from("/home/mark/src/app")),
+        false,
+    );
     r.started_at = Some("2026-10-21T12:00:00Z".into());
     r.duration_ms = Some(123);
     r.seed = Some(42);
@@ -37,21 +41,25 @@ fn full() -> Report {
     r.avail_before_bytes = Some(10);
     r.avail_after_bytes = Some(90);
     let plan = |reason, bytes| PlanEntry {
-        group: "--select".into(),
-        tier: "--select".into(),
+        group: "select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
-        candidate: "/home/mark/src/app/target".into(),
+        candidate: Some("/home/mark/src/app/target".into()),
         reason,
         estimated_bytes: bytes,
         operation: "cargo lock protocol".into(),
         checkouts: Checkouts::Allow,
-        build_evidence: None,
+        build_evidence: Some(BuildEvidence {
+            marker: "CMakeCache.txt",
+            source: "/home/mark/src/app".into(),
+            idle_age_seconds: Some(3600),
+        }),
         detail: None,
         process_blockers: None,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some(Reason::NotIdle), None)];
     r.actions = vec![ActionEntry {
-        tier: "--select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
         candidate: "/t".into(),
         avail_delta_bytes: Some(-3),
@@ -60,9 +68,9 @@ fn full() -> Report {
         count: 1,
     }];
     r.skipped = vec![SkipEntry {
-        tier: "--select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
-        candidate: "/u".into(),
+        candidate: Some("/u".into()),
         count: 1,
         examples: vec!["/u".into()],
         reason: Reason::InUse,
@@ -76,7 +84,7 @@ fn full() -> Report {
     }];
     r.held_by_deleted_files = vec![HeldEntry {
         pid: 42,
-        command: "cat".into(),
+        command: Some("cat".into()),
         bytes: 5,
     }];
     r.overruns = vec![OverrunEntry {
@@ -85,9 +93,9 @@ fn full() -> Report {
         over_ms: 6,
     }];
     r.errors = vec![ErrorEntry {
-        tier: "--select".into(),
-        profile: "cargo-target".into(),
-        candidate: "/v".into(),
+        tier: Some("select".into()),
+        profile: Some("cargo-target".into()),
+        candidate: Some("/v".into()),
         cause: ErrorCause::Host,
         message: "EACCES".into(),
     }];
@@ -229,7 +237,7 @@ fn skip(candidate: impl Into<PathBuf>, tier: &str, profile: &str, reason: Reason
         tier: tier.to_owned(),
         profile: profile.to_owned(),
         examples: vec![candidate.clone()],
-        candidate,
+        candidate: Some(candidate),
         count: 1,
         reason,
         detail: None,
@@ -240,7 +248,7 @@ fn skip(candidate: impl Into<PathBuf>, tier: &str, profile: &str, reason: Reason
 
 #[test]
 fn skips_aggregate_at_21_per_tier_profile_and_reason() {
-    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")));
+    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")), false);
     r.skipped = (0..20)
         .map(|n| skip(format!("/p/{n}"), "tier-a", "profile-a", Reason::Locked))
         .collect();
@@ -253,7 +261,7 @@ fn skips_aggregate_at_21_per_tier_profile_and_reason() {
     r.skipped.push(last);
     let compact = emitted(&r);
     assert_eq!(compact["skipped"].as_array().unwrap().len(), 1);
-    assert_eq!(compact["skipped"][0]["candidate"], "");
+    assert!(compact["skipped"][0]["candidate"].is_null());
     assert_eq!(compact["skipped"][0]["count"], 21);
     assert!(compact["skipped"][0]["detail"].is_null());
     assert!(compact["skipped"][0]["process_blockers"].is_null());
@@ -280,7 +288,7 @@ fn skips_aggregate_at_21_per_tier_profile_and_reason() {
 
 #[test]
 fn actions_keep_1000_details_then_one_counted_summary() {
-    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")));
+    let mut r = Report::new(Status::Exhausted, Some(Path::new("/p")), false);
     r.actions = (0..1000)
         .map(|n| ActionEntry {
             tier: "tier".to_owned(),
@@ -307,7 +315,7 @@ fn actions_keep_1000_details_then_one_counted_summary() {
     });
     let over_limit = emitted(&r);
     assert_eq!(over_limit["actions"].as_array().unwrap().len(), 1001);
-    assert_eq!(over_limit["actions"][1000]["candidate"], "");
+    assert!(over_limit["actions"][1000]["candidate"].is_null());
     assert_eq!(over_limit["actions"][1000]["count"], 1);
     assert_eq!(over_limit["actions"][1000]["avail_delta_bytes"], -3);
     assert_eq!(over_limit["actions"][1000]["duration_ms"], 4);
@@ -327,8 +335,8 @@ fn actions_keep_1000_details_then_one_counted_summary() {
     assert_eq!(over_limit["actions"][1000]["count"], 2);
     assert_eq!(over_limit["actions"][1000]["avail_delta_bytes"], 2);
     assert_eq!(over_limit["actions"][1000]["duration_ms"], 10);
-    assert_eq!(over_limit["actions"][1000]["tier"], "");
-    assert_eq!(over_limit["actions"][1000]["profile"], "");
+    assert!(over_limit["actions"][1000]["tier"].is_null());
+    assert!(over_limit["actions"][1000]["profile"].is_null());
 
     r.actions[1001].avail_delta_bytes = None;
     assert!(emitted(&r)["actions"][1000]["avail_delta_bytes"].is_null());
@@ -339,7 +347,8 @@ fn actions_keep_1000_details_then_one_counted_summary() {
 /// field is still there and `errors` says why.
 #[test]
 fn a_usage_error_report_keeps_every_field() {
-    let r = Report::new(Status::UsageError, None).usage_error("--min-free: `50`: a bare number");
+    let r =
+        Report::new(Status::UsageError, None, false).usage_error("--min-free: `50`: a bare number");
     let got = emitted(&r);
     let doc = documented();
     assert_eq!(keys(&doc), keys(&got));
@@ -361,8 +370,12 @@ fn a_usage_error_report_keeps_every_field() {
         got["errors"][0]["message"],
         "--min-free: `50`: a bare number"
     );
-    assert_eq!(got["errors"][0]["candidate"], "");
+    for field in ["tier", "profile", "candidate"] {
+        assert!(got["errors"][0][field].is_null(), "errors[0].{field}");
+    }
     assert_eq!(got["errors"][0]["cause"], "usage");
+    assert_eq!(got["exit_code"], 2);
+    assert_eq!(got["dry_run"], false);
     assert_eq!(got["tally_cut_short"], false);
     assert_eq!(r.exit_code(), 2);
     assert_eq!(r.summary(), None, "a usage error goes to stderr only");
@@ -495,7 +508,7 @@ fn an_unknown_final_sample_is_a_run_error_whatever_else_happened() {
 
 #[test]
 fn the_summary_is_silent_only_when_nothing_needed_doing() {
-    let mut quiet = Report::new(Status::Met, Some(&PathBuf::from("/p")));
+    let mut quiet = Report::new(Status::Met, Some(&PathBuf::from("/p")), false);
     quiet.mount = Some("/".into());
     assert_eq!(quiet.summary(), None);
     let mut freed = full();
@@ -510,6 +523,7 @@ fn the_summary_is_silent_only_when_nothing_needed_doing() {
     assert!(text.contains("\n  reclaimed /t: -3 B"), "{text}");
     let mut dry = full();
     dry.status = Status::DryRun;
+    dry.dry_run = true;
     let text = dry.summary().expect("a dry run always prints");
     assert!(text.starts_with("dry run: 10 B available on / "), "{text}");
     // One candidate, eligible in its row: the not_idle row of the same
@@ -544,9 +558,9 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
     report.errors.clear();
     report.duration_ms = Some(1_234);
     report.skipped.push(SkipEntry {
-        tier: "--select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
-        candidate: "/busy-build".into(),
+        candidate: Some("/busy-build".into()),
         count: 1,
         examples: Vec::new(),
         reason: Reason::Locked,
@@ -555,9 +569,9 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
         estimated_bytes: None,
     });
     report.skipped.push(SkipEntry {
-        tier: "--select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
-        candidate: "/already-empty".into(),
+        candidate: Some("/already-empty".into()),
         count: 1,
         examples: Vec::new(),
         reason: Reason::Empty,
@@ -578,13 +592,13 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
 
 #[test]
 fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.mount = Some("/tmp".into());
     for index in 0..7 {
         report.skipped.push(SkipEntry {
             tier: "t".into(),
             profile: "p".into(),
-            candidate: format!("/tmp/held-{index}").into(),
+            candidate: Some(format!("/tmp/held-{index}").into()),
             count: 1,
             examples: Vec::new(),
             reason: Reason::InUse,
@@ -593,7 +607,7 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
             estimated_bytes: None,
         });
     }
-    report.skipped[0].candidate = "/tmp/held-0\nspoofed".into();
+    report.skipped[0].candidate = Some("/tmp/held-0\nspoofed".into());
     let text = report.summary().expect("summary");
     assert!(text.contains("7 kept: in_use; examples: "), "{text}");
     assert!(text.contains("(2 more)"), "{text}");
@@ -604,11 +618,11 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
 
 #[test]
 fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.skipped.push(SkipEntry {
-        tier: "--select".into(),
+        tier: "select".into(),
         profile: "cargo-target".into(),
-        candidate: PathBuf::new(),
+        candidate: None,
         count: 1,
         examples: Vec::new(),
         reason: Reason::Missing,
@@ -622,7 +636,7 @@ fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
         "{text}"
     );
     assert!(
-        text.contains("skipped profile cargo-target [--select]: missing"),
+        text.contains("skipped profile cargo-target [select]: missing"),
         "{text}"
     );
     assert!(
@@ -638,26 +652,26 @@ fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
 
 #[test]
 fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.held_by_deleted_files = vec![
         HeldEntry {
             pid: 10,
-            command: "a".into(),
+            command: Some("a".into()),
             bytes: 0,
         },
         HeldEntry {
             pid: 11,
-            command: "b".into(),
+            command: Some("b".into()),
             bytes: 5,
         },
         HeldEntry {
             pid: 12,
-            command: "c".into(),
+            command: Some("c".into()),
             bytes: 2,
         },
         HeldEntry {
             pid: 13,
-            command: "d".into(),
+            command: Some("d".into()),
             bytes: 7,
         },
     ];
@@ -680,7 +694,7 @@ fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
 
 #[test]
 fn rounded_space_comparison_includes_exact_bytes_for_both_values() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.mount = Some("/tmp".into());
     report.avail_after_bytes = Some((15 << 30) + (1 << 20));
     report.min_free_bytes = Some((15 << 30) + (2 << 20));
@@ -692,6 +706,7 @@ fn rounded_space_comparison_includes_exact_bytes_for_both_values() {
     );
     assert!(text.contains("min-free 15.0 GiB (16108224512 B)"), "{text}");
     report.status = Status::DryRun;
+    report.dry_run = true;
     report.avail_before_bytes = report.avail_after_bytes;
     let text = report.summary().expect("dry run");
     assert!(
@@ -704,7 +719,7 @@ fn rounded_space_comparison_includes_exact_bytes_for_both_values() {
 /// too busy and to run again; other reasons do not.
 #[test]
 fn human_summary_says_a_busy_host_kept_candidates_and_to_run_again() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.mount = Some("/tmp".into());
     report.skipped.push(skip("/tmp/a", "t", "p", Reason::InUse));
     let text = report.summary().expect("summary");
@@ -751,7 +766,7 @@ fn tier_action(tier: &str, candidate: &str, delta: i64) -> ActionEntry {
 /// the reason of the last tier that judged it, once.
 #[test]
 fn human_summary_has_one_final_outcome_per_candidate_across_tiers() {
-    let mut report = Report::new(Status::Met, Some(Path::new("/home/t")));
+    let mut report = Report::new(Status::Met, Some(Path::new("/home/t")), false);
     report.mount = Some("/home/t".into());
     report.skipped = vec![
         tier_skip(
@@ -834,7 +849,7 @@ fn human_summary_has_one_final_outcome_per_candidate_across_tiers() {
 /// of the same candidate: one line saying both.
 #[test]
 fn a_part_way_reclaim_is_one_line_naming_why_it_stopped() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")), false);
     report.actions = vec![tier_action("t", "/w/a/target", 4096)];
     report.skipped = vec![tier_skip(
         "t",
@@ -860,7 +875,7 @@ fn plan_row(tier: &str, candidate: &str, reason: Option<Reason>, bytes: Option<u
         group: "g".into(),
         tier: tier.into(),
         profile: "cargo-target".into(),
-        candidate: candidate.into(),
+        candidate: Some(candidate.into()),
         reason,
         estimated_bytes: bytes,
         operation: "cargo lock protocol".into(),
@@ -876,7 +891,7 @@ fn plan_row(tier: &str, candidate: &str, reason: Option<Reason>, bytes: Option<u
 /// tier that would take it deciding.
 #[test]
 fn a_dry_run_shows_what_would_be_reclaimed_against_the_goal() {
-    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")));
+    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")), true);
     report.mount = Some("/w".into());
     report.duration_ms = Some(5);
     report.avail_before_bytes = Some(100);
@@ -941,25 +956,122 @@ fn a_dry_run_shows_what_would_be_reclaimed_against_the_goal() {
     assert!(text.contains("eligible, not needed /w/a"), "{text}");
 }
 
+/// TASK-193: whether a run was a dry run is the report's `dry_run`, not a
+/// guess from its status or plan. A dry run that failed before its first
+/// plan row (a protect scan failure) still reads as a dry run, never as a
+/// reclaim that freed nothing; a live run that failed reads as live.
+#[test]
+fn a_failed_dry_run_without_a_plan_reads_as_a_dry_run() {
+    let mut report = Report::new(Status::Error, Some(Path::new("/w")), true);
+    report.mount = Some("/w".into());
+    report
+        .errors
+        .push(ErrorEntry::run(ErrorCause::Host, "protect scan: EIO"));
+    let text = report.summary().expect("a failed dry run prints");
+    assert!(text.starts_with("dry run, error: "), "{text}");
+    assert!(!text.contains("reclaimed"), "{text}");
+    assert!(text.contains("1 error(s): see stderr"), "{text}");
+    assert_eq!(emitted(&report)["dry_run"], true);
+    assert_eq!(emitted(&report)["status"], "error");
+
+    report.dry_run = false;
+    let text = report.summary().expect("a failed run prints");
+    assert!(text.starts_with("error: "), "{text}");
+    assert!(text.contains("0 reclaimed"), "{text}");
+}
+
+/// TASK-193: a dry run over thousands of candidates is as short as the live
+/// summary: kept candidates grouped by reason with examples above
+/// KEPT_EXAMPLES_MAX, eligible ones listed up to RECLAIMED_LINES_MAX per
+/// verdict and the rest counted with their estimate.
+#[test]
+fn a_dry_run_over_thousands_of_candidates_is_bounded() {
+    let mut report = Report::new(Status::DryRun, Some(Path::new("/tmp")), true);
+    report.mount = Some("/tmp".into());
+    report.avail_before_bytes = Some(0);
+    report.min_free_bytes = Some(1);
+    report.target_free_bytes = Some(1_000);
+    report.plan = (0..6_000)
+        .map(|n| plan_row("t", &format!("/tmp/kept-{n}"), Some(Reason::InUse), None))
+        .chain((0..400).map(|n| plan_row("t", &format!("/tmp/old-{n}"), None, Some(10))))
+        .chain((0..3).map(|n| {
+            plan_row(
+                "t",
+                &format!("/tmp/marked-{n}"),
+                Some(Reason::KeepMarker),
+                None,
+            )
+        }))
+        .collect();
+    report.plan[6_400].detail = Some("inside the candidate".into());
+    let text = report.summary().expect("a dry run prints");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.len() < 40, "{} lines:\n{text}", lines.len());
+    assert!(
+        text.contains("would reclaim 100 of 400 eligible, est. 1000 B of 1000 B needed"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("\n  would reclaim /tmp/old-").count(),
+        10,
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  90 more would reclaim: est. 900 B (--json lists every candidate)"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("\n  eligible, not needed /tmp/old-").count(),
+        10,
+        "{text}"
+    );
+    assert!(
+        text.contains("\n  290 more eligible, not needed: est. 2.8 KiB"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n  6000 kept: in_use; examples: /tmp/kept-0, /tmp/kept-1, /tmp/kept-2, \
+             /tmp/kept-3, /tmp/kept-4 (5995 more); e.g. last build"
+        ),
+        "{text}"
+    );
+    // TASK-192: the keep-marker reason reads as words, not as its JSON name.
+    assert!(
+        text.contains("\n  kept /tmp/marked-0: keep marker, inside the candidate"),
+        "{text}"
+    );
+    assert_eq!(
+        emitted(&report)["plan"]
+            .as_array()
+            .expect("the JSON plan")
+            .len(),
+        6_403,
+        "the JSON keeps every row"
+    );
+    assert_eq!(emitted(&report)["plan"][6_400]["reason"], "keep_marker");
+}
+
 /// A deleted file of 0 B pins no space: no held line, and a met run with
 /// nothing else to say stays silent.
 #[test]
 fn zero_byte_holders_of_deleted_files_are_not_reported() {
-    let mut report = Report::new(Status::Met, Some(Path::new("/tmp")));
+    let mut report = Report::new(Status::Met, Some(Path::new("/tmp")), false);
     report.held_by_deleted_files = vec![HeldEntry {
         pid: 4274,
-        command: "python3.14".into(),
+        command: Some("python3.14".into()),
         bytes: 0,
     }];
     assert_eq!(report.summary(), None);
     report.status = Status::DryRun;
+    report.dry_run = true;
     let text = report.summary().expect("a dry run prints");
     assert!(!text.contains("held by deleted files"), "{text}");
 }
 
 #[test]
 fn a_dry_run_with_nothing_eligible_says_the_goal_is_not_reachable() {
-    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")));
+    let mut report = Report::new(Status::DryRun, Some(Path::new("/w")), true);
     report.avail_before_bytes = Some(100);
     report.min_free_bytes = Some(200);
     report.target_free_bytes = Some(200);
@@ -977,7 +1089,7 @@ fn a_dry_run_with_nothing_eligible_says_the_goal_is_not_reachable() {
 /// candidate, or refused it for another reason, removes it from the count.
 #[test]
 fn busy_host_count_and_wording_follow_the_final_verdict() {
-    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")));
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")), false);
     let long = "the host was too busy to check whether it is in use: 3 attempt(s) found no \
                 in-use scan within the freshness bound of 1000 ms; kept, run again when the \
                 host is less busy";
@@ -1008,7 +1120,7 @@ fn busy_host_count_and_wording_follow_the_final_verdict() {
         "{text}"
     );
 
-    let mut dry = Report::new(Status::DryRun, Some(Path::new("/w")));
+    let mut dry = Report::new(Status::DryRun, Some(Path::new("/w")), true);
     dry.plan = vec![PlanEntry {
         detail: Some(long.into()),
         ..plan_row("a", "/w/x", Some(Reason::InUseUnknown), None)

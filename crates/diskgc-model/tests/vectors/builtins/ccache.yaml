@@ -44,14 +44,14 @@ expect:
     - {candidate: "/home/a/.cache/ccache"}
     - {candidate: "/home/a/.ccache", reason: in_use}
     - {candidate: "/home/b/.cache/ccache", reason: protected}
-    - {candidate: "/home/b/.ccache", reason: kept}
+    - {candidate: "/home/b/.ccache", reason: keep_marker}
   reclaim_exit: 1
   actions: ["/home/a/.cache/ccache"]
   removed: []
   skipped:
     - {candidate: "/home/a/.ccache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
     - {candidate: "/home/b/.cache/ccache", reason: protected}
-    - {candidate: "/home/b/.ccache", reason: kept}
+    - {candidate: "/home/b/.ccache", reason: keep_marker}
   preserved: ["/home/a/.ccache/payload", "/home/b/.cache/ccache/payload", "/home/b/.ccache/payload", "/home/a/.cache/ccache/payload"]
   commands:
     - {"cwd": "/home/a/.cache/ccache", "argv": ["/usr/bin/env", "CCACHE_DIR=/home/a/.cache/ccache", "/usr/bin/ccache", "--clear"]}

@@ -165,7 +165,7 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
     ("protected_or_negated", &["protected", "excluded"]),
     (
         "nested_guard",
-        &["kept", "contains_checkout", "contains_special"],
+        &["keep_marker", "contains_checkout", "contains_special"],
     ),
 ];
 

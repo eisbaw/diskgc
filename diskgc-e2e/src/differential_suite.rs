@@ -1690,7 +1690,9 @@ fn project_browser_vector(mut vector: ProfileVector) -> Result<ProfileVector, St
         })
         .collect::<Result<_, String>>()?;
     for plan in &mut vector.expect.plan {
-        plan.candidate = source_path(&plan.candidate)?;
+        if let Some(candidate) = &mut plan.candidate {
+            *candidate = source_path(candidate)?;
+        }
         if let Some(source) = &mut plan.source {
             *source = source_path(source)?;
         }
@@ -1702,7 +1704,9 @@ fn project_browser_vector(mut vector: ProfileVector) -> Result<ProfileVector, St
         *path = source_path(path)?;
     }
     for skip in &mut vector.expect.skipped {
-        skip.candidate = source_path(&skip.candidate)?;
+        if let Some(candidate) = &mut skip.candidate {
+            *candidate = source_path(candidate)?;
+        }
     }
     for path in &mut vector.expect.preserved {
         *path = source_path(path)?;
@@ -1817,13 +1821,13 @@ fn cargo_target_held_lock_vector() -> Result<ProfileVector, String> {
         .expect
         .plan
         .iter_mut()
-        .find(|plan| plan.candidate == Path::new(CARGO_TARGET_PATH))
+        .find(|plan| plan.candidate.as_deref() == Some(Path::new(CARGO_TARGET_PATH)))
         .ok_or("Cargo target plan missing")?;
     plan.reason = Some("in_use".into());
     vector.expect.actions.clear();
     vector.expect.removed.clear();
     vector.expect.skipped.push(SkipVerdict {
-        candidate: CARGO_TARGET_PATH.into(),
+        candidate: Some(CARGO_TARGET_PATH.into()),
         reason: "locked".into(),
         process_blockers: None,
     });
@@ -1952,13 +1956,13 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
         .expect
         .plan
         .iter_mut()
-        .find(|entry| entry.candidate == cache)
+        .find(|entry| entry.candidate.as_ref() == Some(&cache))
         .ok_or("Python cache candidate missing from expectation")?;
     plan.reason = Some("contains_mount".into());
     vector.expect.actions.clear();
     vector.expect.removed.clear();
     vector.expect.skipped.push(SkipVerdict {
-        candidate: cache,
+        candidate: Some(cache),
         reason: "contains_mount".into(),
         process_blockers: None,
     });
@@ -2092,19 +2096,19 @@ fn generated_mypy_vector(index: u32) -> Result<ProfileVector, String> {
                     .insert("HEAD".into(), NodeSpec::File(FileSpec::default()));
                 cache.entries.insert(".git".into(), NodeSpec::Dir(git));
                 vector.expect.plan.push(PlanVerdict {
-                    candidate: extra.clone(),
+                    candidate: Some(extra.clone()),
                     reason: Some("contains_checkout".into()),
                     source: None,
                 });
                 vector.expect.skipped.push(SkipVerdict {
-                    candidate: extra.clone(),
+                    candidate: Some(extra.clone()),
                     reason: "contains_checkout".into(),
                     process_blockers: None,
                 });
                 vector.expect.preserved.push(extra.join(".git/HEAD"));
             } else {
                 vector.expect.plan.push(PlanVerdict {
-                    candidate: extra.clone(),
+                    candidate: Some(extra.clone()),
                     reason: None,
                     source: None,
                 });
@@ -2154,7 +2158,7 @@ fn generated_python_vector(index: u32) -> Result<ProfileVector, String> {
             );
             vector.host.tree.insert(extra.clone(), NodeSpec::Dir(cache));
             vector.expect.plan.push(PlanVerdict {
-                candidate: extra.clone(),
+                candidate: Some(extra.clone()),
                 reason: None,
                 source: None,
             });
@@ -2169,12 +2173,12 @@ fn generated_python_vector(index: u32) -> Result<ProfileVector, String> {
             cache.entries.insert(".git".into(), NodeSpec::Dir(git));
             vector.host.tree.insert(extra.clone(), NodeSpec::Dir(cache));
             vector.expect.plan.push(PlanVerdict {
-                candidate: extra.clone(),
+                candidate: Some(extra.clone()),
                 reason: Some("contains_checkout".into()),
                 source: None,
             });
             vector.expect.skipped.push(SkipVerdict {
-                candidate: extra.clone(),
+                candidate: Some(extra.clone()),
                 reason: "contains_checkout".into(),
                 process_blockers: None,
             });
@@ -2697,10 +2701,8 @@ fn linux_outcome(
             .iter()
             .map(|entry| {
                 Ok(PlanVerdict {
-                    candidate: entry["candidate"]
-                        .as_str()
-                        .ok_or("plan candidate missing")?
-                        .into(),
+                    candidate: optional_path(&entry["candidate"])
+                        .ok_or("plan candidate is neither a path nor null")?,
                     reason: entry["reason"].as_str().map(str::to_owned),
                     source: entry["build_evidence"]["source"].as_str().map(Into::into),
                 })
@@ -2714,10 +2716,8 @@ fn linux_outcome(
             .iter()
             .map(|entry| {
                 Ok(SkipVerdict {
-                    candidate: entry["candidate"]
-                        .as_str()
-                        .ok_or("skip candidate missing")?
-                        .into(),
+                    candidate: optional_path(&entry["candidate"])
+                        .ok_or("skip candidate is neither a path nor null")?,
                     reason: entry["reason"]
                         .as_str()
                         .ok_or("skip reason missing")?
@@ -2820,6 +2820,16 @@ impl Outcome {
         self.actions.sort();
         self.skipped.sort_by(|a, b| a.candidate.cmp(&b.candidate));
         self.removed.sort();
+    }
+}
+
+/// A report's `candidate`: a path, or `null` for a row of the tier as a
+/// whole (TASK-192); `None` for anything else.
+fn optional_path(value: &Value) -> Option<Option<PathBuf>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(path) => Some(Some(path.into())),
+        _ => None,
     }
 }
 

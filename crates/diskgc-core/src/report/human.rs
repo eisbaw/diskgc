@@ -5,6 +5,7 @@
 //! lists of reclaimed ones are summarised with examples.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use super::outcome::{self, Live, Planned, Verdict};
 use super::{HeldEntry, PlanEntry, Report, SkipEntry, Status, human_space_values, signed_bytes};
@@ -14,7 +15,8 @@ use crate::units::{format_age, format_bytes};
 /// Kept candidates of one reason listed one per line up to this many;
 /// above it, one line with this many examples.
 const KEPT_EXAMPLES_MAX: usize = 5;
-/// Reclaimed candidates listed one per line, the rest counted.
+/// Reclaimed candidates listed one per line, the rest counted; a dry run
+/// lists as many of each eligible verdict (`--json` has every row).
 const RECLAIMED_LINES_MAX: usize = 10;
 /// A skip's diagnostic is cut here (characters): an `in_use` detail lists
 /// every piece of evidence and can run to kilobytes.
@@ -27,10 +29,9 @@ const HELD_TOP_MAX: usize = 3;
 /// [`Report::summary`].
 pub(super) fn summary(report: &Report) -> Option<String> {
     let held = held_line(&report.held_by_deleted_files);
-    let is_dry_run = report.status == Status::DryRun || !report.plan.is_empty();
     match report.status {
         Status::UsageError => None,
-        _ if is_dry_run => Some(dry_run_text(report, held)),
+        _ if report.dry_run => Some(dry_run_text(report, held)),
         Status::Met
             if report.actions.is_empty()
                 && report.errors.is_empty()
@@ -121,7 +122,8 @@ fn live_text(report: &Report, held: Option<String>) -> String {
         }
     };
     lines.extend(reclaimed_lines(&live, &tier_label));
-    lines.extend(kept_lines(&live.kept, &tier_label));
+    let kept_rows: Vec<KeptRow<'_>> = live.kept.iter().map(|s| KeptRow::of_skip(s)).collect();
+    lines.extend(kept_lines(&kept_rows, &tier_label));
     lines.extend(busy_line(
         live.kept
             .iter()
@@ -171,61 +173,122 @@ fn reclaimed_lines(live: &Live<'_>, tier_label: &dyn Fn(&str) -> String) -> Vec<
     lines
 }
 
+/// A kept candidate as the summary shows it: a live run's final refusal or
+/// a dry run's kept plan row.
+struct KeptRow<'a> {
+    candidate: &'a Path,
+    tier: &'a str,
+    reason: Reason,
+    count: u64,
+    diagnostic: Option<String>,
+    /// Text after the diagnostic (a dry run's build evidence), or empty.
+    evidence: String,
+}
+
+impl<'a> KeptRow<'a> {
+    fn of_skip(skip: &'a SkipEntry) -> Self {
+        Self {
+            candidate: skip
+                .candidate
+                .as_deref()
+                .expect("a kept candidate has a path (preflight rows are apart)"),
+            tier: &skip.tier,
+            reason: skip.reason,
+            count: skip.count,
+            diagnostic: skip_diagnostic(skip),
+            evidence: String::new(),
+        }
+    }
+
+    fn of_plan(entry: &'a PlanEntry) -> Self {
+        let reason = entry.reason.expect("the fold keeps only refused rows");
+        Self {
+            candidate: entry
+                .candidate
+                .as_deref()
+                .expect("a planned candidate has a path (preflight rows are apart)"),
+            tier: &entry.tier,
+            reason,
+            count: 1,
+            diagnostic: plain_diagnostic(reason)
+                .or_else(|| diagnostic(entry.detail.as_deref(), entry.process_blockers.as_deref())),
+            evidence: evidence_text(entry),
+        }
+    }
+}
+
 /// One line per kept candidate, grouped by reason in the order the reasons
 /// first appear; a reason with more than [`KEPT_EXAMPLES_MAX`] candidates
-/// becomes one line with the first one's diagnostic and examples.
-fn kept_lines(kept: &[&SkipEntry], tier_label: &dyn Fn(&str) -> String) -> Vec<String> {
+/// becomes one line with the first one's diagnostic and examples. Live runs
+/// and dry runs share it, so a dry run over thousands of candidates stays
+/// as short as the run it previews (TASK-193).
+fn kept_lines(kept: &[KeptRow<'_>], tier_label: &dyn Fn(&str) -> String) -> Vec<String> {
     let mut reasons: Vec<Reason> = Vec::new();
-    for skip in kept {
-        if !reasons.contains(&skip.reason) {
-            reasons.push(skip.reason);
+    for row in kept {
+        if !reasons.contains(&row.reason) {
+            reasons.push(row.reason);
         }
     }
     let mut lines = Vec::new();
     for reason in reasons {
-        let group: Vec<&SkipEntry> = kept
-            .iter()
-            .copied()
-            .filter(|s| s.reason == reason)
-            .collect();
-        let count = group.iter().map(|s| s.count).fold(0, u64::saturating_add);
+        let group: Vec<&KeptRow<'_>> = kept.iter().filter(|r| r.reason == reason).collect();
+        let count = group.iter().map(|r| r.count).fold(0, u64::saturating_add);
         if count <= KEPT_EXAMPLES_MAX as u64 {
-            for skip in group {
+            for row in group {
                 lines.push(format!(
-                    "  kept {}: {}{}",
-                    one_line(&skip.candidate.display().to_string()),
-                    skip_why(skip),
-                    tier_label(&skip.tier)
+                    "  kept {}: {}{}{}",
+                    one_line(&row.candidate.display().to_string()),
+                    why(reason, row.diagnostic.as_deref()),
+                    row.evidence,
+                    tier_label(row.tier)
                 ));
             }
         } else {
             let examples: Vec<String> = group
                 .iter()
                 .take(KEPT_EXAMPLES_MAX)
-                .map(|s| one_line(&s.candidate.display().to_string()))
+                .map(|r| one_line(&r.candidate.display().to_string()))
                 .collect();
             let more = count.saturating_sub(examples.len() as u64);
             lines.push(format!(
-                "  {count} kept: {reason}; examples: {}{}{}",
+                "  {count} kept: {}; examples: {}{}{}",
+                reason_label(reason),
                 examples.join(", "),
                 if more == 0 {
                     String::new()
                 } else {
                     format!(" ({more} more)")
                 },
-                skip_diagnostic(group[0]).map_or_else(String::new, |d| format!("; e.g. {d}"))
+                group[0]
+                    .diagnostic
+                    .as_ref()
+                    .map_or_else(String::new, |d| format!("; e.g. {d}"))
             ));
         }
     }
     lines
 }
 
+/// A reason as the summary names it: its JSON name, except where that
+/// reads as code to a person (`keep_marker`: "kept PATH: keep marker").
+fn reason_label(reason: Reason) -> &'static str {
+    match reason {
+        Reason::KeepMarker => "keep marker",
+        other => other.as_str(),
+    }
+}
+
+/// `REASON, DIAGNOSTIC`, or the reason alone.
+fn why(reason: Reason, diagnostic: Option<&str>) -> String {
+    match diagnostic {
+        Some(diagnostic) => format!("{}, {diagnostic}", reason_label(reason)),
+        None => reason_label(reason).to_owned(),
+    }
+}
+
 /// `REASON, DIAGNOSTIC` ([`diagnostic`]).
 fn skip_why(skip: &SkipEntry) -> String {
-    match skip_diagnostic(skip) {
-        Some(diagnostic) => format!("{}, {diagnostic}", skip.reason),
-        None => skip.reason.as_str().to_owned(),
-    }
+    why(skip.reason, skip_diagnostic(skip).as_deref())
 }
 
 fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
@@ -252,13 +315,6 @@ fn busy_line(count: u64) -> Option<String> {
              kept; run again when the host is less busy"
         )
     })
-}
-
-fn why(reason: &str, detail: Option<&str>, blockers: Option<&[ProcessBlocker]>) -> String {
-    match diagnostic(detail, blockers) {
-        Some(diagnostic) => format!("{reason}, {diagnostic}"),
-        None => reason.to_owned(),
-    }
 }
 
 /// The processes that hold a candidate, when attributed (the full
@@ -318,44 +374,36 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         elapsed_text(report)
     )];
     let tiers: BTreeSet<&str> = report.plan.iter().map(|p| p.tier.as_str()).collect();
-    for Planned { entry, verdict } in &folded.rows {
-        let path = one_line(&entry.candidate.display().to_string());
-        let tier = if tiers.len() > 1 {
-            format!(" [{}]", one_line(&entry.tier))
+    let tier_label = |tier: &str| {
+        if tiers.len() > 1 {
+            format!(" [{}]", one_line(tier))
         } else {
             String::new()
-        };
-        let estimate = || {
-            entry.estimated_bytes.map_or_else(
-                || "size unknown".to_owned(),
-                |b| format!("est. {}", format_bytes(b)),
-            )
-        };
-        let evidence = evidence_text(entry);
-        lines.push(match verdict {
-            Verdict::WouldReclaim => {
-                format!("  would reclaim {path}: {}{evidence}{tier}", estimate())
-            }
-            Verdict::NotNeeded => {
-                format!(
-                    "  eligible, not needed {path}: {}{evidence}{tier}",
-                    estimate()
-                )
-            }
-            Verdict::Kept => {
-                let reason = entry.reason.expect("the fold keeps only refused rows");
-                let why = match plain_diagnostic(reason) {
-                    Some(plain) => format!("{reason}, {plain}"),
-                    None => why(
-                        reason.as_str(),
-                        entry.detail.as_deref(),
-                        entry.process_blockers.as_deref(),
-                    ),
-                };
-                format!("  kept {path}: {why}{evidence}{tier}")
-            }
-        });
-    }
+        }
+    };
+    let of = |verdict: Verdict| -> Vec<&PlanEntry> {
+        folded
+            .rows
+            .iter()
+            .filter(|row| row.verdict == verdict)
+            .map(|row| row.entry)
+            .collect()
+    };
+    lines.extend(eligible_lines(
+        &of(Verdict::WouldReclaim),
+        "would reclaim",
+        &tier_label,
+    ));
+    lines.extend(eligible_lines(
+        &of(Verdict::NotNeeded),
+        "eligible, not needed",
+        &tier_label,
+    ));
+    let kept_rows: Vec<KeptRow<'_>> = of(Verdict::Kept)
+        .into_iter()
+        .map(KeptRow::of_plan)
+        .collect();
+    lines.extend(kept_lines(&kept_rows, &tier_label));
     lines.extend(busy_line(
         folded
             .rows
@@ -368,11 +416,14 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             "  skipped profile {} [{}]: {}",
             one_line(&entry.profile),
             one_line(&entry.tier),
-            why(
-                entry.reason.map_or("eligible", Reason::as_str),
-                entry.detail.as_deref(),
-                entry.process_blockers.as_deref()
-            )
+            match entry.reason {
+                Some(reason) => why(
+                    reason,
+                    diagnostic(entry.detail.as_deref(), entry.process_blockers.as_deref())
+                        .as_deref()
+                ),
+                None => "eligible".to_owned(),
+            }
         )
     }));
     let mut operations: Vec<(&str, &str)> = Vec::new();
@@ -401,6 +452,58 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
     }
     lines.extend(held);
     lines.join("\n")
+}
+
+/// A dry run's eligible candidates of one verdict (`label`), in the order a
+/// reclaim would take them: the first [`RECLAIMED_LINES_MAX`] one per line,
+/// the rest counted with their summed estimate.
+fn eligible_lines(
+    entries: &[&PlanEntry],
+    label: &str,
+    tier_label: &dyn Fn(&str) -> String,
+) -> Vec<String> {
+    let mut lines: Vec<String> = entries
+        .iter()
+        .take(RECLAIMED_LINES_MAX)
+        .map(|entry| {
+            let path = one_line(
+                &entry
+                    .candidate
+                    .as_deref()
+                    .expect("a planned candidate has a path (preflight rows are apart)")
+                    .display()
+                    .to_string(),
+            );
+            let estimate = entry.estimated_bytes.map_or_else(
+                || "size unknown".to_owned(),
+                |b| format!("est. {}", format_bytes(b)),
+            );
+            format!(
+                "  {label} {path}: {estimate}{}{}",
+                evidence_text(entry),
+                tier_label(&entry.tier)
+            )
+        })
+        .collect();
+    let rest = &entries[entries.len().min(RECLAIMED_LINES_MAX)..];
+    if !rest.is_empty() {
+        let estimated = rest
+            .iter()
+            .filter_map(|e| e.estimated_bytes)
+            .fold(0, u64::saturating_add);
+        let unestimated = rest.iter().filter(|e| e.estimated_bytes.is_none()).count();
+        lines.push(format!(
+            "  {} more {label}: est. {}{} (--json lists every candidate)",
+            rest.len(),
+            format_bytes(estimated),
+            if unestimated == 0 {
+                String::new()
+            } else {
+                format!(", {unestimated} without an estimate")
+            }
+        ));
+    }
+    lines
 }
 
 /// What a reclaim would do, by the estimates: how much of the shortfall
@@ -485,7 +588,10 @@ fn held_line(held: &[HeldEntry]) -> Option<String> {
             format!(
                 "pid {} ({}, {})",
                 entry.pid,
-                one_line(&entry.command),
+                entry
+                    .command
+                    .as_deref()
+                    .map_or_else(|| "command unknown".to_owned(), one_line),
                 format_bytes(entry.bytes)
             )
         })

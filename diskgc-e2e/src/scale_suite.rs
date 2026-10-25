@@ -123,7 +123,7 @@ pub fn fs_40k_small_candidates_plan_and_reclaim_scale(ctx: &Ctx) -> TestResult {
         action_count == CANDIDATES as u64
             && actions.len() == 1_001
             && detailed.len() == 1_000
-            && actions[1_000]["candidate"] == ""
+            && actions[1_000]["candidate"].is_null()
             && actions[1_000]["count"] == 39_000
             && result["errors"].as_array().is_some_and(Vec::is_empty),
         "reclaim reported {action_count} actions, {} detailed candidates, expected {CANDIDATES}; status={}",

@@ -31,8 +31,8 @@ closest one (`unknown flag --min-fre; did you mean --min-free?`). With
 `--json`, the one JSON object carries the same message.
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
-(the config's user profiles and `protect` list still apply); reports name
-that tier and its group `--select`. With `--select`, a config file is
+(the config's user profiles and `protect` list still apply); the JSON
+report and stderr name that tier and its group `select`. With `--select`, a config file is
 optional: if none is found, `EXPR` is evaluated against the built-in
 profiles alone. Without `--select`, a missing config is exit 2 as described
 under Configuration file. `--roots DIR` (repeatable, one directory each)
@@ -323,7 +323,7 @@ under `profile`:
     "category": "build",
     "description": "Zephyr test runs left in /tmp",
     "kind": "fs",
-    "find": {"roots": ["/tmp"], "roots_required": false, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
+    "find": {"roots": ["/tmp"], "roots_required": false, "backend": null, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
     "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "source_anchor": null, "liveness_contract": null},
     "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all", "make_writable": false, "command": null, "cwd": null},
@@ -347,9 +347,11 @@ under `profile`:
   for a filter and for every user profile. `releases` lists the release
   catalogs that include a built-in (`["0.1"]` for the proposed 0.1
   catalog), and is empty otherwise.
-- `find.roots` is the list of fixed roots, `null` when
+- `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
-  supplies them), or `"daemon"` for a Docker backend. `find.paths`,
+  supplies them) or when `find.backend` names where the kind's storage
+  comes from (`"daemon"`, YAML's `roots: daemon`, for the Docker kinds;
+  `null` for every other kind). `find.paths`,
   `find.exclude` and `find.type` are `null` for `cargo-target`.
 - `where` always has its fields, `null` when unused (link lists are empty);
   `idle_for` is a duration (`3d`).
@@ -359,13 +361,12 @@ under `profile`:
   `command` (the argv) and `cwd` (`candidate`, `parent`, or `null` when
   it is decided per candidate: `type: any` without `cwd`) for `command`;
   neither for `cargo_lock_protocol`. Later kinds add their own `type`.
-- On an invalid-input error: `{"status": "usage_error", "exit_code": 2,
-  "cause": "parse | config | safety | host | operation | usage | provisioning", "error": "message"}`,
-  the message as on stderr. Host I/O during startup has `status: error`
-  and `exit_code: 3`; invalid input and configuration use exit 2.
-  `status` is the field
-  `ensure`'s report has too. Every command but `ensure` fails with this
-  object under `--json`.
+- On an error, the object every command fails with under `--json`
+  ([Output](#output), Errors): `{"status": "usage_error", "exit_code": 2,
+  "errors": [{"tier": null, "profile": null, "candidate": null, "cause":
+  "usage", "message": "..."}]}`, the message as on stderr. Host I/O during
+  startup has `status: error` and `exit_code: 3`; invalid input and
+  configuration use exit 2.
 
 The JSON of `profiles` is a pre-freeze addition, reviewed with the rest
 at the contract freeze (task-26).
@@ -474,15 +475,19 @@ development builds, the pre-release sandbox gate,
   `kept PATH: REASON, DIAGNOSTIC`, where a candidate no tier reclaimed
   carries the refusal of the last tier that judged it (grouped by reason
   after five), and Cargo targets whose previous reclaim left only lock
-  files are omitted. A candidate kept as `in_use_unknown` reads "the host
+  files are omitted. Reasons are the JSON names, except `keep_marker`,
+  which reads `keep marker`. A candidate kept as `in_use_unknown` reads "the host
   was too busy to check whether it is in use", and one line counts them
   and says to run again when the host is less busy. Lines name their tier (`[TIER]`) when the run had
   more than one. The summary lists preflight profile refusals separately
-  from kept candidates. A dry run lists each candidate once, as `would
-  reclaim`, `eligible, not needed` (the estimates before it already cover
-  the goal) or `kept`, and says what the candidates it would take free by
-  estimate against what the goal needs. Its per-candidate verdicts are not
-  repeated on stderr. Human results, including dry runs, report elapsed
+  from kept candidates. A dry run (the report's `dry_run`, also when it
+  failed) gives each candidate one verdict, `would reclaim`, `eligible,
+  not needed` (the estimates before it already cover the goal) or `kept`,
+  and says what the candidates it would take free by estimate against
+  what the goal needs. It is bounded like a live summary: the first ten of
+  each eligible verdict, then a count with their summed estimate; kept
+  candidates as above (grouped by reason after five). `--json` lists every
+  candidate. Its per-candidate verdicts are not repeated on stderr. Human results, including dry runs, report elapsed
   time and, when present, open deleted files that hold space by process
   count, bytes, and the largest three holders (holders of 0 B are left
   out).
@@ -504,20 +509,34 @@ JSON result (field names are part of the contract):
 ```json
 {
   "status": "met | exhausted | error | usage_error | lock_timeout | deadline | interrupted | dry_run",
+  "exit_code": 0, "dry_run": false,
   "started_at": "2026-10-21T12:00:00Z", "duration_ms": 0, "version": "0.1.0",
   "mount": "/", "path": "/home/mark/src/app", "seed": null,
-  "index": {"source": "live | snapshot | sync", "age_s": 0, "units": 0, "untallied": 0, "coverage": "complete | partial"},
+  "index": {"source": "live | snapshot | sync", "age_seconds": 0, "units": 0, "untallied": 0, "coverage": "complete | partial"},
   "tally_cut_short": false,
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
-  "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow"}],
+  "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow", "build_evidence": {"marker": "", "source": "", "idle_age_seconds": null}}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | kept | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | keep_marker | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage | provisioning", "message": ""}]
 }
 ```
+
+Not applicable is `null`, never an empty string: a field the example
+shows as a string is `null` where it does not apply to that entry (each
+case is listed below), and a field the example shows as `null` may also
+be its value.
+
+Errors: every command fails under `--json` with an object that opens
+like this report, `status`, `exit_code` and `errors` with entries of the
+shape above; `ensure` prints its whole report, every other command
+(`check`, `profiles`, and the commands this version does not have) only
+those three fields, e.g. `{"status": "usage_error", "exit_code": 2,
+"errors": [{"tier": null, "profile": null, "candidate": null, "cause":
+"parse", "message": "..."}]}`.
 
 `cause` is a stable fault-class code in error objects and `errors[]`.
 Scripts match `cause`, `status` and the process exit code; message text is
@@ -540,6 +559,17 @@ boot), so a harness alerts ops rather than retrying or rewriting its call
 after initial root preflight; a host I/O failure while checking that root
 is `host`.
 
+- `exit_code` is the process's exit code for this `status` (the table
+  above); it is derived from `status`, never set apart from it. A failed
+  stdout write exits 3 whatever the report says.
+- `dry_run` is `true` when `--dry-run` was given, also for a dry run that
+  failed (`status: error` or `usage_error`, not `dry_run`); on a command
+  line that was not understood it says whether `--dry-run` was among the
+  arguments.
+- `min_free_bytes` and `target_free_bytes` are the goal: as given when it
+  is a byte count, known before anything is measured, so a run that fails
+  at startup (a host check, the kernel) still says what it was asked to
+  reach; a percentage is `null` until the filesystem's size is sampled.
 - `started_at` is the UTC wall-clock time when an executor run entered the
   library, in RFC 3339 form, or `null` if the host time is outside the
   supported range. `duration_ms` is elapsed monotonic time for that run, or
@@ -549,7 +579,7 @@ is `host`.
   `null` for both. `version` is always the build's package version.
 - `seed` is `null` when no group uses `random`.
 - `index` says where the order came from (the live index of a running
-  `watch`, a snapshot, or a synchronous tally), its age, how many candidates
+  `watch`, a snapshot, or a synchronous tally), its age in seconds, how many candidates
   were not yet tallied, and whether the index covers everything it should
   (`partial` when it hit its memory budget). Builds without an index
   (before task-29) emit `null`.
@@ -576,7 +606,10 @@ is `host`.
   eligible candidate. It is `null` when a skip stopped the eligibility
   walk before an age was established; the skip reason is retained. Source
   evidence on a skipped row records discovery and may not have survived
-  every later recheck. Rows without established source evidence omit it.
+  every later recheck. Rows without established source evidence have
+  `build_evidence: null`. A row of the tier as a whole (its profile
+  refused before discovery: a missing executable, an unavailable backend)
+  has `candidate: null`.
 - `avail_delta_bytes` is signed: the observed net change in available space
   around an action, never "bytes freed by this action" (see
   [architecture.md](architecture.md#measuring-space)); `null` when a
@@ -596,10 +629,12 @@ is `host`.
   a guaranteed age at deletion.
 - `count` is 1 for a single candidate. When more than 20 skipped candidates
   share a tier, profile and reason, they become one `skipped` entry with
-  `count` and the first 20 paths in `examples` (`candidate` is then empty).
-  Up to 20 in a group remain individual entries. The first 1,000 `actions`
-  remain individual entries; any further actions become one summary entry
-  with their `count`.
+  `count` and the first 20 paths in `examples` (`candidate` is then
+  `null`). Up to 20 in a group remain individual entries. The first 1,000
+  `actions` remain individual entries; any further actions become one
+  summary entry with their `count`, summed `avail_delta_bytes` and
+  `duration_ms`, and `tier`, `profile`, `candidate` and `idle_age_seconds`
+  `null`.
 - `skipped[].detail` is an advisory human diagnostic from the refusal, or
   `null` when no diagnostic was captured. Grouped rows always use `null`;
   programs should branch on `reason`, not parse this text.
@@ -630,6 +665,7 @@ is `host`.
   processes. A file held by several processes contributes its allocated bytes
   once, to the lowest listed pid; the other holders appear with zero bytes.
   On btrfs, mounted subvolumes with the same mountinfo source are included.
+  `command` is `null` when the process's command could not be read.
   It comes from the run's last process scan (one is made at the
   end if the run made none); a run that reclaimed nothing because the goal
   was met, or that ended before the reclaim (a usage error, a lock
@@ -638,8 +674,9 @@ is `host`.
   [safety.md](safety.md#deadlines)); always present, usually empty.
 - On a usage error, fields that could not be determined (`mount`, `path`,
   sizes, `target_met`) are `null`; `errors` says why. In `errors`, `tier`,
-  `profile` and `candidate` are empty where they do not apply (a usage
-  error, an error of the whole run).
+  `profile` and `candidate` are `null` where they do not apply (a usage
+  error, an error of the whole run, an error of a tier and not of one
+  candidate).
 
 ### Backend skips and errors
 
@@ -649,7 +686,7 @@ One rule holds for every backend kind, at preflight and at the recheck
 right before acting:
 
 - **Skip** (the tier is excluded, reported in `skipped` with candidate
-  `""`, the other tiers run, and the exit code follows available space:
+  `null`, the other tiers run, and the exit code follows available space:
   0, or 1 when nothing else failed): the host does not offer a supported,
   reachable backend of that kind, identified from a specific signal, never
   by turning failures into skips wholesale.
@@ -999,7 +1036,7 @@ diskgc cannot constrain arbitrary actions taken by that program.
 
 A file named `.diskgc-keep` in a filesystem candidate, anywhere inside it,
 or in any directory between a profile root and the candidate, excludes it
-(reported as `kept`).
+(reported as `keep_marker`; the human summary says `keep marker`).
 
 ## Profiles
 
@@ -1077,7 +1114,7 @@ A `nix-store` source profile is exactly `name`, `category`, `description`,
 is not configurable: it is `/nix/store` of the bound system daemon
 ([safety.md](safety.md#nix-store)). Selected alone as `profile:NAME` (no
 filters, no union), it reports one plan row and one action with candidate
-`/nix/store`, or one skip with candidate `""`, and `estimated_bytes:
+`/nix/store`, or one skip with candidate `null`, and `estimated_bytes:
 null`. Its skip reasons are those of [Backend skips and
 errors](#backend-skips-and-errors) plus `changed`; the human `detail`
 names the evidence (the client's canonical path, both versions, the

@@ -607,7 +607,7 @@ pub fn select_replaces_configured_groups(ctx: &Ctx) -> TestResult {
     ensure!(
         actions.len() == 1
             && actions[0]["candidate"] == selected.to_string_lossy().as_ref()
-            && actions[0]["tier"] == "--select"
+            && actions[0]["tier"] == "select"
             && actions[0]["profile"] == "cli-selected",
         "--select did not replace configured groups: {result}"
     );

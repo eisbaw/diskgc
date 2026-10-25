@@ -88,11 +88,26 @@ fn docker_backend_roots_match_the_documented_json_shape() {
     let library = Library::builtin().expect("built-ins");
     let profile = library.get("docker-dangling").expect("Docker built-in");
     let json: Value = serde_json::from_str(&profile_json(profile).to_text()).expect("JSON");
-    assert_eq!(json["find"]["roots"], "daemon");
+    // TASK-192: `roots` is always a list; the backend is its own field.
+    assert_eq!(json["find"]["roots"], serde_json::json!([]));
     assert_eq!(json["find"]["roots_required"], false);
+    assert_eq!(json["find"]["backend"], "daemon");
+    let required = library.get("cargo-target").expect("cargo-target");
+    let required: Value = serde_json::from_str(&profile_json(required).to_text()).expect("JSON");
+    assert_eq!(required["find"]["roots"], serde_json::json!([]));
+    assert_eq!(required["find"]["roots_required"], true);
+    assert!(required["find"]["backend"].is_null());
+    let fixed = library.get("pytest-tmp").expect("pytest-tmp");
+    let fixed: Value = serde_json::from_str(&profile_json(fixed).to_text()).expect("JSON");
+    assert!(
+        fixed["find"]["roots"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty())
+    );
+    assert!(fixed["find"]["backend"].is_null());
     let docs = section(&reference_md(), "### `profiles` command");
     assert!(
-        docs.contains("`\"daemon\"` for a Docker backend"),
+        docs.contains("(`\"daemon\"`, YAML's `roots: daemon`, for the Docker kinds"),
         "the documented roots JSON shape omitted the Docker backend"
     );
 }
@@ -141,14 +156,19 @@ fn schema_form(json: &Value) -> Value {
             ("origin" | "role" | "override", _) | (_, Value::Null) => continue,
             ("find", Value::Object(fields)) => {
                 let required = fields["roots_required"].as_bool().expect("a boolean");
-                assert_eq!(fields["roots"].is_null(), required, "{json}");
+                let backend = fields["backend"].as_str();
+                let listed = fields["roots"].as_array().expect("roots is always a list");
+                assert_eq!(listed.is_empty(), required || backend.is_some(), "{json}");
                 let mut find: serde_json::Map<String, Value> = fields
                     .iter()
-                    .filter(|(k, v)| !v.is_null() && *k != "roots_required")
+                    .filter(|(k, v)| !v.is_null() && *k != "roots_required" && *k != "backend")
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 if required {
                     find.insert("roots".to_owned(), Value::from("required"));
+                }
+                if let Some(backend) = backend {
+                    find.insert("roots".to_owned(), Value::from(backend));
                 }
                 Value::Object(find)
             }

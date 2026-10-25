@@ -39,7 +39,7 @@ pub struct Live<'a> {
     /// (a Cargo target its previous reclaim left with lock files only is
     /// not news) and candidate-less rows ([`Live::preflight`]).
     pub kept: Vec<&'a SkipEntry>,
-    /// Profiles refused before they had a candidate (empty `candidate`).
+    /// Profiles refused before they had a candidate (no `candidate`).
     pub preflight: Vec<&'a SkipEntry>,
 }
 
@@ -79,21 +79,21 @@ pub fn live<'a>(actions: &'a [ActionEntry], skipped: &'a [SkipEntry]) -> Live<'a
     let mut kept_at: BTreeMap<&Path, usize> = BTreeMap::new();
     let mut preflight = Vec::new();
     for skip in skipped.iter().filter(|skip| skip.reason != Reason::Empty) {
-        if skip.candidate.as_os_str().is_empty() {
+        let Some(candidate) = skip.candidate.as_deref() else {
             preflight.push(skip);
             continue;
-        }
-        if let Some(&index) = reclaimed_at.get(skip.candidate.as_path()) {
-            if action_tiers.contains(&(skip.candidate.as_path(), skip.tier.as_str())) {
+        };
+        if let Some(&index) = reclaimed_at.get(candidate) {
+            if action_tiers.contains(&(candidate, skip.tier.as_str())) {
                 reclaimed[index].part_way = Some(skip);
             }
             continue;
         }
-        match kept_at.get(skip.candidate.as_path()) {
+        match kept_at.get(candidate) {
             // A later tier's refusal replaces an earlier one's.
             Some(&index) => kept[index] = skip,
             None => {
-                kept_at.insert(&skip.candidate, kept.len());
+                kept_at.insert(candidate, kept.len());
                 kept.push(skip);
             }
         }
@@ -164,10 +164,11 @@ pub fn dry_run(plan: &[PlanEntry], needed: Option<u64>) -> DryRun<'_> {
     let mut taken: BTreeSet<&Path> = BTreeSet::new();
     let mut preflight = Vec::new();
     for entry in plan {
-        let candidate = entry.candidate.as_path();
-        if candidate.as_os_str().is_empty() {
+        let Some(candidate) = entry.candidate.as_deref() else {
             preflight.push(entry);
-        } else if taken.contains(candidate) {
+            continue;
+        };
+        if taken.contains(candidate) {
             // An earlier tier would take it: later rows change nothing.
         } else if entry.reason.is_none() {
             taken.insert(candidate);
@@ -225,7 +226,7 @@ mod tests {
             group: String::new(),
             tier: format!("t{tier}"),
             profile: "p".into(),
-            candidate: PathBuf::from(format!("/c{candidate}")),
+            candidate: Some(PathBuf::from(format!("/c{candidate}"))),
             reason,
             estimated_bytes: reason.is_none().then_some(bytes),
             operation: String::new(),
@@ -268,21 +269,21 @@ mod tests {
         #[test]
         fn a_dry_run_folds_to_one_verdict_per_candidate(plan in plans(), needed in 0u64..300) {
             let folded = dry_run(&plan, Some(needed));
-            let candidates: BTreeSet<&Path> = plan.iter().map(|e| e.candidate.as_path()).collect();
-            let rows: Vec<&Path> = folded.rows.iter().map(|r| r.entry.candidate.as_path()).collect();
+            let candidates: BTreeSet<&Path> = plan.iter().filter_map(|e| e.candidate.as_deref()).collect();
+            let rows: Vec<&Path> = folded.rows.iter().filter_map(|r| r.entry.candidate.as_deref()).collect();
             prop_assert_eq!(rows.len(), candidates.len());
             prop_assert_eq!(rows.iter().copied().collect::<BTreeSet<_>>(), candidates);
             let mut seen_kept = false;
             let mut seen_not_needed = false;
             let mut covered = 0u64;
             for row in &folded.rows {
-                let path = row.entry.candidate.as_path();
-                let ever_eligible = plan.iter().any(|e| e.candidate == path && e.reason.is_none());
+                let path = row.entry.candidate.as_deref().expect("a candidate row");
+                let ever_eligible = plan.iter().any(|e| e.candidate.as_deref() == Some(path) && e.reason.is_none());
                 match row.verdict {
                     Verdict::Kept => {
                         seen_kept = true;
                         prop_assert!(!ever_eligible);
-                        let last = plan.iter().rev().find(|e| e.candidate == path);
+                        let last = plan.iter().rev().find(|e| e.candidate.as_deref() == Some(path));
                         prop_assert_eq!(Some(row.entry), last);
                     }
                     Verdict::WouldReclaim => {
@@ -314,7 +315,7 @@ mod tests {
                     None => actions.push(ActionEntry {
                         tier: entry.tier,
                         profile: entry.profile,
-                        candidate: entry.candidate,
+                        candidate: entry.candidate.expect("a candidate row"),
                         avail_delta_bytes: Some(1),
                         duration_ms: 0,
                         idle_age_seconds: None,
@@ -340,11 +341,11 @@ mod tests {
                 reclaimed.clone(),
                 actions.iter().map(|a| a.candidate.as_path()).collect::<BTreeSet<_>>()
             );
-            let kept: Vec<&Path> = folded.kept.iter().map(|s| s.candidate.as_path()).collect();
+            let kept: Vec<&Path> = folded.kept.iter().filter_map(|s| s.candidate.as_deref()).collect();
             prop_assert_eq!(kept.iter().copied().collect::<BTreeSet<_>>().len(), kept.len());
             for skip in &skipped {
-                let path = skip.candidate.as_path();
-                let last = skipped.iter().rev().find(|s| s.candidate == path && s.reason != Reason::Empty);
+                let path = skip.candidate.as_deref().expect("a candidate row");
+                let last = skipped.iter().rev().find(|s| s.candidate.as_deref() == Some(path) && s.reason != Reason::Empty);
                 match last {
                     Some(last) if !reclaimed.contains(path) => {
                         prop_assert!(folded.kept.iter().any(|k| std::ptr::eq(*k, last)));

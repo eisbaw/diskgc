@@ -38,14 +38,14 @@ expect:
     - {candidate: "/home/a/.local/share/pnpm/store"}
     - {candidate: "/home/b/.local/share/pnpm/store", reason: in_use}
     - {candidate: "/home/c/.local/share/pnpm/store", reason: excluded}
-    - {candidate: "/home/d/.local/share/pnpm/store", reason: kept}
+    - {candidate: "/home/d/.local/share/pnpm/store", reason: keep_marker}
   reclaim_exit: 1
   actions: ["/home/a/.local/share/pnpm/store"]
   removed: []
   skipped:
     - {candidate: "/home/b/.local/share/pnpm/store", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
     - {candidate: "/home/c/.local/share/pnpm/store", reason: excluded}
-    - {candidate: "/home/d/.local/share/pnpm/store", reason: kept}
+    - {candidate: "/home/d/.local/share/pnpm/store", reason: keep_marker}
   preserved: ["/home/b/.local/share/pnpm/store/payload", "/home/c/.local/share/pnpm/store/payload", "/home/d/.local/share/pnpm/store/payload", "/home/a/.local/share/pnpm/store/payload"]
   commands:
     - {"cwd": "/home/a/.local/share/pnpm/store", "argv": ["/usr/bin/pnpm", "store", "prune", "--store-dir", "/home/a/.local/share/pnpm/store"]}

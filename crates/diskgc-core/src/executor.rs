@@ -141,9 +141,13 @@ fn deadline_passed<H: Host>(host: &H, deadline: Option<MonoTime>) -> bool {
     deadline.is_some_and(|end| host.now() >= end)
 }
 
-/// The name of the one group and tier `--select` makes, in reports
-/// (docs/reference.md, Commands).
-pub const SELECT_TIER: &str = "--select";
+/// The name of the one group and tier `--select` makes, in the JSON and on
+/// stderr alike (docs/reference.md, Commands). A word, not the flag: a
+/// progress line `select: skip in_use ...` does not read as a complaint
+/// about the command line (TASK-192). A configured group may also be called
+/// `select`; a report never holds both, since `--select` replaces the
+/// configuration's groups.
+pub const SELECT_TIER: &str = "select";
 
 /// One selected tier. Its ordinary fields hold the first source term;
 /// [`Tier::fs_union`] holds any additional positive filesystem
@@ -691,6 +695,14 @@ pub struct Request {
     pub tier: Tier,
 }
 
+impl Request {
+    /// The report a run of this request starts from: its path and the goal
+    /// as far as it is known before anything is measured.
+    fn report(&self, status: Status, dry_run: bool) -> Report {
+        Report::new(status, Some(&self.path), dry_run).with_goal(self.min_free, self.target_free)
+    }
+}
+
 /// `--tally-budget`'s default (docs/reference.md, `ensure`): the smaller of
 /// 30 s and a quarter of `--timeout` (30 s without a timeout).
 pub fn default_tally_budget(timeout: Option<Duration>) -> Duration {
@@ -770,14 +782,14 @@ impl<T> CandidateQueue<T> {
 /// Appends `entry` to the report's errors and logs it: no error reaches
 /// the report without reaching stderr too.
 fn record_error(report: &mut Report, log: &mut dyn FnMut(&str), entry: ErrorEntry) {
-    let mut at = entry.tier.clone();
-    if !entry.candidate.is_empty() {
-        at = format!("{at} {}", entry.candidate);
-    }
+    let at: Vec<&str> = [entry.tier.as_deref(), entry.candidate.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
     if at.is_empty() {
         log(&format!("error: {}", entry.message));
     } else {
-        log(&format!("{at}: error: {}", entry.message));
+        log(&format!("{}: error: {}", at.join(" "), entry.message));
     }
     report.errors.push(entry);
 }
@@ -820,13 +832,9 @@ fn measure_failure(report: Report, log: &mut dyn FnMut(&str), failure: MeasureFa
             log(&format!("error: {message}"));
             let mut report = report;
             report.status = Status::Error;
-            report.errors.push(ErrorEntry {
-                tier: String::new(),
-                profile: String::new(),
-                candidate: String::new(),
-                cause: ErrorCause::Host,
-                message,
-            });
+            report
+                .errors
+                .push(ErrorEntry::run(ErrorCause::Host, message));
             report
         }
     }
@@ -981,7 +989,11 @@ struct RootPreflight {
 
 impl RootPreflight {
     fn filtered_tier(&self, tier: &Tier) -> Tier {
-        let foreign: HashSet<&Path> = self.skipped.iter().map(|s| s.candidate.as_path()).collect();
+        let foreign: HashSet<&Path> = self
+            .skipped
+            .iter()
+            .filter_map(|s| s.candidate.as_deref())
+            .collect();
         let mut filtered = tier.clone();
         filtered
             .roots
@@ -1053,9 +1065,9 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
             return true;
         }
         errors.push(ErrorEntry {
-            tier: tier.name.clone(),
-            profile: (*profile).to_owned(),
-            candidate: root.display().to_string(),
+            tier: Some(tier.name.clone()),
+            profile: Some((*profile).to_owned()),
+            candidate: Some(root.display().to_string()),
             cause: ErrorCause::Safety,
             message: format!(
                 "root {}: inside systemd PrivateTmp (systemd-private-*); misconfigured root; the tier is excluded",
@@ -1080,9 +1092,9 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
     for (profile, root) in roots {
         let mut error = |cause: ErrorCause, message: String| {
             errors.push(ErrorEntry {
-                tier: tier.name.clone(),
-                profile: profile.to_owned(),
-                candidate: root.display().to_string(),
+                tier: Some(tier.name.clone()),
+                profile: Some(profile.to_owned()),
+                candidate: Some(root.display().to_string()),
                 cause,
                 message,
             })
@@ -1100,7 +1112,7 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
             Ok(resolved) if resolved.stat.dev != requested_dev => skipped.push(SkipEntry {
                 tier: tier.name.clone(),
                 profile: profile.to_owned(),
-                candidate: root.clone(),
+                candidate: Some(root.clone()),
                 count: 1,
                 examples: Vec::new(),
                 reason: Reason::OtherFs,
@@ -1351,7 +1363,7 @@ fn ensure_inner<H: Delete>(
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
     // Not a success until a path below says so.
-    let report = Report::new(Status::Error, Some(&request.path));
+    let report = request.report(Status::Error, false);
     // Before anything else (the gate, the first sample, the host lock):
     // only a source whose removal this build implements is reclaimed. An
     // allowlist: kind cargo-target through its lock protocol, kind fs
@@ -1460,7 +1472,7 @@ fn ensure_inner<H: Delete>(
                 report.skipped.push(SkipEntry {
                     tier: request.tier.name.clone(),
                     profile: request.tier.profile.clone(),
-                    candidate: PathBuf::new(),
+                    candidate: None,
                     count: 1,
                     examples: Vec::new(),
                     reason: Reason::Missing,
@@ -1709,7 +1721,7 @@ fn ensure_grouped_inner<H: Delete>(
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
-    let mut report = Report::new(Status::Error, Some(&request.path));
+    let mut report = request.report(Status::Error, false);
     if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
         return usage(report, log, "configuration has no tiers to run".to_owned());
     }
@@ -1948,7 +1960,7 @@ fn ensure_grouped_inner<H: Delete>(
                     report.skipped.push(SkipEntry {
                         tier: tier.name.clone(),
                         profile: tier.profile.clone(),
-                        candidate: PathBuf::new(),
+                        candidate: None,
                         count: 1,
                         examples: Vec::new(),
                         reason: Reason::Missing,
@@ -2004,7 +2016,7 @@ fn ensure_grouped_inner<H: Delete>(
                     report.skipped.push(SkipEntry {
                         tier: tier.name.clone(),
                         profile: tier.profile.clone(),
-                        candidate: PathBuf::new(),
+                        candidate: None,
                         count: 1,
                         examples: Vec::new(),
                         reason: skip.reason,
@@ -2133,7 +2145,7 @@ fn dry_run_inner<H: Host>(
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
-    let mut report = Report::new(Status::DryRun, Some(&request.path));
+    let mut report = request.report(Status::DryRun, true);
     if host.interrupted().is_some() {
         return report;
     }
@@ -2162,11 +2174,13 @@ fn dry_run_inner<H: Host>(
     if deadline_passed(host, deadline) {
         return deadline_before_plan(host, &measured, deadline, report, log, tier);
     }
-    report.plan.extend(roots.skipped.iter().map(|skip| {
-        let mut entry = plan_entry(tier, &skip.candidate, Some(skip.reason), None);
-        entry.profile = skip.profile.clone();
-        entry
-    }));
+    report
+        .plan
+        .extend(roots.skipped.iter().map(|skip| PlanEntry {
+            candidate: skip.candidate.clone(),
+            profile: skip.profile.clone(),
+            ..plan_tier_row(tier, Some(skip.reason))
+        }));
     if !roots.errors.is_empty() {
         for error in roots.errors.iter().cloned() {
             record_error(&mut report, log, error);
@@ -2242,9 +2256,7 @@ fn dry_run_inner<H: Host>(
                     "{}: skip Docker backend: {}: {}",
                     tier.name, skip.reason, skip.detail
                 ));
-                report
-                    .plan
-                    .push(plan_entry(tier, Path::new(""), Some(skip.reason), None));
+                report.plan.push(plan_tier_row(tier, Some(skip.reason)));
             }
             Err(error) => record_error(&mut report, log, run_error(tier, error.to_string())),
         }
@@ -2281,9 +2293,7 @@ fn dry_run_inner<H: Host>(
                     "{}: profile `{}` is missing executable {program:?}",
                     tier.name, tier.profile
                 ));
-                report
-                    .plan
-                    .push(plan_entry(tier, Path::new(""), Some(Reason::Missing), None));
+                report.plan.push(plan_tier_row(tier, Some(Reason::Missing)));
                 report.avail_after_bytes =
                     final_sample(host, &measured, deadline, &mut report, log, tier);
                 return report;
@@ -2374,10 +2384,9 @@ fn dry_run_inner<H: Host>(
         .chain(skipped)
         .collect();
     for index in 0..report.plan.len() {
-        let candidate = report.plan[index].candidate.clone();
-        if candidate.as_os_str().is_empty() {
+        let Some(candidate) = report.plan[index].candidate.clone() else {
             continue;
-        }
+        };
         let started = host.now();
         let overlap = overlaps_checked(host, &candidate, &protection_matches);
         record_deadline_overrun(host, &mut report, deadline, started, "protect", &candidate);
@@ -2457,7 +2466,7 @@ fn dry_run_grouped_inner<H: Host>(
 ) -> Report {
     let Some(first) = tiers.first().filter(|_| tiers.len() == tier_timeouts.len()) else {
         return usage(
-            Report::new(Status::DryRun, Some(&request.path)),
+            request.report(Status::DryRun, true),
             log,
             "configuration has no tiers to plan".to_owned(),
         );
@@ -2542,13 +2551,27 @@ fn plan_entry(
     reason: Option<Reason>,
     bytes: Option<u64>,
 ) -> PlanEntry {
+    assert!(
+        !candidate.as_os_str().is_empty(),
+        "a plan row of the tier as a whole is plan_tier_row's"
+    );
+    PlanEntry {
+        candidate: Some(candidate.to_owned()),
+        estimated_bytes: bytes,
+        ..plan_tier_row(tier, reason)
+    }
+}
+
+/// The plan row of the tier as a whole, refused (`reason`) before it had a
+/// candidate: a missing executable, an unavailable backend.
+fn plan_tier_row(tier: &Tier, reason: Option<Reason>) -> PlanEntry {
     PlanEntry {
         group: tier.group.clone(),
         tier: tier.name.clone(),
         profile: tier.profile.clone(),
-        candidate: candidate.to_owned(),
+        candidate: None,
         reason,
-        estimated_bytes: bytes,
+        estimated_bytes: None,
         operation: tier.operation(),
         checkouts: tier.checkouts,
         build_evidence: None,
@@ -3194,7 +3217,7 @@ fn plan_fs_union<H: Host>(
         .collect();
     for (index, skip) in &misconfigured {
         let mut entry = safety_error(tier, excluded(skip));
-        entry.profile = sources[*index].profile.to_owned();
+        entry.profile = Some(sources[*index].profile.to_owned());
         record_error(report, log, entry);
     }
     for (index, skip) in refused
@@ -3612,9 +3635,9 @@ fn log_skip(log: &mut dyn FnMut(&str), tier: &Tier, skip: &Skip) {
 /// An error of the tier or the run (no one candidate).
 fn run_error(tier: &Tier, message: impl Into<String>) -> ErrorEntry {
     ErrorEntry {
-        tier: tier.name.clone(),
-        profile: tier.profile.clone(),
-        candidate: String::new(),
+        tier: Some(tier.name.clone()),
+        profile: Some(tier.profile.clone()),
+        candidate: None,
         cause: ErrorCause::Operation,
         message: message.into(),
     }
@@ -3679,7 +3702,7 @@ fn held<H: Host>(
         .into_iter()
         .map(|h| HeldEntry {
             pid: h.pid.0,
-            command: h.command.to_string_lossy().into_owned(),
+            command: Some(h.command.to_string_lossy().into_owned()).filter(|c| !c.is_empty()),
             bytes: h.bytes,
         })
         .collect()
@@ -3785,7 +3808,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         }
     }
-    fn skip_docker(&mut self, candidate: &Path, reason: Reason, detail: &str) {
+    /// `candidate` `None`: the backend as a whole was skipped.
+    fn skip_docker(&mut self, candidate: Option<&Path>, reason: Reason, detail: &str) {
         (self.log)(&format!(
             "{}: skip Docker backend: {reason}: {detail}",
             self.tier.name
@@ -3793,7 +3817,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         self.report.skipped.push(SkipEntry {
             tier: self.tier.name.clone(),
             profile: self.tier.profile.clone(),
-            candidate: candidate.to_owned(),
+            candidate: candidate.map(Path::to_owned),
             count: 1,
             examples: Vec::new(),
             reason,
@@ -3821,7 +3845,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let bound = match binding {
             Ok(Binding::Bound(bound)) => bound,
             Ok(Binding::Skipped(skip)) => {
-                self.skip_docker(Path::new(""), skip.reason, &skip.detail);
+                self.skip_docker(None, skip.reason, &skip.detail);
                 return;
             }
             Err(error) => {
@@ -3871,14 +3895,14 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Ok(Binding::Bound(rebound)) if rebound == bound => {}
             Ok(Binding::Bound(_)) => {
                 self.skip_docker(
-                    &candidate,
+                    Some(&candidate),
                     Reason::Changed,
                     "Docker daemon, context, builder or storage changed before prune",
                 );
                 return;
             }
             Ok(Binding::Skipped(skip)) => {
-                self.skip_docker(&candidate, skip.reason, &skip.detail);
+                self.skip_docker(Some(&candidate), skip.reason, &skip.detail);
                 return;
             }
             Err(error) => {
@@ -4048,7 +4072,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         self.report.skipped.push(SkipEntry {
             tier: self.tier.name.clone(),
             profile: profile.to_owned(),
-            candidate: candidate.to_owned(),
+            candidate: Some(candidate.to_owned()),
             count: 1,
             examples: Vec::new(),
             reason: skip.reason,
@@ -4060,9 +4084,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
 
     fn error_as(&mut self, candidate: &Path, profile: &str, message: String) {
         let entry = ErrorEntry {
-            tier: self.tier.name.clone(),
-            profile: profile.to_owned(),
-            candidate: candidate.to_string_lossy().into_owned(),
+            tier: Some(self.tier.name.clone()),
+            profile: Some(profile.to_owned()),
+            candidate: Some(candidate.to_string_lossy().into_owned()),
             cause: ErrorCause::Operation,
             message,
         };
@@ -4167,7 +4191,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             self.report.skipped.push(SkipEntry {
                 tier: self.tier.name.clone(),
                 profile: self.tier.profile.clone(),
-                candidate: skip.path.clone(),
+                candidate: Some(skip.path.clone()),
                 count: 1,
                 examples: Vec::new(),
                 reason: skip.reason,
@@ -4735,7 +4759,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let source = &sources[*index];
             if is_misconfigured_source(source, skip) {
                 let mut entry = safety_error(self.tier, excluded(skip));
-                entry.profile = source.profile.to_owned();
+                entry.profile = Some(source.profile.to_owned());
                 record_error(self.report, self.log, entry);
                 misconfigured = true;
             } else {

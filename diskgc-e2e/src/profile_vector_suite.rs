@@ -91,7 +91,7 @@ pub(crate) fn replay_python_vector(ctx: &Ctx, concurrent_writers: &[&str]) -> Te
     let first = wrong_plan
         .first_mut()
         .ok_or("replay vector has no plan entry")?;
-    first.candidate = "/deliberately-wrong-candidate".into();
+    first.candidate = Some("/deliberately-wrong-candidate".into());
     ensure!(
         check_plan(&actual_plan, &wrong_plan).is_err(),
         "kernel replay accepted a deliberately wrong expected candidate"
@@ -212,10 +212,9 @@ fn plan_verdicts(report: &Value) -> Result<Vec<PlanVerdict>, String> {
         .ok_or("plan is not an array".to_owned())?
         .iter()
         .map(|entry| {
-            let candidate = entry["candidate"]
-                .as_str()
-                .ok_or_else(|| format!("plan entry has no candidate: {entry}"))?
-                .into();
+            let candidate = optional_path(&entry["candidate"]).ok_or_else(|| {
+                format!("plan entry's candidate is neither a path nor null: {entry}")
+            })?;
             Ok(PlanVerdict {
                 candidate,
                 reason: entry["reason"].as_str().map(str::to_owned),
@@ -232,10 +231,9 @@ fn skip_verdicts(report: &Value) -> Result<Vec<SkipVerdict>, String> {
         .iter()
         .map(|entry| {
             Ok(SkipVerdict {
-                candidate: entry["candidate"]
-                    .as_str()
-                    .ok_or_else(|| format!("skip has no candidate: {entry}"))?
-                    .into(),
+                candidate: optional_path(&entry["candidate"]).ok_or_else(|| {
+                    format!("skip's candidate is neither a path nor null: {entry}")
+                })?,
                 reason: entry["reason"]
                     .as_str()
                     .ok_or_else(|| format!("skip has no reason: {entry}"))?
@@ -246,4 +244,14 @@ fn skip_verdicts(report: &Value) -> Result<Vec<SkipVerdict>, String> {
             })
         })
         .collect()
+}
+
+/// A report's `candidate`: a path, or `null` for a row of the tier as a
+/// whole (TASK-192); `None` for anything else.
+fn optional_path(value: &Value) -> Option<Option<std::path::PathBuf>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(path) => Some(Some(path.into())),
+        _ => None,
+    }
 }

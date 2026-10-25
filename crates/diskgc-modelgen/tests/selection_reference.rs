@@ -692,7 +692,7 @@ fn runtime(
         .plan
         .into_iter()
         .filter(|p| p.reason.is_none())
-        .map(|p| p.candidate)
+        .map(|p| p.candidate.expect("a candidate"))
         .collect())
 }
 
@@ -764,14 +764,14 @@ fn user_profiles_keep_the_whole_claude_container_in_plan_and_reclaim() {
     assert!(plan.errors.is_empty(), "{plan:#?}");
     assert!(
         plan.plan.iter().any(|entry| {
-            entry.candidate == Path::new("/tmp/claude-1000")
+            entry.candidate.as_deref() == Some(Path::new("/tmp/claude-1000"))
                 && entry.reason == Some(Reason::Excluded)
         }),
         "{plan:#?}"
     );
     assert!(
         plan.plan.iter().any(|entry| {
-            entry.candidate == Path::new("/tmp/outside") && entry.reason.is_none()
+            entry.candidate.as_deref() == Some(Path::new("/tmp/outside")) && entry.reason.is_none()
         }),
         "{plan:#?}"
     );
@@ -869,7 +869,7 @@ fn rejected_outer_source_where_does_not_weaken_term_negation_or_config_protect()
             .plan
             .iter()
             .filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone())
+            .map(|entry| entry.candidate.clone().expect("a candidate"))
             .collect::<BTreeSet<_>>();
         assert_eq!(eligible, expected, "{plan:#?}\n{replay}");
         let run_host = ModelHost::new(&model).expect("valid model");
@@ -949,7 +949,7 @@ proptest! {
         let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
         prop_assert!(plan.errors.is_empty(), "{plan:#?}\n{replay}");
         let actual = plan.plan.iter().filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone()).collect::<BTreeSet<_>>();
+            .map(|entry| entry.candidate.clone().expect("a candidate")).collect::<BTreeSet<_>>();
         prop_assert_eq!(actual, expected.clone(), "{}", replay);
 
         let run_host = ModelHost::new(&model)
@@ -1042,7 +1042,7 @@ proptest! {
         plan_host.omit_statx_type_at(marker.clone());
         let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
         prop_assert!(plan.errors.is_empty(), "{selection}: {plan:#?}\n{}", replay);
-        prop_assert!(!plan.plan.iter().any(|entry| entry.candidate == marker.parent().unwrap()
+        prop_assert!(!plan.plan.iter().any(|entry| entry.candidate.as_deref() == Some(marker.parent().unwrap())
             && entry.reason.is_none()), "unknown marker selected: {selection}: {plan:#?}\n{}", replay);
 
         let run_host = ModelHost::new(&model)
@@ -1095,9 +1095,9 @@ proptest! {
         let plan = executor::dry_run(&plan_host, &request, &[1000], &mut |_| {});
         prop_assert!(plan.errors.is_empty(), "{selection}: {plan:#?}\n{}", replay);
         let actual: BTreeSet<_> = plan.plan.iter().filter(|p| p.reason.is_none())
-            .map(|p| p.candidate.clone()).collect();
+            .map(|p| p.candidate.clone().expect("a candidate")).collect();
         prop_assert_eq!(actual, expected.clone(), "{}: {:#?}\n{}", selection, plan, replay);
-        prop_assert!(plan.plan.iter().any(|p| p.candidate == newest_path
+        prop_assert!(plan.plan.iter().any(|p| p.candidate.as_ref() == Some(&newest_path)
             && p.reason == Some(Reason::NewestVersion)), "{selection}: {plan:#?}\n{}", replay);
 
         let run_host = ModelHost::new(&model)
@@ -1148,7 +1148,7 @@ proptest! {
         let plan = executor::dry_run(&plan_host, &request, &[uid], &mut |_| {});
         prop_assert!(plan.errors.is_empty(), "uid {uid}: {plan:#?}\n{}", replay);
         let eligible: BTreeSet<_> = plan.plan.iter().filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone()).collect();
+            .map(|entry| entry.candidate.clone().expect("a candidate")).collect();
         prop_assert_eq!(eligible, expected.clone(), "uid {}: {:#?}\n{}", uid, plan, replay);
 
         let run_host = ModelHost::new(&model)

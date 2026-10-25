@@ -2290,7 +2290,7 @@ fn reclaimable_paths(target: &Path) -> Result<Vec<std::path::PathBuf>, String> {
 /// lock (the host lock file is removed, which a lock attempt would turn
 /// into exit 2), and prints even with the goal met: exit 0, status
 /// `dry_run`, the plan listing `old` eligible (sized) before `new`, which a
-/// keep marker in its target makes `kept`. The oracle allows nothing to
+/// keep marker in its target makes `keep_marker`. The oracle allows nothing to
 /// go; the strace record holds no unlink.
 pub fn ensure_dry_run_plans_real_targets_and_deletes_nothing(
     ctx: &Ctx,
@@ -2332,7 +2332,10 @@ pub fn ensure_dry_run_plans_real_targets_and_deletes_nothing(
     ensure!(
         plan == [
             (&Value::from("/tmp/w/old/target"), &Value::Null),
-            (&Value::from("/tmp/w/new/target"), &Value::from("kept"))
+            (
+                &Value::from("/tmp/w/new/target"),
+                &Value::from("keep_marker")
+            )
         ],
         "plan {plan:?}"
     );

@@ -85,14 +85,29 @@ fn non_ensure_json_errors_have_typed_causes() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys,
-        BTreeSet::from(["status", "exit_code", "cause", "error"])
-    );
+    // `ensure`'s envelope and errors list (TASK-192): one shape for every
+    // command's failure.
+    assert_eq!(keys, BTreeSet::from(["status", "exit_code", "errors"]));
     assert_eq!(parsed["status"], "usage_error");
     assert_eq!(parsed["exit_code"], 2);
-    assert_eq!(parsed["cause"], "parse");
-    assert!(parsed["error"].as_str().unwrap().contains("--json"));
+    let [error] = parsed["errors"].as_array().unwrap().as_slice() else {
+        panic!("one error: {parsed}");
+    };
+    let error_keys: BTreeSet<&str> = error
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        error_keys,
+        BTreeSet::from(["tier", "profile", "candidate", "cause", "message"])
+    );
+    for field in ["tier", "profile", "candidate"] {
+        assert!(error[field].is_null(), "{field}: {parsed}");
+    }
+    assert_eq!(error["cause"], "parse");
+    assert!(error["message"].as_str().unwrap().contains("--json"));
 
     let missing = diskgc(&[
         "profiles",
@@ -102,7 +117,7 @@ fn non_ensure_json_errors_have_typed_causes() {
         "--json",
     ]);
     assert_eq!(missing.status.code(), Some(2));
-    assert_eq!(json(&missing)["cause"], "config");
+    assert_eq!(json(&missing)["errors"][0]["cause"], "config");
 }
 
 #[test]
@@ -678,7 +693,10 @@ fn error_of(out: &std::process::Output) -> String {
     assert_eq!(object["status"], "usage_error", "{object}");
     assert_eq!(object["exit_code"], 2, "{object}");
     assert_eq!(out.status.code(), Some(2));
-    object["error"].as_str().expect("an error").to_owned()
+    object["errors"][0]["message"]
+        .as_str()
+        .expect("an error")
+        .to_owned()
 }
 
 /// docs/reference.md, read from the source tree (the flake's
@@ -1083,7 +1101,8 @@ fn profiles_show_json_is_the_full_definition() {
     assert_eq!(cargo["origin"], "built_in");
     assert_eq!(cargo["kind"], "cargo-target");
     assert_eq!(cargo["checkouts"], "allow");
-    assert!(cargo["find"]["roots"].is_null(), "{cargo}");
+    assert_eq!(cargo["find"]["roots"], serde_json::json!([]), "{cargo}");
+    assert!(cargo["find"]["backend"].is_null(), "{cargo}");
     assert_eq!(cargo["find"]["roots_required"], true);
     assert_eq!(cargo["action"]["type"], "cargo_lock_protocol");
     assert!(
@@ -1149,7 +1168,7 @@ fn profiles_show_of_an_unknown_name_is_exit_2() {
     );
     let out = diskgc(&["profiles", "show", "idle-5d", "--json"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_eq!(json(&out)["cause"], "usage");
+    assert_eq!(json(&out)["errors"][0]["cause"], "usage");
     let error = error_of(&out);
     assert!(error.contains("`idle-1d`, `idle-2d`"), "{error}");
 }

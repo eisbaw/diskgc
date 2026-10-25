@@ -258,12 +258,12 @@ fn a_keep_marker_anywhere_inside_keeps_the_candidate() {
     assert_skipped(
         &host,
         &rules(),
-        Reason::Kept,
+        Reason::KeepMarker,
         "/tmp/c/sub/deeper/.diskgc-keep",
     );
     // A directory of that name counts too.
     let host = model("  /tmp/c/.diskgc-keep: {.: {}}\n");
-    assert_skipped(&host, &rules(), Reason::Kept, "/tmp/c/.diskgc-keep");
+    assert_skipped(&host, &rules(), Reason::KeepMarker, "/tmp/c/.diskgc-keep");
 }
 
 #[test]

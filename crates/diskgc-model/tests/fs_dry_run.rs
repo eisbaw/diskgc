@@ -1072,7 +1072,16 @@ fn plan(report: &Report) -> Vec<(String, Option<Reason>)> {
     report
         .plan
         .iter()
-        .map(|p| (p.candidate.display().to_string(), p.reason))
+        .map(|p| {
+            (
+                p.candidate
+                    .as_deref()
+                    .expect("a candidate")
+                    .display()
+                    .to_string(),
+                p.reason,
+            )
+        })
         .collect()
 }
 
@@ -1080,7 +1089,7 @@ fn reason_of(report: &Report, candidate: &str) -> Option<Option<Reason>> {
     report
         .plan
         .iter()
-        .find(|p| p.candidate == Path::new(candidate))
+        .find(|p| p.candidate.as_deref() == Some(Path::new(candidate)))
         .map(|p| p.reason)
 }
 
@@ -1452,8 +1461,8 @@ processes:
         ("/tmp/pytest-of-ok", None),
         ("/tmp/pytest-of-other", Some(Reason::NotOwner)),
         ("/tmp/pytest-of-inner-other", Some(Reason::NotOwner)),
-        ("/tmp/pytest-of-kept", Some(Reason::Kept)),
-        ("/tmp/tmp.K/pytest-of-x", Some(Reason::Kept)),
+        ("/tmp/pytest-of-kept", Some(Reason::KeepMarker)),
+        ("/tmp/tmp.K/pytest-of-x", Some(Reason::KeepMarker)),
         ("/tmp/pytest-of-sock", Some(Reason::ContainsIpc)),
         ("/tmp/pytest-of-used", Some(Reason::InUse)),
         ("/tmp/pytest-of-env", Some(Reason::InUse)),
@@ -1851,12 +1860,15 @@ fn filesystem_union_dedupes_hardlink_aliases_by_inode_identity() {
         .plan
         .iter()
         .filter(|entry| {
-            entry.candidate == Path::new("/tmp/link-a")
-                || entry.candidate == Path::new("/tmp/link-b")
+            entry.candidate.as_deref() == Some(Path::new("/tmp/link-a"))
+                || entry.candidate.as_deref() == Some(Path::new("/tmp/link-b"))
         })
         .collect();
     assert_eq!(aliases.len(), 1, "{plan:#?}");
-    assert_eq!(aliases[0].candidate, Path::new("/tmp/link-a"));
+    assert_eq!(
+        aliases[0].candidate.as_deref(),
+        Some(Path::new("/tmp/link-a"))
+    );
 }
 
 #[test]
@@ -1890,14 +1902,15 @@ fn entry_filters_have_known_and_unknown_verdicts() {
             report
                 .plan
                 .iter()
-                .any(|p| p.candidate == Path::new(eligible) && p.reason.is_none()),
+                .any(|p| p.candidate.as_deref() == Some(Path::new(eligible)) && p.reason.is_none()),
             "{report:#?}"
         );
         assert!(
             report
                 .plan
                 .iter()
-                .any(|p| p.candidate == Path::new(filtered) && p.reason == Some(Reason::Filtered)),
+                .any(|p| p.candidate.as_deref() == Some(Path::new(filtered))
+                    && p.reason == Some(Reason::Filtered)),
             "{report:#?}"
         );
         nothing_locked_or_deleted(&host);
@@ -1911,11 +1924,9 @@ fn entry_filters_have_known_and_unknown_verdicts() {
         let host = host(&yaml(&format!("{tree}{unknown}")));
         let report = dry_run(&host, &request(selection, &[], "/tmp"));
         assert!(
-            report
-                .plan
-                .iter()
-                .any(|p| p.candidate == Path::new("/tmp/pytest-of-plain")
-                    && p.reason == Some(Reason::Unreadable)),
+            report.plan.iter().any(|p| p.candidate.as_deref()
+                == Some(Path::new("/tmp/pytest-of-plain"))
+                && p.reason == Some(Reason::Unreadable)),
             "{report:#?}"
         );
         assert!(host.unfired_events().is_empty());
@@ -1947,7 +1958,8 @@ fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
             report
                 .plan
                 .iter()
-                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+                .any(|entry| entry.candidate.as_deref() == Some(Path::new(&path))
+                    && entry.reason == reason),
             "{path}: {report:#?}"
         );
     }
@@ -1972,7 +1984,8 @@ fn positive_mixed_entry_and_idle_filter_requires_every_predicate() {
             report
                 .plan
                 .iter()
-                .any(|entry| entry.candidate == Path::new(&path) && entry.reason == reason),
+                .any(|entry| entry.candidate.as_deref() == Some(Path::new(&path))
+                    && entry.reason == reason),
             "{path}: {report:#?}"
         );
     }
@@ -1998,12 +2011,12 @@ fn unknown_marker_type_passes_neither_source_has_not_nor_term_has_not() {
         let report = dry_run(&host, &request(selection, &[], "/tmp"));
         assert!(
             report.plan.iter().any(|entry| {
-                entry.candidate
-                    == Path::new(if selection == "profile:unmounted" {
+                entry.candidate.as_deref()
+                    == Some(Path::new(if selection == "profile:unmounted" {
                         marker
                     } else {
                         "/tmp/pytest-of-a"
-                    })
+                    }))
                     && entry.reason == Some(Reason::UnsupportedFs)
             }),
             "{selection}: {report:#?}"
@@ -2021,11 +2034,9 @@ fn negated_mixed_filter_unknown_second_entry_type_is_not_a_complement_match() {
     let selection = "profile:pytest-of-dir && !filter:tagged-idle-unkept";
     let report = dry_run(&host, &request(selection, &[], "/tmp"));
     assert!(
-        report
-            .plan
-            .iter()
-            .any(|entry| entry.candidate == Path::new("/tmp/pytest-of-a")
-                && entry.reason == Some(Reason::UnsupportedFs)),
+        report.plan.iter().any(|entry| entry.candidate.as_deref()
+            == Some(Path::new("/tmp/pytest-of-a"))
+            && entry.reason == Some(Reason::UnsupportedFs)),
         "{report:#?}"
     );
     nothing_locked_or_deleted(&host);
@@ -2283,7 +2294,7 @@ fn the_size_estimate_counts_a_hard_linked_object_once() {
         report
             .plan
             .iter()
-            .find(|p| p.candidate == Path::new(candidate))
+            .find(|p| p.candidate.as_deref() == Some(Path::new(candidate)))
             .and_then(|p| p.estimated_bytes)
             .unwrap_or_else(|| panic!("{candidate}: {:#?}", report.plan))
     };
@@ -2376,7 +2387,7 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
         found,
         [
             ("/tmp/hg".to_owned(), Some(Reason::ContainsCheckout)),
-            ("/tmp/kept-repo".to_owned(), Some(Reason::Kept)),
+            ("/tmp/kept-repo".to_owned(), Some(Reason::KeepMarker)),
             ("/tmp/plain".to_owned(), None),
             ("/tmp/repo".to_owned(), Some(Reason::ContainsCheckout)),
         ],
@@ -2415,7 +2426,7 @@ fn a_profile_with_checkouts_allow_takes_a_candidate_holding_a_checkout() {
         found,
         [
             ("/tmp/hg".to_owned(), None),
-            ("/tmp/kept-repo".to_owned(), Some(Reason::Kept)),
+            ("/tmp/kept-repo".to_owned(), Some(Reason::KeepMarker)),
             ("/tmp/plain".to_owned(), None),
             ("/tmp/repo".to_owned(), None),
         ],

@@ -119,7 +119,7 @@ fn eligible(host: &ModelHost, select: &str) -> BTreeSet<PathBuf> {
         .plan
         .into_iter()
         .filter(|entry| entry.reason.is_none())
-        .map(|entry| entry.candidate)
+        .map(|entry| entry.candidate.expect("a candidate"))
         .collect()
 }
 
@@ -139,7 +139,7 @@ fn protected_a(host: &ModelHost) -> BTreeSet<PathBuf> {
         .plan
         .into_iter()
         .filter(|entry| entry.reason.is_none())
-        .map(|entry| entry.candidate)
+        .map(|entry| entry.candidate.expect("a candidate"))
         .collect()
 }
 
@@ -391,7 +391,7 @@ proptest! {
             return Err(failure(&model, format!("plan errors: {:?}", plan.errors)));
         }
         let planned: Vec<_> = plan.plan.iter().filter(|entry| entry.reason.is_none())
-            .map(|entry| entry.candidate.clone()).collect();
+            .map(|entry| entry.candidate.clone().expect("a candidate")).collect();
         let run_host = loaded(&model)?;
         let report = executor::ensure(&run_host, &request, &[1000], &mut |_| {});
         if !report.errors.is_empty() || !report.skipped.is_empty() {

@@ -45,12 +45,12 @@ expect:
     - {candidate: "/home/tester/.cache/nix/gitv3"}
     - {candidate: "/home/tester/.cache/nix/tarball-cache", reason: in_use}
     - {candidate: "/home/tester/.cache/nix/tarball-cache-v2", reason: protected}
-    - {candidate: "/home/tester/.cache/nix/eval-cache-v6", reason: kept}
+    - {candidate: "/home/tester/.cache/nix/eval-cache-v6", reason: keep_marker}
   reclaim_exit: 1
   actions: ["/home/tester/.cache/nix/gitv3"]
   removed: ["/home/tester/.cache/nix/gitv3"]
   skipped:
     - {candidate: "/home/tester/.cache/nix/tarball-cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
     - {candidate: "/home/tester/.cache/nix/tarball-cache-v2", reason: protected}
-    - {candidate: "/home/tester/.cache/nix/eval-cache-v6", reason: kept}
+    - {candidate: "/home/tester/.cache/nix/eval-cache-v6", reason: keep_marker}
   preserved: ["/home/tester/.cache/nix/tarball-cache/payload", "/home/tester/.cache/nix/tarball-cache-v2/payload", "/home/tester/.cache/nix/eval-cache-v6/payload", "/home/tester/.cache/nix/fetcher-cache-v1/db"]

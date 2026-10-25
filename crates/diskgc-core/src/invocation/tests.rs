@@ -477,3 +477,45 @@ fn documented_config_examples_load_under_the_catalog_they_claim() {
         }
     }
 }
+
+/// TASK-191: a refusal before anything is measured (a host check at
+/// startup, a configuration that does not load) still reports the goal a
+/// harness branches on, when the command line gives it in bytes, and
+/// `--dry-run`; a percentage stays `null` until a sample gives the
+/// filesystem's size.
+#[test]
+fn a_report_before_any_sample_carries_the_goal_as_given() {
+    let mut options = EnsureOptions {
+        min_free: crate::units::Size::Bytes(50),
+        target_free: None,
+        timeout: None,
+        tally_budget: None,
+        select: None,
+        roots: Vec::new(),
+        dry_run: false,
+        allow_root: false,
+        path: "/w".into(),
+        test_entry_budget: None,
+    };
+    let report = options.report(Status::Error);
+    assert_eq!(report.status, Status::Error);
+    assert_eq!(report.path.as_deref(), Some(Path::new("/w")));
+    assert_eq!(report.min_free_bytes, Some(50));
+    assert_eq!(report.target_free_bytes, Some(50), "target defaults to min");
+    assert!(!report.dry_run);
+    assert_eq!(report.avail_before_bytes, None, "nothing was measured");
+    assert_eq!(report.target_met(), None);
+
+    options.target_free = Some(crate::units::Size::Bytes(80));
+    options.dry_run = true;
+    let report = options.report(Status::UsageError);
+    assert_eq!(report.target_free_bytes, Some(80));
+    assert!(report.dry_run);
+
+    options.min_free = crate::units::Size::Percent(10);
+    let report = options.report(Status::Error);
+    assert_eq!(report.min_free_bytes, None, "a percentage needs a sample");
+    assert_eq!(report.target_free_bytes, Some(80));
+    options.target_free = None;
+    assert_eq!(options.report(Status::Error).target_free_bytes, None);
+}

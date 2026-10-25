@@ -455,7 +455,7 @@ impl<H: Host> Walker<'_, H> {
             ));
         }
         if name == KEEP_MARKER {
-            return Err(skip(Reason::Kept, "a keep marker".to_owned()));
+            return Err(skip(Reason::KeepMarker, "inside the candidate".to_owned()));
         }
         if !self.rules.owners.contains(&identity.uid) {
             return Err(skip(

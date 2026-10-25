@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::engine::{Checkouts, ProcessBlocker, Reason};
-use crate::units::format_bytes;
+use crate::units::{Size, format_bytes};
 use json::Json;
 
 /// How a run ended (`status` in the JSON).
@@ -192,7 +192,9 @@ pub struct PlanEntry {
     pub group: String,
     pub tier: String,
     pub profile: String,
-    pub candidate: PathBuf,
+    /// `None` for a row of the tier as a whole: its profile was refused
+    /// before discovery (a missing executable, an unavailable backend).
+    pub candidate: Option<PathBuf>,
     /// The skip reason, `None` for an eligible candidate.
     pub reason: Option<Reason>,
     /// The candidate's estimated size; `None` for every skipped candidate
@@ -203,7 +205,8 @@ pub struct PlanEntry {
     /// The source profile's `checkouts` setting the candidate was judged
     /// under (docs/safety.md, No source checkout).
     pub checkouts: Checkouts,
-    /// Present only for a build output whose recorded source was verified.
+    /// Only for a build output whose recorded source was verified (the
+    /// JSON then has `null`).
     pub build_evidence: Option<BuildEvidence>,
     /// The skip's human diagnostic and attributed processes, as in
     /// [`SkipEntry`], for the human plan only: the JSON plan has neither
@@ -242,7 +245,9 @@ pub struct ActionEntry {
 pub struct SkipEntry {
     pub tier: String,
     pub profile: String,
-    pub candidate: PathBuf,
+    /// `None` when the tier as a whole was skipped (its profile refused
+    /// before it had a candidate) or, in the JSON, for an aggregated row.
+    pub candidate: Option<PathBuf>,
     pub count: u64,
     pub examples: Vec<PathBuf>,
     pub reason: Reason,
@@ -268,8 +273,17 @@ fn process_blocker_json(blocker: &ProcessBlocker) -> Json {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldEntry {
     pub pid: u32,
-    pub command: String,
+    /// `None` when the process's command could not be read.
+    pub command: Option<String>,
     pub bytes: u64,
+}
+
+/// The actions past the first 1,000, summed into one JSON row
+/// ([`Report::output_actions`]).
+struct ActionOverflow {
+    avail_delta_bytes: Option<i64>,
+    duration_ms: u64,
+    count: u64,
 }
 
 /// An operation that blocked past the deadline (`overruns`; task-54).
@@ -280,15 +294,58 @@ pub struct OverrunEntry {
     pub over_ms: u64,
 }
 
-/// An error (`errors`). `tier`, `profile` and `candidate` are empty where
-/// they do not apply (a usage error, an error of the whole run).
+/// An error (`errors`). `tier`, `profile` and `candidate` are `None` where
+/// they do not apply (a usage error, an error of the whole run): `null` in
+/// the JSON, never an empty string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorEntry {
-    pub tier: String,
-    pub profile: String,
-    pub candidate: String,
+    pub tier: Option<String>,
+    pub profile: Option<String>,
+    pub candidate: Option<String>,
     pub cause: ErrorCause,
     pub message: String,
+}
+
+impl ErrorEntry {
+    /// An error of the whole run or command: no tier, profile or candidate.
+    pub fn run(cause: ErrorCause, message: impl Into<String>) -> Self {
+        Self {
+            tier: None,
+            profile: None,
+            candidate: None,
+            cause,
+            message: message.into(),
+        }
+    }
+
+    fn to_json(&self) -> Json {
+        Json::Obj(vec![
+            ("tier", Json::opt(self.tier.as_deref(), Json::str)),
+            ("profile", Json::opt(self.profile.as_deref(), Json::str)),
+            ("candidate", Json::opt(self.candidate.as_deref(), Json::str)),
+            ("cause", Json::str(self.cause.as_str())),
+            ("message", Json::str(&self.message)),
+        ])
+    }
+}
+
+/// The JSON object of a command other than `ensure` that failed
+/// (docs/reference.md, Output, Errors): the envelope `ensure`'s report
+/// opens with (`status`, `exit_code`) and its `errors` list, so a script
+/// reads every command's failure the same way.
+pub fn error_json(status: Status, errors: &[ErrorEntry]) -> Json {
+    assert!(
+        !errors.is_empty(),
+        "a failed command reports at least one error"
+    );
+    Json::Obj(vec![
+        ("status", Json::str(status.as_str())),
+        ("exit_code", Json::U64(status.exit_code().into())),
+        (
+            "errors",
+            Json::Arr(errors.iter().map(ErrorEntry::to_json).collect()),
+        ),
+    ])
 }
 
 /// Stable machine-readable reason for a reported error.
@@ -334,6 +391,9 @@ impl ErrorCause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub status: Status,
+    /// `--dry-run` was asked for: nothing is deleted whatever `status` says
+    /// (a dry run that fails has `status: error`, not `dry_run`).
+    pub dry_run: bool,
     /// UTC start of the run, when the wall clock was representable.
     pub started_at: Option<String>,
     /// Monotonic elapsed time for the whole run, when measured.
@@ -360,35 +420,34 @@ pub struct Report {
 }
 
 impl Report {
-    /// Keep the first 1,000 action details. The remainder is one entry with
-    /// no candidate identity, preserving the count and measured totals.
-    fn output_actions(&self) -> Vec<ActionEntry> {
+    /// Keep the first 1,000 action details as they are; the remainder is
+    /// one summary with no tier, profile or candidate (`null` in the JSON),
+    /// preserving the count and measured totals.
+    fn output_actions(&self) -> (&[ActionEntry], Option<ActionOverflow>) {
         const DETAIL_LIMIT: usize = 1_000;
-        let mut output: Vec<_> = self.actions.iter().take(DETAIL_LIMIT).cloned().collect();
-        let overflow = &self.actions[self.actions.len().min(DETAIL_LIMIT)..];
-        if !overflow.is_empty() {
-            let delta = overflow.iter().try_fold(0_i128, |sum, action| {
-                sum.checked_add(i128::from(action.avail_delta_bytes?))
-            });
-            output.push(ActionEntry {
-                tier: String::new(),
-                profile: String::new(),
-                candidate: PathBuf::new(),
-                avail_delta_bytes: delta.and_then(|sum| i64::try_from(sum).ok()),
-                duration_ms: overflow
-                    .iter()
-                    .fold(0_u64, |sum, action| sum.saturating_add(action.duration_ms)),
-                idle_age_seconds: None,
-                count: overflow
-                    .iter()
-                    .fold(0_u64, |sum, action| sum.saturating_add(action.count)),
-            });
+        let split = self.actions.len().min(DETAIL_LIMIT);
+        let (details, overflow) = self.actions.split_at(split);
+        if overflow.is_empty() {
+            return (details, None);
         }
-        output
+        let delta = overflow.iter().try_fold(0_i128, |sum, action| {
+            sum.checked_add(i128::from(action.avail_delta_bytes?))
+        });
+        let summary = ActionOverflow {
+            avail_delta_bytes: delta.and_then(|sum| i64::try_from(sum).ok()),
+            duration_ms: overflow
+                .iter()
+                .fold(0_u64, |sum, action| sum.saturating_add(action.duration_ms)),
+            count: overflow
+                .iter()
+                .fold(0_u64, |sum, action| sum.saturating_add(action.count)),
+        };
+        (details, Some(summary))
     }
 
     /// Above 20 candidates, show one row per tier/profile/reason with at
-    /// most 20 example paths. Preserve the first occurrence's output order.
+    /// most 20 example paths and no candidate. Preserve the first
+    /// occurrence's output order.
     fn output_skips(&self) -> Vec<SkipEntry> {
         const EXAMPLE_LIMIT: usize = 20;
         type Key<'a> = (&'a str, &'a str, &'a str);
@@ -398,11 +457,11 @@ impl Report {
                 .entry((&skip.tier, &skip.profile, skip.reason.as_str()))
                 .or_insert_with(|| (0, Vec::new()));
             group.0 = group.0.saturating_add(skip.count);
-            if !skip.candidate.as_os_str().is_empty()
+            if let Some(candidate) = &skip.candidate
                 && group.1.len() < EXAMPLE_LIMIT
-                && !group.1.contains(&skip.candidate)
+                && !group.1.contains(candidate)
             {
-                group.1.push(skip.candidate.clone());
+                group.1.push(candidate.clone());
             }
             for example in &skip.examples {
                 if group.1.len() == EXAMPLE_LIMIT {
@@ -427,7 +486,7 @@ impl Report {
                     output.push(SkipEntry {
                         tier: skip.tier.clone(),
                         profile: skip.profile.clone(),
-                        candidate: PathBuf::new(),
+                        candidate: None,
                         count: *count,
                         examples: examples.clone(),
                         reason: skip.reason,
@@ -443,10 +502,11 @@ impl Report {
         output
     }
 
-    /// An empty report of `status` for `path`.
-    pub fn new(status: Status, path: Option<&Path>) -> Self {
+    /// An empty report of `status` for `path`; `dry_run` as asked for.
+    pub fn new(status: Status, path: Option<&Path>, dry_run: bool) -> Self {
         Self {
             status,
+            dry_run,
             started_at: None,
             duration_ms: None,
             seed: None,
@@ -475,13 +535,19 @@ impl Report {
 
     pub fn usage_error_with_cause(mut self, cause: ErrorCause, message: impl Into<String>) -> Self {
         self.status = Status::UsageError;
-        self.errors.push(ErrorEntry {
-            tier: String::new(),
-            profile: String::new(),
-            candidate: String::new(),
-            cause,
-            message: message.into(),
-        });
+        self.errors.push(ErrorEntry::run(cause, message));
+        self
+    }
+
+    /// The space goal as asked for, before anything is measured: a byte
+    /// count is known from the command line, a percentage only from the
+    /// filesystem's size (it stays `None` until the first sample). A run
+    /// that fails before its first sample still says what it was asked to
+    /// reach (TASK-191). `target` `None`: `--target-free` defaults to
+    /// `--min-free`.
+    pub fn with_goal(mut self, min: Size, target: Option<Size>) -> Self {
+        self.min_free_bytes = min.absolute_bytes();
+        self.target_free_bytes = target.unwrap_or(min).absolute_bytes();
         self
     }
 
@@ -499,8 +565,11 @@ impl Report {
     pub fn to_json(&self) -> String {
         let path = |p: &Path| Json::str(p.to_string_lossy());
         let opt_u64 = |v: Option<u64>| Json::opt(v, Json::U64);
+        let (actions, overflow) = self.output_actions();
         Json::Obj(vec![
             ("status", Json::str(self.status.as_str())),
+            ("exit_code", Json::U64(self.exit_code().into())),
+            ("dry_run", Json::Bool(self.dry_run)),
             (
                 "started_at",
                 Json::opt(self.started_at.as_deref(), Json::str),
@@ -524,11 +593,11 @@ impl Report {
                     self.plan
                         .iter()
                         .map(|p| {
-                            let mut fields = vec![
+                            Json::Obj(vec![
                                 ("group", Json::str(&p.group)),
                                 ("tier", Json::str(&p.tier)),
                                 ("profile", Json::str(&p.profile)),
-                                ("candidate", path(&p.candidate)),
+                                ("candidate", Json::opt(p.candidate.as_deref(), path)),
                                 ("eligible", Json::Bool(p.reason.is_none())),
                                 (
                                     "reason",
@@ -537,18 +606,20 @@ impl Report {
                                 ("estimated_bytes", opt_u64(p.estimated_bytes)),
                                 ("operation", Json::str(&p.operation)),
                                 ("checkouts", Json::str(p.checkouts.as_str())),
-                            ];
-                            if let Some(evidence) = &p.build_evidence {
-                                fields.push((
+                                (
                                     "build_evidence",
-                                    Json::Obj(vec![
-                                        ("marker", Json::str(evidence.marker)),
-                                        ("source", path(&evidence.source)),
-                                        ("idle_age_seconds", opt_u64(evidence.idle_age_seconds)),
-                                    ]),
-                                ));
-                            }
-                            Json::Obj(fields)
+                                    Json::opt(p.build_evidence.as_ref(), |evidence| {
+                                        Json::Obj(vec![
+                                            ("marker", Json::str(evidence.marker)),
+                                            ("source", path(&evidence.source)),
+                                            (
+                                                "idle_age_seconds",
+                                                opt_u64(evidence.idle_age_seconds),
+                                            ),
+                                        ])
+                                    }),
+                                ),
+                            ])
                         })
                         .collect(),
                 ),
@@ -556,7 +627,7 @@ impl Report {
             (
                 "actions",
                 Json::Arr(
-                    self.output_actions()
+                    actions
                         .iter()
                         .map(|a| {
                             Json::Obj(vec![
@@ -572,6 +643,20 @@ impl Report {
                                 ("count", Json::U64(a.count)),
                             ])
                         })
+                        .chain(overflow.map(|o| {
+                            Json::Obj(vec![
+                                ("tier", Json::Null),
+                                ("profile", Json::Null),
+                                ("candidate", Json::Null),
+                                (
+                                    "avail_delta_bytes",
+                                    Json::opt(o.avail_delta_bytes, Json::I64),
+                                ),
+                                ("duration_ms", Json::U64(o.duration_ms)),
+                                ("idle_age_seconds", Json::Null),
+                                ("count", Json::U64(o.count)),
+                            ])
+                        }))
                         .collect(),
                 ),
             ),
@@ -584,7 +669,7 @@ impl Report {
                             Json::Obj(vec![
                                 ("tier", Json::str(&s.tier)),
                                 ("profile", Json::str(&s.profile)),
-                                ("candidate", path(&s.candidate)),
+                                ("candidate", Json::opt(s.candidate.as_deref(), path)),
                                 ("count", Json::U64(s.count)),
                                 (
                                     "examples",
@@ -614,7 +699,7 @@ impl Report {
                         .map(|h| {
                             Json::Obj(vec![
                                 ("pid", Json::U64(u64::from(h.pid))),
-                                ("command", Json::str(&h.command)),
+                                ("command", Json::opt(h.command.as_deref(), Json::str)),
                                 ("bytes", Json::U64(h.bytes)),
                             ])
                         })
@@ -638,20 +723,7 @@ impl Report {
             ),
             (
                 "errors",
-                Json::Arr(
-                    self.errors
-                        .iter()
-                        .map(|e| {
-                            Json::Obj(vec![
-                                ("tier", Json::str(&e.tier)),
-                                ("profile", Json::str(&e.profile)),
-                                ("candidate", Json::str(&e.candidate)),
-                                ("cause", Json::str(e.cause.as_str())),
-                                ("message", Json::str(&e.message)),
-                            ])
-                        })
-                        .collect(),
-                ),
+                Json::Arr(self.errors.iter().map(ErrorEntry::to_json).collect()),
             ),
         ])
         .to_text()

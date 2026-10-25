@@ -326,7 +326,7 @@ reservation cannot outlive its producer;
 `every_builtin_source_has_match_in_use_guarded_and_nested_vectors` needs,
 for each built-in source run unchanged, an action of it, an `in_use` or
 `locked` skip, a `protected` or `excluded` skip, and a nested-guard skip
-(`kept`, `contains_checkout` or `contains_special`); Docker prunes need
+(`keep_marker`, `contains_checkout` or `contains_special`); Docker prunes need
 only the action; `every_blocker_evidence_has_a_vector` needs every
 `ProcessEvidence` value in some vector's matched `process_blockers`.
 `wrong_python_matcher_is_rejected_by_the_checked_in_vector`
@@ -550,7 +550,7 @@ Two keep a user profile with `liveness_contract: nix-shell`
 `nix-shell-command-action-live-owner-refused` (a command action is judged
 too). The precondition rows assert the report's `detail`.
 `vectors/builtins/nix-shell-rc.yaml` covers the built-in's roles (both
-shapes reclaimed, `in_use` by an fd, `protected`, `kept` by
+shapes reclaimed, `in_use` by an fd, `protected`, `keep_marker` by
 `.diskgc-keep`, a name without a valid pid `filtered`, `nix-shell.XXXXXX`
 and rc shapes below a shell temp directory not matched). The load-time
 cases and properties are Rust tests. The model has no parent links, so
@@ -561,7 +561,7 @@ pytest vectors landed with step 5: every row of the pytest table below is a
 file of that name in `vectors/liveness/` (against the built-in), plus
 `vectors/builtins/pytest-tmp.yaml` for the built-in's roles (a plain
 session and one holding a test's Git fixture reclaimed under `checkouts:
-allow`, `in_use` by an fd, `protected`, `kept`, `pytest-05` `filtered`, a
+allow`, `in_use` by an fd, `protected`, `keep_marker`, `pytest-05` `filtered`, a
 test directory and sessions outside the temp-prefix preset not matched).
 The project vectors land with TASK-79. Mutation record (step 3, each vector-corpus run red):
 skipping the namespace, `hidepid` or filesystem precondition; tabling only
@@ -820,7 +820,7 @@ the counterexample these turn into cases):
 | `node-project-vcs-only-change-eligible` | all old except `.git/FETCH_HEAD` changed yesterday | eligible |
 | `node-project-cwd-in-vcs-metadata-kept` | all old; a process with cwd `/home/tester/p/.git` | `in_use`, `cwd`: inside by path, though the walk leaves `.git` out |
 | `node-project-fd-in-sibling-dependency-dir-kept` | all old; `p/other/node_modules/y.js` open in a process | `in_use`, `fd` |
-| `node-project-keep-marker-kept` | all old; `p/node_modules/.diskgc-keep` | `kept`: the operator's remedy for hand-edited dependencies |
+| `node-project-keep-marker-kept` | all old; `p/node_modules/.diskgc-keep` | `keep_marker`: the operator's remedy for hand-edited dependencies |
 | `node-project-symlinked-node-modules-not-candidate` | `p/node_modules` a symlink to `/home/tester/shared/node_modules` | no candidate; the target preserved |
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
 | `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory, `mountinfo` root `/w/packages/a`) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |

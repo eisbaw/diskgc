@@ -72,6 +72,16 @@ pub fn parse_size(text: &str) -> Result<Size, String> {
 }
 
 impl Size {
+    /// The bytes this size means without knowing the filesystem: a byte
+    /// count as written, `None` for a percentage (only a sample of the
+    /// filesystem's size turns it into bytes, [`Size::bytes`]).
+    pub fn absolute_bytes(self) -> Option<u64> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Percent(_) => None,
+        }
+    }
+
     /// The bytes this size means on a filesystem of `fs_size` bytes. A size
     /// above the filesystem's is an error (docs/reference.md: a usage
     /// error), so is a percentage above 100.
