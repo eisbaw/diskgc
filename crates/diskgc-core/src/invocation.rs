@@ -21,7 +21,7 @@ use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::Delete;
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
-use crate::resolve::{ResolveError, Want, resolve_in};
+use crate::resolve::{ResolveError, Want, resolve_in, screen_mount_chain};
 use crate::select;
 use crate::units::Size;
 
@@ -436,6 +436,13 @@ fn run<H: Delete>(
 /// read is left to the executor's own host error (exit 3), not turned
 /// into a usage error. A root removed after this check is still the
 /// executor's `missing` skip.
+///
+/// Mounts first (docs/safety.md, Before the walk): a path whose mount chain
+/// [`screen_mount_chain`] refuses (a FUSE or network mount, PrivateTmp, an
+/// unclear mount) is never resolved here, so it is never "missing". Opening
+/// and `statx`ing a dead FUSE mount point hangs in the kernel (TASK-178);
+/// the executor's preflight and protect discovery refuse such a root from
+/// the same screen without touching it.
 fn refuse_missing_roots<H: Delete>(
     host: &H,
     config: Option<&Config>,
@@ -468,12 +475,16 @@ fn refuse_missing_roots<H: Delete>(
     let Ok(mounts) = host.mountinfo() else {
         return Ok(());
     };
+    let is_missing = |path: &Path| {
+        screen_mount_chain(&mounts, path).is_ok()
+            && matches!(
+                resolve_in(host, &mounts, path, Want::Directory),
+                Err(ResolveError::Missing { .. })
+            )
+    };
     // A missing PATH is the executor's first refusal (`PATH ...:
     // missing`): the more basic mistake is reported first.
-    if matches!(
-        resolve_in(host, &mounts, &options.path, Want::Directory),
-        Err(ResolveError::Missing { .. })
-    ) {
+    if is_missing(&options.path) {
         return Ok(());
     }
     let uid = uid.to_string();
@@ -482,10 +493,7 @@ fn refuse_missing_roots<H: Delete>(
         .into_iter()
         .filter_map(|(root, at)| {
             let path = PathBuf::from(root.replace("{uid}", &uid));
-            let gone = matches!(
-                resolve_in(host, &mounts, &path, Want::Directory),
-                Err(ResolveError::Missing { .. })
-            );
+            let gone = is_missing(&path);
             from_config |= gone && at != "--roots";
             gone.then(|| format!("{} ({at})", path.display()))
         })

@@ -167,6 +167,22 @@ fn violation(message: impl fmt::Display) -> ! {
     panic!("ModelHost call check failed: {message}")
 }
 
+/// Fails the test when `op` would reach the filesystem of a `dead` mount:
+/// its server never answers, so on Linux the call sleeps in the kernel
+/// (`fuse_get_req`, an NFS RPC) and no deadline can interrupt it (TASK-102,
+/// TASK-178). docs/safety.md, Before the walk (Mounts first): such a mount
+/// is judged from mountinfo alone, never opened below, `statx`ed, listed,
+/// read or `statfs`ed.
+fn refuse_dead_mount(state: &State, loc: Loc, op: &str, shown: &str) {
+    if state.mount(loc.mnt).dead {
+        violation(format!(
+            "{op} of {shown} reaches dead mount {}, whose server never answers: the call \
+             would hang; judge it from mountinfo without touching it",
+            loc.mnt
+        ));
+    }
+}
+
 /// A fixture or test mistake (not a property of the code under test).
 fn model_error(message: impl fmt::Display) -> ! {
     panic!("host model error: {message}")
@@ -746,7 +762,9 @@ impl Host for ModelHost {
                 no_symlinks: how.resolve.no_symlinks,
                 no_xdev: how.resolve.no_xdev,
                 open_trailing_symlink: how.nofollow && how.access == Access::Path,
+                refuse_dead: true,
             };
+            refuse_dead_mount(state, start, "openat2", &shown);
             let found = if state.inode(start).entries().is_none() {
                 Err(Fault::Errno(Errno::ENOTDIR))
             } else if path.as_os_str().is_empty() {
@@ -766,6 +784,10 @@ impl Host for ModelHost {
             });
             match found {
                 Ok(loc) => {
+                    // An `O_PATH` open of a dead FUSE mount point itself
+                    // returns (TASK-178's hung diskgc held one); the model
+                    // is stricter, as the rule is "never opened".
+                    refuse_dead_mount(state, loc, "openat2", &shown);
                     let object = state.dev_ino(loc);
                     let ofd = inner.state.open_ofd(loc, full.clone(), how.access);
                     inner.state.own_ofds.insert(ofd);
@@ -813,6 +835,7 @@ impl Host for ModelHost {
                 );
             }
             let dir = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, dir, "statx", &shown);
             let found = if name.is_empty() {
                 Ok(dir)
             } else {
@@ -820,6 +843,7 @@ impl Host for ModelHost {
             };
             match found {
                 Ok(loc) => {
+                    refuse_dead_mount(&inner.state, loc, "statx", &shown);
                     let mut stat = inner.state.stat(loc);
                     if inner.missing_statx_type_at.contains(&target) {
                         stat.file_type = None;
@@ -1003,6 +1027,7 @@ impl Host for ModelHost {
                 );
             }
             let loc = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, loc, "getdents", &shown);
             let object = Some(inner.state.dev_ino(loc));
             match inner.state.inode(loc).entries() {
                 Some(entries) if entries.len() > limit => {
@@ -1040,6 +1065,7 @@ impl Host for ModelHost {
                 );
             }
             let loc = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, loc, "read", &shown);
             let object = Some(inner.state.dev_ino(loc));
             match inner.state.inode(loc).kind {
                 Kind::File {
@@ -1111,6 +1137,7 @@ impl Host for ModelHost {
                 );
             }
             let loc = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, loc, "fstatvfs", &shown);
             (Ok(inner.state.space(loc.mnt)), None, "ok".to_owned())
         })
     }
@@ -1568,6 +1595,7 @@ impl Host for ModelHost {
                 );
             }
             let loc = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, loc, "fstatfs", &shown);
             let fs = inner.state.fs(loc.mnt).fs_type.clone();
             let magic = crate::state::fs_magic(&fs);
             (Ok(magic), None, format!("{fs} {magic:#x}"))

@@ -377,7 +377,9 @@ How the format reads (the schema documents every key):
   to 1000, times to `clock`.
 - **Mounts** in mount order, each with a `parent` (a stacked mount's parent
   is the mount it covers); `statx_missing` lists fields the filesystem does
-  not answer. A repeated device requires `bind_of: <earlier mount id>` and
+  not answer; `dead: true` is a mount whose server never answers, and any
+  call that reaches it (`openat2` to or below it, `statx`, `getdents`, a
+  read, `statfs`, `statvfs`) fails the test, as it would hang on Linux. A repeated device requires `bind_of: <earlier mount id>` and
   exposes that filesystem's root through a distinct mount ID. Filesystem
   metadata must match; subdirectory binds are not represented.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`

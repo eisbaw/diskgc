@@ -180,6 +180,8 @@ pub struct Mount {
     /// The directory this mount covers, on its parent mount.
     pub on: Option<Loc>,
     pub read_only: bool,
+    /// Its server never answers ([`crate::spec::MountSpec::dead`]).
+    pub dead: bool,
 }
 
 /// An open file description: what `open` creates and `flock` locks. Shared
@@ -291,6 +293,11 @@ pub struct WalkRules {
     pub no_xdev: bool,
     /// `O_PATH | O_NOFOLLOW`: a trailing symlink is opened, not refused.
     pub open_trailing_symlink: bool,
+    /// A walk for diskgc's own `openat2`, not a fixture's lookup: a name
+    /// looked up on a `dead` mount, or a step into one, fails the test
+    /// whatever the walk's outcome (on Linux the lookup waits on the server
+    /// even when the answer would be ENOENT).
+    pub refuse_dead: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -491,6 +498,7 @@ impl State {
             dev,
             on: Some(on),
             read_only: false,
+            dead: false,
         });
         Ok(())
     }
@@ -539,15 +547,28 @@ impl State {
                     Fault::Model(format!("'..' in {} is not modelled", path.display()))
                 }
             })?;
+        let refuse_dead = |at: Loc, step: &str| {
+            if rules.refuse_dead && self.mount(at.mnt).dead {
+                panic!(
+                    "ModelHost call check failed: openat2 of {} {step} dead mount {}, whose \
+                     server never answers: the lookup would hang; judge it from mountinfo \
+                     without touching it",
+                    path.display(),
+                    at.mnt
+                );
+            }
+        };
         let mut here = start;
         for (i, name) in names.iter().enumerate() {
             let last = i + 1 == names.len();
+            refuse_dead(here, "looks up a name on");
             let entries = self.inode(here).entries().ok_or(Errno::ENOTDIR)?;
             let child = *entries.get(*name).ok_or(Errno::ENOENT)?;
             let (next, crossed) = self.through_mounts(Loc {
                 mnt: here.mnt,
                 ino: child,
             });
+            refuse_dead(next, "steps into");
             if crossed && rules.no_xdev {
                 return Err(Errno::EXDEV.into());
             }

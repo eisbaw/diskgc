@@ -853,6 +853,10 @@
           "format": "uint64",
           "minimum": 0
         },
+        "dead": {
+          "description": "The filesystem's server never answers (a dead FUSE daemon or NFS\nserver): `mountinfo` still lists the mount, but a call that reaches\nit (`openat2` to or below it, `statx`, `getdents`, a read, `statfs`,\n`statvfs`) would hang, so the model fails the test at that call. A\nbind of a dead mount needs its own `dead: true`.",
+          "type": "boolean"
+        },
         "dev": {
           "description": "Device number `major:minor`. Reuse requires `bind_of`.",
           "$ref": "#/$defs/Dev"

@@ -1,0 +1,41 @@
+# TASK-178: protect roots at and below a dead FUSE mount, under --select
+# (which keeps protect); `absent` does not exist, but a lookup there would
+# wait on the dead server, so it is not reported missing (exit 2) either. The missing-root check (TASK-152) used to resolve
+# every supplied root, which opened and statx-ed the mount point and hung
+# in the kernel (fuse_get_req) before protect discovery could refuse it
+# from mountinfo. Neither root is "missing": discovery refuses both
+# without touching the mount (`dead: true` fails the run at any call that
+# reaches it). Exit 3, nothing deleted.
+profile_vector: 1
+config: |
+  version: 1
+  protect:
+    - {profile: cargo-target, roots: [/home/tester/fuse-dead, /home/tester/fuse-dead/below, /home/tester/fuse-dead/absent]}
+profile: cargo-target
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /home/tester/fuse-dead, fs: fuse.sshfs, dev: "0:60", size: 1G, parent: 2, dead: true}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/fuse-dead/below: {}
+    /home/tester/src/app/Cargo.toml: {}
+    /home/tester/src/app/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: operation, contains: "protect `cargo-target` cannot prove matches at /home/tester/fuse-dead: unsupported_fs"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "protect `cargo-target` cannot prove matches at /home/tester/fuse-dead: unsupported_fs"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/app/target/debug/deps/app]

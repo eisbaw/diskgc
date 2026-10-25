@@ -3006,7 +3006,11 @@ these features backported, and an unparseable release is refused too.
   every root the operator supplied (tier and `protect` `roots:`,
   `--roots`) exists; one that does not is exit 2 naming it and where it
   was written (TASK-152), because a typo or an unedited example root
-  otherwise reads as one skipped candidate and exit 0. `check` warns about
+  otherwise reads as one skipped candidate and exit 0. Mounts first: a
+  root whose mount chain is refused from mountinfo (FUSE, network,
+  PrivateTmp, unclear) is not opened by this check and is not "missing";
+  the later phases refuse it without touching it (TASK-178: resolving one
+  on a dead FUSE mount hung `ensure`). `check` warns about
   them without changing its exit code. Roots a profile fixes itself are
   not held to this: their absence is normal (`missing` below).
 - **Environmental** (at the start of every reclaim, for *all* tiers, before

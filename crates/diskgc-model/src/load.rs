@@ -289,6 +289,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             dev,
             on,
             read_only: spec.read_only,
+            dead: spec.dead,
         });
         paths.insert(spec.id, spec.at.clone());
     }

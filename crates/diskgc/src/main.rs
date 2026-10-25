@@ -38,6 +38,7 @@ use diskgc_core::kernel::KernelError;
 use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
+use diskgc_core::resolve::screen_mount_chain;
 use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{read_config_file, read_root_config_file};
@@ -851,19 +852,36 @@ fn check(flag: Option<&OsStr>) -> Result<String, String> {
 /// TASK-152: a configured root that does not exist here is an `ensure`
 /// refusal (exit 2); `check` says so as an advisory warning and keeps its
 /// exit code, because packagers run it where the deployment's roots do not
-/// exist (the NixOS module at build time, the flake's sandbox check). A
-/// read-only `stat` per root, following symlinks
-/// ([`diskgc_linux::host::path_is_absent`]): the hint only needs "absent",
-/// and `ensure` decides with its own safe resolution. `{uid}` is
-/// the caller's, as `ensure` will expand it.
+/// exist (the NixOS module at build time, the flake's sandbox check). The
+/// hint only needs "absent", and `ensure` decides with its own safe
+/// resolution. `{uid}` is the caller's, as `ensure` will expand it.
+///
+/// Mounts first, as `ensure`'s check (TASK-178): a root whose mount chain
+/// mountinfo refuses (FUSE, network, PrivateTmp, unclear) is not looked up,
+/// since a dead server would hang the lookup; without a mount table no
+/// root is looked up. [`diskgc_linux::host::path_is_absent`] follows no
+/// symlink, so the lookup stays on the screened chain.
 fn warn_missing_roots(config: &Config) {
+    if config.written_roots.is_empty() {
+        return;
+    }
+    let mounts = match diskgc_linux::host::read_mountinfo_unheld() {
+        Ok(mounts) => mounts,
+        Err(why) => {
+            log(&format!(
+                "warning: cannot read the mount table ({why}); configured roots not checked"
+            ));
+            return;
+        }
+    };
     let uid = diskgc_linux::host::effective_uid().to_string();
     for written in &config.written_roots {
-        let root = written.root.replace("{uid}", &uid);
-        if diskgc_linux::host::path_is_absent(Path::new(&root)) {
+        let root = PathBuf::from(written.root.replace("{uid}", &uid));
+        if screen_mount_chain(&mounts, &root).is_ok() && diskgc_linux::host::path_is_absent(&root) {
             log(&format!(
-                "warning: root {root} does not exist on this machine (config {}: {written}); \
+                "warning: root {} does not exist on this machine (config {}: {written}); \
                  ensure refuses this configuration here (exit 2)",
+                root.display(),
                 config.path.display()
             ));
         }

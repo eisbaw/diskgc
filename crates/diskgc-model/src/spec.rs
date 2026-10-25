@@ -188,6 +188,13 @@ pub struct MountSpec {
     pub parent: Option<u64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// The filesystem's server never answers (a dead FUSE daemon or NFS
+    /// server): `mountinfo` still lists the mount, but a call that reaches
+    /// it (`openat2` to or below it, `statx`, `getdents`, a read, `statfs`,
+    /// `statvfs`) would hang, so the model fails the test at that call. A
+    /// bind of a dead mount needs its own `dead: true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dead: bool,
     /// `statx` fields the filesystem does not answer (kernel capabilities):
     /// they come back as `None`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

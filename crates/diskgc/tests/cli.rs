@@ -407,6 +407,47 @@ fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
     );
 }
 
+/// TASK-152 and TASK-178: `check` warns about a supplied root that does not
+/// exist, and only that one: an existing root, and one reached through a
+/// symlink (never followed, so never looked up beyond the screened mount
+/// chain), get no warning. Exit 0 either way.
+#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[test]
+fn check_warns_only_about_an_absent_supplied_root() {
+    let tmp = TempDir::new("check-missing-root");
+    let present = tmp.0.join("present");
+    std::fs::create_dir(&present).expect("mkdir");
+    std::os::unix::fs::symlink("/nonexistent-diskgc-target", tmp.0.join("link")).expect("symlink");
+    let absent = tmp.0.join("absent");
+    let through_link = tmp.0.join("link/below");
+    let path = tmp.0.join("config.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            "version: 1\nprofiles:\n  - name: guard\n    find: {{roots: required, paths: ['*'], type: dir}}\n    action: delete\n    examples: {{root: /tmp, match: [/tmp/x]}}\nprotect: [{{profile: guard, roots: [{}, {}, {}]}}]\n",
+            present.display(),
+            absent.display(),
+            through_link.display()
+        ),
+    )
+    .expect("write");
+    let out = diskgc(&["check", "--config", path.to_str().expect("UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stderr.matches("does not exist on this machine").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "warning: root {} does not exist",
+            absent.display()
+        )),
+        "{stderr}"
+    );
+}
+
 #[cfg(not(feature = "proposed-release-01-catalog"))]
 #[test]
 fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {

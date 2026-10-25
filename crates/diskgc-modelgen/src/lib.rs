@@ -200,6 +200,7 @@ pub fn base_mounts() -> Vec<MountSpec> {
         other_used: Bytes(0),
         parent,
         read_only: false,
+        dead: false,
         statx_missing: Vec::new(),
     };
     vec![
@@ -248,6 +249,7 @@ pub fn host_model(
                     other_used: Bytes(0),
                     parent: Some(TMP_MOUNT),
                     read_only: false,
+                    dead: false,
                     statx_missing: Vec::new(),
                 });
             }
