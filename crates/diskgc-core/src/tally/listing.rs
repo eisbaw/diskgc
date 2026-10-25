@@ -147,3 +147,159 @@ fn indexed(
         },
     })
 }
+
+/// Operations a listing step does at least after a stalled one (one that
+/// paused before doing any: reaching the root and reopening the way down
+/// took its whole batch), as the sizing cursor does.
+pub const LISTING_STEP_MIN: usize = 32;
+
+/// A resumable listing of one source (the background tally's; Mark,
+/// 2026-10-25): its kind's own discovery, paused between batches by the
+/// batch's bounds, holding names but no file descriptor
+/// ([`fs_kind::DiscoverCursor`], [`cargo_target::DiscoverCursor`]). The
+/// round is **complete** when the walk reached its end and nothing on the
+/// way was refused, across all its steps.
+#[derive(Debug, Clone)]
+pub struct ListingCursor {
+    finder: Finder,
+    walk: Walker,
+    /// When the round started: singles of this finder not found since are
+    /// lost when the round completes ([`super::recount::apply_round`]).
+    started: MonoTime,
+    /// Nothing refused so far.
+    clean: bool,
+    stalled: bool,
+}
+
+#[derive(Debug, Clone)]
+enum Walker {
+    Fs(fs_kind::DiscoverCursor),
+    Cargo(cargo_target::DiscoverCursor),
+}
+
+/// What one step of a [`ListingCursor`] found.
+#[derive(Debug, Default)]
+pub struct ListingStep {
+    pub listed: Vec<Listed>,
+    pub unindexed: BTreeSet<PathBuf>,
+    /// The walk reached its end.
+    pub done: bool,
+    /// The whole round, if done: no refusal in any step.
+    pub complete: bool,
+}
+
+impl ListingCursor {
+    /// A round of `source`, started at `now`.
+    pub fn new(source: &TallySource, now: MonoTime) -> Self {
+        let root = source.finder.root.to_path_buf();
+        let walk = match &source.find {
+            SourceFind::Fs(_) => Walker::Fs(fs_kind::DiscoverCursor::new(root, false)),
+            SourceFind::CargoTarget => Walker::Cargo(cargo_target::DiscoverCursor::new(root)),
+        };
+        Self {
+            finder: source.finder.clone(),
+            walk,
+            started: now,
+            clean: true,
+            stalled: false,
+        }
+    }
+
+    pub fn finder(&self) -> &Finder {
+        &self.finder
+    }
+
+    pub fn started(&self) -> MonoTime {
+        self.started
+    }
+
+    /// An upper bound of the heap it owns (counted against the index's
+    /// budget with the sizing cursor).
+    pub fn counted_bytes(&self) -> usize {
+        match &self.walk {
+            Walker::Fs(c) => c.counted_bytes(),
+            Walker::Cargo(c) => c.counted_bytes(),
+        }
+    }
+
+    /// Walks on within `budget` (after a stalled step, at least
+    /// [`LISTING_STEP_MIN`] operations whatever it says). `source` must be
+    /// the one it was made for. An error is a failure of the host: the
+    /// round must be dropped.
+    pub fn step<H: Host>(
+        &mut self,
+        host: &H,
+        source: &TallySource,
+        budget: &mut super::budget::Budget,
+    ) -> Result<ListingStep, HostError> {
+        assert_eq!(
+            source.finder, self.finder,
+            "a listing cursor of another source"
+        );
+        let min = if self.stalled { LISTING_STEP_MIN } else { 0 };
+        let mut done_ops = 0usize;
+        let mut pause = |ops: usize| {
+            if done_ops >= min && budget.spent(host) {
+                return true;
+            }
+            budget.take(ops);
+            done_ops += ops;
+            false
+        };
+        let mut out = fs_kind::Discovery::default();
+        let mut cargo = cargo_target::Discovery::default();
+        let stepped = match (&mut self.walk, &source.find) {
+            (Walker::Fs(cursor), SourceFind::Fs(find)) => cursor
+                .step(host, find, &mut out, &mut pause)
+                .map(|s| matches!(s, fs_kind::Stepped::Done)),
+            (Walker::Cargo(cursor), SourceFind::CargoTarget) => cursor
+                .step(host, &mut cargo, &mut pause)
+                .map(|s| matches!(s, cargo_target::Stepped::Done)),
+            _ => unreachable!("the walker is made from the source's kind"),
+        };
+        let done = match stepped {
+            Ok(done) => done,
+            Err(Stop::Failed { error, .. }) => return Err(error),
+            Err(stop) => {
+                return Err(HostError::invalid(
+                    "list",
+                    source.finder.root.display(),
+                    stop.to_string(),
+                ));
+            }
+        };
+        self.stalled = !done && done_ops == 0;
+        let mut found: Vec<(PathBuf, engine::Identity, Seen, MonoTime)> = Vec::new();
+        let mut step = ListingStep::default();
+        for (path, candidate) in out.candidates {
+            match candidate {
+                Ok(f) => found.push((f.path, f.identity, f.seen, f.found_at)),
+                Err(_) => {
+                    step.unindexed.insert(path);
+                }
+            }
+        }
+        let now = host.now();
+        for target in cargo.targets {
+            found.push((target.path, target.identity, target.seen, now));
+        }
+        if !out.refused.is_empty() || !cargo.refused.is_empty() {
+            self.clean = false;
+        }
+        if !found.is_empty() {
+            let mounts = host.mountinfo()?;
+            let now_wall = host.wall_clock();
+            for (path, identity, seen, at) in found {
+                match indexed(&mounts, &path, identity, seen, at, now_wall) {
+                    Some(listed) => step.listed.push(listed),
+                    None => {
+                        step.unindexed.insert(path);
+                    }
+                }
+            }
+        }
+        step.done = done;
+        step.complete = done && self.clean;
+        Ok(step)
+    }
+}

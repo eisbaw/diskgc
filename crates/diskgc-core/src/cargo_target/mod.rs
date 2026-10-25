@@ -46,7 +46,8 @@ use crate::engine::{CARGO_LOCK_NAMES, Identity, Seen};
 use crate::host::{DevIno, FileType, Stat, Timestamp};
 
 pub use discover::{
-    CARGO_MANIFEST, DISCOVERY_DEPTH, Discovery, Project, Reached, discover, inspect, reach,
+    CARGO_MANIFEST, DISCOVERY_DEPTH, DiscoverCursor, Discovery, Project, Reached, Stepped,
+    discover, inspect, reach,
 };
 pub use eligible::{
     Eligible, ProfileWalk, Tally, eligibility, judge_layout, last_build, tally, walk_profiles,

@@ -98,16 +98,21 @@ pub fn discover<H: Host>(
         if !seen_roots.insert(identity) {
             continue;
         }
-        Walk {
+        let mut cursor = DiscoverCursor::new(root.to_owned());
+        cursor.root_id = Some(identity);
+        cursor.frames.push(Frame::root(resolved.stat.ino));
+        cursor.seen = std::mem::take(&mut seen);
+        let walked = cursor.walk(
             host,
-            root,
-            mount_id: resolved.mount.id,
-            mounts: &mounts,
+            &mounts,
+            resolved.mount.id,
             deadline,
-            found: &mut found,
-            seen: &mut seen,
-        }
-        .run(resolved.fd, resolved.stat.ino)?;
+            &mut found,
+            vec![resolved.fd],
+            &mut |_| false,
+        );
+        seen = std::mem::take(&mut cursor.seen);
+        walked?;
     }
     Ok(found)
 }
@@ -533,7 +538,293 @@ fn profile_dir_in<H: Host>(
     }))
 }
 
-/// A walk of one root.
+/// A directory on the walk's way down: names only, so a walk can pause
+/// between steps holding no file descriptor (the background tally's,
+/// [`DiscoverCursor`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    /// Its name in its parent (`None`: the root).
+    name: Option<OsString>,
+    depth: usize,
+    /// Its identity when entered.
+    id: Option<DevIno>,
+    /// Its inode, if reported: the parent inode of a target found in it.
+    ino: Option<u64>,
+    /// Its entries, sorted, once listed and judged not to be a target
+    /// (a target is recorded and its frame dropped at once).
+    names: Option<Vec<OsString>>,
+    /// How many of `names` are done.
+    next: usize,
+}
+
+impl Frame {
+    fn root(ino: Option<u64>) -> Self {
+        Self {
+            name: None,
+            depth: 0,
+            id: None,
+            ino,
+            names: None,
+            next: 0,
+        }
+    }
+}
+
+/// What one [`DiscoverCursor::step`] came to.
+#[derive(Debug)]
+pub enum Stepped {
+    /// The pause callback stopped it; call again to go on.
+    Paused,
+    Done,
+}
+
+/// A resumable discovery of one root (as `fs_kind`'s, see its module doc,
+/// Resumable): each step reaches the root again and reopens the way down by
+/// name; a directory gone ends its branch, one replaced is refused
+/// (`changed`); no file descriptor is held between steps.
+#[derive(Debug, Clone)]
+pub struct DiscoverCursor {
+    root: PathBuf,
+    root_id: Option<DevIno>,
+    frames: Vec<Frame>,
+    seen: HashSet<DevIno>,
+}
+
+impl DiscoverCursor {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            root_id: None,
+            frames: Vec::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// An upper bound of the heap the cursor owns, as the index counts its
+    /// own (`crate::index::memory`).
+    pub fn counted_bytes(&self) -> usize {
+        use crate::index::memory::{heap, vec_bytes};
+        use std::mem::size_of;
+        let name = |n: &OsString| heap(n.capacity());
+        heap(self.root.capacity())
+            + vec_bytes(self.frames.capacity(), size_of::<Frame>())
+            + self
+                .frames
+                .iter()
+                .map(|f| {
+                    f.name.as_ref().map_or(0, name)
+                        + f.names.as_ref().map_or(0, |names| {
+                            vec_bytes(names.capacity(), size_of::<OsString>())
+                                + names.iter().map(name).sum::<usize>()
+                        })
+                })
+                .sum::<usize>()
+            + heap(self.seen.capacity().max(1) * 2 * (size_of::<DevIno>() + 1))
+    }
+
+    /// Walks on, adding what it finds to `out`, until `pause` (asked with
+    /// the operations about to be made, before every listing and `statx`)
+    /// says stop, or the end. An error of the run stops it; the cursor
+    /// must then be dropped.
+    pub fn step<H: Host>(
+        &mut self,
+        host: &H,
+        out: &mut Discovery,
+        pause: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Stepped, Stop> {
+        if self.frames.is_empty() && self.root_id.is_some() {
+            return Ok(Stepped::Done);
+        }
+        let root = self.root.clone();
+        let LocalRoot { resolved, mounts } = match resolve_root(host, &root) {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(skip)) => {
+                out.refused.push(skip);
+                self.finish();
+                return Ok(Stepped::Done);
+            }
+            Err(e) => {
+                out.refused.push(unreachable_root(&root, e)?);
+                self.finish();
+                return Ok(Stepped::Done);
+            }
+        };
+        let Some(identity) = resolved.stat.dev_ino() else {
+            out.refused.push(Skip::new(
+                Reason::UnsupportedFs,
+                root.clone(),
+                "the root inode identity was not reported",
+            ));
+            self.finish();
+            return Ok(Stepped::Done);
+        };
+        match self.root_id {
+            None => {
+                self.root_id = Some(identity);
+                self.frames.push(Frame::root(resolved.stat.ino));
+            }
+            Some(id) if id != identity => {
+                out.refused.push(Skip::new(
+                    Reason::Changed,
+                    root.clone(),
+                    "the root was replaced while it was listed across batches",
+                ));
+                self.finish();
+                return Ok(Stepped::Done);
+            }
+            Some(_) => {}
+        }
+        let mount_id = resolved.mount.id;
+        let mut open = vec![resolved.fd];
+        while open.len() < self.frames.len() {
+            let depth = open.len();
+            let name = self.frames[depth].name.clone().expect("named");
+            let at = self.path_of(depth);
+            match open_dir(host, &open[depth - 1], mount_id, Path::new(&name), &at)? {
+                Ok((fd, stat)) if stat.dev_ino() == self.frames[depth].id => open.push(fd),
+                Ok(_) => {
+                    out.refused.push(Skip::new(
+                        Reason::Changed,
+                        at,
+                        "replaced while it was listed across batches",
+                    ));
+                    self.frames.truncate(depth);
+                }
+                // Gone (`changed` from open_dir), or unreadable: as the
+                // one-shot walk treats it.
+                Err(skip) => {
+                    if skip.reason != Reason::Changed {
+                        out.refused.push(skip);
+                    }
+                    self.frames.truncate(depth);
+                }
+            }
+        }
+        self.walk(host, &mounts, mount_id, None, out, open, pause)
+    }
+
+    fn finish(&mut self) {
+        self.frames.clear();
+        if self.root_id.is_none() {
+            self.root_id = Some(DevIno {
+                dev: crate::host::Dev { major: 0, minor: 0 },
+                ino: 0,
+            });
+        }
+    }
+
+    fn path_of(&self, depth: usize) -> PathBuf {
+        let mut path = self.root.clone();
+        for frame in &self.frames[1..=depth] {
+            path.push(frame.name.as_ref().expect("named"));
+        }
+        path
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk<H: Host>(
+        &mut self,
+        host: &H,
+        mounts: &[MountEntry],
+        mount_id: u64,
+        deadline: Option<MonoTime>,
+        found: &mut Discovery,
+        mut open: Vec<H::Fd>,
+        pause: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Stepped, Stop> {
+        assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
+        let root = self.root.clone();
+        let mut seen = std::mem::take(&mut self.seen);
+        let result = (|| -> Result<Stepped, Stop> {
+            loop {
+                let Some(depth) = self.frames.len().checked_sub(1) else {
+                    return Ok(Stepped::Done);
+                };
+                let path = self.path_of(depth);
+                let mut walk = Walk {
+                    host,
+                    root: &root,
+                    mount_id,
+                    mounts,
+                    deadline,
+                    found: &mut *found,
+                    seen: &mut seen,
+                };
+                if self.frames[depth].names.is_none() {
+                    if pause(1) {
+                        return Ok(Stepped::Paused);
+                    }
+                    let parent_ino = depth.checked_sub(1).and_then(|p| self.frames[p].ino);
+                    match walk.visit(&open[depth], &path, self.frames[depth].depth, parent_ino)? {
+                        Some(names) => self.frames[depth].names = Some(names),
+                        None => {
+                            // A target (recorded), unreadable, or at the
+                            // depth limit: nothing below to walk.
+                            self.frames.pop();
+                            open.pop();
+                            continue;
+                        }
+                    }
+                }
+                let frame = &self.frames[depth];
+                let Some(name) = frame
+                    .names
+                    .as_ref()
+                    .expect("listed")
+                    .get(frame.next)
+                    .cloned()
+                else {
+                    self.frames.pop();
+                    open.pop();
+                    continue;
+                };
+                let at = path.join(&name);
+                if is_private_tmp(&name) || mount_at(mounts, &at) {
+                    self.frames[depth].next += 1;
+                    continue;
+                }
+                if pause(2) {
+                    return Ok(Stepped::Paused);
+                }
+                let child_depth = frame.depth + 1;
+                self.frames[depth].next += 1;
+                match subdir(host, &open[depth], mounts, mount_id, &name, &at)? {
+                    Ok(Some(_)) => {}
+                    Ok(None) => continue,
+                    // A mount below the root is not crossed, and not
+                    // refused: it is simply not this root's.
+                    Err(skip) if skip.reason == Reason::ContainsMount => continue,
+                    Err(skip) => {
+                        walk.refuse(skip);
+                        continue;
+                    }
+                }
+                match open_dir(host, &open[depth], mount_id, Path::new(&name), &at)? {
+                    Ok((fd, stat)) => {
+                        open.push(fd);
+                        self.frames.push(Frame {
+                            name: Some(name),
+                            depth: child_depth,
+                            id: stat.dev_ino(),
+                            ino: stat.ino,
+                            names: None,
+                            next: 0,
+                        });
+                    }
+                    Err(skip) => walk.refuse(skip),
+                }
+            }
+        })();
+        self.seen = seen;
+        result
+    }
+}
+
+/// One step's view of the walk of one root.
 struct Walk<'a, H: Host> {
     host: &'a H,
     root: &'a Path,
@@ -544,51 +835,7 @@ struct Walk<'a, H: Host> {
     seen: &'a mut HashSet<DevIno>,
 }
 
-/// A directory being walked: its fd and the subdirectories still to visit
-/// (opened one at a time, so at most one fd per level is held).
-struct Frame<F> {
-    fd: F,
-    path: PathBuf,
-    depth: usize,
-    /// Its inode, if reported: the parent inode of a target found in it.
-    ino: Option<u64>,
-    pending: std::vec::IntoIter<OsString>,
-}
-
 impl<H: Host> Walk<'_, H> {
-    fn run(mut self, root_fd: H::Fd, root_ino: Option<u64>) -> Result<(), Stop> {
-        let mut stack: Vec<Frame<H::Fd>> = Vec::new();
-        // The root's own parent is not opened: a target at the root has
-        // no parent inode (only a filesystem without birth times needs it).
-        if let Some(frame) = self.visit(root_fd, self.root.to_owned(), 0, root_ino, None)? {
-            stack.push(frame);
-        }
-        while let Some(top) = stack.last_mut() {
-            let Some(name) = top.pending.next() else {
-                stack.pop();
-                continue;
-            };
-            let path = top.path.join(&name);
-            if is_private_tmp(&name) {
-                continue;
-            }
-            if mount_at(self.mounts, &path) {
-                continue;
-            }
-            let depth = top.depth + 1;
-            let parent_ino = top.ino;
-            match open_dir(self.host, &top.fd, self.mount_id, Path::new(&name), &path)? {
-                Ok((fd, stat)) => {
-                    if let Some(frame) = self.visit(fd, path, depth, stat.ino, parent_ino)? {
-                        stack.push(frame);
-                    }
-                }
-                Err(skip) => self.refuse(skip),
-            }
-        }
-        Ok(())
-    }
-
     /// A refusal worth reporting; a directory that vanished while the walk
     /// ran (`changed`) is not: it holds nothing any more.
     fn refuse(&mut self, skip: Skip) {
@@ -597,18 +844,17 @@ impl<H: Host> Walk<'_, H> {
         }
     }
 
-    /// Looks at the directory open as `fd`: a target is recorded and not
-    /// descended into; otherwise its subdirectories on the root's mount are
-    /// returned to visit, unless it is at the depth limit.
+    /// Looks at the directory open as `fd`: a target is recorded (`None`:
+    /// not descended into); otherwise its names to walk, sorted, unless it
+    /// is at the depth limit or cannot be listed (`None`).
     fn visit(
         &mut self,
-        fd: H::Fd,
-        path: PathBuf,
+        fd: &H::Fd,
+        path: &Path,
         depth: usize,
-        ino: Option<u64>,
         parent_ino: Option<u64>,
-    ) -> Result<Option<Frame<H::Fd>>, Stop> {
-        let names = match list(self.host, &fd, &path, self.deadline)? {
+    ) -> Result<Option<Vec<OsString>>, Stop> {
+        let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
             Err(skip) => {
                 self.refuse(skip);
@@ -616,7 +862,7 @@ impl<H: Host> Walk<'_, H> {
             }
         };
         if names.iter().any(|n| n == CACHEDIR_TAG) {
-            match self.target_at(&fd, &path, parent_ino)? {
+            match self.target_at(fd, path, parent_ino)? {
                 Ok(true) => return Ok(None),
                 Ok(false) => {}
                 Err(skip) => {
@@ -628,28 +874,7 @@ impl<H: Host> Walk<'_, H> {
         if depth >= DISCOVERY_DEPTH {
             return Ok(None);
         }
-        let mut pending = Vec::new();
-        for name in names {
-            let at = path.join(&name);
-            if is_private_tmp(&name) {
-                continue;
-            }
-            match subdir(self.host, &fd, self.mounts, self.mount_id, &name, &at)? {
-                Ok(Some(_)) => pending.push(name),
-                Ok(None) => {}
-                // A mount below the root is not crossed, and not refused:
-                // it is simply not this root's.
-                Err(skip) if skip.reason == Reason::ContainsMount => {}
-                Err(skip) => self.refuse(skip),
-            }
-        }
-        Ok(Some(Frame {
-            fd,
-            path,
-            depth,
-            ino,
-            pending: pending.into_iter(),
-        }))
+        Ok(Some(names))
     }
 
     /// Records the directory open as `fd` as a target if it is one (a valid

@@ -22,8 +22,10 @@
 //! - [`listing`]: one source's discovery, by its kind's own code;
 //! - [`recount`]: what complete listings mean for the index;
 //! - this module: [`TallyState`], the index with when each source was last
-//!   listed and the live cursor, and the work items both modes share
-//!   ([`TallyState::list_source`], [`TallyState::size_unit`]);
+//!   listed and the live cursors, and the work items: a whole listing
+//!   ([`TallyState::list_source`], the synchronous tally's), a resumable
+//!   listing round ([`TallyState::list_round`], the background's) and
+//!   sizing ([`TallyState::size_unit`]);
 //! - [`sync`] and [`background`]: the two modes.
 //!
 //! Not here: running the background tally in `watch` (TASK-32), the
@@ -47,7 +49,7 @@ use crate::host::{Host, HostError, MonoTime};
 use crate::index::{Finder, Index, Inserted, MountKey, Refusal, Tally};
 
 use budget::Budget;
-use listing::{Listing, TallySource};
+use listing::{Listing, ListingCursor, TallySource};
 use recount::{Complete, Recount};
 use size::{Cursor, Step};
 
@@ -65,6 +67,13 @@ pub struct TallyState {
     /// The live sizing walk, if one is paused between batches (at most
     /// one; counted against the index's budget).
     cursor: Option<Cursor>,
+    /// The live background listing round, if one is paused between batches
+    /// (at most one; counted against the index's budget with `cursor`),
+    /// with its block member counts and the collapse count at its start.
+    round: Option<Round>,
+    /// Collapses run so far by this state's insertions and cursors: a
+    /// round whose blocks changed under it does not recount them.
+    collapses: u64,
     /// Singles whose last background job (re-check or sizing) failed, and
     /// when: they wait [`schedule::RECHECK_PERIOD`] before their next job,
     /// so a failing unit is not retried every batch. Pruned to the index's
@@ -85,6 +94,26 @@ pub struct Listed {
     pub no_room: usize,
     /// Collapses the insertions needed.
     pub collapses: usize,
+}
+
+/// A live background listing round.
+#[derive(Debug)]
+struct Round {
+    cursor: ListingCursor,
+    members: BTreeMap<recount::BlockKey, u64>,
+    collapses_at_start: u64,
+}
+
+/// What a step of a background listing round came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rounded {
+    /// Paused; the round goes on next time.
+    Paused,
+    /// The round ended: complete (evictions and recounts applied) or not.
+    Done { complete: bool, recount: Recount },
+    /// Its cursor does not fit the index's budget even after a collapse:
+    /// dropped; the source waits its period.
+    NoRoom,
 }
 
 /// What sizing a unit came to.
@@ -112,6 +141,8 @@ impl TallyState {
             discovered: BTreeMap::new(),
             listed: BTreeMap::new(),
             cursor: None,
+            round: None,
+            collapses: 0,
             failed: BTreeMap::new(),
         }
     }
@@ -158,6 +189,7 @@ impl TallyState {
                 self.index
                     .insert(host, &item.mount, &item.path, &source.finder, item.found)?;
             done.collapses += usize::from(inserted.collapse.is_some());
+            self.collapses += u64::from(inserted.collapse.is_some());
             match inserted.outcome {
                 Inserted::New => done.new += 1,
                 Inserted::Refreshed => done.refreshed += 1,
@@ -207,7 +239,7 @@ impl TallyState {
         let step = match step {
             Ok(step) => step,
             Err(e) => {
-                assert!(self.index.set_cursor_bytes(0), "zero always fits");
+                self.account_cursors();
                 return Err(e);
             }
         };
@@ -246,23 +278,159 @@ impl TallyState {
                 Sizing::Refused(Reason::TooManyEntries)
             }
         };
-        assert!(self.index.set_cursor_bytes(0), "zero always fits");
+        self.account_cursors();
         Ok(outcome)
     }
 
     /// Keeps `cursor` live, counted against the budget (collapsing first if
     /// it must). `false`: it does not fit; dropped.
     fn keep_cursor<H: Host>(&mut self, host: &H, cursor: Cursor) -> Result<bool, HostError> {
-        let bytes = cursor.counted_bytes();
-        if !self.index.set_cursor_bytes(bytes) {
-            assert!(self.index.set_cursor_bytes(0), "zero always fits");
-            self.index.collapse_to_low_water(host)?;
-            if !self.index.set_cursor_bytes(bytes) {
-                return Ok(false);
+        self.cursor = Some(cursor);
+        if self.fit_cursors(host)? {
+            return Ok(true);
+        }
+        self.cursor = None;
+        self.account_cursors();
+        Ok(false)
+    }
+
+    /// The live cursors' bytes: the sizing walk's and the listing round's.
+    fn cursor_bytes(&self) -> usize {
+        self.cursor.as_ref().map_or(0, Cursor::counted_bytes)
+            + self.round.as_ref().map_or(0, |r| r.cursor.counted_bytes())
+    }
+
+    /// Counts the live cursors against the budget, collapsing first if
+    /// they do not fit. `false`: they still do not (nothing counted for
+    /// them changed: the caller drops one and calls [`Self::account_cursors`]).
+    fn fit_cursors<H: Host>(&mut self, host: &H) -> Result<bool, HostError> {
+        let bytes = self.cursor_bytes();
+        if self.index.set_cursor_bytes(bytes) {
+            return Ok(true);
+        }
+        assert!(self.index.set_cursor_bytes(0), "zero always fits");
+        self.index.collapse_to_low_water(host)?;
+        self.collapses += 1;
+        Ok(self.index.set_cursor_bytes(bytes))
+    }
+
+    /// Counts the live cursors (smaller than before: always fits).
+    fn account_cursors(&mut self) {
+        let bytes = self.cursor_bytes();
+        assert!(
+            self.index.set_cursor_bytes(bytes),
+            "the live cursors shrank yet do not fit"
+        );
+    }
+
+    /// The source of the live listing round, if any.
+    pub fn round_finder(&self) -> Option<&Finder> {
+        self.round.as_ref().map(|r| r.cursor.finder())
+    }
+
+    /// Drops the live listing round (its source is gone from the run).
+    pub fn drop_round(&mut self) {
+        self.round = None;
+        self.account_cursors();
+    }
+
+    /// One step of the background listing round of `source` within
+    /// `budget`, starting a round if none is live (a round of another
+    /// source is the caller's to finish first). What it finds is inserted
+    /// at once; when the round ends complete, singles of the source it did
+    /// not find lose the finder and its blocks are recounted
+    /// ([`recount::apply_round`]). The source is stamped listed when the
+    /// round ends or fails, so a failing source waits its period.
+    pub fn list_round<H: Host>(
+        &mut self,
+        host: &H,
+        source: &TallySource,
+        budget: &mut Budget,
+    ) -> Result<Rounded, HostError> {
+        let mut round = match self.round.take() {
+            Some(r) if *r.cursor.finder() == source.finder => r,
+            Some(other) => panic!(
+                "a listing round of {} is live: finish it first",
+                other.cursor.finder().root.display()
+            ),
+            None => Round {
+                cursor: ListingCursor::new(source, host.now()),
+                members: BTreeMap::new(),
+                collapses_at_start: self.collapses,
+            },
+        };
+        let step = match round.cursor.step(host, source, budget) {
+            Ok(step) => step,
+            Err(e) => {
+                self.listed.insert(source.finder.clone(), host.now());
+                self.account_cursors();
+                return Err(e);
+            }
+        };
+        for item in &step.listed {
+            let inserted =
+                self.index
+                    .insert(host, &item.mount, &item.path, &source.finder, item.found)?;
+            self.collapses += u64::from(inserted.collapse.is_some());
+            if inserted.outcome == Inserted::Covered
+                && let Some(key) = recount::covering_block(&self.index, &source.finder, item)
+            {
+                *round.members.entry(key).or_default() += 1;
             }
         }
-        self.cursor = Some(cursor);
-        Ok(true)
+        // Found but not indexable: a single there is still found.
+        let now = host.now();
+        for path in &step.unindexed {
+            let mount = self.index_mount_of(path);
+            if let Some(single) = mount.and_then(|m| self.index.single_mut(&m, path)) {
+                single.checked_at = now;
+            }
+        }
+        self.drop_stale_cursor();
+        if !step.done {
+            self.round = Some(round);
+            if !self.fit_cursors(host)? {
+                self.round = None;
+                self.account_cursors();
+                self.listed.insert(source.finder.clone(), now);
+                return Ok(Rounded::NoRoom);
+            }
+            return Ok(Rounded::Paused);
+        }
+        self.listed.insert(source.finder.clone(), now);
+        self.account_cursors();
+        let mut recount = Recount::default();
+        if step.complete {
+            self.discovered
+                .insert(source.finder.clone(), round.cursor.started());
+            recount = recount::apply_round(
+                &mut self.index,
+                &source.finder,
+                round.cursor.started(),
+                &round.members,
+                self.collapses == round.collapses_at_start,
+            );
+            self.drop_stale_cursor();
+        }
+        Ok(Rounded::Done {
+            complete: step.complete,
+            recount,
+        })
+    }
+
+    /// The index's mount holding `path`, by the longest mount point.
+    fn index_mount_of(&self, path: &Path) -> Option<MountKey> {
+        let mut found: Option<MountKey> = None;
+        self.index.for_each_mount(|key| {
+            if path.starts_with(&key.mount_point)
+                && found.as_ref().is_none_or(|f| {
+                    key.mount_point.as_os_str().len() > f.mount_point.as_os_str().len()
+                })
+            {
+                found = Some(key.clone());
+            }
+        });
+        found
     }
 
     /// Evicts the single at `path` (a failed re-check), and the live cursor
@@ -276,7 +444,7 @@ impl TallyState {
     /// Drops the live cursor (its unit is no longer due).
     pub fn drop_cursor(&mut self) {
         self.cursor = None;
-        assert!(self.index.set_cursor_bytes(0), "zero always fits");
+        self.account_cursors();
     }
 
     /// Records that a job of the single at `path` failed at `at`.
@@ -304,7 +472,7 @@ impl TallyState {
         });
         if stale {
             self.cursor = None;
-            assert!(self.index.set_cursor_bytes(0), "zero always fits");
+            self.account_cursors();
         }
     }
 }

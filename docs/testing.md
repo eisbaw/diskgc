@@ -580,14 +580,20 @@ Model scenarios required by [safety.md](safety.md) and
 - **background tally** (virtual clock, every port call costing 1 ms):
   the worker's active time is at
   most 5 % (plus one batch) of any window of 100 batches, no batch
-  exceeds 50 ms or 2,000 operations (a listing, which is not resumable,
-  excepted: its whole time is charged), and it makes no filesystem call
+  exceeds 50 ms or 2,000 operations (plus the reach of one unit or root
+  and, after a stalled step, 32 operations; listings included: they are
+  resumable rounds), and it makes no filesystem call
   while the host lock is held by another process; overdue discovery,
   re-check and re-tally jobs are all served within twice their period
   under constant churn (no starvation; the model test is scaled down to
   about 200 units and 600 entries over 150 minutes; the 100,000-entry
   run is open); a sizing cursor holds
-  no fd between batches and survives a directory vanishing under it
+  no fd between batches and survives a directory vanishing under it;
+  a listing round cut into steps of any size finds exactly what one
+  uninterrupted discovery finds (both kinds, property test), a 3,000-entry
+  root is listed across many batches within their bounds, entries
+  changing under a round keep it sound and a replaced directory makes it
+  partial, and a round is complete only if every step was clean
   (diskgc-model `tests/tally.rs`);
 - **pressure brake** (virtual clock, scripted PSI readings through the
   `Host` query): `pressure_brake_doubles_the_sleep_and_skips_batches`

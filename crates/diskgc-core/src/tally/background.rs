@@ -13,10 +13,10 @@
 //! - a batch ([`Budget::batch`]: at most 50 ms or 2,000 operations) does the
 //!   most overdue jobs first ([`super::schedule`]): listing a source (every 5
 //!   minutes), re-checking a single (every 10), sizing a single (every 60,
-//!   resumed across batches by the live cursor). A listing is not
-//!   resumable: it runs whole, only as a batch's first job, and the duty
-//!   cycle charges its time (it can exceed the batch bounds; see
-//!   [`Event::Batch`]);
+//!   resumed across batches by the live cursor). A listing is resumable
+//!   too (Mark, 2026-10-25): a round of one source runs across batches
+//!   within their bounds ([`super::listing::ListingCursor`]); one round is
+//!   live at a time, finished before another starts;
 //! - after a batch that took `t` it sleeps `19 × t`, or, when nothing was
 //!   due, until the next job is due (at most [`IDLE_SLEEP_MAX`]).
 //!
@@ -30,13 +30,12 @@ use std::time::Duration;
 use super::budget::Budget;
 use super::listing::TallySource;
 use super::pace::{BATCH_OPS_MAX, Gate, Pace};
-use super::recount::Complete;
 use super::schedule::{
     DISCOVERY_PERIOD, Lateness, MostOverdue, RECHECK_PERIOD, RETALLY_PERIOD, last_sized,
     needs_sizing,
 };
 use super::size::reach;
-use super::{Sizing, TallyState};
+use super::{Rounded, Sizing, TallyState};
 use crate::host::{Host, HostError, MonoTime, Pressure};
 use crate::hostlock::{self, LockError};
 use crate::index::{Identity, MountKey, UnitRef};
@@ -46,12 +45,6 @@ pub const LOCK_POLL: Duration = Duration::from_secs(1);
 /// The longest sleep when nothing is due (so a new source or a changed
 /// clock is noticed within it).
 pub const IDLE_SLEEP_MAX: Duration = Duration::from_secs(60);
-/// A background listing of one source stops after this (tentative). A
-/// listing is not resumable: one cut short only adds what it found (it is
-/// partial: no eviction, no recount) and the source waits its period. A
-/// root too large to list within it is never listed completely in the
-/// background; `ensure`'s pass 1 still lists it completely.
-pub const LISTING_TIME_MAX: Duration = Duration::from_secs(1);
 /// After a batch whose every job failed (a failure of the host), the sleep
 /// is at least this, doubling with each such batch in a row, up to
 /// [`super::pace::BRAKE_SLEEP_MAX`].
@@ -94,7 +87,10 @@ pub struct BatchWork {
     /// Filesystem operations, as counted (a listing counts one per
     /// candidate it found and two more, an estimate).
     pub ops: usize,
+    /// Listing rounds ended.
     pub listed: usize,
+    /// Listing rounds paused at the batch's end.
+    pub listing: usize,
     pub rechecked: usize,
     pub evicted: usize,
     pub sized: usize,
@@ -108,7 +104,13 @@ pub struct BatchWork {
 
 impl BatchWork {
     fn jobs(&self) -> usize {
-        self.listed + self.rechecked + self.evicted + self.sized + self.paused + self.failed
+        self.listed
+            + self.listing
+            + self.rechecked
+            + self.evicted
+            + self.sized
+            + self.paused
+            + self.failed
     }
 }
 
@@ -313,17 +315,24 @@ fn batch<H: Host>(
             return next_due;
         }
     };
-    for (n, job) in jobs.into_iter().enumerate() {
+    for job in jobs {
         if budget.spent(host) {
             break;
         }
         let (unit, done) = match job {
             Job::List(i) => {
-                // Not resumable: only as the batch's first job.
-                if n > 0 {
-                    break;
-                }
-                (None, list(host, state, &sources[i], work))
+                // One live round: finish it before another starts.
+                let i = match state.round_finder() {
+                    None => i,
+                    Some(live) => match sources.iter().position(|s| s.finder == *live) {
+                        Some(live) => live,
+                        None => {
+                            state.drop_round(); // its source left the run
+                            i
+                        }
+                    },
+                };
+                (None, list(host, state, &sources[i], budget, work))
             }
             Job::Recheck(mount, path, identity) => {
                 let done = recheck(host, state, &mounts, &mount, &path, identity, budget, work);
@@ -377,19 +386,17 @@ fn list<H: Host>(
     host: &H,
     state: &mut TallyState,
     source: &TallySource,
+    budget: &mut Budget,
     work: &mut BatchWork,
 ) -> Result<(), HostError> {
-    let deadline = host.now().checked_add(LISTING_TIME_MAX);
-    let listed = state.list_source(host, source, deadline)?;
-    if listed.listing.complete {
-        let recount = state.recount(&[Complete {
-            finder: &source.finder,
-            listed: &listed.listing.listed,
-            unindexed: &listed.listing.unindexed,
-        }]);
-        work.evicted += recount.singles_evicted + recount.blocks_evicted;
+    match state.list_round(host, source, budget)? {
+        Rounded::Paused => work.listing += 1,
+        Rounded::Done { recount, .. } => {
+            work.evicted += recount.singles_evicted + recount.blocks_evicted;
+            work.listed += 1;
+        }
+        Rounded::NoRoom => work.listing += 1,
     }
-    work.listed += 1;
     Ok(())
 }
 
@@ -465,6 +472,8 @@ pub fn due_jobs(
         next_due = Some(next_due.map_or(due, |n: MonoTime| n.min(due)));
     };
     for (i, source) in sources.iter().enumerate() {
+        // A live round stays due until it ends: `listed_at` is stamped
+        // only when a round ends (or fails).
         let last = state.listed_at(&source.finder);
         match Lateness::of(last, started, DISCOVERY_PERIOD, now) {
             Some(late) => jobs.offer(late, Job::List(i)),

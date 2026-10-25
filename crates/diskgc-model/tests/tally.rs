@@ -23,11 +23,11 @@ use diskgc_core::tally::background::{
     Background, BatchWork, Event, IDLE_SLEEP_MAX, Job, LOCK_POLL, due_jobs,
 };
 use diskgc_core::tally::budget::Budget;
-use diskgc_core::tally::listing::{SourceFind, TallySource};
+use diskgc_core::tally::listing::{ListingCursor, SourceFind, TallySource};
 use diskgc_core::tally::pace::{BATCH_OPS_MAX, BATCH_TIME_MAX};
 use diskgc_core::tally::recount::Complete;
 use diskgc_core::tally::sync::{SyncTier, synchronous};
-use diskgc_core::tally::{Sizing, TallyState};
+use diskgc_core::tally::{Rounded, Sizing, TallyState};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
 
@@ -173,24 +173,29 @@ fn background_duty_cycle_holds_in_every_window_of_100_batches() {
     let mut events = Vec::new();
     let turns = run_turns(&host, &mut state, &sources, 400, &mut events);
     let one_op = Duration::from_millis(1);
+    // Past its bound a batch finishes at most the reach of one unit or
+    // root (its path from the mount, about 4 calls here) and the call
+    // under way (a candidate's checks), and, after a stalled step, the
+    // entries it must do (STEP_ENTRIES_MIN = LISTING_STEP_MIN = 32). Every
+    // batch, listings included (resumable, Mark 2026-10-25).
+    let overshoot = one_op * (8 + diskgc_core::tally::size::STEP_ENTRIES_MIN as u32);
+    let mut max_active = Duration::ZERO;
     for turn in &turns {
         let work = turn.batch.expect("never braked or paused here");
         assert!(work.ops <= BATCH_OPS_MAX, "{work:?}");
-        // A listing is not resumable: its batch may run longer (open point
-        // for Mark), and the duty cycle charges it in full.
-        if work.listed == 0 {
-            assert!(turn.active <= BATCH_TIME_MAX + one_op, "{turn:?}");
-        }
+        assert!(turn.active <= BATCH_TIME_MAX + overshoot, "{turn:?}");
+        max_active = max_active.max(turn.active);
         assert!(turn.sleep >= turn.active * 19, "{turn:?}");
     }
     for window in turns.windows(100) {
         let active: Duration = window.iter().map(|t| t.active).sum();
         let wall: Duration = window.iter().map(|t| t.active + t.sleep).sum();
         assert!(
-            active <= wall / 20 + BATCH_TIME_MAX + one_op,
+            active <= wall / 20 + BATCH_TIME_MAX + overshoot,
             "active {active:?} of {wall:?}"
         );
     }
+    eprintln!("longest batch {max_active:?} (bound {BATCH_TIME_MAX:?})");
     // It did the work: every unit sized, at a 5 % duty cycle.
     let mut sized = 0;
     state.index.for_each_unit(|_, _, unit| {
@@ -933,8 +938,15 @@ fn background_tally_recounts_blocks_on_complete_listings_only() {
         }
         host.sleep(sleep);
     }
+    // Round 1 collapsed while it ran (the budget holds about 30 of 41),
+    // so it left its blocks' counts (members it covered after the
+    // collapse are not counted, TASK-28); rounds 2 and 3 are partial and
+    // must leave them too.
     assert_eq!(counts.len(), 3, "{counts:?}");
-    assert_eq!(counts, [41, 41, 41], "a partial listing recounted");
+    assert!(
+        counts.iter().all(|c| *c == counts[0]),
+        "a partial listing recounted: {counts:?}"
+    );
     while at(&host) < Duration::from_secs(16 * 60) {
         let sleep = background.turn(&host, &mut state, &sources, &mut log);
         host.sleep(sleep);
@@ -1112,4 +1124,227 @@ fn a_recount_never_counts_a_single_as_a_block_member_too() {
     assert_eq!(state.index.finder_set(single.finders()).len(), 2);
     assert!(state.index.stats().blocks >= 1, "{:?}", state.index.stats());
     assert_eq!(counted(&state), 41, "{:?}", state.index.stats());
+}
+
+// ---- Resumable discovery (Mark, 2026-10-25) ----
+
+fn cargo_source(root: &str) -> TallySource {
+    TallySource {
+        finder: finder("cargo-target", root),
+        find: SourceFind::CargoTarget,
+    }
+}
+
+/// `n` Cargo targets below `/tmp/w`, at depths 1 to 3, among plain dirs.
+fn cargo_tree(n: usize) -> String {
+    let mut tree = String::new();
+    for i in 0..n {
+        let base = match i % 3 {
+            0 => format!("/tmp/w/p{i}"),
+            1 => format!("/tmp/w/g{}/p{i}", i % 5),
+            _ => format!("/tmp/w/g{}/h/p{i}", i % 4),
+        };
+        writeln!(tree, "  {base}/Cargo.toml: {{}}").unwrap();
+        writeln!(tree, "  {base}/src/main.rs: {{size: 1K}}").unwrap();
+        writeln!(tree, "  {base}/target/CACHEDIR.TAG: {{cachedir_tag: true}}").unwrap();
+        writeln!(tree, "  {base}/target/debug/.cargo-lock: {{}}").unwrap();
+        writeln!(tree, "  {base}/target/debug/deps/x: {{size: 4K}}").unwrap();
+    }
+    tree
+}
+
+/// Runs a listing round of `source` to its end in steps of `ops`
+/// operations; the paths found, and whether it was complete.
+fn round_in_steps(
+    host: &ModelHost,
+    source: &TallySource,
+    ops: usize,
+) -> (Vec<PathBuf>, bool, usize) {
+    let mut cursor = ListingCursor::new(source, host.now());
+    let mut found = Vec::new();
+    for steps in 1.. {
+        let mut budget = Budget::ops_only(ops);
+        let step = cursor.step(host, source, &mut budget).unwrap();
+        assert_eq!(host.open_fds(), 0, "an fd held between steps");
+        found.extend(step.listed.into_iter().map(|l| l.path));
+        found.extend(step.unindexed);
+        if step.done {
+            found.sort();
+            return (found, step.complete, steps);
+        }
+        assert!(steps < 100_000, "the round does not end");
+    }
+    unreachable!()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: 32, ..Default::default() })]
+
+    /// Cut into steps of any size, a listing round finds exactly what one
+    /// uninterrupted discovery does, for both kinds, and is complete.
+    #[test]
+    fn a_listing_round_in_steps_of_any_size_finds_what_discovery_finds(
+        dirs_n in 1usize..40,
+        targets in 1usize..12,
+        ops in 1usize..30,
+    ) {
+        let tree = format!("{}{}", dirs("a", dirs_n, 1), cargo_tree(targets));
+        let host = host(&yaml(&tree, ""));
+        for source in [source("a", "/tmp/a"), cargo_source("/tmp/w")] {
+            let mut whole = state();
+            let listed = whole.list_source(&host, &source, None).unwrap();
+            let mut expected: Vec<PathBuf> = listed
+                .listing
+                .listed
+                .iter()
+                .map(|l| l.path.clone())
+                .chain(listed.listing.unindexed.iter().cloned())
+                .collect();
+            expected.sort();
+            proptest::prop_assert!(listed.listing.complete);
+            let (found, complete, steps) = round_in_steps(&host, &source, ops);
+            proptest::prop_assert!(complete);
+            proptest::prop_assert_eq!(&found, &expected, "{} steps", steps);
+            proptest::prop_assert!(!expected.is_empty());
+        }
+    }
+}
+
+/// A flat root of 3,000 candidates is listed by the background tally across
+/// many batches, each within its bounds, and the round ends complete with
+/// every candidate in the index.
+#[test]
+fn a_huge_root_is_listed_across_many_small_batches() {
+    let mut tree = String::new();
+    for i in 0..3000 {
+        writeln!(tree, "  /tmp/a/c{i:05}: {{.: {{}}}}").unwrap();
+    }
+    let host = host(&yaml(&tree, "call_cost: 1ms\n"));
+    let sources = [source("a", "/tmp/a")];
+    let mut state = state();
+    let mut events = Vec::new();
+    let mut log = |e: Event| events.push(e);
+    let mut background = Background::start(&host, &mut log);
+    let overshoot = Duration::from_millis(8 + 32);
+    let mut batches = 0;
+    while state.listed_at(&sources[0].finder).is_none() {
+        let before = at(&host);
+        let sleep = background.turn(&host, &mut state, &sources, &mut log);
+        assert!(
+            at(&host) - before <= BATCH_TIME_MAX + overshoot,
+            "a batch of {:?}",
+            at(&host) - before
+        );
+        assert_eq!(host.open_fds(), 0);
+        batches += 1;
+        host.sleep(sleep);
+        assert!(batches < 10_000);
+    }
+    assert!(batches >= 40, "listed in {batches} batches");
+    assert_eq!(state.index.stats().singles, 3000);
+    assert!(
+        state.discovered_at(&sources[0].finder).is_some(),
+        "complete"
+    );
+}
+
+/// Entries changing under a live round: a candidate removed and one created
+/// after their directory was listed, a directory on the way down replaced.
+/// The round stays sound (no panic, no fd held, what it reports exists or
+/// existed) and a replaced directory makes it incomplete: nothing evicted.
+#[test]
+fn a_round_survives_entries_changing_under_it_and_a_replacement_makes_it_partial() {
+    let mut tree = String::new();
+    for g in 0..4 {
+        for i in 0..40 {
+            writeln!(tree, "  /tmp/a/g{g}/c{i:03}: {{.: {{}}}}").unwrap();
+        }
+    }
+    // At 1 ms a call: g0 is entered and listed within the first few ms,
+    // g1 at about 45 ms, g2 at about 90 ms.
+    let events = "events:\n\
+        - {at: {elapsed: 20ms}, replace: /tmp/a/g0}\n\
+        - {at: {elapsed: 20ms}, remove: /tmp/a/g2}\n\
+        - {at: {elapsed: 70ms}, remove: /tmp/a/g1/c039}\n\
+        - {at: {elapsed: 70ms}, mkdir: /tmp/a/g1/c040}\n";
+    let host = host(&yaml(
+        &tree,
+        &format!("call_cost: 1ms\n{}", events.replace("\n-", "\n  -")),
+    ));
+    let source = two_level("a");
+    let mut cursor = ListingCursor::new(&source, host.now());
+    let mut found = Vec::new();
+    loop {
+        let mut budget = Budget::ops_only(10);
+        let step = cursor.step(&host, &source, &mut budget).unwrap();
+        assert_eq!(host.open_fds(), 0);
+        found.extend(step.listed.into_iter().map(|l| l.path));
+        if step.done {
+            assert!(!step.complete, "g0 was replaced under the round");
+            break;
+        }
+    }
+    assert!(
+        !found.iter().any(|p| p.starts_with("/tmp/a/g2")),
+        "g2 vanished before it was reached"
+    );
+    assert!(
+        found.contains(&PathBuf::from("/tmp/a/g0/c000")),
+        "found before the replacement"
+    );
+    assert!(
+        !found.contains(&PathBuf::from("/tmp/a/g0/c039")),
+        "after the replacement: not walked on"
+    );
+    // g1 was listed before c039 went and c040 came: the removed one is
+    // statted, gone, skipped; the new one is not seen by this round.
+    assert!(!found.contains(&PathBuf::from("/tmp/a/g1/c039")));
+    assert!(!found.contains(&PathBuf::from("/tmp/a/g1/c040")));
+    assert!(found.contains(&PathBuf::from("/tmp/a/g3/c039")));
+}
+
+/// Completeness spans the round: a candidate gone before the round is lost
+/// only when every step of it was clean; a refusal in a later step (an
+/// unreadable directory) makes the whole round partial.
+#[test]
+fn a_round_is_complete_only_if_every_step_was_clean() {
+    for (fail, evicted) in [(false, true), (true, false)] {
+        let mut tree = String::new();
+        for g in 0..3 {
+            for i in 0..30 {
+                writeln!(tree, "  /tmp/a/g{g}/c{i:03}: {{.: {{}}}}").unwrap();
+            }
+        }
+        let mut extra = String::from(
+            "call_cost: 1ms\nevents:\n  - {at: {elapsed: 10s}, remove: /tmp/a/g0/c000}\n",
+        );
+        if fail {
+            extra.push_str(
+                "  - {at: {op: read_dir, path: /tmp/a/g2, nth: 2, when: before}, fail: EACCES}\n",
+            );
+        }
+        let host = host(&yaml(&tree, &extra));
+        let source = two_level("a");
+        let mut state = state();
+        state.list_source(&host, &source, None).unwrap(); // round 0, at once
+        host.sleep(Duration::from_secs(11));
+        let gone = Path::new("/tmp/a/g0/c000");
+        assert!(state.index.single(&tmp_mount(), gone).is_some());
+        let outcome = loop {
+            let mut budget = Budget::ops_only(15);
+            match state.list_round(&host, &source, &mut budget).unwrap() {
+                Rounded::Paused => {}
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(outcome, Rounded::Done { complete, .. } if complete == !fail),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            state.index.single(&tmp_mount(), gone).is_none(),
+            evicted,
+            "fail {fail}"
+        );
+    }
 }

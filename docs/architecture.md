@@ -336,12 +336,21 @@ the order of work.
   tentative constants; beyond them the estimate is coarser). A walk past
   the deletion's entry budget stores a `too_many_entries` refusal hint.
   Cursors are not persisted; a unit whose walk did not finish counts as
-  untallied. A listing of a (profile, root) is not resumable: it runs
-  only as a batch's first job, for at most 1 s (tentative), which exceeds
-  the batch's bounds; the duty cycle charges its time like any batch's.
-  One cut short is partial (it only adds). A root too large to list in
-  1 s is never listed completely in the background; `ensure`'s pass 1
-  lists it completely. A job that fails with a failure of the host
+  untallied. **Discovery is resumable too** (Mark, 2026-10-25): a
+  listing **round** of one (profile, root) runs across batches within
+  their bounds, by the kind's own discovery walk kept as names only (per
+  directory on the way down: its name, identity, the patterns still
+  active, its sorted names and how many are done; no file descriptor
+  between batches). Each step reaches the root again and reopens the way
+  down by name: a directory gone ends its branch; one replaced by another
+  inode, or a replaced root, is refused (`changed`), so that round is not
+  complete; names created in a directory after it was listed are not
+  found by that round. A step after a stalled one (paused before any
+  operation) does at least 32 operations whatever its bounds, as for the
+  sizing cursor. What a round finds is inserted at once. One round is
+  live at a time, counted against the budget with the sizing cursor, and
+  finished before another starts. A round is **complete** when its walk
+  reached the end and no step of it refused anything. A job that fails with a failure of the host
   (`EIO`, `EMFILE`) waits its period (a unit's: 10 minutes) and the batch
   goes on; after a batch whose every job failed the sleep is at least
   1 s, doubling per such batch up to 60 s; each distinct failure is
@@ -399,7 +408,14 @@ the order of work.
   to none evicts the block; ages are left. A block of several finders is
   recounted only when every one of them was listed completely in the
   same round: the synchronous tally's pass 1 is one round, each
-  background listing its own.
+  background listing its own. A background round keeps no list of what
+  it found: a single of its finder whose `checked_at` is older than the
+  round's start was not found (every insertion refreshes it; a re-check
+  during the round does too, which only delays that eviction by a
+  round); blocks of its finder alone are recounted from the members
+  counted as the round inserted them, unless a collapse ran during the
+  round (the blocks changed under the counts: they are left as they are);
+  background rounds never dissolve a block (no member list).
 - **Pausing:** before each batch the background tally tests, without
   blocking, whether anyone holds the host lock (a `LOCK_SH | LOCK_NB`
   `flock` on its own read-only open of the lock file, closed at once;

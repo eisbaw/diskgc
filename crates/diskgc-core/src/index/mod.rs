@@ -615,6 +615,13 @@ impl Index {
         }
     }
 
+    /// Calls `f` with every mount the index has a trie for.
+    pub fn for_each_mount(&self, mut f: impl FnMut(&MountKey)) {
+        for trie in &self.mounts {
+            f(&trie.key);
+        }
+    }
+
     pub fn stats(&self) -> Stats {
         let mut stats = Stats {
             accounted_bytes: self.accounted_bytes(),

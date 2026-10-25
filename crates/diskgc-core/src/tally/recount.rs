@@ -190,3 +190,104 @@ fn covering(index: &Index, finder: &Finder, listed: &Listed) -> Option<BlockAt> 
     }
     None
 }
+
+/// A completed, complete background round of one finder (a resumable
+/// listing, [`super::listing::ListingCursor`]): its candidates were
+/// inserted step by step as found, refreshing each single's `checked_at`,
+/// so a single of `finder` below its root whose `checked_at` is older than
+/// the round's start was not found and loses the finder. Blocks of this
+/// finder alone (sited below its root) are recounted to `members`, their
+/// listed members counted step by step ([`covering_block`]); one with none
+/// listed is evicted. `blocks_valid` is false when a collapse ran during
+/// the round (blocks changed under the counts): then blocks are left.
+/// Blocks are not dissolved here (the round keeps no member list).
+pub fn apply_round(
+    index: &mut Index,
+    finder: &Finder,
+    started: crate::host::MonoTime,
+    members: &BTreeMap<BlockKey, u64>,
+    blocks_valid: bool,
+) -> Recount {
+    let mut done = Recount::default();
+    let mut lost: Vec<(MountKey, PathBuf)> = Vec::new();
+    let mut blocks: Vec<BlockAt> = Vec::new();
+    index.for_each_unit(|mount, path, unit| match unit {
+        UnitRef::Single(single) => {
+            if path.starts_with(&finder.root)
+                && single.checked_at < started
+                && index.finder_set(single.finders()).contains(finder)
+            {
+                lost.push((mount.clone(), path.to_owned()));
+            }
+        }
+        UnitRef::Block(block) => {
+            if path.starts_with(&finder.root)
+                && index.finder_set(block.finders()) == [finder.clone()]
+            {
+                blocks.push(BlockAt {
+                    mount: mount.clone(),
+                    site: path.to_owned(),
+                    finders: block.finders(),
+                    family: block.family.clone(),
+                });
+            }
+        }
+    });
+    for (mount, path) in lost {
+        match index.drop_finder(&mount, &path, finder) {
+            crate::index::FinderDropped::Kept => done.finders_dropped += 1,
+            crate::index::FinderDropped::Evicted => done.singles_evicted += 1,
+            crate::index::FinderDropped::Missing => {}
+        }
+    }
+    if !blocks_valid {
+        return done;
+    }
+    for block in blocks {
+        let key = BlockKey::of(&block);
+        let listed = members.get(&key).copied().unwrap_or(0);
+        match index.recount_block(
+            &block.mount,
+            &block.site,
+            block.finders,
+            &block.family,
+            listed,
+        ) {
+            crate::index::Recounted::Changed { .. } => done.blocks_recounted += 1,
+            crate::index::Recounted::Evicted => done.blocks_evicted += 1,
+            crate::index::Recounted::Same | crate::index::Recounted::Missing => {}
+        }
+    }
+    done
+}
+
+/// A block, as a background round counts its members: where, which finder
+/// set and family.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BlockKey {
+    mount: MountKey,
+    site: PathBuf,
+    finders: FinderSetId,
+    family: Family,
+}
+
+impl BlockKey {
+    fn of(block: &BlockAt) -> Self {
+        Self {
+            mount: block.mount.clone(),
+            site: block.site.clone(),
+            finders: block.finders,
+            family: block.family.clone(),
+        }
+    }
+}
+
+/// The block that `listed` (found by `finder`, just inserted and reported
+/// covered) counts for: the shallowest that stands for it, as insertion's
+/// coverage decides. `None` if a single holds its path.
+pub fn covering_block(index: &Index, finder: &Finder, listed: &Listed) -> Option<BlockKey> {
+    if index.single(&listed.mount, &listed.path).is_some() {
+        return None;
+    }
+    covering(index, finder, listed).map(|b| BlockKey::of(&b))
+}
