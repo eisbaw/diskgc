@@ -243,10 +243,11 @@ pub fn owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace(
 /// diskgc runs in a nested one here and the rule is observed by its
 /// detail (Owner PID names `hidepid` before the namespace). Positive
 /// control: from the initial namespace without `hidepid` the shell is
-/// listed, and the same directory is `in_use`; In use decides it before the
-/// contract, since the shell's fd table is denied to tester (ptrace
-/// access, like `hidepid`, also compares groups), so evidence `unreadable`
-/// (a live process that cannot be inspected blocks every candidate).
+/// listed, and the same directory is `in_use_unknown`; In use decides it
+/// before the contract, since the shell's fd table is denied to tester
+/// (ptrace access, like `hidepid`, also compares groups), so evidence
+/// `unreadable` (a live process that cannot be inspected blocks every
+/// candidate, as unknown rather than seen use: TASK-190).
 pub fn owner_pid_is_unknown_under_hidepid(ctx: &Ctx) -> TestResult {
     let base = free_pid_range()?;
     let namespace = Namespace::start(true)?;
@@ -340,7 +341,7 @@ pub fn owner_pid_is_unknown_under_hidepid(ctx: &Ctx) -> TestResult {
     expect_skipped(
         &initial_run,
         &rc_dir,
-        "in_use",
+        "in_use_unknown",
         &[(host, "unreadable")],
         None,
     )?;

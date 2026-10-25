@@ -193,6 +193,11 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     ),
     ("npm_cache_cleaner", "needs the pinned npm in the Nix image"),
     (
+        "named_checkout_policy_for_command_caches",
+        "needs the pinned npm and uv in the Nix image (a command profile without its \
+         executable is planned `missing`, with no candidate)",
+    ),
+    (
         "pnpm_store_cleaner",
         "needs the pinned pnpm in the Nix image",
     ),
