@@ -1176,3 +1176,244 @@ impl Delete for Gated {
         ))
     }
 }
+
+// ---- Step 3: one scan serves the parts within Freshness (TASK-173) ----
+
+/// The model's clock as a `now` call reported it (`Duration`'s `Debug`;
+/// the model starts at an hour of uptime, so always in seconds).
+fn clock_of(result: &str) -> Duration {
+    let secs = result
+        .strip_suffix('s')
+        .filter(|s| !s.ends_with(['m', 'n', 'µ']))
+        .unwrap_or_else(|| panic!("not a clock in seconds: {result:?}"));
+    Duration::from_secs_f64(secs.parse().unwrap_or_else(|e| panic!("{result:?}: {e}")))
+}
+
+/// What happened when, read off the trace: each scan's start (its first
+/// clock read, the last one before its `own_pid`) and each part's start
+/// (the last clock read before the part's first unlink: `delete_cleared`'s
+/// or later, with nothing between that moves the clock: these tests move
+/// it only after an `own_pid` or an `unlinkat`, and by retry pauses).
+/// Parts are the entries of `debug`, by their first name below it.
+struct Timeline {
+    /// (trace position, clock) of every scan's start.
+    scans: Vec<(usize, Duration)>,
+    /// (trace position, part, clock) of every part's first unlink.
+    parts: Vec<(usize, String, Duration)>,
+}
+
+fn timeline(host: &ModelHost) -> Timeline {
+    let (mut scans, mut parts) = (Vec::new(), Vec::<(usize, String, Duration)>::new());
+    let mut clock = None;
+    for (at, call) in host.trace().into_iter().enumerate() {
+        match call.op {
+            Op::Now => clock = Some(clock_of(&call.result)),
+            Op::OwnPid => scans.push((at, clock.expect("a scan reads the clock first"))),
+            Op::Unlinkat if call.result == "ok" => {
+                let path = call.path.expect("unlinkat has a path");
+                let rel = path
+                    .strip_prefix(format!("{TARGET}/debug"))
+                    .expect("in debug");
+                let part = rel
+                    .components()
+                    .next()
+                    .expect("a name")
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into_owned();
+                if parts.last().is_none_or(|(_, last, _)| *last != part) {
+                    parts.push((at, part, clock.expect("the delete reads the clock first")));
+                }
+            }
+            _ => {}
+        }
+    }
+    Timeline { scans, parts }
+}
+
+/// The classic profile's parts, in deletion order: 16 entries in 7 parts.
+const CLASSIC_PARTS: [&str; 7] = [
+    ".fingerprint",
+    "examples",
+    "incremental",
+    "p",
+    "p.d",
+    "build",
+    "deps",
+];
+
+/// The model with a scan of `scan_ms[k]` for the k-th scan and
+/// `unlink_ms[j]` after the j-th unlink (zero: no event).
+fn timed(scan_ms: &[u64], unlink_ms: &[u64]) -> ModelHost {
+    let mut events = Vec::new();
+    for (k, ms) in scan_ms.iter().enumerate().filter(|(_, ms)| **ms > 0) {
+        events.push(format!(
+            "{{at: {{op: own_pid, nth: {}, when: after}}, advance: {ms}ms}}",
+            k + 1
+        ));
+    }
+    for (j, ms) in unlink_ms.iter().enumerate().filter(|(_, ms)| **ms > 0) {
+        events.push(format!(
+            "{{at: {{op: unlinkat, nth: {}, when: after}}, advance: {ms}ms}}",
+            j + 1
+        ));
+    }
+    let events: Vec<&str> = events.iter().map(String::as_str).collect();
+    host(&with_events(&yaml(CLASSIC, None, ""), &events))
+}
+
+fn sleeps(host: &ModelHost) -> usize {
+    host.trace_count(Op::Sleep)
+}
+
+/// A 600 ms scan (past the 500 ms reuse window of separate candidates)
+/// made under the locks serves every part: all seven start within 1 s of
+/// its start, so there is no second scan. Before TASK-173 each part made
+/// its own: (parts + 1) scans per target on a busy host.
+#[test]
+fn one_slow_scan_serves_every_part_that_starts_within_the_bound() {
+    let host = timed(&[600], &[]);
+    let locks = lock_files(&host);
+    let done = reclaimed(&host);
+    assert_eq!(done.end, ReclaimEnd::Complete, "{done:?}");
+    assert_eq!(done.removed_entries, 16);
+    assert_invariants(&host, &locks);
+    let t = timeline(&host);
+    assert_eq!(t.scans.len(), 1, "one scan for the target");
+    let parts: Vec<&str> = t.parts.iter().map(|(_, p, _)| p.as_str()).collect();
+    assert_eq!(parts, CLASSIC_PARTS);
+    assert_eq!(sleeps(&host), 0, "no attempt spent");
+}
+
+/// A part that would start at or past 1 s after the scan's start gets a new
+/// scan; the parts before it share the first. The new scan is no retry: no
+/// attempt is spent, no pause.
+#[test]
+fn a_part_that_would_start_past_the_bound_gets_a_new_scan() {
+    // The scan ends at 600 ms; `.fingerprint` (3 unlinks) then takes
+    // 400 ms: `examples` would start at exactly 1 s.
+    let host = timed(&[600], &[0, 0, 400]);
+    let done = reclaimed(&host);
+    assert_eq!(done.end, ReclaimEnd::Complete, "{done:?}");
+    let t = timeline(&host);
+    assert_eq!(t.scans.len(), 2, "{:?}", t.scans);
+    let (second_scan_at, _) = t.scans[1];
+    let (examples_at, ref part, _) = t.parts[1];
+    assert_eq!(part, "examples");
+    assert!(t.parts[0].0 < second_scan_at && second_scan_at < examples_at);
+    assert_eq!(sleeps(&host), 0, "no attempt spent");
+}
+
+/// The call numbers of the last two clock reads before `part`'s first
+/// unlink in an untimed run of `model`: the checker's verdict check, then
+/// `delete_cleared`'s.
+fn last_clock_reads_before(model: &str, part: &str) -> (u64, u64) {
+    let host = host(model);
+    assert_eq!(reclaimed(&host).end, ReclaimEnd::Complete);
+    let t = timeline(&host);
+    let (first_unlink, _, _) = t
+        .parts
+        .iter()
+        .find(|(_, p, _)| p == part)
+        .expect("the part was deleted");
+    let trace = host.trace();
+    let nows: Vec<u64> = trace[..*first_unlink]
+        .iter()
+        .filter(|c| c.op == Op::Now)
+        .map(|c| c.index)
+        .collect();
+    let [.., verdict, delete] = nows[..] else {
+        panic!("fewer than two clock reads: {nows:?}");
+    };
+    (verdict, delete)
+}
+
+/// A kept scan that reaches the bound while a part is checked, or between
+/// its clear and its delete, is the end of its reuse, not a busy host: a
+/// new scan, no attempt spent (no pause), nothing deleted on the old one,
+/// and the use the new scan sees stops the target.
+#[test]
+fn a_kept_scan_expiring_at_a_parts_check_is_replaced_without_spending_an_attempt() {
+    let rest = "processes:\n  - {pid: 50, exe: /bin/sh, cwd: /, maps: [/bin/sh], \
+                environ: [A=1], fds: [{path: /bin/sh}]}";
+    let untimed = yaml(CLASSIC, None, rest);
+    let (verdict, delete) = last_clock_reads_before(&untimed, "examples");
+    for call in [verdict, delete] {
+        let model = with_events(
+            &untimed,
+            &[
+                &format!("{{at: {{call: {call}, when: before}}, advance: 1s}}"),
+                &format!(
+                    "{{at: {{call: {call}, when: before}}, open: {{pid: 50, path: \
+                     {TARGET}/debug/examples}}}}"
+                ),
+            ],
+        );
+        let host = host(&model);
+        let done = reclaimed(&host);
+        assert_skipped(&done, Reason::InUse, "pid 50");
+        assert!(
+            exists(&host, &format!("{TARGET}/debug/examples")),
+            "call {call}"
+        );
+        assert!(!exists(&host, &format!("{TARGET}/debug/.fingerprint")));
+        assert_eq!(timeline(&host).scans.len(), 2, "call {call}");
+        assert_eq!(sleeps(&host), 0, "call {call}: no attempt spent");
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+    /// Whatever the scans and deletions take: no part starts on a scan
+    /// 1 s old or older (Freshness); a target whose scans all take under
+    /// 1 s is reclaimed completely without spending an attempt, and makes
+    /// a new scan only for a part the kept one could not serve; one with
+    /// slower scans ends complete or `in_use_unknown`, never anything
+    /// else; and the lock invariants hold.
+    #[test]
+    fn no_part_starts_on_a_scan_past_the_bound(
+        scan_ms in proptest::collection::vec(0_u64..1_300, 1..12),
+        unlink_ms in proptest::collection::vec(0_u64..700, 0..16),
+    ) {
+        let host = timed(&scan_ms, &unlink_ms);
+        let locks = lock_files(&host);
+        let done = reclaimed(&host);
+        assert_invariants(&host, &locks);
+        let t = timeline(&host);
+        for (at, part, started) in &t.parts {
+            let (_, scan) = t.scans.iter().rev().find(|(s, _)| s < at).expect("a scan before");
+            proptest::prop_assert!(
+                started.saturating_sub(*scan) < Duration::from_secs(1),
+                "{} started {:?} after its scan", part, started.saturating_sub(*scan)
+            );
+        }
+        let made = t.scans.len();
+        let all_fast = scan_ms.iter().take(made).all(|ms| *ms < 1_000);
+        if all_fast {
+            proptest::prop_assert_eq!(&done.end, &ReclaimEnd::Complete);
+            proptest::prop_assert_eq!(done.removed_entries, 16);
+            proptest::prop_assert_eq!(sleeps(&host), 0);
+            // A new scan only once the kept one is 1 s old: the model moves
+            // no time between the checker's decision to scan and the new
+            // scan's first read, so its start is the kept scan's age then.
+            for pair in t.scans.windows(2) {
+                let (_, previous) = pair[0];
+                let (_, next) = pair[1];
+                let age = next.saturating_sub(previous);
+                proptest::prop_assert!(
+                    age >= Duration::from_secs(1),
+                    "a new scan though the kept one was {:?} old", age
+                );
+            }
+        } else {
+            match &done.end {
+                ReclaimEnd::Complete => {}
+                ReclaimEnd::Skipped(skip) => {
+                    proptest::prop_assert_eq!(skip.reason, Reason::InUseUnknown, "{}", skip);
+                }
+                other => proptest::prop_assert!(false, "unexpected end {:?}", other),
+            }
+        }
+    }
+}

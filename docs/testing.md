@@ -1725,11 +1725,21 @@ alone from the same interrupted state; the seeds must include kills inside
   does not repeat it (task-13 H13).
 - Race test 8's late case is conditional evidence for the scan made under
   the locks: a scan kept from before them is caught only while the
-  driver's pause is shorter than the in-use scan's reuse limit (500 ms),
+  driver's pause is shorter than the in-use scan's reuse limit inside the
+  protocol (1 s, Freshness: one scan serves a target's parts, TASK-173),
   and only in a round where `cargo run` wrote nothing into the profile
   (the test logs both, and warns when no round of 5 reached the check; it
   does not fail on that). The model test of that step holds it
   independently.
+- Races 2 and 3, `cargo clean -p`, the split build directory and the
+  shared target resume a driver paused inside a deletion only once it has
+  been paused for at least one second (`resume_past_freshness`): the scan
+  that cleared the part in progress started before the pause, so the next
+  part's check makes a new scan, which sees the Cargo started meanwhile.
+  After a shorter pause that part may still be served by the earlier scan
+  (one scan serves a target's parts within Freshness, TASK-173), and
+  diskgc may finish the target while the Cargo waits for its locks: safe
+  by the `.cargo-lock` invariant, but not the stop these tests check.
 - The "no lock taken" checks of races 7, 9 and the split build directory
   see a lock still held at the run's second lock attempt; a lock taken
   and released before it is not seen (the strace record traces no

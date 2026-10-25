@@ -64,7 +64,7 @@ use crate::engine::{Candidate, DeleteOptions, Identity, Reason, Rules, Skip, Wal
 use crate::host::{
     Access, Delete, Host, HostError, LockMode, Locked, MonoTime, Timestamp, TryLock,
 };
-use crate::inuse::{Checker, FreshAttempts, NotDeleted, clear_and_delete};
+use crate::inuse::{Checker, FRESHNESS, FreshAttempts, NotDeleted, clear_and_delete};
 use crate::profile::IdleWindow;
 use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath};
 
@@ -143,31 +143,40 @@ pub fn reclaim_checked<H: Delete>(
     checker: &mut Checker<'_>,
     guard: &mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
 ) -> Reclaimed {
-    let mut run = Run {
-        host,
-        target,
-        checker,
-        deadline: policy.deadline,
-        removed_entries: 0,
-        removed_bytes: 0,
-        locked_at: None,
-        attempts: FreshAttempts::new(policy.deadline),
-        guard,
-    };
-    let end = match run.protocol(policy.judged_last_build, policy.rules, policy.idle) {
-        Ok(()) => ReclaimEnd::Complete,
-        Err(end) => end,
-    };
-    // `protocol` has returned, so every lock it took is closed by now.
-    let locks_held = run
-        .locked_at
-        .map(|first| host.now().saturating_since(first));
-    Reclaimed {
-        removed_entries: run.removed_entries,
-        removed_bytes: run.removed_bytes,
-        locks_held,
-        end,
-    }
+    // Under the target's locks one scan serves every part whose deletion
+    // starts while it is younger than FRESHNESS, not only the checks made
+    // within the caller's shorter reuse window (TASK-173): with scans of
+    // ~0.5-1 s on a busy host that window made every part rescan, (parts +
+    // 1) scans per target. Each deletion still starts on a scan younger
+    // than FRESHNESS (`clear_and_delete`); the locks are what keep a Cargo
+    // of this lock set out meanwhile (docs/safety.md, Reclaim protocol).
+    checker.reusing_for(FRESHNESS, |checker| {
+        let mut run = Run {
+            host,
+            target,
+            checker,
+            deadline: policy.deadline,
+            removed_entries: 0,
+            removed_bytes: 0,
+            locked_at: None,
+            attempts: FreshAttempts::new(policy.deadline),
+            guard,
+        };
+        let end = match run.protocol(policy.judged_last_build, policy.rules, policy.idle) {
+            Ok(()) => ReclaimEnd::Complete,
+            Err(end) => end,
+        };
+        // `protocol` has returned, so every lock it took is closed by now.
+        let locks_held = run
+            .locked_at
+            .map(|first| host.now().saturating_since(first));
+        Reclaimed {
+            removed_entries: run.removed_entries,
+            removed_bytes: run.removed_bytes,
+            locks_held,
+            end,
+        }
+    })
 }
 
 /// One run of the protocol on one target.

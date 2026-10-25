@@ -26,8 +26,8 @@ use crate::cargo_harness::{
     PlannedPart, SAMPLE_GAP, SIGKILL, STEADY_SAMPLES, build, cargo_reclaim, deletable, expect_skip,
     first_unlink_of, layout_of, lock_inodes, lock_usage, name_of, part_objects, path_str,
     planned_parts, profile_dirs, rebuilds, reclaim_touching_nothing, reclaimable, results,
-    spawn_paused, steadily_blocked, tree_changes, tree_state, unlinked, verdict, verdict_of,
-    watch_target_locks,
+    resume_past_freshness, spawn_paused, steadily_blocked, tree_changes, tree_state, unlinked,
+    verdict, verdict_of, watch_target_locks,
 };
 use crate::cargo_under_test::{self, Cargo, Gate, RACE, REACH_TIMEOUT, Toolchain};
 use crate::holder::Holder;
@@ -348,7 +348,7 @@ fn started_during_deletion(ctx: &Ctx, round: &Round<'_>) -> TestResult {
         before.len()
     );
 
-    spawned.resume(&paused)?;
+    resume_past_freshness(&mut spawned, &paused)?;
     let run = spawned.wait()?;
     info!(
         "{what}: driver:\n{}\n--- stderr\n{}",
@@ -583,7 +583,7 @@ pub fn cargo_race_3_a_blocked_build_and_a_later_one_never_run_together(
         "the first build waits for {:?}, which diskgc does not hold ({driver})",
         blocked.waits
     );
-    spawned.resume(&paused)?;
+    resume_past_freshness(&mut spawned, &paused)?;
     let run = spawned.wait()?;
     info!("driver:\n{}\n--- stderr\n{}", run.stdout, run.stderr);
     let got = verdict_of(&run, &target)?;
@@ -1256,7 +1256,7 @@ pub fn cargo_race_8_run_or_test_paused_before_its_binary_keeps_the_target(
              the locks within the reuse limit (each wrote into the profile first and was \
              `changed`, or the driver was paused {} ms or longer): the scan made under the \
              locks was not exercised on toolchain {}",
-            diskgc_core::inuse::REUSE_LIMIT.as_millis(),
+            diskgc_core::inuse::FRESHNESS.as_millis(),
             toolchain.name
         );
     }
@@ -1278,9 +1278,11 @@ const LATE_ROUNDS: usize = 5;
 /// whose newer last build the recheck finds first. Returns whether the
 /// round reached the in-use check with the driver paused for less than
 /// the reuse limit (only such a round counts). Logs how long the driver
-/// was paused: from the reuse limit on ([`diskgc_core::inuse::REUSE_LIMIT`])
-/// a scan kept from before the locks would have been renewed anyway, so
-/// the round tells nothing about it.
+/// was paused: from the reuse limit on a scan kept from before the locks
+/// would have been renewed anyway, so the round tells nothing about it.
+/// Inside the protocol that limit is [`diskgc_core::inuse::FRESHNESS`]
+/// (one scan serves a target's parts within it, TASK-173), not the
+/// caller's shorter [`diskgc_core::inuse::REUSE_LIMIT`].
 fn late_run(
     ctx: &Ctx,
     toolchain: &Toolchain,
@@ -1320,7 +1322,7 @@ fn late_run(
         "{case}: driver:\n{}\n--- stderr\n{}",
         run.stdout, run.stderr
     );
-    let limit = diskgc_core::inuse::REUSE_LIMIT;
+    let limit = diskgc_core::inuse::FRESHNESS;
     info!(
         "{case}: the driver was paused {:.0} ms between judging and locking{}",
         pause.as_secs_f64() * 1e3,
@@ -1340,10 +1342,10 @@ fn late_run(
     // scan was made there only if the driver's pause was shorter than the
     // reuse limit (a longer pause renews any kept scan anyway). The scan
     // from the eligibility check is older than the pause by the time
-    // between that scan and the pause, so `pause < REUSE_LIMIT` is
+    // between that scan and the pause, so `pause < FRESHNESS` is
     // necessary for such a round to tell anything, not sufficient.
     let reached_the_check = written.is_empty();
-    let exercised = reached_the_check && pause < diskgc_core::inuse::REUSE_LIMIT;
+    let exercised = reached_the_check && pause < limit;
     if reached_the_check {
         expect_skip(&got, "in_use", target, &[(runner, manifest)])
             .map_err(|e| format!("{case}: {e}"))?;
@@ -1733,7 +1735,7 @@ pub fn cargo_race_shared_target_dir_from_cargo_config(
         changes.is_empty(),
         "the build of q wrote into the shared profile while it waited: {changes:?}"
     );
-    spawned.resume(&paused)?;
+    resume_past_freshness(&mut spawned, &paused)?;
     let run = spawned.wait()?;
     let out = building.wait()?;
     let judged = oracle.judge(&run)?;
@@ -1890,7 +1892,7 @@ pub fn cargo_race_2_a_cargo_clean_during_deletion(ctx: &Ctx, toolchain: &Toolcha
             }
             info!("{what}: ran to its end without waiting ({samples} samples while it ran)");
         }
-        spawned.resume(&paused)?;
+        resume_past_freshness(&mut spawned, &paused)?;
         let run = spawned.wait()?;
         info!(
             "{what}: driver:\n{}\n--- stderr\n{}",

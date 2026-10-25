@@ -56,7 +56,9 @@ pub const FRESHNESS: Duration = Duration::from_secs(1);
 /// [`delete_cleared`] still enforce [`FRESHNESS`] immediately before every
 /// deletion, including when a scan expires during the candidate check. The
 /// shorter reuse window gives a newly started process a chance to be seen
-/// between candidates before the deletion freshness limit is reached.
+/// between candidates before the deletion freshness limit is reached. The
+/// parts of one Cargo target, under its locks, reuse a scan up to
+/// [`FRESHNESS`] instead ([`Checker::reusing_for`], TASK-173).
 pub const REUSE_LIMIT: Duration = Duration::from_millis(500);
 
 /// A scan that blocks every candidate is kept for less time after it finishes,
@@ -649,6 +651,10 @@ fn below(path: &Path, rel: &Path) -> PathBuf {
 #[derive(Debug)]
 pub struct Clear<'checked, 'parent, F> {
     fresh_until: MonoTime,
+    /// The scan was kept from an earlier check rather than made for this
+    /// one: its expiry is the end of its reuse, not a sign of a busy host
+    /// ([`clear_and_delete`] then scans again without spending an attempt).
+    reused: bool,
     candidate: &'checked Candidate<'parent, F>,
     record: &'checked WalkRecord,
 }
@@ -746,6 +752,23 @@ impl<'a> Checker<'a> {
         self
     }
 
+    /// Runs `within` with this checker reusing a scan for up to `limit`
+    /// after it started, then restores its own reuse limit. For a Cargo
+    /// target's parts under its locks (docs/safety.md, `cargo-target`:
+    /// Reclaim protocol, step 3): there one scan serves every part whose
+    /// deletion starts within [`FRESHNESS`]. The bound itself is unchanged
+    /// ([`Checker::check`], [`delete_cleared`]); `limit` above it is a bug.
+    pub fn reusing_for<T>(&mut self, limit: Duration, within: impl FnOnce(&mut Self) -> T) -> T {
+        assert!(
+            limit <= FRESHNESS,
+            "a reuse limit of {limit:?} is past the freshness bound {FRESHNESS:?}"
+        );
+        let own = std::mem::replace(&mut self.reuse_limit, limit);
+        let out = within(self);
+        self.reuse_limit = own;
+        out
+    }
+
     /// The scan the last check used.
     pub fn latest(&self) -> Option<&Scan> {
         self.latest.as_ref()
@@ -785,9 +808,12 @@ impl<'a> Checker<'a> {
                 "the walk record was made for another candidate name or mount",
             ));
         }
-        // Bounded by `attempts`: each pass ends in a verdict or spends one.
-        for _ in 0..FRESH_ATTEMPTS {
-            if !self.reusable_at(host.now()) {
+        // Bounded: each pass ends in a verdict or spends one attempt, except
+        // at most one pass whose kept scan expired during the check (only
+        // the first pass can reuse: every later one follows a `forget`).
+        for _ in 0..=FRESH_ATTEMPTS {
+            let reused = self.reusable_at(host.now());
+            if !reused {
                 self.rescan(host)?;
             }
             let scan = self.latest.as_ref().expect("made above");
@@ -798,8 +824,15 @@ impl<'a> Checker<'a> {
                 return Ok(Ok(Clear {
                     candidate,
                     record,
+                    reused,
                     fresh_until: scan.fresh_until(),
                 }));
+            }
+            if reused {
+                // The kept scan reached the bound while this check ran: the
+                // end of its reuse, not a slow scan. Check on a new one.
+                self.forget();
+                continue;
             }
             let stale = Stale::of(
                 scan,
@@ -809,7 +842,7 @@ impl<'a> Checker<'a> {
                 return Ok(Err(skip));
             }
         }
-        unreachable!("each pass decides or spends one of {FRESH_ATTEMPTS} attempts")
+        unreachable!("each pass decides or spends one of {FRESH_ATTEMPTS} attempts, but one reuse")
     }
 
     /// A scan younger than the reuse limit: the kept one, or a new one.
@@ -971,15 +1004,23 @@ pub fn clear_and_delete<H: Delete>(
     attempts: &mut FreshAttempts,
     also: &mut dyn FnMut(&Scan) -> Result<(), NotDeleted>,
 ) -> Result<Deletion, NotDeleted> {
-    // Bounded by `attempts`: each pass deletes, refuses, or spends one.
-    for _ in 0..FRESH_ATTEMPTS {
+    // Bounded: each pass deletes, refuses, or spends one attempt, except at
+    // most one pass whose clear came from a kept scan (after its `forget`,
+    // every later clear is on a scan made for it).
+    for _ in 0..=FRESH_ATTEMPTS {
         let clear = checker
             .check(host, candidate, record, attempts)
             .map_err(NotDeleted::Failed)?
             .map_err(NotDeleted::Skipped)?;
+        let reused = clear.reused;
         also(checker.latest().expect("the check made or kept one"))?;
         match delete_cleared(host, clear, options) {
             Ok(done) => return Ok(done),
+            Err(NotCleared::Expired(_)) if reused => {
+                // The kept scan's reuse ended before the deletion could
+                // start: check again on a new scan, no attempt spent.
+                checker.forget();
+            }
             Err(NotCleared::Expired(_)) => {
                 let scan = checker.latest().expect("the check made or kept one");
                 let stale = Stale::of(scan, "its clear expired before the deletion could start");
@@ -989,7 +1030,9 @@ pub fn clear_and_delete<H: Delete>(
             }
         }
     }
-    unreachable!("each pass deletes, refuses, or spends one of {FRESH_ATTEMPTS} attempts")
+    unreachable!(
+        "each pass deletes, refuses, or spends one of {FRESH_ATTEMPTS} attempts, but one reuse"
+    )
 }
 
 /// Why one attempt at a fresh verdict was spent, for the skip's detail.

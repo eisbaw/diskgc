@@ -18,6 +18,7 @@ use crate::proc_locks::{self, Usage, Watched};
 use crate::suite::{Ctx, TestResult};
 use crate::under_test::{Paused, Run, Spawned};
 use crate::{ensure, info};
+use diskgc_core::inuse::FRESHNESS;
 
 /// SIGKILL's number on Linux.
 pub(crate) const SIGKILL: i32 = 9;
@@ -463,6 +464,20 @@ pub(crate) fn spawn_paused(
     let mut spawned = ctx.spawn_as_tester(&ctx.driver(), &full)?;
     let paused = spawned.wait_paused()?;
     Ok((spawned, paused))
+}
+
+/// Resumes the driver paused inside a target's deletion, but not before
+/// [`FRESHNESS`] has passed since the pause was seen. The scan that cleared
+/// the part in progress started before the pause, so the next part's check
+/// must then make a new scan, which sees what started during the pause. A
+/// shorter pause leaves the next part to that scan (one scan serves a
+/// target's parts while it is younger than FRESHNESS, TASK-173), which
+/// cannot see it.
+pub(crate) fn resume_past_freshness(spawned: &mut Spawned, paused: &Paused) -> TestResult {
+    if let Some(rest) = FRESHNESS.checked_sub(paused.seen.elapsed()) {
+        std::thread::sleep(rest);
+    }
+    spawned.resume(paused)
 }
 
 /// The verdict line of `target` in the driver's run, which must exit 0.

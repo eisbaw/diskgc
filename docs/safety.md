@@ -694,10 +694,16 @@ the layer's inode in `maps`, a mapping alone does not match.
 **Freshness:** the `/proc` scan used for a candidate is never older than one
 second (monotonic clock including suspend time) when that candidate's
 deletion starts. A scan is as old as its first read. One scan serves the
-candidates checked strictly before 500 ms from its start. The check that
+candidates checked strictly before 500 ms from its start; within one Cargo
+target under its locks, it serves every part whose deletion starts within
+the one-second bound instead (`cargo-target`, Reclaim protocol, step 3).
+The check that
 clears a candidate looks at the clock as its last step before the
 deletion starts, and the deletion (or command) looks again as its own
-last step. A stale scan there (a suspend during the scan or right after
+last step. A scan kept from an earlier check that reaches the bound
+during a check, or between its clear and the deletion, has reached the
+end of its reuse: the check is made again on a new scan without spending
+an attempt (below); only a scan made for the check spends one. A stale scan there (a suspend during the scan or right after
 it, a scan slower than the bound on a busy host) never clears anything:
 it spends one of the candidate's three attempts, and the next attempt
 waits (250 ms, then 1 s; never to or past the deadline) and checks against
@@ -2187,7 +2193,38 @@ The step that deletes (`cargo_target::reclaim` in the core).
    Each part is deleted right after its own in-use check (`Checker::check`
    on exactly the record then deleted, with the Cargo process checks on the
    same scan, within Freshness) through `delete_cleared`; a hit stops the
-   deletion (`in_use`). Before each part its profile directory's lock
+   deletion (`in_use`). One scan serves every part whose deletion starts
+   while that scan is younger than the one-second Freshness bound, from
+   its first read: the scan made under the locks in step 2 serves the
+   first parts, and a part that would start on a scan one second old or
+   older gets a new one, which then serves the parts after it. This
+   replaces, for the parts of one target only, the 500 ms window in which
+   a scan serves separate candidates. Decided 2026-10-25 for TASK-173 on
+   Mark's delegation ("let one scan serve all parts of a target as long as
+   each part's delete starts inside the 1 s bound. dont touch the 1 s
+   rule"): with that window a scan slower than ~450 ms on a busy host
+   served no part, so each part made its own scan, (parts + 1) scans per
+   target, 5 to 13 s of held locks per target at load 18 to 34 (TASK-145).
+   It is safe because nothing the bound protects changes: every part's
+   deletion still starts on a scan younger than one second, its own in-use
+   check and the Cargo process checks still run against that scan right
+   before it, a stale scan still clears nothing, and the parts share the
+   target's three attempts as before. What is reused longer is only the
+   answer about processes, while diskgc holds every lock of the target,
+   and the locks, not the scan, are what keep a Cargo of this lock set out
+   (below). What changes is availability: a Cargo of the same lock set
+   that starts waiting meanwhile is seen at a part's check up to one second
+   after it started instead of up to half a second, so diskgc may delete
+   one or more further parts before it stops for it (`in_use`), and that
+   Cargo waits that much longer. The locks do not cover a process that
+   takes no Cargo lock (a binary of the target run directly, a debugger,
+   a proc-macro server loading `deps/*.so`, an indexer): one that starts
+   using a later part while earlier parts are deleted is certain to be
+   seen only if it started at least one second before that part's deletion
+   starts, where the shorter window made that typically half a second; one
+   that started closer to the deletion may be missed, the check-to-delete
+   race of In use, limit 5. That margin is what the shorter window gave
+   between parts; the Freshness bound is unchanged. Before each part its profile directory's lock
    files are listed again: one created, removed or replaced while diskgc
    holds the locks (a Cargo of another lock set starting, Lock files) stops
    the deletion (`changed`). That listing is a detector and a backstop,
@@ -2256,7 +2293,8 @@ off): a read-only directory a build script left in its output makes that
 part's delete fail (`EACCES`), an error for the target after its
 fingerprints went.
 Each part's in-use check is fresh (Freshness), not atomic with its
-delete (In use, limit 5). The order "fingerprints first" relies on Cargo
+delete (In use, limit 5), and may answer from a scan that also served the
+parts before it (step 3). The order "fingerprints first" relies on Cargo
 treating a unit whose fingerprint is missing as dirty: race test 6
 ([testing.md](testing.md#cargo-race-tests)) kills the reclaim at the
 first unlink of every part and in the middle of every larger one

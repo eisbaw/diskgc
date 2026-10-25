@@ -203,6 +203,7 @@ version = "0.1.0"
 dependencies = [
  "diskgc-core",
  "jiff",
+ "proptest",
  "schemars",
  "serde",
  "serde-saphyr",

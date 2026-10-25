@@ -311,6 +311,8 @@ pub struct Paused {
     /// The call's position among calls of `op`, from 1.
     pub nth: u64,
     pub pid: u32,
+    /// When the harness saw the pause; the process paused no later.
+    pub seen: Instant,
 }
 
 /// Prefix of strace's per-process record files (`-ff` adds `.PID`).
@@ -605,7 +607,13 @@ impl Spawned {
     /// until [`Spawned::resume`].
     pub fn wait_paused(&mut self) -> Result<Paused, String> {
         let paused = match self.next_control("pause")? {
-            ControlLine::Pause { call, op, nth, pid } => Paused { call, op, nth, pid },
+            ControlLine::Pause { call, op, nth, pid } => Paused {
+                call,
+                op,
+                nth,
+                pid,
+                seen: Instant::now(),
+            },
             other => return Err(format!("{:?}: expected a pause, got {other}", self.argv)),
         };
         let not_blocked = |e: String| {
