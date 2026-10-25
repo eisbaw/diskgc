@@ -430,26 +430,25 @@ impl Library {
     }
 
     /// Why `name` is not in this library although it is a documented
-    /// built-in: it is one the release catalog leaves out. `None` for a
-    /// name this library has, or one no built-in has, and always for the
-    /// development library.
-    pub fn withheld(&self, name: &str) -> Option<String> {
+    /// built-in: one the release catalog leaves out ("`X` is a built-in
+    /// that diskgc 0.1 does not ship."). `None` for a name this library
+    /// has, or one no built-in has, and always for the development library.
+    /// [`Self::release_scope`] says what the release ships instead.
+    pub fn not_shipped(&self, name: &str) -> Option<String> {
         let (release, names) = self.withheld.as_ref()?;
         names.contains(name).then(|| {
             format!(
-                "`{name}` is a built-in that diskgc {} does not ship. {}",
-                release.name(),
-                self.release_scope()
+                "`{name}` is a built-in that diskgc {} does not ship.",
+                release.name()
             )
         })
     }
 
-    /// What a release library offers, in a user's words: its sources and
-    /// filters by name, and where to read more.
-    fn release_scope(&self) -> String {
-        let (sources, filters): (Vec<&Profile>, Vec<&Profile>) = self
-            .profiles
-            .values()
+    /// What this library offers, in a user's words: its sources and
+    /// filters by name, in `profiles list` order, and where to read more.
+    pub fn release_scope(&self) -> String {
+        let (sources, filters): (Vec<&Profile>, Vec<&Profile>) = describe::listing_order(self)
+            .into_iter()
             .partition(|p| matches!(&p.body, Body::Source(_)));
         let names = |profiles: &[&Profile]| {
             profiles
@@ -540,7 +539,8 @@ impl Catalog for Library {
     type Action = Action;
 
     fn withheld(&self, name: &str) -> Option<String> {
-        Library::withheld(self, name)
+        self.not_shipped(name)
+            .map(|why| format!("{why} {}", self.release_scope()))
     }
 
     fn names(&self) -> Vec<&str> {

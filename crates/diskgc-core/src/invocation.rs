@@ -91,9 +91,12 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String>
     let mut refused = Vec::new();
     let not_shipped = |name: &str| {
         library
-            .withheld(name)
-            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog"))
+            .not_shipped(name)
+            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog."))
     };
+    // Tiers are checked through `ShortRefusals`, so the release's scope is
+    // said once below instead of after every refused part (TASK-146 walk).
+    let short = ShortRefusals(&library);
     for policy in &config.profile_policies {
         if library.get(&policy.profile).is_none() {
             refused.push(format!(
@@ -112,7 +115,7 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String>
     }
     for group in &config.groups {
         for tier in &group.tiers {
-            if let Err(e) = select::check(tier.select.expr().clone(), &library) {
+            if let Err(e) = select::check(tier.select.expr().clone(), &short) {
                 refused.push(format!("group `{}` tier `{}`: {e}", group.name, tier.name));
             }
         }
@@ -124,14 +127,35 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), String>
     }
     if !refused.is_empty() {
         return Err(format!(
-            "invalid config {}: {} part(s) are not available in this release:\n  {}",
+            "invalid config {}: {} part(s) are not available in this release:\n  {}\n{}",
             config.path.display(),
             refused.len(),
-            refused.join("\n  ")
+            refused.join("\n  "),
+            library.release_scope()
         ));
     }
     config.library = library;
     Ok(())
+}
+
+/// A release library whose "not shipped" refusals leave out the release's
+/// scope, which the caller states once for all of them.
+struct ShortRefusals<'a>(&'a Library);
+
+impl select::Catalog for ShortRefusals<'_> {
+    type Action = <Library as select::Catalog>::Action;
+
+    fn lookup(&self, name: &str) -> Option<select::Entry<'_, Self::Action>> {
+        self.0.lookup(name)
+    }
+
+    fn names(&self) -> Vec<&str> {
+        self.0.names()
+    }
+
+    fn withheld(&self, name: &str) -> Option<String> {
+        self.0.not_shipped(name)
+    }
 }
 
 /// The configuration file as the binary's lookup left it (docs/reference.md,
