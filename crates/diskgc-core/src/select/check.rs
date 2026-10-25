@@ -14,9 +14,10 @@
 
 use std::fmt;
 
-use super::parse::{MAX_SUGGESTION_NAME_CHARS, Syntax, SyntaxError, edit_distance, parse};
+use super::parse::{Syntax, SyntaxError, parse};
 use super::{Expr, Factor, Term};
 use crate::kind::{Kind, PredicateName};
+use crate::suggest::{MAX_NAME_CHARS, edit_distance};
 
 /// What the checker needs to know about names: implemented by the profile
 /// model over the built-in and user profiles (overrides already applied).
@@ -471,7 +472,7 @@ fn unknown<C: Catalog>(written: String, name: &str, catalog: &C) -> CheckError {
         return CheckError::NotInRelease { written, why };
     }
     let name_len = name.chars().count();
-    if name_len > MAX_SUGGESTION_NAME_CHARS {
+    if name_len > MAX_NAME_CHARS {
         return CheckError::Unknown {
             written,
             name: name.to_owned(),

@@ -218,6 +218,46 @@ fn no_arguments_is_a_usage_error_with_exit_2() {
     assert!(text(&out.stderr).contains("usage: diskgc"));
 }
 
+/// TASK-148: a usage error is its message first, then only the command's
+/// usage lines and one pointer to `--help`; the help body (which would
+/// scroll the error away) is not printed.
+#[test]
+fn a_usage_error_shows_the_error_then_only_the_command_usage() {
+    for (args, error, usage_lines) in [
+        (
+            &["ensure", "--min-fre", "1G", "/nonexistent"][..],
+            "diskgc: error: ensure: unknown flag --min-fre; did you mean --min-free?",
+            3,
+        ),
+        (
+            &["profiles", "frob"],
+            "diskgc: error: profiles: unknown subcommand frob",
+            3,
+        ),
+        (
+            &["check", "extra"],
+            "diskgc: error: check: unknown argument extra",
+            1,
+        ),
+        (&[], "diskgc: error: no command given", 9),
+    ] {
+        let out = diskgc(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = text(&out.stderr);
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert!(lines[0].starts_with(error), "{args:?}:\n{stderr}");
+        assert!(lines[1].starts_with("usage: diskgc"), "{args:?}:\n{stderr}");
+        assert_eq!(lines.len(), 1 + usage_lines + 1, "{args:?}:\n{stderr}");
+        assert_eq!(
+            lines.last(),
+            Some(&"Run `diskgc --help` for examples, sizes, durations and exit codes."),
+            "{args:?}"
+        );
+        assert!(!stderr.contains("Start here"), "{args:?}:\n{stderr}");
+    }
+}
+
 /// AC #4 (syntax half): a bare number and a month duration are usage
 /// errors, exit 2, before anything on the machine is measured; with
 /// `--json`, exactly one JSON object says so.
@@ -736,7 +776,7 @@ fn json_anywhere_gives_one_object() {
             &["profiles", "--json"],
             "list, show NAME or test is required",
         ),
-        (&["watch", "--json"], "not implemented in this build yet"),
+        (&["watch", "--json"], "`watch` is not in diskgc 0.1.0 yet"),
     ] {
         let out = diskgc(args);
         let error = error_of(&out);

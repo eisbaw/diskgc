@@ -53,6 +53,7 @@ pub mod profile;
 pub mod report;
 pub mod resolve;
 pub mod select;
+pub mod suggest;
 pub mod units;
 
 #[cfg(test)]

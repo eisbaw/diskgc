@@ -53,17 +53,45 @@ const EXIT_OUTPUT_ERROR: u8 = 3;
 /// `--timeout`'s default (docs/reference.md, `ensure`).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-const USAGE: &str = "\
-usage: diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
+/// Each command's synopsis as the `usage:` lines print it: continuation
+/// lines are indented for the 7 columns of `usage: `.
+const ENSURE_SYNOPSIS: &str = "\
+diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
                      [--tally-budget DUR] [--no-index] [--select EXPR] [--roots DIR]...
-                     [--dry-run] [--json] [--config FILE] [--allow-root] PATH
-       diskgc profiles list [--json] [--config FILE]
+                     [--dry-run] [--json] [--config FILE] [--allow-root] PATH";
+const PROFILES_SYNOPSIS: &str = "\
+diskgc profiles list [--json] [--config FILE]
        diskgc profiles show NAME [--json] [--config FILE]
-       diskgc profiles test [--json] [--config FILE]
-       diskgc check [--config FILE]
-       diskgc --version
-       diskgc --help
+       diskgc profiles test [--json] [--config FILE]";
+const CHECK_SYNOPSIS: &str = "diskgc check [--config FILE]";
+const INFO_SYNOPSIS: &str = "\
+diskgc --version
+       diskgc --help";
 
+/// The usage lines: of `command` when it is one of ours, else of all.
+fn usage(command: Option<&str>) -> String {
+    let synopses: &[&str] = match command {
+        Some("ensure") => &[ENSURE_SYNOPSIS],
+        Some("profiles") => &[PROFILES_SYNOPSIS],
+        Some("check") => &[CHECK_SYNOPSIS],
+        _ => &[
+            ENSURE_SYNOPSIS,
+            PROFILES_SYNOPSIS,
+            CHECK_SYNOPSIS,
+            INFO_SYNOPSIS,
+        ],
+    };
+    format!("usage: {}\n", synopses.join("\n       "))
+}
+
+/// What follows a usage error's usage lines: one line, so the error stays
+/// on screen (the full help is ~40 lines).
+const SEE_HELP: &str = "Run `diskgc --help` for examples, sizes, durations and exit codes.\n";
+
+/// The help after the usage lines. The Profiles section that ends it is
+/// rendered from the build's library ([`describe::help_section`]). No
+/// task numbers or source-tree paths: the release package ships neither.
+const HELP: &str = "
 Start here, with a dry run (it reads only and deletes nothing):
   diskgc ensure --dry-run --json --min-free 50G \\
       --select 'profile:cargo-target && filter:idle-3d' --roots DIR PATH
@@ -78,12 +106,67 @@ Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
 
-This build runs `ensure --select` or configured groups with ordered or random
-tier ranking and oldest or best-fit candidate order. `watch`
-and `survey` arrive with later tasks. PATH and every DIR are absolute.
+Configuration: --config FILE, else $DISKGC_CONFIG, else the first of
+  $XDG_CONFIG_HOME/diskgc/config.yaml (default ~/.config/diskgc/config.yaml)
+  and /etc/diskgc/config.yaml that exists. `ensure --select` needs none;
+  configured groups do. `diskgc check` validates a configuration. The
+  package installs an example: share/doc/diskgc/examples/example.yaml.
+
+This version runs `ensure --select` or configured groups with ordered or
+random tier ranking and oldest or best-fit candidate order; `watch` and
+`survey` are not in it yet. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
-The full contract is docs/reference.md in diskgc's source tree.
 ";
+
+/// The flags each command takes, for "did you mean" (the parsers below
+/// are the authority; a test holds each list to its parser and usage).
+const ENSURE_FLAGS: [&str; 11] = [
+    "--min-free",
+    "--target-free",
+    "--timeout",
+    "--tally-budget",
+    "--no-index",
+    "--select",
+    "--roots",
+    "--dry-run",
+    "--json",
+    "--config",
+    "--allow-root",
+];
+const PROFILES_FLAGS: [&str; 2] = ["--json", "--config"];
+const CHECK_FLAGS: [&str; 1] = ["--config"];
+
+/// The words a command line may start with, for "did you mean".
+const FIRST_WORDS: [&str; 7] = [
+    "ensure",
+    "check",
+    "profiles",
+    "watch",
+    "survey",
+    "--help",
+    "--version",
+];
+
+/// "unknown flag X", with the flag `known` most likely meant.
+fn unknown_flag(written: &str, known: &[&str]) -> String {
+    match diskgc_core::suggest::closest(written, known) {
+        Some(near) => format!("unknown flag {written}; did you mean {near}?"),
+        None => format!("unknown flag {written}"),
+    }
+}
+
+/// The refusal of a command line whose first word is no command.
+fn unknown_command(first: &str) -> String {
+    let what = if first.starts_with('-') {
+        "unknown flag before a command"
+    } else {
+        "unknown command"
+    };
+    match diskgc_core::suggest::closest(first, &FIRST_WORDS) {
+        Some(near) => format!("{what} `{first}`; did you mean `{near}`?"),
+        None => format!("{what} `{first}`; the commands are ensure, check and profiles"),
+    }
+}
 
 /// What the command line asks for. Kept separate from acting on it so the
 /// decision is a pure function of the arguments.
@@ -94,11 +177,8 @@ enum Invocation {
     Ensure(EnsureArgs),
     Profiles(ProfilesArgs),
     Check(Option<OsString>),
-    /// A command of the contract that this build does not have yet.
-    NotYet {
-        command: String,
-        task: &'static str,
-    },
+    /// A command of the contract that this version does not have yet.
+    NotYet(&'static str),
     UsageError(String),
 }
 
@@ -125,9 +205,8 @@ enum ProfilesCommand {
     Test,
 }
 
-/// The commands of docs/reference.md this build does not run yet, and
-/// the task that brings each.
-const NOT_YET: [(&str, &str); 2] = [("watch", "task-32"), ("survey", "task-38")];
+/// The commands of docs/reference.md this version does not run yet.
+const NOT_YET: [&str; 2] = ["watch", "survey"];
 
 /// Whether the command line asks for JSON: any argument `--json`, or
 /// `--json=...` (then a usage error). Decided on the raw arguments, before
@@ -162,18 +241,12 @@ fn parse(args: &[OsString]) -> Invocation {
             Ok(config) => Invocation::Check(config),
             Err(why) => Invocation::UsageError(format!("check: {why}")),
         },
-        [command, ..] => match NOT_YET.iter().find(|(name, _)| command == name) {
-            Some((name, task)) => Invocation::NotYet {
-                command: (*name).to_owned(),
-                task,
-            },
-            None => Invocation::UsageError(format!(
-                "unknown command or arguments: {}",
-                args.iter()
-                    .map(|a| a.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )),
+        [first, ..] if first == "--version" || first == "-V" => {
+            Invocation::UsageError("--version takes no arguments (`--json` aside)".to_owned())
+        }
+        [command, ..] => match NOT_YET.iter().find(|name| command == *name) {
+            Some(name) => Invocation::NotYet(name),
+            None => Invocation::UsageError(unknown_command(&command.to_string_lossy())),
         },
     }
 }
@@ -192,6 +265,12 @@ fn parse_check(args: &[OsString]) -> Result<Option<OsString>, String> {
             )?,
             Some(s) if s.starts_with("--config=") => {
                 set(&mut config, "--config", Ok(OsString::from(&s[9..])))?
+            }
+            Some(flag) if flag.starts_with('-') => {
+                return Err(unknown_flag(
+                    flag.split_once('=').map_or(flag, |(name, _)| name),
+                    &CHECK_FLAGS,
+                ));
             }
             _ => return Err(format!("unknown argument {}", arg.to_string_lossy())),
         }
@@ -224,7 +303,8 @@ fn parse_profiles(args: &[OsString]) -> Invocation {
                     set(&mut config, flag, Ok(value.clone()))?;
                 }
                 Some(("--config", value)) => set(&mut config, "--config", Ok(value.into()))?,
-                _ => return Err(format!("unknown flag {flag}")),
+                Some((name, _)) => return Err(unknown_flag(name, &PROFILES_FLAGS)),
+                None => return Err(unknown_flag(flag, &PROFILES_FLAGS)),
             }
         }
         Ok(())
@@ -244,9 +324,12 @@ fn parse_profiles(args: &[OsString]) -> Invocation {
         ("show", []) => return usage("show needs a NAME".to_owned()),
         ("show", more) => return usage(format!("show takes one NAME, not {}", more.len())),
         (other, _) => {
-            return usage(format!(
-                "unknown subcommand {other}: list, show NAME or test"
-            ));
+            return usage(
+                match diskgc_core::suggest::closest(other, &["list", "show", "test"]) {
+                    Some(near) => format!("unknown subcommand {other}; did you mean {near}?"),
+                    None => format!("unknown subcommand {other}: list, show NAME or test"),
+                },
+            );
         }
     };
     Invocation::Profiles(ProfilesArgs { command, config })
@@ -323,7 +406,7 @@ fn parse_ensure(args: &[OsString]) -> Result<EnsureArgs, String> {
                     _ => set(&mut config, name, Ok(value.clone()))?,
                 }
             }
-            _ => return Err(format!("unknown flag {name}")),
+            _ => return Err(unknown_flag(name, &ENSURE_FLAGS)),
         }
     }
     let min_free = min_free.ok_or("--min-free SIZE is required")?;
@@ -668,7 +751,8 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesF
             }
         }
         (ProfilesCommand::Test, json) => {
-            let failures = diskgc_core::profile::examples::failures(library);
+            let run = diskgc_core::profile::examples::run(library);
+            let failures: Vec<String> = run.failures.iter().map(ToString::to_string).collect();
             let failed = !failures.is_empty();
             if json {
                 let object = Json::Obj(vec![
@@ -698,13 +782,24 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesF
                     true,
                 )
             } else {
-                (
-                    format!("{} profiles: examples pass\n", library.profiles().count()),
-                    false,
-                )
+                (tested_text(&run, library.profiles().count()), false)
             }
         }
     })
+}
+
+/// `profiles test`'s line when nothing failed: what was checked, so a
+/// library without examples is not reported as passing them.
+fn tested_text(run: &diskgc_core::profile::examples::Run, profiles: usize) -> String {
+    let without = profiles - run.profiles;
+    if run.examples == 0 {
+        format!("no examples to test: none of the {profiles} profiles has any\n")
+    } else {
+        format!(
+            "{} examples of {} profiles pass ({without} profiles have none)\n",
+            run.examples, run.profiles
+        )
+    }
 }
 
 /// Machine-independent policy validation. No `LinuxHost`, kernel version
@@ -849,10 +944,13 @@ fn main() -> ExitCode {
     match parse(&args) {
         Invocation::Version => output(&format!("diskgc {}\n", env!("CARGO_PKG_VERSION")), 0),
         Invocation::Help => match builtin_library() {
-            Ok(library) => output(&format!("{USAGE}{}", describe::help_section(&library)), 0),
+            Ok(library) => output(
+                &format!("{}{HELP}{}", usage(None), describe::help_section(&library)),
+                0,
+            ),
             Err(why) => {
                 log(&format!("error: {why}"));
-                output(USAGE, EXIT_USAGE)
+                output(&format!("{}{HELP}", usage(None)), EXIT_USAGE)
             }
         },
         Invocation::Ensure(args) => finish(&ensure(&args), json),
@@ -883,9 +981,12 @@ fn main() -> ExitCode {
                 }
             }
         },
-        Invocation::NotYet { command, task } => {
-            let why = format!("{command} is not implemented in this build yet ({task})");
-            eprintln!("diskgc: {why}");
+        Invocation::NotYet(command) => {
+            let why = format!(
+                "`{command}` is not in diskgc {} yet; its commands are ensure, check and profiles",
+                env!("CARGO_PKG_VERSION")
+            );
+            log(&format!("error: {why}"));
             if json {
                 output(
                     &format!("{}\n", error_json(ErrorCause::Usage, &why)),
@@ -929,10 +1030,13 @@ fn main() -> ExitCode {
                     )
                 }
                 (false, _) => {
+                    // The error first and alone on its line, then only this
+                    // command's usage and where the rest is: the full help
+                    // would scroll the error away (TASK-148).
+                    log(&format!("error: {reason}"));
                     if status == Status::UsageError {
-                        eprint!("diskgc: {reason}\n{USAGE}");
-                    } else {
-                        eprintln!("diskgc: error: {reason}");
+                        let command = args.first().and_then(|a| a.to_str());
+                        eprint!("{}{SEE_HELP}", usage(command));
                     }
                     ExitCode::from(status.exit_code())
                 }
@@ -1290,6 +1394,107 @@ mod tests {
             let error = profiles_args(list).expect_err(&format!("{list:?}"));
             assert!(error.starts_with("profiles: "), "{error}");
             assert!(error.contains(needle), "{list:?}: {error}");
+        }
+    }
+
+    /// TASK-148: a mistyped flag, subcommand or command names what was
+    /// probably meant.
+    #[test]
+    fn mistyped_words_suggest_the_closest_known_one() {
+        for (list, needle) in [
+            (
+                &["ensure", "--min-fre", "1G", "/p"][..],
+                "ensure: unknown flag --min-fre; did you mean --min-free?",
+            ),
+            (
+                &["ensure", "--min-free", "1G", "--dryrun", "/p"],
+                "unknown flag --dryrun; did you mean --dry-run?",
+            ),
+            (
+                &["ensure", "--min-free", "1G", "--frobnicate", "/p"],
+                "unknown flag --frobnicate",
+            ),
+            (
+                &["profiles", "list", "--jsno"],
+                "unknown flag --jsno; did you mean --json?",
+            ),
+            (
+                &["profiles", "list", "--confg=/c.yaml"],
+                "unknown flag --confg; did you mean --config?",
+            ),
+            (
+                &["profiles", "lst"],
+                "unknown subcommand lst; did you mean list?",
+            ),
+            (
+                &["check", "--conifg", "/c.yaml"],
+                "check: unknown flag --conifg; did you mean --config?",
+            ),
+            (&["help"], "unknown command `help`; did you mean `--help`?"),
+            (
+                &["ensur"],
+                "unknown command `ensur`; did you mean `ensure`?",
+            ),
+            (
+                &["prune"],
+                "unknown command `prune`; the commands are ensure, check and profiles",
+            ),
+            (&["--version", "ensure"], "--version takes no arguments"),
+        ] {
+            match parse(&args(list)) {
+                Invocation::UsageError(error) => {
+                    assert!(error.contains(needle), "{list:?}: {error}");
+                }
+                other => panic!("{list:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The "did you mean" lists hold exactly what the parsers accept and
+    /// the usage lines show.
+    #[test]
+    fn flag_lists_match_the_parsers_and_the_usage() {
+        for flag in ENSURE_FLAGS {
+            assert!(
+                ENSURE_SYNOPSIS.contains(&format!("{flag} "))
+                    || ENSURE_SYNOPSIS.contains(&format!("{flag}]")),
+                "{flag}"
+            );
+            if let Err(error) = ensure_args(&[flag, "1G", "/p"]) {
+                assert!(!error.contains("unknown flag"), "{flag}: {error}");
+            }
+        }
+        for flag in PROFILES_FLAGS {
+            assert!(PROFILES_SYNOPSIS.contains(flag), "{flag}");
+            if let Err(error) = profiles_args(&["list", flag, "/c.yaml"]) {
+                assert!(!error.contains("unknown flag"), "{flag}: {error}");
+            }
+        }
+        for flag in CHECK_FLAGS {
+            assert!(CHECK_SYNOPSIS.contains(flag), "{flag}");
+            assert!(matches!(
+                parse(&args(&["check", flag, "/c.yaml"])),
+                Invocation::Check(_)
+            ));
+        }
+    }
+
+    /// TASK-153: what a user reads has no task numbers or source-tree
+    /// paths: the release package ships neither.
+    #[test]
+    fn help_and_refusals_name_no_internal_tasks_or_source_paths() {
+        let library = builtin_library().expect("the build's catalog");
+        let help = format!("{}{HELP}{}", usage(None), describe::help_section(&library));
+        for leak in ["task", "TASK", "docs/", "source tree", "later tasks"] {
+            assert!(!help.contains(leak), "{leak:?} in --help:\n{help}");
+        }
+        assert!(help.contains("/etc/diskgc/config.yaml"), "{help}");
+        assert!(
+            help.contains("share/doc/diskgc/examples/example.yaml"),
+            "{help}"
+        );
+        for command in NOT_YET {
+            assert_eq!(parse(&args(&[command])), Invocation::NotYet(command));
         }
     }
 

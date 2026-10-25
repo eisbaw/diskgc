@@ -10,10 +10,7 @@
 use std::fmt;
 
 use super::{Expr, Factor, Term, distribute};
-
-/// Spelling suggestions are useful for short identifiers, and must not
-/// turn a large invalid input into a quadratic diagnostic scan.
-pub(super) const MAX_SUGGESTION_NAME_CHARS: usize = 256;
+use crate::suggest::{MAX_NAME_CHARS, edit_distance};
 
 /// Why an expression does not parse, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +251,7 @@ impl fmt::Display for Syntax {
 
 fn closest_qualifier(written: &str) -> Option<&'static str> {
     let written_len = written.chars().count();
-    if written_len > MAX_SUGGESTION_NAME_CHARS {
+    if written_len > MAX_NAME_CHARS {
         return None;
     }
     ["profile", "filter"]
@@ -262,21 +259,6 @@ fn closest_qualifier(written: &str) -> Option<&'static str> {
         .filter(|known| written_len.abs_diff(known.chars().count()) <= 2)
         .filter(|known| edit_distance(written, known) <= 2)
         .min_by_key(|known| (edit_distance(written, known), *known))
-}
-
-/// Character edit distance, used only for short diagnostic suggestions.
-pub(super) fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let substitute = previous[j] + usize::from(ca != *cb);
-            current.push(substitute.min(previous[j + 1] + 1).min(current[j] + 1));
-        }
-        previous = current;
-    }
-    previous[b.len()]
 }
 
 /// Whether `s` is a valid NAME in the grammar, `[a-z0-9][a-z0-9_-]*`:

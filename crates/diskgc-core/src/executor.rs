@@ -421,10 +421,10 @@ impl Tier {
         uid: u32,
     ) -> Result<Self, String> {
         let diagnostic_expr = format!("{expr:?}");
-        let not_yet = |what: &str, task: &str| {
+        let not_yet = |what: &str| {
             format!(
-                "--select {diagnostic_expr}: {what} is not supported by ensure in this build yet \
-                 ({task}); select one source profile (`profile:NAME`, kind cargo-target, or \
+                "--select {diagnostic_expr}: {what} is not supported by ensure in this version \
+                 yet; select one source profile (`profile:NAME`, kind cargo-target, or \
                  kind fs), optionally with supported filters, a positive fs union with one action, or a \
                  same-source Cargo union with only positive idle filters"
             )
@@ -441,7 +441,7 @@ impl Tier {
             Action::Delete { .. } | Action::Command { .. } | Action::CargoLockProtocol
         ) && (!first.negated.is_empty() || terms.iter().any(|term| !term.negated.is_empty()))
         {
-            return Err(not_yet("!profile: with this source action", "task-16"));
+            return Err(not_yet("!profile: with this source action"));
         }
         if !terms.is_empty() {
             // For one Cargo source, positive idle filters are lower age
@@ -468,10 +468,7 @@ impl Tier {
             if !matches!(first.source, SourceKind::Fs(_))
                 || !matches!(first.action, Action::Delete { .. } | Action::Command { .. })
             {
-                return Err(not_yet(
-                    "a union of this kind or action",
-                    "task-16, task-20",
-                ));
+                return Err(not_yet("a union of this kind or action"));
             }
             if terms.iter().any(|term| term.action != first.action) {
                 return Err(format!(
@@ -481,7 +478,7 @@ impl Tier {
             let mut extra = Vec::with_capacity(terms.len());
             for tier in &terms {
                 let SourceKind::Fs(find) = &tier.source else {
-                    return Err(not_yet("a union of non-filesystem sources", "task-16"));
+                    return Err(not_yet("a union of non-filesystem sources"));
                 };
                 extra.push(FsUnionSource {
                     profile: tier.profile.clone(),
@@ -507,7 +504,7 @@ impl Tier {
         library: &Library,
         bound: &std::collections::BTreeMap<String, Vec<String>>,
         uid: u32,
-        not_yet: &impl Fn(&str, &str) -> String,
+        not_yet: &impl Fn(&str) -> String,
     ) -> Result<Tier, String> {
         let diagnostic_expr = format!("{expr:?}");
         let Some(Body::Source(source)) = library.get(&term.source).map(|p| &p.body) else {
@@ -550,7 +547,7 @@ impl Tier {
                             uid,
                         ))),
                         Finds::CargoTargets => NegatedKind::CargoTarget,
-                        _ => return Err(not_yet(&format!("`!profile:{name}`"), "task-16")),
+                        _ => return Err(not_yet(&format!("`!profile:{name}`"))),
                     };
                     let roots = bound
                         .get(name)
@@ -631,16 +628,14 @@ impl Tier {
                 continue;
             }
             if is_negated {
-                return Err(not_yet(
-                    &format!("`!filter:{name}` (unsupported predicates)"),
-                    "task-16",
-                ));
+                return Err(not_yet(&format!(
+                    "`!filter:{name}` (unsupported predicates)"
+                )));
             }
             if where_.has.is_some() || where_.has_dir.is_some() || where_.has_not.is_some() {
-                return Err(not_yet(
-                    &format!("`filter:{name}` (a `has` / `has_dir` / `has_not` filter)"),
-                    "task-16",
-                ));
+                return Err(not_yet(&format!(
+                    "`filter:{name}` (a `has` / `has_dir` / `has_not` filter)"
+                )));
             }
             if let SourceKind::Fs(find) = &mut kind {
                 find.apply_version_filter(where_).map_err(|error| {

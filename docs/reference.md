@@ -18,9 +18,17 @@ diskgc profiles test [--json] [--config FILE]
 diskgc --help | --version
 ```
 
-`watch` and `survey` are planned commands (tasks 32 and 38). This build
-returns exit 2 for either; their intended interfaces are described below
-for design review, not as available CLI behavior.
+`watch` and `survey` are planned commands. This version returns exit 2
+for either, naming the commands it has; their intended interfaces are
+described below for design review, not as available CLI behavior.
+
+A usage error (an unknown command or flag, a missing or malformed
+argument) exits 2 and prints, on stderr, `diskgc: error: MESSAGE`, then
+the usage lines of the command given (of every command when there is
+none) and one line pointing to `diskgc --help`; it does not print the
+whole help. A mistyped command, flag or `profiles` subcommand names the
+closest one (`unknown flag --min-fre; did you mean --min-free?`). With
+`--json`, the one JSON object carries the same message.
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
 (the config's user profiles and `protect` list still apply); reports name
@@ -264,7 +272,8 @@ stderr (`diskgc: config PATH`).
   profile's declared type (directory for `any`) and its required `has`
   marker, so type and marker changes need separate model/golden fixtures.
   Structural kinds and filters have no path examples. Human output reports
-  every failure; `--json` prints `config`, `status` (`passed | failed`),
+  every failure, or how many examples of how many profiles passed (a
+  profile without examples is not counted as passing); `--json` prints `config`, `status` (`passed | failed`),
   `exit_code`, `profiles` (count), and `failures` (strings). Exit 0 when
   all examples pass, 1 when any fails.
 - Exit codes of `list`, `show` and `test`: 0 when the list or profile was
@@ -363,8 +372,12 @@ built-in source profile (name, category, description, and `(roots
 required: --roots DIR)` where it applies), the built-in filters on one
 line, then where to learn more (user profiles are listed by `diskgc
 profiles list`, details by `diskgc profiles show NAME`, machine-readable
-with `--json`). It reads no configuration. `--help` and `--version` exit
-0, and print text also when `--json` is given: help wins over `--json`.
+with `--json`; a release build says instead that it runs only these
+built-ins). Before the Profiles section it says where the configuration
+is looked up (Configuration file, Lookup) and where the package installs
+the example configuration. It reads no configuration. `--help` and
+`--version` exit 0, and print text also when `--json` is given: help wins
+over `--json`.
 
 ### `check`
 

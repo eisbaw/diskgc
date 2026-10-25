@@ -399,7 +399,7 @@ fn help_names_every_built_in() {
             ),
         }
     }
-    assert!(help.ends_with(&format!("{MORE}\n")), "{help}");
+    assert!(help.ends_with(&format!("{}\n", more(&library))), "{help}");
 }
 
 /// The help section lists built-ins only: user profiles are what `profiles

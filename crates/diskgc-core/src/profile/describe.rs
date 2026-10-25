@@ -24,12 +24,22 @@ use std::path::Path;
 
 use super::{Action, Body, Finds, Library, Origin, Profile, Roots, Source, Where};
 use crate::report::json::Json;
+use crate::suggest::{MAX_NAME_CHARS, edit_distance};
 use crate::units::format_duration;
 
 /// The closing lines of `--help`'s Profiles section: where the rest is.
-const MORE: &str = "\
-User profiles from your config are listed by `diskgc profiles list`;
-details: `diskgc profiles show NAME`; machine-readable: `--json`.";
+/// A release catalog runs no user profiles, so its help does not offer
+/// them.
+fn more(library: &Library) -> String {
+    let first = match library.release_name() {
+        Some(release) => format!(
+            "diskgc {release} runs only these built-ins (no user profiles); \
+             `diskgc profiles list` lists them;"
+        ),
+        None => "User profiles from your config are listed by `diskgc profiles list`;".to_owned(),
+    };
+    format!("{first}\ndetails: `diskgc profiles show NAME`; machine-readable: `--json`.")
+}
 
 /// Every profile in the order every listing uses: sources by name, then
 /// filters by their `idle_for` (shortest first, those without one last)
@@ -77,7 +87,7 @@ fn aligned(rows: &[Vec<String>]) -> String {
 /// The Profiles section that ends `diskgc --help`: one line per built-in
 /// source (name, category, description, and `(roots required)` where it
 /// applies), the built-in filters on one line, and where to learn more
-/// ([`MORE`]).
+/// ([`more`]).
 pub fn help_section(library: &Library) -> String {
     let builtin: Vec<&Profile> = listing_order(library)
         .into_iter()
@@ -107,9 +117,10 @@ pub fn help_section(library: &Library) -> String {
         .collect();
     format!(
         "\nProfiles built in (select with --select 'profile:NAME && filter:NAME'):\n{}  \
-         filters: {}\n{MORE}\n",
+         filters: {}\n{}\n",
         aligned(&rows),
-        filters.join(", ")
+        filters.join(", "),
+        more(library)
     )
 }
 
@@ -500,8 +511,7 @@ fn yaml_action(action: &Action) -> String {
             format!("  action: {{command: {}{cwd}}}\n", yaml_list(argv))
         }
         Action::CargoLockProtocol => {
-            "  # action: the Cargo lock protocol, fixed by kind cargo-target (docs/safety.md)\n"
-                .to_owned()
+            "  # action: the Cargo lock protocol, fixed by kind cargo-target\n".to_owned()
         }
         Action::DockerBuilderPrune => "  action: docker-builder-prune\n".to_owned(),
         Action::DockerImagePrune { all: false } => "  action: docker-image-prune\n".to_owned(),
@@ -614,8 +624,6 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
 
 /// The most names [`close_names`] suggests.
 const MAX_CLOSE: usize = 5;
-/// Bound fuzzy diagnostics independently of configuration and CLI input size.
-const MAX_SUGGESTION_NAME_CHARS: usize = 256;
 
 /// The names in `library` close to `name`: those that contain it or that
 /// it contains (a qualified `profile:cargo-target`, a bare `cargo`), then
@@ -624,7 +632,7 @@ const MAX_SUGGESTION_NAME_CHARS: usize = 256;
 /// each group.
 pub fn close_names<'a>(library: &'a Library, name: &str) -> Vec<&'a str> {
     let name_len = name.chars().count();
-    if name_len > MAX_SUGGESTION_NAME_CHARS {
+    if name_len > MAX_NAME_CHARS {
         return Vec::new();
     }
     let names = || library.profiles().map(|p| p.name.as_str());
@@ -659,21 +667,6 @@ pub fn unknown_name(library: &Library, name: &str) -> String {
             quoted.join(", ")
         )
     }
-}
-
-/// Levenshtein distance over characters.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let substitute = previous[j] + usize::from(ca != *cb);
-            current.push(substitute.min(previous[j + 1] + 1).min(current[j] + 1));
-        }
-        previous = current;
-    }
-    previous[b.len()]
 }
 
 #[cfg(test)]
