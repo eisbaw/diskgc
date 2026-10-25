@@ -241,7 +241,7 @@ fn is_at_or_below(named: &[u8], sought: &[u8]) -> bool {
 /// The process facts of one scan, with what row 6 compares derived once
 /// ([`NamedPaths`]). Built only by [`Processes::new`], so the derived
 /// part always belongs to the facts it was derived from.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Processes {
     facts: Vec<ProcessFacts>,
     named: Vec<NamedPaths>,

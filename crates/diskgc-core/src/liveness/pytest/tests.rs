@@ -296,6 +296,21 @@ fn named_by_argument(text: &[u8], sought: &Path) -> bool {
         .any(|n| is_at_or_below(n, sought.as_os_str().as_bytes()))
 }
 
+/// Whether a process whose one environment value is `text` names `S` by
+/// its environment, as the verdict decides it.
+fn named_by_environment(text: &[u8], sought: &Path) -> bool {
+    let mut entry = b"X=".to_vec();
+    entry.extend_from_slice(text);
+    let p = ProcessFacts {
+        environ: Some(Environ::from_entries([OsString::from_vec(entry)])),
+        ..proc(9, &[], &[])
+    };
+    NamedPaths::of(&p)
+        .environment
+        .iter()
+        .any(|n| is_at_or_below(n, sought.as_os_str().as_bytes()))
+}
+
 #[test]
 fn naming_by_string_is_lexical_and_bounded_by_a_separator() {
     let s = Path::new("/tmp/nix-shell.AB/pytest-of-tester/pytest-3");
@@ -856,6 +871,7 @@ proptest! {
                 Just("tmp"), Just("nix-shell.AB"), Just("pytest-of-tester"),
                 Just("pytest-3"), Just("pytest-30"), Just("x"), Just("pytest"), Just("-3"),
                 Just("/x/pytest-3"), Just("/tmp/pytest-of-tester/pytest-30"),
+                Just("/tmp/nix-shell.AB/pytest-of-tester"),
             ],
             0..12,
         ),
@@ -866,11 +882,9 @@ proptest! {
         let s = ["/tmp/nix-shell.AB/pytest-of-tester/pytest-3", "/tmp/pytest-of-tester/pytest-30",
                  "/x/pytest-3"][which];
         let s = Path::new(s);
-        prop_assert_eq!(
-            named_by_argument(text.as_bytes(), s),
-            names_path(text.as_bytes(), s).is_some(),
-            "{}", text
-        );
+        let named = names_path(text.as_bytes(), s).is_some();
+        prop_assert_eq!(named_by_argument(text.as_bytes(), s), named, "argument {}", text);
+        prop_assert_eq!(named_by_environment(text.as_bytes(), s), named, "environment {}", text);
     }
 }
 
