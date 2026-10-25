@@ -359,6 +359,25 @@ they never override the Invariants.
 ### Experiments
 
 <!-- - YYYY-MM-DD, Retro TASK-NNN: observation (numbers) -> change; judged by <metric>. Status: new | kept | extend | reverted (why) -->
+- 2026-10-25, Retro TASK-188: TASK-178 (a hang on a dead FUSE protect
+  root) was merged in TASK-152 on a fast check plus unrelated container
+  tests; async QA found it 2 merges later and its stop hid 4 suites'
+  results. -> Merges that touch path resolution, roots or mount handling
+  run the mount/FUSE/network container tests (`just e2e-one`, e.g.
+  `fs_protected_dead_fuse_root_is_refused_without_opening_it`, the network
+  and FUSE refusal tests) before merge. Adds rigour. Judged by:
+  regressions found by async QA next window (target 0). Status: new.
+- 2026-10-25, Retro TASK-188: TASK-155 took 2.8 h, mostly two rebase
+  conflicts with TASK-144 (both edited report/mod.rs in parallel). ->
+  Before launching parallel implementers, compare the files each brief
+  will touch; never two in the same module at once. Judged by: rebase
+  conflicts next window (target 0). Status: new.
+- 2026-10-25, Retro TASK-188: TASK-145/173 performance walks ran at load
+  29-65 instead of 15-25 because other implementers were building, making
+  before/after noisy. -> Performance tasks record load with every
+  measurement, and while one measures, at most 2 other implementers run.
+  Judged by: share of perf measurements inside their stated load band.
+  Status: new.
 
 ### Gotchas
 
