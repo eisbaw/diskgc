@@ -886,12 +886,20 @@
 
         # Static config validation must run in a Nix build sandbox: it may
         # read the config, but cannot require deployment roots or backends.
+        # The example's root does not exist in the sandbox: check warns with
+        # the decision ensure refuses with (TASK-194), which needs its host
+        # to start in a build sandbox, and still exits 0.
         config-check-sandbox = pkgs.runCommand "diskgc-config-check-sandbox" { } ''
-          output=$(${lib.getExe diskgc} check --config ${./docs/example.yaml})
+          output=$(${lib.getExe diskgc} check --config ${./docs/example.yaml} 2> stderr)
           case "$output" in
             *"profile:cargo-target && filter:idle-30d"*) ;;
             *) echo "check did not show the normalized tier" >&2; exit 1 ;;
           esac
+          if ! grep -F "warning: root /home/example/src does not exist on this machine" stderr; then
+            cat stderr >&2
+            echo "check did not warn about the example's absent root" >&2
+            exit 1
+          fi
           touch $out
         '';
 

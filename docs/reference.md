@@ -396,16 +396,21 @@ Static validation only, machine-independent: load the config, print the
 resolved config path and each tier's expression normalised with the
 profiles it resolves to, exit 0 or 2 (3 if writing stdout fails). Its exit
 code needs nothing from the deployment machine (no `PATH` lookups, no
-filesystem access beyond reading the config and a `stat` of each supplied
-root), so packaging and configuration tools run it before deploying (the
-NixOS module at build time, also when cross-building). Everything that
-depends on the machine is checked at run time; see
-[safety.md](safety.md#validation). One run-time refusal is previewed: a
+filesystem access beyond reading the config, the mount table, and a lookup
+of each supplied root whose mounts allow one), so packaging and
+configuration tools run it before deploying (the NixOS module at build
+time, also when cross-building). Everything that depends on the machine
+is checked at run time; see [safety.md](safety.md#validation). One
+run-time refusal is previewed, by the same decision `ensure` makes: a
 supplied root (a tier's or a `protect` entry's `roots:`) that does not
 exist where `check` runs is a stderr warning naming the root, the config
-line and the entry, saying that `ensure` refuses the configuration there;
-the exit code is unchanged, since a build sandbox has none of the
-deployment's roots.
+line and the entry, saying that `ensure` refuses the configuration there.
+A supplied root on a mount `ensure` never opens (FUSE, network, an
+untriggered automount, systemd PrivateTmp; [safety.md](safety.md#before-the-walk))
+is not looked up and warns that it is not. The exit code is unchanged
+either way, since a build sandbox has none of the deployment's roots;
+where the roots cannot be inspected (no mount table, or diskgc's host
+checks fail there), a warning says they were not checked.
 
 The text output starts with `config PATH`, then one line per tier in policy
 order: `GROUP.TIER: NORMALIZED_EXPRESSION => [source profiles]`. Advisory

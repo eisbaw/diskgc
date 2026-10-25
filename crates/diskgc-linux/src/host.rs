@@ -219,34 +219,6 @@ impl LinuxHost {
     }
 }
 
-/// The process's effective uid: what `{uid}` expands to. For callers
-/// without a [`LinuxHost`] (`check`'s advisory root warning).
-pub fn effective_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
-/// Whether nothing exists at `path`: an `O_PATH` open with
-/// `RESOLVE_NO_SYMLINKS` fails with ENOENT or ENOTDIR. For `check`'s
-/// advisory warning about a configured root (TASK-152), which needs no
-/// [`LinuxHost`]; any other outcome, an error or a symlink on the way
-/// included, is "not known to be absent". Nothing is `stat`ed and no
-/// symlink is followed, so the lookup stays on the path's own mount chain,
-/// which the caller has screened from mountinfo (TASK-178: a dead FUSE
-/// mount on the way would hang a `stat`).
-pub fn path_is_absent(path: &Path) -> bool {
-    let opened = rustix::fs::openat2(
-        CWD,
-        path,
-        OFlags::PATH | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    );
-    matches!(
-        opened,
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR)
-    )
-}
-
 /// The one place `/proc` is opened by path: an `O_PATH` directory fd,
 /// checked to be procfs (`fstatfs`), through which every later `/proc`
 /// access goes ([`ProcRoot`]).
@@ -271,17 +243,6 @@ fn open_procfs() -> Result<OwnedFd, HostError> {
         ));
     }
     Ok(proc)
-}
-
-/// The mount table (`self/mountinfo`), read without [`LinuxHost`] (for
-/// `check`, which runs in Nix build sandboxes where `LinuxHost::new`'s
-/// other checks do not hold): the table `check` screens a configured root
-/// against before [`path_is_absent`] looks it up.
-pub fn read_mountinfo_unheld() -> Result<Vec<MountEntry>, HostError> {
-    let proc = open_procfs()?;
-    let path = "self/mountinfo";
-    let text = ProcRoot(proc.as_fd()).read(path)?;
-    parse_mountinfo(&text).map_err(|e| HostError::invalid("parse", ProcRoot::shown(path), e))
 }
 
 /// Read a configuration without constructing `LinuxHost`. `diskgc check`
@@ -1928,7 +1889,7 @@ impl Host for LinuxHost {
     }
 
     fn effective_uid(&self) -> u32 {
-        effective_uid()
+        rustix::process::geteuid().as_raw()
     }
 
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {

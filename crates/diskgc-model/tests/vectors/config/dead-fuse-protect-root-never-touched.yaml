@@ -39,3 +39,9 @@ expect:
   removed: []
   skipped: []
   preserved: [/home/tester/src/app/target/debug/deps/app]
+  # check takes the same decision (TASK-194): none of the three is looked
+  # up, so none is "missing"; each is said to be on a refused mount.
+  check_warnings:
+    - "root /home/tester/fuse-dead is not looked up: ancestor /home/tester/fuse-dead is on fuse.sshfs mount"
+    - "root /home/tester/fuse-dead/below is not looked up"
+    - "root /home/tester/fuse-dead/absent is not looked up"

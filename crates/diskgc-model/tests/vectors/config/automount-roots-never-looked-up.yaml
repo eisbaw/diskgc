@@ -1,0 +1,52 @@
+# TASK-180: an untriggered automount point (systemd's x-systemd.automount
+# for an NFS share) is `autofs` in mountinfo. A lookup through it would
+# mount the share, and with its server down the lookup hangs in the kernel
+# (modelled as `dead: true`: any call that reaches it fails the test). A
+# tier root and a protect root below it are refused from mountinfo alone,
+# fail closed, like a network mount: never "missing" (no lookup). The dry
+# run excludes the tier as a safety error; the reclaim stops first on
+# protect discovery, which cannot prove its matches there (as for a dead
+# FUSE protect root). Exit 3 both ways, nothing deleted, not even under the
+# local root.
+# check (TASK-194) says each is not looked up and warns about nothing else.
+profile_vector: 1
+config: |
+  version: 1
+  protect:
+    - {profile: cargo-target, roots: [/mnt/nas/keep]}
+  groups:
+    - name: g
+      tiers:
+        - name: cargo
+          select: profile:cargo-target
+          roots:
+            - /home/tester/src
+            - /mnt/nas/src
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /mnt/nas, fs: autofs, dev: "0:70", size: 0, parent: 1, dead: true}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/app/Cargo.toml: {}
+    /home/tester/src/app/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: safety, contains: "root /mnt/nas/src: ancestor /mnt/nas/src is on autofs mount /mnt/nas"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "cannot prove matches at /mnt/nas/keep: unsupported_fs: /mnt/nas/keep: on an untriggered automount point"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/app/target/debug/deps/app]
+  check_warnings:
+    - "root /mnt/nas/src is not looked up: ancestor /mnt/nas/src is on autofs mount /mnt/nas and may block on I/O (config /etc/diskgc/config.yaml: line 11, tier `cargo`); ensure never opens it"
+    - "root /mnt/nas/keep is not looked up: ancestor /mnt/nas/keep is on autofs mount /mnt/nas"

@@ -300,11 +300,16 @@ evidence}`, `[]` meaning the report's `null`; an empty list in the report
 itself is a runner error), `preserved` (paths that
 must survive: they existed before reclaim or an event makes them),
 `commands` (optional: every command or Docker run in order, `{cwd,
-argv}`), and `report` / `dry_run_report` (optional subsets of the JSON
-report, e.g. `{status: met, seed: 42}`).
+argv}`), `report` / `dry_run_report` (optional subsets of the JSON
+report, e.g. `{status: met, seed: 42}`), and `check_warnings` (optional,
+with a `config`: `check`'s root warnings in order, each a text it must
+contain, and no others; `invocation::check_roots`, the decision `ensure`
+refuses missing roots with).
 
 Every vector is also held to invariants it does not state: the dry run
-never calls `unlinkat` or `fchmod` and runs no command; every `unlinkat`
+never calls `unlinkat` or `fchmod` and runs no command; nor does `check`'s
+root check, run on a fresh host for every vector whose configuration loads
+(a lookup that reaches a `dead` mount fails it there too); every `unlinkat`
 lies inside an expected action; every deleting action has a `removed`
 postcondition; every command run pairs with exactly one action (a
 command action's run in its checked candidate or that candidate's parent,

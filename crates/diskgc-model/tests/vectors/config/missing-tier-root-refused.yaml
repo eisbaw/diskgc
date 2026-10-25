@@ -38,3 +38,5 @@ expect:
   removed: []
   skipped: []
   preserved: [/home/tester/src/app/target/debug/deps/app]
+  # check previews the same refusal (TASK-194), and only for the missing root.
+  check_warnings: ["root /home/tester/scr does not exist on this machine (config /etc/diskgc/config.yaml: line 9, tier `cargo`); ensure refuses this configuration here (exit 2)"]

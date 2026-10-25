@@ -143,6 +143,12 @@ pub struct Expected {
     /// The same for the dry run's report.
     #[serde(default)]
     pub dry_run_report: Option<Value>,
+    /// `check`'s root warnings ([`invocation::check_roots`], TASK-194), in
+    /// order: each must contain its text, and there must be no other.
+    /// Absent: not compared, but `check` still runs on every vector whose
+    /// configuration loads, read-only and without reaching a dead mount.
+    #[serde(default)]
+    pub check_warnings: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -221,6 +227,9 @@ impl ProfileVector {
         }
         if vector.profile.is_some() && vector.select.is_some() {
             return Err("give `profile` or `select`, not both".to_owned());
+        }
+        if vector.expect.check_warnings.is_some() && vector.config.is_none() {
+            return Err("check_warnings needs a config: check reads one".to_owned());
         }
         if vector.config.is_some() && !vector.user_profiles.is_empty() {
             return Err(
@@ -376,6 +385,8 @@ impl ProfileVector {
             }
         }
 
+        self.check_check()?;
+
         let reclaiming = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
         // Both lists name paths that existed before reclaim, so a typo is
         // an error, not a vacuous postcondition. A preserved path may also
@@ -435,6 +446,48 @@ impl ProfileVector {
             reclaim,
             builtin,
         })
+    }
+
+    /// `check`'s root warnings on a fresh host, when the configuration
+    /// loads under the vector's catalog: compared with `check_warnings`
+    /// when given; always read-only. A call that reaches a `dead` mount
+    /// fails the test inside the host model.
+    fn check_check(&self) -> Result<(), String> {
+        let Some(text) = &self.config else {
+            return Ok(());
+        };
+        let Ok(config) = Catalog::from(self.catalog).config(
+            Path::new(CONFIG_PATH),
+            text.as_bytes(),
+            ConfigUse::Run,
+        ) else {
+            return match self.expect.check_warnings {
+                Some(_) => Err("check_warnings given, but the configuration does not load".into()),
+                None => Ok(()),
+            };
+        };
+        let host = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        let warnings = invocation::check_roots(&host, &config);
+        for op in [Op::Unlinkat, Op::Fchmod, Op::RunCommand] {
+            if host.trace().iter().any(|call| call.op == op) {
+                return Err(format!("check called {op}"));
+            }
+        }
+        let Some(expected) = &self.expect.check_warnings else {
+            return Ok(());
+        };
+        let matches = warnings.len() == expected.len()
+            && warnings
+                .iter()
+                .zip(expected)
+                .all(|(got, want)| got.contains(want.as_str()));
+        if matches {
+            Ok(())
+        } else {
+            Err(format!(
+                "check warnings {warnings:#?}, expected (contained, in order) {expected:#?}"
+            ))
+        }
     }
 
     /// Paths an event creates, renames to, replaces or mounts on.

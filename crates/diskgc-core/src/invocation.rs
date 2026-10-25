@@ -18,10 +18,10 @@ use std::time::Duration;
 use crate::config::{self, Config, ConfigError, IpcPolicy, Owner, Problems, Ranking, RootEntry};
 use crate::engine::Checkouts;
 use crate::executor::{self, Request, SelectionFailure, Tier};
-use crate::host::Delete;
+use crate::host::{Delete, Host, MountEntry};
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
-use crate::resolve::{ResolveError, Want, resolve_in, screen_mount_chain};
+use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in, screen_mount_chain};
 use crate::select;
 use crate::units::Size;
 
@@ -444,20 +444,13 @@ fn run<H: Delete>(
 /// exit 0. Roots a profile fixes itself (`/tmp`, a user profile's
 /// `find.roots`) may legitimately be absent and stay an empty match set.
 ///
-/// Only "does not exist" (ENOENT or ENOTDIR on the safe resolution the
-/// executor uses) refuses here. An unsafe, foreign or unreadable root
-/// stays the executor's per-tier report, and a mount table that cannot be
-/// read is left to the executor's own host error (exit 3), not turned
-/// into a usage error. A root removed after this check is still the
-/// executor's `missing` skip.
-///
-/// Mounts first (docs/safety.md, Before the walk): a path whose mount chain
-/// [`screen_mount_chain`] refuses (a FUSE or network mount, PrivateTmp, an
-/// unclear mount) is never resolved here, so it is never "missing". Opening
-/// and `statx`ing a dead FUSE mount point hangs in the kernel (TASK-178);
-/// the executor's preflight and protect discovery refuse such a root from
-/// the same screen without touching it.
-fn refuse_missing_roots<H: Delete>(
+/// Only [`RootFinding::Missing`] refuses here. A root the mount screen
+/// refuses, or an unsafe, foreign or unreadable one, stays the executor's
+/// per-tier report, and a mount table that cannot be read is left to the
+/// executor's own host error (exit 3), not turned into a usage error. A
+/// root removed after this check is still the executor's `missing` skip.
+/// `check` previews the same decision ([`check_roots`]).
+fn refuse_missing_roots<H: Host>(
     host: &H,
     config: Option<&Config>,
     options: &EnsureOptions,
@@ -466,16 +459,8 @@ fn refuse_missing_roots<H: Delete>(
     // (root as written, where), in the order the operator wrote them.
     let mut supplied: Vec<(&str, String)> = Vec::new();
     if let Some(config) = config {
-        for written in &config.written_roots {
-            // `--select` replaces the configured tiers, not `protect`.
-            if options.select.is_some() && matches!(written.entry, RootEntry::Tier(_)) {
-                continue;
-            }
-            supplied.push((
-                &written.root,
-                format!("config {}: {written}", config.path.display()),
-            ));
-        }
+        // `--select` replaces the configured tiers, not `protect`.
+        supplied.extend(configured_roots(config, options.select.is_none()));
     }
     supplied.extend(
         options
@@ -490,23 +475,21 @@ fn refuse_missing_roots<H: Delete>(
         return Ok(());
     };
     let is_missing = |path: &Path| {
-        screen_mount_chain(&mounts, path).is_ok()
-            && matches!(
-                resolve_in(host, &mounts, path, Want::Directory),
-                Err(ResolveError::Missing { .. })
-            )
+        matches!(
+            root_finding(host, &mounts, path),
+            Some(RootFinding::Missing)
+        )
     };
     // A missing PATH is the executor's first refusal (`PATH ...:
     // missing`): the more basic mistake is reported first.
     if is_missing(&options.path) {
         return Ok(());
     }
-    let uid = uid.to_string();
     let mut from_config = false;
     let missing: Vec<String> = supplied
         .into_iter()
         .filter_map(|(root, at)| {
-            let path = PathBuf::from(root.replace("{uid}", &uid));
+            let path = expand_uid(root, uid);
             let gone = is_missing(&path);
             from_config |= gone && at != "--roots";
             gone.then(|| format!("{} ({at})", path.display()))
@@ -536,6 +519,100 @@ fn refuse_missing_roots<H: Delete>(
             ),
         )),
     }
+}
+
+/// What `check` and `ensure` find about a supplied root before anything
+/// plans with it: the one decision both make (TASK-194; before it `check`
+/// had its own lookup, and TASK-178 had to be fixed twice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootFinding {
+    /// It does not exist here: ENOENT or ENOTDIR on the safe resolution
+    /// the executor uses.
+    Missing,
+    /// Its mount chain is refused, so it was not looked up.
+    NotLookedUp(MountScreenError),
+}
+
+/// Mounts first (docs/safety.md, Before the walk): a path whose mount chain
+/// [`screen_mount_chain`] refuses (a FUSE, network or untriggered automount
+/// mount, PrivateTmp, an unclear mount) is never resolved, so it is never
+/// "missing". Opening and `statx`ing a dead FUSE mount point hangs in the
+/// kernel (TASK-178), and a lookup through an automount point mounts it
+/// (TASK-180); the executor's preflight and protect discovery refuse such
+/// a root from the same screen without touching it. `None`: the root is
+/// there, or what is wrong with it is the executor's to report.
+fn root_finding<H: Host>(host: &H, mounts: &[MountEntry], path: &Path) -> Option<RootFinding> {
+    if let Err(why) = screen_mount_chain(mounts, path) {
+        return Some(RootFinding::NotLookedUp(why));
+    }
+    matches!(
+        resolve_in(host, mounts, path, Want::Directory),
+        Err(ResolveError::Missing { .. })
+    )
+    .then_some(RootFinding::Missing)
+}
+
+/// The roots `config` supplies, as written, and where ("config PATH:
+/// line N, tier `T`"), in [`Config::written_roots`]' order; a tier's only
+/// when `tiers` (an
+/// `ensure` with `--select` runs no configured tier).
+fn configured_roots(config: &Config, tiers: bool) -> impl Iterator<Item = (&str, String)> {
+    config
+        .written_roots
+        .iter()
+        .filter(move |written| tiers || !matches!(written.entry, RootEntry::Tier(_)))
+        .map(|written| {
+            (
+                written.root.as_str(),
+                format!("config {}: {written}", config.path.display()),
+            )
+        })
+}
+
+/// A written root with `{uid}` expanded, as the executor will see it.
+fn expand_uid(root: &str, uid: u32) -> PathBuf {
+    PathBuf::from(root.replace("{uid}", &uid.to_string()))
+}
+
+/// `check`'s preview of [`refuse_missing_roots`] (TASK-152, TASK-194): an
+/// advisory warning per configured root that `ensure` would refuse as
+/// missing here, or that it will never open because its mount chain is
+/// refused, plus one if the mount table cannot be read. `check` keeps its
+/// exit code: packagers run it where the deployment's roots do not exist
+/// (the NixOS module at build time, the flake's sandbox check). `{uid}` is
+/// the caller's, as `ensure` will expand it. Read-only: nothing is opened
+/// beyond the screened chain, nothing is written.
+pub fn check_roots<H: Host>(host: &H, config: &Config) -> Vec<String> {
+    let supplied: Vec<(&str, String)> = configured_roots(config, true).collect();
+    if supplied.is_empty() {
+        return Vec::new();
+    }
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(why) => {
+            return vec![format!(
+                "cannot read the mount table ({why}); configured roots not checked"
+            )];
+        }
+    };
+    let uid = host.effective_uid();
+    supplied
+        .into_iter()
+        .filter_map(|(root, at)| {
+            let path = expand_uid(root, uid);
+            Some(match root_finding(host, &mounts, &path)? {
+                RootFinding::Missing => format!(
+                    "root {} does not exist on this machine ({at}); ensure refuses this \
+                     configuration here (exit 2)",
+                    path.display()
+                ),
+                RootFinding::NotLookedUp(why) => format!(
+                    "root {} is not looked up: {why} ({at}); ensure never opens it",
+                    path.display()
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Translate configured owners once before any planning or deletion. Two
