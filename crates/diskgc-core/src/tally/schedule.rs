@@ -9,6 +9,7 @@ use std::collections::BinaryHeap;
 use std::time::Duration;
 
 use crate::host::MonoTime;
+use crate::index::Single;
 
 /// Discovery of each (profile, root): listing its patterns for new and
 /// vanished candidates (tentative).
@@ -17,6 +18,23 @@ pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(5 * 60);
 pub const RECHECK_PERIOD: Duration = Duration::from_secs(10 * 60);
 /// A re-tally of each unit: its size and newest change (tentative).
 pub const RETALLY_PERIOD: Duration = Duration::from_secs(60 * 60);
+
+/// When a single was last sized: its tally or its refusal hint, whichever
+/// is later (`None`: never).
+pub fn last_sized(single: &Single) -> Option<MonoTime> {
+    single
+        .tally
+        .map(|t| t.tallied_at)
+        .into_iter()
+        .chain(single.refusal.map(|r| r.at))
+        .max()
+}
+
+/// Whether a single is stale: never sized, or last sized (tallied or
+/// refused) [`RETALLY_PERIOD`] or more ago. The one rule both modes use.
+pub fn needs_sizing(single: &Single, now: MonoTime) -> bool {
+    last_sized(single).is_none_or(|last| now.saturating_since(last) >= RETALLY_PERIOD)
+}
 
 /// How late a job is, relative to its period. Ordered by `late ÷ period`
 /// (compared exactly, by cross-multiplying), greater is more overdue.

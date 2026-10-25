@@ -40,6 +40,7 @@ pub mod size;
 pub mod sync;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::engine::{DEFAULT_MAX_ENTRIES, Reason};
 use crate::host::{Host, HostError, MonoTime};
@@ -64,6 +65,11 @@ pub struct TallyState {
     /// The live sizing walk, if one is paused between batches (at most
     /// one; counted against the index's budget).
     cursor: Option<Cursor>,
+    /// Singles whose last background job (re-check or sizing) failed, and
+    /// when: they wait [`schedule::RECHECK_PERIOD`] before their next job,
+    /// so a failing unit is not retried every batch. Pruned to the index's
+    /// singles ([`Self::prune_failed`]).
+    failed: BTreeMap<(MountKey, PathBuf), MonoTime>,
 }
 
 /// What listing one source did to the index.
@@ -106,6 +112,7 @@ impl TallyState {
             discovered: BTreeMap::new(),
             listed: BTreeMap::new(),
             cursor: None,
+            failed: BTreeMap::new(),
         }
     }
 
@@ -141,6 +148,9 @@ impl TallyState {
         source: &TallySource,
         deadline: Option<MonoTime>,
     ) -> Result<Listed, HostError> {
+        // Stamped first: a listing that fails is not retried before its
+        // period (the background schedule).
+        self.listed.insert(source.finder.clone(), host.now());
         let listing = listing::list(host, source, deadline)?;
         let mut done = Listed::default();
         for item in &listing.listed {
@@ -158,7 +168,6 @@ impl TallyState {
             }
         }
         let now = host.now();
-        self.listed.insert(source.finder.clone(), now);
         if listing.complete {
             self.discovered.insert(source.finder.clone(), now);
         }
@@ -254,6 +263,38 @@ impl TallyState {
         }
         self.cursor = Some(cursor);
         Ok(true)
+    }
+
+    /// Evicts the single at `path` (a failed re-check), and the live cursor
+    /// with it if it sized that unit.
+    pub fn evict_single(&mut self, mount: &MountKey, path: &Path) -> bool {
+        let evicted = self.index.evict_single(mount, path);
+        self.drop_stale_cursor();
+        evicted
+    }
+
+    /// Drops the live cursor (its unit is no longer due).
+    pub fn drop_cursor(&mut self) {
+        self.cursor = None;
+        assert!(self.index.set_cursor_bytes(0), "zero always fits");
+    }
+
+    /// Records that a job of the single at `path` failed at `at`.
+    pub fn mark_failed(&mut self, mount: &MountKey, path: &Path, at: MonoTime) {
+        self.failed.insert((mount.clone(), path.to_owned()), at);
+    }
+
+    /// When a job of the single at `path` last failed.
+    pub fn failed_at(&self, mount: &MountKey, path: &Path) -> Option<MonoTime> {
+        self.failed.get(&(mount.clone(), path.to_owned())).copied()
+    }
+
+    /// Forgets failures of units no longer in the index as singles, and
+    /// ones older than `older_than`.
+    pub fn prune_failed(&mut self, older_than: MonoTime) {
+        let index = &self.index;
+        self.failed
+            .retain(|(mount, path), at| *at >= older_than && index.single(mount, path).is_some());
     }
 
     /// Drops the live cursor if its unit is no longer the single it sizes.

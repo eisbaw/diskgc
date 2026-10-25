@@ -321,17 +321,31 @@ the order of work.
   byte order), which survives entries vanishing under it (`ENOENT`
   ends that branch). A cursor holds no file descriptor between batches:
   each batch reaches the unit's root again from its mount (checking its
-  identity), reopens the cursor's directories and lists the deepest one
-  again, so a sleeping tally never keeps a directory inside a candidate
-  open (another process's in-use check would see it). One cursor is live
-  at a time, counted against the index's budget; it enters at most 64
+  identity) and reopens the cursor's directories, so a sleeping tally
+  never keeps a directory inside a candidate open (another process's
+  in-use check would see it). The cursor keeps the listing of each
+  directory on its path (so a huge flat directory is listed once per
+  walk, not once per batch; entries created after it was listed are
+  missed); a listing is charged one operation per name. A batch that
+  paused before doing any entry (reaching and reopening took it all)
+  marks the cursor stalled, and the next batch does at least 32 entries
+  whatever its bounds, so every walk ends. One cursor is live at a
+  time, counted against the index's budget with its listings; it enters
+  at most 64
   directory levels and remembers at most 16,384 hard-linked inodes (both
   tentative constants; beyond them the estimate is coarser). A walk past
   the deletion's entry budget stores a `too_many_entries` refusal hint.
   Cursors are not persisted; a unit whose walk did not finish counts as
   untallied. A listing of a (profile, root) is not resumable: it runs
-  whole, only as a batch's first job, and may exceed the batch's bounds;
-  the duty cycle charges its time like any batch's. The worker's time
+  only as a batch's first job, for at most 1 s (tentative), which exceeds
+  the batch's bounds; the duty cycle charges its time like any batch's.
+  One cut short is partial (it only adds). A root too large to list in
+  1 s is never listed completely in the background; `ensure`'s pass 1
+  lists it completely. A job that fails with a failure of the host
+  (`EIO`, `EMFILE`) waits its period (a unit's: 10 minutes) and the batch
+  goes on; after a batch whose every job failed the sleep is at least
+  1 s, doubling per such batch up to 60 s; each distinct failure is
+  logged once. The worker's time
   `t` is the whole turn: the host-lock test and the pressure read
   included.
 - **Pressure brake (background)** (Mark, 2026-10-25: duty cycle and
@@ -358,8 +372,10 @@ the order of work.
   on a busy `/tmp`. Constants are tentative and live in code. A source
   is scheduled by its last listing attempt (a listing that is never
   complete must not run every batch), never listed: due from the start;
-  a single never sized: due from when it was last found; a refusal hint
-  waits a re-tally period like a tally. A listing is itself a re-check
+  a single never sized is due from the start too (an estimate nobody has
+  outranks a re-tally); a single needs sizing when never sized or sized
+  (tallied, or refused as a hint) 60 minutes or more ago, one rule for
+  both modes. A listing is itself a re-check
   of what it finds (their `checked_at` is refreshed), so
   re-checks mostly serve units of roots the tally does not list. Blocks
   are neither re-checked nor sized here (they have no check time and no
@@ -376,7 +392,8 @@ the order of work.
   **recounted** (Mark, 2026-10-25: a complete listing of a block's site
   recounts its members and estimates; partial listings leave them). A
   listed candidate counts for the shallowest block that stands for it,
-  as insertion's coverage does. Recounting to fewer members shrinks
+  as insertion's coverage does, unless its path holds a single (then it
+  is that single). Recounting to fewer members shrinks
   `est_bytes` and `files` in proportion; to more, the new members are
   untallied, so the estimate becomes a lower bound (`tallied_at` none);
   to none evicts the block; ages are left. A block of several finders is
@@ -411,7 +428,8 @@ the order of work.
      stale units, that is never tallied or tallied more than 60 minutes
      ago, in the tier's order by the provisional key (`oldest`: oldest
      first; `best-fit`: the stored estimate, largest first, unknown
-     last). The first tier is the earliest in policy order with a
+     last). A unit refused (a hint) within the 60 minutes counts as
+     sized. The first tier is the earliest in policy order with a
      discovered candidate: the one that will act first. Later tiers keep
      their stored sizes and ages for their order (units without any
      are ordered by the provisional key, after sized ones under

@@ -3,16 +3,26 @@
 //! `ctime`, by a walk that resumes across batches through a [`Cursor`].
 //!
 //! The cursor holds no file descriptor between steps, only names: the
-//! names from the unit's root down to the directory being walked, and in
-//! each directory the last name done, in sorted (byte) order. Each step
-//! reaches the root again from its mount (as discovery does: no symlink
-//! followed, no mount crossed), checks the root's identity, opens the
-//! directories on the cursor's path again and lists the deepest one again,
-//! continuing after its last name done. So a batch that pauses holds
-//! nothing open while the tally sleeps (a reclaim's in-use check would see
-//! an open directory inside a candidate), and entries vanishing between
-//! steps only end their branch (`ENOENT` and the like): a directory on the
-//! cursor's path that is gone is skipped as done.
+//! names from the unit's root down to the directory being walked and, for
+//! each directory on that path, its listing (sorted by bytes) and how far
+//! the walk got in it. Each step reaches the root again from its mount (as
+//! discovery does: no symlink followed, no mount crossed), checks the
+//! root's identity, opens the directories on the cursor's path again and
+//! continues in the kept listings. So a batch that pauses holds nothing
+//! open while the tally sleeps (a reclaim's in-use check would see an open
+//! directory inside a candidate), a directory is listed once per walk
+//! (never again per batch: a huge flat directory costs one listing, not
+//! one per batch), and entries vanishing between steps only end their
+//! branch (`ENOENT` and the like). Entries created after their directory
+//! was listed are missed: an estimate. The kept listings are counted
+//! against the index's budget with the cursor ([`Cursor::counted_bytes`]).
+//!
+//! **Progress.** A step that paused before doing any entry (reaching the
+//! root and reopening the cursor's path took its whole batch) marks the
+//! cursor stalled; the next step then does at least [`STEP_ENTRIES_MIN`]
+//! entries whatever its batch's bounds say, so such a walk still ends
+//! (its batches exceed the bounds by that much, every other batch). A
+//! listing is charged as one operation per name.
 //!
 //! What is counted is an estimate for the order of work, never a check:
 //! a mount point beneath the root is neither statted nor entered (it may be
@@ -40,6 +50,10 @@ use crate::resolve::{Resolved, Want, open_beneath, resolve_in};
 /// Directories below a unit's root the walk enters (each holds an fd
 /// during a step). Deeper ones are counted, not entered.
 pub const LEVELS_MAX: usize = 64;
+
+/// Entries a step after a stalled one does at least (see the module doc,
+/// Progress).
+pub const STEP_ENTRIES_MIN: usize = 32;
 
 /// Inodes with several links remembered per walk, to count each once
 /// (8 bytes each in a B-tree: about 200 KiB at most).
@@ -73,8 +87,10 @@ pub enum Step {
 struct Level {
     /// Its name in its parent (`None`: the unit's root).
     name: Option<OsString>,
-    /// The last of its entries done, in byte order.
-    done_up_to: Option<OsString>,
+    /// Its entries, sorted by bytes, once listed.
+    names: Option<Vec<OsString>>,
+    /// How many of `names` are done.
+    next: usize,
 }
 
 /// A resumable walk of one unit's tree (see the module doc).
@@ -90,15 +106,8 @@ pub struct Cursor {
     bytes: u64,
     newest: Option<Timestamp>,
     hardlinks: BTreeSet<u64>,
-}
-
-/// An open directory of the current step.
-struct Open<F> {
-    fd: F,
-    /// Its names, sorted, once listed in this step.
-    names: Option<Vec<OsString>>,
-    /// The next of `names` to do.
-    next: usize,
+    /// The last step paused before doing any entry.
+    stalled: bool,
 }
 
 impl Cursor {
@@ -120,6 +129,7 @@ impl Cursor {
             bytes: 0,
             newest: None,
             hardlinks: BTreeSet::new(),
+            stalled: false,
         }
     }
 
@@ -146,14 +156,21 @@ impl Cursor {
             + self
                 .levels
                 .iter()
-                .map(|l| name(&l.name) + name(&l.done_up_to))
+                .map(|l| {
+                    name(&l.name)
+                        + l.names.as_ref().map_or(0, |names| {
+                            vec_bytes(names.capacity(), size_of::<OsString>())
+                                + names.iter().map(|n| heap(n.capacity())).sum::<usize>()
+                        })
+                })
                 .sum::<usize>()
             + btree_bytes(self.hardlinks.len(), btree_node_bytes(size_of::<u64>(), 0))
     }
 
-    /// Walks on within `budget`, at most `entries_max` entries in all.
-    /// An error is a failure of the host (`EIO`, `EMFILE`): the cursor is
-    /// left as it was before the failed call, to be resumed or dropped.
+    /// Walks on within `budget` (but see the module doc, Progress), at most
+    /// `entries_max` entries in all. An error is a failure of the host
+    /// (`EIO`, `EMFILE`): the cursor may have counted part of the step and
+    /// must be dropped, not resumed.
     pub fn step<H: Host>(
         &mut self,
         host: &H,
@@ -176,13 +193,11 @@ impl Cursor {
             }
             self.levels.push(Level {
                 name: None,
-                done_up_to: None,
+                names: None,
+                next: 0,
             });
         }
         let name = self.root.file_name().expect("a unit has a name");
-        if budget.spent(host) {
-            return Ok(Step::Paused);
-        }
         budget.take(1);
         let root_fd = match open_beneath(
             host,
@@ -317,116 +332,109 @@ impl<H: Host> Walk<'_, H> {
         root_fd: H::Fd,
         budget: &mut Budget,
     ) -> Result<Step, HostError> {
-        let mut open: Vec<Open<H::Fd>> = vec![Open {
-            fd: root_fd,
-            names: None,
-            next: 0,
-        }];
-        // Open the cursor's path again.
+        let mut open: Vec<H::Fd> = vec![root_fd];
+        // Open the cursor's path again (bounded by LEVELS_MAX).
         while open.len() < cursor.levels.len() {
-            if budget.spent(self.host) {
-                return Ok(Step::Paused);
-            }
             let depth = open.len();
             let name = cursor.levels[depth].name.clone().expect("named");
             budget.take(1);
-            match self.open_dir(&open[depth - 1].fd, &name)? {
-                Some(fd) => open.push(Open {
-                    fd,
-                    names: None,
-                    next: 0,
-                }),
-                None => {
-                    // Gone since the last step: its branch is done.
-                    cursor.levels.truncate(depth);
-                    cursor.levels[depth - 1].done_up_to = Some(name);
-                }
+            match self.open_dir(&open[depth - 1], &name)? {
+                Some(fd) => open.push(fd),
+                // Gone since the last step: its branch is done.
+                None => cursor.levels.truncate(depth),
             }
         }
+        // Entries done in this step; after a stalled step at least
+        // STEP_ENTRIES_MIN, whatever the budget says (the module doc,
+        // Progress).
+        let min = if cursor.stalled { STEP_ENTRIES_MIN } else { 0 };
+        let mut done = 0usize;
+        let stop = |budget: &Budget, done: usize| done >= min && budget.spent(self.host);
+        let step = self.walk(cursor, &mut open, budget, &mut done, &stop);
+        cursor.stalled = matches!(step, Ok(Step::Paused)) && done == 0;
+        step
+    }
+
+    fn walk(
+        &self,
+        cursor: &mut Cursor,
+        open: &mut Vec<H::Fd>,
+        budget: &mut Budget,
+        done: &mut usize,
+        stop: &dyn Fn(&Budget, usize) -> bool,
+    ) -> Result<Step, HostError> {
         loop {
             let depth = open.len() - 1;
-            let top = open.last_mut().expect("the root is open");
-            if top.names.is_none() {
-                if budget.spent(self.host) {
+            if cursor.levels[depth].names.is_none() {
+                if stop(budget, *done) {
                     return Ok(Step::Paused);
                 }
-                budget.take(1);
                 let left = self.entries_max.saturating_sub(cursor.entries as usize);
-                let mut names = match self.host.read_dir(&top.fd, left) {
+                let mut names = match self.host.read_dir(&open[depth], left) {
                     Ok(DirListing::Names(names)) => names,
                     Ok(DirListing::TooMany) => return Ok(Step::TooMany),
                     Err(e) if means_gone(&e) => Vec::new(),
                     Err(e) => return Err(e),
                 };
+                budget.take(names.len().max(1));
                 names.sort_unstable_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
-                let done = cursor.levels[depth].done_up_to.as_deref();
-                top.next = names.partition_point(|n| {
-                    done.is_some_and(|d| n.as_encoded_bytes() <= d.as_encoded_bytes())
-                });
-                top.names = Some(names);
+                cursor.levels[depth].names = Some(names);
             }
-            let names = top.names.as_ref().expect("listed");
-            let Some(name) = names.get(top.next).cloned() else {
+            let level = &cursor.levels[depth];
+            let Some(name) = level
+                .names
+                .as_ref()
+                .expect("listed")
+                .get(level.next)
+                .cloned()
+            else {
                 // This directory is done.
                 open.pop();
-                let finished = cursor.levels.pop().expect("a level per open directory");
-                match cursor.levels.last_mut() {
-                    None => return Ok(Step::Done(cursor.sized())),
-                    Some(parent) => parent.done_up_to = finished.name,
+                cursor.levels.pop();
+                if cursor.levels.is_empty() {
+                    return Ok(Step::Done(cursor.sized()));
                 }
                 continue;
             };
             let path = cursor.dir_path(depth).join(&name);
             if self.mount_points.contains(&path) {
-                top.next += 1;
-                cursor.levels[depth].done_up_to = Some(name);
+                cursor.levels[depth].next += 1;
                 continue;
             }
-            if budget.spent(self.host) {
+            if stop(budget, *done) {
                 return Ok(Step::Paused);
             }
             budget.take(1);
-            let stat = match self.host.statx(Base::Dir(&top.fd), Path::new(&name)) {
+            *done += 1;
+            let stat = match self.host.statx(Base::Dir(&open[depth]), Path::new(&name)) {
                 Ok(stat) => stat,
                 Err(e) if means_gone(&e) => {
-                    top.next += 1;
-                    cursor.levels[depth].done_up_to = Some(name);
+                    cursor.levels[depth].next += 1;
                     continue;
                 }
                 Err(e) => return Err(e),
             };
+            cursor.levels[depth].next += 1;
             if cursor.count(&stat) > self.entries_max {
                 return Ok(Step::TooMany);
             }
             let enter = stat.file_type == Some(FileType::Directory)
                 && stat.dev == cursor.identity.dev
                 && cursor.levels.len() < LEVELS_MAX;
-            top.next += 1;
             if !enter {
-                cursor.levels[depth].done_up_to = Some(name);
                 continue;
             }
             // Counted: from here on it is on the cursor's path, so a pause
-            // before it is opened resumes inside it, not at it again.
-            cursor.levels.push(Level {
-                name: Some(name.clone()),
-                done_up_to: None,
-            });
-            if budget.spent(self.host) {
-                return Ok(Step::Paused);
-            }
+            // before it is listed resumes inside it, not at it again.
             budget.take(1);
-            let parent_fd = &open[depth].fd;
-            match self.open_dir(parent_fd, &name)? {
-                Some(fd) => open.push(Open {
-                    fd,
+            // Gone since its statx: counted, nothing below.
+            if let Some(fd) = self.open_dir(&open[depth], &name)? {
+                open.push(fd);
+                cursor.levels.push(Level {
+                    name: Some(name),
                     names: None,
                     next: 0,
-                }),
-                None => {
-                    cursor.levels.pop();
-                    cursor.levels[depth].done_up_to = Some(name);
-                }
+                });
             }
         }
     }

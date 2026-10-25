@@ -12,8 +12,8 @@
 //!    are one round of evictions and recounts ([`super::recount`]).
 //! 2. **Depth (sizing), first tier only** (Mark, 2026-10-25): the first
 //!    selected tier with a discovered candidate (the one that will act
-//!    first) has its stale singles sized, never tallied or tallied more
-//!    than [`RETALLY_PERIOD`] ago, in the tier's order by the stored keys
+//!    first) has its stale singles sized, never sized or sized (tallied or
+//!    refused) [`super::schedule::RETALLY_PERIOD`] or more ago ([`needs_sizing`]), in the tier's order by the stored keys
 //!    (`oldest`: oldest first; `best-fit`: the stored estimate, largest
 //!    first, unknown last). Later tiers keep what they have. Then the tally
 //!    ends, even with budget left.
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use super::budget::Budget;
 use super::listing::TallySource;
 use super::recount::{Complete, Recount};
-use super::schedule::{DISCOVERY_PERIOD, RETALLY_PERIOD};
+use super::schedule::{DISCOVERY_PERIOD, needs_sizing};
 use super::{Listed, Sizing, TallyState};
 use crate::config::Order;
 use crate::engine::Reason;
@@ -238,10 +238,7 @@ fn first_tier_stale<H: Host>(
             .into_iter()
             .filter_map(|e| match &e.unit {
                 Queued::Single(s) => {
-                    let stale = s
-                        .tally
-                        .is_none_or(|t| now.saturating_since(t.tallied_at) > RETALLY_PERIOD);
-                    stale.then(|| (e.mount.clone(), e.path.clone()))
+                    needs_sizing(s, now).then(|| (e.mount.clone(), e.path.clone()))
                 }
                 Queued::Block(_) => None,
             })

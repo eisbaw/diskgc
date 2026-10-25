@@ -31,7 +31,10 @@ use super::budget::Budget;
 use super::listing::TallySource;
 use super::pace::{BATCH_OPS_MAX, Gate, Pace};
 use super::recount::Complete;
-use super::schedule::{DISCOVERY_PERIOD, Lateness, MostOverdue, RECHECK_PERIOD, RETALLY_PERIOD};
+use super::schedule::{
+    DISCOVERY_PERIOD, Lateness, MostOverdue, RECHECK_PERIOD, RETALLY_PERIOD, last_sized,
+    needs_sizing,
+};
 use super::size::reach;
 use super::{Sizing, TallyState};
 use crate::host::{Host, HostError, MonoTime, Pressure};
@@ -43,6 +46,18 @@ pub const LOCK_POLL: Duration = Duration::from_secs(1);
 /// The longest sleep when nothing is due (so a new source or a changed
 /// clock is noticed within it).
 pub const IDLE_SLEEP_MAX: Duration = Duration::from_secs(60);
+/// A background listing of one source stops after this (tentative). A
+/// listing is not resumable: one cut short only adds what it found (it is
+/// partial: no eviction, no recount) and the source waits its period. A
+/// root too large to list within it is never listed completely in the
+/// background; `ensure`'s pass 1 still lists it completely.
+pub const LISTING_TIME_MAX: Duration = Duration::from_secs(1);
+/// After a batch whose every job failed (a failure of the host), the sleep
+/// is at least this, doubling with each such batch in a row, up to
+/// [`super::pace::BRAKE_SLEEP_MAX`].
+pub const FAILURE_SLEEP_MIN: Duration = Duration::from_secs(1);
+/// Distinct failure messages logged per run; later ones are counted only.
+pub const FAILURE_MESSAGES_MAX: usize = 64;
 
 /// What the background tally reports, for the log (TASK-32 words it).
 #[derive(Debug)]
@@ -65,7 +80,9 @@ pub enum Event {
     Braked { reading: Pressure, sleep: Duration },
     /// A batch ran.
     Batch(BatchWork),
-    /// A failure of the host stopped a batch (its jobs stay due).
+    /// A job failed with a failure of the host (`EIO`, `EMFILE`): that job
+    /// waits its period (a unit's: [`RECHECK_PERIOD`]), the batch goes on.
+    /// Logged once per distinct message.
     Failed(HostError),
 }
 
@@ -83,13 +100,15 @@ pub struct BatchWork {
     pub sized: usize,
     /// Sizing walks that paused at the batch's end.
     pub paused: usize,
+    /// Jobs that failed (a failure of the host).
+    pub failed: usize,
     /// The sleep after it.
     pub sleep: Duration,
 }
 
 impl BatchWork {
     fn jobs(&self) -> usize {
-        self.listed + self.rechecked + self.evicted + self.sized + self.paused
+        self.listed + self.rechecked + self.evicted + self.sized + self.paused + self.failed
     }
 }
 
@@ -108,6 +127,10 @@ pub struct Background {
     started: MonoTime,
     psi_error_logged: bool,
     lock_error_logged: Option<std::mem::Discriminant<LockError>>,
+    /// Batches in a row whose every job failed.
+    failing: u32,
+    /// Failure messages logged so far (at most [`FAILURE_MESSAGES_MAX`]).
+    failures_logged: std::collections::BTreeSet<String>,
 }
 
 /// One job of a batch.
@@ -143,6 +166,8 @@ impl Background {
             started: host.now(),
             psi_error_logged: false,
             lock_error_logged: None,
+            failing: 0,
+            failures_logged: std::collections::BTreeSet::new(),
         }
     }
 
@@ -200,19 +225,41 @@ impl Background {
         }
         let mut budget = Budget::batch(start);
         let mut work = BatchWork::default();
-        let run = batch(host, state, sources, self.started, &mut budget, &mut work);
+        let mut failures = Vec::new();
+        let next_due = batch(
+            host,
+            state,
+            sources,
+            self.started,
+            &mut budget,
+            &mut work,
+            &mut failures,
+        );
         work.took = host.now().saturating_since(start);
         work.ops = budget.ops();
         let mut sleep = self.pace.after_batch(work.took);
-        match run {
-            Ok(next_due) if work.jobs() == 0 => {
-                let until_due = next_due.map_or(IDLE_SLEEP_MAX, |due| {
-                    due.saturating_since(host.now()).min(IDLE_SLEEP_MAX)
-                });
-                sleep = sleep.max(until_due);
+        for failure in failures {
+            let message = failure.to_string();
+            if self.failures_logged.len() < FAILURE_MESSAGES_MAX
+                && self.failures_logged.insert(message)
+            {
+                log(Event::Failed(failure));
             }
-            Ok(_) => {}
-            Err(e) => log(Event::Failed(e)),
+        }
+        if work.failed > 0 && work.failed == work.jobs() {
+            self.failing = self.failing.saturating_add(1);
+            let backoff = FAILURE_SLEEP_MIN
+                .saturating_mul(1 << (self.failing - 1).min(16))
+                .min(super::pace::BRAKE_SLEEP_MAX);
+            sleep = sleep.max(backoff);
+        } else {
+            self.failing = 0;
+        }
+        if work.jobs() == 0 {
+            let until_due = next_due.map_or(IDLE_SLEEP_MAX, |due| {
+                due.saturating_since(host.now()).min(IDLE_SLEEP_MAX)
+            });
+            sleep = sleep.max(until_due);
         }
         work.sleep = sleep;
         log(Event::Batch(work));
@@ -236,8 +283,10 @@ pub fn run<H: Host>(
     }
 }
 
-/// One batch: the most overdue jobs within `budget`. Returns when the next
-/// job not yet due falls due (`None`: none known).
+/// One batch: the most overdue jobs within `budget`. A job that fails
+/// with a failure of the host is recorded in `failures` and waits its
+/// period; the batch goes on. Returns when the next job not yet due falls
+/// due (`None`: none known).
 fn batch<H: Host>(
     host: &H,
     state: &mut TallyState,
@@ -245,87 +294,164 @@ fn batch<H: Host>(
     started: MonoTime,
     budget: &mut Budget,
     work: &mut BatchWork,
-) -> Result<Option<MonoTime>, HostError> {
+    failures: &mut Vec<HostError>,
+) -> Option<MonoTime> {
     let now = host.now();
+    if let Some(older_than) = now.0.checked_sub(RECHECK_PERIOD) {
+        state.prune_failed(MonoTime(older_than));
+    }
     let (jobs, next_due) = due_jobs(state, sources, started, now);
     if jobs.is_empty() {
-        return Ok(next_due);
+        return next_due;
     }
     budget.take(1);
-    let mounts = host.mountinfo()?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(e) => {
+            work.failed += 1;
+            failures.push(e);
+            return next_due;
+        }
+    };
     for (n, job) in jobs.into_iter().enumerate() {
         if budget.spent(host) {
             break;
         }
-        match job {
+        let (unit, done) = match job {
             Job::List(i) => {
                 // Not resumable: only as the batch's first job.
                 if n > 0 {
                     break;
                 }
-                let source = &sources[i];
-                let listed = state.list_source(host, source, None)?;
-                budget.take(listed.listing.listed.len() + listed.listing.unindexed.len() + 2);
-                if listed.listing.complete {
-                    let recount = state.recount(&[Complete {
-                        finder: &source.finder,
-                        listed: &listed.listing.listed,
-                        unindexed: &listed.listing.unindexed,
-                    }]);
-                    work.evicted += recount.singles_evicted + recount.blocks_evicted;
-                }
-                work.listed += 1;
+                (None, list(host, state, &sources[i], work))
             }
             Job::Recheck(mount, path, identity) => {
-                if state.index.single(&mount, &path).map(|s| s.identity) != Some(identity) {
-                    continue; // evicted or replaced by an earlier job
-                }
-                match reach(host, &mounts, &path, identity, budget)? {
-                    Some(_) => {
-                        let at = host.now();
-                        state
-                            .index
-                            .single_mut(&mount, &path)
-                            .expect("read above")
-                            .checked_at = at;
-                        work.rechecked += 1;
-                    }
-                    None => {
-                        state.index.evict_single(&mount, &path);
-                        work.evicted += 1;
-                    }
-                }
+                let done = recheck(host, state, &mounts, &mount, &path, identity, budget, work);
+                (Some((mount, path)), done)
             }
             Job::Size(mount, path) => {
-                // One live cursor: finish it before starting another walk.
+                // One live cursor: finish it first while it is still due.
                 let (mount, path) = match state.cursor_unit() {
-                    Some((m, p)) => (m.clone(), p.to_owned()),
+                    Some((m, p)) if due_to_size(state, m, p, host.now()) => {
+                        (m.clone(), p.to_owned())
+                    }
+                    Some(_) => {
+                        state.drop_cursor();
+                        (mount, path)
+                    }
                     None => (mount, path),
                 };
-                let now = host.now();
-                let still_due = state.index.single(&mount, &path).is_some_and(|s| {
-                    s.tally
-                        .is_none_or(|t| now.saturating_since(t.tallied_at) >= RETALLY_PERIOD)
-                });
-                if !still_due {
-                    continue; // sized by an earlier job (the live cursor's)
+                if !due_to_size(state, &mount, &path, host.now()) {
+                    continue; // sized or evicted by an earlier job
                 }
-                match state.size_unit(host, &mounts, &mount, &path, budget)? {
-                    Sizing::Paused => work.paused += 1,
-                    Sizing::Gone => work.evicted += 1,
-                    Sizing::Done | Sizing::Refused(_) => work.sized += 1,
-                    Sizing::Missing | Sizing::NoRoom => {}
-                }
+                let done = size(host, state, &mounts, &mount, &path, budget, work);
+                (Some((mount, path)), done)
             }
+        };
+        if let Err(e) = done {
+            work.failed += 1;
+            if let Some((mount, path)) = unit {
+                state.mark_failed(&mount, &path, host.now());
+            }
+            failures.push(e);
         }
     }
-    Ok(next_due)
+    next_due
+}
+
+/// Whether the single at `path` still needs sizing and has not just failed.
+fn due_to_size(
+    state: &TallyState,
+    mount: &MountKey,
+    path: &std::path::Path,
+    now: MonoTime,
+) -> bool {
+    state
+        .index
+        .single(mount, path)
+        .is_some_and(|s| needs_sizing(s, now))
+        && state.failed_at(mount, path).is_none()
+}
+
+fn list<H: Host>(
+    host: &H,
+    state: &mut TallyState,
+    source: &TallySource,
+    work: &mut BatchWork,
+) -> Result<(), HostError> {
+    let deadline = host.now().checked_add(LISTING_TIME_MAX);
+    let listed = state.list_source(host, source, deadline)?;
+    if listed.listing.complete {
+        let recount = state.recount(&[Complete {
+            finder: &source.finder,
+            listed: &listed.listing.listed,
+            unindexed: &listed.listing.unindexed,
+        }]);
+        work.evicted += recount.singles_evicted + recount.blocks_evicted;
+    }
+    work.listed += 1;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recheck<H: Host>(
+    host: &H,
+    state: &mut TallyState,
+    mounts: &[crate::host::MountEntry],
+    mount: &MountKey,
+    path: &std::path::Path,
+    identity: Identity,
+    budget: &mut Budget,
+    work: &mut BatchWork,
+) -> Result<(), HostError> {
+    if state.index.single(mount, path).map(|s| s.identity) != Some(identity) {
+        return Ok(()); // evicted or replaced by an earlier job
+    }
+    match reach(host, mounts, path, identity, budget)? {
+        Some(_) => {
+            let at = host.now();
+            state
+                .index
+                .single_mut(mount, path)
+                .expect("read above")
+                .checked_at = at;
+            work.rechecked += 1;
+        }
+        None => {
+            state.evict_single(mount, path);
+            work.evicted += 1;
+        }
+    }
+    Ok(())
+}
+
+fn size<H: Host>(
+    host: &H,
+    state: &mut TallyState,
+    mounts: &[crate::host::MountEntry],
+    mount: &MountKey,
+    path: &std::path::Path,
+    budget: &mut Budget,
+    work: &mut BatchWork,
+) -> Result<(), HostError> {
+    match state.size_unit(host, mounts, mount, path, budget)? {
+        Sizing::Paused => work.paused += 1,
+        Sizing::Gone => work.evicted += 1,
+        Sizing::Done | Sizing::Refused(_) => work.sized += 1,
+        // Its cursor does not fit the budget: wait, as after a failure.
+        Sizing::NoRoom => {
+            state.mark_failed(mount, path, host.now());
+            work.paused += 1;
+        }
+        Sizing::Missing => {}
+    }
+    Ok(())
 }
 
 /// The jobs due at `now`, most overdue first (at most one batch's worth:
 /// [`BATCH_OPS_MAX`]), and when the next job not yet due falls due. A
-/// source never listed is due from `started`; a single never sized from
-/// when it was last found (its `checked_at`).
+/// source never listed and a single never sized are due from `started`; a
+/// single whose last job failed waits [`RECHECK_PERIOD`] from the failure.
 pub fn due_jobs(
     state: &TallyState,
     sources: &[TallySource],
@@ -352,6 +478,10 @@ pub fn due_jobs(
         let UnitRef::Single(single) = unit else {
             return;
         };
+        if let Some(failed) = state.failed_at(mount, path) {
+            not_due(failed, RECHECK_PERIOD);
+            return;
+        }
         match Lateness::of(Some(single.checked_at), started, RECHECK_PERIOD, now) {
             Some(late) => jobs.offer(
                 late,
@@ -359,20 +489,14 @@ pub fn due_jobs(
             ),
             None => not_due(single.checked_at, RECHECK_PERIOD),
         }
-        // Never sized: due from when it was last found. A refusal hint
-        // waits a period like a tally.
-        let last = single
-            .tally
-            .map(|t| t.tallied_at)
-            .into_iter()
-            .chain(single.refusal.map(|r| r.at))
-            .max();
-        match Lateness::of(last, single.checked_at, RETALLY_PERIOD, now) {
+        // Never sized: due from the tally's start (a unit without any
+        // estimate must not starve behind overdue re-tallies, which its
+        // own listings' refreshes of `checked_at` would make it do). A
+        // refusal hint waits a period like a tally (`needs_sizing`).
+        let last = last_sized(single);
+        match Lateness::of(last, started, RETALLY_PERIOD, now) {
             Some(late) => jobs.offer(late, Job::Size(mount.clone(), path.to_owned())),
-            None => match last {
-                Some(last) => not_due(last, RETALLY_PERIOD),
-                None => not_due(single.checked_at, Duration::ZERO),
-            },
+            None => not_due(last.unwrap_or(started), RETALLY_PERIOD),
         }
     });
     (jobs.into_jobs(), next_due)

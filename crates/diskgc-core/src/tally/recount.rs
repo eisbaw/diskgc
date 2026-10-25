@@ -110,6 +110,11 @@ pub fn apply(index: &mut Index, round: &[Complete<'_>]) -> Recount {
     });
     for listing in round {
         for listed in listing.listed {
+            // A path that holds a single is that single (insertion gave it
+            // the finder), never a block's member too.
+            if index.single(&listed.mount, &listed.path).is_some() {
+                continue;
+            }
             if let Some(block) = covering(index, listing.finder, listed)
                 && let Some(of_block) = members.get_mut(&block)
             {

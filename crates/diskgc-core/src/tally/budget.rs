@@ -38,6 +38,16 @@ impl Budget {
         }
     }
 
+    /// At most `ops_max` operations, no time bound (a walk cut into steps
+    /// of a fixed size, e.g. by a test).
+    pub fn ops_only(ops_max: usize) -> Self {
+        Self {
+            ops: 0,
+            ops_max,
+            ends_at: None,
+        }
+    }
+
     /// Whether the bound is reached: no operation may start.
     pub fn spent<H: Host>(&self, host: &H) -> bool {
         self.ops >= self.ops_max || self.ends_at.is_some_and(|end| host.now() >= end)

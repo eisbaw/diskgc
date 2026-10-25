@@ -483,10 +483,10 @@ fn a_sizing_cursor_resumes_when_the_directory_it_was_in_vanishes() {
 
 // ---- Aging ----
 
-/// The next jobs are the most overdue relative to their period: a single
-/// re-checked 13 minutes ago (0.3 periods late) before one sized 75 minutes
-/// ago (0.25) before a source listed 6 minutes ago (0.2) before a never
-/// sized single found 2 minutes ago (2/60).
+/// The next jobs are the most overdue relative to their period: a never
+/// sized single, due since the tally started 86 minutes ago (26/60 = 0.43
+/// late), before a single re-checked 13 minutes ago (0.3) before one sized
+/// 75 minutes ago (0.25) before a source listed 6 minutes ago (0.2).
 #[test]
 fn due_jobs_are_ordered_by_lateness_over_period() {
     let host = host(&yaml(
@@ -516,12 +516,13 @@ fn due_jobs_are_ordered_by_lateness_over_period() {
     };
     set(&mut state, "x", 13, Some(5)); // re-check 0.3 late
     set(&mut state, "y", 1, Some(75)); // re-tally 0.25 late
-    set(&mut state, "z", 2, None); // never sized: 2/60
+    set(&mut state, "z", 2, None); // never sized: due since the start
     let (jobs, _) = due_jobs(&state, &sources, started, now);
     let p = |n: &str| Path::new("/tmp/a").join(n);
     assert_eq!(
         jobs,
         [
+            Job::Size(mount.clone(), p("z")),
             Job::Recheck(
                 mount.clone(),
                 p("x"),
@@ -529,7 +530,6 @@ fn due_jobs_are_ordered_by_lateness_over_period() {
             ),
             Job::Size(mount.clone(), p("y")),
             Job::List(0),
-            Job::Size(mount.clone(), p("z")),
         ]
     );
 }
@@ -940,4 +940,176 @@ fn background_tally_recounts_blocks_on_complete_listings_only() {
         host.sleep(sleep);
     }
     assert_eq!(counted(&state), 31);
+}
+
+/// Sizing a unit whose cursor path is so deep that reopening it takes a
+/// whole batch (2 ms a call, 30 levels) still ends: a stalled step makes
+/// the next one do some entries whatever its bounds.
+#[test]
+fn a_sizing_walk_whose_reopening_takes_a_batch_still_ends() {
+    let mut deep = String::from("/tmp/a/deep");
+    for level in 0..30 {
+        write!(deep, "/l{level}").unwrap();
+    }
+    let mut tree = String::new();
+    for f in 0..40 {
+        writeln!(tree, "  {deep}/f{f}: {{size: 4K}}").unwrap();
+    }
+    let host = host(&yaml(&tree, "call_cost: 2ms\n"));
+    let mut state = state();
+    state
+        .list_source(&host, &source("a", "/tmp/a"), None)
+        .unwrap();
+    let (mount, path) = (tmp_mount(), Path::new("/tmp/a/deep"));
+    let mut steps = Vec::new();
+    while steps.last() != Some(&Sizing::Done) {
+        let mounts = host.mountinfo().unwrap();
+        let mut budget = Budget::batch(host.now());
+        steps.push(
+            state
+                .size_unit(&host, &mounts, &mount, path, &mut budget)
+                .unwrap(),
+        );
+        host.sleep(Duration::from_secs(1));
+        assert!(
+            steps.len() < 400,
+            "the walk does not end: {} steps",
+            steps.len()
+        );
+    }
+    assert_eq!(
+        state
+            .index
+            .single(&mount, path)
+            .unwrap()
+            .tally
+            .unwrap()
+            .files,
+        31 + 40
+    );
+}
+
+/// A failure of the host (EIO on every listing below `/tmp/a`) is not
+/// retried every batch: the failing jobs wait, the batches back off to
+/// 60 s, and the failure is logged once.
+#[test]
+fn a_failing_host_is_not_retried_every_batch() {
+    let mut events = String::from("call_cost: 1ms\nevents:\n");
+    for nth in 1..400 {
+        writeln!(
+            events,
+            "  - {{at: {{op: read_dir, path: /tmp/a/d000, nth: {nth}, when: before}}, fail: EIO}}"
+        )
+        .unwrap();
+    }
+    let host = host(&yaml(&dirs("a", 1, 3), &events));
+    let mut state = state();
+    let mut log = Vec::new();
+    let turns = run_turns(&host, &mut state, &[source("a", "/tmp/a")], 60, &mut log);
+    let failed = log.iter().filter(|e| matches!(e, Event::Failed(_))).count();
+    assert_eq!(failed, 1, "{log:?}");
+    let attempts = host
+        .trace()
+        .iter()
+        .filter(|c| c.op == Op::ReadDir && c.path.as_deref() == Some(Path::new("/tmp/a/d000")))
+        .count();
+    let elapsed = host.elapsed().as_secs();
+    // One attempt per re-check period (10 min) at most, plus the first.
+    assert!(
+        attempts as u64 <= 1 + elapsed / 600,
+        "{attempts} attempts in {elapsed} s"
+    );
+    assert!(turns.iter().all(|t| {
+        t.batch
+            .is_none_or(|b| b.failed == 0 || t.sleep >= Duration::from_secs(1))
+    }));
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: 48, ..Default::default() })]
+
+    /// Cut into steps of any size, a sizing walk comes to exactly what one
+    /// uninterrupted walk does: no entry counted twice or missed at a
+    /// pause point.
+    #[test]
+    fn a_walk_cut_into_steps_of_any_size_sizes_the_same(
+        shape in proptest::collection::vec((0usize..4, 0usize..5), 1..12),
+        ops in 1usize..40,
+    ) {
+        let mut tree = String::new();
+        for (i, (depth, files)) in shape.iter().enumerate() {
+            let mut dir = format!("/tmp/a/u/s{i}");
+            for level in 0..*depth {
+                write!(dir, "/n{level}").unwrap();
+            }
+            writeln!(tree, "  {dir}/x: {{size: 4K}}").unwrap();
+            for f in 0..*files {
+                writeln!(tree, "  {dir}/f{f}: {{size: 8K}}").unwrap();
+            }
+        }
+        let host = host(&yaml(&tree, ""));
+        let (mount, path) = (tmp_mount(), Path::new("/tmp/a/u"));
+        let mounts = host.mountinfo().unwrap();
+        let mut whole = state();
+        whole.list_source(&host, &source("a", "/tmp/a"), None).unwrap();
+        let mut budget = Budget::until(None);
+        proptest::prop_assert_eq!(
+            whole.size_unit(&host, &mounts, &mount, path, &mut budget).unwrap(),
+            Sizing::Done
+        );
+        let mut cut = state();
+        cut.list_source(&host, &source("a", "/tmp/a"), None).unwrap();
+        let mut steps = 0;
+        loop {
+            let mut budget = Budget::ops_only(ops);
+            match cut.size_unit(&host, &mounts, &mount, path, &mut budget).unwrap() {
+                Sizing::Paused => {}
+                Sizing::Done => break,
+                other => proptest::prop_assert!(false, "{other:?}"),
+            }
+            steps += 1;
+            proptest::prop_assert!(steps < 10_000);
+        }
+        let tally = |s: &TallyState| {
+            let t = s.index.single(&mount, path).unwrap().tally.unwrap();
+            (t.est_bytes, t.files)
+        };
+        proptest::prop_assert_eq!(tally(&cut), tally(&whole));
+    }
+}
+
+/// A path that holds a single (found by two profiles) beneath a block of
+/// one of them is that single, never also one of the block's members: a
+/// recount counts it once.
+#[test]
+fn a_recount_never_counts_a_single_as_a_block_member_too() {
+    let host = recount_model(&[]);
+    let mut state = small_state();
+    let one = TallySource {
+        finder: finder("b", "/tmp/a"),
+        find: SourceFind::Fs(Box::new(Find::new(
+            &["grp/nix-shell.ab000x".to_owned()],
+            EntryType::Dir,
+            &Where::default(),
+            1000,
+        ))),
+    };
+    let a = two_level("a");
+    for source in [&one, &a] {
+        let listed = state.list_source(&host, source, None).unwrap();
+        assert!(listed.listing.complete);
+        state.recount(&[Complete {
+            finder: &source.finder,
+            listed: &listed.listing.listed,
+            unindexed: &listed.listing.unindexed,
+        }]);
+    }
+    let x = Path::new("/tmp/a/grp/nix-shell.ab000x");
+    let single = state
+        .index
+        .single(&tmp_mount(), x)
+        .expect("x stays a single");
+    assert_eq!(state.index.finder_set(single.finders()).len(), 2);
+    assert!(state.index.stats().blocks >= 1, "{:?}", state.index.stats());
+    assert_eq!(counted(&state), 41, "{:?}", state.index.stats());
 }
