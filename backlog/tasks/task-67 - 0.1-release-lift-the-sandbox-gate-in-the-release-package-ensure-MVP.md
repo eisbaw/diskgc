@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 20:17'
+updated_date: '2026-10-25 22:15'
 labels:
   - wave-2
   - release
@@ -100,6 +100,8 @@ Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): ipc: live-
 2026-10-25 rc-walk clean non-Nix install walk: release-01-candidate built at rc-walk 80c858c (/nix/store/3rz5nwyfl1flv14074kcallzwffmy5b9-diskgc-release-01-candidate-0.1.0), clean container from the e2e Debian image (own uid slot 18, fresh tmpfs /run, /tmp, /home/tester; nothing installed), installed from the package files per the release notes, walked as a new user (help, check, dry runs, real ensure). Cargo: real reclaim of 2 targets met the goal, cargo run rebuilt; lock missing -> exit 2 with provisioning commands; --json exhausted report parses as documented. /tmp: in the container's own PID namespace every tester session/rc dir is producer_unknown (documented limit), exit 1; other users' dirs read 'open /tmp/X: EACCES (13)' (TASK-140 fix). Release notes fixed on rc-walk 505f6ad (install -D for tmpfiles, first-run idle expectations, reclaimed Cargo target keeps lock files). Findings filed: TASK-209..218, 221, 222 (label shipping). Not proved: a /tmp reclaim in the initial PID namespace from the package (the TASK-156 VM walk covers it), systemd boot-time tmpfiles, seccomp profiles beyond Podman 5.8.7's default (start + empty scan only). Dumps: tmp/walks/2026-10-25-rc-walk-debian/dumps/. release-01-debian runner at 80c858c: 8/8 PASS.
 
 COMPASS round 4 (2026-10-25): RC QA = e2e-all + the full runner + both release runners + docs-vs-binary (host and container) + nix flake check --no-build, all on the RC sha. Added deps: TASK-205 (Cargo fine-grain lock names, measure), TASK-207 (Full-tier 100k test counts rows), TASK-133 (nix flake check red). Freeze rule after these: only a deletion-safety hole or a wrong frozen contract can be added as a blocker. Go/no-go brief must disclose that the deletion-path mutation run (TASK-13/177) has never run, and the TASK-212 decision (check stays exit 0; --strict later).
+
+RC QA on a11e77b (2026-10-25): flake eval, e2e-all 22/22, docs-vs-binary host 171/0 and container 192/0 pass; full tier red: 2 deterministic test bugs (owner_pid_suite stale in_use expectation; named_checkout_policy_for_command_caches registered on Debian without npm) being fixed on release-0.1; 2 intermittents under suite load (TASK-238, TASK-239) not resolved, no wrong deletion; under the freeze rule they are disclosed, not blockers.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
