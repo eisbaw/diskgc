@@ -237,6 +237,37 @@ impl Identity {
             btime: stat.btime,
         })
     }
+
+    /// `identity` for a message; `None` is what [`Identity::of`] gives when
+    /// the kernel did not report one.
+    pub fn shown(identity: Option<Self>) -> String {
+        identity.map_or_else(
+            || "an entry whose inode, owner or type was not reported".to_owned(),
+            |i| i.to_string(),
+        )
+    }
+}
+
+/// The `not_owner` detail: `owned by uid 1000, not by uid 1001` (or `not
+/// by any of uids 1001, 1002`, the `owners:` list), never Debug text.
+pub(crate) fn not_owner_detail(uid: u32, owners: &[u32]) -> String {
+    let allowed: Vec<String> = owners.iter().map(u32::to_string).collect();
+    match allowed.as_slice() {
+        [one] => format!("owned by uid {uid}, not by uid {one}"),
+        many => format!("owned by uid {uid}, not by any of uids {}", many.join(", ")),
+    }
+}
+
+/// E.g. `directory 0:32:153 of uid 1000 born 1729850000.5`: every field
+/// the identity compares, so two that differ never read the same.
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {} of uid {}", self.file_type, self.id, self.uid)?;
+        match self.btime {
+            Some(t) => write!(f, " born {}.{:09}", t.secs, t.nanos),
+            None => Ok(()),
+        }
+    }
 }
 
 /// One entry the walk checked.
@@ -791,6 +822,34 @@ fn deadline_passed<H: Host>(host: &H, deadline: Option<MonoTime>) -> bool {
 mod tests {
     use super::*;
     use crate::host::Dev;
+
+    /// `changed` details name identities as a user reads them, never as
+    /// Debug text (TASK-140), and two identities that differ in any
+    /// compared field read differently.
+    #[test]
+    fn identities_read_as_text_in_messages() {
+        let mut identity = Identity::of(&stat()).expect("complete");
+        assert_eq!(
+            identity.to_string(),
+            "regular file 0:42:7 of uid 1000 born 10.000000005"
+        );
+        let before = identity.to_string();
+        identity.btime = None;
+        assert_eq!(identity.to_string(), "regular file 0:42:7 of uid 1000");
+        assert_ne!(identity.to_string(), before);
+        assert_eq!(
+            Identity::shown(None),
+            "an entry whose inode, owner or type was not reported"
+        );
+        assert_eq!(
+            not_owner_detail(1000, &[1001]),
+            "owned by uid 1000, not by uid 1001"
+        );
+        assert_eq!(
+            not_owner_detail(1000, &[1001, 1002]),
+            "owned by uid 1000, not by any of uids 1001, 1002"
+        );
+    }
 
     fn stat() -> Stat {
         Stat {

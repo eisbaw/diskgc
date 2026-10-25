@@ -310,6 +310,22 @@ impl FileType {
     }
 }
 
+/// As messages name it ("a {self}").
+impl fmt::Display for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Regular => f.write_str("regular file"),
+            Self::Directory => f.write_str("directory"),
+            Self::Symlink => f.write_str("symlink"),
+            Self::Socket => f.write_str("socket"),
+            Self::Fifo => f.write_str("FIFO"),
+            Self::CharDevice => f.write_str("character device"),
+            Self::BlockDevice => f.write_str("block device"),
+            Self::Unknown(bits) => write!(f, "file of unknown type {bits:#o}"),
+        }
+    }
+}
+
 /// A timestamp as statx reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Timestamp {

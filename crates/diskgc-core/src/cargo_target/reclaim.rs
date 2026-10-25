@@ -535,8 +535,9 @@ fn lock_file<H: Host>(
         return skip(
             Reason::Changed,
             format!(
-                "not the lock file found (found {:?}, now {now:?})",
-                lock.identity
+                "not the lock file found (found {}, now {})",
+                lock.identity,
+                Identity::shown(now)
             ),
         );
     }

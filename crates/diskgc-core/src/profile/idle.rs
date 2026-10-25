@@ -106,6 +106,16 @@ pub enum Unknown {
     InFuture,
 }
 
+/// Why, for a message.
+impl std::fmt::Display for Unknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unanswered => "the kernel did not report a timestamp it needs",
+            Self::InFuture => "its last change is in the future",
+        })
+    }
+}
+
 impl Unknown {
     /// The skip reason in reports (docs/reference.md, Output).
     pub fn skip_reason(self) -> &'static str {

@@ -107,7 +107,7 @@ pub fn judge_layout(path: &Path, inspected: &Inspected) -> Result<(), Skip> {
             return unsupported(
                 path.join(&profile.rel).join(&lock.name),
                 format!(
-                    "a Cargo lock file name on a {:?}, not a regular file: no measured Cargo \
+                    "a Cargo lock file name on a {}, not a regular file: no measured Cargo \
                      makes that",
                     lock.identity.file_type
                 ),
@@ -233,7 +233,7 @@ fn judge_owners(
         Some((at, id)) => Err(Skip::new(
             Reason::NotOwner,
             at,
-            format!("owned by uid {}, not by {owners:?}", id.uid),
+            crate::engine::not_owner_detail(id.uid, owners),
         )),
     }
 }

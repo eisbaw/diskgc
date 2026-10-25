@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -114,12 +115,28 @@ fn install_interrupt_handlers_ungated() -> Result<(), HostError> {
 }
 
 /// An open file descriptor (close-on-exec). Dropping it closes it.
+///
+/// `shown` is the path it was opened by (its base's path joined with the
+/// relative path), and its [`Display`](fmt::Display) is that path. It exists
+/// for messages only, so that an error names what a user knows rather than
+/// an fd number (TASK-140): the entry may have been renamed or replaced
+/// since, so nothing may look it up again or judge by it; the fd is the
+/// identity.
 #[derive(Debug)]
-pub struct LinuxFd(OwnedFd);
+pub struct LinuxFd {
+    fd: OwnedFd,
+    shown: PathBuf,
+}
 
 impl AsFd for LinuxFd {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
+        self.fd.as_fd()
+    }
+}
+
+impl fmt::Display for LinuxFd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.shown.display().fmt(f)
     }
 }
 
@@ -627,11 +644,17 @@ fn io_error(op: &'static str, subject: impl std::fmt::Display, e: &std::io::Erro
     }
 }
 
-fn shown(base: &Base<'_, LinuxFd>, path: &Path) -> String {
+/// The path an open of `path` from `base` is shown as (see [`LinuxFd`]).
+fn shown_path(base: &Base<'_, LinuxFd>, path: &Path) -> PathBuf {
     match base {
-        Base::Root => path.display().to_string(),
-        Base::Dir(fd) => format!("{fd:?}/{}", path.display()),
+        Base::Root => path.to_owned(),
+        Base::Dir(fd) if path.as_os_str().is_empty() || path == Path::new(".") => fd.shown.clone(),
+        Base::Dir(fd) => fd.shown.join(path),
     }
+}
+
+fn shown(base: &Base<'_, LinuxFd>, path: &Path) -> String {
+    shown_path(base, path).display().to_string()
 }
 
 fn oflags(how: OpenHow) -> OFlags {
@@ -1130,21 +1153,22 @@ trait ProcFiles {
 struct Kernel<'a>(ProcRoot<'a>);
 
 impl ProcFiles for Kernel<'_> {
-    type File = std::fs::File;
+    /// The file and the `/proc` path it was opened by, for messages.
+    type File = (std::fs::File, String);
 
-    fn open(&self, path: &str) -> Result<std::fs::File, HostError> {
-        self.0.open(path, OFlags::RDONLY).map(std::fs::File::from)
+    fn open(&self, path: &str) -> Result<Self::File, HostError> {
+        let file = self.0.open(path, OFlags::RDONLY).map(std::fs::File::from)?;
+        Ok((file, ProcRoot::shown(path)))
     }
 
-    fn read(&self, file: &mut std::fs::File, buf: &mut [u8]) -> Result<usize, HostError> {
-        file.read(buf)
-            .map_err(|e| io_error("read", format!("{file:?}"), &e))
+    fn read(&self, (file, shown): &mut Self::File, buf: &mut [u8]) -> Result<usize, HostError> {
+        file.read(buf).map_err(|e| io_error("read", &*shown, &e))
     }
 
-    fn rewind(&self, file: &mut std::fs::File) -> Result<(), HostError> {
+    fn rewind(&self, (file, shown): &mut Self::File) -> Result<(), HostError> {
         file.seek(SeekFrom::Start(0))
             .map(|_| ())
-            .map_err(|e| io_error("seek", format!("{file:?}"), &e))
+            .map_err(|e| io_error("seek", &*shown, &e))
     }
 
     fn list_once(&self, dir: &str, size: usize) -> Result<(Vec<u32>, bool), HostError> {
@@ -1391,7 +1415,10 @@ impl Host for LinuxHost {
             Base::Dir(fd) => fd.as_fd(),
         };
         match rustix::fs::openat2(dir, path, oflags(how), Mode::empty(), resolve_flags(how)) {
-            Ok(fd) => Ok(LinuxFd(fd)),
+            Ok(fd) => Ok(LinuxFd {
+                fd,
+                shown: shown_path(&base, path),
+            }),
             Err(error) => {
                 // O_DIRECTORY | O_NOFOLLOW reports a trailing symlink as
                 // ENOTDIR. For a mount-point open, resolve maps that to
@@ -1524,7 +1551,7 @@ impl Host for LinuxHost {
     }
 
     fn read_dir(&self, dir: &LinuxFd, limit: usize) -> Result<DirListing, HostError> {
-        let subject = format!("{dir:?}");
+        let subject = dir.to_string();
         let readable = reopen_readable(dir, &subject)?;
         let mut names = Vec::new();
         let mut too_many = false;
@@ -1545,7 +1572,7 @@ impl Host for LinuxHost {
     }
 
     fn read_head(&self, file: &LinuxFd, limit: usize) -> Result<Vec<u8>, HostError> {
-        let subject = format!("{file:?}");
+        let subject = file.to_string();
         let reopened = self.open_regular(file, &subject, "only marker files are read")?;
         let mut head = Vec::new();
         std::fs::File::from(reopened)
@@ -1556,13 +1583,16 @@ impl Host for LinuxHost {
     }
 
     fn reopen_regular(&self, file: &LinuxFd) -> Result<LinuxFd, HostError> {
-        let subject = format!("{file:?}");
+        let subject = file.to_string();
         self.open_regular(file, &subject, "only lock files are reopened")
-            .map(LinuxFd)
+            .map(|fd| LinuxFd {
+                fd,
+                shown: file.shown.clone(),
+            })
     }
 
     fn statvfs(&self, fd: &LinuxFd) -> Result<Space, HostError> {
-        let subject = format!("{fd:?}");
+        let subject = fd.to_string();
         let s = rustix::fs::fstatvfs(fd)
             .map_err(|e| HostError::errno("fstatvfs", &subject, errno_of(e)))?;
         let bytes = |blocks: u64, what: &str| {
@@ -1586,7 +1616,7 @@ impl Host for LinuxHost {
                 Ok(()) => return Ok(TryLock::Acquired(Locked::granted(fd, mode))),
                 Err(rustix::io::Errno::WOULDBLOCK) => return Ok(TryLock::Busy(fd)),
                 Err(rustix::io::Errno::INTR) => continue,
-                Err(e) => return Err(HostError::errno("flock", format!("{fd:?}"), errno_of(e))),
+                Err(e) => return Err(HostError::errno("flock", &fd, errno_of(e))),
             }
         }
     }
@@ -1902,7 +1932,7 @@ impl Host for LinuxHost {
     /// stays close-on-exec.
     fn inherit_lock(&self, lock: &Locked<LinuxFd>) -> Result<(), HostError> {
         let fd = lock.fd();
-        let subject = format!("{fd:?}");
+        let subject = fd.to_string();
         let flags = rustix::io::fcntl_getfd(fd)
             .map_err(|e| HostError::errno("fcntl F_GETFD", &subject, errno_of(e)))?;
         rustix::io::fcntl_setfd(fd, flags - rustix::io::FdFlags::CLOEXEC)
@@ -2039,12 +2069,12 @@ impl Host for LinuxHost {
     }
 
     fn fs_magic(&self, fd: &LinuxFd) -> Result<u64, HostError> {
-        let fs = rustix::fs::fstatfs(fd)
-            .map_err(|e| HostError::errno("fstatfs", format!("{fd:?}"), errno_of(e)))?;
+        let fs =
+            rustix::fs::fstatfs(fd).map_err(|e| HostError::errno("fstatfs", fd, errno_of(e)))?;
         fs_magic_of(i128::from(fs.f_type)).ok_or_else(|| {
             HostError::invalid(
                 "fstatfs",
-                format!("{fd:?}"),
+                fd,
                 format!("f_type {:#x} is no 32-bit filesystem magic", fs.f_type),
             )
         })
@@ -2432,7 +2462,7 @@ impl Delete for LinuxHost {
     }
 
     fn fchmod(&self, dir: &LinuxFd, deadline: Option<MonoTime>) -> Result<bool, HostError> {
-        let subject = format!("{dir:?}");
+        let subject = dir.to_string();
         let permit = gate("fchmod", &subject)?;
         let stat = rustix::fs::fstat(dir)
             .map_err(|e| HostError::errno("fstat before fchmod", &subject, errno_of(e)))?;
@@ -2547,7 +2577,7 @@ fn reopen_readable(dir: &LinuxFd, subject: &str) -> Result<OwnedFd, HostError> {
     open_with_noatime(base, |flags| {
         rustix::fs::openat(dir, ".", flags, Mode::empty())
     })
-    .map_err(|e| HostError::errno("open", format!("{subject}/."), errno_of(e)))
+    .map_err(|e| HostError::errno("open", subject, errno_of(e)))
 }
 
 /// Retry only the documented ownership/capability refusal. Other open
@@ -5731,6 +5761,19 @@ mod tests {
         .expect("chmod 000");
         if me != 0 {
             assert_eq!(reason_of("locked"), Reason::Unreadable);
+            // The message names the directory by its path, never by the
+            // Debug text of an fd (TASK-140: it read
+            // `open LinuxFd(OwnedFd { fd: 4 })/.: EACCES (13)`).
+            let Err(WalkStop::Skipped(skip)) = walk_of("locked") else {
+                panic!("locked: expected a skip");
+            };
+            assert_eq!(
+                skip.detail,
+                format!(
+                    "cannot list it (fail closed): open {}: EACCES (13)",
+                    locked.join("unreadable").display()
+                )
+            );
         }
         std::fs::set_permissions(
             locked.join("unreadable"),

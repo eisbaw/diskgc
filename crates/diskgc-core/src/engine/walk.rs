@@ -471,10 +471,7 @@ impl<H: Host> Walker<'_, H> {
         if !self.rules.owners.contains(&identity.uid) {
             return Err(skip(
                 Reason::NotOwner,
-                format!(
-                    "owned by uid {}, not by {:?}",
-                    identity.uid, self.rules.owners
-                ),
+                super::not_owner_detail(identity.uid, self.rules.owners),
             ));
         }
         match identity.file_type {
@@ -595,7 +592,10 @@ fn open_failure(path: PathBuf, failed: OpenFailed) -> WalkStop {
         OpenFailure::DeadlinePassed => return WalkStop::DeadlinePassed { path },
         OpenFailure::NotSame { found } => (
             Reason::Changed,
-            format!("replaced while the walk ran (now {found:?})"),
+            format!(
+                "replaced while the walk ran (now {})",
+                Identity::shown(found)
+            ),
         ),
         OpenFailure::Resolve(ResolveError::Host(e)) => return host_failure(path, "open", &e),
         OpenFailure::Resolve(e) => match &e {

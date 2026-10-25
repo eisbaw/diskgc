@@ -480,7 +480,8 @@ development builds, the pre-release sandbox gate,
   ten, then a count), `reclaimed part-way PATH: CHANGE, then kept: ...`, or
   `kept PATH: REASON, DIAGNOSTIC`, where a candidate no tier reclaimed
   carries the refusal of the last tier that judged it (grouped by reason
-  after five), and Cargo targets whose previous reclaim left only lock
+  after five; `unreadable` and `not_owner`, on a shared host mostly other
+  users' entries, from two), and Cargo targets whose previous reclaim left only lock
   files are omitted. Reasons are the JSON names, except `keep_marker`,
   which reads `keep marker`. A candidate kept as `in_use_unknown` because
   no scan stayed fresh or the process list did not settle reads "the host

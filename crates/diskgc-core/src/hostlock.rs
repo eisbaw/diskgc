@@ -122,10 +122,13 @@ impl fmt::Display for LockError {
                 "the host lock {} was still held by another reclaim at the deadline",
                 path.display()
             ),
-            Self::Interrupted(signal) => write!(
-                f,
-                "interrupted by {signal:?} while waiting for the host lock"
-            ),
+            Self::Interrupted(signal) => {
+                let name = match signal {
+                    Signal::Int => "SIGINT",
+                    Signal::Term => "SIGTERM",
+                };
+                write!(f, "interrupted by {name} while waiting for the host lock")
+            }
             Self::Failed(e) => write!(f, "the host lock {}: {e}", path.display()),
         }
     }
@@ -158,7 +161,7 @@ fn open_lock<H: Host>(host: &H) -> Result<H::Fd, LockError> {
             return Err(LockError::Unusable {
                 detail: format!(
                     "not a regular file ({}); it must be the file the tmpfiles line `{}` makes",
-                    other.map_or_else(|| "type not reported".to_owned(), |t| format!("{t:?}")),
+                    other.map_or_else(|| "type not reported".to_owned(), |t| t.to_string()),
                     TMPFILES_LINES[1]
                 ),
             });

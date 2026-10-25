@@ -616,6 +616,56 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
     assert!(!text.contains("held-6"), "{text}");
 }
 
+/// Another user's entries on a shared host (TASK-140): two or more
+/// `unreadable` or `not_owner` candidates read as one line each per reason,
+/// while one stays a line of its own and other reasons are unchanged.
+#[test]
+fn human_groups_other_users_entries_from_two() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
+    report.mount = Some("/tmp".into());
+    let kept = |name: &str, reason, detail: &str| SkipEntry {
+        tier: "t".into(),
+        profile: "p".into(),
+        candidate: Some(format!("/tmp/{name}").into()),
+        count: 1,
+        examples: Vec::new(),
+        reason,
+        detail: Some(detail.into()),
+        process_blockers: None,
+        estimated_bytes: None,
+    };
+    let denied = "cannot list it (fail closed): open /tmp/x: EACCES (13)";
+    let foreign = "owned by uid 1000, not by uid 1001";
+    report.skipped = vec![
+        kept("a", Reason::Unreadable, denied),
+        kept("b", Reason::Unreadable, denied),
+        kept("c", Reason::Unreadable, denied),
+        kept("d", Reason::NotOwner, foreign),
+        kept("e", Reason::NotOwner, foreign),
+        kept("f", Reason::KeepMarker, "inside the candidate"),
+        kept("g", Reason::KeepMarker, "inside the candidate"),
+    ];
+    let text = report.summary().expect("summary");
+    let lines: Vec<&str> = text.lines().skip(1).collect();
+    assert_eq!(
+        lines,
+        [
+            format!("  3 kept: unreadable; examples: /tmp/a, /tmp/b, /tmp/c; e.g. {denied}"),
+            format!("  2 kept: not_owner; examples: /tmp/d, /tmp/e; e.g. {foreign}"),
+            "  kept /tmp/f: keep marker, inside the candidate".to_owned(),
+            "  kept /tmp/g: keep marker, inside the candidate".to_owned(),
+        ],
+        "{text}"
+    );
+
+    report.skipped.truncate(1);
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains(&format!("  kept /tmp/a: unreadable, {denied}")),
+        "{text}"
+    );
+}
+
 #[test]
 fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
     let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);

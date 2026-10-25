@@ -443,7 +443,7 @@ impl Judge<'_> {
                             reason,
                             found.path.clone(),
                             format!(
-                                "!filter:{}: unknown idle age ({unknown:?}) passes neither polarity",
+                                "!filter:{}: unknown idle age ({unknown}) passes neither polarity",
                                 filter.name
                             ),
                         )));
@@ -637,7 +637,7 @@ pub(crate) fn judge_idle<H: Host>(
                     reason,
                     at.to_owned(),
                     format!(
-                        "its newest change cannot be told ({unknown:?}): an unknown age is never idle"
+                        "its newest change cannot be told ({unknown}): an unknown age is never idle"
                     ),
                 ))
             }
@@ -1542,8 +1542,9 @@ pub(crate) fn same_object(
         Reason::Changed,
         found.path.clone(),
         format!(
-            "not the entry found (found {:?}, {what} {now:?})",
-            found.identity
+            "not the entry found (found {}, {what} {})",
+            found.identity,
+            engine::Identity::shown(now)
         ),
     ))
 }

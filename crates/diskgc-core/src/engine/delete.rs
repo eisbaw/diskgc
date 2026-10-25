@@ -288,7 +288,8 @@ fn checked_unlink<H: Delete>(
     let now = Identity::of(&found);
     if now != Some(*expected) {
         return Ok(Unlinked::Changed(format!(
-            "not the object the walk checked: found {now:?}, recorded {expected:?}"
+            "not the object the walk checked: found {}, recorded {expected}",
+            Identity::shown(now)
         )));
     }
     if deadline_passed(host, deadline) {
@@ -336,7 +337,10 @@ fn open_failure(path: PathBuf, failed: OpenFailed) -> End {
         },
         OpenFailure::NotSame { found } => End::Changed {
             path,
-            detail: format!("not the directory the walk checked (now {found:?})"),
+            detail: format!(
+                "not the directory the walk checked (now {})",
+                Identity::shown(found)
+            ),
         },
     }
 }

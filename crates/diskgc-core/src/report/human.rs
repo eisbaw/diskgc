@@ -15,6 +15,18 @@ use crate::units::{format_age, format_bytes};
 /// Kept candidates of one reason listed one per line up to this many;
 /// above it, one line with this many examples.
 const KEPT_EXAMPLES_MAX: usize = 5;
+
+/// Reasons whose kept candidates are one line from two on. On a shared
+/// host they are mostly other users' entries (another user's 0700 session
+/// dir is `unreadable`, a readable one `not_owner`): nothing the reader can
+/// act on, and one line each buries the lines they can (TASK-140). The
+/// JSON still has each one.
+fn grouped_from(reason: Reason) -> u64 {
+    match reason {
+        Reason::NotOwner | Reason::Unreadable => 2,
+        _ => KEPT_EXAMPLES_MAX as u64 + 1,
+    }
+}
 /// Reclaimed candidates listed one per line, the rest counted; a dry run
 /// lists as many of each eligible verdict (`--json` has every row).
 const RECLAIMED_LINES_MAX: usize = 10;
@@ -219,7 +231,8 @@ impl<'a> KeptRow<'a> {
 
 /// One line per kept candidate, grouped by reason in the order the reasons
 /// first appear; a reason with more than [`KEPT_EXAMPLES_MAX`] candidates
-/// becomes one line with the first one's diagnostic and examples. Live runs
+/// (or as many as [`grouped_from`] says) becomes one line with the first
+/// one's diagnostic and examples. Live runs
 /// and dry runs share it, so a dry run over thousands of candidates stays
 /// as short as the run it previews (TASK-193).
 fn kept_lines(kept: &[KeptRow<'_>], tier_label: &dyn Fn(&str) -> String) -> Vec<String> {
@@ -233,7 +246,7 @@ fn kept_lines(kept: &[KeptRow<'_>], tier_label: &dyn Fn(&str) -> String) -> Vec<
     for reason in reasons {
         let group: Vec<&KeptRow<'_>> = kept.iter().filter(|r| r.reason == reason).collect();
         let count = group.iter().map(|r| r.count).fold(0, u64::saturating_add);
-        if count <= KEPT_EXAMPLES_MAX as u64 {
+        if count < grouped_from(reason) {
             for row in group {
                 lines.push(format!(
                     "  kept {}: {}{}{}",
