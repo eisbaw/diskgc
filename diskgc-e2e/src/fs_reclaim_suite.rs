@@ -8,7 +8,7 @@
 //! `systemd-private-*` directory, a `/tmp` of 100,000 entries, and a FUSE
 //! mount whose server never answers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1281,6 +1281,48 @@ fn outcome(report: &Value) -> (BTreeMap<String, String>, Vec<String>) {
     (skipped, actions)
 }
 
+/// How many candidates a report says it reclaimed, summing each action
+/// row's `count`. The report keeps at most 1,000 detail rows (one candidate
+/// each, every one in `eligible` and none twice) and folds the rest into a
+/// single last row with `null` tier, profile and candidate
+/// (docs/reference.md, Output); any other shape is an error.
+fn reclaimed_count(report: &Value, eligible: &BTreeSet<String>) -> Result<u64, String> {
+    const DETAIL_LIMIT: usize = 1_000;
+    let rows = report["actions"].as_array().ok_or("no actions array")?;
+    let mut seen = BTreeSet::new();
+    let mut total: u64 = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let count = row["count"]
+            .as_u64()
+            .ok_or_else(|| format!("action row {index} has no count: {row}"))?;
+        match row["candidate"].as_str() {
+            Some(candidate) => {
+                ensure!(count == 1, "detail row {index} counts {count}: {row}");
+                ensure!(
+                    index < DETAIL_LIMIT,
+                    "detail row {index} past the limit: {row}"
+                );
+                ensure!(eligible.contains(candidate), "{candidate} is not eligible");
+                ensure!(seen.insert(candidate), "{candidate} reclaimed twice");
+            }
+            None => {
+                ensure!(
+                    row["candidate"].is_null() && row["tier"].is_null() && row["profile"].is_null(),
+                    "malformed summary row {index}: {row}"
+                );
+                ensure!(
+                    index == DETAIL_LIMIT && index + 1 == rows.len(),
+                    "summary row at {index} of {} rows, expected last after {DETAIL_LIMIT}",
+                    rows.len()
+                );
+                ensure!(count >= 1, "empty summary row: {row}");
+            }
+        }
+        total += count;
+    }
+    Ok(total)
+}
+
 fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
@@ -1530,7 +1572,8 @@ fn tmp_fixture(ctx: &Ctx, scale: Scale) -> TestResult {
         scale.idle
     );
     let mut skipped = BTreeMap::new();
-    let mut actions = Vec::new();
+    let mut reclaimed: u64 = 0;
+    let eligible_set: BTreeSet<String> = eligible.iter().map(|p| p.display().to_string()).collect();
     for run in [&pytest, &rc] {
         // Exhausted: every eligible candidate processed, 100% never met.
         run.expect_code(1)?;
@@ -1541,14 +1584,15 @@ fn tmp_fixture(ctx: &Ctx, scale: Scale) -> TestResult {
             "{}",
             r["errors"]
         );
-        let (s, a) = outcome(&r);
+        let (s, _) = outcome(&r);
         skipped.extend(s);
-        actions.extend(a);
+        reclaimed += reclaimed_count(&r, &eligible_set)?;
     }
+    // Candidates, not rows: the report folds every action past its first
+    // 1,000 into one summary row with a `count` (TASK-192, TASK-207).
     ensure!(
-        actions.len() == eligible.len(),
-        "{} actions for {} eligible candidates",
-        actions.len(),
+        reclaimed == eligible.len() as u64,
+        "{reclaimed} candidates reclaimed for {} eligible candidates",
         eligible.len()
     );
     for path in &eligible {
@@ -1873,4 +1917,60 @@ pub fn fs_reclaim_a_dead_fuse_mount_is_never_touched(ctx: &Ctx) -> TestResult {
     }
     ensure!(exists(&s.path("holder/f")), "the holder's file went");
     verdict.assert_clean()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn detail(candidate: &str) -> Value {
+        json!({"tier": "t", "profile": "p", "candidate": candidate, "count": 1})
+    }
+
+    fn summary(count: u64) -> Value {
+        json!({"tier": null, "profile": null, "candidate": null, "count": count})
+    }
+
+    fn eligible(n: usize) -> BTreeSet<String> {
+        (0..n).map(|i| format!("/tmp/c{i}")).collect()
+    }
+
+    fn details(n: usize) -> Vec<Value> {
+        (0..n).map(|i| detail(&format!("/tmp/c{i}"))).collect()
+    }
+
+    #[test]
+    fn counts_candidates_in_the_folded_summary_row_not_rows() {
+        let mut rows = details(1_000);
+        rows.push(summary(7_000));
+        let report = json!({ "actions": rows });
+        assert_eq!(reclaimed_count(&report, &eligible(1_000)), Ok(8_000));
+        let short = json!({ "actions": details(3) });
+        assert_eq!(reclaimed_count(&short, &eligible(3)), Ok(3));
+    }
+
+    #[test]
+    fn rejects_a_report_whose_rows_break_the_fold_contract() {
+        let set = eligible(1_000);
+        let early_summary = json!({ "actions": [detail("/tmp/c0"), summary(5)] });
+        let mut after_summary = details(1_000);
+        after_summary.push(summary(5));
+        after_summary.push(summary(5));
+        let twice = json!({ "actions": [detail("/tmp/c0"), detail("/tmp/c0")] });
+        let stranger = json!({ "actions": [detail("/tmp/other")] });
+        let fat_detail = json!({ "actions": [{"tier": "t", "profile": "p", "candidate": "/tmp/c0", "count": 2}] });
+        let no_count = json!({ "actions": [{"candidate": "/tmp/c0"}] });
+        for bad in [
+            early_summary,
+            json!({ "actions": after_summary }),
+            twice,
+            stranger,
+            fat_detail,
+            no_count,
+            json!({}),
+        ] {
+            assert!(reclaimed_count(&bad, &set).is_err(), "{bad}");
+        }
+    }
 }
