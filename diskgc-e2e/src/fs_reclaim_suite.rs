@@ -1730,7 +1730,9 @@ impl Drop for DeadFuse {
 
 /// A protected root on a dead FUSE mount must be refused before the root
 /// is opened. Protection discovery must fail closed quickly, and no sibling
-/// candidate may be deleted after that incomplete scan.
+/// candidate may be deleted after that incomplete scan. `check` takes the
+/// same decision (TASK-194): it says the root is not looked up, at once,
+/// and exits 0.
 pub fn fs_protected_dead_fuse_root_is_refused_without_opening_it(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     ctx.home.write_file(
@@ -1745,6 +1747,21 @@ pub fn fs_protected_dead_fuse_root_is_refused_without_opening_it(ctx: &Ctx) -> T
     let oracle = Oracle::arm(Fixture::new())?;
     let fuse = DeadFuse::mount(&s.path("fuse-dead"))?;
     let blocked = fuse.proven_dead(Duration::from_secs(2))?;
+    let checked = ctx.run_as_tester(&ctx.diskgc(), &["check", "--config", CONFIG])?;
+    checked.expect_code(0)?;
+    ensure!(
+        checked.took < Duration::from_secs(5),
+        "check stalled on the dead FUSE root for {:?}",
+        checked.took
+    );
+    ensure!(
+        checked
+            .stderr
+            .contains("warning: root /tmp/fuse-dead is not looked up: ")
+            && !checked.stderr.contains("does not exist"),
+        "{}",
+        checked.stderr
+    );
     let run = ensure_tmp(
         ctx,
         &["--min-free", "100%", "--select", "profile:reclaim-test"],
@@ -1753,7 +1770,7 @@ pub fn fs_protected_dead_fuse_root_is_refused_without_opening_it(ctx: &Ctx) -> T
     blocked
         .join()
         .map_err(|_| "FUSE control thread panicked".to_owned())?;
-    let verdict = oracle.judge(&run)?;
+    let verdict = oracle.judge_runs(&[&checked, &run])?;
     run.expect_code(3)?;
     ensure!(
         run.took < Duration::from_secs(5),
