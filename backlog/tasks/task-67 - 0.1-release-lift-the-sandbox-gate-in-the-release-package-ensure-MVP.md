@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 22:15'
+updated_date: '2026-10-25 22:54'
 labels:
   - wave-2
   - release
@@ -102,6 +102,8 @@ Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): ipc: live-
 COMPASS round 4 (2026-10-25): RC QA = e2e-all + the full runner + both release runners + docs-vs-binary (host and container) + nix flake check --no-build, all on the RC sha. Added deps: TASK-205 (Cargo fine-grain lock names, measure), TASK-207 (Full-tier 100k test counts rows), TASK-133 (nix flake check red). Freeze rule after these: only a deletion-safety hole or a wrong frozen contract can be added as a blocker. Go/no-go brief must disclose that the deletion-path mutation run (TASK-13/177) has never run, and the TASK-212 decision (check stays exit 0; --strict later).
 
 RC QA on a11e77b (2026-10-25): flake eval, e2e-all 22/22, docs-vs-binary host 171/0 and container 192/0 pass; full tier red: 2 deterministic test bugs (owner_pid_suite stale in_use expectation; named_checkout_policy_for_command_caches registered on Debian without npm) being fixed on release-0.1; 2 intermittents under suite load (TASK-238, TASK-239) not resolved, no wrong deletion; under the freeze rule they are disclosed, not blockers.
+
+rc-fix on release-0.1 (2026-10-25): af3d503 (cherry-picked to rc-fix-master as 14dc12b) fixes the two deterministic RC QA test bugs: owner_pid_is_unknown_under_hidepid now expects in_use_unknown (last in_use+unreadable expectation in diskgc-e2e/vectors/VM scripts); named_checkout_policy_for_command_caches added to NIX_ONLY_TESTS (Debian lists 219, was 220; no other command-profile test runs on Debian). Evidence on af3d503: e2e-clippy+e2e-tests built; e2e-one hidepid PASS on Nix and Debian; just check exit 0 (own target). Full Nix tier 303/306 (load 13.8-22 during the run, 10-12 GiB avail): FAIL fs_40k_small_candidates_plan_and_reclaim_scale status deadline at 645 s (TASK-238 recurrence), pytest_orphan_xdist_worker_keeps_session in_use_unknown unsettled scan (TASK-239 recurrence), pytest_live_basetemp_session_is_kept dry plan in_use_unknown unsettled scan (same class as TASK-239, new instance; not rerun). No oracle violations. Full Debian tier 219/219 (load 7.5-10). Logs: tmp/e2e-logs-batch/rc-fix-af3d503/.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
