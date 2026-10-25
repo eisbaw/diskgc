@@ -1911,14 +1911,15 @@ fn same_filesystem_root_identity_is_walked_once() {
 /// measure the model's quadratic accounting instead of scan cadence. The
 /// filesystem omits nlink so its unrelated link-count walk is skipped. An
 /// event advances the clock at the halfway unlink: the next candidate
-/// must scan again at the exact 500 ms reuse boundary.
+/// must scan again at the exact one-second Freshness boundary, the end of
+/// a delete's reuse (TASK-203).
 #[test]
 fn forty_thousand_tmp_candidates_reclaim_once_per_reuse_window() {
     const CANDIDATES: usize = 40_000;
     let mut model = diskgc_model::load::parse_yaml(&yaml(
         "",
         "",
-        "events:\n  - {at: {op: unlinkat, nth: 20000, when: after}, advance: 500ms}\n",
+        "events:\n  - {at: {op: unlinkat, nth: 20000, when: after}, advance: 1s}\n",
     ))
     .expect("base model");
     model

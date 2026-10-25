@@ -766,11 +766,29 @@ the layer's inode in `maps`, a mapping alone does not match.
 
 **Freshness:** the `/proc` scan used for a candidate is never older than one
 second (monotonic clock including suspend time) when that candidate's
-deletion starts. A scan is as old as its first read. One scan serves the
-candidates checked strictly before 500 ms from its start; within one Cargo
-target under its locks, it serves every part whose deletion starts within
-the one-second bound instead (`cargo-target`, Reclaim protocol, step 3).
-The check that
+deletion starts. A scan is as old as its first read. For a `delete` of
+`fs` candidates, one scan serves every candidate whose deletion starts
+while it is younger than that bound, and a candidate that would start on
+a scan one second old or older gets a new one; within one Cargo target
+under its locks, the same holds for its parts (`cargo-target`, Reclaim
+protocol, step 3). Before a command action, whose program may act on
+anything in the candidate, a scan serves only the candidates checked
+strictly before 500 ms from its start. The `fs` rule was decided
+2026-10-25 for TASK-203 on Mark's delegation ("one scan serves
+consecutive fs candidates while each delete starts on a scan younger than
+FRESHNESS; never start a delete on an older scan"): on the development
+laptop (1609 processes, load 17-19) a scan took 336 ms (median, glibc) to
+514 ms (static build) and 1050 ms (p95), and a pytest session's walk and
+delete 100 to 300 ms, so the 500 ms window made every candidate scan
+again: about 0.5 to 1 s per candidate, one to two hours for its 6400
+sessions (TASK-184). Nothing the bound protects changes: every deletion
+still starts on a scan younger than one second, against which its own
+in-use check, liveness contracts and the other final checks run right
+before it, and a stale scan still clears nothing. What changes is the
+margin of limit 5: a process that starts using a candidate is certain to
+be seen only if it started at least one second before that candidate's
+deletion starts, where the shorter window made that typically half a
+second. The check that
 clears a candidate looks at the clock as its last step before the
 deletion starts, and the deletion (or command) looks again as its own
 last step. A scan kept from an earlier check that reaches the bound
@@ -795,8 +813,8 @@ outcome resets the count. A later tier starts again from zero. Refusing
 needs no freshness. Buckets
 ([architecture.md](architecture.md#the-index)) only group candidates for
 scheduling; each member gets its own check under this bound, which a scan
-less than 500 ms old may answer: a use that starts after that scan
-is limit 5 above.
+kept as above may answer: a use that starts after that scan is limit 5
+above.
 
 **Visibility:** without root, other users' `/proc/<pid>/fd` cannot be read,
 so their use of *your* files is not seen; nor is the use of the user's own
@@ -2320,8 +2338,9 @@ The step that deletes (`cargo_target::reclaim` in the core).
    its first read: the scan made under the locks in step 2 serves the
    first parts, and a part that would start on a scan one second old or
    older gets a new one, which then serves the parts after it. This
-   replaces, for the parts of one target only, the 500 ms window in which
-   a scan serves separate candidates. Decided 2026-10-25 for TASK-173 on
+   replaced, for the parts of one target, the 500 ms window in which a scan
+   then served separate candidates (In use: Freshness; since TASK-203 a
+   `delete` of `fs` candidates follows the same one-second rule). Decided 2026-10-25 for TASK-173 on
    Mark's delegation ("let one scan serve all parts of a target as long as
    each part's delete starts inside the 1 s bound. dont touch the 1 s
    rule"): with that window a scan slower than ~450 ms on a busy host

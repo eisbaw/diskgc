@@ -56,9 +56,11 @@ pub const FRESHNESS: Duration = Duration::from_secs(1);
 /// [`delete_cleared`] still enforce [`FRESHNESS`] immediately before every
 /// deletion, including when a scan expires during the candidate check. The
 /// shorter reuse window gives a newly started process a chance to be seen
-/// between candidates before the deletion freshness limit is reached. The
-/// parts of one Cargo target, under its locks, reuse a scan up to
-/// [`FRESHNESS`] instead ([`Checker::reusing_for`], TASK-173).
+/// between candidates before the deletion freshness limit is reached; it
+/// holds for command actions, whose program may act on anything in the
+/// candidate. The parts of one Cargo target, under its locks (TASK-173),
+/// and consecutive `fs` candidates of a `delete` (TASK-203) reuse a scan up
+/// to [`FRESHNESS`] instead ([`Checker::reusing_for`]).
 pub const REUSE_LIMIT: Duration = Duration::from_millis(500);
 
 /// A scan that blocks every candidate is kept for less time after it finishes,
@@ -756,7 +758,8 @@ impl<'a> Checker<'a> {
     /// Runs `within` with this checker reusing a scan for up to `limit`
     /// after it started, then restores its own reuse limit. For a Cargo
     /// target's parts under its locks (docs/safety.md, `cargo-target`:
-    /// Reclaim protocol, step 3): there one scan serves every part whose
+    /// Reclaim protocol, step 3) and an `fs` candidate's delete (In use:
+    /// Freshness): there one scan serves every part or candidate whose
     /// deletion starts within [`FRESHNESS`]. The bound itself is unchanged
     /// ([`Checker::check`], [`delete_cleared`]); `limit` above it is a bug.
     pub fn reusing_for<T>(&mut self, limit: Duration, within: impl FnOnce(&mut Self) -> T) -> T {

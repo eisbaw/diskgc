@@ -4,7 +4,9 @@
 # no fresh scan, 2 is reclaimed, 3 and 4 get none (two in a row), so 5 is
 # still checked, gets a fresh scan, and is reclaimed. Each stale scan
 # finishes 2 s after it started, twice the freshness bound; the fresh one
-# for 2 is 600 ms old when checked, so 3 cannot reuse it (500 ms).
+# for 2 is 600 ms old when checked, and 2's deletion takes 500 ms, so it is
+# 1.1 s old when 3 is checked and 3 cannot reuse it (a delete reuses a scan
+# while it is younger than the 1 s bound, TASK-203).
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -32,6 +34,7 @@ host:
     - {at: {op: proc_environ, nth: 2, when: after}, advance: 2s}
     - {at: {op: proc_environ, nth: 3, when: after}, advance: 2s}
     - {at: {op: proc_environ, nth: 4, when: after}, advance: 600ms}
+    - {at: {op: unlinkat, nth: 2, when: after}, advance: 500ms}
     - {at: {op: proc_environ, nth: 5, when: after}, advance: 2s}
     - {at: {op: proc_environ, nth: 6, when: after}, advance: 2s}
     - {at: {op: proc_environ, nth: 7, when: after}, advance: 2s}

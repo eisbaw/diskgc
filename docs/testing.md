@@ -484,6 +484,12 @@ Model scenarios required by [safety.md](safety.md) and
   used for the earlier member is older than the reuse limit or the bucket
   spans a suspend ([safety.md](safety.md#in-use), Freshness); an open within
   the reuse window is the accepted limit 5 and is pinned as such;
+- one scan serving consecutive `fs` candidates of a `delete` (TASK-203;
+  property test `no_fs_delete_starts_on_a_scan_past_the_bound`, with
+  random scan, unlink and final-check durations): no deletion starts on a
+  scan one second old or older, a scan is replaced only once it could not
+  serve the next deletion, and with scans under a second no attempt is
+  spent; a command action keeps the 500 ms window;
 - a host too busy for a fresh in-use scan (every scan finishing older
   than the freshness bound): nothing is deleted on a stale scan, the
   candidate is skipped `in_use_unknown` after its three attempts and the

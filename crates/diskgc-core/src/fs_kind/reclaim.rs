@@ -52,7 +52,8 @@ use super::judge::{Judge, Reached, Tally, Walked, mountinfo, same_object, still_
 use crate::engine::{Checkouts, DeleteOptions, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{Base, Delete, Host, MonoTime};
 use crate::inuse::{
-    Checker, FreshAttempts, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked,
+    Checker, FRESHNESS, FreshAttempts, NotDeleted, clear_and_delete, lock_candidate,
+    locked_is_walked,
 };
 use crate::outcome::{Judged, PolicyAt, ReclaimEnd, Stop};
 use std::path::Path;
@@ -243,17 +244,28 @@ pub fn reclaim_alternatives_checked<H: Delete>(
         end: ReclaimEnd::Complete,
         selected: None,
     };
-    if let Err(end) = protocol(
-        host,
-        alternatives,
-        make_writable,
-        checker,
-        deadline,
-        &mut done,
-        policy,
-    ) {
-        done.end = end;
-    }
+    // One scan serves consecutive candidates while each deletion starts on
+    // it younger than FRESHNESS (TASK-203, as TASK-173 did for the parts of
+    // a Cargo target), not only the checks made within the 500 ms reuse
+    // window: on a busy laptop a scan takes 0.3-1 s and a session's walk
+    // and delete 0.1-0.3 s, so that window made every candidate rescan (one
+    // scan per candidate, ~1-2 h for 6400 pytest sessions). Each deletion
+    // still starts on a scan younger than FRESHNESS (`clear_and_delete`);
+    // what is reused longer is only the answer about processes
+    // (docs/safety.md, In use: Freshness).
+    checker.reusing_for(FRESHNESS, |checker| {
+        if let Err(end) = protocol(
+            host,
+            alternatives,
+            make_writable,
+            checker,
+            deadline,
+            &mut done,
+            policy,
+        ) {
+            done.end = end;
+        }
+    });
     done
 }
 
