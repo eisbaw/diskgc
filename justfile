@@ -24,6 +24,10 @@ default:
 #
 # Cargo metadata resolves the separate E2E project without compiling or
 # running its destructive harness.
+# The last line runs the diskgc crate's tests again with the release
+# package's catalog feature, the only crate with feature-gated tests;
+# without it no fast gate ran them.
+#
 # Check E2E lockfile freshness, formatting, clippy and workspace tests.
 check:
     cargo metadata --locked --manifest-path diskgc-e2e/Cargo.toml --format-version 1 > /dev/null
@@ -35,6 +39,7 @@ check:
     cargo test --manifest-path fuzz/Cargo.toml --test seeds --locked
     cargo clippy --workspace --all-targets --locked -- --deny warnings
     cargo test --workspace --locked
+    cargo test --locked -p diskgc --features proposed-release-01-catalog
 
 # The container recipes first run the harness's unit tests (a flake check),
 # then the flake's e2e runner. The runner runs nothing

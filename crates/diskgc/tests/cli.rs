@@ -18,7 +18,6 @@ use std::process::Command;
 
 #[cfg(not(feature = "proposed-release-01-catalog"))]
 use diskgc_core::config;
-#[cfg(not(feature = "proposed-release-01-catalog"))]
 use diskgc_core::profile::Library;
 use serde_json::Value;
 
@@ -908,7 +907,17 @@ fn proposed_catalog_is_consistent_across_cli_surfaces() {
     let list = diskgc(&["profiles", "list", "--json"]);
     assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
     let names = listed(&json(&list));
-    assert_eq!(names.len(), 8, "{names:?}");
+    // The expected catalog is derived from builtin.yaml's `releases:`, the
+    // one place it is decided: a hard-coded count went stale silently when
+    // TASK-65 added nix-shell-rc and pytest-tmp.
+    let catalog: BTreeSet<String> = Library::builtin()
+        .expect("the built-in profiles load")
+        .proposed_release_01()
+        .expect("the 0.1 catalog")
+        .profiles()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(names, catalog);
     assert!(names.contains("cargo-target"));
     assert!(!names.contains("docker-build-cache"));
 
