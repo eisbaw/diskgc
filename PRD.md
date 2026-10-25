@@ -1,6 +1,6 @@
 # diskgc: PRD
 
-Status: draft, round 13. The human decides when this is done.
+Status: draft, round 14. The human decides when this is done.
 
 This file is the product contract: purpose, users, behaviour, safety
 boundaries, acceptance criteria, scope and decisions. Each detailed rule
@@ -66,10 +66,13 @@ v1 is about filesystem bytes; inode exhaustion and quotas are out of scope.
   qualified expressions such as
   `(profile:node-compile-cache || profile:nix-shell-rc) && filter:idle-3d`, grouped
   so that stale cruft goes before anything that costs rebuild time.
-- **Gather, then act.** A throttled background tally keeps an index of what
-  the profiles find, so freeing space never waits for a survey. The reclaim
-  walk takes candidates in policy order, discovers each tier afresh before
-  moving on, and checks every candidate on the live filesystem before
+- **Gather, then act.** A tally keeps an index of what the profiles find,
+  so freeing space never waits for a survey: in `watch` a throttled
+  background tally, in `ensure` a fast synchronous one bounded by
+  `--tally-budget`; both save the index as a snapshot that the next run
+  starts from. The tally updates the index; the reclaim walk enacts it,
+  taking candidates in policy order, discovering each tier afresh before
+  moving on, and checking every candidate on the live filesystem before
   acting.
 
 ## Safety boundaries
@@ -151,10 +154,18 @@ out-link is gone ([safety.md](docs/safety.md#nix-store)).
   match sets are unchanged unless renamed.
 - With available space steady between the thresholds, `watch` makes zero
   deletions and its tally keeps its duty cycle.
-- With a warm index on a 100,000-entry `/tmp`, the first deletion starts
-  within 10 seconds of crossing `--min-free` for candidates of up to 10,000
-  files (the time includes the candidate's eligibility walk; it is measured
-  and reported for larger ones).
+- `watch`'s background tally does not load the system: it keeps its duty
+  cycle at idle priority and pauses while a reclaim runs. `ensure`'s
+  synchronous tally may load the machine, runs at full speed within
+  `--tally-budget`, and yields a useful index: every selected tier
+  discovered and queued in policy order before any tree is sized.
+  Deletions act on that index and check every candidate live. There is
+  no latency target; time to the first deletion is measured and
+  reported by the scale tests.
+- Each `ensure` that tallied or acted leaves a snapshot the next run
+  starts from, so `ensure`-only machines get warmer with each call; a
+  corrupt, mismatched or other user's snapshot is ignored, never
+  trusted.
 - New stale cruft created after the last tally is deleted before any
   pressure tier runs.
 - Every action produces one log line and one JSON `actions` entry; every
@@ -266,7 +277,7 @@ whatever the profile.
 | Built-in profiles | YAML data with examples, golden sets and `verified_with`; a changed matching set means a new name | Narrowing is unsafe under negation and protection, so meaning is immutable per name. |
 | Safety | Code, always on; eligibility walk, ownership of every entry, in-use and identity checks at deletion time; the checkout guard is on by default, and a profile may allow checkouts | A wrong profile or a stale index costs at most unused own files or speed; one that says `checkouts: allow` can also cost a repository's uncommitted or unpushed work. |
 | Nesting | Fixed structural recognisers (Cargo targets, `.diskgc-keep`, version-control checkouts), independent of the profile library; only the candidate's own profile can turn the checkout guard off (`checkouts: allow`) | Editing one profile never widens what another profile's delete may remove; only a profile's own `checkouts: allow` lets its candidates hold checkouts. |
-| Gather vs act | Throttled background tally builds an index; reclaim walk orders by it, discovers per tier, checks live | No survey when the disk is full; policy order holds even with a stale index. |
+| Gather vs act | A tally builds an index (background and throttled in `watch`, synchronous and fast in `ensure`; both write the snapshot); reclaim walk orders by it, discovers per tier, checks live | No survey when the disk is full; policy order holds even with a stale index. |
 | Order in a tier | `oldest` default; opt-in `best-fit` | LRU by default; one sizable step when asked. |
 | Deadlines | Cooperative, with reported overruns | Blocking kernel operations cannot be interrupted; honesty over a false promise. |
 | Command actions | Trusted, preflight-resolved, never as root | Cleaners can load user-controlled config. |
@@ -302,11 +313,18 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   may still select such paths at its author's risk; the development config
   example in [reference.md](docs/reference.md#configuration-file) protects
   Claude Code's session directories with one (0.1 has no user profiles).
-- **Index coverage and cost.** The index can be partial (memory budget) or
-  stale; per-tier discovery and live checks keep that a speed problem. The
-  tally's duty cycle bounds the worker, not the disk.
-- **Eligibility walks on giant candidates** delay the first deletion; time
-  to first deletion is measured, not assumed.
+- **Index coverage and cost.** The index has a fixed memory ceiling; at
+  the ceiling it collapses units into coarser blocks (after re-checking
+  that their members still exist) instead of dropping them, so a huge
+  filesystem costs listing and `statx` work at delete time, not
+  coverage. It can also be stale or cut short by `--tally-budget`;
+  per-tier discovery and live checks keep all of that a speed problem.
+  The background tally's duty cycle bounds the worker, not the disk (idle
+  I/O priority does nothing on NVMe without BFQ); the synchronous tally
+  deliberately loads the machine for at most its budget.
+- **Eligibility walks on giant candidates** (and expanding large blocks)
+  delay the first deletion; time to first deletion is measured, not
+  assumed or promised.
 - **Burst writes.** Thresholds cannot protect against a burst; the gap below
   `--min-free` must exceed write rate × (interval + slowest tier).
 - **Nix GC** can take minutes and hold the host lock; with
@@ -342,7 +360,7 @@ Hard to walk back (deep review, tests before features):
 Tentative (change freely):
 - Example groups and tiers; default timeouts and back-off constants;
   human-readable output; log format.
-- The `Host` trait, the crate split, the index structure, bucket rules,
+- The `Host` trait, the crate split, the index structure, collapse rules,
   tally pacing and the snapshot format (a cache, discarded on version
   mismatch).
 - The test host-model schema (pinned by regression files, migrated with

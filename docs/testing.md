@@ -70,8 +70,10 @@ The strongest end-to-end checks; if these are green, diskgc genuinely works.
 4. **JSON contract snapshots** (`insta`) unchanged, or changed together with
    [reference.md](reference.md) in the same commit.
 5. **Freeing works:** on the 100,000-entry `/tmp` fixture, `ensure` reaches
-   `--min-free`, exits 0, and the first deletion starts within the latency
-   bound in the PRD.
+   `--min-free` and exits 0, cold (no snapshot) and warm (its own
+   snapshot from the previous run); the time to the first deletion is
+   logged for both and is not a pass criterion (the PRD sets no latency
+   target).
 
 ### Good and bad, observable
 
@@ -479,9 +481,9 @@ Model scenarios required by [safety.md](safety.md) and
 - a candidate directory renamed elsewhere mid-delete: deletion continues on
   the checked object only;
 - a user-owned directory containing another user's file: `not_owner`;
-- a bucket whose later member is opened by a process after an earlier
-  member was deleted: the later member is skipped (`in_use`) when the scan
-  used for the earlier member is older than the reuse limit or the bucket
+- an index block (or consecutive candidates) whose later member is
+  opened by a process after an earlier member was deleted: the later member is skipped (`in_use`) when the scan
+  used for the earlier member is older than the reuse limit or the run
   spans a suspend ([safety.md](safety.md#in-use), Freshness); an open within
   the reuse window is the accepted limit 5 and is pinned as such;
 - one scan serving consecutive `fs` candidates of a `delete` (TASK-203;
@@ -501,6 +503,74 @@ Model scenarios required by [safety.md](safety.md) and
   tally): the deletion-time checks refuse what they must;
 - new candidates of a stale tier created after the snapshot: they are
   deleted before any pressure tier runs (per-tier discovery);
+- **index and collapse** ([architecture.md](architecture.md#the-index)),
+  with the memory budget made small in the model:
+  - `collapse_keeps_every_member_checked`: with a goal that needs every
+    candidate, a tier whose candidates are all collapsed into blocks
+    gives every candidate the same verdict as the same run with a large
+    budget (oracle on the call trace), and every member
+    deleted had its own identity check, eligibility walk and in-use
+    check; a block member planted with a `.diskgc-keep`, an open fd or
+    another owner is skipped with that reason;
+  - `collapse_revalidates_members`: members removed or replaced after
+    their tally are evicted by the collapse and contribute nothing to
+    the block's `members` or `est_bytes`; a site directory replaced by
+    another inode under the same name is not collapsed and its units
+    are evicted;
+  - `index_never_exceeds_its_budget`: after every insertion and
+    collapse the accounted size is at most the budget (asserted in the
+    engine, and checked here over 98,000 rc dirs with a budget that
+    fits a tenth of them), and repeated collapse ends;
+  - `discovery_dissolves_a_block_only_below_the_low_water_mark`: a
+    block is replaced by its listed members only when they fit under
+    the low-water mark;
+  - `new_candidate_after_a_recent_snapshot_is_found_before_pressure`: a
+    tier candidate created one minute after the snapshot (whose
+    `discovered_at` lets pass 1 skip the root) is deleted before the
+    pressure tier runs;
+  - `stored_cargo_refusal_is_retallied_without_locks`: a kept Cargo
+    target refused by an earlier tally is tallied again at reclaim and
+    none of its lock files is opened for locking;
+  - `ensure_skips_the_snapshot_when_it_would_cost_the_goal`: state
+    directory on the reclaimed filesystem, available space just above
+    `--min-free` after the walk: no write, one log line, exit code
+    unchanged; `ENOSPC` on the write likewise;
+  - `block_expansion_finds_only_what_discovery_would`: a block's site
+    holding a non-matching name, a symlink, a mount and a name outside
+    its family yields none of them as members;
+  - `index_unit_not_matching_its_root_is_stale`: a unit whose finder's
+    root differs from the tier's bound root, or whose path no longer
+    matches the source pattern under it, is skipped `stale` and never
+    walked;
+  - `stored_refusal_never_fakes_exhaustion`: a unit refused by an earlier
+    tally (`kept`) whose marker is gone is deleted in the same run;
+    a refusal found by the run's own synchronous tally skips it for the
+    run;
+- **synchronous tally** (virtual clock): `sync_tally_discovers_every_tier_before_sizing`
+  (with a budget that ends during pass 2, every selected tier has a
+  queue, and pass 2 sized the first tier's candidates in its order
+  first); `sync_tally_budget_ending_in_discovery_still_finds_the_rest`
+  (the walk's per-tier discovery deletes what the tally did not list);
+  the tally takes no host lock and makes no deleting call;
+- **background tally** (virtual clock): the worker's active time is at
+  most 5 % (plus one batch) of any window of 100 batches, no batch
+  exceeds 50 ms or 2,000 operations, and it makes no filesystem call
+  while the host lock is held by another process; overdue discovery,
+  re-check and re-tally jobs are all served within twice their period
+  on a 100,000-entry model under constant churn (no starvation);
+- **snapshot** (ModelHost state operation): `ensure_writes_the_snapshot_and_the_next_run_starts_from_it`
+  (the second run reports `source: snapshot` and lists no root
+  discovered less than 5 minutes earlier);
+  `ensure_skips_the_write_while_watch_holds_the_lock` (one log line,
+  the snapshot unchanged); `watch_waits_for_an_ensure_writing_then_starts`
+  and `second_watch_exits_2`; corrupt (bad checksum, truncated, oversized),
+  wrong format version, another `<fs>` key, another boot for a
+  filesystem without UUID, and another user's snapshot: each ignored
+  with a log line, `source: sync`, and the run's deletions equal a
+  `--no-index` run's; a profile edited between runs drops only that
+  profile's units; a changed tier or `--roots` drops nothing;
+  `--no-index` neither reads nor writes the snapshot; an `ensure` that
+  exits 0 because space is already there writes nothing;
 - a `TMPDIR` changed by `export` after `exec`: documented as invisible (the
   test pins the heuristic's known limit);
 - deadline overruns: a blocking operation that exceeds the deadline is
@@ -1094,9 +1164,13 @@ removed (the TASK-121 discipline).
 - no Cargo lock file ever deleted or moved; nothing deleted that the walk
   did not check; no symlink followed; no mount crossed (on the call trace);
 - every deleted entry's owner was authorised;
-- **the index is never an authority:** with a randomly stale, partial or
-  corrupted index, every deletion still passes the deletion-time checks,
-  and nothing is deleted that a run with a correct index would refuse;
+- **the index is never an authority:** with a randomly stale, partial,
+  collapsed (random budget, random blocks) or corrupted index, including
+  units with wrong identities, wrong finders, roots or paths, every
+  deletion still passes the deletion-time checks, and nothing is deleted
+  that a run with a correct index (or `--no-index --tally-budget 0`)
+  would refuse; the set deleted is a subset of what that run's own
+  discovery finds;
 - the exit code follows the full precedence table for the final state;
 - **selection semantics:** the eligible candidates equal a simple reference
   implementation of the rules in [reference.md](reference.md#selection-grammar);
@@ -1528,6 +1602,32 @@ filesystem, processes and mounts from the developer's system.
     daemon through the pinned fd, and the decoy receives no connection.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
   process.**
+- **Index on the real kernel:**
+  - `background_tally_does_not_load_the_system`: `watch --tally-only` over
+    the 100,000-entry `/tmp` fixture for 10 minutes beside a foreground
+    workload (a fixed file create, stat and remove loop). Asserted: the
+    diskgc process's CPU time (from `/proc/<pid>/stat`, read by the
+    harness) is at most 7 % of wall time over every 60 s window, and its
+    scheduling priority and I/O class are `nice 19` and idle. Measured
+    and logged, not asserted (the device and scheduler decide it): the
+    foreground loop's throughput and p99 latency with and without the
+    tally, and the I/O scheduler of the device;
+  - `sync_tally_is_useful_within_its_budget`: a cold `ensure
+    --tally-budget 5s` over the fixture, with two selected tiers and a
+    goal that needs both, reports `coverage: complete`, acts on the first
+    tier before the second, and is judged by the oracle; the elapsed
+    tally time and the time to the first deletion are logged (the dry
+    run is not bounded by the budget, so it cannot show this);
+  - `ensure_warms_the_snapshot`: three `ensure` runs in a row, with
+    candidates added between them; from the second on, `index.source` is
+    `snapshot` and the tally's operation count (logged by diskgc) is
+    lower than the cold run's; the deletion oracle judges all three;
+  - `snapshot_file_is_private_and_atomic`: mode 0600, the lock file
+    0600, a run SIGKILLed while writing leaves the old snapshot or the
+    new one, never a mix the next run accepts;
+  - `collapsed_index_reclaims_the_fixture`: a build with a small budget
+    (a test feature, never in the release) collapses the fixture into
+    blocks and still reaches the goal, judged by the oracle.
 - **Journeys** (`journey_suite.rs`): the product driven through the files
   its users write, judged like every container test. The CI operator's:
   the example pre-job hook [ci-pre-job.sh](ci-pre-job.sh), run as written

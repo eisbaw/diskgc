@@ -851,9 +851,10 @@ candidates in a row of one tier (in the order taken) end `in_use_unknown`
 the host is taken to be too busy for this run: the tier's remaining
 candidates are skipped `in_use_unknown` without a scan, and any other
 outcome resets the count. A later tier starts again from zero. Refusing
-needs no freshness. Buckets
-([architecture.md](architecture.md#the-index)) only group candidates for
-scheduling; each member gets its own check under this bound, which a scan
+needs no freshness. Index blocks
+([architecture.md](architecture.md#memory-budget-and-collapse)) only
+group candidates for scheduling; each member is found again when its
+block is expanded and gets its own check under this bound, which a scan
 kept as above may answer: a use that starts after that scan is limit 5
 above.
 
@@ -1784,7 +1785,15 @@ was found under and its identity (device, inode, owner, type, birth time
 where reported). It judges nothing inside a candidate but the source's
 own `where`, which decides whether it is a candidate at all. A reclaim
 acts only on a discovery that completed: one stopped by the deadline or an
-error of the run reclaims nothing of the tier.
+error of the run reclaims nothing of the tier. With the index
+([architecture.md](architecture.md#the-index)), a candidate taken from it
+is discovered again at reclaim time: an index unit by reaching it from
+its root (step 2) and a `statx` that must match the stored (`st_dev`,
+inode, birth time), otherwise `stale`; a block's members by the tier's
+discovery restricted to the block's site, under the same completion
+rule. The identity from that reclaim-time `statx` or listing (device,
+inode, owner, type, birth time) is what steps 2 to 4 compare against;
+an identity stored by an earlier tally is never trusted as such.
 
 **The tally** (the tier's order, docs/architecture.md, The reclaim walk)
 runs steps 1 and 2 below and, of step 4, the source's `where` and the

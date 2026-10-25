@@ -143,8 +143,11 @@ process runs, even if that Cargo works in an unrelated directory; see
   whether it is eligible or the skip reason, its estimated size and the
   operation it would run (JSON: the `plan` array); delete nothing. The
   eligible candidates come first, in the order a reclaim would take them
-  when its tally is not cut short (`--tally-budget 0`), then the skipped
-  ones; a reclaim stops at the goal, the plan does not.
+  when its tally is not cut short (`--tally-budget 0`) and its index
+  holds no collapsed blocks or stored refusal hints (otherwise a
+  reclaim's order within a tier can differ;
+  [architecture.md](architecture.md#order-within-a-tier)), then the
+  skipped ones; a reclaim stops at the goal, the plan does not.
   Takes no lock (so it cannot tell `locked`: whether a target's locks or
   an `fs` candidate's `flock` are free is only tried by the reclaim) and
   always prints, even if the goal is already met. An `fs` tier's plan is
@@ -236,8 +239,10 @@ Read-only: takes no lock and deletes nothing. For each `PATH`:
 
 Without `--select`, all profiles (built-in and user) are applied; each
 `PATH` also serves as the root for `roots: required` profiles, so
-`diskgc survey ~/src` finds Cargo targets there. `survey` uses a fresh
-snapshot when one exists, otherwise it tallies.
+`diskgc survey ~/src` finds Cargo targets there. `survey` starts from a
+valid snapshot when one exists and tallies what it lacks
+([architecture.md](architecture.md#the-tally)); it never writes the
+snapshot.
 
 ### `profiles` command
 
@@ -521,7 +526,7 @@ JSON result (field names are part of the contract):
   "exit_code": 0, "dry_run": false,
   "started_at": "2026-10-21T12:00:00Z", "duration_ms": 0, "version": "0.1.0",
   "mount": "/", "path": "/home/mark/src/app", "seed": null,
-  "index": {"source": "live | snapshot | sync", "age_seconds": 0, "units": 0, "untallied": 0, "coverage": "complete | partial"},
+  "index": {"source": "live | snapshot | sync", "age_seconds": 0, "units": 0, "blocks": 0, "untallied": 0, "coverage": "complete | partial"},
   "tally_cut_short": false,
   "min_free_bytes": 0, "target_free_bytes": 0, "target_met": false,
   "avail_before_bytes": 0, "avail_after_bytes": 0,
@@ -587,11 +592,20 @@ is `host`.
   CLI parsing, configuration or startup before the executor begins use
   `null` for both. `version` is always the build's package version.
 - `seed` is `null` when no group uses `random`.
-- `index` says where the order came from (the live index of a running
-  `watch`, a snapshot, or a synchronous tally), its age in seconds, how many candidates
-  were not yet tallied, and whether the index covers everything it should
-  (`partial` when it hit its memory budget). Builds without an index
-  (before task-29) emit `null`.
+- `index` says where the run's index started (`live`: the running
+  `watch`'s own; `snapshot`: a valid snapshot, then refreshed by the
+  synchronous tally; `sync`: built from nothing by that tally, also
+  under `--no-index` or when the snapshot was unusable), the age in
+  seconds of what it started from, how many units it holds and how many
+  of those are collapsed blocks (`blocks`: each stands for many
+  candidates, found and checked one by one when it is expanded,
+  [architecture.md](architecture.md#memory-budget-and-collapse)), how
+  many candidates were not yet tallied, and whether it covers everything
+  it should: `partial` when some selected source root has no complete
+  discovery listing in it (the tally budget ended first, or `watch` has
+  not finished its first pass). Hitting the memory budget collapses
+  units into blocks; it never makes coverage `partial`. Builds without
+  an index (before task-29) emit `null`.
 - `tally_cut_short` is true only after the reclaim tally actually stops at
   `--tally-budget` with at least one candidate left untallied. It is false
   for dry runs, runs that stop before tallying, and tallies that complete;
