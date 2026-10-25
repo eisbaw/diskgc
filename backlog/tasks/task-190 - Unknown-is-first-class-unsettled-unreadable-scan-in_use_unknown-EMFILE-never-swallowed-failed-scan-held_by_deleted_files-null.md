@@ -1,11 +1,12 @@
 ---
 id: TASK-190
 title: >-
-  An unsettled scan or unexcused unreadable process is reported as in_use, not
-  in_use_unknown
+  Unknown is first-class: unsettled/unreadable scan -> in_use_unknown; EMFILE
+  never swallowed; failed scan -> held_by_deleted_files null
 status: To Do
 assignee: []
 created_date: '2026-10-25 05:59'
+updated_date: '2026-10-25 08:38'
 labels:
   - shipping
   - json
@@ -18,3 +19,9 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 From the 10-task codebase review at 72b376c (2026-10-25). inuse/mod.rs:Scan::blocks_all / Scan::check: 'could not tell' gets in_use with real-looking evidence (same class as TASK-166's EMFILE mislabel); harnesses cannot tell retry from busy; these skips do not count toward the 3-in-a-row in_use_unknown breaker, so a fork storm costs two full scans per candidate. Fix: map to in_use_unknown, count toward the breaker, update safety.md 'Unsettled'.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+COMPASS round 3 (2026-10-25): one task with TASK-185 and TASK-187 (same concept, frozen JSON surface); do together with TASK-189 (deadline) in one in-use pass, unifying the FreshAttempts loop (TASK-196 item 3).
+<!-- SECTION:NOTES:END -->

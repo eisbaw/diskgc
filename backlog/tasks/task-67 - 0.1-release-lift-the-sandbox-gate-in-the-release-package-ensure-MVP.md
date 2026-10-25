@@ -4,14 +4,23 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 00:55'
+updated_date: '2026-10-25 08:38'
 labels:
   - wave-2
   - release
   - irreversible
   - safety
 dependencies:
-  - TASK-115
+  - TASK-184
+  - TASK-189
+  - TASK-190
+  - TASK-187
+  - TASK-167
+  - TASK-195
+  - TASK-197
+  - TASK-156
+  - TASK-157
+  - TASK-171
 references:
   - PRD.md
   - docs/safety.md
@@ -37,12 +46,12 @@ The v1 release (task-49) builds on this one.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 The release package is the only build with the gate flag, enforced by a test (sandbox_gate_flag_is_enabled_nowhere allows exactly one place)
-- [ ] #2 All MVP evidence is green: Cargo race tests 1-9 on every pinned toolchain; the journeys for the CI operator, the /tmp laptop owner and the agent harness; the contract freeze review (task-26); wave-1 and wave-2 hardening (task-13, task-64, and task-27's mutation-testing slice on selection and the executor)
-- [ ] #3 Release notes list the limits and the deferred scope
-- [ ] #4 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
-- [ ] #5 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
-- [ ] #6 The 0.1 release operator can set checkouts: allow or refuse for an admitted built-in profile in YAML without replacing its find, kind, or action. With no operator setting, the built-in default applies; profiles without an explicit exception refuse checkouts. This setting cannot admit excluded profiles, Docker or command actions, or arbitrary delete patterns. Disposable-container tests cover checkout-marker fixtures for admitted built-ins and verify excluded npm and uv profiles stay excluded.
-- [ ] #7 Before the first real-machine run, review a dry-run of the actual gate-lifted release binary in a disposable real-kernel Docker or Podman fixture with representative 0.1 profiles. Record which deployment contracts that fixture proves and which it cannot; keep release blocked until any unproved safety-critical contract has evidence that respects the user restriction against running diskgc on the developer host.
+- [ ] #2 Release notes list the limits and the deferred scope
+- [ ] #3 The gate-lifted 0.1 release binary rejects Docker and generic command actions, whether selected from built-ins or user configuration and whether selected through a config tier or --select, before any backend call or filesystem mutation; prove this with disposable-container negative tests against the actual release artifact.
+- [ ] #4 The gate-lifted 0.1 artifact enforces a reviewed runnable built-in catalog limited to Cargo and the explicitly signed-off TASK65 /tmp profiles; profiles list/show/help reflect that catalog, and disposable-container tests prove every excluded built-in is refused before deletion or backend calls. Operator-authored fs/delete policy is explicitly decided and documented.
+- [ ] #5 The 0.1 release operator can set checkouts: allow or refuse for an admitted built-in profile in YAML without replacing its find, kind, or action. With no operator setting, the built-in default applies; profiles without an explicit exception refuse checkouts. This setting cannot admit excluded profiles, Docker or command actions, or arbitrary delete patterns. Disposable-container tests cover checkout-marker fixtures for admitted built-ins and verify excluded npm and uv profiles stay excluded.
+- [ ] #6 Before the first real-machine run, review a dry-run of the actual gate-lifted release binary in a disposable real-kernel Docker or Podman fixture with representative 0.1 profiles. Record which deployment contracts that fixture proves and which it cannot; keep release blocked until any unproved safety-critical contract has evidence that respects the user restriction against running diskgc on the developer host.
+- [ ] #7 All MVP evidence is green: Cargo race tests 1-9 on every pinned toolchain; the journeys for the CI operator, the /tmp laptop owner and the agent harness; the contract freeze review (task-26) and the 0.1 JSON contract pass (task-192); task-64. Wave-1/wave-2 hardening (task-13, task-27 mutation slice, task-177) run async and block only on a found deletion-path hole (ruling 2026-10-25)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -73,6 +82,8 @@ Orchestrator 2026-10-24 (COMPASS round 2): Mark ruled 2026-10-24: cut 0.1 RIGHT 
 From TASK-65 (2026-10-25): decide for 0.1 whether 'ipc: live-only' stays accepted now that it applies to /tmp; the host dry run found 137 pytest sessions with IPC objects.
 
 Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): do not hold 0.1 for the mutation wave. TASK-13 runs async alongside and blocks the release only if it finds a real hole in the deletion path. TASK-60 is harness, not a release blocker.
+
+COMPASS round 3 (2026-10-25): AC2 rewritten to match the 2026-10-25 mark-emulator ruling (mutation/hardening async, blocks only on a found hole); dependencies set to today's 0.1 blockers (only TASK-115 before, done). TASK-138 is not a 0.1 blocker (pytest-tmp admitted by Mark himself; no emulator-admitted profile is in the catalog).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

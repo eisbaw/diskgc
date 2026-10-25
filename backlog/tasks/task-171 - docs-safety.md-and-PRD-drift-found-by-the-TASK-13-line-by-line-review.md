@@ -4,6 +4,7 @@ title: docs/safety.md and PRD drift found by the TASK-13 line-by-line review
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:14'
+updated_date: '2026-10-25 08:38'
 labels:
   - hardening
   - docs
@@ -47,3 +48,9 @@ PRD (needs Mark):
 - [ ] #1 Items 1-17 resolved (doc or code) with the linked tasks
 - [ ] #2 Item 18 ruled by Mark and PRD updated if accepted
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+COMPASS round 3 (2026-10-25): the 0.1 subset (items 1, 11, 12 and TASK-168's doc fix) is a 0.1 blocker; the rest is post-0.1.
+<!-- SECTION:NOTES:END -->

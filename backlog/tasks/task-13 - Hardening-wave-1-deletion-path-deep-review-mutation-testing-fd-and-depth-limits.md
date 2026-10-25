@@ -6,14 +6,13 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-25 03:25'
+updated_date: '2026-10-25 08:38'
 labels:
   - wave-1
   - hardening
 dependencies:
   - TASK-12
   - TASK-58
-  - TASK-60
   - TASK-64
 references:
   - docs/testing.md
@@ -76,6 +75,8 @@ Filed: TASK-165 (release-blocker); TASK-166 (fd limit: measured on the host, see
 2. Mutation (cargo-mutants 27.1.0, container with the unchanged guards, see TASK-177): engine/delete.rs 25 = 21 caught, 4 unviable, 0 missed; hostlock.rs 14 = 4 caught, 10 unviable, 0 missed. engine/walk.rs 0/4: the baseline passed, then the 4 GiB RAM floor stopped the run before any outcome. MemAvailable stayed below the 12 GiB start guard for 80 of the ~150 minutes. Not run: the other ~1190 deletion-path mutants and the diskgc-linux mountinfo//proc code.
 3. Limits. Entry budget: DEFAULT_MAX_ENTRIES 2,000,000, enforced in each listing (read_dir stops at the remaining budget) and per Cargo target; covered by model tests plus walk/too-many-entries.yaml. FD_WINDOW 16 (at most FD_WINDOW+3 engine fds), model test at depth 60. e2e: engine_deletes_a_100k_entry_30_deep_tree_under_rlimit_nofile_32 and engine_deletes_a_tree_deeper_than_path_max (not run here). Walk EMFILE is an error of the run (model test). Cargo DISCOVERY_DEPTH 6 is pinned by a model test. Gap (TASK-166): the in-use scan holds one pidfd per process, and the binary never raises its soft NOFILE. Measured with a read-only dry run (tmp/target/debug/diskgc, host with 1911 processes): `ulimit -n 1024` (also 512 and 40) made every pytest-tmp candidate skip as in_use with 'pidfd_open <pid>: EMFILE', which is quiet and the opposite of the walk's loud-EMFILE rule. ulimit 2048 was inconclusive in its 40 s window.
 AC status: #1 findings are filed (not fixed); #2 is not met (TASK-171, TASK-165); #3 is not met (2 of ~15 files swept); #4 was not assessed. Leave TASK-13 open.
+
+COMPASS round 3 (2026-10-25): dropped the TASK-60 edge (runs async now). Mutation work consolidated into TASK-177.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
