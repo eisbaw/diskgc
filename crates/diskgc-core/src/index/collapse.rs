@@ -746,6 +746,7 @@ fn absorb_step(
     if gain(index, site, &step.takes) <= 0 {
         return;
     }
+    let accounted_before = index.accounted_bytes();
     let site = node_at_mut(&mut index.mounts[step.mount].root, names).expect("still there");
     let mut removed = Delta::default();
     let taken = take(site, &step.takes, &mut removed);
@@ -779,6 +780,10 @@ fn absorb_step(
     net.add(pushed);
     assert_eq!(-net.bytes, trie, "collapse gain mispredicted");
     assert!(net.bytes < 0, "a collapse grew the trie");
+    assert!(
+        index.accounted_bytes() < accounted_before,
+        "a collapse grew the index (tables included)"
+    );
     report.absorbed += units;
     report.collapses += 1;
     if step.takes.scope == Scope::Lump {

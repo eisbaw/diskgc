@@ -699,7 +699,9 @@ impl Index {
             taken
         });
         self.apply(delta);
-        self.sweep_tables();
+        // Its finders, to put it back if even the lump has no room.
+        let old_finders: Option<Vec<Finder>> =
+            old.as_ref().map(|s| self.finder_set(s.finders).to_vec());
         let base: Vec<FinderSetId> = old.iter().map(|s| s.finders).collect();
         let lump_at = self.find_mount(mount).and_then(|i| {
             self.mounts[i]
@@ -725,7 +727,13 @@ impl Index {
             checked_at: found.checked_at,
             refusal: None,
         };
-        let members: Vec<Single> = old.into_iter().chain(std::iter::once(candidate)).collect();
+        let members: Vec<Single> = old
+            .iter()
+            .cloned()
+            .chain(std::iter::once(candidate))
+            .collect();
+        // The set the old single leaves unused frees room before the checks.
+        self.sweep_tables();
         match lump_at {
             Some(at) => {
                 let i = self.find_mount(mount).expect("lump");
@@ -735,11 +743,13 @@ impl Index {
                 } else if self.set_users().get(&current) == Some(&1) {
                     let old_bytes = finder_set_bytes(self.finder_set(current));
                     if !self.has_room(finder_set_bytes(&set).saturating_sub(old_bytes)) {
+                        self.restore_single(mount, path, old, old_finders);
                         return Ok(Inserted::NoRoom);
                     }
                     self.replace_set(current, set)
                 } else {
                     if !self.has_room(self.set_cost(&set)) {
+                        self.restore_single(mount, path, old, old_finders);
                         return Ok(Inserted::NoRoom);
                     }
                     self.intern_set(set)
@@ -773,6 +783,7 @@ impl Index {
                     },
                 );
                 if !self.has_room(block_cost + self.set_cost(&set) + self.mount_cost(mount)) {
+                    self.restore_single(mount, path, old, old_finders);
                     return Ok(Inserted::NoRoom);
                 }
                 let id = self.intern_set(set);
@@ -796,6 +807,30 @@ impl Index {
         }
         self.sweep_tables();
         Ok(Inserted::Lumped)
+    }
+
+    /// Puts back the single [`Self::lump_in`] took out when it refuses
+    /// after all (a budget below the floor): what it freed is room enough,
+    /// since the nodes, the box and its set cost what they freed.
+    fn restore_single(
+        &mut self,
+        mount: &MountKey,
+        path: &Path,
+        old: Option<Single>,
+        finders: Option<Vec<Finder>>,
+    ) {
+        let (Some(mut single), Some(finders)) = (old, finders) else {
+            return;
+        };
+        single.finders = self.intern_set(finders);
+        let i = self.mount_index(mount);
+        let mut delta = Delta::default();
+        let mut node = &mut self.mounts[i].root;
+        for name in rel_names(&mount.mount_point, path) {
+            node = node.child_entry(name, &mut delta);
+        }
+        node.set_single(single, &mut delta);
+        self.apply(delta);
     }
 
     /// One attempt: `None` if there is no room for it.
