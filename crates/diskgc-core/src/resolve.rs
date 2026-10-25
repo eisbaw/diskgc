@@ -411,7 +411,7 @@ pub fn resolve_in<H: Host>(
 /// the executor never searches or deletes below it through this fd. A
 /// `PATH` on a dead network mount can block here; that is the operator's
 /// own mount, named on the command line.
-pub fn resolve_unscreened<H: Host>(
+pub(crate) fn resolve_unscreened<H: Host>(
     host: &H,
     path: &Path,
     want: Want,
@@ -1156,8 +1156,12 @@ pub(crate) mod tests {
     }
 
     /// Source guard: the one unscreened lookup is `PATH`'s, in the executor's
-    /// `measure` (executor/preflight.rs). Any other caller must go through the screen; adding one
-    /// fails here and needs a documented reason in docs/safety.md first.
+    /// `measure` (executor/preflight.rs). `resolve_unscreened` is
+    /// `pub(crate)`, so only diskgc-core can name it; here no other file
+    /// names it at all (a rename, a turbofish or a function value would
+    /// still name it), and preflight.rs calls it exactly once. Adding a
+    /// caller needs a documented reason in docs/safety.md (Path traversal,
+    /// step 0) first.
     #[test]
     fn only_path_skips_the_mount_screen() {
         fn sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
@@ -1170,32 +1174,30 @@ pub(crate) mod tests {
                 }
             }
         }
-        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/");
-        let workspace = crates.parent().expect("the workspace");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
-        for dir in [crates.to_owned(), workspace.join("diskgc-e2e")] {
-            sources(&dir, &mut files);
-        }
+        sources(&src, &mut files);
         assert!(files.len() > 50, "found only {} sources", files.len());
-        let mut callers: Vec<String> = files
+        let mut naming: Vec<String> = files
             .iter()
-            .filter(|f| !f.ends_with("diskgc-core/src/resolve.rs"))
+            .filter(|f| !f.ends_with("src/resolve.rs"))
             .filter(|f| {
                 std::fs::read_to_string(f)
                     .expect("read source")
-                    .contains("resolve_unscreened(")
+                    .contains("resolve_unscreened")
             })
             .map(|f| {
-                f.strip_prefix(workspace)
-                    .expect("below the workspace")
+                f.strip_prefix(&src)
+                    .expect("below src")
                     .display()
                     .to_string()
             })
             .collect();
-        callers.sort();
-        assert_eq!(callers, ["crates/diskgc-core/src/executor/preflight.rs"]);
+        naming.sort();
+        assert_eq!(naming, ["executor/preflight.rs"]);
+        let preflight =
+            std::fs::read_to_string(src.join("executor/preflight.rs")).expect("read preflight");
+        assert_eq!(preflight.matches("resolve_unscreened(").count(), 1);
     }
 
     /// The screen's one-pass prefilter judges every ancestor exactly as a
