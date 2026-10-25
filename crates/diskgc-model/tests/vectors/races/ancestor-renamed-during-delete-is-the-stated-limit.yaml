@@ -1,0 +1,33 @@
+# TASK-165, the stated limit (docs/safety.md, Deletion: accepted limits,
+# check to delete): the candidate's parent renamed under a keep marker
+# after the last path check, while the candidate is being deleted, is not
+# seen. The delete goes on with the objects it checked (by fd), now below
+# the kept directory. This vector pins that documented outcome so the
+# window cannot widen or be "fixed" silently.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp/work"], "paths": ["p/zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/work/p/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/work/p/zephyr-a: {f: {size: 4K}}
+    /tmp/work/keep/.diskgc-keep: {}
+  events:
+    - at: {op: unlinkat, path: /tmp/work/p/zephyr-a/f, nth: 1, when: after}
+      rename: {from: /tmp/work/p, to: /tmp/work/keep/p}
+expect:
+  plan:
+    - {candidate: /tmp/work/p/zephyr-a}
+  reclaim_exit: 1
+  actions: [/tmp/work/p/zephyr-a]
+  removed: [/tmp/work/p/zephyr-a/f, /tmp/work/p/zephyr-a]
+  skipped: []
+  preserved: [/tmp/work/keep/.diskgc-keep, /tmp/work/keep/p]

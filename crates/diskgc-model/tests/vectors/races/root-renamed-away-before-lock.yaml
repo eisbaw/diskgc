@@ -1,0 +1,31 @@
+# TASK-165. The configured root is renamed away (taking the candidate
+# with it) before the candidate lock, nothing left at its name: the path no
+# longer leads to the candidate, changed (not missing: it was reached under
+# this run), nothing removed.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp/work"], "paths": ["p/zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/work/p/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/work/p/zephyr-a: {f: {size: 4K}}
+  events:
+    - at: {op: flock, path: /tmp/work/p/zephyr-a, nth: 1, when: before}
+      rename: {from: /tmp/work, to: /tmp/old-work}
+expect:
+  plan:
+    - {candidate: /tmp/work/p/zephyr-a}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/work/p/zephyr-a, reason: changed}
+  preserved: [/tmp/old-work/p/zephyr-a/f]

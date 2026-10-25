@@ -1,0 +1,34 @@
+# TASK-165. The candidate's parent is renamed into a directory holding a
+# keep marker after the reach and before the candidate lock: the step-4
+# recheck under the lock must judge the path as it is now, not the
+# directories it was reached through (docs/safety.md, Deletion step 4).
+# The old path no longer reaches the locked object: changed, nothing
+# removed.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp/work"], "paths": ["p/zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/work/p/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/work/p/zephyr-a: {f: {size: 4K}}
+    /tmp/work/keep/.diskgc-keep: {}
+  events:
+    - at: {op: flock, path: /tmp/work/p/zephyr-a, nth: 1, when: before}
+      rename: {from: /tmp/work/p, to: /tmp/work/keep/p}
+expect:
+  plan:
+    - {candidate: /tmp/work/p/zephyr-a}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/work/p/zephyr-a, reason: changed}
+  preserved: [/tmp/work/keep/p/zephyr-a/f, /tmp/work/keep/.diskgc-keep]

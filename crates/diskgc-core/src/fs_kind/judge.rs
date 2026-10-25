@@ -5,7 +5,9 @@
 //! candidates). The sequence has two halves, so the reclaim can put the
 //! candidate's `flock` between them and repeat the first under it:
 //! [`Judge::approach`] (steps 1 and 2; again under the lock:
-//! [`Judge::again`]) and [`Judge::contents`] (steps 3 and 4):
+//! [`Judge::again`], which first shows that the path still leads to what
+//! was reached, [`still_reached`], so the path rules judge where the
+//! candidate is now) and [`Judge::contents`] (steps 3 and 4):
 //!
 //! 1. [`Judge::place`], before anything about the candidate is opened: the
 //!    checkout guard's path rule (`contains_checkout`, fail closed
@@ -167,9 +169,11 @@ impl Judge<'_> {
     }
 
     /// Steps 1 and 2 again on a candidate already reached (the reclaim,
-    /// under its lock): its place under the mount table `mounts`, read
-    /// again, and the keep markers on the very directories it was reached
-    /// through.
+    /// under its lock, and once more right before it acts): the path must
+    /// still lead to the very directories it was reached through and to the
+    /// object found ([`still_reached`], `changed` otherwise), so that its
+    /// place under the mount table `mounts`, read again, and the keep
+    /// markers on those directories are judged on where it is now.
     pub(crate) fn again<H: Host>(
         &self,
         host: &H,
@@ -178,10 +182,11 @@ impl Judge<'_> {
         mounts: &[MountEntry],
         deadline: Option<MonoTime>,
     ) -> Judged<()> {
+        judged!(still_reached(host, found, reached, mounts, deadline));
         if let Err(skip) = self.place(found, mounts) {
             return Ok(Err(skip));
         }
-        no_keep_markers(host, reached, mounts, deadline)
+        Ok(Ok(()))
     }
 
     /// Steps 3 and 4, what the candidate holds: the source's own `where`
@@ -1488,9 +1493,9 @@ pub(super) fn source_where<H: Host>(
 }
 
 /// A candidate reached again from its root ([`reach`]): the directories
-/// from the root down to its parent, each held open (`O_PATH`), so that the
-/// keep markers on the way can be judged again ([`no_keep_markers`]) on the
-/// very directories the candidate was reached through.
+/// from the root down to its parent, each held open (`O_PATH`), so that
+/// the path can be shown to still lead through them ([`still_reached`])
+/// and the keep markers on the way judged again ([`no_keep_markers`]).
 #[derive(Debug)]
 pub struct Reached<F> {
     /// (path, directory), the root first, the candidate's parent last.
@@ -1557,16 +1562,7 @@ pub(crate) fn reach<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Reached<H::Fd>> {
     let root = &found.root;
-    check_deadline(host, deadline, root)?;
-    match check_root(root, mounts) {
-        Ok(()) => {}
-        Err(Ok(why)) => return Ok(Err(super::discover::private_root(root, &why))),
-        Err(Err(skip)) => return Ok(Err(skip)),
-    }
-    let top = match resolve_in(host, mounts, root, Want::Directory) {
-        Ok(dir) => dir,
-        Err(e) => return Ok(Err(unreachable_root(root, e)?)),
-    };
+    let top = judged!(reach_root(host, root, mounts, deadline));
     let rel = found.path.strip_prefix(root).map_err(|_| Stop::Failed {
         path: found.path.clone(),
         error: HostError::invalid(
@@ -1648,6 +1644,115 @@ pub(crate) fn reach<H: Host>(
         return Ok(Err(skip));
     }
     Ok(Ok(Reached { dirs }))
+}
+
+/// The configured root `root` resolved now under the mount table `mounts`:
+/// its mount's line judged first (a `systemd-private-*` bind mount, a
+/// network filesystem), then opened with no symlink and no mount crossed.
+fn reach_root<H: Host>(
+    host: &H,
+    root: &Path,
+    mounts: &[MountEntry],
+    deadline: Option<MonoTime>,
+) -> Judged<Resolved<H::Fd>> {
+    check_deadline(host, deadline, root)?;
+    match check_root(root, mounts) {
+        Ok(()) => {}
+        Err(Ok(why)) => return Ok(Err(super::discover::private_root(root, &why))),
+        Err(Err(skip)) => return Ok(Err(skip)),
+    }
+    match resolve_in(host, mounts, root, Want::Directory) {
+        Ok(dir) => Ok(Ok(dir)),
+        Err(e) => Ok(Err(unreachable_root(root, e)?)),
+    }
+}
+
+/// Whether the path `found.path` reaches, now, exactly what [`reach`]
+/// reached (TASK-165): its root resolved again, then, one level at a time,
+/// each name `statx`ed (not followed) in the directory `reached` holds for
+/// the level above, and each result must be the directory held for that
+/// level, and the candidate's name in the parent held the object `found`
+/// (identity: device, inode, owner, type, birth time). Every check of the
+/// path text (the checkout path rule, `protect`, the keep markers held) is
+/// sound only after this: a directory on the way renamed since the reach
+/// (into a kept directory, a checkout's metadata, out of the root) leaves
+/// the held fds valid but the path pointing elsewhere, and is `changed`.
+/// Then [`no_keep_markers`] on the held directories, which are now the
+/// directories on the path.
+///
+/// Costs one transient resolution of the root and one `statx` per level;
+/// it opens nothing that stays open, so the reclaim's fd budget is that of
+/// [`reach`]. Each level is checked at its own instant; a rename after a
+/// level's check is the window after the check (docs/safety.md, Deletion:
+/// accepted limits, check to delete).
+pub(crate) fn still_reached<H: Host>(
+    host: &H,
+    found: &Found,
+    reached: &Reached<H::Fd>,
+    mounts: &[MountEntry],
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    let changed = |at: &Path, now: &str| {
+        Ok(Err(Skip::new(
+            Reason::Changed,
+            found.path.clone(),
+            format!(
+                "its path no longer leads to it: {} {now} since it was reached",
+                at.display()
+            ),
+        )))
+    };
+    let (root_path, root) = reached.dirs.first().expect("the root at least");
+    assert_eq!(root_path, &found.root, "reached from the candidate's root");
+    let fresh = match reach_root(host, root_path, mounts, deadline)? {
+        Ok(fresh) => fresh,
+        // The root reached before is gone from its path: the path no longer
+        // leads to the candidate, like any other level gone.
+        Err(skip) if skip.reason == Reason::Missing => return changed(root_path, "is gone"),
+        Err(skip) => return Ok(Err(skip)),
+    };
+    if engine::Identity::of(&fresh.stat).is_none()
+        || engine::Identity::of(&fresh.stat) != engine::Identity::of(&root.stat)
+    {
+        return changed(root_path, "is another directory");
+    }
+    drop(fresh);
+    for pair in reached.dirs.windows(2) {
+        let ((_, above), (at, held)) = (&pair[0], &pair[1]);
+        let name = at
+            .file_name()
+            .expect("a directory below the root has a name");
+        if mounts.iter().any(|m| &m.mount_point == at) {
+            return Ok(Err(Skip::new(
+                Reason::ContainsMount,
+                at.clone(),
+                "a mount point on the way to the candidate (mountinfo): not entered",
+            )));
+        }
+        check_deadline(host, deadline, at)?;
+        match host.statx(Base::Dir(&above.fd), Path::new(name)) {
+            Ok(stat) => {
+                let now = engine::Identity::of(&stat);
+                if now.is_none() || now != engine::Identity::of(&held.stat) {
+                    return changed(at, "is another entry");
+                }
+            }
+            Err(e) if e.is(Errno::ENOENT) => return changed(at, "is gone"),
+            Err(e) => return Ok(Err(skip_or_stop(at.clone(), "stat", &e)?)),
+        }
+    }
+    let name = file_name(found)?;
+    check_deadline(host, deadline, &found.path)?;
+    match host.statx(Base::Dir(&reached.parent().fd), Path::new(name)) {
+        Ok(stat) => judged!(Ok(same_object(
+            found,
+            engine::Identity::of(&stat),
+            "on its path now"
+        ))),
+        Err(e) if e.is(Errno::ENOENT) => return changed(&found.path, "is gone"),
+        Err(e) => return Ok(Err(skip_or_stop(found.path.clone(), "stat", &e)?)),
+    }
+    no_keep_markers(host, reached, mounts, deadline)
 }
 
 /// No keep marker in the root or any directory on the way to the

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::Found;
 use super::discover::check_deadline;
-use super::judge::{Judge, Reached, Walked, mountinfo, same_object};
+use super::judge::{Judge, Reached, Walked, mountinfo, same_object, still_reached};
 use super::reclaim::{Alternative, runtime_retention_guard_veto};
 use crate::command_action::{self, Ready};
 use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
@@ -301,6 +301,12 @@ fn protocol<H: Delete>(
                 result.selected = Some(admitted[veto_index]);
                 return Err(skip.into());
             }
+            // The path again, right before the command (TASK-165): it
+            // gets the path text, and `protect` below judges it, so a
+            // directory on the way renamed since the locked judgement is
+            // `changed`.
+            let mounts = mountinfo(host)?;
+            judge.again(host, found, &reached, &mounts, deadline)??;
             if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
                 boundary_skip = Some((index, skip));
                 refused_at_boundary[index] = true;
@@ -314,6 +320,9 @@ fn protocol<H: Delete>(
                 result.selected = Some(guard_index);
                 return Err(skip.into());
             }
+            // The path once more as the last filesystem check before the
+            // command: the checks above can take a while.
+            still_reached(host, found, &reached, &mounts, deadline)??;
             check_deadline(host, deadline, path)?;
             // The policy may scan other trees and take longer than the in-use
             // verdict remains fresh. Recheck its lifetime at the point of use.

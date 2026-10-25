@@ -1,0 +1,34 @@
+# TASK-165, a command action: the cache's parent is renamed under a keep
+# marker while the locked eligibility walk lists the candidate. The
+# command gets the path text, so the path is judged again right before it
+# starts: changed, no command run.
+profile_vector: 1
+profile: ccache
+roots: ["/home/a"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/env: {mode: "0755"}
+    /usr/bin/ccache: {mode: "0755"}
+    "/home/a/.cache/ccache": {"payload": {"size": "8K"}}
+    /home/a/keep/.diskgc-keep: {}
+  events:
+    - at: {op: read_dir, path: /home/a/.cache/ccache, nth: 2, when: after}
+      rename: {from: /home/a/.cache, to: /home/a/keep/.cache}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/ccache"}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: "/home/a/.cache/ccache", reason: changed}
+  preserved: ["/home/a/keep/.cache/ccache/payload"]
+  commands: []

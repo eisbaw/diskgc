@@ -20,7 +20,10 @@
 //!    step 1, within one entry budget for the target; the last build (newer
 //!    than the one the caller judged: `changed`), the idle requirement, and
 //!    the in-use check of the whole target against a scan made now, under
-//!    the locks.
+//!    the locks; then the target reached again from its root (a keep
+//!    marker on the way: `kept`; the path no longer leading to the target
+//!    locked: `changed`, [`still_reached`]) before the guard judges its
+//!    path.
 //! 3. **Delete inside the locked profile directories**, each part with the
 //!    deletion engine's identity-checked delete, through
 //!    [`clear_and_delete`] on the in-use check of exactly that part's record
@@ -320,6 +323,9 @@ impl<H: Delete> Run<'_, '_, H> {
             .map_err(|error| failed(path, error))?;
         judge_in_use(scan, &walks, target, &inspected, reached.project)
             .map_err(ReclaimEnd::Skipped)?;
+        // The path again, right before the deletion: the guard below and
+        // the checkout path rule judge the path text.
+        step(still_reached(host, target, &reached.target, deadline))?;
         if let Some(skip) = (self.guard)(path).map_err(ReclaimEnd::Stopped)? {
             return Err(ReclaimEnd::Skipped(skip));
         }
@@ -402,6 +408,43 @@ impl<H: Delete> Run<'_, '_, H> {
         self.removed_entries += done.removed_entries;
         self.removed_bytes = self.removed_bytes.saturating_add(done.removed_bytes);
         ReclaimEnd::of(done.end)
+    }
+}
+
+/// Whether the target's path, reached again from its root now ([`reach`]:
+/// one directory at a time, a keep marker in each listed), still leads to
+/// the target held as `held` (TASK-165). The locks and walks go through
+/// fds, so a directory between the root and the target renamed since the
+/// first reach (under a keep marker, into a checkout's metadata, out of the
+/// root) would otherwise go unseen: the old path no longer leading to the
+/// target is `changed`. A target is a directory, so its one path leading to
+/// it means it is there now, and the checkout path rule checked before the
+/// locks ([`judge_checkout_paths`], by the same path) holds for it.
+fn still_reached<H: Host>(
+    host: &H,
+    target: &Target,
+    held: &Resolved<H::Fd>,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    let changed = |detail: String| {
+        Ok(Err(Skip::new(
+            Reason::Changed,
+            target.path.clone(),
+            format!("its path no longer leads to the target locked: {detail}"),
+        )))
+    };
+    // `reach` itself requires the directory reached to be the target found
+    // (`changed` otherwise), and the held target was matched against the
+    // same identity, so a success is the held target.
+    match reach(host, target, deadline)? {
+        Ok(now) => {
+            debug_assert_eq!(now.target.stat.dev_ino(), held.stat.dev_ino());
+            Ok(Ok(()))
+        }
+        Err(skip) if skip.reason == Reason::Missing => {
+            changed(format!("{} {}", skip.path.display(), skip.detail))
+        }
+        Err(skip) => Ok(Err(skip)),
     }
 }
 

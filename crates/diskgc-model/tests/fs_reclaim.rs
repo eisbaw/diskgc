@@ -2726,10 +2726,15 @@ fn anchored_cmake_reads_the_locked_candidate_after_its_path_is_swapped() {
          \"{cache}\", mtime: {OLD}}}, CMakeFiles: {{.: {{mtime: {OLD}}}}}, \
          precious: {{mtime: {OLD}}}}}\n"
     );
+    // The swap happens under the lock after step 4 showed the path still
+    // leads to the candidate (TASK-165: a swap before that is `changed`
+    // without reading anything), right before the source check reads the
+    // cache: the third read of it, after discovery's and the tally's.
+    let cache_file = format!("{candidate}/CMakeCache.txt");
     let events = format!(
-        "events:\n  - {{at: {{op: flock, path: {candidate}, when: after}}, \
+        "events:\n  - {{at: {{op: read_head, path: {cache_file}, nth: 3, when: before}}, \
          rename: {{from: {candidate}, to: {moved}}}}}\n  - \
-         {{at: {{op: flock, path: {candidate}, when: after}}, \
+         {{at: {{op: read_head, path: {cache_file}, nth: 3, when: before}}, \
          rename: {{from: {replacement}, to: {candidate}}}}}\n"
     );
     let host = host(&yaml("", &tree, &events));

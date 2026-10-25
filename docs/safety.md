@@ -16,7 +16,10 @@ stated here, once.
   ([reference.md](reference.md#profiles)).
 - **Checked at deletion time.** The index only orders work
   ([architecture.md](architecture.md)); every check below runs on the
-  current filesystem state immediately before acting.
+  current filesystem state immediately before acting, on the path as it is
+  then (a directory on the way renamed since it was reached is `changed`).
+  What changes after the last check and during the act is each protocol's
+  stated window (Deletion: accepted limits, check to delete).
 - **Report time formatting.** The core uses jiff only to format the host's
   supplied wall-clock timestamp as UTC in JSON. It does not ask jiff to
   read a timezone database or the filesystem; deletion still goes through
@@ -1681,17 +1684,42 @@ filesystem as it is then, whatever the tally or a plan said:
    or exclusive, it is `locked`. The locked directory must be the object
    discovery found (`changed`). A candidate that is a single file is not
    locked.
-4. **Judged again under the lock:** the mount table read again and the
-   place again (a mount made since step 1 is `contains_mount`, never
-   looked into); the keep markers on the way again, on the very
-   directories it was reached through; the source's own `where` (no longer
+4. **Judged again under the lock:** the mount table read again; the
+   **path** again (below); the place again on it (a mount made since
+   step 1 is `contains_mount`, never looked into); the keep markers on the
+   way again; the source's own `where` (no longer
    passing it: `changed`); the eligibility walk (above), whose root must be
    the object found and the one locked (`changed`); the idle requirement
    on its newest change (none known: never idle). Then the in-use check
    against a process scan within the freshness bound (In use: Freshness).
    An unsettled scan is retried once after 20 ms; a persistently blocked
-   scan can only skip candidates for half a second before it is replaced. Any
-   failure: release, skip.
+   scan can only skip candidates for half a second before it is replaced.
+   Right after that check, on its scan, and before the delete starts (or a
+   command action's program, which is given the path), the mount table is
+   read once more and the path, the place and the keep markers are judged
+   once more, then `protect` and `!profile:` and the other checks on that
+   scan, and the path and keep markers once more as the last check before
+   acting. Any failure: release, skip.
+
+   *The path* (TASK-165): the directories step 2 reached stay open, and
+   the lock, the walk and the delete go through them, so a directory on
+   the way renamed since step 2 (into a directory holding a keep marker,
+   into a checkout's metadata, out of the root) leaves them valid while the
+   candidate's path names something else. Every rule judged on the path
+   (the checkout path rule, `protect` and `!profile:`, the keep markers on
+   the way) is therefore judged only after the path is shown to lead,
+   now, to what was reached: the root resolved anew (Path traversal) must
+   be the directory held for it, each name on the way `statx`ed (not
+   followed) in the directory held above it must be the directory held for
+   it, and the candidate's name in its parent the object found (identity:
+   device, inode, owner, type, birth time where reported). Anything else,
+   a name gone included, is `changed`. The keep markers are then looked
+   for in the directories held, which are the directories on the path. One
+   `statx` per level and a transient resolution of the root; nothing
+   stays open, so the fd budget is step 2's. Each level is checked at its
+   own instant: the guarantee is that every level led to the next during
+   the check; a rename after its level was checked is the check-to-delete
+   window below.
 5. Delete depth-first exactly the entries the walk recorded, right after
    the check, through the clear that check made for exactly that record
    (an expired clear is checked once more against a new scan), reopening
@@ -1772,8 +1800,12 @@ Each with the number of events outside diskgc it needs:
   4's checks and before or during the delete is not looked for again. A
   process that starts using the candidate is In use's limit 5 (at most
   the freshness bound, usually milliseconds); a keep marker put on the way
-  to it, or a change that makes its source's `where` fail, is not seen and
-  the candidate is deleted; a file, socket or FIFO created inside it is
+  to it, a directory on the way renamed after the last check of the path
+  (under a keep marker, into a checkout's metadata, out of its root; the
+  delete keeps deleting the objects it checked, Scope), or a change that
+  makes its source's `where` fail, is not seen and the candidate is
+  deleted. The window runs from that last path check, after the in-use
+  check, to the end of the delete, so it grows with the candidate's size; a file, socket or FIFO created inside it is
   never unlinked and stops the delete (`ENOTEMPTY`, an error).
 - *Mounts made after a table was read* (one event): the table is read at
   step 1 and again at step 4, and a mount can appear after either read
@@ -2171,8 +2203,15 @@ The step that deletes (`cargo_target::reclaim` in the core).
    again even if the tally's earlier measurement passed. Then
    the in-use check of the whole target against a scan made now, under
    the locks (a scan from before could miss a process started meanwhile):
-   every entry's record and the Cargo process checks (In use). Any hit:
-   release, skip.
+   every entry's record and the Cargo process checks (In use). Then the
+   target is **reached again from its root** (Discovery: one directory at
+   a time, each listed for a keep marker, `kept`) and the directory reached
+   must be the target whose locks diskgc holds; the path no longer leading
+   to it (a directory between the root and the target renamed since step 1,
+   under a keep marker, into a checkout's metadata or out of the root) is
+   `changed` (TASK-165). Only then are `protect` and `!profile:` judged on
+   the path, and the checkout path rule of step 1 holds for the target
+   where it is. Any hit: release, skip.
 3. **Delete inside the locked profile directories,** each part with the
    per-entry identity check of Deletion, in this order:
    - **fingerprints first**, of every profile directory before anything
@@ -2277,7 +2316,11 @@ which reports it); a real build of the race fixture, about 260 entries,
 13 to 23 ms. It is reported (`locks_held`), not bounded: a deadline still
 stops the protocol between operations.
 
-**Limits.** The lock files are listed again before each part, not before
+**Limits.** The path from the root is checked once, at the end of
+step 2, not before each part: a directory between the root and the target
+renamed during step 3 is not seen, and the parts are deleted where they
+are (the `fs` kind's check-to-delete window, Deletion). The lock files are
+listed again before each part, not before
 each unlink: a lock file created during a part is seen at the next one
 (safe by the `.cargo-lock` invariant above, which this listing does not
 replace). An entry renamed out of a locked profile directory while it is

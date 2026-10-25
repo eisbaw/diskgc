@@ -315,6 +315,48 @@ pub fn cargo_reclaim_changed_between_discovery_and_locking(
         }
         judged.assert_clean()?;
     }
+    // TASK-165: the project renamed under a keep marker while the driver
+    // is paused before its first lock. The locks and walks go through fds
+    // that stay valid, so only the path reached again from the root under
+    // the locks sees that the target is no longer below its root as found:
+    // changed, nothing unlinked. Moved back afterwards for the control.
+    s.mkdir("w/kept", 0o755, TESTER)?;
+    s.write_file("w/kept/.diskgc-keep", b"", 0o644, TESTER)?;
+    let locks = lock_inodes(&target)?;
+    // Nothing is eligible; judged after the project is moved back, so the
+    // harness's own renames leave every object where it was armed.
+    let oracle = Oracle::arm(Fixture::new())?;
+    let mut spawned = ctx.spawn_as_tester(
+        &ctx.driver(),
+        &["--pause-at", "flock_try:1", "cargo-reclaim", "/tmp/w"],
+    )?;
+    let paused = spawned.wait_paused()?;
+    ensure!(paused.op == "flock_try" && paused.nth == 1, "{paused:?}");
+    s.rename("w/p", "w/kept/p")?;
+    spawned.resume(&paused)?;
+    let run = spawned.wait()?;
+    info!(
+        "ancestor renamed under a keep marker:\n{}\n--- stderr\n{}",
+        run.stdout, run.stderr
+    );
+    s.rename("w/kept/p", "w/p")?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    let got = verdict(&results(&run)?, &target)?;
+    ensure!(
+        got.starts_with(&format!("skip changed {target:?} entries=0 ")),
+        "ancestor renamed under a keep marker: expected changed, got {got}"
+    );
+    ensure!(
+        unlinked(&run).is_empty(),
+        "ancestor renamed under a keep marker: the driver unlinked {:?}",
+        unlinked(&run)
+    );
+    ensure!(
+        lock_inodes(&target)? == locks,
+        "ancestor renamed under a keep marker: a lock file gone or replaced"
+    );
+    judged.assert_clean()?;
     // The control: judged and reclaimed with nothing in between, the same
     // run deletes (the eligibility check and the locks change no time the
     // last build measures).

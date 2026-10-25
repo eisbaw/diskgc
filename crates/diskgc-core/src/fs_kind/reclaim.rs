@@ -22,9 +22,10 @@
 //!    The locked directory must be the object found (`changed`). A file
 //!    candidate is not locked;
 //! 4. **judged again under the lock**: the mount table read again and
-//!    [`Judge::again`] (the place: a mount made since step 1 is
-//!    `contains_mount`, never looked into; the keep markers on the
-//!    directories it was reached through), then [`Judge::contents`] (the
+//!    [`Judge::again`] (the path must still lead to the directories it was
+//!    reached through and to the object found, `changed` otherwise; then
+//!    the place on it: a mount made since step 1 is `contains_mount`,
+//!    never looked into; the keep markers on the way), then [`Judge::contents`] (the
 //!    source's `where`, the eligibility walk with the tier's rules, whose
 //!    root must be the object found, and the idle requirement on its newest
 //!    change, none known: never idle), and the walked root must be the one
@@ -32,7 +33,10 @@
 //! 5. and 6. [`clear_and_delete`]: **in use?** against a process scan
 //!    within the freshness rules (docs/safety.md, In use: Freshness);
 //!    an unsettled scan is retried once, and a persistently blocking one
-//!    only skips candidates briefly. A clear candidate is **deleted**
+//!    only skips candidates briefly. On that scan, the mount table read
+//!    again and [`Judge::again`] once more (a directory on the way renamed
+//!    during the walk), then the policy (`protect`) on the path that still
+//!    leads to it. A clear candidate is **deleted**
 //!    right after the check, exactly the record the walk made and the
 //!    check cleared: every directory reopened and matched, every entry
 //!    `statx`ed and matched right before its `unlinkat`, the deadline read
@@ -44,7 +48,7 @@
 
 use super::Found;
 use super::discover::check_deadline;
-use super::judge::{Judge, Reached, Tally, Walked, mountinfo, same_object};
+use super::judge::{Judge, Reached, Tally, Walked, mountinfo, same_object, still_reached};
 use crate::engine::{Checkouts, DeleteOptions, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{Base, Delete, Host, MonoTime};
 use crate::inuse::{
@@ -424,6 +428,17 @@ fn protocol<H: Delete>(
         options,
         &mut attempts,
         &mut |scan| {
+            // The path again, right before the deletion (TASK-165): the
+            // walk and the scan took time, and a directory on the way
+            // renamed meanwhile (under a keep marker, into a checkout, out
+            // of the root) leaves every fd held valid. `protect` below
+            // judges the path text, so it runs only on a path that still
+            // leads here.
+            let mounts = mountinfo(host).map_err(NotDeleted::Stopped)?;
+            judge
+                .again(host, found, &reached, &mounts, deadline)
+                .map_err(NotDeleted::Stopped)?
+                .map_err(NotDeleted::Skipped)?;
             if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
                 return Err(NotDeleted::Skipped(skip));
             }
@@ -452,6 +467,12 @@ fn protocol<H: Delete>(
                 done.selected = Some(guard_index);
                 return Err(NotDeleted::Skipped(skip));
             }
+            // The checks above can take a while (the policy may scan other
+            // trees): the path once more as the last check before the
+            // delete, so the window after it is the delete itself.
+            still_reached(host, found, &reached, &mounts, deadline)
+                .map_err(NotDeleted::Stopped)?
+                .map_err(NotDeleted::Skipped)?;
             Ok(())
         },
     ) {

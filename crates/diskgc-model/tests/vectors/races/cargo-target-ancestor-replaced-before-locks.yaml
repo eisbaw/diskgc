@@ -1,0 +1,39 @@
+# TASK-165. As cargo-target-ancestor-renamed-under-keep-marker-before-locks,
+# and a new target directory is made at the old path: the path reaches a
+# target again, but not the one whose locks diskgc holds. changed, nothing
+# removed.
+profile_vector: 1
+profile: cargo-target
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/keep/.diskgc-keep: {}
+    /home/tester/src/proj/Cargo.toml: {}
+    /home/tester/src/proj/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, .fingerprint: {app-1: {bin-app: {}}}, deps: {app: {size: 1M}}}
+  events:
+    - at: {op: flock, path: /home/tester/src/proj/target/debug/.cargo-lock, nth: 1, when: before}
+      rename: {from: /home/tester/src/proj, to: /home/tester/src/keep/proj}
+    - at: {op: flock, path: /home/tester/src/proj/target/debug/.cargo-lock, nth: 1, when: before}
+      mkdir: /home/tester/src/proj/target/debug/deps
+expect:
+  plan:
+    - {candidate: /home/tester/src/proj/target}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/proj/target, reason: changed}
+  preserved:
+    - /home/tester/src/keep/proj/target/debug/deps/app
+    - /home/tester/src/keep/proj/target/debug/.fingerprint/app-1/bin-app
+    - /home/tester/src/keep/.diskgc-keep
