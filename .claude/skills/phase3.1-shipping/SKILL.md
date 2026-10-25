@@ -375,6 +375,13 @@ they never override the Invariants.
   broke when TASK-65 grew the 0.1 catalog and nothing noticed until the
   cli-msg walk. When the release catalog changes, run the release-feature
   tests (being added to `just check`).
+- 2026-10-25: `just e2e` stops at the first failing stage: a hang in the
+  fast suite (TASK-178) left release, Debian, Docker and VM results
+  missing for that sha. A red async QA means "unknown" for every later
+  stage, not "pass".
+- 2026-10-25: a gate run inside a QA worktree wrote a 3.3 GB `tmp/target`
+  there despite `CARGO_TARGET_DIR` pointing at the main checkout's
+  (some recipe sets its own); budget disk for it (TASK-178 checks which).
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
