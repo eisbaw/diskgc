@@ -423,6 +423,12 @@ they never override the Invariants.
   `just walk-down NAME`; two forgotten ones burned ~4 cores for 6-10 h
   and skewed every timing and VM probe (TASK-197 flake). Tear a walk env
   down when its task merges; check `podman ps | grep walk` at each merge.
+- 2026-10-25: renaming or remapping a skip reason or message breaks
+  container-test expectations that neither `just check` nor the
+  `e2e-tests` flake check runs (TASK-190: two in_use -> in_use_unknown
+  strings, caught only by async QA). Before reporting, grep diskgc-e2e
+  and the vectors for the old string and run those tests with
+  `just e2e-one`.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
