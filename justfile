@@ -179,6 +179,12 @@ docs-check:
     python3 tools/check_docs.py docs/reference.md docs/safety.md
     cargo test -p diskgc-core --lib --locked
 
+# Run what docs/reference.md documents against diskgc binary BIN and report drift
+# (phase3.1 step 5b); read-only on the host, reclaiming probes only with
+# `--container NAME` against a walk env's BIN (e.g. /usr/local/bin/diskgc).
+docs-vs-binary BIN *ARGS:
+    python3 tools/docs_vs_binary.py "{{BIN}}" {{ARGS}}
+
 # What CI runs: every flake check, then every container test.
 ci:
     nix flake check -L
