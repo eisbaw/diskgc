@@ -187,18 +187,24 @@ scan-timing SCANS="20" *ARGS="":
 # Walkthrough driver (tools/walk, phase3.1 skill): a disposable rootless
 # Podman container from the e2e base image with the 0.1 release package on
 # PATH, seeded data on size-limited tmpfs and a host-shaped process load,
-# driven through tmux session walk-diskgc-ENV. Reclaiming runs belong there.
-# Bring up the walk container and its tmux session.
-walk-up ENV="podman":
-    bash tools/walk/up.sh {{ENV}}
+# driven through tmux session walk-diskgc-NAME. Reclaiming runs belong there.
+# Each NAME gets its own container and uid slot (docs/testing.md).
+# Bring up walk environment NAME: its container and tmux session.
+walk-up NAME="podman":
+    bash tools/walk/up.sh {{NAME}}
 
-# Regenerate the walk container's data in place from WALK_SEED (default 1).
-walk-reset ENV="podman":
-    podman exec -e WALK_SEED="${WALK_SEED:-1}" walk-diskgc-{{ENV}} sh /opt/walk/reset.sh
+# Regenerate walk environment NAME's data in place from WALK_SEED (default 1),
+# with WALK_TMP_BULK bulk /tmp leftovers (default 0).
+walk-reset NAME="podman":
+    podman exec -e WALK_SEED="${WALK_SEED:-1}" -e WALK_TMP_BULK="${WALK_TMP_BULK:-0}" walk-diskgc-{{NAME}} sh /opt/walk/reset.sh
 
-# Remove the walk container and its tmux session.
-walk-down ENV="podman":
-    bash tools/walk/down.sh {{ENV}}
+# Copy diskgc binary BIN into walk environment NAME as diskgc-TAG.
+walk-install NAME BIN TAG:
+    bash tools/walk/install.sh {{NAME}} "{{BIN}}" {{TAG}}
+
+# Remove walk environment NAME's container and tmux session.
+walk-down NAME="podman":
+    bash tools/walk/down.sh {{NAME}}
 
 # Print the retro table from the verification notes' retro lines.
 retro:

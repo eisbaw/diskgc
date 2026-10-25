@@ -1,7 +1,8 @@
 #!/bin/sh
 # Inside the walk container, as root: stop the data's live processes, wipe
 # the tester's home and /tmp (both container-private tmpfs mounts), and
-# generate them again from the seed (WALK_SEED, default 1). Then start the
+# generate them again from the seed (WALK_SEED, default 1; WALK_TMP_BULK
+# adds that many bulk /tmp leftovers, default 0, see gen.py). Then start the
 # live work a developer's machine has: a Cargo build in progress (holding
 # its target's locks), a binary running from its own target, a live pytest
 # session, and the owner shells of one nix-shell and one nix-develop dir.
@@ -11,9 +12,17 @@ HOLD_S=43200
 holders=/run/walk/holders
 cargo_path=/opt/cargo-under-test/1.99.1/bin:/opt/cargo-under-test/cc/bin:/bin
 
-# Every holder is a session leader (setsid) whose pid is in $holders.
+# Every holder is a session leader (setsid) recorded in $holders as "PID
+# STARTTIME". Only a process with that pid AND start time is signalled: with
+# WALK_PID_HOST=1 a dead holder's pid can be reused by a host process, and
+# container root is the invoking user, who may signal it. (/proc/PID/ns/user
+# cannot tell: root lacks CAP_SYS_PTRACE to read it for tester's processes.)
+start_time() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }  # stat field 22
 if [ -f "$holders" ]; then
-  while read -r pid; do kill -TERM -- "-$pid" 2>/dev/null || true; done < "$holders"
+  while read -r pid started; do
+    [ -n "$started" ] && [ "$(start_time "$pid")" = "$started" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done < "$holders"
   : > "$holders"
 fi
 sleep 1
@@ -26,14 +35,14 @@ as_tester() { su -s /bin/sh tester -c "$1"; }
 # the pid is the command's own).
 hold() {
   setsid su -s /bin/sh tester -c "cd /home/tester && export PATH=$cargo_path CARGO_NET_OFFLINE=true && $1" >/dev/null 2>&1 &
-  echo $! >> "$holders"
+  echo "$! $(start_time $!)" >> "$holders"
 }
 
 hold "exec sleep $HOLD_S"   # a nix-shell's shell
 hold "exec sleep $HOLD_S"   # a nix develop's shell
 sleep 1
-set -- $(cat "$holders")
-as_tester "/usr/local/bin/python3 /opt/walk/gen.py --home /home/tester --tmp /tmp --seed ${WALK_SEED:-1} --live-pid $1 --live-pid $2"
+set -- $(cut -d' ' -f1 "$holders")
+as_tester "/usr/local/bin/python3 /opt/walk/gen.py --home /home/tester --tmp /tmp --seed ${WALK_SEED:-1} --tmp-bulk ${WALK_TMP_BULK:-0} --live-pid $1 --live-pid $2"
 
 # Real Cargo for the live cases: a web app built and running from its
 # target, and an agent's build stuck in a build script, holding the locks.
@@ -83,5 +92,5 @@ chown -R tester:tester /home/tester/src/pyproj
 hold "cd src/pyproj && exec pytest -q"
 
 sleep 3
-echo "reset: seed ${WALK_SEED:-1}; holders: $(tr '\n' ' ' < "$holders")"
+echo "reset: seed ${WALK_SEED:-1}; holders: $(cut -d' ' -f1 "$holders" | tr '\n' ' ')"
 df -h /home/tester /tmp | sed 's/^/reset: /'

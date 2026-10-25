@@ -2186,3 +2186,54 @@ subuid range covering uids 1000 and 1001 (the dev shell does not provide
 Podman; CI runners that are themselves containers need nested Podman).
 Each test's tier is declared in `diskgc-e2e/src/suite.rs`. Coverage of unit and model tests
 via `cargo llvm-cov`.
+
+### Walkthrough driver
+
+Walks (the phase3.1 acceptance signal) run in a disposable rootless Podman
+container from the e2e base image with the 0.1 release package on `PATH`,
+seeded data on size-limited tmpfs mounts and a host-shaped process load
+(`tools/walk/`). Every reclaiming run in a walk happens there.
+
+| `just` recipe | What |
+|---|---|
+| `walk-up [NAME]` | container and tmux session `walk-diskgc-NAME` (default `podman`), with the tester's shell |
+| `walk-reset [NAME]` | regenerate the data from `WALK_SEED`; `WALK_TMP_BULK=N` adds N bulk `/tmp` leftovers |
+| `walk-install NAME BIN TAG` | copy a diskgc binary into the container as `/usr/local/bin/diskgc-TAG` |
+| `walk-down [NAME]` | remove the container and its tmux session |
+
+`NAME` is positional (`just walk-up review`; `NAME=review` is refused).
+`tools/walk/step.sh DUMP COMMAND` types one command into the session named
+by `WALK_ENV` and saves the screen.
+
+Each name is its own container with its own uid/gid slot
+(`tools/walk/uid-slot.sh`): container root stays the invoking user (so the
+container can read the bind-mounted checkout under a 0700 home), and
+container uids 1..2047 map to a block of 2,047 subordinate ids. Slots are
+2,048 ids wide, so the usual 65,536-id `/etc/subuid` range gives 32; the
+script reads the effective range from `podman unshare`'s uid and gid maps
+and refuses fewer than two slots. A name other than `podman` starts at a
+slot derived from its checksum and takes the next one no running container
+labelled `diskgc.walk.uid-slot` holds; two `walk-up`s racing for one slot
+both back out. `podman` is slot 0, Podman's default host uids for those
+users, which it shares with every default-mapped rootless container,
+including walk containers started before slots existed (they carry no
+label and are not counted).
+
+Why slots: the in-use scan cannot read a process of the user's own uid in
+another user namespace and keeps whatever it could use, so two containers
+whose tester is one host uid, and that see each other's processes, reclaim
+nothing (reproduced 2026-10-25: a `--pid=host` probe on a walk container's
+slot kept all 8 Cargo targets `in_use` by that container's load; on a
+distinct slot it reclaimed them).
+
+By default a walk container has its own PID namespace and runs with
+`--init`, so the holders `walk-reset` stops are reaped rather than left as
+zombies that grow the process table, and with it the in-use scan's cost,
+across a series of resets. `WALK_PID_HOST=1 just walk-up NAME` joins the
+host's initial PID namespace instead, which Owner PID needs (rc dirs and
+pytest locks of `/tmp` profiles are otherwise `producer_unknown`;
+[safety.md](safety.md)); there Podman refuses `--init`, the container sees
+the host's and other walk containers' processes (which is when slots
+matter), and container root, being the invoking user, could signal the
+user's host processes: `reset.sh` signals a holder only while its pid
+still has the start time recorded when it was started.

@@ -403,9 +403,12 @@ they never override the Invariants.
   `tmp/target`; never create extra target dirs. A hook blocks `rm`;
   `git worktree remove` of merged clean worktrees is the cleanup path.
 - 2026-10-25: two walk containers whose users map to the same host uid
-  make each other's processes uninspectable, so diskgc (correctly)
-  treats them as using every candidate and reclaims nothing. Give each
-  walk container its own `--uidmap` range (TASK-65 walk, attempt1).
+  and that see each other's processes (`--pid=host`) make them
+  uninspectable, so diskgc (correctly) treats them as using every
+  candidate and reclaims nothing (TASK-65 walk, attempt1; reproduced in
+  tmp/walks/2026-10-25-walk-tools/06-*). Run parallel walks as
+  `just walk-up NAME` (own container, tmux session and uid slot); never
+  hand-copy up.sh. `just walk-install NAME BIN TAG` adds a build.
 - 2026-10-25: never `cd` into a worktree from the orchestrator's shell:
   the session's primary directory follows it. Use `git -C` / absolute
   paths (happened twice).
