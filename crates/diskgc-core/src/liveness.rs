@@ -92,6 +92,13 @@ pub struct PidTable {
     unreadable: Vec<Pid>,
 }
 
+/// Why the held `/proc` cannot list every process (Owner PID preconditions
+/// 3 and 4, docs/safety.md), as every `producer_unknown` detail of that
+/// cause ends: the human summary recognises the cause by these texts to
+/// say what to do about it (TASK-221), so they have this one home.
+pub const NOT_INITIAL_PID_NAMESPACE: &str = "diskgc is not in the initial PID namespace";
+pub const HIDEPID: &str = "the held /proc is mounted with hidepid";
+
 impl PidTable {
     /// Owner PID's preconditions 3 and 4 (docs/safety.md): whether the
     /// held `/proc` can list every process of this kernel, or the rule that
@@ -102,8 +109,8 @@ impl PidTable {
     pub fn process_list_complete(&self) -> Result<(), String> {
         match &self.namespace {
             Err(why) => Err(format!("PID namespace unreadable: {why}")),
-            Ok(ns) if ns.hidepid => Err("the held /proc is mounted with hidepid".to_owned()),
-            Ok(ns) if !ns.initial => Err("diskgc is not in the initial PID namespace".to_owned()),
+            Ok(ns) if ns.hidepid => Err(HIDEPID.to_owned()),
+            Ok(ns) if !ns.initial => Err(NOT_INITIAL_PID_NAMESPACE.to_owned()),
             Ok(_) => Ok(()),
         }
     }

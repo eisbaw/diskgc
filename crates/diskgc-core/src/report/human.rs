@@ -4,12 +4,16 @@
 //! with its final outcome. Bounded: groups of kept candidates and long
 //! lists of reclaimed ones are summarised with examples.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::outcome::{self, Live, Planned, Verdict};
-use super::{HeldEntry, PlanEntry, Report, SkipEntry, Status, human_space_values, signed_bytes};
+use super::{
+    HeldEntry, OTHER_FS_ROOT_DETAIL, PlanEntry, Report, SkipEntry, Status, human_space_values,
+    signed_bytes,
+};
 use crate::engine::{ProcessBlocker, Reason};
+use crate::liveness::{HIDEPID, NOT_INITIAL_PID_NAMESPACE};
 use crate::units::{format_age, format_bytes};
 
 /// Kept candidates of one reason listed one per line up to this many;
@@ -134,7 +138,18 @@ fn live_text(report: &Report, held: Option<String>) -> String {
         }
     };
     lines.extend(reclaimed_lines(&live, &tier_label));
-    let kept_rows: Vec<KeptRow<'_>> = live.kept.iter().map(|s| KeptRow::of_skip(s)).collect();
+    let root_tiers = foreign_root_tiers(report.skipped.iter().map(|skip| {
+        (
+            skip.tier.as_str(),
+            skip.candidate.as_deref(),
+            Some(skip.reason),
+            skip.detail.as_deref(),
+        )
+    }));
+    let kept_rows = with_root_tiers(
+        live.kept.iter().map(|s| KeptRow::of_skip(s)).collect(),
+        &root_tiers,
+    );
     lines.extend(kept_lines(&kept_rows, &tier_label));
     lines.extend(busy_line(
         live.kept
@@ -142,6 +157,11 @@ fn live_text(report: &Report, held: Option<String>) -> String {
             .filter(|skip| skip.reason == Reason::InUseUnknown)
             .map(|skip| skip.count)
             .fold(0, u64::saturating_add),
+    ));
+    lines.extend(hidden_processes_line(
+        live.kept
+            .iter()
+            .map(|skip| (skip.reason, skip.detail.as_deref(), skip.count)),
     ));
     lines.extend(live.preflight.iter().map(|skip| {
         format!(
@@ -189,7 +209,9 @@ fn reclaimed_lines(live: &Live<'_>, tier_label: &dyn Fn(&str) -> String) -> Vec<
 /// a dry run's kept plan row.
 struct KeptRow<'a> {
     candidate: &'a Path,
-    tier: &'a str,
+    /// The tier that decided it; for a root on another filesystem, every
+    /// tier that skipped it ([`foreign_root_tiers`]).
+    tier: String,
     reason: Reason,
     count: u64,
     diagnostic: Option<String>,
@@ -204,7 +226,7 @@ impl<'a> KeptRow<'a> {
                 .candidate
                 .as_deref()
                 .expect("a kept candidate has a path (preflight rows are apart)"),
-            tier: &skip.tier,
+            tier: skip.tier.clone(),
             reason: skip.reason,
             count: skip.count,
             diagnostic: skip_diagnostic(skip),
@@ -219,14 +241,54 @@ impl<'a> KeptRow<'a> {
                 .candidate
                 .as_deref()
                 .expect("a planned candidate has a path (preflight rows are apart)"),
-            tier: &entry.tier,
+            tier: entry.tier.clone(),
             reason,
             count: 1,
-            diagnostic: plain_diagnostic(reason, entry.process_blockers.as_deref())
-                .or_else(|| diagnostic(entry.detail.as_deref(), entry.process_blockers.as_deref())),
+            diagnostic: plain_diagnostic(
+                reason,
+                entry.detail.as_deref(),
+                entry.process_blockers.as_deref(),
+            )
+            .or_else(|| diagnostic(entry.detail.as_deref(), entry.process_blockers.as_deref())),
             evidence: evidence_text(entry),
         }
     }
+}
+
+/// The tiers that skipped each root on another filesystem than PATH's, in
+/// run order. The per-candidate fold keeps a candidate's last refusal, but
+/// a root is not a candidate: every tier that has it skips it (TASK-210),
+/// and naming only the last read as if the others had not.
+fn foreign_root_tiers<'a>(
+    rows: impl Iterator<Item = (&'a str, Option<&'a Path>, Option<Reason>, Option<&'a str>)>,
+) -> BTreeMap<&'a Path, Vec<&'a str>> {
+    let mut tiers: BTreeMap<&Path, Vec<&str>> = BTreeMap::new();
+    for (tier, candidate, reason, detail) in rows {
+        if let Some(root) = candidate
+            .filter(|_| reason == Some(Reason::OtherFs) && detail == Some(OTHER_FS_ROOT_DETAIL))
+        {
+            let seen = tiers.entry(root).or_default();
+            if !seen.contains(&tier) {
+                seen.push(tier);
+            }
+        }
+    }
+    tiers
+}
+
+/// [`KeptRow`]s, a foreign root's naming all its tiers.
+fn with_root_tiers<'a>(
+    mut rows: Vec<KeptRow<'a>>,
+    root_tiers: &BTreeMap<&Path, Vec<&str>>,
+) -> Vec<KeptRow<'a>> {
+    for row in &mut rows {
+        if let Some(tiers) = root_tiers.get(row.candidate)
+            && row.reason == Reason::OtherFs
+        {
+            row.tier = tiers.join(", ");
+        }
+    }
+    rows
 }
 
 /// One line per kept candidate, grouped by reason in the order the reasons
@@ -253,7 +315,7 @@ fn kept_lines(kept: &[KeptRow<'_>], tier_label: &dyn Fn(&str) -> String) -> Vec<
                     one_line(&row.candidate.display().to_string()),
                     why(reason, row.diagnostic.as_deref()),
                     row.evidence,
-                    tier_label(row.tier)
+                    tier_label(&row.tier)
                 ));
             }
         } else {
@@ -305,8 +367,12 @@ fn skip_why(skip: &SkipEntry) -> String {
 }
 
 fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
-    plain_diagnostic(skip.reason, skip.process_blockers.as_deref())
-        .or_else(|| diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref()))
+    plain_diagnostic(
+        skip.reason,
+        skip.detail.as_deref(),
+        skip.process_blockers.as_deref(),
+    )
+    .or_else(|| diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref()))
 }
 
 /// The diagnostic for a reason whose refusal detail is for diagnosis, not
@@ -314,7 +380,17 @@ fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
 /// and the line [`busy_line`] says what to do. One whose scan could not
 /// inspect a process of the user (TASK-190) names that process instead:
 /// it is not the host's load, and "used by" would claim a use nobody saw.
-fn plain_diagnostic(reason: Reason, blockers: Option<&[ProcessBlocker]>) -> Option<String> {
+/// A `producer_unknown` whose cause is a process list diskgc cannot see
+/// whole names that cause in words, not the contract row that met it
+/// (TASK-221); [`hidden_processes_line`] says what to do.
+fn plain_diagnostic(
+    reason: Reason,
+    detail: Option<&str>,
+    blockers: Option<&[ProcessBlocker]>,
+) -> Option<String> {
+    if reason == Reason::ProducerUnknown {
+        return hidden_processes(reason, detail).map(|hidden| hidden.why().to_owned());
+    }
     if reason != Reason::InUseUnknown {
         return None;
     }
@@ -329,6 +405,80 @@ fn plain_diagnostic(reason: Reason, blockers: Option<&[ProcessBlocker]>) -> Opti
         ),
         None => "the host was too busy to check whether it is in use".to_owned(),
     })
+}
+
+/// Why diskgc cannot see every process, when that kept a candidate
+/// `producer_unknown` (TASK-221): a liveness contract that looks up process
+/// ids permits nothing then (docs/safety.md, Producer liveness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiddenProcesses {
+    /// diskgc is not in the initial PID namespace: most containers.
+    OwnPidNamespace,
+    /// The held `/proc` is mounted with `hidepid`.
+    Hidepid,
+}
+
+impl HiddenProcesses {
+    fn why(self) -> &'static str {
+        match self {
+            Self::OwnPidNamespace => {
+                "diskgc runs in its own PID namespace (a container) and cannot see every process"
+            }
+            Self::Hidepid => "/proc is mounted with hidepid, which hides other processes",
+        }
+    }
+
+    fn what_to_do(self) -> &'static str {
+        match self {
+            Self::OwnPidNamespace => "run ensure on the host (outside any container)",
+            Self::Hidepid => "run ensure where /proc is mounted without hidepid",
+        }
+    }
+}
+
+/// The cause of a `producer_unknown` refusal, if it is one diskgc's
+/// environment imposes rather than the candidate: recognised by the texts
+/// [`crate::liveness`] gives those causes, which every such detail ends
+/// with (the JSON's `detail`; its `reason` is the same for every cause).
+fn hidden_processes(reason: Reason, detail: Option<&str>) -> Option<HiddenProcesses> {
+    let detail = detail.filter(|_| reason == Reason::ProducerUnknown)?;
+    if detail.ends_with(NOT_INITIAL_PID_NAMESPACE) {
+        Some(HiddenProcesses::OwnPidNamespace)
+    } else if detail.ends_with(HIDEPID) {
+        Some(HiddenProcesses::Hidepid)
+    } else {
+        None
+    }
+}
+
+/// One line per cause that kept candidates `producer_unknown` because diskgc
+/// cannot see every process: why, and what to do. The reason name and the
+/// contract's row say neither (TASK-221: a CI job in a container kept every
+/// `/tmp` candidate and learned why only from the release notes).
+fn hidden_processes_line<'a>(
+    kept: impl Iterator<Item = (Reason, Option<&'a str>, u64)>,
+) -> Vec<String> {
+    let mut counts: Vec<(HiddenProcesses, u64)> = Vec::new();
+    for (reason, detail, count) in kept {
+        let Some(hidden) = hidden_processes(reason, detail) else {
+            continue;
+        };
+        match counts.iter_mut().find(|(seen, _)| *seen == hidden) {
+            Some((_, total)) => *total = total.saturating_add(count),
+            None => counts.push((hidden, count)),
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(hidden, count)| {
+            format!(
+                "  {count} candidate(s) kept producer_unknown: {}, so whether their producer \
+                 ended cannot be told; {} to reclaim them",
+                hidden.why(),
+                hidden.what_to_do()
+            )
+        })
+        .collect()
 }
 
 /// What a user does about candidates kept as `in_use_unknown` (TASK-144):
@@ -393,9 +543,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         Status::DryRun => "dry run".to_owned(),
         other => format!("dry run, {}", other.as_str()),
     };
+    // The colon is added below, only when lines follow it (TASK-216).
     let mut lines = vec![format!(
         "{status}: {available} available on {} (min-free {min_free}, target-free {target_free}); \
-         {} (took {}):",
+         {} (took {})",
         mount_text(report),
         dry_run_outcome(&folded.rows, needed),
         elapsed_text(report)
@@ -426,10 +577,21 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         "eligible, not needed",
         &tier_label,
     ));
-    let kept_rows: Vec<KeptRow<'_>> = of(Verdict::Kept)
-        .into_iter()
-        .map(KeptRow::of_plan)
-        .collect();
+    let root_tiers = foreign_root_tiers(report.plan.iter().map(|entry| {
+        (
+            entry.tier.as_str(),
+            entry.candidate.as_deref(),
+            entry.reason,
+            entry.detail.as_deref(),
+        )
+    }));
+    let kept_rows = with_root_tiers(
+        of(Verdict::Kept)
+            .into_iter()
+            .map(KeptRow::of_plan)
+            .collect(),
+        &root_tiers,
+    );
     lines.extend(kept_lines(&kept_rows, &tier_label));
     lines.extend(busy_line(
         folded
@@ -438,6 +600,13 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             .filter(|row| row.entry.reason == Some(Reason::InUseUnknown))
             .count() as u64,
     ));
+    lines.extend(hidden_processes_line(folded.rows.iter().filter_map(
+        |row| {
+            row.entry
+                .reason
+                .map(|reason| (reason, row.entry.detail.as_deref(), 1))
+        },
+    )));
     lines.extend(folded.preflight.iter().map(|entry| {
         format!(
             "  skipped profile {} [{}]: {}",
@@ -478,6 +647,9 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         lines.push(format!("  {} error(s): see stderr", report.errors.len()));
     }
     lines.extend(held);
+    if lines.len() > 1 {
+        lines[0].push(':');
+    }
     lines.join("\n")
 }
 

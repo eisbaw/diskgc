@@ -492,8 +492,13 @@ development builds, the pre-release sandbox gate,
   no scan stayed fresh or the process list did not settle reads "the host
   was too busy to check whether it is in use"; one kept because a process
   of the user cannot be inspected names that process. One line counts
-  them and says to run again when the host is less busy. Lines name their tier (`[TIER]`) when the run had
-  more than one. The summary lists preflight profile refusals separately
+  them and says to run again when the host is less busy. A candidate kept
+  `producer_unknown` because diskgc cannot see every process (it runs in
+  its own PID namespace, as in most containers, or `/proc` has `hidepid`)
+  says so in words, and one line per such cause counts them and says
+  where to run instead. A root on another filesystem than `PATH`'s
+  (`other_fs`, below) is one line naming every tier that has it. Lines
+  name their tier (`[TIER]`) when the run had more than one. The summary lists preflight profile refusals separately
   from kept candidates. A dry run (the report's `dry_run`, also when it
   failed) gives each candidate one verdict, `would reclaim`, `eligible,
   not needed` (the estimates before it already cover the goal) or `kept`,
@@ -515,7 +520,11 @@ development builds, the pre-release sandbox gate,
 - stderr carries progress logs: one line per action with tier, profile,
   candidate, observed change in available space, duration. Output of child
   commands (Docker, Nix, command actions) goes to stderr, prefixed with the
-  tier and profile name.
+  tier and profile name. Each tier logs where it looked (`N target(s)
+  below ROOT`), or `nothing searched` when none of its roots is on
+  `PATH`'s filesystem. A note of a process scan (`process scan: ...`, e.g.
+  how many processes of other users were not inspected) is logged once per
+  run while its text stays the same, not once per tier.
 - `watch` logs to stderr only; a supervisor such as journald collects it.
 
 JSON result (field names are part of the contract):
@@ -679,9 +688,17 @@ is `host`.
   untallied paths and grouped rows use `null`. It is a point-in-time size,
   not a promise of space that could be reclaimed.
 - A Cargo target whose profile directories hold only lock files is omitted
-  from a live `ensure` result's `skipped` list and human skipped count. It
-  remains discoverable and may appear as an ineligible `empty` plan row in
-  `--dry-run`.
+  from a live `ensure` result's `skipped` list and human skipped count; a
+  stderr line names it (`TIER: PATH: its profile directories hold nothing
+  but lock files; nothing to reclaim, not listed in the result`), so the
+  tier's `N target(s) below` count adds up. It remains discoverable and may
+  appear as an ineligible `empty` plan row in `--dry-run`.
+- A root of a tier on another filesystem than `PATH`'s is not searched. It
+  is one row per tier that has it (in `skipped`, or in `plan` for
+  `--dry-run`), however many of the tier's sources share it: `candidate`
+  is the root, `reason` is `other_fs`, `profile` is the first source
+  with that root, and `detail` says it is a root (decided for 0.1,
+  TASK-210: no field of its own).
 - `held_by_deleted_files` lists open-but-deleted files on the requested
   filesystem (visible processes only): an empty list when the run's
   process scan found none, `null` when it is unknown (TASK-187: never `[]`
@@ -1853,7 +1870,7 @@ it:
   `profile_policies` only to narrow a built-in's checkout guard; user
   profiles and overrides are refused.
 
-**Install.** The package holds three files:
+**Install.** The package holds:
 
 1. `bin/diskgc`, a static musl binary with no run-time dependencies: put
    it on `PATH`.
@@ -1870,6 +1887,10 @@ it:
    `~/.config/diskgc/config.yaml` or `/etc/diskgc/config.yaml`, replace
    its Cargo root with directories you own, and run `diskgc check`. It is
    not installed as an active default.
+4. `share/doc/diskgc/`: a README (install and first run), these release
+   notes (`RELEASE-NOTES.md`, cut from `reference.md` at build time),
+   `reference.md` and [safety.md](safety.md), so that the notes' links
+   resolve (links into the design documents do not).
 
 Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
 reads only and lists what a reclaim would take and why the rest is kept.
@@ -1977,7 +1998,7 @@ Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
-| Package contents | The actual `release-01-candidate` derivation passes the static ELF and installed-file check; its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
+| Package contents | The actual `release-01-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile, the README, reference and release notes are installed); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
 | Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |

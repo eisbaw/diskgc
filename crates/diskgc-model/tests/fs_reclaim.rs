@@ -1282,10 +1282,18 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
             }),
             "{selection}: {plan:#?}"
         );
+        // TASK-222: the union, not the profile alone, refused it; the
+        // detail says so in the profiles' terms.
+        let union_note = "`union-allow` allows checkouts, but `union-refuse` also selected this \
+                          candidate and refuses them";
         assert!(
             plan.plan.iter().any(|entry| {
                 entry.candidate.as_deref() == Some(Path::new("/tmp/union-shared-tagged"))
                     && entry.reason == Some(Reason::ContainsCheckout)
+                    && entry
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.ends_with(union_note))
             }),
             "{selection}: {plan:#?}"
         );
@@ -1295,6 +1303,17 @@ fn union_checkout_policy_uses_only_terms_admitted_by_their_filters() {
         assert_eq!(
             actions(&report),
             ["/tmp/union-shared-clear"],
+            "{selection}: {report:#?}"
+        );
+        assert!(
+            report.skipped.iter().any(|skip| {
+                skip.candidate.as_deref() == Some(Path::new("/tmp/union-shared-tagged"))
+                    && skip.reason == Reason::ContainsCheckout
+                    && skip
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.ends_with(union_note))
+            }),
             "{selection}: {report:#?}"
         );
         assert!(!exists(&reclaim_host, "/tmp/union-shared-clear"));

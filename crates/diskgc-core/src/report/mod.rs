@@ -239,6 +239,13 @@ pub struct ActionEntry {
     pub count: u64,
 }
 
+/// The `detail` of a root skipped as `other_fs` (a `skipped` row, or a
+/// dry run's `plan` row): it is a root of the tier, not a candidate, and
+/// nothing below it was looked at (TASK-210). The human summary names
+/// every tier of such a row by it.
+pub const OTHER_FS_ROOT_DETAIL: &str =
+    "a root of the tier, on another filesystem than PATH's: not searched";
+
 /// One skipped candidate (`skipped`). Groups with more than 20 candidates
 /// are aggregated in the JSON result.
 #[derive(Debug, Clone, PartialEq, Eq)]

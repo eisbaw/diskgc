@@ -2513,12 +2513,29 @@ fn a_reclaimed_cargo_target_is_not_a_skip_on_later_ensures() {
             );
         }
         for _ in 0..2 {
-            let later = ensure(&host, &req);
+            let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
+            let mut lines = Vec::new();
+            let later = executor::ensure(&host, &req, &[uid], &mut |l| lines.push(l.to_owned()));
             assert_eq!(later.status, Status::Exhausted, "{budget:?}: {later:#?}");
             assert!(later.actions.is_empty(), "{budget:?}: {later:#?}");
             assert!(later.skipped.is_empty(), "{budget:?}: {later:#?}");
             assert!(later.errors.is_empty(), "{budget:?}: {later:#?}");
             assert!(later.summary().unwrap().contains("0 kept"));
+            // TASK-213: the log's "2 target(s) below" adds up: each omitted
+            // target has a line saying why it is not in the result.
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.ends_with("2 target(s) below /home/mark/src")),
+                "{lines:#?}"
+            );
+            for target in [OLD, NEW] {
+                let want = format!(
+                    "select: {target}: its profile directories hold nothing but lock files; \
+                     nothing to reclaim, not listed in the result"
+                );
+                assert!(lines.contains(&want), "{want}: {lines:#?}");
+            }
         }
     }
 }
@@ -2666,4 +2683,102 @@ fn a_protected_match_made_in_a_cargo_target_is_seen_or_never_unlinked() {
             .any(|e| e.message.contains("ENOTEMPTY")),
         "{report:#?}"
     );
+}
+
+/// TASK-210/211/209 (the 0.1 Debian walk): a grouped run on /home whose
+/// /tmp tiers have no root there. Each tier reports the foreign /tmp root
+/// once (a union's two /tmp sources included), the human summary names
+/// every such tier, the tiers log that they searched nothing, and the
+/// process scan's unchanged notes are logged once, not once per tier.
+#[test]
+fn foreign_roots_are_one_row_per_tier_and_scan_notes_are_logged_once() {
+    let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: tmp-rc\n        select: profile:nix-shell-rc\n      - name: tmp-union\n        select: profile:pytest-tmp || profile:nix-shell-rc\n      - name: old\n        select: profile:cargo-target && filter:idle-30d\n        roots: [/home/mark/src]\n";
+    let other_user = "processes:\n  - {pid: 77, exe: /usr/bin/x, maps: [/usr/bin/x], environ: [PATH=/usr/bin], \
+                      fds: [], proc: denied, uid: 1001}\n";
+    let (tiers, timeouts) = configured(policy);
+    let mut request = cargo("50G", None);
+    request.tier = tiers[0].clone();
+    for live in [false, true] {
+        let host = host(&yaml(true, &format!("  /usr/bin/x: {{}}\n{other_user}")));
+        let mut lines = Vec::new();
+        let mut log = |line: &str| lines.push(line.to_owned());
+        let report = if live {
+            executor::ensure_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut log)
+        } else {
+            executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut log)
+        };
+        eprintln!("log:\n  {}", lines.join("\n  "));
+        let foreign: Vec<(String, String, Option<String>)> = if live {
+            report
+                .skipped
+                .iter()
+                .filter(|skip| skip.reason == Reason::OtherFs)
+                .map(|skip| {
+                    (
+                        skip.tier.clone(),
+                        skip.candidate.as_deref().unwrap().display().to_string(),
+                        skip.detail.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            report
+                .plan
+                .iter()
+                .filter(|entry| entry.reason == Some(Reason::OtherFs))
+                .map(|entry| {
+                    (
+                        entry.tier.clone(),
+                        entry.candidate.as_deref().unwrap().display().to_string(),
+                        entry.detail.clone(),
+                    )
+                })
+                .collect()
+        };
+        let detail = Some(diskgc_core::report::OTHER_FS_ROOT_DETAIL.to_owned());
+        assert_eq!(
+            foreign,
+            [
+                ("tmp-rc".to_owned(), "/tmp".to_owned(), detail.clone()),
+                ("tmp-union".to_owned(), "/tmp".to_owned(), detail),
+            ],
+            "live {live}: {report:#?}"
+        );
+        let summary = report.summary().expect("a summary");
+        assert!(
+            summary.contains(
+                "\n  kept /tmp: other_fs, a root of the tier, on another filesystem than PATH's: \
+                 not searched [tmp-rc, tmp-union]"
+            ),
+            "live {live}: {summary}"
+        );
+        for tier in [
+            "tmp-rc: `profile:nix-shell-rc`",
+            "tmp-union: `profile:pytest-tmp || profile:nix-shell-rc`",
+        ] {
+            let want = format!(
+                "{tier}: nothing searched: no root of the tier is on PATH's filesystem (skipped \
+                 as other_fs)"
+            );
+            assert!(lines.contains(&want), "live {live}: {want}: {lines:#?}");
+        }
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("below  ") || line.ends_with("below ")),
+            "live {live}: {lines:#?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("processes of other users not inspected"))
+                .count(),
+            1,
+            "live {live}: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("old: ")),
+            "the last tier ran: {lines:#?}"
+        );
+    }
 }

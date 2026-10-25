@@ -38,7 +38,7 @@
 
 mod tier_policy;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1020,9 +1020,33 @@ impl RootPreflight {
     }
 }
 
+/// A tier's roots for its log line.
+fn roots_text(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The log line of a tier left without a root: each was on another
+/// filesystem than PATH's ([`preflight_roots`] skips those as `other_fs`
+/// before the tier runs), so it looked nowhere. It replaces the count line,
+/// which read `judged below  (` with an empty root list (TASK-209).
+fn nothing_searched(tier: &Tier) -> String {
+    format!(
+        "{}: `{}`: nothing searched: no root of the tier is on PATH's filesystem (skipped as \
+         other_fs)",
+        tier.name, tier.select
+    )
+}
+
 /// Check every source root against PATH's device before enumerating candidates.
 /// A missing root remains an empty source. A foreign root is reported and
-/// skipped while same-device roots proceed. An unsafe or unreadable root
+/// skipped while same-device roots proceed: once per tier, however many of
+/// its sources (a union's terms, a negated profile) share that root, so
+/// that every tier reports it exactly once (TASK-210, decided for 0.1: a
+/// skipped `other_fs` row, no new JSON field). An unsafe or unreadable root
 /// excludes its tier; all roots are checked before another tier may delete.
 /// Compare devices, not mount ids: a bind mount of the requested filesystem
 /// can free space on PATH.
@@ -1112,17 +1136,24 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
             continue;
         }
         match resolve_in(host, &mounts, root, Want::Directory) {
-            Ok(resolved) if resolved.stat.dev != requested_dev => skipped.push(SkipEntry {
-                tier: tier.name.clone(),
-                profile: profile.to_owned(),
-                candidate: Some(root.clone()),
-                count: 1,
-                examples: Vec::new(),
-                reason: Reason::OtherFs,
-                detail: None,
-                process_blockers: None,
-                estimated_bytes: None,
-            }),
+            Ok(resolved) if resolved.stat.dev != requested_dev => {
+                if !skipped
+                    .iter()
+                    .any(|skip: &SkipEntry| skip.candidate.as_ref() == Some(root))
+                {
+                    skipped.push(SkipEntry {
+                        tier: tier.name.clone(),
+                        profile: profile.to_owned(),
+                        candidate: Some(root.clone()),
+                        count: 1,
+                        examples: Vec::new(),
+                        reason: Reason::OtherFs,
+                        detail: Some(crate::report::OTHER_FS_ROOT_DETAIL.to_owned()),
+                        process_blockers: None,
+                        estimated_bytes: None,
+                    });
+                }
+            }
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
             Err(ResolveError::UnsafePath { why, .. }) => error(
                 ErrorCause::Safety,
@@ -1723,6 +1754,8 @@ fn ensure_grouped_inner<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    let mut notes = NotesOncePerRun::new(log);
+    let log: &mut dyn FnMut(&str) = &mut |line| notes.line(line);
     let deadline = deadline_of(host, request.timeout);
     let mut report = request.report(Status::Error, false);
     if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
@@ -2210,6 +2243,7 @@ fn dry_run_inner<H: Host>(
         .extend(roots.skipped.iter().map(|skip| PlanEntry {
             candidate: skip.candidate.clone(),
             profile: skip.profile.clone(),
+            detail: skip.detail.clone(),
             ..plan_tier_row(tier, Some(skip.reason))
         }));
     if !roots.errors.is_empty() {
@@ -2337,7 +2371,7 @@ fn dry_run_inner<H: Host>(
             }
         }
     }
-    let rules = rules(tier, owners, log);
+    let rules = rules(tier, owners);
     let mut checker = Checker::for_plan(&rules)
         .with_pid_lookup(tier.pid_lookup())
         .with_pytest_facts(tier.pytest_facts());
@@ -2501,6 +2535,8 @@ fn dry_run_grouped_inner<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    let mut notes = NotesOncePerRun::new(log);
+    let log: &mut dyn FnMut(&str) = &mut |line| notes.line(line);
     let Some(first) = tiers.first().filter(|_| tiers.len() == tier_timeouts.len()) else {
         return usage(
             request.report(Status::DryRun, true),
@@ -2794,20 +2830,24 @@ fn plan_fs<H: Host>(
         String::new()
     };
     planned.stopped = stopped;
-    log(&format!(
-        "{}: `{}`: {} candidate(s) judged below {} ({} found again through another root or \
-         pattern, {} systemd-private-* passed over{partial})",
-        tier.name,
-        tier.select,
-        found.judged.len(),
-        tier.roots
-            .iter()
-            .map(|r| r.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-        found.duplicates.len(),
-        found.private_tmp,
-    ));
+    if tier.roots.is_empty() {
+        assert!(
+            found.judged.is_empty(),
+            "a tier without roots finds nothing"
+        );
+        log(&nothing_searched(tier));
+    } else {
+        log(&format!(
+            "{}: `{}`: {} candidate(s) judged below {} ({} found again through another root \
+             or pattern, {} systemd-private-* passed over{partial})",
+            tier.name,
+            tier.select,
+            found.judged.len(),
+            roots_text(&tier.roots),
+            found.duplicates.len(),
+            found.private_tmp,
+        ));
+    }
     let misconfigured: Vec<&Skip> = found
         .refused
         .iter()
@@ -3229,6 +3269,47 @@ fn union_checkout_path<'a>(
         })
 }
 
+/// The checkout refusal of a union candidate whose admitted sources do not
+/// all allow checkouts ([`union_checkouts`] is `refuse`): a refusing
+/// source's checkout metadata on the path, else a checkout its walk found
+/// (`checkout_marker`). When an admitted source allows checkouts, the
+/// union is what refused it, and the detail says so in the profiles'
+/// terms. That replaces a warning logged on every union run with an
+/// `allow` source, though most unions (the two 0.1 `/tmp` built-ins) can
+/// never find one candidate twice (TASK-222).
+fn union_checkout_refusal(
+    sources: &[FsUnionSourceRef<'_>],
+    candidate: &FsUnionCandidate,
+    admitted: &[usize],
+    checkout_marker: Option<(usize, &Path)>,
+) -> Option<(usize, Skip)> {
+    let (refusing, mut skip) = union_checkout_path(sources, candidate, admitted)
+        .map(|(index, _, skip)| (index, skip))
+        .or_else(|| {
+            checkout_marker.map(|(index, marker_path)| {
+                (
+                    index,
+                    Skip::new(
+                        Reason::ContainsCheckout,
+                        marker_path.to_path_buf(),
+                        "an admitted source refuses a version-control checkout in this candidate",
+                    ),
+                )
+            })
+        })?;
+    if let Some(allowing) = admitted
+        .iter()
+        .map(|index| &sources[*index])
+        .find(|source| source.checkouts == Checkouts::Allow)
+    {
+        skip.detail = format!(
+            "{}; `{}` allows checkouts, but `{}` also selected this candidate and refuses them",
+            skip.detail, allowing.profile, sources[refusing].profile
+        );
+    }
+    Some((refusing, skip))
+}
+
 /// Retention belongs to every source that discovered this inode, regardless
 /// of which source's evidence eventually admits it. Checkout policy remains
 /// a separate decision over admitted terms only.
@@ -3282,13 +3363,17 @@ fn plan_fs_union<H: Host>(
         skipped: Vec::new(),
         stopped,
     };
-    log(&format!(
-        "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
-        tier.name,
-        tier.select,
-        candidates.len(),
-        sources.len()
-    ));
+    if sources.iter().all(|source| source.roots.is_empty()) {
+        log(&nothing_searched(tier));
+    } else {
+        log(&format!(
+            "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
+            tier.name,
+            tier.select,
+            candidates.len(),
+            sources.len()
+        ));
+    }
     if planned.stopped.is_some() {
         return planned;
     }
@@ -3436,27 +3521,16 @@ fn plan_fs_union<H: Host>(
         }
         if let Some((index, path, tally)) = selected {
             let checkouts = union_checkouts(&sources, &admitted);
-            if checkouts == Checkouts::Refuse {
-                let refused = union_checkout_path(&sources, candidate, &admitted)
-                    .map(|(index, _, skip)| (index, skip));
-                if let Some((refusing_index, skip)) = refused.or_else(|| {
-                    checkout_marker.map(|(index, marker_path)| {
-                        (index,
-                        Skip::new(
-                            Reason::ContainsCheckout,
-                            marker_path.to_path_buf(),
-                            "an admitted source refuses a version-control checkout in this candidate",
-                        ))
-                    })
-                }) {
-                    let mut entry = plan_skip(tier, path, &skip);
-                    entry.profile = sources[refusing_index].profile.to_owned();
-                    entry.checkouts = checkouts;
-                    entry.build_evidence =
-                        skipped_build_evidence(candidate.discovered(refusing_index));
-                    planned.skipped.push(entry);
-                    continue;
-                }
+            if checkouts == Checkouts::Refuse
+                && let Some((refusing_index, skip)) =
+                    union_checkout_refusal(&sources, candidate, &admitted, checkout_marker)
+            {
+                let mut entry = plan_skip(tier, path, &skip);
+                entry.profile = sources[refusing_index].profile.to_owned();
+                entry.checkouts = checkouts;
+                entry.build_evidence = skipped_build_evidence(candidate.discovered(refusing_index));
+                planned.skipped.push(entry);
+                continue;
             }
             let source = &sources[index];
             let mut entry = plan_entry(tier, path, None, Some(tally.bytes));
@@ -3485,20 +3559,9 @@ fn plan_fs_union<H: Host>(
 /// `owners`', any socket or FIFO refuses (the default policy), the default
 /// entry budget (the tier's `max_entries`), and the source profile's `checkouts`
 /// setting. Operator checkout allowances are warned about by config loading;
-/// a union logs its additional policy interaction here.
-fn rules<'o>(tier: &Tier, owners: &'o [u32], log: &mut dyn FnMut(&str)) -> Rules<'o> {
-    if !tier.fs_union.is_empty() {
-        for source in tier
-            .fs_sources()
-            .into_iter()
-            .filter(|source| source.checkouts == Checkouts::Allow)
-        {
-            log(&format!(
-                "{}: profile `{}` says `checkouts: allow`; in a union, a candidate also admitted by any refusing source uses `checkouts: refuse`",
-                tier.name, source.profile
-            ));
-        }
-    }
+/// a union's refusal of a candidate an `allow` source admitted says so in
+/// its detail ([`union_checkout_refusal`]).
+fn rules<'o>(tier: &Tier, owners: &'o [u32]) -> Rules<'o> {
     Rules {
         checkouts: tier.checkouts,
         max_entries: tier.max_entries,
@@ -3604,17 +3667,21 @@ fn discover<H: Host>(
         }
     }
     let found = cargo_target::discover(host, &tier.roots, deadline)?;
-    log(&format!(
-        "{}: `{}`: {} target(s) below {}",
-        tier.name,
-        tier.select,
-        found.targets.len(),
-        tier.roots
-            .iter()
-            .map(|r| r.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    if tier.roots.is_empty() {
+        assert!(
+            found.targets.is_empty(),
+            "a tier without roots finds nothing"
+        );
+        log(&nothing_searched(tier));
+    } else {
+        log(&format!(
+            "{}: `{}`: {} target(s) below {}",
+            tier.name,
+            tier.select,
+            found.targets.len(),
+            roots_text(&tier.roots)
+        ));
+    }
     for skip in &found.refused {
         // A misconfigured root is reported (and logged) once, as an error.
         if !is_misconfigured(tier, skip) {
@@ -3743,6 +3810,36 @@ fn stop_error(tier: &Tier, stop: &Stop, message: impl Into<String>) -> ErrorEntr
     }
 }
 
+/// How a process scan's notes start on stderr ([`held`]).
+const SCAN_NOTE_PREFIX: &str = "process scan: ";
+
+/// A grouped run's log: each tier ends with its process scan's notes, and
+/// on a shared host those are the same every tier ("3 processes of other
+/// users not inspected", three times for three tiers: TASK-211). A note is
+/// logged the first time its exact text appears in the run; a note that
+/// changes (another count, another process) is logged again. Every other
+/// line passes through. Bounded by the distinct notes of one run.
+struct NotesOncePerRun<'l> {
+    log: &'l mut dyn FnMut(&str),
+    seen: BTreeSet<String>,
+}
+
+impl<'l> NotesOncePerRun<'l> {
+    fn new(log: &'l mut dyn FnMut(&str)) -> Self {
+        Self {
+            log,
+            seen: BTreeSet::new(),
+        }
+    }
+
+    fn line(&mut self, line: &str) {
+        if line.starts_with(SCAN_NOTE_PREFIX) && !self.seen.insert(line.to_owned()) {
+            return;
+        }
+        (self.log)(line);
+    }
+}
+
 /// `held_by_deleted_files` (docs/reference.md, Output) from the run's
 /// latest process scan; if the run made none, from one made now (stopping
 /// at `deadline`). `None` (unknown, JSON `null`) when that scan failed or
@@ -3766,7 +3863,7 @@ fn held<H: Host>(
     }
     let scan = checker.latest().expect("kept or made above");
     for note in scan.notes() {
-        log(&format!("process scan: {note}"));
+        log(&format!("{SCAN_NOTE_PREFIX}{note}"));
     }
     if !scan.settled() {
         log("held_by_deleted_files: the process scan did not settle, unknown");
@@ -4180,8 +4277,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     ) {
         // Reclaimed Cargo targets keep their profile directories and lock
         // files. They remain discoverable, but have no work left to skip on
-        // each later ensure. A dry-run records them in `plan` separately.
+        // each later ensure, so the result omits them (docs/reference.md,
+        // Output). A dry-run records them in `plan` separately. Logged, so
+        // that the tier's "N target(s) below" adds up (TASK-213).
         if matches!(self.tier.source, SourceKind::CargoTarget) && skip.reason == Reason::Empty {
+            (self.log)(&format!(
+                "{}: {}: {}; nothing to reclaim, not listed in the result",
+                self.tier.name,
+                skip.path.display(),
+                skip.detail
+            ));
             return;
         }
         log_skip(self.log, self.tier, skip);
@@ -4253,7 +4358,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.stop_if_interrupted() {
             return;
         }
-        let rules = rules(self.tier, owners, self.log);
+        let rules = rules(self.tier, owners);
         let mut checker = Checker::new(&rules, REUSE_LIMIT)
             .with_pid_lookup(self.tier.pid_lookup())
             .with_pytest_facts(self.tier.pytest_facts());
@@ -4625,21 +4730,24 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let started = self.host.now();
         let (found, stopped) = fs_kind::discover(self.host, &self.tier.roots, find, self.deadline);
         self.record_overrun("discover", &self.measured.path, started, self.host.now());
-        (self.log)(&format!(
-            "{}: `{}`: {} candidate(s) below {} ({} found again through another root or \
-             pattern, {} systemd-private-* passed over)",
-            self.tier.name,
-            self.tier.select,
-            found.candidates.len(),
-            self.tier
-                .roots
-                .iter()
-                .map(|r| r.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            found.duplicates.len(),
-            found.private_tmp,
-        ));
+        if self.tier.roots.is_empty() {
+            assert!(
+                found.candidates.is_empty(),
+                "a tier without roots finds nothing"
+            );
+            (self.log)(&nothing_searched(self.tier));
+        } else {
+            (self.log)(&format!(
+                "{}: `{}`: {} candidate(s) below {} ({} found again through another root or \
+                 pattern, {} systemd-private-* passed over)",
+                self.tier.name,
+                self.tier.select,
+                found.candidates.len(),
+                roots_text(&self.tier.roots),
+                found.duplicates.len(),
+                found.private_tmp,
+            ));
+        }
         if let Some(stop) = stopped {
             // An incomplete discovery is not the tier's set: nothing is
             // reclaimed from it.
@@ -4872,13 +4980,17 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let started = self.host.now();
         let (candidates, refused, stopped) = discover_fs_union(self.host, &sources, self.deadline);
         self.record_overrun("discover", &self.measured.path, started, self.host.now());
-        (self.log)(&format!(
-            "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
-            self.tier.name,
-            self.tier.select,
-            candidates.len(),
-            sources.len()
-        ));
+        if sources.iter().all(|source| source.roots.is_empty()) {
+            (self.log)(&nothing_searched(self.tier));
+        } else {
+            (self.log)(&format!(
+                "{}: `{}`: {} distinct filesystem candidate(s) from {} source term(s)",
+                self.tier.name,
+                self.tier.select,
+                candidates.len(),
+                sources.len()
+            ));
+        }
         if let Some(stop) = stopped {
             return self.stop(&stop);
         }
@@ -5064,22 +5176,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 continue;
             }
             if let Some(tally) = tally {
-                if union_checkouts(&sources, &admitted) == Checkouts::Refuse {
-                    let refusal = union_checkout_path(&sources, candidate, &admitted)
-                        .map(|(index, _, skip)| (index, skip))
-                        .or_else(|| {
-                            checkout_marker.map(|(index, marker_path)| {
-                                (index, Skip::new(
-                                    Reason::ContainsCheckout,
-                                    marker_path.to_path_buf(),
-                                    "an admitted source refuses a version-control checkout in this candidate",
-                                ))
-                            })
-                        });
-                    if let Some((refusing_index, skip)) = refusal {
-                        self.skip_as(path, sources[refusing_index].profile, &skip);
-                        continue;
-                    }
+                if union_checkouts(&sources, &admitted) == Checkouts::Refuse
+                    && let Some((refusing_index, skip)) =
+                        union_checkout_refusal(&sources, candidate, &admitted, checkout_marker)
+                {
+                    self.skip_as(path, sources[refusing_index].profile, &skip);
+                    continue;
                 }
                 tallied.push((candidate, tally));
             } else {
@@ -5486,7 +5588,7 @@ struct Outcome {
 
 #[cfg(test)]
 mod operator_message_tests {
-    use super::{Reason, Skip, Tier, Timestamp, log_skip, observed_age, rules};
+    use super::{Reason, Skip, Tier, Timestamp, log_skip, observed_age};
     use crate::profile::Library;
     use std::path::PathBuf;
 
@@ -5559,24 +5661,6 @@ mod operator_message_tests {
             error.contains("no roots were given; add --roots DIR"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn builtin_cargo_checkout_default_does_not_warn_on_every_run() {
-        let library = Library::builtin().expect("built-ins");
-        let tier = Tier::select(
-            "profile:cargo-target",
-            &library,
-            Some(&["/tmp".to_owned()]),
-            1000,
-        )
-        .expect("selection");
-        let owners = [1000];
-        let mut messages = Vec::new();
-        let _rules = rules(&tier, &owners, &mut |message| {
-            messages.push(message.to_owned())
-        });
-        assert!(messages.is_empty(), "{messages:?}");
     }
 }
 

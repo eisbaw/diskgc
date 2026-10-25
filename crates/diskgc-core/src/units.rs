@@ -97,28 +97,74 @@ impl Size {
             }
         };
         if bytes > fs_size {
+            let [size, fs] = format_bytes_apart(bytes, fs_size);
             return Err(format!(
-                "{} ({bytes} bytes) is more than the filesystem's size ({}; {fs_size} bytes)",
-                format_bytes(bytes),
-                format_bytes(fs_size)
+                "{size} ({bytes} bytes) is more than the filesystem's size, {fs} ({fs_size} bytes)"
             ));
         }
         Ok(bytes)
     }
 }
 
+/// The size as [`parse_size`] reads it back to the same value, in the
+/// largest unit that divides it (`K` to `T`, `KB` to `TB`): `7TB`, not
+/// `6835937500K`. Every parsed size is a multiple of one of them; a byte
+/// count no unit divides (only code makes one) prints as `N bytes`. So a
+/// message echoes `--min-free 1560M` as the user wrote it (TASK-217), not
+/// `1635778560 bytes`; an equal value written in other units comes back
+/// in these (`1024KB` as `1000K`).
 impl fmt::Display for Size {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Bytes(b) => write!(f, "{b} bytes"),
+        match *self {
             Self::Percent(p) => write!(f, "{p}%"),
+            Self::Bytes(0) => write!(f, "0K"),
+            Self::Bytes(b) => {
+                let unit = ["T", "G", "M", "K", "TB", "GB", "MB", "KB"]
+                    .into_iter()
+                    .map(|unit| (unit, size_unit_factor(unit)))
+                    .filter(|(_, factor)| b.is_multiple_of(*factor))
+                    .max_by_key(|(_, factor)| *factor);
+                match unit {
+                    Some((unit, factor)) => write!(f, "{}{unit}", b / factor),
+                    None => write!(f, "{b} bytes"),
+                }
+            }
         }
     }
+}
+
+fn size_unit_factor(unit: &str) -> u64 {
+    SIZE_UNITS
+        .iter()
+        .find(|(u, _)| *u == unit)
+        .map(|(_, factor)| *factor)
+        .expect("a unit of SIZE_UNITS")
 }
 
 /// `bytes` for people: binary units with one decimal (`52.3 GiB`), whole
 /// bytes below 1 KiB. Never parsed back.
 pub fn format_bytes(bytes: u64) -> String {
+    format_bytes_with(bytes, 1)
+}
+
+/// Two different sizes for people, each as [`format_bytes`] would, but
+/// with as many decimals (up to three) as it takes to tell them apart:
+/// `1.52 GiB` and `1.50 GiB`, never `1.5 GiB is more than 1.5 GiB`
+/// (TASK-217). Values that still read alike are told apart by the byte
+/// counts their messages give beside them.
+pub fn format_bytes_apart(a: u64, b: u64) -> [String; 2] {
+    (1..=3)
+        .map(|decimals| {
+            [
+                format_bytes_with(a, decimals),
+                format_bytes_with(b, decimals),
+            ]
+        })
+        .find(|[x, y]| x != y)
+        .unwrap_or_else(|| [format_bytes(a), format_bytes(b)])
+}
+
+fn format_bytes_with(bytes: u64, decimals: usize) -> String {
     const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
     if bytes < 1024 {
         return format!("{bytes} B");
@@ -129,7 +175,7 @@ pub fn format_bytes(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    format!("{value:.1} {}", UNITS[unit])
+    format!("{value:.decimals$} {}", UNITS[unit])
 }
 
 /// The units, longest first (the order [`format_duration`] tries them).
@@ -335,6 +381,63 @@ mod tests {
             "{too_large}"
         );
         assert!(Size::Percent(101).bytes(fs).is_err());
+    }
+
+    /// TASK-217, the Debian walk: `--min-free 1560M` on a 1.5 GiB tmpfs
+    /// read "1.5 GiB (1635778560 bytes) is more than the filesystem's size
+    /// (1.5 GiB; ...)". The sizes now differ where the reader looks.
+    #[test]
+    fn a_size_just_above_the_filesystem_reads_as_larger() {
+        let size = parse_size("1560M").unwrap();
+        let error = size.bytes(1_610_612_736).unwrap_err();
+        assert_eq!(
+            format!("--min-free {size}: {error}"),
+            "--min-free 1560M: 1.52 GiB (1635778560 bytes) is more than the filesystem's \
+             size, 1.50 GiB (1610612736 bytes)"
+        );
+    }
+
+    #[test]
+    fn sizes_are_told_apart_with_as_few_decimals_as_needed() {
+        assert_eq!(
+            format_bytes_apart(16 << 30, 15 << 30),
+            ["16.0 GiB", "15.0 GiB"]
+        );
+        assert_eq!(
+            format_bytes_apart(1_635_778_560, 1_610_612_736),
+            ["1.52 GiB", "1.50 GiB"]
+        );
+        // Three decimals are not enough for one byte: the counts beside
+        // them in the message tell these apart.
+        assert_eq!(
+            format_bytes_apart(1 << 30, (1 << 30) + 1),
+            ["1.0 GiB", "1.0 GiB"]
+        );
+        assert_eq!(format_bytes_apart(100, 101), ["100 B", "101 B"]);
+    }
+
+    #[test]
+    fn sizes_display_in_the_unit_they_were_written_in() {
+        for text in [
+            "1560M", "50G", "500MB", "1GB", "2K", "3T", "7TB", "10%", "0%", "0K",
+        ] {
+            assert_eq!(parse_size(text).unwrap().to_string(), text);
+        }
+        assert_eq!(parse_size("80GiB").unwrap().to_string(), "80G");
+        assert_eq!(parse_size("1024KB").unwrap().to_string(), "1000K");
+        assert_eq!(Size::Bytes(1_000_001).to_string(), "1000001 bytes");
+    }
+
+    proptest::proptest! {
+        /// Whatever a user writes, the size it echoes parses back to the
+        /// same value.
+        #[test]
+        fn a_displayed_size_parses_back_to_itself(n in 0u64..5_000_000, unit in 0usize..SIZE_UNITS.len()) {
+            let text = format!("{n}{}", SIZE_UNITS[unit].0);
+            if let Ok(size) = parse_size(&text) {
+                proptest::prop_assert_eq!(parse_size(&size.to_string()), Ok(size), "{}", text);
+            }
+        }
     }
 
     #[test]

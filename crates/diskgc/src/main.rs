@@ -112,7 +112,8 @@ Configuration: --config FILE, else $DISKGC_CONFIG, else the first of
   $XDG_CONFIG_HOME/diskgc/config.yaml (default ~/.config/diskgc/config.yaml)
   and /etc/diskgc/config.yaml that exists. `ensure --select` needs none;
   configured groups do. `diskgc check` validates a configuration. The
-  package installs an example: share/doc/diskgc/examples/example.yaml.
+  package installs an example (share/doc/diskgc/examples/example.yaml), a
+  README and the release notes with the known limits (share/doc/diskgc/).
 
 This version runs `ensure --select` or configured groups with ordered or
 random tier ranking and oldest or best-fit candidate order; `watch` and

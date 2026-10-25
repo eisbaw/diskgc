@@ -208,7 +208,7 @@
       # this is the sole build that removes the gate, and it also narrows the
       # embedded catalog. Publishing it remains blocked on TASK-67's scope
       # and real-kernel evidence.
-      diskgcRelease01 = craneLib.buildPackage (
+      diskgcRelease01Build = craneLib.buildPackage (
         workspaceArgs
         // {
           pname = "diskgc-release-01-candidate";
@@ -219,6 +219,36 @@
           meta.mainProgram = "diskgc";
         }
       );
+      # The release package: the build above plus its documentation
+      # (TASK-214: a user with only the package had --help and nothing
+      # else). Assembled apart from the compile so that a docs edit copies
+      # files instead of rebuilding the static binary. The release notes
+      # are cut from docs/reference.md (their one home) at build time, and
+      # reference.md and safety.md ship beside them so that their links
+      # resolve; links into architecture.md and testing.md do not.
+      diskgcRelease01 = pkgs.runCommand "diskgc-release-01-candidate-${version}"
+        { meta.mainProgram = "diskgc"; }
+        ''
+          cp -R ${diskgcRelease01Build}/. $out
+          chmod -R u+w $out
+          doc=$out/share/doc/diskgc
+          install -Dm0644 ${./packaging/README.md} $doc/README.md
+          install -Dm0644 ${./docs/reference.md} $doc/reference.md
+          install -Dm0644 ${./docs/safety.md} $doc/safety.md
+          # From the section's heading to the next heading of its level;
+          # its in-page links (#x) point into reference.md.
+          awk '/^### 0\.1 release notes$/ { on = 1; print "# diskgc 0.1 release notes"; next }
+               on && /^#{1,3} / { exit }
+               on' ${./docs/reference.md} \
+            | sed 's/](#/](reference.md#/g' > $doc/RELEASE-NOTES.md
+          # Fail closed on a renamed heading or a cut that lost the body.
+          grep -qF '**Known limits.**' $doc/RELEASE-NOTES.md
+          grep -qF '**JSON contract.**' $doc/RELEASE-NOTES.md
+          if grep -q '^### User profiles' $doc/RELEASE-NOTES.md; then
+            echo "release notes ran into the next section" >&2
+            exit 1
+          fi
+        '';
 
       # A separate feature-built binary for catalog-policy container tests.
       # This is not the default package and retains the pre-release gate.
@@ -981,6 +1011,11 @@
             fi
             cmp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
             cmp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
+            cmp ${diskgcRelease01}/share/doc/diskgc/README.md ${./packaging/README.md}
+            cmp ${diskgcRelease01}/share/doc/diskgc/reference.md ${./docs/reference.md}
+            head -n 1 ${diskgcRelease01}/share/doc/diskgc/RELEASE-NOTES.md \
+              | grep -qxF '# diskgc 0.1 release notes'
+            cmp ${lib.getExe diskgcRelease01} ${lib.getExe diskgcRelease01Build}
             test "$("$bin" --version)" = "diskgc ${version}"
             touch $out
           '';

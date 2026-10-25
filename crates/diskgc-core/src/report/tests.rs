@@ -1212,3 +1212,98 @@ fn an_uninspectable_process_is_named_not_blamed() {
     );
     assert!(!text.contains("used by"), "{text}");
 }
+
+/// TASK-221 (Debian walk dumps 14-16): in a container diskgc has its own
+/// PID namespace, and every `/tmp` candidate whose contract needs the
+/// process list is kept `producer_unknown`. The summary says why in words
+/// (not the contract's row) and what to do, once per cause, in live and
+/// dry runs; a `producer_unknown` of another cause gets no such line.
+#[test]
+fn producer_unknown_from_a_hidden_process_list_says_what_to_do() {
+    let row8 = "liveness_contract pytest row 8 (named): the process list is not complete: \
+                diskgc is not in the initial PID namespace";
+    let rc = "liveness_contract nix-shell: whether owner pid 41234 ended cannot be decided: \
+              diskgc is not in the initial PID namespace";
+    let marker = "liveness_contract nix-shell: the pid marker is malformed";
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
+    report.skipped = vec![
+        tier_skip(
+            "t",
+            "/tmp/pytest-of-u/pytest-0",
+            Reason::ProducerUnknown,
+            row8,
+        ),
+        tier_skip("t", "/tmp/nix-shell-41234-1", Reason::ProducerUnknown, rc),
+        tier_skip("t", "/tmp/nix-shell-9-1", Reason::ProducerUnknown, marker),
+    ];
+    let want = "\n  2 candidate(s) kept producer_unknown: diskgc runs in its own PID namespace (a \
+                container) and cannot see every process, so whether their producer ended cannot \
+                be told; run ensure on the host (outside any container) to reclaim them";
+    let text = report.summary().expect("summary");
+    assert!(text.contains(want), "{text}");
+    assert!(!text.contains("row 8"), "{text}");
+    assert!(
+        text.contains(
+            "kept /tmp/pytest-of-u/pytest-0: producer_unknown, diskgc runs in its own PID \
+             namespace (a container) and cannot see every process"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("kept /tmp/nix-shell-9-1: producer_unknown, liveness_contract nix-shell: the pid marker is malformed"),
+        "{text}"
+    );
+
+    let mut dry = Report::new(Status::DryRun, Some(Path::new("/tmp")), true);
+    dry.plan = [row8, rc, marker]
+        .iter()
+        .enumerate()
+        .map(|(n, detail)| PlanEntry {
+            detail: Some((*detail).into()),
+            ..plan_row(
+                "t",
+                &format!("/tmp/c{n}"),
+                Some(Reason::ProducerUnknown),
+                None,
+            )
+        })
+        .collect();
+    let text = dry.summary().expect("a dry run prints");
+    assert!(text.contains(want), "{text}");
+
+    let hidepid = "liveness_contract nix-shell: whether owner pid 7 ended cannot be decided: \
+                   the held /proc is mounted with hidepid";
+    report.skipped = vec![tier_skip("t", "/tmp/x", Reason::ProducerUnknown, hidepid)];
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains(
+            "\n  1 candidate(s) kept producer_unknown: /proc is mounted with hidepid, which hides \
+             other processes, so whether their producer ended cannot be told; run ensure where \
+             /proc is mounted without hidepid to reclaim them"
+        ),
+        "{text}"
+    );
+    report.skipped = vec![tier_skip("t", "/tmp/x", Reason::ProducerUnknown, marker)];
+    let text = report.summary().expect("summary");
+    assert!(!text.contains("to reclaim them"), "{text}");
+}
+
+/// TASK-216: the first line of a dry run ends with a colon only when lines
+/// follow it.
+#[test]
+fn a_dry_run_with_nothing_to_list_ends_without_a_colon() {
+    let mut dry = Report::new(Status::DryRun, Some(Path::new("/w")), true);
+    dry.duration_ms = Some(1);
+    dry.avail_before_bytes = Some(300);
+    dry.min_free_bytes = Some(200);
+    dry.target_free_bytes = Some(200);
+    let text = dry.summary().expect("a dry run prints");
+    assert!(
+        text.ends_with("a reclaim would take nothing (0 eligible, 0 kept) (took 1 ms)"),
+        "{text}"
+    );
+    assert!(!text.contains('\n'), "{text}");
+    dry.plan = vec![plan_row("t", "/w/a", Some(Reason::NotIdle), None)];
+    let text = dry.summary().expect("a dry run prints");
+    assert!(text.contains("(took 1 ms):\n  kept /w/a"), "{text}");
+}

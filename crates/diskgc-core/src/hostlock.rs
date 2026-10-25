@@ -44,7 +44,9 @@ pub const TMPFILES_LINES: [&str; 2] = [
 /// the package's tmpfiles.d drop-in (`lib/tmpfiles.d/diskgc.conf`, the
 /// [`TMPFILES_LINES`]) written out in full, so the command is exact
 /// wherever the package lives, installed in `/etc/tmpfiles.d` so that the
-/// next boot recreates `/run/diskgc`, and applied now; then the plain
+/// next boot recreates `/run/diskgc`, and applied now. `install -D`, not
+/// `tee`: a minimal system has no `/etc/tmpfiles.d` yet (TASK-215, a clean
+/// Debian container), and `tee` cannot create it. Then the plain
 /// `mkdir`/`touch`/`chmod` for a host without systemd-tmpfiles.
 struct FixIt;
 
@@ -54,7 +56,7 @@ impl fmt::Display for FixIt {
             f,
             "To provision it now and at every boot, install the tmpfiles.d drop-in the \
              package ships (lib/tmpfiles.d/diskgc.conf) and apply it:\n  \
-             printf '%s\\n' '{}' '{}' | sudo tee /etc/tmpfiles.d/diskgc.conf\n  \
+             printf '%s\\n' '{}' '{}' | sudo install -Dm0644 /dev/stdin /etc/tmpfiles.d/diskgc.conf\n  \
              sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf\n\
              Without systemd-tmpfiles (until the next boot, /run is emptied then):\n  \
              sudo mkdir -p -m 0755 {HOST_LOCK_DIR} && sudo touch {lock} && sudo chmod 0644 {lock}",
@@ -269,7 +271,8 @@ mod tests {
                 commands,
                 [
                     "printf '%s\\n' 'd /run/diskgc      0755 root root -' \
-                     'f /run/diskgc/lock 0644 root root -' | sudo tee /etc/tmpfiles.d/diskgc.conf",
+                     'f /run/diskgc/lock 0644 root root -' \
+                     | sudo install -Dm0644 /dev/stdin /etc/tmpfiles.d/diskgc.conf",
                     "sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf",
                     "sudo mkdir -p -m 0755 /run/diskgc && sudo touch /run/diskgc/lock \
                      && sudo chmod 0644 /run/diskgc/lock",

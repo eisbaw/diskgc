@@ -369,7 +369,7 @@
 # docs/reference.md, Liveness contracts (pytest's mkdir-to-lock window).
 - name: pytest-tmp
   category: test
-  description: pytest session directories under temp-prefix v1 roots in /tmp, once the pytest contract permits
+  description: pytest session directories in /tmp/pytest-of-USER (also inside nix-shell and mktemp temp dirs in /tmp), once no pytest run is seen using them
   find: {roots: [/tmp], paths: ["pytest-of-*/pytest-*"], type: dir}
   where: {liveness_contract: pytest}
   min_idle_for: 1h
