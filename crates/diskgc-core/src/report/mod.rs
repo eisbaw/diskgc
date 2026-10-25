@@ -414,7 +414,10 @@ pub struct Report {
     pub plan: Vec<PlanEntry>,
     pub actions: Vec<ActionEntry>,
     pub skipped: Vec<SkipEntry>,
-    pub held_by_deleted_files: Vec<HeldEntry>,
+    /// `None` (JSON `null`) when no complete process scan of this run
+    /// answered: the scan failed or was not made, or its process list did
+    /// not settle (TASK-187: unknown is never `[]`, which means none held).
+    pub held_by_deleted_files: Option<Vec<HeldEntry>>,
     pub overruns: Vec<OverrunEntry>,
     pub errors: Vec<ErrorEntry>,
 }
@@ -520,7 +523,7 @@ impl Report {
             plan: Vec::new(),
             actions: Vec::new(),
             skipped: Vec::new(),
-            held_by_deleted_files: Vec::new(),
+            held_by_deleted_files: None,
             overruns: Vec::new(),
             errors: Vec::new(),
         }
@@ -693,18 +696,19 @@ impl Report {
             ),
             (
                 "held_by_deleted_files",
-                Json::Arr(
-                    self.held_by_deleted_files
-                        .iter()
-                        .map(|h| {
-                            Json::Obj(vec![
-                                ("pid", Json::U64(u64::from(h.pid))),
-                                ("command", Json::opt(h.command.as_deref(), Json::str)),
-                                ("bytes", Json::U64(h.bytes)),
-                            ])
-                        })
-                        .collect(),
-                ),
+                Json::opt(self.held_by_deleted_files.as_deref(), |held| {
+                    Json::Arr(
+                        held.iter()
+                            .map(|h| {
+                                Json::Obj(vec![
+                                    ("pid", Json::U64(u64::from(h.pid))),
+                                    ("command", Json::opt(h.command.as_deref(), Json::str)),
+                                    ("bytes", Json::U64(h.bytes)),
+                                ])
+                            })
+                            .collect(),
+                    )
+                }),
             ),
             (
                 "overruns",

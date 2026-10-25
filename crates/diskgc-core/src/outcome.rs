@@ -21,6 +21,10 @@ pub enum Stop {
     DeadlinePassed { path: PathBuf },
     /// The host failed at `path`.
     Failed { path: PathBuf, error: HostError },
+    /// SIGINT or SIGTERM arrived while `path` was being judged (in a step
+    /// that waits or scans long enough to check: the in-use scan and its
+    /// retry pauses, TASK-189). The run's status says which signal.
+    Interrupted { path: PathBuf },
 }
 
 impl std::fmt::Display for Stop {
@@ -28,6 +32,7 @@ impl std::fmt::Display for Stop {
         match self {
             Self::DeadlinePassed { path } => write!(f, "deadline passed at {}", path.display()),
             Self::Failed { path, error } => write!(f, "{}: {error}", path.display()),
+            Self::Interrupted { path } => write!(f, "interrupted at {}", path.display()),
         }
     }
 }

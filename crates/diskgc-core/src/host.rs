@@ -232,6 +232,12 @@ impl HostError {
     pub fn is(&self, errno: Errno) -> bool {
         self.cause == Cause::Errno(errno)
     }
+
+    /// Whether diskgc itself ran out of file descriptors (`EMFILE`: its own
+    /// `RLIMIT_NOFILE`; `ENFILE`: the system's table).
+    pub fn is_out_of_descriptors(&self) -> bool {
+        self.is(Errno::EMFILE) || self.is(Errno::ENFILE)
+    }
 }
 
 impl fmt::Display for HostError {
@@ -889,8 +895,8 @@ fn is_gone<T>(answer: &Result<T, ProcError>) -> bool {
 }
 
 /// Why a `/proc/<pid>` reader returned nothing (docs/safety.md, In use:
-/// unreadable or vanishing processes). Callers treat everything except
-/// `Ok` and `Gone` as "may be using anything".
+/// unreadable or vanishing processes). Callers treat `Denied` and `Failed`
+/// as "may be using anything", and `Exhausted` as an error of the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcError {
     /// The kernel said, through the process's pidfd, that the process has
@@ -902,17 +908,37 @@ pub enum ProcError {
     Denied(HostError),
     /// Anything else, including a live task that could not be inspected.
     Failed(HostError),
+    /// diskgc itself ran out of file descriptors (`EMFILE`: its own
+    /// `RLIMIT_NOFILE`; `ENFILE`: the system's table). Says nothing about
+    /// the process being read and would hit the next one too: an error of
+    /// the run, never an unreadable process (TASK-166, TASK-185). Its own
+    /// variant, so every reader's caller must decide what to do with it
+    /// rather than fold it into `Failed` by accident.
+    Exhausted(HostError),
 }
 
 impl ProcError {
-    /// Classifies a failed `/proc/<pid>` access: `Denied` or `Failed`, never
-    /// `Gone`. A vanished entry (`ENOENT`, `ESRCH`) is `Failed` here: alone
-    /// it proves nothing (a lookup can race an exec, `hidepid` hides live
-    /// processes), so the readers handle it before it gets this far.
+    /// Classifies a failed `/proc/<pid>` access: `Exhausted`, `Denied` or
+    /// `Failed`, never `Gone`. A vanished entry (`ENOENT`, `ESRCH`) is
+    /// `Failed` here: alone it proves nothing (a lookup can race an exec,
+    /// `hidepid` hides live processes), so the readers handle it before it
+    /// gets this far.
     pub fn from_host(e: HostError) -> Self {
         match e.kernel_errno() {
+            Some(Errno::EMFILE | Errno::ENFILE) => Self::Exhausted(e),
             Some(Errno::EACCES | Errno::EPERM) => Self::Denied(e),
             _ => Self::Failed(e),
+        }
+    }
+
+    /// `Failed`, unless `e` says diskgc ran out of file descriptors
+    /// (`Exhausted`): for a failure whose `EACCES` or `EPERM` is not a
+    /// refusal to show the process (a seccomp filter on `pidfd_open`).
+    pub fn failed(e: HostError) -> Self {
+        if e.is_out_of_descriptors() {
+            Self::Exhausted(e)
+        } else {
+            Self::Failed(e)
         }
     }
 }
@@ -922,7 +948,7 @@ impl fmt::Display for ProcError {
         match self {
             Self::Gone => f.write_str("process gone"),
             Self::Denied(e) => write!(f, "denied: {e}"),
-            Self::Failed(e) => write!(f, "{e}"),
+            Self::Failed(e) | Self::Exhausted(e) => write!(f, "{e}"),
         }
     }
 }
@@ -1488,6 +1514,22 @@ mod tests {
         ));
         assert!(matches!(
             ProcError::from_host(e(Errno::EINVAL)),
+            ProcError::Failed(_)
+        ));
+        // diskgc out of descriptors is never a fact about the process.
+        for exhausted in [Errno::EMFILE, Errno::ENFILE] {
+            assert!(matches!(
+                ProcError::from_host(e(exhausted)),
+                ProcError::Exhausted(_)
+            ));
+            assert!(matches!(
+                ProcError::failed(e(exhausted)),
+                ProcError::Exhausted(_)
+            ));
+        }
+        // `failed` keeps a refusal that is not the process's as `Failed`.
+        assert!(matches!(
+            ProcError::failed(e(Errno::EPERM)),
             ProcError::Failed(_)
         ));
     }

@@ -82,11 +82,11 @@ fn full() -> Report {
         }]),
         estimated_bytes: Some(4096),
     }];
-    r.held_by_deleted_files = vec![HeldEntry {
+    r.held_by_deleted_files = Some(vec![HeldEntry {
         pid: 42,
         command: Some("cat".into()),
         bytes: 5,
-    }];
+    }]);
     r.overruns = vec![OverrunEntry {
         operation: "unlinkat".into(),
         path: "/x".into(),
@@ -653,7 +653,7 @@ fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
 #[test]
 fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
     let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
-    report.held_by_deleted_files = vec![
+    report.held_by_deleted_files = Some(vec![
         HeldEntry {
             pid: 10,
             command: Some("a".into()),
@@ -674,7 +674,7 @@ fn human_held_deleted_summary_orders_top_pids_and_counts_bytes_once() {
             command: Some("d".into()),
             bytes: 7,
         },
-    ];
+    ]);
     let text = report.summary().expect("summary");
     // pid 10 holds 0 B: it pins nothing and is left out.
     assert!(text.contains("3 process(es), 14 B"), "{text}");
@@ -1057,11 +1057,11 @@ fn a_dry_run_over_thousands_of_candidates_is_bounded() {
 #[test]
 fn zero_byte_holders_of_deleted_files_are_not_reported() {
     let mut report = Report::new(Status::Met, Some(Path::new("/tmp")), false);
-    report.held_by_deleted_files = vec![HeldEntry {
+    report.held_by_deleted_files = Some(vec![HeldEntry {
         pid: 4274,
         command: Some("python3.14".into()),
         bytes: 0,
-    }];
+    }]);
     assert_eq!(report.summary(), None);
     report.status = Status::DryRun;
     report.dry_run = true;
@@ -1132,4 +1132,33 @@ fn busy_host_count_and_wording_follow_the_final_verdict() {
         ) && text.contains("too busy to check 1 candidate(s) for use"),
         "{text}"
     );
+}
+
+/// TASK-190: a candidate kept `in_use_unknown` because a process of the
+/// user cannot be inspected names that process ("cannot be inspected"),
+/// not the host's load, and never says "used by": nobody saw a use.
+#[test]
+fn an_uninspectable_process_is_named_not_blamed() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")), false);
+    let mut skip = tier_skip(
+        "a",
+        "/w/x",
+        Reason::InUseUnknown,
+        "pid 9 (sh) cannot be inspected, so it may be using any candidate: EIO",
+    );
+    skip.process_blockers = Some(vec![crate::engine::ProcessBlocker {
+        pid: 9,
+        command: Some("sh".into()),
+        evidence: crate::engine::ProcessEvidence::Unreadable,
+    }]);
+    report.skipped = vec![skip];
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains(
+            "kept /w/x: in_use_unknown, pid 9 (sh) cannot be inspected, so whether it is in use \
+             cannot be told"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("used by"), "{text}");
 }

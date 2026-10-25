@@ -694,6 +694,42 @@ fn target_free_reclaims_past_min_free() {
     );
 }
 
+/// TASK-187: when the process scan that would list open deleted files
+/// fails (here diskgc out of descriptors on its first pidfd), what they
+/// hold is unknown: `held_by_deleted_files` is `null` in the JSON, live and
+/// dry run alike, never `[]` (which says that nothing is held). No
+/// candidate reaches the in-use step (both too recent), so the end-of-run
+/// scan is the only one.
+#[test]
+fn a_failed_scan_reports_held_by_deleted_files_as_null() {
+    let extra = "  /home/mark/big.log: {size: 1G}\n  /usr/bin/tail: {}\nprocesses:\n  - pid: 4242\n    \
+                 exe: /usr/bin/tail\n    cwd: /home/mark\n    maps: [/usr/bin/tail]\n    environ: \
+                 [PATH=/usr/bin]\n    fds: [{path: /home/mark/big.log, deleted: true}]\nevents:\n  - \
+                 {at: {op: proc_identity, nth: 1, when: before}, fail: EMFILE}\n";
+    let request = request(
+        "profile:cargo-target && filter:idle-30d",
+        &[SRC],
+        SRC,
+        "12G",
+        None,
+    );
+    for (mode, run) in [
+        ("live", ensure as fn(&ModelHost, &Request) -> Report),
+        ("dry run", dry_run),
+    ] {
+        let host = host(&yaml(true, extra));
+        let report = run(&host, &request);
+        assert!(host.unfired_events().is_empty(), "{mode}");
+        assert_eq!(report.held_by_deleted_files, None, "{mode}: {report:#?}");
+        let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("JSON");
+        assert!(
+            wire["held_by_deleted_files"].is_null(),
+            "{mode}: {}",
+            wire["held_by_deleted_files"]
+        );
+    }
+}
+
 /// Exit 1: every candidate processed without errors, still below
 /// `--min-free` (both targets too recent for `idle-30d`). A process holding
 /// a deleted file on `/home` is listed in `held_by_deleted_files`.
@@ -730,9 +766,10 @@ fn everything_processed_below_min_free_is_exhausted_exit_1() {
         ]
     );
     assert!(calls(&host, Op::Unlinkat).is_empty());
-    assert_eq!(report.held_by_deleted_files.len(), 1, "{report:#?}");
-    assert_eq!(report.held_by_deleted_files[0].pid, 4242);
-    assert_eq!(report.held_by_deleted_files[0].bytes, GIB);
+    let held = report.held_by_deleted_files.as_deref().expect("a scan ran");
+    assert_eq!(held.len(), 1, "{report:#?}");
+    assert_eq!(held[0].pid, 4242);
+    assert_eq!(held[0].bytes, GIB);
     assert!(
         report
             .summary()
@@ -821,9 +858,10 @@ fn btrfs_sibling_subvolume_deleted_file_is_reported() {
         1,
         "process scan must read environ"
     );
-    assert_eq!(report.held_by_deleted_files.len(), 1, "{report:#?}");
-    assert_eq!(report.held_by_deleted_files[0].pid, 4242);
-    assert_eq!(report.held_by_deleted_files[0].bytes, GIB);
+    let held = report.held_by_deleted_files.as_deref().expect("a scan ran");
+    assert_eq!(held.len(), 1, "{report:#?}");
+    assert_eq!(held[0].pid, 4242);
+    assert_eq!(held[0].bytes, GIB);
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 

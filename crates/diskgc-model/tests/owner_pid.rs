@@ -21,6 +21,7 @@ fn scan_with_pids(host: &diskgc_model::ModelHost) -> inuse::Scan {
             pid_lookup: true,
             pytest_facts: false,
         },
+        None,
     )
     .unwrap_or_else(|e| panic!("{e}"))
 }
@@ -118,7 +119,8 @@ fn an_unreadable_nspid_is_reread_then_blocks_every_answer() {
         model.fs_magic(&tmp.fd).map_err(|e| e.to_string()),
         4242,
         |_| panic!("not probed"),
-    );
+    )
+    .expect("decided");
     let OwnerPid::Unknown(unknown) = answer else {
         panic!("{answer:?}");
     };
@@ -138,6 +140,7 @@ fn without_the_option_no_status_is_read() {
             pid_lookup: false,
             pytest_facts: false,
         },
+        None,
     )
     .expect("scan");
     assert!(scan.pid_table().is_none());

@@ -59,7 +59,10 @@ pub fn delete_unused<H: Delete>(
     )
     .map_err(|e| match e {
         NotDeleted::Skipped(skip) => Stop::Skipped(skip),
-        NotDeleted::Failed(error) => Stop::Failed(error),
+        // An error of the run, as before NotDeleted folded it into Stopped.
+        NotDeleted::Stopped(diskgc_core::outcome::Stop::Failed { error, .. }) => {
+            Stop::Failed(error)
+        }
         NotDeleted::Stopped(stop) => Stop::Stopped(stop),
     })?;
     drop(lock);

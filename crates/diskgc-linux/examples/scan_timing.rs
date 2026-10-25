@@ -52,7 +52,7 @@ fn main() {
     );
     let mut took: Vec<Duration> = Vec::with_capacity(scans);
     for i in 0..scans {
-        let scan = inuse::scan(&host, &options).expect("scan");
+        let scan = inuse::scan(&host, &options, None).expect("scan");
         // The age of the scan when it is returned: from its first read
         // (its start) to now, which includes the work after the process
         // reads (Owner PID's table, the pytest facts, the environment

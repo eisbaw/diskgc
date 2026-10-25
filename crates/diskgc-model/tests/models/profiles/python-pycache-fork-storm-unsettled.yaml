@@ -2,10 +2,10 @@
 # settled"): a fork storm that outlasts the checker's one retry. Python 42
 # forks a child after each of the first 32 process listings, so the first
 # candidate's scan and its retry both reach the 16-growth-listing bound:
-# unsettled twice, in_use. The second candidate must not reuse that
-# unsettled scan (even inside the 500 ms blocked-reuse window): it scans
-# again, the storm is over, and it is deleted. No process uses either
-# cache. Mutations that turn this red: reusing an unsettled scan
+# unsettled twice, in_use_unknown (TASK-190). The second candidate must
+# not reuse that unsettled scan (even inside the 500 ms blocked-reuse
+# window): it scans again, the storm is over, and it is deleted. No
+# process uses either cache. Mutations that turn this red: reusing an unsettled scan
 # (Checker::reusable_at), letting an unsettled scan clear (Scan::blocked).
 profile_vector: 1
 profile: python-pycache
@@ -67,12 +67,12 @@ host:
     - {at: {op: pids, nth: 32, when: after}, fork: {pid: 42, child: 132}}
 expect:
   plan:
-    - {candidate: /home/tester/project/a/__pycache__, reason: in_use}
+    - {candidate: /home/tester/project/a/__pycache__, reason: in_use_unknown}
     - {candidate: /home/tester/project/b/__pycache__}
   reclaim_exit: 1
   actions: [/home/tester/project/b/__pycache__]
   removed: [/home/tester/project/b/__pycache__]
   skipped:
-    - {candidate: /home/tester/project/a/__pycache__, reason: in_use}
+    - {candidate: /home/tester/project/a/__pycache__, reason: in_use_unknown}
   preserved:
     - /home/tester/project/a/__pycache__/a.pyc

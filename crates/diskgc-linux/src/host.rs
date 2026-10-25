@@ -929,7 +929,9 @@ fn open_pidfd(pid: Pid) -> Result<OwnedFd, ProcError> {
     match rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty()) {
         Ok(fd) => Ok(fd),
         Err(rustix::io::Errno::SRCH) => Err(ProcError::Gone),
-        Err(e) => Err(ProcError::Failed(HostError::errno(
+        // `EPERM` here is a seccomp filter, not a refusal to show the
+        // process: `failed`, which keeps only `EMFILE`/`ENFILE` apart.
+        Err(e) => Err(ProcError::failed(HostError::errno(
             "pidfd_open",
             pid,
             errno_of(e),
@@ -980,7 +982,7 @@ fn pidfd_released(pid: Pid, pidfd: &OwnedFd) -> Result<bool, ProcError> {
         rustix::io::Errno::SRCH => Ok(true),
         // A live process belonging to another user may deny the check.
         rustix::io::Errno::PERM => Ok(false),
-        _ => Err(ProcError::Failed(HostError::errno(
+        _ => Err(ProcError::failed(HostError::errno(
             "pidfd_send_signal",
             pid,
             errno_of(error),
@@ -996,7 +998,7 @@ fn poll_pidfd(pid: Pid, pidfd: &OwnedFd, timeout: Duration) -> Result<PidfdPoll,
         tv_nsec: timeout.subsec_nanos().into(),
     };
     rustix::event::poll(&mut fds, Some(&wait))
-        .map_err(|e| ProcError::Failed(HostError::errno("poll", pid, errno_of(e))))?;
+        .map_err(|e| ProcError::failed(HostError::errno("poll", pid, errno_of(e))))?;
     let answer = pidfd_poll_answer(pid, fds[0].revents())?;
     if answer == PidfdPoll::Readable && pidfd_released(pid, pidfd)? {
         Ok(PidfdPoll::Hangup)
@@ -1923,12 +1925,7 @@ impl Host for LinuxHost {
             })?;
             // Optional: absent without user namespaces; then no excuse
             // that needs it.
-            let uid_map = match proc.read(&format!("{pid}/uid_map")) {
-                Ok(bytes) => String::from_utf8(bytes)
-                    .map_or_else(|_| UidMap::Unreadable("not UTF-8".into()), UidMap::Map),
-                Err(e) if e.is(Errno::ENOENT) => UidMap::Absent,
-                Err(e) => UidMap::Unreadable(e.to_string()),
-            };
+            let uid_map = uid_map_of(proc.read(&format!("{pid}/uid_map")))?;
             let fd_dir_owner = match task_ids(proc, pid)? {
                 None => None,
                 Some(tids) => {
@@ -2037,7 +2034,7 @@ impl Host for LinuxHost {
         match open_pidfd(pid) {
             Ok(_) => Ok(true),
             Err(ProcError::Gone) => Ok(false),
-            Err(ProcError::Denied(e) | ProcError::Failed(e)) => Err(e),
+            Err(ProcError::Denied(e) | ProcError::Failed(e) | ProcError::Exhausted(e)) => Err(e),
         }
     }
 
@@ -2116,13 +2113,7 @@ impl Host for LinuxHost {
         // while other threads live has none, ENOENT) says nothing about
         // what exists inside it: the error carries no errno, so no caller
         // can read it as the absence of the path looked up.
-        let unopened = |e: HostError| {
-            ProcError::Failed(HostError::invalid(
-                "open",
-                ProcRoot::shown(&rel),
-                format!("the process's root cannot be opened: {e}"),
-            ))
-        };
+        let unopened = |e: HostError| root_unopened(e, &rel);
         let root = match proc.open(&rel, OFlags::PATH | OFlags::DIRECTORY) {
             Ok(root) => root,
             Err(e) if is_vanished(&e) => {
@@ -2168,11 +2159,12 @@ impl Host for LinuxHost {
             // The object was opened: no failure from here on says that the
             // path is absent, so none carries an errno (unresolvable).
             .map_err(|e| {
-                ProcError::Failed(HostError::invalid(
+                errno_erased(
+                    errno_of(e),
                     "statx",
                     shown(),
-                    format!("the opened object could not be statted: {}", errno_of(e)),
-                ))
+                    "the opened object could not be statted",
+                )
             })?;
             let id = stat.dev_ino().ok_or_else(|| {
                 ProcError::Failed(HostError::invalid(
@@ -2197,11 +2189,12 @@ impl Host for LinuxHost {
                 Mode::empty(),
             )
             .map_err(|e| {
-                ProcError::Failed(HostError::invalid(
+                errno_erased(
+                    errno_of(e),
                     "openat",
                     shown(),
-                    format!("climbing from the opened object failed: {}", errno_of(e)),
-                ))
+                    "climbing from the opened object failed",
+                )
             })?;
             let (id, _) = id_of(&up)?;
             if Some(&id) == chain.last() {
@@ -2239,7 +2232,50 @@ fn root_lookup_error(
             "ESRCH outside a /proc root: unexplained, so unresolvable",
         ));
     }
-    ProcError::Failed(HostError::errno("openat2", shown, errno))
+    ProcError::failed(HostError::errno("openat2", shown, errno))
+}
+
+/// A process's root that could not be opened (a leader that called
+/// `pthread_exit` while other threads live has none, `ENOENT`) says
+/// nothing about what exists inside it: the error carries no errno, so no
+/// caller can read it as the absence of the path looked up. diskgc out of
+/// descriptors is the exception: kept as it is, an error of the run
+/// (TASK-185), never an unresolvable lookup.
+fn root_unopened(e: HostError, rel: &str) -> ProcError {
+    if e.is_out_of_descriptors() {
+        return ProcError::Exhausted(e);
+    }
+    ProcError::Failed(HostError::invalid(
+        "open",
+        ProcRoot::shown(rel),
+        format!("the process's root cannot be opened: {e}"),
+    ))
+}
+
+/// A failure after the looked-up object was opened: nothing from there on
+/// says that the path is absent, so the error carries no errno
+/// (unresolvable), except diskgc out of descriptors (`Exhausted`, an error
+/// of the run, TASK-185).
+fn errno_erased(errno: Errno, op: &'static str, shown: String, what: &str) -> ProcError {
+    let e = HostError::errno(op, &shown, errno);
+    if e.is_out_of_descriptors() {
+        return ProcError::Exhausted(e);
+    }
+    ProcError::Failed(HostError::invalid(op, shown, format!("{what}: {errno}")))
+}
+
+/// What reading `/proc/<pid>/uid_map` gave: absent (`ENOENT`, a kernel
+/// without user namespaces), or unreadable for another reason (kept for
+/// the notes; only the capability excuse needs the map). diskgc out of
+/// descriptors is no fact about the process: `Exhausted` (TASK-185).
+fn uid_map_of(read: Result<Vec<u8>, HostError>) -> Result<UidMap, ProcError> {
+    match read {
+        Ok(bytes) => Ok(String::from_utf8(bytes)
+            .map_or_else(|_| UidMap::Unreadable("not UTF-8".into()), UidMap::Map)),
+        Err(e) if e.is(Errno::ENOENT) => Ok(UidMap::Absent),
+        Err(e) if e.is_out_of_descriptors() => Err(ProcError::Exhausted(e)),
+        Err(e) => Ok(UidMap::Unreadable(e.to_string())),
+    }
 }
 
 /// `/proc/<pid>/cmdline`: the arguments, each ended by a NUL byte (the
@@ -4648,6 +4684,55 @@ mod tests {
         );
     }
 
+    /// TASK-185: diskgc out of file descriptors is never folded into an
+    /// unreadable `uid_map`, an unopened root or an unresolvable lookup:
+    /// each keeps it apart as `Exhausted`, an error of the run; every other
+    /// failure keeps its old meaning.
+    #[test]
+    fn out_of_descriptors_is_kept_apart_in_every_errno_erasing_reader() {
+        let e = |errno| HostError::errno("read", "/proc/9/uid_map", errno);
+        for exhausted in [Errno::EMFILE, Errno::ENFILE] {
+            assert!(
+                matches!(uid_map_of(Err(e(exhausted))), Err(ProcError::Exhausted(x)) if x.is(exhausted)),
+                "uid_map {exhausted:?}"
+            );
+            assert!(
+                matches!(root_unopened(e(exhausted), "9/root"), ProcError::Exhausted(x) if x.is(exhausted)),
+                "root {exhausted:?}"
+            );
+            for op in ["statx", "openat"] {
+                assert!(
+                    matches!(errno_erased(exhausted, op, "x".to_owned(), "w"), ProcError::Exhausted(x) if x.is(exhausted)),
+                    "{op} {exhausted:?}"
+                );
+            }
+            assert!(matches!(
+                root_lookup_error(exhausted, || panic!("not asked"), "x".to_owned()),
+                ProcError::Exhausted(_)
+            ));
+        }
+        assert_eq!(uid_map_of(Err(e(Errno::ENOENT))), Ok(UidMap::Absent));
+        assert!(matches!(
+            uid_map_of(Err(e(Errno::EACCES))),
+            Ok(UidMap::Unreadable(_))
+        ));
+        assert_eq!(
+            uid_map_of(Ok(b"0 0 4294967295\n".to_vec())),
+            Ok(UidMap::Map("0 0 4294967295\n".to_owned()))
+        );
+        // Another failure to open the root, or after the object was opened,
+        // still carries no errno: unresolvable, never absent.
+        for unresolvable in [
+            root_unopened(e(Errno::ENOENT), "9/root"),
+            errno_erased(Errno::ENOENT, "statx", "x".to_owned(), "w"),
+        ] {
+            assert!(
+                matches!(&unresolvable, ProcError::Failed(x) if x.kernel_errno().is_none()),
+                "{unresolvable:?}"
+            );
+        }
+    }
+
     /// The pytest contract's readers on our own process (read-only, the
     /// host's real `/proc`): our uids and command line; a value resolved
     /// in our root is the object a plain `stat` names, `..` clamped at the
@@ -4902,6 +4987,7 @@ mod tests {
                 pid_lookup: true,
                 pytest_facts: false,
             },
+            None,
         )
         .expect("scan");
         // Owner PID's table over the real process list: the holder (a

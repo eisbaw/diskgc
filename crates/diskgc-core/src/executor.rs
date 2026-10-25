@@ -2455,8 +2455,14 @@ fn dry_run_inner<H: Host>(
     report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
     if !deadline_passed(host, deadline) && host.interrupted().is_none() {
         let started = host.now();
-        report.held_by_deleted_files =
-            held(host, &mut checker, measured.dev, &measured.at.mount, log);
+        report.held_by_deleted_files = held(
+            host,
+            &mut checker,
+            measured.dev,
+            &measured.at.mount,
+            deadline,
+            log,
+        );
         record_deadline_overrun(
             host,
             &mut report,
@@ -3733,32 +3739,38 @@ fn safety_error(tier: &Tier, message: impl Into<String>) -> ErrorEntry {
 fn stop_error(tier: &Tier, stop: &Stop, message: impl Into<String>) -> ErrorEntry {
     match stop {
         Stop::Failed { .. } => host_error(tier, message),
-        Stop::DeadlinePassed { .. } => run_error(tier, message),
+        Stop::DeadlinePassed { .. } | Stop::Interrupted { .. } => run_error(tier, message),
     }
 }
 
 /// `held_by_deleted_files` (docs/reference.md, Output) from the run's
-/// latest process scan; if the run made none, from one made now.
+/// latest process scan; if the run made none, from one made now (stopping
+/// at `deadline`). `None` (unknown, JSON `null`) when that scan failed or
+/// stopped, or its process list did not settle: never an empty list, which
+/// says that nothing is held (TASK-187).
 fn held<H: Host>(
     host: &H,
     checker: &mut Checker<'_>,
     dev: Dev,
     mount: &MountEntry,
+    deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
-) -> Vec<HeldEntry> {
+) -> Option<Vec<HeldEntry>> {
     if checker.latest().is_none()
-        && let Err(e) = checker.current(host)
+        && let Err(e) = checker.current(host, deadline)
     {
         log(&format!(
-            "held_by_deleted_files: the process scan failed, the list is empty: {e}"
+            "held_by_deleted_files: the process scan did not complete, unknown: {e}"
         ));
-        return Vec::new();
+        return None;
     }
-    let Some(scan) = checker.latest() else {
-        return Vec::new();
-    };
+    let scan = checker.latest().expect("kept or made above");
     for note in scan.notes() {
         log(&format!("process scan: {note}"));
+    }
+    if !scan.settled() {
+        log("held_by_deleted_files: the process scan did not settle, unknown");
+        return None;
     }
     let mut devices = vec![dev];
     if mount.fs_type == "btrfs" {
@@ -3773,14 +3785,16 @@ fn held<H: Host>(
             )),
         }
     }
-    scan.held_by_deleted_files_on(&devices)
-        .into_iter()
-        .map(|h| HeldEntry {
-            pid: h.pid.0,
-            command: Some(h.command.to_string_lossy().into_owned()).filter(|c| !c.is_empty()),
-            bytes: h.bytes,
-        })
-        .collect()
+    Some(
+        scan.held_by_deleted_files_on(&devices)
+            .into_iter()
+            .map(|h| HeldEntry {
+                pid: h.pid.0,
+                command: Some(h.command.to_string_lossy().into_owned()).filter(|c| !c.is_empty()),
+                bytes: h.bytes,
+            })
+            .collect(),
+    )
 }
 
 /// One reclaim of the tier, under the host lock.
@@ -4212,15 +4226,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         record_error(self.report, self.log, host_error(self.tier, message));
     }
 
-    /// An error of the run: recorded, and the run stops.
+    /// An error of the run: recorded, and the run stops. A deadline or a
+    /// signal is no error: the run's status says it.
     fn stop(&mut self, stop: &Stop) {
         self.run_stopped = true;
-        if matches!(stop, Stop::DeadlinePassed { .. }) {
-            self.deadline_hit = true;
-            (self.log)(&format!("{}: the deadline passed: {stop}", self.tier.name));
-            return;
+        match stop {
+            Stop::DeadlinePassed { .. } => {
+                self.deadline_hit = true;
+                (self.log)(&format!("{}: the deadline passed: {stop}", self.tier.name));
+            }
+            Stop::Interrupted { .. } => {
+                (self.log)(&format!("{}: {stop}", self.tier.name));
+            }
+            Stop::Failed { .. } => self.host_failure(format!("the run stops: {stop}")),
         }
-        self.host_failure(format!("the run stops: {stop}"));
     }
 
     fn past_deadline(&self) -> bool {
@@ -4228,6 +4247,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn run(&mut self, owners: &[u32]) {
+        // An earlier tier's list is not this run's last word: unknown until
+        // this tier's end-of-run scan answers (null if it stops first).
+        self.report.held_by_deleted_files = None;
         if self.stop_if_interrupted() {
             return;
         }
@@ -4257,6 +4279,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 &mut checker,
                 self.measured.dev,
                 &self.measured.at.mount,
+                self.deadline,
                 self.log,
             );
             self.record_overrun("in_use", &self.measured.path, started, self.host.now());

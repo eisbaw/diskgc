@@ -327,8 +327,8 @@ impl<H: Delete> Run<'_, '_, H> {
         self.checker.forget();
         let scan = self
             .checker
-            .current(host)
-            .map_err(|error| failed(path, error))?;
+            .current(host, deadline)
+            .map_err(|e| ReclaimEnd::Stopped(e.at(path)))?;
         judge_in_use(scan, &walks, target, &inspected, reached.project)
             .map_err(ReclaimEnd::Skipped)?;
         // The path again, right before the deletion: the guard below and
@@ -425,7 +425,6 @@ impl<H: Delete> Run<'_, '_, H> {
         ) {
             Ok(done) => done,
             Err(NotDeleted::Skipped(skip)) => return Err(ReclaimEnd::Skipped(skip)),
-            Err(NotDeleted::Failed(error)) => return Err(failed(candidate.path(), error)),
             Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
         };
         self.removed_entries += done.removed_entries;

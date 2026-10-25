@@ -55,7 +55,7 @@ use crate::host::{
 
 use std::os::unix::ffi::OsStrExt;
 
-use super::environ;
+use super::{ScanError, environ};
 use crate::host::PidNamespace;
 use crate::liveness::PidTable;
 use crate::liveness::pytest::{self, Lookup, ProcessFacts};
@@ -388,12 +388,21 @@ fn merge_lookups(old: &[RootLookup], new: &mut Vec<RootLookup>) {
 }
 
 /// Reads every visible process but diskgc's own (see the module docs).
-/// `users`: the uids whose files candidates may hold. Fails only when the
-/// process list itself cannot be read, when diskgc runs out of file
-/// descriptors on any read of the scan ([`out_of_descriptors`]), or when
-/// the host answers a read of several processes with another number of
-/// results.
-pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Gathered, HostError> {
+/// `users`: the uids whose files candidates may hold. Fails
+/// ([`ScanError::Failed`]) only when the process list itself cannot be
+/// read, when diskgc runs out of file descriptors on any read of the scan
+/// ([`out_of_descriptors`]), or when the host answers a read of several
+/// processes with another number of results. Stops
+/// ([`ScanError::DeadlinePassed`], [`ScanError::Interrupted`]) when
+/// `deadline` has passed or a signal arrived, checked before every listing
+/// and after every pause: a scan of up to [`MAX_LISTINGS`] growing
+/// listings and their re-reads can take seconds on a busy host (TASK-189).
+pub(crate) fn gather<H: Host>(
+    host: &H,
+    users: &[u32],
+    facts: bool,
+    deadline: Option<MonoTime>,
+) -> Result<Gathered, ScanError> {
     // `users` is the candidate ownership allowlist, not the complete set of
     // processes that can use their files. In root mode a root process can
     // open any listed user's candidate, so an unreadable root process must
@@ -406,8 +415,17 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
     let own = host.own_pid();
     // diskgc's own capabilities and uid_map, to recognise a more capable
     // process while both are in the initial user namespace (see
-    // [`Excuse::Privileged`]). Unknown: no such excuse.
-    let own_status = host.proc_status(own).ok();
+    // [`Excuse::Privileged`]). Unknown: no such excuse; but diskgc out of
+    // descriptors is an error of the run, not an unknown status (TASK-185).
+    let own_status = match host.proc_status(own) {
+        Ok(status) => Some(status),
+        Err(error) => {
+            if let Some(exhausted) = out_of_descriptors(&error) {
+                return Err(ScanError::Failed(exhausted));
+            }
+            None
+        }
+    };
     let mut entries: BTreeMap<Pid, Entry> = BTreeMap::new();
     let mut identities: BTreeMap<Pid, H::ProcIdentity> = BTreeMap::new();
     let mut listings = 0;
@@ -419,7 +437,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
                 Ok(value) => value,
                 Err(error) => {
                     if let Some(exhausted) = out_of_descriptors(&error) {
-                        return Err(exhausted);
+                        return Err(ScanError::Failed(exhausted));
                     }
                     break $label Some(format!(
                         "a process identity could not be checked: {}",
@@ -430,6 +448,10 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
         };
     }
     let unsettled = 'scan: loop {
+        // Bounded: at most MAX_LISTINGS growing listings, and listings for
+        // re-reads bounded by REREAD_PAUSES per process; each is as long
+        // as its reads, so the deadline and signals are checked per round.
+        ScanError::stop_if_due(host, deadline)?;
         let listing = host.pids()?;
         last_listing.clone_from(&listing);
         let listed: BTreeSet<Pid> = listing.iter().copied().collect();
@@ -530,6 +552,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
             let first = pending.iter().map(|(_, due)| *due).min().expect("pending");
             if first > now {
                 host.sleep(first.saturating_since(now));
+                ScanError::stop_if_due(host, deadline)?;
                 now = host.now();
             }
         }
@@ -541,14 +564,14 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
         );
         let views = host.proc_views(&batch, facts);
         if views.len() != batch.len() {
-            return Err(HostError::invalid(
+            return Err(ScanError::Failed(HostError::invalid(
                 "proc_views",
                 format!("{} processes", batch.len()),
                 format!("the host answered with {} results", views.len()),
-            ));
+            )));
         }
         if let Some(exhausted) = views.iter().find_map(view_out_of_descriptors) {
-            return Err(exhausted);
+            return Err(ScanError::Failed(exhausted));
         }
         let mut read_back = Vec::new();
         for (pid, view) in batch.iter().zip(views) {
@@ -578,7 +601,7 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
             if let Some(Err(error)) = &entry.status
                 && let Some(exhausted) = out_of_descriptors(error)
             {
-                return Err(exhausted);
+                return Err(ScanError::Failed(exhausted));
             }
             let released = if let Some(identity) = identities.get(pid) {
                 identity_or_unsettled!('scan, host.proc_identity_released(identity))
@@ -660,16 +683,20 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
 /// answer is unknown anyway. Otherwise unreadable processes are read again
 /// in rounds, one pause of [`REREAD_PAUSES`] per round for all of them (at
 /// most 40 ms per scan, whatever their number); one that stays unreadable,
-/// whatever its user, is recorded and makes every answer unknown.
+/// whatever its user, is recorded and makes every answer unknown. diskgc
+/// out of file descriptors in any of these reads is an error of the run
+/// (TASK-185), never an unknown answer; the deadline and signals are
+/// checked after each pause, as in [`gather`].
 pub(crate) fn pid_table<H: Host>(
     host: &H,
     before: Result<PidNamespace, HostError>,
     listed: &[Pid],
     settled: bool,
-) -> PidTable {
-    let mut table = PidTable::new(before.map_err(|e| e.to_string()), settled);
+    deadline: Option<MonoTime>,
+) -> Result<PidTable, ScanError> {
+    let mut table = PidTable::new(namespace_or_run_error(before)?, settled);
     if !table.preconditions_hold() {
-        return table;
+        return Ok(table);
     }
     let mut pending: Vec<Pid> = listed.to_vec();
     let mut pauses = REREAD_PAUSES.iter();
@@ -680,6 +707,9 @@ pub(crate) fn pid_table<H: Host>(
                 Ok(levels) => table.add_levels(&levels),
                 Err(ProcError::Gone) => {}
                 Err(ProcError::Denied(_) | ProcError::Failed(_)) => failed.push(pid),
+                Err(ProcError::Exhausted(e)) => {
+                    return Err(ScanError::Failed(with_descriptor_advice(e)));
+                }
             }
         }
         if failed.is_empty() {
@@ -688,6 +718,7 @@ pub(crate) fn pid_table<H: Host>(
         match pauses.next() {
             Some(pause) => {
                 host.sleep(*pause);
+                ScanError::stop_if_due(host, deadline)?;
                 pending = failed;
             }
             None => {
@@ -698,8 +729,21 @@ pub(crate) fn pid_table<H: Host>(
             }
         }
     }
-    table.confirm_namespace(host.pid_namespace().map_err(|e| e.to_string()));
-    table
+    table.confirm_namespace(namespace_or_run_error(host.pid_namespace())?);
+    Ok(table)
+}
+
+/// The PID namespace facts as [`PidTable`] takes them (a failed read: its
+/// reason, which makes every answer unknown), or diskgc out of file
+/// descriptors as an error of the run (TASK-185).
+fn namespace_or_run_error(
+    read: Result<PidNamespace, HostError>,
+) -> Result<Result<PidNamespace, String>, ScanError> {
+    match read {
+        Ok(facts) => Ok(Ok(facts)),
+        Err(e) if e.is_out_of_descriptors() => Err(ScanError::Failed(with_descriptor_advice(e))),
+        Err(e) => Ok(Err(e.to_string())),
+    }
 }
 
 /// The pytest contract's process facts (docs/safety.md, pytest sessions:
@@ -833,18 +877,22 @@ pub(crate) fn is_users_ids(ids: crate::host::Ids, users: &[u32]) -> bool {
     ids.all().iter().any(|uid| users.contains(uid))
 }
 
-/// diskgc itself out of file descriptors (`EMFILE`: its own
-/// `RLIMIT_NOFILE`; `ENFILE`: the system's table): an error of the run,
-/// never a fact about the process being read. It says nothing about this
-/// process and would hit the next one too, so taking it as an unreadable
-/// process or an unsettled scan would quietly skip every candidate as
-/// `in_use` (TASK-166); the walk's rule for the same errors is the same
-/// (docs/safety.md, Fail closed on anything unreadable).
-/// The error comes back with what the operator can do about it.
+/// diskgc itself out of file descriptors ([`ProcError::Exhausted`]): an
+/// error of the run, never a fact about the process being read. It says
+/// nothing about this process and would hit the next one too, so taking it
+/// as an unreadable process or an unsettled scan would quietly skip every
+/// candidate (TASK-166); the walk's rule for the same errors is the same
+/// (docs/safety.md, Fail closed on anything unreadable). The error comes
+/// back with what the operator can do about it.
 fn out_of_descriptors(error: &ProcError) -> Option<HostError> {
-    let (ProcError::Denied(e) | ProcError::Failed(e)) = error else {
-        return None;
-    };
+    match error {
+        ProcError::Exhausted(e) => Some(with_descriptor_advice(e.clone())),
+        ProcError::Gone | ProcError::Denied(_) | ProcError::Failed(_) => None,
+    }
+}
+
+/// `e` (`EMFILE` or `ENFILE`) with what the operator can do about it.
+pub(crate) fn with_descriptor_advice(e: HostError) -> HostError {
     let advice = if e.is(Errno::EMFILE) {
         "the in-use scan holds a descriptor for every visible process and ran out under \
          diskgc's open-file limit (RLIMIT_NOFILE): raise its hard limit"
@@ -852,15 +900,15 @@ fn out_of_descriptors(error: &ProcError) -> Option<HostError> {
         "the in-use scan holds a descriptor for every visible process and the system's \
          open-file table (fs.file-max) is full"
     } else {
-        return None;
+        "diskgc ran out of file descriptors"
     };
-    let mut annotated = e.clone();
+    let mut annotated = e;
     annotated.detail = if annotated.detail.is_empty() {
         advice.to_owned()
     } else {
         format!("{}; {advice}", annotated.detail)
     };
-    Some(annotated)
+    annotated
 }
 
 /// [`out_of_descriptors`] of any reader of one process's view: the view
@@ -893,7 +941,7 @@ fn identity_error(error: ProcError) -> HostError {
             "held process",
             "a held process identity returned Gone instead of a release result",
         ),
-        ProcError::Denied(e) | ProcError::Failed(e) => e,
+        ProcError::Denied(e) | ProcError::Failed(e) | ProcError::Exhausted(e) => e,
     }
 }
 

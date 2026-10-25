@@ -42,6 +42,7 @@ use crate::host::{
 };
 use crate::liveness::PidTable;
 use crate::liveness::pytest::Processes;
+use crate::outcome::Stop;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
@@ -91,8 +92,17 @@ pub const FRESH_RETRY_PAUSES: [Duration; FRESH_ATTEMPTS - 1] =
 
 /// One short pause before retrying a process list that kept growing. The
 /// retry is a complete scan; neither scan can clear a candidate unless it
-/// settles. A persistent fork storm stays a conservative `in_use` skip.
+/// settles. A persistent fork storm stays a conservative `in_use_unknown`
+/// skip (TASK-190).
 pub const UNSETTLED_RETRY_PAUSE: Duration = Duration::from_millis(20);
+
+/// The longest single sleep of a retry pause ([`FRESH_RETRY_PAUSES`]): a
+/// signal is noticed within this, not after the whole pause (TASK-189).
+/// `Host::sleep` itself is not interruptible, and must not be: loops that
+/// poll until a time (a command's grace period) would spin on a sleep that
+/// returns early. 50 ms is far below a person's notice and 20 wake-ups for
+/// the longest pause.
+pub const PAUSE_SLICE: Duration = Duration::from_millis(50);
 
 /// Filesystems whose memory maps may show another device (and, on older
 /// kernels, inode) than `statx` of the same file: a mapping matches by
@@ -188,22 +198,100 @@ pub struct Scan {
     pytest_facts: Option<(Vec<u32>, Processes)>,
 }
 
+/// Why a scan ended without a result: an error of the run, or the run's
+/// own end (its deadline, a signal). Never a fact about a candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanError {
+    /// The process list could not be read, or diskgc ran out of file
+    /// descriptors (`EMFILE`, `ENFILE`) in any read of the scan (TASK-166,
+    /// TASK-185).
+    Failed(HostError),
+    /// The run's deadline passed before the scan was done (TASK-189).
+    DeadlinePassed,
+    /// SIGINT or SIGTERM arrived during the scan or its pauses.
+    Interrupted,
+}
+
+impl ScanError {
+    /// This end of a scan made for the candidate at `path`, as the run's
+    /// [`Stop`].
+    pub fn at(self, path: &Path) -> Stop {
+        let path = path.to_owned();
+        match self {
+            Self::Failed(error) => Stop::Failed { path, error },
+            Self::DeadlinePassed => Stop::DeadlinePassed { path },
+            Self::Interrupted => Stop::Interrupted { path },
+        }
+    }
+
+    /// `Err` once a signal arrived or `deadline` passed (in that order: an
+    /// interrupted run reports the signal).
+    pub(crate) fn stop_if_due<H: Host>(host: &H, deadline: Option<MonoTime>) -> Result<(), Self> {
+        if host.interrupted().is_some() {
+            return Err(Self::Interrupted);
+        }
+        if deadline.is_some_and(|d| host.now() >= d) {
+            return Err(Self::DeadlinePassed);
+        }
+        Ok(())
+    }
+}
+
+impl From<HostError> for ScanError {
+    fn from(error: HostError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for ScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(e) => write!(f, "{e}"),
+            Self::DeadlinePassed => f.write_str("the deadline passed during the process scan"),
+            Self::Interrupted => f.write_str("interrupted during the process scan"),
+        }
+    }
+}
+
 /// Reads every visible process (see [`self::scan`] for the order of
-/// listings, reads and re-reads). Fails only when the process list itself
+/// listings, reads and re-reads), stopping when `deadline` passes or a
+/// signal arrives ([`ScanError`]). Fails only when the process list itself
 /// cannot be read or diskgc runs out of file descriptors (`EMFILE`,
 /// `ENFILE`) in any read of the scan: an error of the run (TASK-166).
-pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError> {
+pub fn scan<H: Host>(
+    host: &H,
+    options: &Options<'_>,
+    deadline: Option<MonoTime>,
+) -> Result<Scan, ScanError> {
+    ScanError::stop_if_due(host, deadline)?;
     // The scan is as old as its first read.
     let started = host.now();
-    let sockets = options.sockets.then(|| host.bound_unix_sockets());
+    let sockets = options.sockets.then(|| match host.bound_unix_sockets() {
+        // Out of descriptors for the netlink socket says nothing about any
+        // socket: an error of the run, not `contains_ipc` for every
+        // candidate that holds one (TASK-185's class).
+        Err(e) if e.is_out_of_descriptors() => {
+            Err(ScanError::Failed(scan::with_descriptor_advice(e)))
+        }
+        answer => Ok(answer),
+    });
+    let sockets = sockets.transpose()?;
     // Owner PID's namespace facts are read before the first listing and
     // again after the NSpid reads, so they cover the window of the
     // listings they qualify ([`scan::pid_table`]).
     let namespace_before = options.pid_lookup.then(|| host.pid_namespace());
-    let gathered = scan::gather(host, options.users, options.pytest_facts)?;
-    let pid_table = namespace_before.map(|before| {
-        scan::pid_table(host, before, &gathered.listed, gathered.unsettled.is_none())
-    });
+    let gathered = scan::gather(host, options.users, options.pytest_facts, deadline)?;
+    let pid_table = namespace_before
+        .map(|before| {
+            scan::pid_table(
+                host,
+                before,
+                &gathered.listed,
+                gathered.unsettled.is_none(),
+                deadline,
+            )
+        })
+        .transpose()?;
     let pytest_facts = options.pytest_facts.then(|| {
         (
             options.users.to_vec(),
@@ -461,6 +549,17 @@ impl Scan {
         self.environ_index.minimum_bytes()
     }
 
+    /// The `in_use_unknown` skip of the candidate at `path` when this scan
+    /// cannot judge anything ([`Self::blocked`]), naming the unreadable
+    /// process that blocks, if one does; `None`: it can judge candidates.
+    pub fn unknown(&self, path: &Path) -> Option<Skip> {
+        let why = self.blocked()?;
+        Some(
+            Skip::new(Reason::InUseUnknown, path.to_owned(), why)
+                .with_process_blockers(self.blocking_unreadable().into_iter().collect()),
+        )
+    }
+
     /// Why this scan cannot clear anything: it is unsettled, or a process
     /// that blocks could not be read (docs/safety.md, In use). `None`: it
     /// can judge candidates.
@@ -524,7 +623,9 @@ impl Scan {
     /// order, the first that applies:
     ///
     /// 1. the scan is unsettled, or a process that blocks could not be
-    ///    read: `in_use` (it could be using anything);
+    ///    read: `in_use_unknown` (it could be using anything, and whether
+    ///    it does cannot be told; TASK-190: not `in_use`, which would give
+    ///    a harness evidence that does not exist);
     /// 2. a process uses one of the record's objects (fd, cwd, root, exe,
     ///    mapping; a FIFO held open is found here): `in_use`;
     /// 3. a process's initial environment names a path inside the
@@ -544,8 +645,8 @@ impl Scan {
             Err(Skip::new(Reason::InUse, at, detail)
                 .with_process_blockers(process.into_iter().collect()))
         };
-        if let Some(why) = self.blocked() {
-            return in_use(path.to_owned(), why, self.blocking_unreadable());
+        if let Some(skip) = self.unknown(path) {
+            return Err(skip);
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
         for id in record.objects() {
@@ -646,18 +747,14 @@ fn below(path: &Path, rel: &Path) -> PathBuf {
     }
 }
 
-/// A candidate cleared by the in-use check: only [`Checker::check`] makes
-/// one, borrowing the exact candidate and walk record it checked.
+/// A candidate cleared by the in-use check: only [`Checker::with_fresh_clear`]
+/// makes one, borrowing the exact candidate and walk record it checked.
 /// [`delete_cleared`] can only consume this checked pair while the clear is
 /// fresh (docs/safety.md, Freshness). Neither `Copy` nor `Clone`: one check,
 /// one deletion. The borrow also prevents splitting the record meanwhile.
 #[derive(Debug)]
 pub struct Clear<'checked, 'parent, F> {
     fresh_until: MonoTime,
-    /// The scan was kept from an earlier check rather than made for this
-    /// one: its expiry is the end of its reuse, not a sign of a busy host
-    /// ([`clear_and_delete`] then scans again without spending an attempt).
-    reused: bool,
     candidate: &'checked Candidate<'parent, F>,
     record: &'checked WalkRecord,
 }
@@ -761,7 +858,8 @@ impl<'a> Checker<'a> {
     /// Reclaim protocol, step 3) and an `fs` candidate's delete (In use:
     /// Freshness): there one scan serves every part or candidate whose
     /// deletion starts within [`FRESHNESS`]. The bound itself is unchanged
-    /// ([`Checker::check`], [`delete_cleared`]); `limit` above it is a bug.
+    /// ([`Checker::with_fresh_clear`], [`delete_cleared`]); `limit` above
+    /// it is a bug.
     pub fn reusing_for<T>(&mut self, limit: Duration, within: impl FnOnce(&mut Self) -> T) -> T {
         assert!(
             limit <= FRESHNESS,
@@ -788,86 +886,124 @@ impl<'a> Checker<'a> {
         self.options
     }
 
-    /// Checks `candidate` against a scan younger than the reuse limit,
-    /// scanning anew if the kept one is older (or there is none). A skip
-    /// stands whatever the scan's age (refusing is always safe). A clear
-    /// stands only if the scan is still fresh after the check, as the last
-    /// thing before the caller's deletion starts: otherwise (a suspend
-    /// during the scan or right after it, a scan slower than the bound)
-    /// the attempt is spent ([`FreshAttempts::retry`]: a pause, then a new
-    /// scan), and once `attempts` are spent the candidate is skipped
-    /// (`in_use_unknown`), never cleared. The caller starts the deletion
-    /// right away and never after [`Clear::fresh_until`].
+    /// The one freshness loop of every deletion and command action
+    /// (docs/safety.md, In use: Freshness; TASK-196 item 3). Checks
+    /// `candidate` against a scan younger than the reuse limit (scanning
+    /// anew if the kept one is older, or there is none; a scan stops at the
+    /// deadline of `attempts` or a signal), and hands a clear that is still
+    /// fresh after the check to `act`, with the scan, as the last thing
+    /// before the caller's action starts. A skip stands whatever the scan's
+    /// age (refusing is always safe).
+    ///
+    /// `act` returns `Some` when it acted (or decided), `None` when the
+    /// clear expired before the action could start. A stale scan (a suspend
+    /// during the scan or right after it, a scan slower than the bound) or
+    /// an expired clear spends one of the candidate's `attempts`
+    /// ([`FreshAttempts::retry`]: a pause, then a new scan); once they are
+    /// spent the candidate is skipped (`in_use_unknown`), never cleared. A
+    /// scan kept from an earlier check that reaches the bound meanwhile has
+    /// reached the end of its reuse: checked again on a new scan, no attempt
+    /// spent.
+    pub fn with_fresh_clear<'checked, 'parent, H: Host, T, E>(
+        &mut self,
+        host: &H,
+        candidate: &'checked Candidate<'parent, H::Fd>,
+        record: &'checked WalkRecord,
+        attempts: &mut FreshAttempts,
+        mut act: impl FnMut(&Scan, Clear<'checked, 'parent, H::Fd>) -> Result<Option<T>, E>,
+    ) -> Result<T, E>
+    where
+        E: From<Skip> + From<Stop>,
+    {
+        let path = candidate.path();
+        if !record.belongs_to(candidate) {
+            return Err(Stop::Failed {
+                path: path.to_owned(),
+                error: HostError::invalid(
+                    "in-use check",
+                    path.display(),
+                    "the walk record was made for another candidate name or mount",
+                ),
+            }
+            .into());
+        }
+        // Bounded: each pass ends in a verdict or an action, or spends one
+        // attempt, except at most one pass whose kept scan reached the end
+        // of its reuse (only the first pass can reuse: every later one
+        // follows a `forget`).
+        for _ in 0..=FRESH_ATTEMPTS {
+            let reused = self.reusable_at(host.now());
+            if !reused {
+                self.rescan(host, attempts.deadline)
+                    .map_err(|e| e.at(path))?;
+            }
+            let scan = self.latest.as_ref().expect("made above");
+            scan.check(candidate, record)?;
+            let what = if scan.is_fresh_at(host.now()) {
+                let clear = Clear {
+                    candidate,
+                    record,
+                    fresh_until: scan.fresh_until(),
+                };
+                match act(scan, clear)? {
+                    Some(done) => return Ok(done),
+                    None => "its clear expired before the action could start",
+                }
+            } else {
+                "its scan was older than the freshness bound once the check finished"
+            };
+            if reused {
+                self.forget();
+                continue;
+            }
+            let stale = Stale::of(self.latest.as_ref().expect("checked above"), what);
+            attempts.retry::<H, E>(host, self, path, stale)?;
+        }
+        unreachable!("each pass decides or spends one of {FRESH_ATTEMPTS} attempts, but one reuse")
+    }
+
+    /// [`Checker::with_fresh_clear`] for a caller that acts on the clear
+    /// itself: the clear, or the candidate's skip, or an end of the run.
     pub fn check<'checked, 'parent, H: Host>(
         &mut self,
         host: &H,
         candidate: &'checked Candidate<'parent, H::Fd>,
         record: &'checked WalkRecord,
         attempts: &mut FreshAttempts,
-    ) -> Result<Result<Clear<'checked, 'parent, H::Fd>, Skip>, HostError> {
-        if !record.belongs_to(candidate) {
-            return Err(HostError::invalid(
-                "in-use check",
-                candidate.path().display(),
-                "the walk record was made for another candidate name or mount",
-            ));
+    ) -> Result<Result<Clear<'checked, 'parent, H::Fd>, Skip>, Stop> {
+        match self.with_fresh_clear(host, candidate, record, attempts, |_, clear| {
+            Ok::<_, NotDeleted>(Some(clear))
+        }) {
+            Ok(clear) => Ok(Ok(clear)),
+            Err(NotDeleted::Skipped(skip)) => Ok(Err(skip)),
+            Err(NotDeleted::Stopped(stop)) => Err(stop),
         }
-        // Bounded: each pass ends in a verdict or spends one attempt, except
-        // at most one pass whose kept scan expired during the check (only
-        // the first pass can reuse: every later one follows a `forget`).
-        for _ in 0..=FRESH_ATTEMPTS {
-            let reused = self.reusable_at(host.now());
-            if !reused {
-                self.rescan(host)?;
-            }
-            let scan = self.latest.as_ref().expect("made above");
-            if let Err(skip) = scan.check(candidate, record) {
-                return Ok(Err(skip));
-            }
-            if scan.is_fresh_at(host.now()) {
-                return Ok(Ok(Clear {
-                    candidate,
-                    record,
-                    reused,
-                    fresh_until: scan.fresh_until(),
-                }));
-            }
-            if reused {
-                // The kept scan reached the bound while this check ran: the
-                // end of its reuse, not a slow scan. Check on a new one.
-                self.forget();
-                continue;
-            }
-            let stale = Stale::of(
-                scan,
-                "its scan was older than the freshness bound once the check finished",
-            );
-            if let Err(skip) = attempts.retry(host, self, candidate.path(), stale) {
-                return Ok(Err(skip));
-            }
-        }
-        unreachable!("each pass decides or spends one of {FRESH_ATTEMPTS} attempts, but one reuse")
     }
 
-    /// A scan younger than the reuse limit: the kept one, or a new one.
-    /// For judging without deleting (a plan, a survey): refusing needs no
-    /// freshness, and nothing it clears is deleted on its word (deleting
-    /// goes through [`Checker::check`] and its [`Clear`]).
-    pub fn current<H: Host>(&mut self, host: &H) -> Result<&Scan, HostError> {
+    /// A scan younger than the reuse limit: the kept one, or a new one
+    /// (stopping at `deadline` or a signal). For judging without deleting
+    /// (a plan, a survey): refusing needs no freshness, and nothing it
+    /// clears is deleted on its word (deleting goes through
+    /// [`Checker::with_fresh_clear`] and its [`Clear`]).
+    pub fn current<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+    ) -> Result<&Scan, ScanError> {
         let now = host.now();
         let reusable = self.reusable_at(now);
         if !reusable {
-            self.rescan(host)?;
+            self.rescan(host, deadline)?;
         }
         Ok(self.latest.as_ref().expect("made above"))
     }
 
-    fn rescan<H: Host>(&mut self, host: &H) -> Result<(), HostError> {
+    fn rescan<H: Host>(&mut self, host: &H, deadline: Option<MonoTime>) -> Result<(), ScanError> {
         self.latest = None;
-        let mut latest = scan(host, &self.options)?;
+        let mut latest = scan(host, &self.options, deadline)?;
         if let Some(why) = latest.unsettled.take() {
             host.sleep(UNSETTLED_RETRY_PAUSE);
-            latest = scan(host, &self.options)?;
+            latest = scan(host, &self.options, deadline)?;
             latest.retried_unsettled = Some(why);
         }
         self.latest = Some(latest);
@@ -955,13 +1091,25 @@ pub fn lock_candidate<H: Host>(
 /// Why [`clear_and_delete`] deleted nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotDeleted {
-    /// In use (or refused by the caller's own check on the same scan).
+    /// In use, unknown (or refused by the caller's own check on the same
+    /// scan).
     Skipped(Skip),
-    /// An error of the run: the process list could not be read, or no scan
-    /// stayed fresh until the deletion could start.
-    Failed(HostError),
-    /// A caller's last safety check hit a run-wide failure or deadline.
-    Stopped(crate::outcome::Stop),
+    /// An error of the run, or its end: the process list could not be read,
+    /// diskgc ran out of file descriptors, the deadline passed, a signal
+    /// arrived, or a caller's last safety check hit one of these.
+    Stopped(Stop),
+}
+
+impl From<Skip> for NotDeleted {
+    fn from(skip: Skip) -> Self {
+        Self::Skipped(skip)
+    }
+}
+
+impl From<Stop> for NotDeleted {
+    fn from(stop: Stop) -> Self {
+        Self::Stopped(stop)
+    }
 }
 
 impl Checker<'_> {
@@ -989,16 +1137,16 @@ impl Checker<'_> {
 
 /// The last step of every deletion of a checked candidate (docs/safety.md,
 /// Deletion; the Cargo protocol's parts): the in-use check of exactly
-/// `record` against a scan within the freshness rules ([`Checker::check`];
-/// an unsettled scan is retried once, and a persistently blocking scan is
-/// kept for at most the checker's short reuse window), the caller's own
-/// check on the same scan (`also`: the Cargo process heuristics; nothing
-/// for kind `fs`), then [`delete_cleared`]
-/// right away. A stale scan or a clear that expired before the delete could
-/// start spends one of the candidate's `attempts` (a pause, then a new
-/// scan); once they are spent it is skipped (`in_use_unknown`). The
-/// candidate is what the caller reclaims as one: a Cargo target passes the
-/// same budget for each of its parts.
+/// `record` against a scan within the freshness rules
+/// ([`Checker::with_fresh_clear`]; an unsettled scan is retried once, and a
+/// persistently blocking scan is kept for at most the checker's short reuse
+/// window), the caller's own check on the same scan (`also`: the Cargo
+/// process heuristics, the `fs` kind's final path and policy checks), then
+/// [`delete_cleared`] right away. A stale scan or a clear that expired
+/// before the delete could start spends one of the candidate's `attempts`;
+/// once they are spent it is skipped (`in_use_unknown`). The candidate is
+/// what the caller reclaims as one: a Cargo target passes the same budget
+/// for each of its parts.
 pub fn clear_and_delete<H: Delete>(
     host: &H,
     checker: &mut Checker<'_>,
@@ -1008,35 +1156,13 @@ pub fn clear_and_delete<H: Delete>(
     attempts: &mut FreshAttempts,
     also: &mut dyn FnMut(&Scan) -> Result<(), NotDeleted>,
 ) -> Result<Deletion, NotDeleted> {
-    // Bounded: each pass deletes, refuses, or spends one attempt, except at
-    // most one pass whose clear came from a kept scan (after its `forget`,
-    // every later clear is on a scan made for it).
-    for _ in 0..=FRESH_ATTEMPTS {
-        let clear = checker
-            .check(host, candidate, record, attempts)
-            .map_err(NotDeleted::Failed)?
-            .map_err(NotDeleted::Skipped)?;
-        let reused = clear.reused;
-        also(checker.latest().expect("the check made or kept one"))?;
+    checker.with_fresh_clear(host, candidate, record, attempts, |scan, clear| {
+        also(scan)?;
         match delete_cleared(host, clear, options) {
-            Ok(done) => return Ok(done),
-            Err(NotCleared::Expired(_)) if reused => {
-                // The kept scan's reuse ended before the deletion could
-                // start: check again on a new scan, no attempt spent.
-                checker.forget();
-            }
-            Err(NotCleared::Expired(_)) => {
-                let scan = checker.latest().expect("the check made or kept one");
-                let stale = Stale::of(scan, "its clear expired before the deletion could start");
-                attempts
-                    .retry(host, checker, candidate.path(), stale)
-                    .map_err(NotDeleted::Skipped)?;
-            }
+            Ok(done) => Ok(Some(done)),
+            Err(NotCleared::Expired(_)) => Ok(None),
         }
-    }
-    unreachable!(
-        "each pass deletes, refuses, or spends one of {FRESH_ATTEMPTS} attempts, but one reuse"
-    )
+    })
 }
 
 /// Why one attempt at a fresh verdict was spent, for the skip's detail.
@@ -1075,7 +1201,8 @@ pub struct FreshAttempts {
 }
 
 impl FreshAttempts {
-    /// A fresh budget; no retry pause runs to or past `deadline`.
+    /// A fresh budget for a run ending at `deadline`: no retry pause runs
+    /// to or past it, and no scan of the candidate's checks goes past it.
     pub fn new(deadline: Option<MonoTime>) -> Self {
         Self {
             spent: 0,
@@ -1087,21 +1214,22 @@ impl FreshAttempts {
 
     /// Spends one attempt on `stale`. With attempts left and the pause
     /// ([`FRESH_RETRY_PAUSES`]) ending before the deadline: drops the
-    /// checker's scan so the next check scans afresh, pauses, and returns
-    /// `Ok`. Otherwise the candidate's `in_use_unknown` skip, the stale
-    /// scan kept as the checker's latest.
-    pub fn retry<H: Host>(
+    /// checker's scan so the next check scans afresh, pauses (a signal ends
+    /// the pause and the run: [`Stop::Interrupted`]), and returns `Ok`.
+    /// Otherwise the candidate's `in_use_unknown` skip, the stale scan kept
+    /// as the checker's latest.
+    fn retry<H: Host, E: From<Skip> + From<Stop>>(
         &mut self,
         host: &H,
         checker: &mut Checker<'_>,
         path: &Path,
         stale: Stale,
-    ) -> Result<(), Skip> {
+    ) -> Result<(), E> {
         assert!(self.spent < FRESH_ATTEMPTS, "a spent budget is not retried");
         self.spent += 1;
         self.last = Some(stale);
         let Some(pause) = FRESH_RETRY_PAUSES.get(self.spent - 1).copied() else {
-            return Err(self.spent(path));
+            return Err(self.spent(path).into());
         };
         let in_time = match (self.deadline, host.now().checked_add(pause)) {
             (None, _) => true,
@@ -1110,12 +1238,16 @@ impl FreshAttempts {
         };
         if !in_time {
             self.cut_by_deadline = true;
-            return Err(self.spent(path));
+            return Err(self.spent(path).into());
         }
         // Only now: a skip keeps the last scan as `latest` (its notes).
         checker.forget();
-        host.sleep(pause);
-        Ok(())
+        sleep_unless_interrupted(host, pause).map_err(|()| {
+            Stop::Interrupted {
+                path: path.to_owned(),
+            }
+            .into()
+        })
     }
 
     /// The `in_use_unknown` skip of `path`, saying why in plain words.
@@ -1145,6 +1277,25 @@ impl FreshAttempts {
             ),
         )
     }
+}
+
+/// Sleeps `pause` in slices of at most [`PAUSE_SLICE`], ending early
+/// (`Err`) once a signal arrived (before or during it).
+fn sleep_unless_interrupted<H: Host>(host: &H, pause: Duration) -> Result<(), ()> {
+    let mut left = pause;
+    // Bounded: each pass sleeps a nonzero slice of what is left.
+    while !left.is_zero() {
+        if host.interrupted().is_some() {
+            return Err(());
+        }
+        let slice = left.min(PAUSE_SLICE);
+        host.sleep(slice);
+        left -= slice;
+    }
+    if host.interrupted().is_some() {
+        return Err(());
+    }
+    Ok(())
 }
 
 /// A directory candidate is deleted only under its lock, and only if the

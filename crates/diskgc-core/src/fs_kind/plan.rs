@@ -162,13 +162,12 @@ pub fn judge_walked<H: Host>(
         true,
         deadline
     ));
-    let scan = checker.current(host).map_err(|error| Stop::Failed {
-        path: found.path.clone(),
-        error,
-    })?;
-    // A process scan may outlast the deadline, including its one bounded
-    // retry. Leave this candidate unjudged rather than publishing a late
-    // verdict (the scan itself has no cooperative deadline).
+    let scan = checker
+        .current(host, deadline)
+        .map_err(|e| e.at(&found.path))?;
+    // The scan stops at the deadline (TASK-189), but a reused or finished
+    // one may end right at it: leave this candidate unjudged rather than
+    // publishing a late verdict.
     check_deadline(host, deadline, &found.path)?;
     if let Err(skip) = scan.check(&candidate, &walked.record) {
         return Ok(Err(skip));
@@ -231,9 +230,8 @@ pub fn contract_veto<'a, H: Host>(
             )));
         }
     };
-    let scan = checker.current(host).map_err(|error| Stop::Failed {
-        path: first.path.clone(),
-        error,
-    })?;
+    let scan = checker
+        .current(host, deadline)
+        .map_err(|e| e.at(&first.path))?;
     super::liveness::veto(host, scan, sources.iter().copied(), &parent.fd, record)
 }

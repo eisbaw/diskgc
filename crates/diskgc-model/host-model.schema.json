@@ -479,7 +479,7 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,\n`proc_identity`, `proc_identity_released`, `docker_query` (e.g.\n`ENOENT`: no Docker client installed) or `run_command` (the child\ndoes not start).",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`\nreaders (`proc_identity`, `proc_identity_released`, `proc_fds`,\n`proc_links`, `proc_maps`, `proc_environ`, `proc_status`,\n`proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,\n`proc_nspid`, `pid_alive`), `docker_query` (e.g.\n`ENOENT`: no Docker client installed) or `run_command` (the child\ndoes not start).",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"

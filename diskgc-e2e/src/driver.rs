@@ -573,6 +573,7 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
             pid_lookup: false,
             pytest_facts: false,
         },
+        None,
     )
     .map_err(|e| format!("scan: {e}"))?;
     for h in scan.held_by_deleted_files(at.stat.dev) {
@@ -1079,6 +1080,11 @@ fn cargo_reclaim<H: Delete>(
                     cause_tag(&error)
                 ))
             }
+            ReclaimEnd::Stopped(cargo_target::Stop::Interrupted { path }) => {
+                out.err_line(format!(
+                    "failed interrupted {path:?} entries={n} -- interrupted"
+                ));
+            }
         }
     }
     if let Some(scan) = checker.latest() {
@@ -1120,6 +1126,7 @@ fn cargo_stop(stop: &cargo_target::Stop, out: &mut Lines<'_>) {
         cargo_target::Stop::Failed { path, error } => {
             out.err_line(format!("failed {} {path:?} -- {error}", cause_tag(error)));
         }
+        cargo_target::Stop::Interrupted { path } => out.err_line(format!("interrupted {path:?}")),
     }
 }
 

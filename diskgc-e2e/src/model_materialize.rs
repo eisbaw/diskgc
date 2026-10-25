@@ -647,8 +647,11 @@ fn validate_process(index: usize, process: &ProcessSpec, locked: bool) -> Result
     if process.proc != ProcAccess::Readable {
         return unsupported("proc", "the ready helper must be inspectable");
     }
+    // A lock holder may be the copied probe too: it runs the same
+    // `flock-hold-existing` as the default helper, and is then readable in
+    // the model as on Linux (TASK-190: an unreadable model process is
+    // `in_use_unknown`, never the lock holder's `in_use`).
     let copied_probe = process.exe.as_deref() == Some(Path::new(SCRATCH_PROBE_EXE))
-        && !locked
         && process.maps == [PathBuf::from(SCRATCH_PROBE_EXE)]
         && process.environ.len() == 1
         && process.environ[0] == "PATH=/bin"

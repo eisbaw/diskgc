@@ -2127,7 +2127,7 @@ fn a_blocking_scan_is_not_reused_past_the_reuse_limit() {
     assert!(host.unfired_events().is_empty());
     assert_eq!(
         reason_of(&report, "/tmp/pytest-of-a"),
-        Some(Some(Reason::InUse))
+        Some(Some(Reason::InUseUnknown))
     );
     assert_eq!(
         reason_of(&report, "/tmp/pytest-of-b"),

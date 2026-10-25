@@ -547,8 +547,11 @@ pub struct EventSpec {
     /// name (e.g. `EIO`, `EACCES`), without acting.
     /// Only with an `op` trigger, `when: before`, and an op that can fail
     /// this way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,
-    /// `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
-    /// `proc_identity`, `proc_identity_released`, `docker_query` (e.g.
+    /// `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`
+    /// readers (`proc_identity`, `proc_identity_released`, `proc_fds`,
+    /// `proc_links`, `proc_maps`, `proc_environ`, `proc_status`,
+    /// `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,
+    /// `proc_nspid`, `pid_alive`), `docker_query` (e.g.
     /// `ENOENT`: no Docker client installed) or `run_command` (the child
     /// does not start).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -13,11 +13,9 @@ use super::reclaim::{Alternative, runtime_retention_guard_veto};
 use crate::command_action::{self, Ready};
 use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{
-    Base, Cause, CommandExit, CommandInvocation, Delete, FileType, Host, HostError, MonoTime,
+    Base, Cause, CommandExit, CommandInvocation, Delete, FileType, HostError, MonoTime,
 };
-use crate::inuse::{
-    CandidateLock, Checker, FRESH_ATTEMPTS, FreshAttempts, Stale, lock_candidate, locked_is_walked,
-};
+use crate::inuse::{CandidateLock, Checker, FreshAttempts, lock_candidate, locked_is_walked};
 use crate::outcome::{ReclaimEnd, Stop};
 use crate::profile::Cwd;
 
@@ -163,7 +161,7 @@ fn protocol<H: Delete>(
     let path = &found.path;
     let stopped = |error| {
         ReclaimEnd::Stopped(Stop::Failed {
-            path: path.clone(),
+            path: path.to_owned(),
             error,
         })
     };
@@ -267,135 +265,148 @@ fn protocol<H: Delete>(
         );
         // The clear verdict is valid only briefly. Build the source-specific
         // argv first, then start immediately after the final policy scan.
-        let mut retry_alternative = false;
-        // Bounded by `attempts`: each pass runs, refuses, or spends one.
-        for _ in 0..FRESH_ATTEMPTS {
-            let clear = checker
-                .check(host, &candidate, &record, &mut attempts)
-                .map_err(stopped)??;
-            if host.now() >= clear.fresh_until() {
-                expired(host, checker, &mut attempts, path)?;
-                continue;
-            }
-            check_deadline(host, deadline, path)?;
-            if let Some(app_lock) = &judge.find.app_not_running {
-                super::app::check(host, &found.root, app_lock, deadline)??;
-            }
-            // The contract is judged from the scan that just cleared it.
-            let scan = checker
-                .latest()
-                .expect("the in-use check above made or kept a scan");
-            // Every discovering source's contract, on this same scan.
-            let admitted: Vec<usize> = (0..alternatives.len())
-                .filter(|at| alternatives[*at].admitted)
-                .collect();
-            if let Err((veto_index, skip)) = super::liveness::veto(
-                host,
-                scan,
-                admitted
-                    .iter()
-                    .map(|at| (alternatives[*at].judge.find, alternatives[*at].found)),
-                candidate.parent(),
-                &record,
-            )? {
-                result.selected = Some(admitted[veto_index]);
-                return Err(skip.into());
-            }
-            // The path again, right before the command (TASK-165): it
-            // gets the path text, and `protect` below judges it, so a
-            // directory on the way renamed since the locked judgement is
-            // `changed`.
-            let mounts = mountinfo(host)?;
-            judge.again(host, found, &reached, &mounts, deadline)??;
-            if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
+        // The one freshness loop (`Checker::with_fresh_clear`) checks, spends
+        // attempts and rescans; this closure is the last checks and the
+        // command, or a late policy refusal of this source.
+        let pass = checker.with_fresh_clear(
+            host,
+            &candidate,
+            &record,
+            &mut attempts,
+            |scan, clear| -> Result<Option<CommandPass>, ReclaimEnd> {
+                check_deadline(host, deadline, path)?;
+                if let Some(app_lock) = &judge.find.app_not_running {
+                    super::app::check(host, &found.root, app_lock, deadline)??;
+                }
+                // The contract is judged from the scan that just cleared it:
+                // every discovering source's contract, on this same scan.
+                let admitted: Vec<usize> = (0..alternatives.len())
+                    .filter(|at| alternatives[*at].admitted)
+                    .collect();
+                if let Err((veto_index, skip)) = super::liveness::veto(
+                    host,
+                    scan,
+                    admitted
+                        .iter()
+                        .map(|at| (alternatives[*at].judge.find, alternatives[*at].found)),
+                    candidate.parent(),
+                    &record,
+                )? {
+                    result.selected = Some(admitted[veto_index]);
+                    return Err(skip.into());
+                }
+                // The path again, right before the command (TASK-165): it
+                // gets the path text, and `protect` below judges it, so a
+                // directory on the way renamed since the locked judgement is
+                // `changed`.
+                let mounts = mountinfo(host)?;
+                judge.again(host, found, &reached, &mounts, deadline)??;
+                if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
+                    return Ok(Some(CommandPass::RefusedAtBoundary(skip)));
+                }
+                if let Some((guard_index, skip)) =
+                    runtime_retention_guard_veto(host, alternatives, deadline)
+                        .map_err(ReclaimEnd::Stopped)?
+                {
+                    result.selected = Some(guard_index);
+                    return Err(skip.into());
+                }
+                // The path once more as the last filesystem check before the
+                // command: the checks above can take a while.
+                still_reached(host, found, &reached, &mounts, deadline)??;
+                check_deadline(host, deadline, path)?;
+                // The policy may scan other trees and take longer than the
+                // in-use verdict remains fresh. Recheck its lifetime at the
+                // point of use.
+                if host.now() >= clear.fresh_until() {
+                    return Ok(None);
+                }
+                let (started, ended) = start_command(host, cwd_fd, &run, path);
+                result.attempted |= started;
+                Ok(Some(CommandPass::Ran(ended)))
+            },
+        )?;
+        match pass {
+            CommandPass::Ran(ended) => return ended,
+            CommandPass::RefusedAtBoundary(skip) => {
                 boundary_skip = Some((index, skip));
                 refused_at_boundary[index] = true;
-                retry_alternative = true;
-                break;
             }
-            if let Some((guard_index, skip)) =
-                runtime_retention_guard_veto(host, alternatives, deadline)
-                    .map_err(ReclaimEnd::Stopped)?
-            {
-                result.selected = Some(guard_index);
-                return Err(skip.into());
-            }
-            // The path once more as the last filesystem check before the
-            // command: the checks above can take a while.
-            still_reached(host, found, &reached, &mounts, deadline)??;
-            check_deadline(host, deadline, path)?;
-            // The policy may scan other trees and take longer than the in-use
-            // verdict remains fresh. Recheck its lifetime at the point of use.
-            if host.now() >= clear.fresh_until() {
-                expired(host, checker, &mut attempts, path)?;
-                continue;
-            }
-            let exit = match host.run_command(cwd_fd, &run) {
-                CommandInvocation::Started(exit_result) => {
-                    result.attempted = true;
-                    exit_result
-                }
-                CommandInvocation::DeadlineBeforeStart => {
-                    return Err(ReclaimEnd::Stopped(Stop::DeadlinePassed {
-                        path: path.clone(),
-                    }));
-                }
-                CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
-                    return Err(ReclaimEnd::GateRefused {
-                        path: path.clone(),
-                        error,
-                    });
-                }
-                CommandInvocation::NotStarted(error) => Err(error),
-            };
-            return match exit {
-                Ok(CommandExit::Exited(0)) => Ok(()),
-                Ok(CommandExit::Exited(code)) => Err(ReclaimEnd::Failed {
-                    path: path.clone(),
-                    error: HostError::invalid(
-                        "run command",
-                        path.display(),
-                        format!("cleaner exited with status {code}"),
-                    ),
-                }),
-                Ok(CommandExit::Signaled(signal)) => Err(ReclaimEnd::Failed {
-                    path: path.clone(),
-                    error: HostError::invalid(
-                        "run command",
-                        path.display(),
-                        format!("cleaner died from signal {signal}"),
-                    ),
-                }),
-                Ok(CommandExit::TimedOut) => Err(ReclaimEnd::Stopped(Stop::DeadlinePassed {
-                    path: path.clone(),
-                })),
-                Err(error) => Err(ReclaimEnd::Failed {
-                    path: path.clone(),
-                    error,
-                }),
-            };
         }
-        assert!(
-            retry_alternative,
-            "each pass runs, refuses, or spends one of {FRESH_ATTEMPTS} attempts"
-        );
     }
 }
 
-/// A clear that expired before the command could start spends one of the
-/// candidate's attempts at a fresh verdict; the candidate's
-/// `in_use_unknown` skip once they are spent.
-fn expired<H: Host>(
+/// How one pass of a command's freshness loop ended.
+enum CommandPass {
+    /// The command ran (or could not start): its end.
+    Ran(Result<(), ReclaimEnd>),
+    /// The tier's policy refused the selected source at the last boundary:
+    /// judge the alternatives again under the same lock.
+    RefusedAtBoundary(Skip),
+}
+
+/// Runs the command `run` for the candidate at `path`: whether it started,
+/// and how it ended (exit 0 complete, any other exit or a signal an error
+/// of the candidate, a deadline before or during it a stop of the run, the
+/// sandbox gate an error of the run).
+fn start_command<H: Delete>(
     host: &H,
-    checker: &mut Checker<'_>,
-    attempts: &mut FreshAttempts,
+    cwd_fd: &H::Fd,
+    run: &crate::host::CommandRun,
     path: &Path,
-) -> Result<(), ReclaimEnd> {
-    let scan = checker.latest().expect("the check made or kept one");
-    let stale = Stale::of(scan, "its clear expired before the command could start");
-    attempts
-        .retry(host, checker, path, stale)
-        .map_err(ReclaimEnd::from)
+) -> (bool, Result<(), ReclaimEnd>) {
+    let exit = match host.run_command(cwd_fd, run) {
+        CommandInvocation::Started(exit_result) => exit_result,
+        CommandInvocation::DeadlineBeforeStart => {
+            return (
+                false,
+                Err(ReclaimEnd::Stopped(Stop::DeadlinePassed {
+                    path: path.to_owned(),
+                })),
+            );
+        }
+        CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
+            return (
+                false,
+                Err(ReclaimEnd::GateRefused {
+                    path: path.to_owned(),
+                    error,
+                }),
+            );
+        }
+        CommandInvocation::NotStarted(error) => return (false, ended(Err(error), path)),
+    };
+    (true, ended(exit, path))
+}
+
+/// How a command that ran ended, as the end of its reclaim.
+fn ended(exit: Result<CommandExit, HostError>, path: &Path) -> Result<(), ReclaimEnd> {
+    match exit {
+        Ok(CommandExit::Exited(0)) => Ok(()),
+        Ok(CommandExit::Exited(code)) => Err(ReclaimEnd::Failed {
+            path: path.to_owned(),
+            error: HostError::invalid(
+                "run command",
+                path.display(),
+                format!("cleaner exited with status {code}"),
+            ),
+        }),
+        Ok(CommandExit::Signaled(signal)) => Err(ReclaimEnd::Failed {
+            path: path.to_owned(),
+            error: HostError::invalid(
+                "run command",
+                path.display(),
+                format!("cleaner died from signal {signal}"),
+            ),
+        }),
+        Ok(CommandExit::TimedOut) => Err(ReclaimEnd::Stopped(Stop::DeadlinePassed {
+            path: path.to_owned(),
+        })),
+        Err(error) => Err(ReclaimEnd::Failed {
+            path: path.to_owned(),
+            error,
+        }),
+    }
 }
 
 /// A complete source decision under the held inode lock. The outer command

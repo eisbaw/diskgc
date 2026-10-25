@@ -55,6 +55,9 @@ proptest! {
                 }
                 Err(ProcError::Denied(_) | ProcError::Failed(_)) => {}
                 Err(ProcError::Gone) => return Err(TestCaseError::fail("listed pids are not gone")),
+                Err(ProcError::Exhausted(e)) => {
+                    return Err(TestCaseError::fail(format!("no event injects EMFILE: {e}")));
+                }
             }
         }
     }

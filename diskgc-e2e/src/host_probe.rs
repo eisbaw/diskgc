@@ -73,6 +73,7 @@ fn inuse_index_memory(host: &LinuxHost) -> Result<(), String> {
             pid_lookup: false,
             pytest_facts: false,
         },
+        None,
     )
     .map_err(|e| format!("scan for index memory: {e}"))?;
     let during_kib = self_status_kib("VmRSS:")?;
@@ -370,8 +371,8 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         let overlap_deadline = Instant::now() + OVERLAP_BUDGET;
         let take_sample = || -> Result<Sample, String> {
             let before = counts();
-            let measured =
-                scan(host, &options).map_err(|e| format!("scan with {workers} workers: {e}"))?;
+            let measured = scan(host, &options, None)
+                .map_err(|e| format!("scan with {workers} workers: {e}"))?;
             let after = counts();
             let start = measured.started();
             let end = start
@@ -521,7 +522,7 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         ));
     }
 
-    let settled = scan(host, &options).map_err(|e| format!("post-storm scan: {e}"))?;
+    let settled = scan(host, &options, None).map_err(|e| format!("post-storm scan: {e}"))?;
     let result = settled.check(&candidate, &record);
     println!(
         "post_storm listings={} took_ms={} clear={}",
@@ -556,7 +557,7 @@ fn inuse_sustained_churn(host: &LinuxHost, candidate: &str) -> Result<(), String
     let record = walk(host, &candidate, &rules, None)
         .map_err(|e| format!("walk unused candidate: {e:?}"))?;
     let options = Options::from_rules(&rules);
-    let baseline = scan(host, &options).map_err(|e| format!("baseline scan: {e}"))?;
+    let baseline = scan(host, &options, None).map_err(|e| format!("baseline scan: {e}"))?;
     baseline
         .check(&candidate, &record)
         .map_err(|e| format!("unused candidate blocked before load: {e:?}"))?;
@@ -659,7 +660,7 @@ fn inuse_sustained_churn(host: &LinuxHost, candidate: &str) -> Result<(), String
             "loaded scanner did not exercise the {MAX_LISTINGS}-growth-listing limit: max_listings={max_listings}"
         ));
     }
-    let after = scan(host, &options).map_err(|e| format!("post-load scan: {e}"))?;
+    let after = scan(host, &options, None).map_err(|e| format!("post-load scan: {e}"))?;
     after
         .check(&candidate, &record)
         .map_err(|e| format!("unused candidate remained blocked after load: {e:?}"))?;
@@ -1043,6 +1044,10 @@ fn proc_result<T>(what: &str, r: Result<T, ProcError>) -> Option<T> {
             println!("{what} failed {e}");
             None
         }
+        Err(ProcError::Exhausted(e)) => {
+            println!("{what} exhausted {e}");
+            None
+        }
     }
 }
 
@@ -1221,7 +1226,7 @@ fn maps_watch(host: &LinuxHost, pid: &str, want: &str, millis: &str) -> Result<(
             Ok(maps) if maps.iter().any(|m| format!("{}:{}", m.dev, m.ino) == want) => with += 1,
             Ok(_) => without += 1,
             Err(ProcError::Gone) => gone += 1,
-            Err(ProcError::Failed(_)) => failed += 1,
+            Err(ProcError::Failed(_) | ProcError::Exhausted(_)) => failed += 1,
             Err(ProcError::Denied(_)) => denied += 1,
         }
     }

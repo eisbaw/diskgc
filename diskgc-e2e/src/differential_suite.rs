@@ -1715,27 +1715,64 @@ fn project_browser_vector(mut vector: ProfileVector) -> Result<ProfileVector, St
 }
 
 /// The checked-in in-use vector names a nominal Python executable. The
-/// container probe supplies the same open-file and cwd evidence, so remove
-/// only the nominal executable/mapping/environment fields before replay.
+/// container runs the copied probe instead, holding the same open file, so
+/// the projection models that probe as the process (its executable,
+/// mapping and environment): a readable process whose fd is the evidence.
 /// The unchanged expected in-use verdict still comes from the vector.
 pub fn python_in_use_vector_matches_linux(ctx: &Ctx) -> TestResult {
-    replay_model(ctx, python_in_use_probe_vector()?, false)
+    replay_model(ctx, python_in_use_probe_vector(probe_size(ctx)?)?, false)
 }
 
 /// A live exclusive Cargo lock must leave the target and its payload intact.
 pub fn cargo_target_held_lock_matches_linux(ctx: &Ctx) -> TestResult {
-    replay_model(ctx, cargo_target_held_lock_vector()?, false)
+    replay_model(ctx, cargo_target_held_lock_vector(probe_size(ctx)?)?, false)
 }
 
 pub fn cargo_target_shared_lock_matches_linux(ctx: &Ctx) -> TestResult {
-    let mut vector = cargo_target_held_lock_vector()?;
+    let mut vector = cargo_target_held_lock_vector(probe_size(ctx)?)?;
     vector.host.locks[0].mode = LockModeSpec::Shared;
     replay_model(ctx, vector, false)
 }
 
+/// The size of the copied probe (this runner's own binary), which a model
+/// of it must state ([`model_materialize::SCRATCH_PROBE_EXE`]).
+fn probe_size(ctx: &Ctx) -> Result<u64, String> {
+    Ok(fs::metadata(&ctx.self_exe)
+        .map_err(|error| format!("stat fixture probe {}: {error}", ctx.self_exe.display()))?
+        .len())
+}
+
+/// `process` becomes the copied probe (TASK-190): readable, with the probe
+/// as its executable and mapping and `PATH=/bin` as its environment, the
+/// shape the materializer runs. A process with none of them reads as
+/// unreadable in the model, which a scan reports as `in_use_unknown`: the
+/// model's verdict would then not be the fd's, which Linux's is.
+fn as_copied_probe(vector: &mut ProfileVector, pid: u32, probe_size: u64) -> Result<(), String> {
+    let probe = PathBuf::from(model_materialize::SCRATCH_PROBE_EXE);
+    let process = vector
+        .host
+        .processes
+        .iter_mut()
+        .find(|process| process.pid == pid)
+        .ok_or_else(|| format!("process {pid} missing"))?;
+    process.exe = Some(probe.clone());
+    process.maps = vec![probe.clone()];
+    process.environ = vec!["PATH=/bin".into()];
+    process.cwd = None;
+    vector.host.tree.insert(
+        probe,
+        NodeSpec::File(FileSpec {
+            size: Some(Bytes(probe_size)),
+            mode: Some(Mode(0o755)),
+            ..FileSpec::default()
+        }),
+    );
+    Ok(())
+}
+
 /// The materialized helper must release its kernel lock when its guard ends.
 pub fn materialized_lock_releases_on_finish(ctx: &Ctx) -> TestResult {
-    let mut vector = cargo_target_held_lock_vector()?;
+    let mut vector = cargo_target_held_lock_vector(probe_size(ctx)?)?;
     adapt_home_mount(&mut vector);
     let materialized = projected_materialize(ctx, &vector)?;
     materialized.assert_holding()?;
@@ -1806,12 +1843,13 @@ pub fn lock_mode_verifier_rejects_mismatch(ctx: &Ctx) -> TestResult {
     Ok(())
 }
 
-fn cargo_target_held_lock_vector() -> Result<ProfileVector, String> {
+fn cargo_target_held_lock_vector(probe_size: u64) -> Result<ProfileVector, String> {
     let mut vector = ProfileVector::parse(CARGO_TARGET_VECTOR)?;
     let path = PathBuf::from(CARGO_LOCK_PATH);
     let process: ProcessSpec = serde_json::from_value(serde_json::json!({"pid": 42}))
         .map_err(|error| format!("lock holder model: {error}"))?;
     vector.host.processes.push(process);
+    as_copied_probe(&mut vector, 42, probe_size)?;
     vector.host.locks.push(LockSpec {
         path: path.clone(),
         holder: 42,
@@ -1970,15 +2008,14 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
     Ok(vector)
 }
 
-fn python_in_use_probe_vector() -> Result<ProfileVector, String> {
+fn python_in_use_probe_vector(probe_size: u64) -> Result<ProfileVector, String> {
     let mut vector = ProfileVector::parse(PYTHON_IN_USE_VECTOR)?;
     vector.host.tree.remove(Path::new("/usr/bin/python"));
-    let [process] = vector.host.processes.as_mut_slice() else {
+    let [process] = vector.host.processes.as_slice() else {
         return Err("Python in-use vector must have exactly one process".into());
     };
-    process.exe = None;
-    process.maps.clear();
-    process.environ.clear();
+    let pid = process.pid;
+    as_copied_probe(&mut vector, pid, probe_size)?;
     Ok(vector)
 }
 
@@ -2837,6 +2874,10 @@ fn optional_path(value: &Value) -> Option<Option<PathBuf>> {
 mod tests {
     use super::*;
 
+    /// Any size will do for the model: the copied probe's real size only
+    /// matters where it is materialized.
+    const UNIT_PROBE_SIZE: u64 = 1 << 20;
+
     /// Every checked-in model fixture with user profiles gets a CLI config
     /// that loads back to the same profiles, so a container replay never
     /// refuses a probe profile (TASK-122: six fixtures became probes).
@@ -2932,7 +2973,8 @@ mod tests {
 
     #[test]
     fn projected_in_use_vector_keeps_its_independent_expected_verdict() {
-        let mut vector = python_in_use_probe_vector().expect("checked-in in-use vector");
+        let mut vector =
+            python_in_use_probe_vector(UNIT_PROBE_SIZE).expect("checked-in in-use vector");
         adapt_home_mount(&mut vector);
         model_materialize::validate(&vector.host).expect("probe-supported process shape");
         vector
@@ -2943,7 +2985,8 @@ mod tests {
     #[test]
     fn held_cargo_lock_has_an_independent_refusal_expectation() {
         for mode in [LockModeSpec::Exclusive, LockModeSpec::Shared] {
-            let mut vector = cargo_target_held_lock_vector().expect("held lock vector");
+            let mut vector =
+                cargo_target_held_lock_vector(UNIT_PROBE_SIZE).expect("held lock vector");
             vector.host.locks[0].mode = mode;
             adapt_home_mount(&mut vector);
             vector

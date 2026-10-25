@@ -504,7 +504,6 @@ fn protocol<H: Delete>(
             check_deadline(host, deadline, path)?;
             return Err(skip.into());
         }
-        Err(NotDeleted::Failed(error)) => return Err(failed(error)),
         Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
     };
     done.removed_entries = deletion.removed_entries;

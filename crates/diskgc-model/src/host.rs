@@ -1262,7 +1262,7 @@ impl Host for ModelHost {
             |inner| {
                 if let Some(errno) = inner.injected.take() {
                     return (
-                        Err(ProcError::Failed(HostError::errno(
+                        Err(ProcError::failed(HostError::errno(
                             "pidfd_open",
                             pid,
                             errno,
@@ -1294,7 +1294,7 @@ impl Host for ModelHost {
             |inner| {
                 if let Some(errno) = inner.injected.take() {
                     return (
-                        Err(ProcError::Failed(HostError::errno(
+                        Err(ProcError::failed(HostError::errno(
                             "poll pidfd",
                             pid,
                             errno,
@@ -1671,7 +1671,7 @@ impl Host for ModelHost {
         self.call(Op::ProcRootLookup, Some(path.to_owned()), None, |inner| {
             let fail = |e: Errno| {
                 (
-                    Err(ProcError::Failed(HostError::errno("openat2", &shown, e))),
+                    Err(ProcError::failed(HostError::errno("openat2", &shown, e))),
                     None,
                     errno_text(e),
                 )

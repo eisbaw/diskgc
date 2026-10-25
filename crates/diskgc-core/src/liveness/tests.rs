@@ -107,7 +107,11 @@ proptest! {
         namespace_readable in any::<bool>(),
         local in any::<bool>(),
         settled in any::<bool>(),
-        probe in prop_oneof![Just(Ok(false)), Just(Ok(true)), Just(Err("EPERM".to_owned()))],
+        probe in prop_oneof![
+            Just(Ok(false)),
+            Just(Ok(true)),
+            Just(Err(crate::host::HostError::errno("pidfd_open", 7, crate::host::Errno::EPERM))),
+        ],
     ) {
         let namespace = if namespace_readable {
             Ok(PidNamespace { initial, hidepid })
@@ -135,7 +139,8 @@ proptest! {
             probed = true;
             assert_eq!(pid, Pid(number));
             probe.clone()
-        });
+        })
+        .expect("no generated probe runs out of descriptors");
         let preconditions = local && namespace_readable && initial && !hidepid;
         let ended = preconditions && settled && !carried && !unreadable && probe == Ok(false);
         prop_assert_eq!(answer == OwnerPid::Ended, ended, "{:?}", answer);
@@ -169,7 +174,7 @@ fn an_inner_namespace_level_matches_and_reports_the_outer_pid() {
         true,
     );
     table.add_levels(&[3_025_375, 9]);
-    let answer = owner_pid(&table, Ok(TMPFS), 9, |_| panic!("not probed"));
+    let answer = owner_pid(&table, Ok(TMPFS), 9, |_| panic!("not probed")).expect("decided");
     assert_eq!(answer, OwnerPid::MayBeInUse(Pid(3_025_375)));
 }
 
@@ -185,7 +190,8 @@ fn unreadable_processes_are_every_blocker_sorted() {
     table.add_unreadable(Pid(91));
     table.add_unreadable(Pid(90));
     table.add_unreadable(Pid(91));
-    let OwnerPid::Unknown(unknown) = owner_pid(&table, Ok(TMPFS), 4242, |_| panic!("not probed"))
+    let Ok(OwnerPid::Unknown(unknown)) =
+        owner_pid(&table, Ok(TMPFS), 4242, |_| panic!("not probed"))
     else {
         panic!("an unreadable process makes the answer unknown");
     };
@@ -224,7 +230,7 @@ fn namespace_facts_must_hold_over_the_whole_scan() {
     ] {
         let mut table = PidTable::new(before.clone(), true);
         table.confirm_namespace(after.clone());
-        let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false));
+        let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false)).expect("decided");
         assert_eq!(answer == OwnerPid::Ended, trusted, "{before:?} {after:?}");
     }
 }
@@ -241,7 +247,7 @@ fn a_failed_precondition_names_its_rule_hidepid_first() {
         (false, true, "the held /proc is mounted with hidepid"),
     ] {
         let table = PidTable::new(Ok(PidNamespace { initial, hidepid }), true);
-        let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false));
+        let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false)).expect("decided");
         assert_eq!(
             answer,
             OwnerPid::Unknown(Unknown {
@@ -251,4 +257,29 @@ fn a_failed_precondition_names_its_rule_hidepid_first() {
             "initial {initial} hidepid {hidepid}"
         );
     }
+}
+
+/// TASK-185: the probe running out of descriptors is no answer about the
+/// number (never "unknown", which skips one candidate after another): an
+/// error of the run for the caller. Any other probe failure is unknown.
+#[test]
+fn a_probe_out_of_descriptors_is_an_error_not_an_unknown_owner() {
+    use crate::host::{Errno, HostError};
+    let table = PidTable::new(
+        Ok(PidNamespace {
+            initial: true,
+            hidepid: false,
+        }),
+        true,
+    );
+    for errno in [Errno::EMFILE, Errno::ENFILE] {
+        let answer = owner_pid(&table, Ok(TMPFS), 4242, |pid| {
+            Err(HostError::errno("pidfd_open", pid, errno))
+        });
+        assert!(matches!(&answer, Err(e) if e.is(errno)), "{answer:?}");
+    }
+    let answer = owner_pid(&table, Ok(TMPFS), 4242, |pid| {
+        Err(HostError::errno("pidfd_open", pid, Errno::EPERM))
+    });
+    assert!(matches!(answer, Ok(OwnerPid::Unknown(_))), "{answer:?}");
 }

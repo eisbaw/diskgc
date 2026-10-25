@@ -2883,8 +2883,47 @@ fn a_blocking_scan_is_replaced_at_the_short_limit() {
     let host = host(&yaml("", &tree, rest));
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert!(host.unfired_events().is_empty());
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-b"), Some(Reason::InUse));
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-b"),
+        Some(Reason::InUseUnknown)
+    );
     assert_eq!(actions(&report), ["/tmp/pytest-of-a"], "{report:#?}");
+}
+
+/// TASK-190: a process of the user that cannot be inspected makes whether
+/// any candidate is in use unknown (`in_use_unknown`, not `in_use` with
+/// evidence it does not have), and those skips count toward the tier's
+/// three-in-a-row breaker: after three, the rest of the tier is skipped
+/// unchecked, without a scan each.
+#[test]
+fn an_unreadable_process_counts_toward_the_in_use_unknown_breaker() {
+    let tree: String = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|n| format!("  /tmp/pytest-of-{n}: {}\n", old_dir("10K")))
+        .collect();
+    let host = host(&yaml(
+        "",
+        &tree,
+        "  - {pid: 9, exe: /usr/bin/tool, proc: failed}\n",
+    ));
+    let report = ensure(&host, &tmp("profile:pytest-of-dir"));
+    assert!(actions(&report).is_empty(), "{report:#?}");
+    let reasons: Vec<Reason> = report.skipped.iter().map(|s| s.reason).collect();
+    assert_eq!(reasons, [Reason::InUseUnknown; 5], "{report:#?}");
+    let (checked, unchecked): (Vec<_>, Vec<_>) = report
+        .skipped
+        .iter()
+        .partition(|s| !s.detail.as_deref().unwrap_or("").starts_with("not checked"));
+    assert_eq!((checked.len(), unchecked.len()), (3, 2), "{report:#?}");
+    for skip in checked {
+        assert_eq!(
+            skip.process_blockers
+                .as_deref()
+                .map(|b| (b[0].pid, b[0].evidence.as_str())),
+            Some((9, "unreadable")),
+            "{skip:?}"
+        );
+    }
 }
 
 #[test]
@@ -2896,7 +2935,10 @@ fn an_unreadable_process_without_a_name_has_null_command_on_the_wire() {
         "  - {pid: 9, exe: /usr/bin/tool, name: '', proc: failed}\n",
     ));
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
-    assert_eq!(skip_of(&report, "/tmp/pytest-of-a"), Some(Reason::InUse));
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-a"),
+        Some(Reason::InUseUnknown)
+    );
     let wire: serde_json::Value = serde_json::from_str(&report.to_json()).expect("report JSON");
     assert_eq!(
         wire["skipped"][0]["process_blockers"],

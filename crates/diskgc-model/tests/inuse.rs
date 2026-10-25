@@ -12,7 +12,7 @@ use diskgc_core::engine::{Candidate, DeleteOptions, Deletion, End, Reason, Rules
 use diskgc_core::host::{Dev, Errno, Host, Pid};
 use diskgc_core::inuse::{
     self, Checker, FreshAttempts, HeldByDeleted, MAX_LISTINGS, Options, REREAD_PAUSES, REUSE_LIMIT,
-    Scan,
+    Scan, ScanError,
 };
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
@@ -101,7 +101,7 @@ fn check_c(host: &ModelHost, block_ipc: bool) -> (Result<(), Skip>, Scan) {
     let path = PathBuf::from("/tmp/c");
     let candidate = Candidate::new(&parent, &path).expect("a name");
     let record = walk(host, &candidate, &rules(block_ipc), None).expect("walk");
-    let scan = inuse::scan(host, &options(!block_ipc)).expect("scan");
+    let scan = inuse::scan(host, &options(!block_ipc), None).expect("scan");
     (scan.check(&candidate, &record), scan)
 }
 
@@ -136,6 +136,14 @@ fn exists(host: &ModelHost, path: &str) -> bool {
 fn in_use(result: Result<(), Skip>) -> Skip {
     let skip = result.expect_err("expected in_use");
     assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    skip
+}
+
+/// A scan that cannot judge (unsettled, or an unreadable process that
+/// blocks) says `in_use_unknown`, never `in_use` (TASK-190).
+fn in_use_unknown(result: Result<(), Skip>) -> Skip {
+    let skip = result.expect_err("expected in_use_unknown");
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
     skip
 }
 
@@ -461,7 +469,7 @@ fn unreadable_processes_block_unless_their_status_explains_them() {
         let notes = scan.notes().join("\n");
         assert!(notes.contains(noted), "{with:?}: {notes}");
         if blocks {
-            let skip = in_use(result);
+            let skip = in_use_unknown(result);
             assert!(
                 skip.detail.starts_with("pid 10 (tool) cannot be inspected"),
                 "{with:?}: {skip}"
@@ -488,7 +496,7 @@ fn root_mode_does_not_excuse_an_unreadable_root_process() {
     ] {
         let host = model(&format!("{}own_uid: 0\n", processes(&[process(10, &with)])));
         let (result, scan) = check_c(&host, true);
-        let skip = in_use(result);
+        let skip = in_use_unknown(result);
         assert!(skip.detail.contains("pid 10"), "{name}: {skip}");
         assert!(
             scan.notes().iter().all(|note| !note.contains("excused")),
@@ -571,7 +579,7 @@ fn a_child_forked_before_its_parent_was_found_gone_is_read() {
         processes(&[process(10, &["proc: failed"])])
     ));
     let (result, scan) = check_c(&host, true);
-    let skip = in_use(result);
+    let skip = in_use_unknown(result);
     assert!(skip.detail.starts_with("pid 11 "), "{skip}");
     assert_eq!(scan.gone(), 1);
 }
@@ -634,7 +642,7 @@ fn an_excuse_must_hold_on_every_status_read() {
 ",
         processes(&[non_dumpable()])
     ));
-    let skip = in_use(check_c(&host, true).0);
+    let skip = in_use_unknown(check_c(&host, true).0);
     assert!(skip.detail.starts_with("pid 10 "), "{skip}");
 }
 
@@ -769,7 +777,7 @@ fn only_listings_with_new_pids_count_against_the_bound() {
         assert_eq!(result, Ok(()), "k={k}: {:?}", scan.notes());
     }
     let (result, _) = run(max);
-    assert!(in_use(result).detail.contains("still growing"));
+    assert!(in_use_unknown(result).detail.contains("still growing"));
 }
 
 /// A clear borrows the exact candidate and record that were checked. Two
@@ -796,7 +804,7 @@ fn a_clear_for_one_candidate_deletes_only_that_candidate() {
         .check(&host, &dc, &c_record, &mut FreshAttempts::new(None))
         .expect_err("a hard-linked alias is a different candidate name");
     assert!(
-        mismatch.detail.contains("another candidate name"),
+        mismatch.to_string().contains("another candidate name"),
         "{mismatch}"
     );
     let clear = checker
@@ -928,7 +936,7 @@ fn an_identity_probe_error_blocks_every_candidate_without_aborting_the_scan() {
         processes(&[process(10, &[])])
     ));
     let (result, scan) = check_c(&host, true);
-    let skip = in_use(result);
+    let skip = in_use_unknown(result);
     assert!(
         skip.detail
             .contains("process identity could not be checked"),
@@ -952,7 +960,7 @@ fn an_identity_open_error_also_blocks_every_candidate() {
         processes(&[process(10, &[])])
     ));
     let (result, scan) = check_c(&host, true);
-    let skip = in_use(result);
+    let skip = in_use_unknown(result);
     assert!(
         skip.detail
             .contains("process identity could not be checked"),
@@ -991,6 +999,16 @@ fn running_out_of_descriptors_in_the_scan_is_an_error_of_the_run() {
         ("proc_uids", 1, "EMFILE", "readable"),
         ("proc_cmdline", 1, "ENFILE", "readable"),
         ("proc_root_lookup", 1, "EMFILE", "readable"),
+        // TASK-185: diskgc's own status (its capabilities and uid_map for
+        // the privilege excuse) was read with `.ok()`: an unknown status.
+        ("proc_status", 1, "EMFILE", "readable"),
+        // Owner PID's reads: the namespace facts before and after the
+        // listings, and every listed process's NSpid.
+        ("pid_namespace", 1, "ENFILE", "readable"),
+        ("pid_namespace", 2, "EMFILE", "readable"),
+        ("proc_nspid", 1, "EMFILE", "readable"),
+        // The socket query: `contains_ipc` for every candidate with one.
+        ("bound_unix_sockets", 1, "EMFILE", "readable"),
     ];
     for (op, nth, errno, access) in cases {
         // TMPDIR makes the facts look the value up in the process's root.
@@ -1006,11 +1024,13 @@ fn running_out_of_descriptors_in_the_scan_is_an_error_of_the_run() {
         ));
         let options = Options {
             pytest_facts: true,
+            pid_lookup: true,
             ..options(true)
         };
-        let error = inuse::scan(&host, &options)
-            .map(|scan| scan.notes())
-            .expect_err(&format!("{op} {errno}: the scan must fail"));
+        let error = match inuse::scan(&host, &options, None).map(|scan| scan.notes()) {
+            Err(ScanError::Failed(error)) => error,
+            other => panic!("{op} {errno}: the scan must fail, got {other:?}"),
+        };
         assert!(
             error.is(Errno::from_name(errno).expect("named")),
             "{op}: {error}"
@@ -1037,7 +1057,7 @@ fn another_reader_error_still_blocks_without_failing_the_scan() {
         processes(&[process(10, &[])])
     ));
     let (result, scan) = check_c(&host, true);
-    let skip = in_use(result);
+    let skip = in_use_unknown(result);
     assert!(skip.detail.contains("EIO"), "{skip}");
     assert_eq!(scan.unreadable().len(), 1);
 }
@@ -1143,7 +1163,7 @@ fn a_process_list_that_keeps_growing_leaves_the_scan_unsettled() {
         processes(&[process(10, &[])]),
         forks(n)
     ));
-    let skip = in_use(check_c(&host, true).0);
+    let skip = in_use_unknown(check_c(&host, true).0);
     assert!(skip.detail.contains("still growing"), "{skip}");
     assert!(
         skip.process_blockers.is_none(),
@@ -1234,7 +1254,7 @@ fn a_persistently_unsettled_scan_is_never_reused() {
             .expect("check")
             .expect_err("two unsettled scans must block")
             .reason,
-        Reason::InUse
+        Reason::InUseUnknown
     );
     assert_eq!(
         host.trace().iter().filter(|c| c.op == Op::OwnPid).count(),
@@ -1276,7 +1296,7 @@ fn a_blocking_scan_respects_zero_reuse() {
                 .expect("check")
                 .expect_err("unreadable process blocks")
                 .reason,
-            Reason::InUse
+            Reason::InUseUnknown
         );
     }
     assert_eq!(
@@ -1505,7 +1525,7 @@ fn only_live_sockets_and_fifos_keep_their_candidate_under_the_live_policy() {
     let path = PathBuf::from("/tmp/c");
     let candidate = Candidate::new(&parent, &path).expect("a name");
     let record = walk(&host, &candidate, &rules(false), None).expect("walk");
-    let scan = inuse::scan(&host, &options(false)).expect("scan");
+    let scan = inuse::scan(&host, &options(false), None).expect("scan");
     let skip = scan.check(&candidate, &record).expect_err("cannot tell");
     assert_eq!(skip.reason, Reason::ContainsIpc, "{skip}");
 }
@@ -1830,4 +1850,119 @@ fn an_in_use_unknown_skip_keeps_the_stale_scan_as_latest() {
     assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
     let latest = checker.latest().expect("the stale scan is kept");
     assert!(!latest.is_fresh_at(host.now()));
+}
+
+// ---- The run's deadline and signals in the scan (TASK-189) ----
+
+/// A fork storm whose listings are slow: pid 10 forks a new child after
+/// each of the first `n` listings, and each listing takes `ms` (the clock
+/// jumps after it), as on a busy host with thousands of processes.
+fn slow_storm(n: u32, ms: u32) -> String {
+    let mut events = String::from("events:\n");
+    for k in 1..=n {
+        events.push_str(&format!(
+            "  - {{at: {{op: pids, nth: {k}, when: after}}, fork: {{pid: 10, child: {}}}}}\n",
+            100 + k
+        ));
+        events.push_str(&format!(
+            "  - {{at: {{op: pids, nth: {k}, when: after}}, advance: {ms}ms}}\n"
+        ));
+    }
+    format!("{}{events}", processes(&[process(10, &[])]))
+}
+
+/// The deletion step for `/tmp/c` with a deadline `after` from now.
+fn reclaim_until(host: &ModelHost, after: std::time::Duration) -> Result<Deletion, Stop> {
+    let deadline = host.now().checked_add(after).expect("fits");
+    let parent = dir(host, "/tmp");
+    let path = PathBuf::from("/tmp/c");
+    let candidate = Candidate::new(&parent, &path).expect("a name");
+    let mut checker = Checker::new(&rules(true), REUSE_LIMIT);
+    delete_unused(
+        host,
+        &mut checker,
+        &candidate,
+        &rules(true),
+        DeleteOptions {
+            deadline: Some(deadline),
+            ..DeleteOptions::default()
+        },
+    )
+}
+
+/// A scan of up to 16 growing listings and its retry can take seconds on a
+/// busy host (here 2 x 16 listings of 200 ms). It stops at the first
+/// listing after the deadline: the run stops (`DeadlinePassed`) within one
+/// listing of it, never runs on to a verdict 6 s later (the PRD's
+/// `--timeout` + 10 s), and deletes nothing.
+#[test]
+fn a_slow_unsettled_scan_stops_at_the_deadline() {
+    let listing_ms = 200;
+    let n = u32::try_from(2 * MAX_LISTINGS).expect("small");
+    let host = model(&slow_storm(n, listing_ms));
+    let started = host.now();
+    let deadline = std::time::Duration::from_secs(1);
+    match reclaim_until(&host, deadline) {
+        Err(Stop::Stopped(diskgc_core::outcome::Stop::DeadlinePassed { path })) => {
+            assert_eq!(path, Path::new("/tmp/c"));
+        }
+        other => panic!("expected the deadline to stop the scan, got {other:?}"),
+    }
+    let took = host.now().saturating_since(started);
+    assert!(
+        took <= deadline + std::time::Duration::from_millis(listing_ms.into()),
+        "stopped {took:?} after the start, past one listing beyond the deadline"
+    );
+    assert!(exists(&host, "/tmp/c/a"));
+}
+
+/// SIGINT during the 1 s retry pause (the scans before it were stale):
+/// the pause ends within one slice (`PAUSE_SLICE`), the run stops
+/// (`Interrupted`), and the candidate is not checked again nor deleted.
+#[test]
+fn a_signal_during_the_retry_pause_stops_promptly() {
+    // Two stale scans: pauses of 250 ms (5 slices) and 1 s; the signal
+    // arrives at the end of the first slice of the second pause.
+    let first_pause_slices =
+        u32::try_from(inuse::FRESH_RETRY_PAUSES[0].as_millis() / inuse::PAUSE_SLICE.as_millis())
+            .expect("small");
+    let host = model(&format!(
+        "{}  - {{at: {{op: sleep, nth: {}, when: after}}, signal: int}}\n",
+        stale_scans(2),
+        first_pause_slices + 1
+    ));
+    let started = host.now();
+    match reclaim(&host, "/tmp/c", true) {
+        Err(Stop::Stopped(diskgc_core::outcome::Stop::Interrupted { path })) => {
+            assert_eq!(path, Path::new("/tmp/c"));
+        }
+        other => panic!("expected the signal to stop the pause, got {other:?}"),
+    }
+    let stale = std::time::Duration::from_secs(2) * 2;
+    assert_eq!(
+        host.now().saturating_since(started),
+        stale + inuse::FRESH_RETRY_PAUSES[0] + inuse::PAUSE_SLICE,
+        "the 1 s pause ended after one slice"
+    );
+    assert_eq!(scans(&host), 2, "no scan after the signal");
+    assert!(exists(&host, "/tmp/c/a"));
+    assert!(host.unfired_events().is_empty());
+}
+
+/// A signal during a scan stops it at the next listing: no more listings,
+/// no verdict.
+#[test]
+fn a_signal_during_a_scan_stops_it_at_the_next_listing() {
+    let n = u32::try_from(MAX_LISTINGS).expect("small");
+    let host = model(&format!(
+        "{}  - {{at: {{op: pids, nth: 3, when: after}}, signal: term}}\n",
+        slow_storm(n, 0)
+    ));
+    match reclaim(&host, "/tmp/c", true) {
+        Err(Stop::Stopped(diskgc_core::outcome::Stop::Interrupted { .. })) => {}
+        other => panic!("expected the signal to stop the scan, got {other:?}"),
+    }
+    let listings = host.trace().iter().filter(|c| c.op == Op::Pids).count();
+    assert_eq!(listings, 3, "no listing after the signal");
+    assert!(exists(&host, "/tmp/c/a"));
 }

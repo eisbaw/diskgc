@@ -1,0 +1,34 @@
+# TASK-185: Owner PID's pidfd probe of the pid in the name failing with
+# EMFILE says nothing about that pid and would hit the next candidate too:
+# an error of the run (exit 3), never `producer_unknown` for one candidate
+# after another. Nothing is deleted. (Every other rule passed: local
+# filesystem, initial PID namespace, settled scan, no carrier of 4242.)
+profile_vector: 1
+profile: nix-shell-rc
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/nix-shell-4242-17: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+  events:
+    - at: {op: pid_alive, nth: 1, when: before}
+      fail: EMFILE
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: host}]
+  reclaim_exit: 3
+  errors: [{cause: host}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/nix-shell-4242-17/rc]

@@ -28,7 +28,7 @@ const HELD_TOP_MAX: usize = 3;
 
 /// [`Report::summary`].
 pub(super) fn summary(report: &Report) -> Option<String> {
-    let held = held_line(&report.held_by_deleted_files);
+    let held = held_line(report.held_by_deleted_files.as_deref().unwrap_or_default());
     match report.status {
         Status::UsageError => None,
         _ if report.dry_run => Some(dry_run_text(report, held)),
@@ -210,7 +210,7 @@ impl<'a> KeptRow<'a> {
             tier: &entry.tier,
             reason,
             count: 1,
-            diagnostic: plain_diagnostic(reason)
+            diagnostic: plain_diagnostic(reason, entry.process_blockers.as_deref())
                 .or_else(|| diagnostic(entry.detail.as_deref(), entry.process_blockers.as_deref())),
             evidence: evidence_text(entry),
         }
@@ -292,16 +292,30 @@ fn skip_why(skip: &SkipEntry) -> String {
 }
 
 fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
-    plain_diagnostic(skip.reason)
+    plain_diagnostic(skip.reason, skip.process_blockers.as_deref())
         .or_else(|| diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref()))
 }
 
 /// The diagnostic for a reason whose refusal detail is for diagnosis, not
 /// for the user: `in_use_unknown`'s names attempts and freshness bounds,
-/// and the line [`busy_line`] says what to do.
-fn plain_diagnostic(reason: Reason) -> Option<String> {
-    (reason == Reason::InUseUnknown)
-        .then(|| "the host was too busy to check whether it is in use".to_owned())
+/// and the line [`busy_line`] says what to do. One whose scan could not
+/// inspect a process of the user (TASK-190) names that process instead:
+/// it is not the host's load, and "used by" would claim a use nobody saw.
+fn plain_diagnostic(reason: Reason, blockers: Option<&[ProcessBlocker]>) -> Option<String> {
+    if reason != Reason::InUseUnknown {
+        return None;
+    }
+    Some(match blockers.and_then(<[ProcessBlocker]>::first) {
+        Some(blocker) => format!(
+            "pid {}{} cannot be inspected, so whether it is in use cannot be told",
+            blocker.pid,
+            blocker
+                .command
+                .as_deref()
+                .map_or_else(String::new, |command| format!(" ({})", one_line(command)))
+        ),
+        None => "the host was too busy to check whether it is in use".to_owned(),
+    })
 }
 
 /// What a user does about candidates kept as `in_use_unknown` (TASK-144):

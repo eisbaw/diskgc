@@ -462,16 +462,32 @@ never after the last one. Every read only adds: a use any read of a process
 found counts, also when a later read of it fails or finds it gone. A pid
 found gone and listed again was reused (or is a zombie not yet reaped): it
 is read again as a new process, once per scan. After 16
-listings that each brought new pids the scan is unsettled. The checker
-waits 20 ms and makes one complete new scan before judging a candidate.
-If that scan is unsettled too, the candidate is `in_use`; the next candidate
-starts a new scan immediately. Other blocking scans can be reused for less
-than half a second from completion. Listings made
-only for re-reads do not count (they
-are bounded by the re-reads each process gets) (a process it did not read could have inherited
-anything); a machine that keeps starting processes faster than the scan
-reads them costs reclaim that way. diskgc's own process is never counted:
-it holds the candidate open and locked while it checks it.
+listings that each brought new pids the scan is **unsettled** (a process
+it did not read could have inherited anything); listings made only for
+re-reads do not count (they are bounded by the re-reads each process
+gets). The checker waits 20 ms and makes one complete new scan before
+judging a candidate. If that scan is unsettled too, whether the candidate
+is in use cannot be told: it is skipped `in_use_unknown`, not `in_use`
+(TASK-190, decided 2026-10-25 on Mark's delegation: `in_use` would give a
+harness evidence of a use that was never seen), and it counts toward the
+tier's three-in-a-row limit (Freshness, below), so a sustained fork storm
+costs at most three candidates' scans per tier, not two per candidate.
+The next candidate starts a new scan immediately. Other blocking scans can
+be reused for less than half a second from completion. A machine that
+keeps starting processes faster than the scan reads them costs reclaim
+that way. diskgc's own process is never counted: it holds the candidate
+open and locked while it checks it.
+
+**The run's deadline and signals** are checked by the scan before every
+listing and after every pause (the re-reads', the 20 ms before the retry
+of an unsettled scan, Owner PID's re-reads): up to 16 growing listings
+and the reads they call for, twice, can take seconds on a busy host. A
+scan that reaches the deadline stops the run (`deadline`); one that sees
+SIGINT or SIGTERM stops it (`interrupted`). Neither judges the candidate
+(TASK-189). What a scan cannot interrupt is one batch of reads (every
+process new in one listing), a few hundred milliseconds on a host of
+thousands of processes, and a read blocked in the kernel (A process using
+a dead mount, below).
 
 **Unreadable or vanishing processes:** a process that cannot be read is
 read again, each process on its own schedule: 2 ms after its first read, 8
@@ -536,8 +552,11 @@ reclaim on any desktop):
   after its `setresuid`), that stands, as for any other user's process.
   Limit: a privileged process that switches all its uids to another user
   while keeping the user's files open is then not seen;
-- any other unreadable process of the user makes every candidate `in_use`:
-  one whose reads fail for another reason (also another user's: a failed
+- any other unreadable process of the user makes every candidate
+  `in_use_unknown` (it could be using any of them, and whether it does
+  cannot be told; the skip names it, evidence `unreadable`), counted
+  toward the three-in-a-row limit like an unsettled scan (TASK-190): one
+  whose reads fail for another reason (also another user's: a failed
   read says nothing about who may read it), one whose status cannot be
   read, and one refused although it is dumpable, unprivileged and the
   user's (a shell started with `newgrp` or `sg`: the kernel also compares
@@ -731,11 +750,17 @@ once; none of them makes diskgc take a live process for gone):
    stock soft limit of 1024 is too low on a busy host; the hard limit is
    never raised, and children get the soft limit diskgc was started with.
    Running out anyway (`EMFILE`, or `ENFILE` for the system's table) in
-   any read of the scan (a pin, a `/proc` reader, a status read) says
+   any read of the scan (a pin, a `/proc` reader, a status read, a
+   `uid_map`, diskgc's own status, a lookup in a process's root, Owner
+   PID's namespace and `NSpid` reads and its pidfd probe, the pytest
+   contract's listing of the session's directory, the socket query) says
    nothing about the process being read and would hit the next one too,
    so it is an error of the run (exit 3 if the goal is not met), never an
-   unsettled scan or an unreadable process: the same rule as the walk's
-   ([Fail closed on anything unreadable](#the-eligibility-walk-mandatory-per-candidate)).
+   unsettled scan, an unreadable process, an unknown privilege excuse, an
+   unknown owner (`producer_unknown`) or an unknown socket: the same rule
+   as the walk's ([Fail closed on anything unreadable](#the-eligibility-walk-mandatory-per-candidate)).
+   The readers report it as its own kind of failure, which every caller
+   must handle (TASK-185).
    A host with more processes than the hard limit therefore reclaims
    nothing through `fs` and Cargo tiers, loudly, until the limit is
    raised. A process that appears after the final identity check belongs
@@ -819,8 +844,10 @@ more); its exit code
 follows available space like any other skip (decided 2026-10-25 for
 TASK-144 on Mark's delegation: "never delete on a stale scan; retry with
 backoff a few times, then skip that candidate and carry on"). A part-way
-Cargo target stops at the part that hit it, as for `in_use`. After three
-candidates in a row of one tier (in the order taken) end `in_use_unknown`,
+Cargo target stops at the part that hit it, as for `in_use`. A signal
+during a retry pause ends it within 50 ms and stops the run. After three
+candidates in a row of one tier (in the order taken) end `in_use_unknown`
+(a stale scan, an unsettled scan, or a process that cannot be inspected),
 the host is taken to be too busy for this run: the tier's remaining
 candidates are skipped `in_use_unknown` without a scan, and any other
 outcome resets the count. A later tier starts again from zero. Refusing
@@ -1860,11 +1887,12 @@ reach (step 2) opens and before its `statx` of the candidate and of each
 keep marker, before each `where` predicate, before each `openat2`,
 listing and `statx` of the eligibility walk and of the delete's reopening
 of directories, and right before each `unlinkat` and `fchmod` (step 5).
-Not before: the reads of the mount table, the open and `flock` of step 3 (the lock does
-not wait) and the in-use scan (bounded by its own rounds).
-An in-use scan can overrun the deadline, including its one retry after an
-unsettled scan. A dry run checks the deadline again before judging its
-candidate; a reclaim checks it in the delete engine before each mutation.
+Not before: the reads of the mount table and the open and `flock` of step 3 (the lock does
+not wait). The in-use scan checks it before each of its listings and after
+each pause (In use, The run's deadline and signals), so it overruns by at
+most one batch of reads. A dry run checks the deadline again before
+judging its candidate; a reclaim checks it in the delete engine before
+each mutation.
 
 **Scope** means *the objects the walk checked*. Every directory diskgc
 descends into is matched by (device, inode) against the walk's record, and
@@ -2201,7 +2229,7 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   them in its initial environment (Filesystem candidates, In use), or uses
   the target directory, a directory directly in it, a profile directory or
   a lock file, matched by (device, inode) (`in_use`); an unsettled scan or
-  an unreadable process of the user blocks as there;
+  an unreadable process of the user blocks as there (`in_use_unknown`);
 - a visible process has its working directory or executable inside the
   target, by path text (a test binary still running; parts the walks do
   not read, such as `target/doc` and `target/tmp`);
@@ -3379,7 +3407,8 @@ the kernel (a hung network mount, a disk in error recovery) cannot be
 interrupted by a signal and can overrun the deadline; diskgc lists the
 overrun in the report's `overruns` when it returns. Network filesystems are never candidates, which
 removes the commonest cause, and a mount point is never `statx`ed by
-discovery or the judgement of a candidate (Before the walk). What can
+discovery or the judgement of a candidate (Before the walk). The in-use
+scan checks the deadline and signals before every listing (In use). What can
 still block: a process using a dead mount hangs the in-use scan (In use),
 and a dead mount made after the mount table was read (Deletion, accepted
 limits). A supervised worker that the caller could

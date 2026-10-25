@@ -442,10 +442,7 @@ pub fn eligibility<H: Host>(
     if let Err(skip) = judge_idle(host, path, last, idle) {
         return Ok(Err(skip));
     }
-    let scan = checker.current(host).map_err(|error| Stop::Failed {
-        path: path.clone(),
-        error,
-    })?;
+    let scan = checker.current(host, deadline).map_err(|e| e.at(path))?;
     check_deadline(host, deadline, path)?;
     if let Err(skip) = judge_in_use(
         scan,
@@ -644,9 +641,8 @@ pub(super) fn judge_in_use<F>(
     project: Project,
 ) -> Result<(), Skip> {
     let path = &target.path;
-    if let Some(why) = scan.blocked() {
-        return Err(Skip::new(Reason::InUse, path.clone(), why)
-            .with_process_blockers(scan.blocking_unreadable().into_iter().collect()));
+    if let Some(skip) = scan.unknown(path) {
+        return Err(skip);
     }
     let mut evidence = Vec::new();
     let mut blockers = Vec::new();

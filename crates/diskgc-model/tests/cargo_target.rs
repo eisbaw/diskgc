@@ -951,14 +951,19 @@ fn cargo_manifest_dir_of_the_project_in_the_initial_environment_is_in_use() {
 }
 
 /// A process that cannot be read (and is not explained as another user's
-/// or privileged) could be using the target: `in_use`.
+/// or privileged) could be using the target: whether it is cannot be told,
+/// `in_use_unknown` (TASK-190).
 #[test]
 fn an_unreadable_process_blocks() {
     let model = model(
         "",
         "processes:\n  - {pid: 42, exe: /bin/sh, proc: failed}\n",
     );
-    assert_skip(only_target(&model), Reason::InUse, "cannot be inspected");
+    assert_skip(
+        only_target(&model),
+        Reason::InUseUnknown,
+        "cannot be inspected",
+    );
 }
 
 /// Eligibility deletes nothing and takes no lock: no `unlinkat`, `fchmod`

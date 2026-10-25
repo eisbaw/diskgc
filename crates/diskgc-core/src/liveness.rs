@@ -212,7 +212,7 @@ impl Unknown {
 
 /// The pidfd probe's answer for the number in diskgc's namespace
 /// ([`crate::host::Host::pid_alive`]).
-pub type Probe = Result<bool, String>;
+pub type Probe = Result<bool, crate::host::HostError>;
 
 /// Owner PID steps 2 to 5 for `number`, in order: the candidate's
 /// filesystem must be local (`fs_magic`), the held `/proc` without
@@ -220,42 +220,45 @@ pub type Probe = Result<bool, String>;
 /// the scan, unchanged); then a match at any level of the table retains; a process that stayed
 /// unreadable, or an unsettled scan, makes the answer unknown; last, only
 /// the probe's `ESRCH` (`Ok(false)`) lets "ended" stand. `probe` is called
-/// only when every other rule passed.
+/// only when every other rule passed. `Err`: the probe found diskgc out of
+/// file descriptors, an error of the run and no answer about `number`
+/// (TASK-185).
 pub fn owner_pid(
     table: &PidTable,
     fs_magic: Result<u64, String>,
     number: u32,
     probe: impl FnOnce(Pid) -> Probe,
-) -> OwnerPid {
+) -> Result<OwnerPid, crate::host::HostError> {
     match fs_magic {
-        Err(why) => return Unknown::rule(format!("filesystem type unreadable: {why}")),
+        Err(why) => return Ok(Unknown::rule(format!("filesystem type unreadable: {why}"))),
         Ok(magic) if local_filesystem(magic).is_none() => {
-            return Unknown::rule(format!(
+            return Ok(Unknown::rule(format!(
                 "filesystem type {magic:#x} is not on the local list"
-            ));
+            )));
         }
         Ok(_) => {}
     }
     if let Err(rule) = table.process_list_complete() {
-        return Unknown::rule(rule);
+        return Ok(Unknown::rule(rule));
     }
     if let Some(carrier) = table.carrier(number) {
-        return OwnerPid::MayBeInUse(carrier);
+        return Ok(OwnerPid::MayBeInUse(carrier));
     }
     if !table.settled {
-        return Unknown::rule("the process scan did not settle");
+        return Ok(Unknown::rule("the process scan did not settle"));
     }
     if !table.unreadable.is_empty() {
-        return OwnerPid::Unknown(Unknown {
+        return Ok(OwnerPid::Unknown(Unknown {
             rule: "a process's NSpid stayed unreadable".to_owned(),
             blockers: table.unreadable.clone(),
-        });
+        }));
     }
-    match probe(Pid(number)) {
+    Ok(match probe(Pid(number)) {
         Ok(false) => OwnerPid::Ended,
         Ok(true) => OwnerPid::MayBeInUse(Pid(number)),
+        Err(e) if e.is_out_of_descriptors() => return Err(e),
         Err(why) => Unknown::rule(format!("pidfd probe of {number} failed: {why}")),
-    }
+    })
 }
 
 #[cfg(test)]

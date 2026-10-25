@@ -482,9 +482,11 @@ development builds, the pre-release sandbox gate,
   carries the refusal of the last tier that judged it (grouped by reason
   after five), and Cargo targets whose previous reclaim left only lock
   files are omitted. Reasons are the JSON names, except `keep_marker`,
-  which reads `keep marker`. A candidate kept as `in_use_unknown` reads "the host
-  was too busy to check whether it is in use", and one line counts them
-  and says to run again when the host is less busy. Lines name their tier (`[TIER]`) when the run had
+  which reads `keep marker`. A candidate kept as `in_use_unknown` because
+  no scan stayed fresh or the process list did not settle reads "the host
+  was too busy to check whether it is in use"; one kept because a process
+  of the user cannot be inspected names that process. One line counts
+  them and says to run again when the host is less busy. Lines name their tier (`[TIER]`) when the run had
   more than one. The summary lists preflight profile refusals separately
   from kept candidates. A dry run (the report's `dry_run`, also when it
   failed) gives each candidate one verdict, `would reclaim`, `eligible,
@@ -598,9 +600,9 @@ is `host`.
   byte).
 - `plan` is filled only by `--dry-run`; `reason` uses the skip-reason enum.
   The current plan has one row per candidate. `estimated_bytes` is
-  `null` for Docker and Nix without a reported size, for candidates not
-  yet tallied, and for every skipped candidate (its checks stopped before
-  its walk was complete, so a size would be a partial count); `checkouts`
+  `null` when the size is unknown: Docker and Nix without a reported
+  size, candidates not yet tallied, and a skipped candidate whose checks
+  stopped before its walk was complete (a size would be a partial count); `checkouts`
   is the source profile's setting the candidate was judged under (`allow`:
   it may hold a version-control checkout, see
   [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate));
@@ -666,16 +668,21 @@ is `host`.
   remains discoverable and may appear as an ineligible `empty` plan row in
   `--dry-run`.
 - `held_by_deleted_files` lists open-but-deleted files on the requested
-  filesystem (visible processes only); always present, possibly empty. Their
+  filesystem (visible processes only): an empty list when the run's
+  process scan found none, `null` when it is unknown (TASK-187: never `[]`
+  then). Their
   space returns only when the process closes them; diskgc never kills
   processes. A file held by several processes contributes its allocated bytes
   once, to the lowest listed pid; the other holders appear with zero bytes.
   On btrfs, mounted subvolumes with the same mountinfo source are included.
   `command` is `null` when the process's command could not be read.
   It comes from the run's last process scan (one is made at the
-  end if the run made none); a run that reclaimed nothing because the goal
-  was met, or that ended before the reclaim (a usage error, a lock
-  timeout), scans nothing and leaves it empty.
+  end if the run made none). It is `null` when that scan failed (diskgc
+  out of file descriptors, the process list unreadable), stopped (the
+  deadline, a signal) or did not settle (a process list that kept
+  growing), and when the run made no scan: a run that reclaimed nothing
+  because the goal was met, that ended before the reclaim (a usage error,
+  a lock timeout), or that stopped before its end-of-run scan.
 - `overruns` lists operations that blocked past the deadline (see
   [safety.md](safety.md#deadlines)); always present, usually empty.
 - On a usage error, fields that could not be determined (`mount`, `path`,
@@ -1909,7 +1916,9 @@ reads only and lists what a reclaim would take and why the rest is kept.
   a process scan less than a second old. On a host where one scan takes
   longer (hundreds of processes holding thousands of descriptors; the
   static musl binary scans slower than a glibc build), a candidate whose
-  three attempts all see a stale scan is kept `in_use_unknown`, and after
+  three attempts all see a stale scan is kept `in_use_unknown`, as is one
+  whose scan's process list keeps growing (a fork storm) or that a process
+  of the user diskgc cannot inspect could be using; after
   three such candidates in a row the rest of that tier is skipped for the
   run. Nothing is deleted on a stale scan; the exit code follows the
   space, and the summary says to run again when the host is less busy.

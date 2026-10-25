@@ -216,14 +216,14 @@ pub(crate) fn check<H: Host>(
         )));
     }
     let magic = || host.fs_magic(parent).map_err(|e| e.to_string());
-    let probe = |pid: Pid| host.pid_alive(pid).map_err(|e| e.to_string());
+    let probe = |pid: Pid| host.pid_alive(pid);
     match instance {
         Instance::Unjudged => unreachable!("the find has a contract"),
         Instance::RcPid(number) => Ok(nix_shell(
             scan,
             found,
             number,
-            owner_pid(table, magic(), number, probe),
+            owner_pid(table, magic(), number, probe).map_err(failed)?,
         )),
         Instance::Session => {
             let Some((users, processes)) = scan.pytest_facts() else {
@@ -308,7 +308,7 @@ fn pytest_session<H: Host>(
     users: &[u32],
     processes: &pytest::Processes,
     magic: impl Fn() -> Result<u64, String>,
-    probe: impl Fn(Pid) -> Result<bool, String>,
+    probe: impl Fn(Pid) -> crate::liveness::Probe,
 ) -> Judged<()> {
     let failed = |error| Stop::Failed {
         path: found.path.clone(),
@@ -392,7 +392,9 @@ fn pytest_session<H: Host>(
         Err(error) => return Err(failed(error)),
     };
     let lock_owner = match &lock {
-        Some(Lock::Pid { pid, .. }) => Some(owner_pid(table, magic(), *pid, probe)),
+        Some(Lock::Pid { pid, .. }) => {
+            Some(owner_pid(table, magic(), *pid, probe).map_err(failed)?)
+        }
         _ => None,
     };
     let listing = match host.read_dir(parent, PYTEST_OF_NAMES_MAX) {
@@ -400,6 +402,9 @@ fn pytest_session<H: Host>(
         Ok(DirListing::TooMany) => Err(format!(
             "more than {PYTEST_OF_NAMES_MAX} names (the listing was cut short)"
         )),
+        // diskgc out of descriptors says nothing about P: an error of the
+        // run, not an unknown listing for this session (TASK-185).
+        Err(e) if e.is_out_of_descriptors() => return Err(failed(e)),
         Err(e) => Err(e.to_string()),
     };
     let process_list = table.process_list_complete();

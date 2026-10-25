@@ -1,8 +1,9 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # A process of the user that cannot be read could be using anything: it
-# blocks every candidate as in_use with evidence `unreadable` (fail
-# closed). A modelled process without fds reads as Failed on LinuxHost's
-# terms, so it is unreadable too (TASK-64 gotcha).
+# blocks every candidate with evidence `unreadable` (fail closed), as
+# in_use_unknown: whether it uses one cannot be told (TASK-190). A
+# modelled process without fds reads as Failed on LinuxHost's terms, so
+# it is unreadable too (TASK-64 gotcha).
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -23,10 +24,10 @@ host:
     - {pid: 301, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], proc: denied}
 expect:
   plan:
-    - {candidate: /tmp/zephyr-a, reason: in_use}
+    - {candidate: /tmp/zephyr-a, reason: in_use_unknown}
   reclaim_exit: 1
   actions: []
   removed: []
   skipped:
-    - {candidate: /tmp/zephyr-a, reason: in_use, process_blockers: [{pid: 301, evidence: unreadable}]}
+    - {candidate: /tmp/zephyr-a, reason: in_use_unknown, process_blockers: [{pid: 301, evidence: unreadable}]}
   preserved: [/tmp/zephyr-a/data]

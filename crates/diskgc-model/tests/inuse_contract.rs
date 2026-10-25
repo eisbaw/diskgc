@@ -190,6 +190,6 @@ processes:
         pid_lookup: false,
         pytest_facts: false,
     };
-    let err = inuse::scan(&Short(model), &options).expect_err("a short answer is an error");
-    assert!(err.detail.contains("answered with 1 results"), "{err}");
+    let err = inuse::scan(&Short(model), &options, None).expect_err("a short answer is an error");
+    assert!(err.to_string().contains("answered with 1 results"), "{err}");
 }
