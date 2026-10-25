@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:12'
+updated_date: '2026-10-25 05:20'
 labels:
   - release-blocker
   - safety
@@ -38,8 +39,14 @@ Decide: (a) fix: after the locked walk (and again inside clear_and_delete's also
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A vector in crates/diskgc-model/tests/vectors/races/ renames an ancestor of the candidate into a directory holding .diskgc-keep after the flock of the candidate; it expects kept and nothing removed (or the limit is documented and the vector pins the documented outcome)
-- [ ] #2 Same check for a rename out of the root and into a VCS checkout
-- [ ] #3 cargo-target: keep markers between root and target are rechecked under the locks, or the doc says they are not
-- [ ] #4 docs/safety.md Deletion step 4 and Principles match the code
+- [x] #1 A vector in crates/diskgc-model/tests/vectors/races/ renames an ancestor of the candidate into a directory holding .diskgc-keep after the flock of the candidate; it expects kept and nothing removed (or the limit is documented and the vector pins the documented outcome)
+- [x] #2 Same check for a rename out of the root and into a VCS checkout
+- [x] #3 cargo-target: keep markers between root and target are rechecked under the locks, or the doc says they are not
+- [x] #4 docs/safety.md Deletion step 4 and Principles match the code
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented on branch t165 (commit f25e97b, not merged), 2026-10-25 04:27-~07:30. fs: still_reached (judge.rs) resolves the root anew and statx'es each name in the held directory above it, requiring the held directory, then the candidate identity, then keep markers and path rules; called in Judge::again (step 4, before the locked walk), in the clear_and_delete callback before protect and again as its last check, and before a command action starts (command.rs). cargo: fresh reach after the in-use check under the locks (Missing -> changed). Residual window documented (safety.md Principles, Deletion step 4/limits, cargo step 2/Limits) and pinned by races/ancestor-renamed-during-delete-is-the-stated-limit.yaml. Evidence: 13 vectors in crates/diskgc-model/tests/vectors/races (9 written first fail on master: deleted); each new guard mutated off -> a vector fails; container cargo_reclaim_changed_between_discovery_and_locking@{1.90.0,1.99.1,nightly-2026-10-16} PASS, and with the cargo recheck removed the oracle reports DELETED on 1.99.1. just check exit 0; flake e2e-clippy + e2e-tests exit 0. Full just e2e not run. Reviews: mped-architect (no blocker; adopted: last-check-before-act, Principles clause, stated-limit vector, cargo replaced-path vector) and codex (no blocker; adopted: root gone -> changed). Not done (follow-up): cargo per-part path recheck (cost: reach lists every ancestor dir per part); fs container test (driver has no fs-kind reclaim operation).
+<!-- SECTION:NOTES:END -->
