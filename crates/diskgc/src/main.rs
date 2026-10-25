@@ -954,21 +954,13 @@ fn main() -> ExitCode {
             }
         },
         Invocation::Ensure(args) => finish(&ensure(&args), json),
+        // `check` has no `--json` (TASK-198: post-0.1 if a harness needs
+        // it); a `--json` argument is an unknown flag, a parse error above.
         Invocation::Check(config) => match check(config.as_deref()) {
             Ok(out) => output(&out, 0),
             Err(why) => {
                 log(&format!("error: {why}"));
-                if json {
-                    output(
-                        &format!(
-                            "{}\n",
-                            error_json(Status::UsageError, ErrorCause::Config, &why)
-                        ),
-                        EXIT_USAGE,
-                    )
-                } else {
-                    ExitCode::from(EXIT_USAGE)
-                }
+                ExitCode::from(EXIT_USAGE)
             }
         },
         Invocation::Profiles(args) => match profiles(&args, json) {
