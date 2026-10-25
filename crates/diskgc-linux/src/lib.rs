@@ -14,6 +14,7 @@ pub mod host;
 pub mod mountinfo;
 pub mod procfs;
 pub mod sandbox;
+mod scratch;
 pub mod sockdiag;
 mod stat;
 mod tasks;

@@ -552,21 +552,25 @@ fn for_each_name(
     fd: &OwnedFd,
     mut each: impl FnMut(&[u8]) -> bool,
 ) -> Result<(), rustix::io::Errno> {
-    let mut buf: Vec<u8> = Vec::with_capacity(DIRENT_BUFFER);
-    let mut entries = rustix::fs::RawDir::new(fd, buf.spare_capacity_mut());
-    loop {
-        match entries.next() {
-            None => return Ok(()),
-            Some(Err(rustix::io::Errno::INTR)) => continue,
-            Some(Err(e)) => return Err(e),
-            Some(Ok(entry)) => {
-                let name = entry.file_name().to_bytes();
-                if name != b"." && name != b".." && !each(name) {
-                    return Ok(());
+    // The thread's scratch buffer (crate::scratch: why).
+    crate::scratch::with_scratch(|buf| {
+        buf.reserve(DIRENT_BUFFER);
+        let mut entries =
+            rustix::fs::RawDir::new(fd, &mut buf.spare_capacity_mut()[..DIRENT_BUFFER]);
+        loop {
+            match entries.next() {
+                None => return Ok(()),
+                Some(Err(rustix::io::Errno::INTR)) => continue,
+                Some(Err(e)) => return Err(e),
+                Some(Ok(entry)) => {
+                    let name = entry.file_name().to_bytes();
+                    if name != b"." && name != b".." && !each(name) {
+                        return Ok(());
+                    }
                 }
             }
         }
-    }
+    })
 }
 
 /// The pid namespace check of [`LinuxHost::new`], on what reading
@@ -1157,40 +1161,50 @@ impl ProcFiles for Kernel<'_> {
 
     fn list_once(&self, dir: &str, size: usize) -> Result<(Vec<u32>, bool), HostError> {
         let fd = self.0.open(dir, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        let mut buf: Vec<u8> = Vec::with_capacity(size);
-        let mut entries = rustix::fs::RawDir::new(&fd, buf.spare_capacity_mut());
-        let mut fds = Vec::new();
-        let mut filled = false;
-        loop {
-            if filled && entries.is_buffer_empty() {
-                // The next `next` makes a second call: it must find nothing.
-                return match entries.next() {
-                    None => Ok((fds, true)),
-                    Some(Ok(_)) => Ok((fds, false)),
-                    Some(Err(e)) => Err(HostError::errno("getdents", dir, errno_of(e))),
-                };
-            }
-            match entries.next() {
-                None => return Ok((fds, true)),
-                Some(Err(e)) => return Err(HostError::errno("getdents", dir, errno_of(e))),
-                Some(Ok(entry)) => {
-                    filled = true;
-                    let name = entry.file_name().to_bytes();
-                    if name == b"." || name == b".." {
-                        continue;
-                    }
-                    let fd = std::str::from_utf8(name)
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| {
-                            HostError::invalid(
-                                "getdents",
-                                dir,
-                                format!("unexpected entry {name:?}"),
-                            )
-                        })?;
-                    fds.push(fd);
+        // The thread's scratch buffer (crate::scratch: why).
+        crate::scratch::with_scratch(|buf| {
+            buf.reserve(size);
+            list_fd_numbers(&fd, dir, &mut buf.spare_capacity_mut()[..size])
+        })
+    }
+}
+
+/// The fd numbers of the fd directory open as `fd` (at `dir`) from one
+/// `getdents` call into `buf`, and whether the next call gave nothing
+/// ([`ProcFiles::list_once`]).
+fn list_fd_numbers(
+    fd: &OwnedFd,
+    dir: &str,
+    buf: &mut [std::mem::MaybeUninit<u8>],
+) -> Result<(Vec<u32>, bool), HostError> {
+    let mut entries = rustix::fs::RawDir::new(fd, buf);
+    let mut fds = Vec::new();
+    let mut filled = false;
+    loop {
+        if filled && entries.is_buffer_empty() {
+            // The next `next` makes a second call: it must find nothing.
+            return match entries.next() {
+                None => Ok((fds, true)),
+                Some(Ok(_)) => Ok((fds, false)),
+                Some(Err(e)) => Err(HostError::errno("getdents", dir, errno_of(e))),
+            };
+        }
+        match entries.next() {
+            None => return Ok((fds, true)),
+            Some(Err(e)) => return Err(HostError::errno("getdents", dir, errno_of(e))),
+            Some(Ok(entry)) => {
+                filled = true;
+                let name = entry.file_name().to_bytes();
+                if name == b"." || name == b".." {
+                    continue;
                 }
+                let fd = std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| {
+                        HostError::invalid("getdents", dir, format!("unexpected entry {name:?}"))
+                    })?;
+                fds.push(fd);
             }
         }
     }
@@ -1306,17 +1320,20 @@ fn read_maps(files: &impl ProcFiles, path: &str) -> Result<Vec<u8>, HostError> {
                 // Calls that grow with the content: a desktop process maps
                 // up to some 10^3 objects (~10^5 bytes), and every call is
                 // a `read` and a resume; the buffer each call zeroes stays
-                // within the content read so far (TASK-115).
-                let mut content = Vec::new();
-                loop {
-                    let start = content.len();
-                    content.resize(start + start.clamp(MAPS_READ_MIN, MAPS_READ_MAX), 0);
-                    let n = files.read(file, &mut content[start..])?;
-                    content.truncate(start + n);
-                    if n == 0 {
-                        return Ok(content);
+                // within the content read so far (TASK-115). Read into the
+                // thread's scratch buffer and copied out at its length
+                // (crate::scratch: why).
+                crate::scratch::with_scratch(|content| {
+                    loop {
+                        let start = content.len();
+                        content.resize(start + start.clamp(MAPS_READ_MIN, MAPS_READ_MAX), 0);
+                        let n = files.read(file, &mut content[start..])?;
+                        content.truncate(start + n);
+                        if n == 0 {
+                            return Ok(content.to_vec());
+                        }
                     }
-                }
+                })
             },
             |file| {
                 files.rewind(file)?;

@@ -90,11 +90,14 @@ pub fn read_in_one_call<F, E>(
     let mut size = first.max(1);
     while size <= max {
         let mut file = open()?;
-        let mut buf = vec![0; size];
-        let n = read(&mut file, &mut buf)?;
-        if n < size {
-            buf.truncate(n);
-            return Ok(Some(buf));
+        // The thread's scratch buffer, the content copied out at its own
+        // length (crate::scratch: why).
+        let content = crate::scratch::with_scratch(|buf| {
+            buf.resize(size, 0);
+            read(&mut file, buf).map(|n| (n < size).then(|| buf[..n].to_vec()))
+        })?;
+        if content.is_some() {
+            return Ok(content);
         }
         size *= 2;
     }
@@ -147,6 +150,12 @@ pub fn read_two_passes<E>(mut pass: impl FnMut() -> Result<Vec<u8>, E>) -> Resul
     fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
         text.split(|b| *b == b'\n').filter(|l| !l.is_empty())
     }
+    // Equal passes whose every line is non-empty and ended by a newline
+    // (the kernel's `maps`) are their own union: no copy (crate::scratch:
+    // why the scan avoids large allocations).
+    if first == second && lines_are_canonical(&first) {
+        return Ok(first);
+    }
     let mut union = Vec::with_capacity(first.len() + 1);
     let mut add = |line: &[u8]| {
         union.extend_from_slice(line);
@@ -160,6 +169,14 @@ pub fn read_two_passes<E>(mut pass: impl FnMut() -> Result<Vec<u8>, E>) -> Resul
             .for_each(&mut add);
     }
     Ok(union)
+}
+
+/// Whether `text` is a sequence of non-empty lines, each ended by a
+/// newline: the form [`read_two_passes`] gives its union in.
+fn lines_are_canonical(text: &[u8]) -> bool {
+    text.first().is_some_and(|b| *b != b'\n')
+        && text.last() == Some(&b'\n')
+        && !text.windows(2).any(|pair| pair == b"\n\n")
 }
 
 /// Lists a directory whose entries must come from one source in one
@@ -574,6 +591,32 @@ CapInh:\t0000000000000000\nCapPrm:\t0000000800000000\nCapEff:\t0000000000000020\
             got,
             Ok(b"1000-2000 r--p 0 fd:01 7 /a\n3000-4000 r--p 0 fd:01 8 /b\n".to_vec())
         );
+    }
+
+    /// The shortcut for equal canonical passes gives what building their
+    /// union line by line gives, for every short text over the bytes that
+    /// matter (newline and two others).
+    #[test]
+    fn equal_passes_shortcut_matches_the_union_built_by_lines() {
+        let alphabet = *b"\nab";
+        for len in 0..=7_u32 {
+            for code in 0..3_usize.pow(len) {
+                let text: Vec<u8> = (0..len)
+                    .scan(code, |rest, _| {
+                        let b = alphabet[*rest % 3];
+                        *rest /= 3;
+                        Some(b)
+                    })
+                    .collect();
+                let got = read_two_passes::<()>(|| Ok(text.clone())).unwrap();
+                let mut built = Vec::new();
+                for line in text.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+                    built.extend_from_slice(line);
+                    built.push(b'\n');
+                }
+                assert_eq!(got, built, "for {:?}", String::from_utf8_lossy(&text));
+            }
+        }
     }
 
     #[test]
