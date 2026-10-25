@@ -1,10 +1,10 @@
 ---
 id: TASK-184
 title: pytest-tmp judges only ~50-150 of ~6400 candidates in 90-120 s on the laptop
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-25 05:34'
-updated_date: '2026-10-25 09:02'
+updated_date: '2026-10-25 09:19'
 labels:
   - shipping
   - performance
@@ -52,4 +52,6 @@ REVIEW: mped-architect, one read-only round on 07e840b: ship, no blockers (nits 
 GATES: `just check` exit 0 on the final tree (8c1c042) with the worktree's OWN target dir: 1129 passed, 0 failed, 2 ignored. Shared-target runs were unreliable (see follow-up): one 'pass' (on 07e840b) ran another worktree's test binaries; one failed compiling this tree's diskgc against another tree's diskgc-core. diskgc-e2e not touched; no e2e-one run (no container-test-relevant change).
 
 Follow-ups filed: TASK-200 (protect/!profile enumerated 3x per candidate, decision), TASK-201 (shared CARGO_TARGET_DIR links across worktrees; gate evidence), TASK-202 (in_use_unknown detail blames the host when checks after the scan were slow), TASK-203 (one scan per candidate on a busy laptop: batch option or rule change), TASK-204 (discovery syscalls per directory). Status left In Progress for the orchestrator: the dry-run part is cut; the reclaim part is inherent under Freshness as written (TASK-203) and the protect part awaits TASK-200's decision.
+
+Merged to master as 3ce3d51 on 2026-10-25T09:19Z. Partial: dry-run CPU -87%, wall -19..29%; remaining time is discovery and session-walk I/O; reclaim throughput continues in TASK-200 (protect per candidate) and TASK-203 (one scan per candidate).
 <!-- SECTION:NOTES:END -->
