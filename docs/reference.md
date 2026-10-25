@@ -442,7 +442,9 @@ development builds, the pre-release sandbox gate,
   `kept PATH: REASON, DIAGNOSTIC`, where a candidate no tier reclaimed
   carries the refusal of the last tier that judged it (grouped by reason
   after five), and Cargo targets whose previous reclaim left only lock
-  files are omitted. Lines name their tier (`[TIER]`) when the run had
+  files are omitted. A candidate kept as `in_use_unknown` reads "the host
+  was too busy to check whether it is in use", and one line counts them
+  and says to run again when the host is less busy. Lines name their tier (`[TIER]`) when the run had
   more than one. The summary lists preflight profile refusals separately
   from kept candidates. A dry run lists each candidate once, as `would
   reclaim`, `eligible, not needed` (the estimates before it already cover

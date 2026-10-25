@@ -122,6 +122,13 @@ fn live_text(report: &Report, held: Option<String>) -> String {
     };
     lines.extend(reclaimed_lines(&live, &tier_label));
     lines.extend(kept_lines(&live.kept, &tier_label));
+    lines.extend(busy_line(
+        live.kept
+            .iter()
+            .filter(|skip| skip.reason == Reason::InUseUnknown)
+            .map(|skip| skip.count)
+            .fold(0, u64::saturating_add),
+    ));
     lines.extend(live.preflight.iter().map(|skip| {
         format!(
             "  skipped profile {} [{}]: {}",
@@ -215,15 +222,36 @@ fn kept_lines(kept: &[&SkipEntry], tier_label: &dyn Fn(&str) -> String) -> Vec<S
 
 /// `REASON, DIAGNOSTIC` ([`diagnostic`]).
 fn skip_why(skip: &SkipEntry) -> String {
-    why(
-        skip.reason.as_str(),
-        skip.detail.as_deref(),
-        skip.process_blockers.as_deref(),
-    )
+    match skip_diagnostic(skip) {
+        Some(diagnostic) => format!("{}, {diagnostic}", skip.reason),
+        None => skip.reason.as_str().to_owned(),
+    }
 }
 
 fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
-    diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref())
+    plain_diagnostic(skip.reason)
+        .or_else(|| diagnostic(skip.detail.as_deref(), skip.process_blockers.as_deref()))
+}
+
+/// The diagnostic for a reason whose refusal detail is for diagnosis, not
+/// for the user: `in_use_unknown`'s names attempts and freshness bounds,
+/// and the line [`busy_line`] says what to do.
+fn plain_diagnostic(reason: Reason) -> Option<String> {
+    (reason == Reason::InUseUnknown)
+        .then(|| "the host was too busy to check whether it is in use".to_owned())
+}
+
+/// What a user does about candidates kept as `in_use_unknown` (TASK-144):
+/// the reason name alone does not say that a later run may reclaim them.
+/// `count` is of final verdicts, so a candidate a later tier reclaimed or
+/// refused for another reason is not counted.
+fn busy_line(count: u64) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "  the host was too busy to check {count} candidate(s) for use (in_use_unknown): \
+             kept; run again when the host is less busy"
+        )
+    })
 }
 
 fn why(reason: &str, detail: Option<&str>, blockers: Option<&[ProcessBlocker]>) -> String {
@@ -314,19 +342,27 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
                     estimate()
                 )
             }
-            Verdict::Kept => format!(
-                "  kept {path}: {}{evidence}{tier}",
-                why(
-                    entry
-                        .reason
-                        .expect("the fold keeps only refused rows")
-                        .as_str(),
-                    entry.detail.as_deref(),
-                    entry.process_blockers.as_deref()
-                )
-            ),
+            Verdict::Kept => {
+                let reason = entry.reason.expect("the fold keeps only refused rows");
+                let why = match plain_diagnostic(reason) {
+                    Some(plain) => format!("{reason}, {plain}"),
+                    None => why(
+                        reason.as_str(),
+                        entry.detail.as_deref(),
+                        entry.process_blockers.as_deref(),
+                    ),
+                };
+                format!("  kept {path}: {why}{evidence}{tier}")
+            }
         });
     }
+    lines.extend(busy_line(
+        folded
+            .rows
+            .iter()
+            .filter(|row| row.entry.reason == Some(Reason::InUseUnknown))
+            .count() as u64,
+    ));
     lines.extend(folded.preflight.iter().map(|entry| {
         format!(
             "  skipped profile {} [{}]: {}",

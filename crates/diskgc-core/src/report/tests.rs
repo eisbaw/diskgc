@@ -970,3 +970,54 @@ fn a_dry_run_with_nothing_eligible_says_the_goal_is_not_reachable() {
         "{text}"
     );
 }
+
+/// TASK-144 with the per-candidate fold: an `in_use_unknown` kept line says
+/// plainly that the host was too busy (not the attempt diagnostics), and
+/// the busy count is of final verdicts: a later tier that reclaimed the
+/// candidate, or refused it for another reason, removes it from the count.
+#[test]
+fn busy_host_count_and_wording_follow_the_final_verdict() {
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/w")));
+    let long = "the host was too busy to check whether it is in use: 3 attempt(s) found no \
+                in-use scan within the freshness bound of 1000 ms; kept, run again when the \
+                host is less busy";
+    report.skipped = vec![
+        tier_skip("a", "/w/x", Reason::InUseUnknown, long),
+        tier_skip("a", "/w/y", Reason::InUseUnknown, long),
+        tier_skip("a", "/w/z", Reason::InUseUnknown, long),
+        tier_skip(
+            "b",
+            "/w/y",
+            Reason::NotIdle,
+            "last build 1 m ago; idle_for 1h required",
+        ),
+    ];
+    report.actions = vec![tier_action("b", "/w/z", 1)];
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("\n  kept /w/x: in_use_unknown, the host was too busy to check whether it is in use [a]\n"),
+        "{text}"
+    );
+    assert!(!text.contains("attempt(s)"), "{text}");
+    assert!(
+        text.contains("the host was too busy to check 1 candidate(s) for use (in_use_unknown): kept; run again when the host is less busy"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 reclaimed (observed change +1 B), 2 kept"),
+        "{text}"
+    );
+
+    let mut dry = Report::new(Status::DryRun, Some(Path::new("/w")));
+    dry.plan = vec![PlanEntry {
+        detail: Some(long.into()),
+        ..plan_row("a", "/w/x", Some(Reason::InUseUnknown), None)
+    }];
+    let text = dry.summary().expect("a dry run prints");
+    assert!(
+        text.contains(
+            "kept /w/x: in_use_unknown, the host was too busy to check whether it is in use"
+        ) && text.contains("too busy to check 1 candidate(s) for use"),
+        "{text}"
+    );
+}
