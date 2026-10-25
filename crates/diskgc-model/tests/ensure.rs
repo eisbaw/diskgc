@@ -507,6 +507,122 @@ fn configured_dry_run_reports_later_tier_budget_expiry_as_error() {
     assert!(host.unfired_events().is_empty());
 }
 
+/// Three tiers whose plans each find the same Cargo targets.
+const THREE_TIERS: &str = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: second\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n  - name: pressure\n    tiers:\n      - name: third\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+
+/// A grouped dry run whose overall `--timeout` (10 min) passes once the
+/// `nth` sample of the filesystem returns.
+fn grouped_dry_run_past_the_deadline_at_sample(nth: u32) -> (ModelHost, Report) {
+    let (tiers, timeouts) = configured(THREE_TIERS);
+    let events = format!(
+        "events:\n  - {{at: {{op: statvfs, path: /home/mark/src, nth: {nth}, when: after}}, advance: 11m}}\n"
+    );
+    let host = host(&yaml(true, &events));
+    let mut request = cargo("12G", Some("15G"));
+    request.tier = tiers[0].clone();
+    let report =
+        executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+    (host, report)
+}
+
+fn unplanned_tiers(report: &Report) -> Vec<&str> {
+    report
+        .errors
+        .iter()
+        .filter(|error| error.message == "deadline passed before this tier was planned")
+        .map(|error| error.tier.as_deref().expect("a tier's error names it"))
+        .collect()
+}
+
+/// TASK-232: the overall deadline passing after a tier's plan completed
+/// stops the grouped plan, and `errors` names every tier left unplanned
+/// (docs/reference.md `--dry-run`: the deadline cut the plan short).
+#[test]
+fn a_grouped_dry_run_past_the_deadline_names_every_tier_it_did_not_plan() {
+    // Sample 2 ends the first tier's plan, sample 4 the second's.
+    for (nth, planned, unplanned) in [
+        (2, &["first"][..], &["second", "third"][..]),
+        (4, &["first", "second"][..], &["third"][..]),
+    ] {
+        let (host, report) = grouped_dry_run_past_the_deadline_at_sample(nth);
+        assert!(
+            host.unfired_events().is_empty(),
+            "{nth}: {:#?}",
+            host.trace()
+        );
+        assert_eq!(report.status, Status::Deadline, "{nth}: {report:#?}");
+        assert_eq!(report.exit_code(), 124);
+        assert_eq!(unplanned_tiers(&report), unplanned, "{nth}: {report:#?}");
+        for tier in planned {
+            assert!(
+                report
+                    .plan
+                    .iter()
+                    .any(|entry| entry.tier == *tier && entry.reason.is_none()),
+                "{nth}: {tier} keeps its judged rows: {report:#?}"
+            );
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .all(|error| error.tier.as_deref() != Some(*tier)),
+                "{nth}: {tier} was planned in full: {report:#?}"
+            );
+        }
+        for tier in unplanned {
+            assert!(
+                report.plan.iter().all(|entry| entry.tier != *tier),
+                "{nth}: {report:#?}"
+            );
+        }
+        assert!(calls(&host, Op::Unlinkat).is_empty());
+    }
+}
+
+/// A tier whose own budget runs out after its plan completed (in the
+/// process scan) leaves nothing missing from the grouped plan: no error,
+/// and the complete plan is a successful dry run, for the first tier and
+/// for a later one.
+#[test]
+fn a_tier_budget_spent_after_its_plan_completed_is_no_grouped_error() {
+    // Sample 2 ends the first tier's plan, sample 4 the second's.
+    for (quick, nth) in [(0, 2), (1, 4)] {
+        let mut policy = "version: 1\ngroups:\n  - name: g\n    tiers:\n".to_owned();
+        for (index, name) in ["one", "two", "three"].into_iter().enumerate() {
+            let timeout = if index == quick { "1s" } else { "30s" };
+            policy.push_str(&format!(
+                "      - name: {name}\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n        timeout: {timeout}\n"
+            ));
+        }
+        let (tiers, timeouts) = configured(&policy);
+        let events = format!(
+            "events:\n  - {{at: {{op: statvfs, path: /home/mark/src, nth: {nth}, when: after}}, advance: 2s}}\n"
+        );
+        let host = host(&yaml(true, &events));
+        let mut request = cargo("12G", Some("15G"));
+        request.tier = tiers[0].clone();
+        let report =
+            executor::dry_run_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |_| {});
+        assert!(
+            host.unfired_events().is_empty(),
+            "{quick}: {:#?}",
+            host.trace()
+        );
+        assert_eq!(report.status, Status::DryRun, "{quick}: {report:#?}");
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.errors.is_empty(), "{quick}: {report:#?}");
+        for tier in ["one", "two", "three"] {
+            assert!(
+                report
+                    .plan
+                    .iter()
+                    .any(|entry| entry.tier == tier && entry.reason.is_none()),
+                "{quick}: {tier}: {report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn failed_space_sample_in_first_tier_stops_later_tiers_without_deletion() {
     let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: later\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";

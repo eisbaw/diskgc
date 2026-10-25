@@ -2588,18 +2588,26 @@ fn dry_run_grouped_inner<H: Host>(
     }
     if report.status == Status::Deadline {
         if run_deadline.is_some_and(|end| host.now() >= end) {
+            record_unplanned(&mut report, log, &tiers[1..]);
             return report;
         }
-        // Only this tier's budget expired. Keep planning later tiers, but
-        // the partial plan is an error, never a successful dry run.
-        report.status = Status::Error;
+        // Only this tier's budget expired; later tiers are still planned.
+        // Any error (the cut, or a host error) makes the grouped plan an
+        // error. No error: the tier's plan completed and its budget ran out
+        // in a later step (the process scan); nothing is missing.
+        report.status = if report.errors.is_empty() {
+            Status::DryRun
+        } else {
+            Status::Error
+        };
     }
-    for (tier, timeout) in tiers.iter().zip(tier_timeouts).skip(1) {
+    for (index, (tier, timeout)) in tiers.iter().zip(tier_timeouts).enumerate().skip(1) {
         if host.interrupted().is_some() {
             break;
         }
         if run_deadline.is_some_and(|end| host.now() >= end) {
             report.status = Status::Deadline;
+            record_unplanned(&mut report, log, &tiers[index..]);
             break;
         }
         for_tier.tier = tier.clone();
@@ -2612,20 +2620,38 @@ fn dry_run_grouped_inner<H: Host>(
             report.avail_after_bytes = part.avail_after_bytes;
             return report;
         }
+        let part_failed = !part.errors.is_empty();
         report.plan.extend(part.plan);
         report.errors.extend(part.errors);
         report.held_by_deleted_files = part.held_by_deleted_files;
         report.avail_after_bytes = part.avail_after_bytes;
         if part.status == Status::Deadline && run_deadline.is_some_and(|end| host.now() >= end) {
             report.status = Status::Deadline;
+            record_unplanned(&mut report, log, &tiers[index + 1..]);
             break;
         }
-        if part.status == Status::Deadline {
-            // A tier deadline alone does not stop the overall plan.
+        if part.status == Status::Deadline && part_failed {
+            // A tier deadline alone does not stop the overall plan; its
+            // error (as in the first tier's) makes the plan an error.
             report.status = Status::Error;
         }
     }
     report
+}
+
+/// The overall deadline stopped a grouped dry run before `unplanned` were
+/// planned: each gets the error that says the plan was cut short (the
+/// contract of a dry run at the deadline, docs/reference.md `--dry-run`),
+/// so a later tier is never silently missing from the plan (TASK-232).
+fn record_unplanned(report: &mut Report, log: &mut dyn FnMut(&str), unplanned: &[Tier]) {
+    debug_assert_eq!(report.status, Status::Deadline);
+    for tier in unplanned {
+        record_error(
+            report,
+            log,
+            run_error(tier, "deadline passed before this tier was planned"),
+        );
+    }
 }
 
 fn bounded_tier_timeout<H: Host>(
