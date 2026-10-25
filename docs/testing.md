@@ -524,6 +524,10 @@ Model scenarios required by [safety.md](safety.md) and
     collapse the accounted size is at most the budget (asserted in the
     engine, and checked here over 98,000 rc dirs with a budget that
     fits a tenth of them), and repeated collapse ends;
+  - `no_insertion_is_refused_at_or_above_the_floor`: with a budget at or
+    above one lump per mount with its finders plus the tables (two
+    mounts, three profiles), no insertion is refused, the budget holds
+    after every insertion and every collapse ends;
   - `discovery_dissolves_a_block_only_below_the_low_water_mark`: a
     block is replaced by its listed members only when they fit under
     the low-water mark;

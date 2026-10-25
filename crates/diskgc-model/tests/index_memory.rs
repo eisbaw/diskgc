@@ -165,7 +165,7 @@ fn index_with(host: &ModelHost, paths: impl IntoIterator<Item = PathBuf>) -> Ind
     let rc = Finder {
         profile: "nix-shell-rc".into(),
         profile_hash: 1,
-        root: index.root(Path::new("/tmp")).unwrap(),
+        root: Path::new("/tmp").into(),
     };
     let other = Finder {
         profile: "tmp-entry".into(),
@@ -201,7 +201,7 @@ fn the_count_bounds_the_heap_of_wide_deep_and_churned_indexes() {
     let rc = Finder {
         profile: "nix-shell-rc".into(),
         profile_hash: 1,
-        root: index.root(Path::new("/tmp")).unwrap(),
+        root: Path::new("/tmp").into(),
     };
     for step in 0..60_000u64 {
         let path = PathBuf::from(format!("/tmp/d{}/e{}", rng.next(40), rng.next(400)));
@@ -248,7 +248,7 @@ tree:
     let rc = Finder {
         profile: "nix-shell-rc".into(),
         profile_hash: 1,
-        root: index.root(Path::new("/tmp")).unwrap(),
+        root: Path::new("/tmp").into(),
     };
     let mut collapses = 0;
     for path in &paths {

@@ -17,23 +17,31 @@
 //!   [`Host`] port before anything is absorbed;
 //! - [`queue`]: a tier's queue, a pure function of the index.
 //!
-//! **Budget.** The counted size ([`memory`]) of the tries and of the root,
+//! **Budget.** The counted size ([`memory`]) of the tries and of the
 //! finder-set and mount tables never exceeds the budget. An insertion that
 //! would cross it first collapses ([`collapse`]) until the index is at or
-//! below the low-water mark, then inserts; if collapsing cannot make room
-//! (everything is already one block per finder set and root) the insertion
-//! is refused with [`Inserted::NoRoom`] and the candidate is left to the
-//! reclaim walk's per-tier discovery. Registering a root ([`Index::root`])
-//! takes no Host port and so cannot collapse: at the ceiling it is refused
-//! ([`TablesFull`]) until a collapse made room.
+//! below the low-water mark, coarser and coarser up to one lump per mount
+//! if it must, then inserts. At that limit a candidate that still does not
+//! fit as a single joins its mount's lump ([`Inserted::Lumped`]): no
+//! insertion is refused and coverage is never partial because of memory,
+//! as long as the budget holds one lump per mount with its finders (64 MB
+//! is orders of magnitude more; below that floor an insertion is
+//! [`Inserted::NoRoom`], a configuration error of a test budget).
+//!
+//! **Tables.** Finder sets and mounts that no unit uses are swept after
+//! every collapse pass ([`Index::sweep_tables`]), so the tables shrink with
+//! the units. A finder names its root by path. When each root was last
+//! listed completely (`discovered_at`) is the tally's to keep (TASK-29).
 //!
 //! **Coverage.** A candidate found beneath a block that stands for it (one
 //! of the block's finders found it; for a family block, it lies directly
 //! beneath the site and its name is in the family) is not inserted: it is
 //! [`Inserted::Covered`], and the block is left as it is (its member count
 //! is not raised: a block stores no names, so a candidate it already
-//! counts cannot be told from a new one). A path that already holds a
-//! single gains the finder instead, whatever blocks lie above it.
+//! counts cannot be told from a new one; recounting a block's members on a
+//! complete listing of its site is the tally's, TASK-29). A path that
+//! already holds a single gains the finder instead, whatever blocks lie
+//! above it.
 //!
 //! Not here yet: the tally that fills the index (TASK-29, which also adds
 //! its live cursors to the count), the snapshot and dropping finders whose
@@ -54,13 +62,13 @@ use std::path::{Component, Path, PathBuf};
 pub use collapse::CollapseReport;
 pub use family::name_family;
 pub use memory::BUDGET_BYTES;
-pub use unit::{
-    Birth, Block, Family, Finder, FinderSetId, Identity, Refusal, RootId, Single, Tally,
-};
+pub use unit::{Birth, Block, Family, Finder, FinderSetId, Identity, Refusal, Single, Tally};
 
 use crate::host::{Dev, Host, HostError, MonoTime, MountEntry, Timestamp};
 use memory::{heap, low_water, vec_bytes};
-use trie::{Delta, Node, children_map_bytes, name_bytes, new_child_bytes, single_bytes};
+use trie::{
+    Delta, Node, children_map_bytes, exact_blocks_bytes, name_bytes, new_child_bytes, single_bytes,
+};
 
 /// A mount the index has a trie for: the filesystem's device and where it
 /// is mounted. Not the mount id, which is per boot.
@@ -77,13 +85,6 @@ impl MountKey {
             mount_point: mount.mount_point.clone(),
         }
     }
-}
-
-/// A root a finder names, and when it was last listed completely.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Root {
-    pub path: PathBuf,
-    pub discovered_at: Option<MonoTime>,
 }
 
 /// A candidate as discovery reports it to the index.
@@ -107,7 +108,10 @@ pub enum Inserted {
     Replaced,
     /// A block stands for it (see the module doc, Coverage).
     Covered,
-    /// No room even after collapsing, or the tables are full.
+    /// Collapsed to the limit, it still did not fit as a single: it joined
+    /// its mount's lump (see the module doc, Budget).
+    Lumped,
+    /// The budget is below the floor: one lump per mount with its finders.
     NoRoom,
 }
 
@@ -134,7 +138,8 @@ pub enum Dissolved {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRemoved {
     Remaining(u64),
-    /// That was the last member: the block was evicted.
+    /// That was the last member: the block was evicted (a block reaching
+    /// zero members, docs/architecture.md, Index update after an action).
     Evicted,
     Missing,
 }
@@ -155,12 +160,10 @@ pub struct Stats {
     pub members: u64,
     pub accounted_bytes: usize,
     pub budget_bytes: usize,
+    /// Entries of the finder-set and mount tables.
+    pub finder_sets: usize,
+    pub mounts: usize,
 }
-
-/// A new root does not fit: collapse ([`Index::collapse_to_low_water`])
-/// and register it again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TablesFull;
 
 #[derive(Debug)]
 struct MountTrie {
@@ -177,8 +180,16 @@ pub struct Index {
     tables_bytes: usize,
     units: usize,
     mounts: Vec<MountTrie>,
-    roots: Vec<Root>,
-    finder_sets: Vec<Box<[Finder]>>,
+    /// Finder sets in the order of their ids.
+    finder_sets: Vec<SetSlot>,
+    /// The id the next new set gets.
+    next_set_id: u32,
+}
+
+#[derive(Debug)]
+struct SetSlot {
+    id: FinderSetId,
+    finders: Box<[Finder]>,
 }
 
 fn signed(bytes: usize) -> isize {
@@ -214,10 +225,13 @@ fn rel_names<'p>(mount_point: &Path, path: &'p Path) -> Vec<&'p [u8]> {
         .collect()
 }
 
-/// Bytes of a finder set's slice and profile names.
+/// Bytes of a finder set's slice, profile names and root paths.
 fn finder_set_bytes(set: &[Finder]) -> usize {
     vec_bytes(set.len(), size_of::<Finder>())
-        + set.iter().map(|f| heap(f.profile.len())).sum::<usize>()
+        + set
+            .iter()
+            .map(|f| heap(f.profile.len()) + heap(f.root.as_os_str().len()))
+            .sum::<usize>()
 }
 
 /// Whether `block` (of the finder set `set`) stands for a candidate found by
@@ -251,8 +265,8 @@ impl Index {
             tables_bytes: 0,
             units: 0,
             mounts: Vec::new(),
-            roots: Vec::new(),
             finder_sets: Vec::new(),
+            next_set_id: 0,
         }
     }
 
@@ -300,17 +314,11 @@ impl Index {
                 .iter()
                 .map(|m| heap(m.key.mount_point.capacity()))
                 .sum::<usize>()
-            + vec_bytes(self.roots.capacity(), size_of::<Root>())
-            + self
-                .roots
-                .iter()
-                .map(|r| heap(r.path.capacity()))
-                .sum::<usize>()
-            + vec_bytes(self.finder_sets.capacity(), size_of::<Box<[Finder]>>())
+            + vec_bytes(self.finder_sets.capacity(), size_of::<SetSlot>())
             + self
                 .finder_sets
                 .iter()
-                .map(|s| finder_set_bytes(s))
+                .map(|s| finder_set_bytes(&s.finders))
                 .sum::<usize>()
     }
 
@@ -325,45 +333,16 @@ impl Index {
         grow + extra
     }
 
-    /// The id of the root at `path` (absolute), registered if new.
-    pub fn root(&mut self, path: &Path) -> Result<RootId, TablesFull> {
-        assert!(
-            path.is_absolute(),
-            "root {} is not absolute",
-            path.display()
-        );
-        let i = match self.roots.iter().position(|r| r.path == path) {
-            Some(i) => i,
-            None => {
-                let path = path.to_path_buf();
-                let cost = Self::push_cost(&self.roots, heap(path.capacity()));
-                if !self.has_room(cost) {
-                    return Err(TablesFull);
-                }
-                self.tables_bytes += cost;
-                push_exact(
-                    &mut self.roots,
-                    Root {
-                        path,
-                        discovered_at: None,
-                    },
-                )
-            }
-        };
-        Ok(RootId(u32::try_from(i).expect("roots fit u32")))
-    }
-
-    pub fn root_info(&self, id: RootId) -> &Root {
-        &self.roots[id.0 as usize]
-    }
-
-    /// Records the time of a complete discovery listing of a root.
-    pub fn set_discovered(&mut self, id: RootId, at: MonoTime) {
-        self.roots[id.0 as usize].discovered_at = Some(at);
-    }
-
+    /// The finders of a set. A stale id (of a set swept since) is a
+    /// programmer error.
     pub fn finder_set(&self, id: FinderSetId) -> &[Finder] {
-        &self.finder_sets[id.0 as usize]
+        self.live_set(id)
+            .unwrap_or_else(|| panic!("stale finder set id {id:?}"))
+    }
+
+    fn live_set(&self, id: FinderSetId) -> Option<&[Finder]> {
+        let at = self.finder_sets.binary_search_by_key(&id, |s| s.id).ok()?;
+        Some(&self.finder_sets[at].finders)
     }
 
     /// The set `base` plus `finder` (sorted, no duplicates).
@@ -375,17 +354,40 @@ impl Index {
         set
     }
 
+    /// The union of the sets `ids` (sorted, no duplicates).
+    fn set_union(&self, ids: impl IntoIterator<Item = FinderSetId>) -> Vec<Finder> {
+        let mut set: Vec<Finder> = ids
+            .into_iter()
+            .flat_map(|id| self.finder_set(id).iter().cloned())
+            .collect();
+        set.sort();
+        set.dedup();
+        set
+    }
+
     fn find_set(&self, set: &[Finder]) -> Option<FinderSetId> {
-        let i = self.finder_sets.iter().position(|s| **s == *set)?;
-        Some(FinderSetId(u32::try_from(i).expect("sets fit u32")))
+        self.finder_sets
+            .iter()
+            .find(|slot| *slot.finders == *set)
+            .map(|slot| slot.id)
     }
 
     /// What interning `set` costs (nothing if it is known).
     fn set_cost(&self, set: &[Finder]) -> usize {
-        match self.find_set(set) {
-            Some(_) => 0,
-            None => Self::push_cost(&self.finder_sets, finder_set_bytes(set)),
+        if self.find_set(set).is_some() {
+            0
+        } else {
+            Self::push_cost(&self.finder_sets, finder_set_bytes(set))
         }
+    }
+
+    fn next_id(&mut self) -> FinderSetId {
+        let id = FinderSetId(self.next_set_id);
+        self.next_set_id = self
+            .next_set_id
+            .checked_add(1)
+            .expect("finder set ids exhausted");
+        id
     }
 
     /// The id of `set`, registered if new; the caller checked the room
@@ -396,20 +398,46 @@ impl Index {
             "finder set sorted, unique"
         );
         assert!(!set.is_empty(), "a unit has at least one finder");
-        for finder in &set {
-            assert!(
-                (finder.root.0 as usize) < self.roots.len(),
-                "finder names an unknown root"
-            );
-        }
         if let Some(id) = self.find_set(&set) {
             return id;
         }
         let cost = self.set_cost(&set);
         assert!(self.has_room(cost), "finder set interned without room");
         self.tables_bytes += cost;
-        let i = push_exact(&mut self.finder_sets, set.into_boxed_slice());
-        FinderSetId(u32::try_from(i).expect("sets fit u32"))
+        let id = self.next_id();
+        push_exact(
+            &mut self.finder_sets,
+            SetSlot {
+                id,
+                finders: set.into_boxed_slice(),
+            },
+        );
+        id
+    }
+
+    /// Replaces the set `id` by `set` under a new id (so the old id is
+    /// stale). Only for a set no other unit uses; the caller checked the
+    /// room. The table does not grow: one entry out, one in.
+    fn replace_set(&mut self, id: FinderSetId, set: Vec<Finder>) -> FinderSetId {
+        let at = self
+            .finder_sets
+            .binary_search_by_key(&id, |s| s.id)
+            .expect("a live set");
+        let old = finder_set_bytes(&self.finder_sets[at].finders);
+        let new = finder_set_bytes(&set);
+        assert!(
+            self.has_room(new.saturating_sub(old)),
+            "finder set replaced without room"
+        );
+        self.finder_sets.remove(at);
+        let new_id = self.next_id();
+        assert!(self.finder_sets.len() < self.finder_sets.capacity());
+        self.finder_sets.push(SetSlot {
+            id: new_id,
+            finders: set.into_boxed_slice(),
+        });
+        self.tables_bytes = self.tables_bytes + new - old;
+        new_id
     }
 
     /// What registering `key` costs (nothing if it is known).
@@ -437,6 +465,46 @@ impl Index {
                 root: Node::default(),
             },
         )
+    }
+
+    /// Drops the finder sets no unit uses and the mounts whose trie is
+    /// empty, so the tables shrink with the units (to their exact
+    /// length). Linear in the index: run
+    /// at the end of every collapse pass, and by the tally after evictions
+    /// when it likes.
+    pub fn sweep_tables(&mut self) {
+        self.sweep_sets();
+        self.mounts.retain(|m| !m.root.is_empty());
+        self.mounts.shrink_to_fit();
+        self.tables_bytes = self.tables_cost();
+    }
+
+    /// The finder-set half of [`Self::sweep_tables`] (mounts, and so mount
+    /// indices, stay).
+    fn sweep_sets(&mut self) {
+        let mut used: BTreeSet<FinderSetId> = BTreeSet::new();
+        self.for_each_unit(|_, _, unit| {
+            used.insert(match unit {
+                UnitRef::Single(s) => s.finders,
+                UnitRef::Block(b) => b.finders,
+            });
+        });
+        self.finder_sets.retain(|slot| used.contains(&slot.id));
+        self.finder_sets.shrink_to_fit();
+        self.tables_bytes = self.tables_cost();
+    }
+
+    /// How many units use each finder set.
+    fn set_users(&self) -> BTreeMap<FinderSetId, usize> {
+        let mut users: BTreeMap<FinderSetId, usize> = BTreeMap::new();
+        self.for_each_unit(|_, _, unit| {
+            let set = match unit {
+                UnitRef::Single(s) => s.finders,
+                UnitRef::Block(b) => b.finders,
+            };
+            *users.entry(set).or_default() += 1;
+        });
+        users
     }
 
     fn find_mount(&self, key: &MountKey) -> Option<usize> {
@@ -509,6 +577,8 @@ impl Index {
         let mut stats = Stats {
             accounted_bytes: self.accounted_bytes(),
             budget_bytes: self.budget,
+            finder_sets: self.finder_sets.len(),
+            mounts: self.mounts.len(),
             ..Stats::default()
         };
         self.for_each_unit(|_, _, unit| match unit {
@@ -523,7 +593,7 @@ impl Index {
 
     /// Checks the counted size and unit count against a count from scratch,
     /// and the trie's shape (no empty node, exact block vectors, sites
-    /// within their finders' roots). For tests: linear in the index.
+    /// referring to live finder sets). For tests: linear in the index.
     pub fn assert_consistent(&self) {
         let mut bytes = 0;
         let mut units = 0;
@@ -542,18 +612,12 @@ impl Index {
         );
         self.for_each_unit(|_, path, unit| {
             if let UnitRef::Block(block) = unit {
+                assert!(block.members >= 1, "an empty block at {}", path.display());
                 assert!(
-                    block.members >= 2,
-                    "a block of fewer than two members at {}",
+                    self.live_set(block.finders).is_some(),
+                    "a block of a stale finder set at {}",
                     path.display()
                 );
-                for finder in self.finder_set(block.finders) {
-                    assert!(
-                        path.starts_with(&self.root_info(finder.root).path),
-                        "block site {} above its root",
-                        path.display()
-                    );
-                }
             }
         });
     }
@@ -575,12 +639,16 @@ impl Index {
             found.identity.dev, mount.dev,
             "a unit on another device than its mount"
         );
-        let root = &self.root_info(finder.root).path;
         assert!(
-            path.starts_with(root),
+            path.starts_with(&finder.root),
             "{} is not below its finder's root {}",
             path.display(),
-            root.display()
+            finder.root.display()
+        );
+        assert!(
+            path != mount.mount_point,
+            "a candidate is never a mount point: {}",
+            path.display()
         );
         if let Some(outcome) = self.try_insert(mount, path, finder, found) {
             return Ok(Insertion {
@@ -588,14 +656,146 @@ impl Index {
                 collapse: None,
             });
         }
-        let collapse = collapse::to_low_water(self, host)?;
-        let outcome = self
-            .try_insert(mount, path, finder, found)
-            .unwrap_or(Inserted::NoRoom);
+        let collapse = self.collapse_to_low_water(host)?;
+        let outcome = match self.try_insert(mount, path, finder, found) {
+            Some(outcome) => outcome,
+            None => self.lump_in(host, mount, path, finder, found)?,
+        };
         Ok(Insertion {
             outcome,
             collapse: Some(collapse),
         })
+    }
+
+    /// Collapsed to the low-water mark, the candidate still does not fit:
+    /// collapse to the limit (one lump per mount) and, if a single still
+    /// does not fit, make it a member of its mount's lump, which gains its
+    /// finder.
+    fn lump_in<H: Host>(
+        &mut self,
+        host: &H,
+        mount: &MountKey,
+        path: &Path,
+        finder: &Finder,
+        found: Discovered,
+    ) -> Result<Inserted, HostError> {
+        self.collapse_to(host, 0)?;
+        if let Some(outcome) = self.try_insert(mount, path, finder, found) {
+            return Ok(outcome);
+        }
+        // A single still at the path (all else collapsed) joins too.
+        let mut delta = Delta::default();
+        let old = self.find_mount(mount).and_then(|i| {
+            let names = rel_names(&mount.mount_point, path);
+            let mut taken = None;
+            edit_path(
+                &mut self.mounts[i].root,
+                &names,
+                &mut delta,
+                |node, delta| {
+                    taken = node.take_single(delta);
+                },
+            );
+            taken
+        });
+        self.apply(delta);
+        self.sweep_tables();
+        let base: Vec<FinderSetId> = old.iter().map(|s| s.finders).collect();
+        let lump_at = self.find_mount(mount).and_then(|i| {
+            self.mounts[i]
+                .root
+                .blocks
+                .iter()
+                .position(|b| b.family == Family::Any)
+        });
+        let mut set: Vec<Finder> = self.set_union(base.into_iter().chain(lump_at.map(|at| {
+            self.mounts[self.find_mount(mount).expect("lump")]
+                .root
+                .blocks[at]
+                .finders
+        })));
+        if let Err(at) = set.binary_search(finder) {
+            set.insert(at, finder.clone());
+        }
+        let candidate = Single {
+            identity: found.identity,
+            finders: FinderSetId(0),
+            newest_change: found.newest_change,
+            tally: None,
+            checked_at: found.checked_at,
+            refusal: None,
+        };
+        let members: Vec<Single> = old.into_iter().chain(std::iter::once(candidate)).collect();
+        match lump_at {
+            Some(at) => {
+                let i = self.find_mount(mount).expect("lump");
+                let current = self.mounts[i].root.blocks[at].finders;
+                let id = if let Some(id) = self.find_set(&set) {
+                    id
+                } else if self.set_users().get(&current) == Some(&1) {
+                    let old_bytes = finder_set_bytes(self.finder_set(current));
+                    if !self.has_room(finder_set_bytes(&set).saturating_sub(old_bytes)) {
+                        return Ok(Inserted::NoRoom);
+                    }
+                    self.replace_set(current, set)
+                } else {
+                    if !self.has_room(self.set_cost(&set)) {
+                        return Ok(Inserted::NoRoom);
+                    }
+                    self.intern_set(set)
+                };
+                let lump = &mut self.mounts[i].root.blocks[at];
+                lump.finders = id;
+                for member in &members {
+                    let mut one = Block::of_single(lump.site, Family::Any, member);
+                    one.finders = id;
+                    lump.absorb(&one);
+                }
+            }
+            None => {
+                let mounts = host.mountinfo()?;
+                let Some((_, _, site)) =
+                    collapse::reach_site(host, &mounts, mount, &mount.mount_point)?
+                else {
+                    return Err(HostError::invalid(
+                        "index",
+                        mount.mount_point.display(),
+                        "the mount's root cannot be reached to make its lump",
+                    ));
+                };
+                let probe = Block::of_single(site, Family::Any, &members[0]);
+                let block_cost = self.find_mount(mount).map_or_else(
+                    || exact_blocks_bytes([&probe]),
+                    |i| {
+                        let root = &self.mounts[i].root;
+                        exact_blocks_bytes(root.blocks.iter().chain([&probe]))
+                            - exact_blocks_bytes(&root.blocks)
+                    },
+                );
+                if !self.has_room(block_cost + self.set_cost(&set) + self.mount_cost(mount)) {
+                    return Ok(Inserted::NoRoom);
+                }
+                let id = self.intern_set(set);
+                let i = self.mount_index(mount);
+                let mut lump: Option<Block> = None;
+                for member in &members {
+                    let mut one = Block::of_single(site, Family::Any, member);
+                    one.finders = id;
+                    match &mut lump {
+                        Some(lump) => lump.absorb(&one),
+                        None => lump = Some(one),
+                    }
+                }
+                let mut delta = Delta::default();
+                let lump = lump.expect("the candidate is a member");
+                self.mounts[i]
+                    .root
+                    .change_blocks(&mut delta, |blocks| blocks.push(lump));
+                self.apply(delta);
+            }
+        }
+        self.sweep_tables();
+        Ok(Inserted::Lumped)
     }
 
     /// One attempt: `None` if there is no room for it.
@@ -771,9 +971,7 @@ impl Index {
                 block.members -= 1;
                 block.est_bytes = block.est_bytes.saturating_sub(measured_bytes);
                 block.files = block.files.saturating_sub(files);
-                if block.members < 2 {
-                    // A block of one member cannot be told from its site:
-                    // the member is left to discovery.
+                if block.members == 0 {
                     blocks.remove(at);
                     outcome = MemberRemoved::Evicted;
                 } else {

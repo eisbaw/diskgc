@@ -72,6 +72,15 @@ fn blocks_bytes(blocks: &Vec<Block>) -> usize {
             .sum::<usize>()
 }
 
+/// What a block vector holding exactly `blocks` costs (capacity kept at the
+/// length, [`Node::change_blocks`]).
+pub(super) fn exact_blocks_bytes<'b>(blocks: impl IntoIterator<Item = &'b Block>) -> usize {
+    let (count, families) = blocks
+        .into_iter()
+        .fold((0, 0), |(n, f), b| (n + 1, f + family_bytes(&b.family)));
+    vec_bytes(count, size_of::<Block>()) + families
+}
+
 /// What adding a child named `name` to a map of `len` entries costs.
 pub(super) fn new_child_bytes(len: usize, name: &[u8]) -> usize {
     children_map_bytes(len + 1) - children_map_bytes(len) + name_bytes(name)

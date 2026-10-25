@@ -51,11 +51,11 @@ fn found(ino: u64, change: i64) -> Discovered {
     }
 }
 
-fn finder(index: &mut Index, profile: &str, root: &str) -> Finder {
+fn finder(profile: &str, root: &str) -> Finder {
     Finder {
         profile: profile.into(),
         profile_hash: 7,
-        root: index.root(Path::new(root)).unwrap(),
+        root: Path::new(root).into(),
     }
 }
 
@@ -107,8 +107,8 @@ const BUDGET: usize = 1 << 20;
 #[test]
 fn a_path_found_again_is_refreshed_replaced_or_gains_a_finder() {
     let mut index = Index::new(BUDGET);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
-    let entry = finder(&mut index, "tmp-entry", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
+    let entry = finder("tmp-entry", "/tmp");
     assert_eq!(put(&mut index, "/tmp/a", &rc, 10, 5), Some(Inserted::New));
     tally(&mut index, "/tmp/a", 4096);
     assert_eq!(
@@ -140,8 +140,8 @@ fn a_path_found_again_is_refreshed_replaced_or_gains_a_finder() {
 #[test]
 fn a_candidate_a_block_stands_for_is_covered_and_nothing_else_is() {
     let mut index = Index::new(BUDGET);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
-    let other = finder(&mut index, "tmp-entry", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
+    let other = finder("tmp-entry", "/tmp");
     let rc_set = index.intern_set(vec![rc.clone()]);
     let family = Family::Name(name_family(b"nix-shell.aaaaaa"));
     put_block(&mut index, "/tmp", block(rc_set, family, 3, 30, 1));
@@ -178,7 +178,7 @@ fn a_candidate_a_block_stands_for_is_covered_and_nothing_else_is() {
 #[test]
 fn an_insertion_that_would_cross_the_ceiling_needs_a_collapse() {
     let mut index = Index::new(64 * 1024);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     let mut inserted = 0;
     for ino in 0..10_000 {
         match put(&mut index, &format!("/tmp/nix-shell.{ino:06}"), &rc, ino, 1) {
@@ -194,7 +194,7 @@ fn an_insertion_that_would_cross_the_ceiling_needs_a_collapse() {
 #[test]
 fn eviction_prunes_and_block_members_count_down() {
     let mut index = Index::new(BUDGET);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     put(&mut index, "/tmp/a/b/c", &rc, 1, 1);
     assert!(index.evict_single(&tmp(), Path::new("/tmp/a/b/c")));
     assert!(!index.evict_single(&tmp(), Path::new("/tmp/a/b/c")));
@@ -218,15 +218,48 @@ fn eviction_prunes_and_block_members_count_down() {
         index.blocks_at(&tmp(), Path::new("/tmp/s"))[0].est_bytes,
         200
     );
+    assert_eq!(removed(&mut index), MemberRemoved::Remaining(1));
     assert_eq!(removed(&mut index), MemberRemoved::Evicted);
     assert_eq!(removed(&mut index), MemberRemoved::Missing);
     assert_eq!(index.units(), 0);
 }
 
+/// Finder sets and mounts no unit uses are swept: the tables shrink with
+/// the units, and an id kept past the sweep is stale, never another set.
+#[test]
+fn the_tables_shrink_with_the_units() {
+    let mut index = Index::new(BUDGET);
+    let rc = finder("nix-shell-rc", "/tmp");
+    let entry = finder("tmp-entry", "/tmp");
+    put(&mut index, "/tmp/a", &rc, 1, 1);
+    put(&mut index, "/tmp/b", &entry, 2, 1);
+    let rc_set = index.single(&tmp(), Path::new("/tmp/a")).unwrap().finders();
+    let with_both = index.accounted_bytes();
+    index.sweep_tables();
+    assert_eq!(index.accounted_bytes(), with_both, "nothing unused yet");
+    assert!(index.evict_single(&tmp(), Path::new("/tmp/a")));
+    let evicted = index.accounted_bytes();
+    index.sweep_tables();
+    index.assert_consistent();
+    assert!(index.accounted_bytes() < evicted, "the rc set went");
+    assert!(index.live_set(rc_set).is_none());
+    // A new set gets a new id: the old one stays stale.
+    put(&mut index, "/tmp/c", &finder("other", "/tmp"), 3, 1);
+    let other = index.single(&tmp(), Path::new("/tmp/c")).unwrap().finders();
+    assert_ne!(other, rc_set);
+    assert!(index.live_set(rc_set).is_none());
+    // Everything evicted: no set and no mount is left.
+    index.evict_single(&tmp(), Path::new("/tmp/b"));
+    index.evict_single(&tmp(), Path::new("/tmp/c"));
+    index.sweep_tables();
+    index.assert_consistent();
+    assert_eq!(index.accounted_bytes(), 0);
+}
+
 #[test]
 fn a_block_dissolves_only_when_its_members_fit_under_the_low_water_mark() {
     let mut index = Index::new(64 * 1024);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     let set = index.intern_set(vec![rc.clone()]);
     let family = Family::Name(name_family(b"nix-shell.aaaaaa"));
     put_block(&mut index, "/tmp", block(set, family.clone(), 400, 4000, 1));
@@ -287,8 +320,8 @@ fn paths(entries: &[queue::QueueEntry]) -> Vec<String> {
 #[test]
 fn oldest_order_with_blocks_by_their_oldest_member_and_hints_last() {
     let mut index = Index::new(BUDGET);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
-    let other = finder(&mut index, "tmp-entry", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
+    let other = finder("tmp-entry", "/tmp");
     put(&mut index, "/tmp/c", &rc, 1, 30);
     put(&mut index, "/tmp/a", &rc, 2, 10);
     put(&mut index, "/tmp/b", &rc, 3, 10);
@@ -356,7 +389,7 @@ fn oldest_order_with_blocks_by_their_oldest_member_and_hints_last() {
 #[test]
 fn best_fit_takes_the_smallest_covering_unit_else_the_largest_and_blocks_after_singles() {
     let mut index = Index::new(BUDGET);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     for (ino, path, est) in [
         (1, "/tmp/s100", 100),
         (2, "/tmp/s400", 400),
@@ -432,8 +465,8 @@ fn path_of(names: &[u8]) -> String {
 
 fn run(ops: &[Op], budget: usize) -> Index {
     let mut index = Index::new(budget);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
-    let entry = finder(&mut index, "tmp-entry", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
+    let entry = finder("tmp-entry", "/tmp");
     for op in ops {
         match op {
             Op::Insert {
@@ -508,7 +541,7 @@ proptest! {
 
         // The same units inserted in reverse order give the same queue.
         let mut reversed = Index::new(BUDGET);
-        let rc = finder(&mut reversed, "nix-shell-rc", "/tmp");
+        let rc = finder("nix-shell-rc", "/tmp");
         for entry in queue.ready.iter().rev() {
             let Queued::Single(s) = &entry.unit else { unreachable!("no blocks here") };
             let found = Discovered { identity: s.identity, newest_change: s.newest_change, checked_at: s.checked_at };

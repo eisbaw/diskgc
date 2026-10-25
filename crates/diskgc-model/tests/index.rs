@@ -26,6 +26,7 @@ use diskgc_model::ModelHost;
 use diskgc_model::load::parse_yaml;
 use diskgc_model::spec::Op;
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 
 const HEADER: &str = r#"host_model: 1
 clock: 2026-10-15T03:00:00Z
@@ -46,11 +47,11 @@ fn tmp_mount(_host: &ModelHost) -> MountKey {
     }
 }
 
-fn finder(index: &mut Index, profile: &str, root: &str) -> Finder {
+fn finder(profile: &str, root: &str) -> Finder {
     Finder {
         profile: profile.into(),
         profile_hash: 1,
-        root: index.root(Path::new(root)).expect("tables have room"),
+        root: Path::new(root).into(),
     }
 }
 
@@ -155,7 +156,7 @@ fn index_never_exceeds_its_budget() {
     // The trie bytes of a tenth of them as singles, measured by inserting
     // them into an index with room to spare.
     let mut calibration = Index::new(1 << 30);
-    let rc = finder(&mut calibration, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     let mount = tmp_mount(&host);
     for name in names.iter().take((DIRS / 10) as usize) {
         let path = Path::new("/tmp").join(name);
@@ -168,7 +169,7 @@ fn index_never_exceeds_its_budget() {
     let per_single = tenth / (DIRS / 10) as usize;
 
     let mut index = Index::new(tenth);
-    let rc = finder(&mut index, "nix-shell-rc", "/tmp");
+    let rc = finder("nix-shell-rc", "/tmp");
     let statx_before = host.trace_count(Op::Statx);
     let fed = feed_listing(&host, &mut index, &rc);
     index.assert_consistent();
@@ -293,7 +294,7 @@ fn collapse_revalidates_members() {
     let paths: Vec<PathBuf> = names.iter().map(|n| Path::new("/tmp").join(n)).collect();
     let host = host(&yaml);
     let mut index = tight_index(|index| {
-        let rc = finder(index, "nix-shell-rc", "/tmp");
+        let rc = finder("nix-shell-rc", "/tmp");
         feed_tallied(&host, index, &rc, &paths, 0);
     });
     let report = index.collapse_to_low_water(&host).unwrap();
@@ -331,13 +332,13 @@ fn a_replaced_site_is_not_collapsed_and_its_units_are_evicted() {
         .map(|i| PathBuf::from(format!("/tmp/site/x{i}")))
         .collect();
     let mut index = tight_index(|index| {
-        let entry = finder(index, "tmp-entry", "/tmp");
+        let entry = finder("tmp-entry", "/tmp");
         let mount = tmp_mount(&host);
         let site = Path::new("/tmp/site");
         index
             .insert(&host, &mount, site, &entry, discovered(&host, site))
             .unwrap();
-        let inner_finder = finder(index, "inner", "/tmp/site");
+        let inner_finder = finder("inner", "/tmp/site");
         feed_tallied(&host, index, &inner_finder, &inner, 0);
     });
     let report = index.collapse_to_low_water(&host).unwrap();
@@ -376,9 +377,9 @@ fn a_climbing_collapse_evicts_a_finer_block_whose_site_was_replaced() {
     .unwrap();
     let host = host(&yaml);
     let mut index = tight_index(|index| {
-        let rc = finder(index, "nix-shell-rc", "/tmp");
+        let rc = finder("nix-shell-rc", "/tmp");
         feed_tallied(&host, index, &rc, &rc_paths, 0);
-        let big = finder(index, "big", "/tmp");
+        let big = finder("big", "/tmp");
         let mount = tmp_mount(&host);
         for path in &big_paths {
             index
@@ -416,8 +417,8 @@ fn a_collapse_that_would_grow_the_index_is_not_taken() {
         "{HEADER}tree:\n  /tmp/{n1}/y: {{.: {{}}}}\n  /tmp/{n2}/y: {{.: {{}}}}\n  /tmp/z: {{.: {{}}}}\n"
     ));
     let fill = |index: &mut Index| {
-        let outer = finder(index, "p1", "/tmp");
-        let inner = finder(index, "p2", "/tmp");
+        let outer = finder("p1", "/tmp");
+        let inner = finder("p2", "/tmp");
         let mount = tmp_mount(&host);
         for name in [&n1, &n2] {
             let path = Path::new("/tmp").join(name);
@@ -467,8 +468,8 @@ fn a_block_of_a_replaced_site_is_never_absorbed_under_the_new_identity() {
     let d = Path::new("/tmp/D");
     assert_ne!(discovered(&old, d).identity, discovered(&new, d).identity);
     let fill = |index: &mut Index| {
-        let a = finder(index, "a", "/tmp");
-        let b = finder(index, "b", "/tmp");
+        let a = finder("a", "/tmp");
+        let b = finder("b", "/tmp");
         for (path, f) in [("/tmp/D", &a), ("/tmp/D/x1", &b), ("/tmp/D/x2", &b)] {
             let path = Path::new(path);
             index
@@ -480,7 +481,7 @@ fn a_block_of_a_replaced_site_is_never_absorbed_under_the_new_identity() {
     let mut index = tight_index(|index| {
         fill(index);
     });
-    let (a, b) = (index_finder(&mut index, "a"), index_finder(&mut index, "b"));
+    let (a, b) = (index_finder("a"), index_finder("b"));
     index.collapse_to_low_water(&old).unwrap();
     assert_eq!(blocks(&index).len(), 1, "x1 and x2 collapsed at D");
     let mount = tmp_mount(&new);
@@ -523,8 +524,8 @@ fn a_collapse_evicts_a_block_sited_at_a_replaced_site() {
     let host = host(&yaml);
     let mount = tmp_mount(&host);
     let phase_one = |index: &mut Index| {
-        let b = finder(index, "b", "/tmp");
-        let c = finder(index, "c", "/tmp");
+        let b = finder("b", "/tmp");
+        let c = finder("c", "/tmp");
         for path in ["/tmp/D/x1", "/tmp/D/x2"] {
             let path = Path::new(path);
             index
@@ -542,7 +543,7 @@ fn a_collapse_evicts_a_block_sited_at_a_replaced_site() {
     let mut index = tight_index(|index| {
         phase_one(index);
     });
-    let b = finder(&mut index, "b", "/tmp");
+    let b = finder("b", "/tmp");
     let first = index.collapse_to_low_water(&host).unwrap();
     let x_family = Family::Name(b"x#".to_vec().into());
     assert!(
@@ -561,7 +562,7 @@ fn a_collapse_evicts_a_block_sited_at_a_replaced_site() {
         assert_eq!(done.outcome, Inserted::New);
     }
     // Fill (another profile, elsewhere) until the next collapse must run.
-    let c = finder(&mut index, "c", "/tmp");
+    let c = finder("c", "/tmp");
     for i in 0..60 {
         if !index.at_low_water() {
             break;
@@ -584,8 +585,67 @@ fn a_collapse_evicts_a_block_sited_at_a_replaced_site() {
     assert!(second.evicted >= 1, "{second:?}");
 }
 
-fn index_finder(index: &mut Index, profile: &str) -> Finder {
-    finder(index, profile, "/tmp")
+/// Collapsing every unit of two finder sets into one lump leaves one set
+/// (their union) in the table: the absorbed sets are swept, and the count
+/// drops by their bytes.
+#[test]
+fn a_lump_sweeps_the_sets_it_absorbed() {
+    let mut yaml = format!("{HEADER}tree:\n");
+    for i in 0..6 {
+        writeln!(yaml, "  /tmp/p{i}/f: {{size: 1K}}").unwrap();
+        writeln!(yaml, "  /tmp/q{i}/f: {{size: 1K}}").unwrap();
+    }
+    let host = host(&yaml);
+    let mut index = Index::new(1 << 30);
+    let mount = tmp_mount(&host);
+    for i in 0..6 {
+        for (dir, profile) in [("p", "a"), ("q", "b")] {
+            let path = PathBuf::from(format!("/tmp/{dir}{i}"));
+            index
+                .insert(
+                    &host,
+                    &mount,
+                    &path,
+                    &finder(profile, "/tmp"),
+                    discovered(&host, &path),
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(index.stats().finder_sets, 2);
+    let before = index.accounted_bytes();
+    let report = index.collapse_to(&host, 0).unwrap();
+    index.assert_consistent();
+    let stats = index.stats();
+    assert_eq!(
+        (stats.singles, stats.blocks, stats.members),
+        (0, 1, 12),
+        "{report:?}"
+    );
+    assert_eq!(stats.finder_sets, 1, "only the union is left");
+    assert!(report.lumps >= 1, "{report:?}");
+    let [(site, lump)] = blocks(&index).try_into().unwrap();
+    assert_eq!(site, Path::new("/tmp"));
+    assert_eq!(index.finder_set(lump.finders()).len(), 2);
+    assert!(index.accounted_bytes() < before);
+    // And evicting the lump's last member empties the tables.
+    for _ in 0..12 {
+        index.block_member_removed(
+            &mount,
+            Path::new("/tmp"),
+            lump.finders(),
+            &Family::Any,
+            0,
+            0,
+        );
+    }
+    index.sweep_tables();
+    index.assert_consistent();
+    assert_eq!(index.accounted_bytes(), 0);
+}
+
+fn index_finder(profile: &str) -> Finder {
+    finder(profile, "/tmp")
 }
 
 /// A name that became a mount point is never `statx`ed or opened: its unit
@@ -607,7 +667,7 @@ fn a_mount_point_beneath_the_site_is_evicted_untouched() {
     let host = host(&yaml);
     let paths: Vec<PathBuf> = names.iter().map(|n| Path::new("/tmp").join(n)).collect();
     let mut index = tight_index(|index| {
-        let rc = finder(index, "nix-shell-rc", "/tmp");
+        let rc = finder("nix-shell-rc", "/tmp");
         feed_tallied(&host, index, &rc, &paths, 0);
     });
     let report = index.collapse_to_low_water(&host).unwrap();
@@ -723,11 +783,12 @@ proptest! {
         }
         let host = gen_model(&units);
         let mut index = Index::new(budget);
-        let a = finder(&mut index, "a", "/tmp");
-        let b = finder(&mut index, "b", "/tmp");
+        let a = finder("a", "/tmp");
+        let b = finder("b", "/tmp");
         let mount = tmp_mount(&host);
         let mut recorded: Vec<(PathBuf, Identity, u32)> = Vec::new();
         let mut collapse_runs = 0;
+        let mut lumped = 0;
         for (bit, (path, profile_b, _)) in units.iter().enumerate() {
             let bit = u32::try_from(bit).unwrap();
             let Some(stat) = host.stat_path(path) else { continue };
@@ -743,8 +804,9 @@ proptest! {
             index.assert_consistent();
             if let Some(c) = done.collapse {
                 collapse_runs += 1;
-                prop_assert!(c.passes <= units.len() + 1);
+                prop_assert!(c.passes <= 2 * units.len() + 4);
             }
+            lumped += usize::from(done.outcome == Inserted::Lumped);
             if done.outcome == Inserted::New {
                 index.single_mut(&mount, path).unwrap().tally = Some(Tally {
                     est_bytes: 1 << bit,
@@ -758,7 +820,7 @@ proptest! {
         let last = index.collapse_to_low_water(&host).unwrap();
         index.assert_consistent();
         prop_assert_eq!(last.reached_low_water, index.at_low_water());
-        prop_assert!(last.passes <= units.len() + 1);
+        prop_assert!(last.passes <= 2 * units.len() + 4);
 
         let valid = |path: &Path, identity: Identity| -> bool {
             let (Some(stat), Some(parent)) = (host.stat_path(path), host.stat_path(path.parent().unwrap())) else {
@@ -768,11 +830,14 @@ proptest! {
         };
         let mut in_blocks: u64 = 0;
         let mut as_singles: u64 = 0;
+        let mut untallied_members: u64 = 0;
         index.for_each_unit(|_, _, unit| match unit {
             UnitRef::Block(block) => {
                 assert_eq!(in_blocks & block.est_bytes, 0, "a unit in two blocks");
-                assert_eq!(u64::from(block.est_bytes.count_ones()), block.members, "members != absorbed");
-                assert_eq!(block.files, block.members);
+                // Tallied members carry one bit and one file each; a member
+                // that joined a lump at the limit carries neither.
+                assert_eq!(u64::from(block.est_bytes.count_ones()), block.files, "sums != absorbed");
+                untallied_members += block.members - block.files;
                 in_blocks |= block.est_bytes;
             }
             UnitRef::Single(single) => {
@@ -782,6 +847,7 @@ proptest! {
             }
         });
         prop_assert_eq!(in_blocks & as_singles, 0);
+        prop_assert_eq!(untallied_members, lumped as u64, "lumped members");
         for (path, identity, bit) in &recorded {
             let mask = 1u64 << bit;
             if in_blocks & mask != 0 {
@@ -796,5 +862,69 @@ proptest! {
                 );
             }
         }
+    }
+
+    /// Mark's rule (2026-10-25): with a budget at or above the floor (one
+    /// lump per mount with its finders, plus the tables), no insertion is
+    /// ever refused; the budget always holds; every collapse ends. Two
+    /// mounts, three profiles with roots on both.
+    #[test]
+    fn no_insertion_is_refused_at_or_above_the_floor(
+        generated in prop::collection::vec((gen_unit(), 0u8..3, any::<bool>()), 2..40),
+        above_floor in 0usize..3_000,
+    ) {
+        let mut units: Vec<(PathBuf, u8)> = Vec::new();
+        for (unit, profile, on_var) in generated {
+            let base = if on_var { "/var/tmp" } else { "/tmp" };
+            let path = Path::new(base).join(unit.names.join("/"));
+            if units.iter().all(|(p, _)| *p != path) {
+                units.push((path, profile));
+            }
+        }
+        let mut yaml = format!(
+            "{}  - {{id: 31, at: /var/tmp, fs: tmpfs, dev: \"0:43\", size: 1G, parent: 1}}\ntree:\n",
+            HEADER
+        );
+        for (path, _) in &units {
+            writeln!(yaml, "  {}/f: {{size: 1K}}", path.display()).unwrap();
+        }
+        let host = host(&yaml);
+        let mount_of = |path: &Path| MountKey {
+            dev: if path.starts_with("/var/tmp") { Dev { major: 0, minor: 43 } } else { Dev { major: 0, minor: 42 } },
+            mount_point: PathBuf::from(if path.starts_with("/var/tmp") { "/var/tmp" } else { "/tmp" }),
+        };
+        let finder_of = |path: &Path, profile: u8| finder(
+            ["a", "b", "c"][usize::from(profile)],
+            if path.starts_with("/var/tmp") { "/var/tmp" } else { "/tmp" },
+        );
+        let feed = |index: &mut Index, check: bool| -> Result<Vec<Inserted>, TestCaseError> {
+            let mut outcomes = Vec::new();
+            for (path, profile) in &units {
+                let done = index
+                    .insert(&host, &mount_of(path), path, &finder_of(path, *profile), discovered(&host, path))
+                    .unwrap();
+                if check {
+                    prop_assert!(index.accounted_bytes() <= index.budget_bytes());
+                    index.assert_consistent();
+                }
+                outcomes.push(done.outcome);
+            }
+            Ok(outcomes)
+        };
+        // The floor: everything collapsed to one lump per mount.
+        let mut reference = Index::new(1 << 30);
+        feed(&mut reference, false)?;
+        reference.collapse_to(&host, 0).unwrap();
+        reference.assert_consistent();
+        let stats = reference.stats();
+        prop_assert!(stats.singles == 0 && stats.blocks == stats.mounts, "{:?}", stats);
+        let floor = reference.accounted_bytes();
+
+        let mut index = Index::new(floor.max(1024) + above_floor);
+        let outcomes = feed(&mut index, true)?;
+        prop_assert!(!outcomes.contains(&Inserted::NoRoom), "{:?} at floor {}", outcomes, floor);
+        let stats = index.stats();
+        let found = outcomes.iter().filter(|o| matches!(o, Inserted::New | Inserted::Lumped)).count();
+        prop_assert_eq!(stats.singles as u64 + stats.members, found as u64, "{:?}", stats);
     }
 }

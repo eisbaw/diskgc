@@ -114,9 +114,7 @@ pub struct TierQueue {
 fn selected(index: &Index, set: FinderSetId, tier: &TierQuery<'_>) -> bool {
     index.finder_set(set).iter().any(|f| {
         tier.sources.iter().any(|s| {
-            *f.profile == *s.profile
-                && f.profile_hash == s.profile_hash
-                && index.root_info(f.root).path == s.root
+            *f.profile == *s.profile && f.profile_hash == s.profile_hash && *f.root == *s.root
         })
     })
 }

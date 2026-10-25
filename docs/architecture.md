@@ -52,7 +52,7 @@ Single {                        # one candidate
 
 Block {                         # many candidates, collapsed
   site                          # identity of a directory D (st_dev, inode, birth time)
-  finders                       # the members' common set of (profile, profile hash, root)
+  finders                       # the members' common set of (profile, profile hash, root); a lump's: their union
   family                        # name family of the members, or any
   members                       # count; names and identities are not stored
   est_bytes, files              # sums over the members
@@ -134,12 +134,19 @@ about 370 bytes per `Single` with a 16-byte name (its trie node, name,
 identity, finders, counters; the allocator measures about 325), so the
 budget holds roughly 170,000 singles: the development laptop's `/tmp`
 (about 155,000 top-level entries) still fits without collapsing;
-collapse is for larger trees and many roots on one filesystem. The root,
-finder-set and mount tables count against the same budget. Registering
-a root takes no `Host` port and cannot collapse, so at the ceiling it is
-refused until a collapse made room; an insertion that does not fit even
-after everything collapsible is collapsed (one block per finder set and
-root) is refused and the candidate left to per-tier discovery.
+collapse is for larger trees and many roots on one filesystem. The
+finder-set and mount tables count against the same budget and shrink
+with the units: after every collapse pass, a finder set or mount no unit
+uses is dropped (a finder names its root by path; a set's id is never
+reused, so an id kept past the sweep is stale, never another set's).
+
+**No insertion is refused, no coverage is partial** (Mark, 2026-10-25).
+Collapse continues past one block per (finder set, root) with
+**lumps** (below) up to one lump per mount. A candidate that still does
+not fit as a single then joins its mount's lump, which gains its finder.
+The budget only has to hold one lump per mount with its finders and the
+tables, a few hundred bytes per mount; below that floor (only a test
+budget can be) an insertion is refused. The budget is never raised.
 
 **What a collapse does.** It picks a **site**, a directory `D`, and a
 finder set `F`, and replaces every unit beneath `D` whose finders are
@@ -149,11 +156,30 @@ name family directly beneath `D` (the old "bucket"), then all families
 (`any`) beneath `D`; once `D`'s block is `any`, the next collapse of
 that subtree climbs to `D`'s parent and absorbs `D`'s block and its
 siblings. A site never lies above its finders' root (patterns are
-relative to it) nor on another mount than its members. Every collapse
-strictly reduces the number of units, so a
-sequence of collapses is bounded by the unit count and ends, at worst,
-at one block per (finder set, root): the index then knows sizes and age
-ranges per root and nothing finer.
+relative to it) nor on another mount than its members.
+
+**Lumps.** Once those steps make no more progress (everything is one
+block per finder set and root) and the index is still above the
+low-water mark, collapse merges across finder sets: a **lump** at a site
+`D` takes every unit beneath `D`, of any finder set, into one block of
+family `any` whose finders are the union of theirs. Lumps take the same
+key (small first, deepest first), so they climb towards the mount's
+root; at the mount's root a lump may take a single unit (a deep path
+becomes one block), so the limit is one lump per mount. A lump never
+crosses a mount. Its site may lie above some of its finders' roots: for
+discovery a lump never stands above a finder's root, because a tier
+expands it by its own discovery from the deeper of the lump's site and
+the tier's bound root (below, Expanding a block). The price is the
+widest expansion: more listing and `statx` at delete time, every member
+still checked live.
+
+Every collapse step is taken only if it shrinks the index, counted
+exactly beforehand (the units and the trie nodes it frees against the
+new block and, for a lump, its union finder set, crediting the sets only
+its units used); a long family name over singles whose trie nodes stay
+could otherwise grow it. So every step strictly shrinks the index and a
+sequence of collapses ends, at worst, at one lump per mount: the index
+then knows sizes and age ranges per mount and nothing finer.
 
 **Which site first.** A lexicographic key over the candidate sites
 (every directory with at least two units of one finder set beneath
@@ -167,7 +193,8 @@ it):
    discovering all of `/tmp` again).
 
 Ties are broken by the trie's path order, then the family step before
-the all-families step, then the finder set and the family, so collapse
+the all-families step before a lump, then the finder set and the
+family, so collapse
 is deterministic for a given index. A pass plans at most 1,024 steps
 in that order (a bounded working set) and executes them until the
 low-water mark; the next pass plans again from what is left. Further keys (most units, youngest first) wait for a
@@ -179,10 +206,14 @@ reached from its mount root one directory at a time without following
 symlinks or crossing mounts (as the tally walks) and must have the
 recorded identity; then each unit to be absorbed is re-checked (its
 root, or a finer block's site, still present beneath `D` under the same
-identity). A unit that fails is evicted and contributes nothing to the
-block's `members`, sums or ages. If `D` itself is gone or replaced,
-nothing is collapsed there: every unit beneath it is evicted and the
-next site is taken. Re-validation keeps a block's estimates honest
+identity). A unit that fails (gone, replaced, not permitted) is evicted
+and contributes nothing to the block's `members`, sums or ages; a
+failure of the host itself (EMFILE, ENOMEM, EIO) stops the collapse
+with that error instead. If `D` itself is gone or replaced, nothing is
+collapsed there: every unit at and beneath it is evicted and the next
+site is taken; a block sited at `D` under another identity than `D`'s
+now is evicted (and a single replaced by discovery takes the blocks
+sited at its path with it). Re-validation keeps a block's estimates honest
 (vanished members would inflate it and misorder the queue). It is not
 a safety check and grants nothing: a block's members are found and
 judged afresh when it is expanded. In `watch` the re-validation's
@@ -216,7 +247,8 @@ split step waits for a measured need (backlog).
   member after expansion, never to the block as a whole.
 - **Expanding a block.** When a block reaches the head of its tier's
   queue, the reclaim walk runs the tier's own discovery restricted to the
-  subtree beneath the block's site (one code path: the same patterns
+  subtree beneath the block's site, or from the tier's bound root where a
+  lump's site lies above it (one code path: the same patterns
   relative to the bound root, any depth they reach, no symlinks, no
   mounts, the same listing bounds) and keeps the names in the block's
   family. Like per-tier discovery, it acts only on an expansion that

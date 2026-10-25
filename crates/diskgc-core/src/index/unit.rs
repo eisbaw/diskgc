@@ -2,6 +2,8 @@
 //! group of candidates, and what both refer to (docs/architecture.md, The
 //! index). Plain values with the block arithmetic; no I/O, no trie.
 
+use std::path::Path;
+
 use crate::engine::Reason;
 use crate::host::{Dev, MonoTime, Stat, Timestamp};
 
@@ -44,12 +46,10 @@ impl Identity {
     }
 }
 
-/// Index of a root in the index's root table ([`super::Index::root`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RootId(pub(super) u32);
-
-/// Index of a finder set in the index's table: the units of one set share
-/// it, so a unit stores four bytes, not its finders.
+/// A finder set in the index's table: the units of one set share it, so a
+/// unit stores four bytes, not its finders. Each new set gets the next
+/// number, never reused, so an id kept past the set's sweep
+/// ([`super::Index::sweep_tables`]) is stale, never another set's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FinderSetId(pub(super) u32);
 
@@ -60,7 +60,8 @@ pub struct FinderSetId(pub(super) u32);
 pub struct Finder {
     pub profile: Box<str>,
     pub profile_hash: u64,
-    pub root: RootId,
+    /// The root it was bound to (absolute).
+    pub root: Box<Path>,
 }
 
 /// What the tally learned about a tree.
@@ -116,7 +117,8 @@ pub enum Family {
 }
 
 /// Many candidates, collapsed: every candidate of its finders beneath the
-/// directory `site` that its [`Family`] names. Names and identities of the
+/// directory `site` that its [`Family`] names (a lump's finders are the
+/// union of several sets, and its site may lie above some of their roots). Names and identities of the
 /// members are not stored; the reclaim walk finds them again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
