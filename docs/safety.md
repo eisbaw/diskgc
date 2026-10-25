@@ -211,10 +211,9 @@ Immediately before acting, diskgc walks the candidate's whole tree
     different names for one hard-linked inode, during planning, tally, and
     reclaim. A supported same-source Cargo union reduces to one idle
     bound; other union forms remain unsupported. Each tier judges its own candidates by its source
-    settings. Protected matches are enumerated before reclaim and rechecked
-    under the candidate lock and immediately before deletion. Changes in a
-    separately writable protected tree can still race between that scan and
-    deletion; this is not an atomic cross-tree exclusion.
+    settings. When protected matches are enumerated, and which enumeration
+    each check uses, is under Not protected, not excluded (below); it is not
+    an atomic cross-tree exclusion.
   - **Kept too (the accepted cost):** whatever holds a clone is never
     deleted by a profile that refuses checkouts (the default), and that
     can be much of what a profile finds. Seen on the development machine:
@@ -260,10 +259,47 @@ Immediately before acting, diskgc walks the candidate's whole tree
   network namespace are not seen, so a socket file used only from another
   network namespace looks stale and is deleted. Only the default is reachable until
   the configuration schema defines the setting.
-- **Not excluded** by overlap with a negated profile
-  ([reference.md](reference.md#protect)). Negated profiles are enumerated
-  before the first deletion and checked again under candidate locks;
-  incomplete enumeration excludes the tier.
+- **Not protected, not excluded:** no overlap, by name or by identity (a
+  same-device bind mount), with a `protect` match or a negated profile's
+  ([reference.md](reference.md#protect)). `protect` matches are enumerated
+  before the first deletion of the run and again before each later tier;
+  a tier's negated profiles at its start. An incomplete enumeration stops
+  the run (`protect`) or excludes the tier (negated). Each candidate is
+  judged before its lock, under it before the walk, and after the walk
+  immediately before the deletion (a Cargo target: before each part).
+  Which enumeration a check uses depends on the action (decided 2026-10-25
+  for TASK-200 on Mark's delegation):
+  - **`delete` and the Cargo protocol** judge against the tier's
+    enumeration. Their deletion unlinks only entries the walk listed, so a
+    match made inside the candidate after the walk is never unlinked (its
+    directory fails `ENOTEMPTY`). One made inside it between the
+    enumeration and the walk is in the walk and changes a time the walk
+    reads: the entry's ctime, and its directory's mtime and ctime. When the
+    walk's newest mtime or ctime (for a Cargo target, its last build: the
+    profile directories, lock files and walked entries) is unknown, or no
+    more than 2 s older than the start of the enumeration, or later, the
+    check after the walk enumerates every match again, as before a
+    command. The 2 s cover the kernel's coarse timestamp clock (a tick
+    behind) and filesystems with whole- or two-second times. A wall clock
+    that moved more than 2 s away from the monotonic one (including
+    suspend) since the enumeration makes every time doubtful: the check
+    enumerates again. Before TASK-200 every check enumerated every
+    protected and negated tree again, three full enumerations per
+    candidate: with a 61,000-directory protect, 2.2 to 3.3 s per candidate
+    and clears expiring before their deletion (`in_use_unknown`), against
+    5 to 33 ms without the protect (TASK-184).
+  - **A command action** enumerates every match again under the lock and
+    immediately before its program runs: the program may act on anything
+    in the candidate, walked or not.
+
+  Limits: a directory on the candidate's path, outside it, that becomes a
+  match after the enumeration (a new `CACHEDIR.TAG` making an ancestor a
+  Cargo target) is not seen by a delete until the next tier or run; nor is
+  a match made inside a candidate whose times a wall-clock step set back
+  past the enumeration, when the step was undone before the check; and for
+  every action, a separately writable protected tree can change between
+  the last enumeration and the deletion. None of this is an atomic
+  cross-tree exclusion.
 
 - **Fail closed on anything unreadable**, never treating it as empty or as
   nothing to check. A listing that fails part-way is that error, never a
@@ -1731,8 +1767,8 @@ filesystem as it is then, whatever the tally or a plan said:
    Right after that check, on its scan, and before the delete starts (or a
    command action's program, which is given the path), the mount table is
    read once more and the path, the place and the keep markers are judged
-   once more, then `protect` and `!profile:` and the other checks on that
-   scan, and the path and keep markers once more as the last check before
+   once more, then `protect` and `!profile:` (Not protected, not excluded)
+   and the other checks on that scan, and the path and keep markers once more as the last check before
    acting. Any failure: release, skip.
 
    *The path* (TASK-165): the directories step 2 reached stay open, and
@@ -2255,8 +2291,10 @@ The step that deletes (`cargo_target::reclaim` in the core).
    to it (a directory between the root and the target renamed since step 1,
    under a keep marker, into a checkout's metadata or out of the root) is
    `changed` (TASK-165). Only then are `protect` and `!profile:` judged on
-   the path, and the checkout path rule of step 1 holds for the target
-   where it is. Any hit: release, skip.
+   the path (Filesystem candidates: Not protected, not excluded; the
+   target's last build is the walk's newest change), and the checkout path
+   rule of step 1 holds for the target where it is. Any hit: release,
+   skip.
 3. **Delete inside the locked profile directories,** each part with the
    per-entry identity check of Deletion, in this order:
    - **fingerprints first**, of every profile directory before anything

@@ -68,6 +68,7 @@ use crate::host::{
     Access, Delete, Host, HostError, LockMode, Locked, MonoTime, Timestamp, TryLock,
 };
 use crate::inuse::{Checker, FRESHNESS, FreshAttempts, NotDeleted, clear_and_delete};
+use crate::outcome::PolicyAt;
 use crate::profile::IdleWindow;
 use crate::resolve::{ResolveError, Resolved, Unsafe, Want, open_beneath};
 
@@ -96,6 +97,10 @@ pub struct Reclaimed {
     pub locks_held: Option<Duration>,
     pub end: ReclaimEnd,
 }
+
+/// The tier's `protect` and `!profile:` policy, asked about the target by
+/// path ([`reclaim_checked`]).
+pub type Guard<'g> = dyn FnMut(&Path, PolicyAt) -> Result<Option<Skip>, Stop> + 'g;
 
 /// Checks that remain fixed while one Cargo target is reclaimed.
 pub struct ReclaimPolicy<'r, 'a> {
@@ -133,18 +138,21 @@ pub fn reclaim<H: Delete>(
             deadline,
         },
         checker,
-        &mut |_| Ok(None),
+        &mut |_, _| Ok(None),
     )
 }
 
-/// Recheck protected and negated profile overlap while Cargo's candidate
-/// locks are held, and immediately before each part is deleted.
+/// Asks `guard` (the tier's `protect` and `!profile:` policy) about the
+/// target while Cargo's locks are held, before the walks
+/// ([`PolicyAt::BeforeWalk`]), and after them immediately before the
+/// deletion and before each part ([`PolicyAt::AfterWalk`], with the newest
+/// change the walks saw).
 pub fn reclaim_checked<H: Delete>(
     host: &H,
     target: &Target,
     policy: ReclaimPolicy<'_, '_>,
     checker: &mut Checker<'_>,
-    guard: &mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
+    guard: &mut Guard<'_>,
 ) -> Reclaimed {
     // Under the target's locks one scan serves every part whose deletion
     // starts while it is younger than FRESHNESS, not only the checks made
@@ -196,7 +204,7 @@ struct Run<'r, 'c, H: Delete> {
     /// shared by all its parts: a busy host does not get a fresh budget
     /// per part while the target's Cargo locks are held.
     attempts: FreshAttempts,
-    guard: &'r mut dyn FnMut(&Path) -> Result<Option<Skip>, Stop>,
+    guard: &'r mut Guard<'r>,
 }
 
 /// A judgement as the end of the protocol.
@@ -261,7 +269,7 @@ impl<H: Delete> Run<'_, '_, H> {
             dirs.push(dir);
         }
 
-        if let Some(skip) = (self.guard)(path).map_err(ReclaimEnd::Stopped)? {
+        if let Some(skip) = (self.guard)(path, PolicyAt::BeforeWalk).map_err(ReclaimEnd::Stopped)? {
             return Err(ReclaimEnd::Skipped(skip));
         }
 
@@ -326,7 +334,13 @@ impl<H: Delete> Run<'_, '_, H> {
         // The path again, right before the deletion: the guard below and
         // the checkout path rule judge the path text.
         step(still_reached(host, target, &reached.target, deadline))?;
-        if let Some(skip) = (self.guard)(path).map_err(ReclaimEnd::Stopped)? {
+        // The parts unlink only what these walks listed: the guard learns
+        // the newest change they saw (and the profile directories' and
+        // lock files', which `last` includes).
+        let after_walk = PolicyAt::AfterWalk {
+            newest_change: last,
+        };
+        if let Some(skip) = (self.guard)(path, after_walk).map_err(ReclaimEnd::Stopped)? {
             return Err(ReclaimEnd::Skipped(skip));
         }
 
@@ -345,7 +359,13 @@ impl<H: Delete> Run<'_, '_, H> {
             };
             let candidate =
                 Candidate::new(parent, &part.path).expect("a part's path ends in its name");
-            self.delete_part(&candidate, &part.record, &inspected, reached.project)?;
+            self.delete_part(
+                &candidate,
+                &part.record,
+                &inspected,
+                reached.project,
+                after_walk,
+            )?;
         }
         // Step 4: the locks are released when `locks` is dropped here.
         drop(locks);
@@ -361,6 +381,7 @@ impl<H: Delete> Run<'_, '_, H> {
         record: &WalkRecord,
         inspected: &Inspected,
         project: Project,
+        after_walk: PolicyAt,
     ) -> Result<(), ReclaimEnd> {
         let (host, target) = (self.host, self.target);
         let options = DeleteOptions {
@@ -369,7 +390,9 @@ impl<H: Delete> Run<'_, '_, H> {
         };
         // The Cargo process heuristics, on the same scan as the check.
         let mut heuristics = |scan: &crate::inuse::Scan| {
-            if let Some(skip) = (self.guard)(&target.path).map_err(NotDeleted::Stopped)? {
+            if let Some(skip) =
+                (self.guard)(&target.path, after_walk).map_err(NotDeleted::Stopped)?
+            {
                 return Err(NotDeleted::Skipped(skip));
             }
             let evidence =

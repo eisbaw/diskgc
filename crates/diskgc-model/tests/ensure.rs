@@ -2562,3 +2562,70 @@ fn a_cargo_target_with_an_empty_profile_directory_in_checkout_metadata_is_refuse
         }
     }
 }
+
+/// A `protect` entry for a `keep-me` file in any Cargo target's `deps/`
+/// below `SRC`.
+fn protect_keep_me_in_deps() -> Vec<executor::ProtectedSource> {
+    let config = config::parse(
+        Path::new("/tmp/protect.yaml"),
+        br#"version: 1
+profiles:
+  - name: keep-me
+    find: {roots: [/home/mark/src], paths: ["*/target/debug/deps/keep-me"], type: file}
+    action: delete
+    examples: {match: [/home/mark/src/app/target/debug/deps/keep-me]}
+protect: [keep-me]
+"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// TASK-200, kind `cargo-target`: a protected match created in a locked
+/// profile directory before its walk is a change the walk sees, so the
+/// matches are enumerated again before the first part is deleted and the
+/// target is kept; one created after the walk is never unlinked (its
+/// directory, a part, cannot be removed).
+#[test]
+fn a_protected_match_made_in_a_cargo_target_is_seen_or_never_unlinked() {
+    let lock = format!("{OLD}/debug/.cargo-lock");
+    let keep = format!("{OLD}/debug/deps/keep-me");
+    let before_walk = format!(
+        "events:\n  - {{at: {{op: flock, path: {lock}, nth: 1, when: after}}, create: {keep}}}\n"
+    );
+    let host_before = host(&yaml(true, &before_walk));
+    let mut request = cargo("11G", None);
+    request.tier.protections = protect_keep_me_in_deps();
+    let report = ensure(&host_before, &request);
+    assert!(host_before.unfired_events().is_empty());
+    let old = report
+        .skipped
+        .iter()
+        .find(|e| e.candidate.as_deref() == Some(Path::new(OLD)))
+        .unwrap_or_else(|| panic!("{report:#?}"));
+    assert_eq!(old.reason, Reason::Protected, "{report:#?}");
+    assert!(
+        !calls(&host_before, Op::Unlinkat)
+            .iter()
+            .any(|c| c.path.as_deref().is_some_and(|p| p.starts_with(OLD))),
+        "{report:#?}"
+    );
+
+    let after_walk =
+        format!("events:\n  - {{at: {{op: own_pid, nth: 1, when: after}}, create: {keep}}}\n");
+    let host_after = host(&yaml(true, &after_walk));
+    let report = ensure(&host_after, &request);
+    assert!(host_after.unfired_events().is_empty());
+    let keep_alive = host_after
+        .trace()
+        .iter()
+        .all(|c| !(c.op == Op::Unlinkat && c.path.as_deref() == Some(Path::new(&keep))));
+    assert!(keep_alive, "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("ENOTEMPTY")),
+        "{report:#?}"
+    );
+}

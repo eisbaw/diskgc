@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use crate::engine::{End, Reason, Skip};
-use crate::host::HostError;
+use crate::host::{HostError, Timestamp};
 
 /// A judgement that can also stop the run: `Ok(Ok(value))`, a skip of
 /// the candidate (`Ok(Err(skip))`), or an error of the run (`Err(stop)`).
@@ -30,6 +30,23 @@ impl std::fmt::Display for Stop {
             Self::Failed { path, error } => write!(f, "{}: {error}", path.display()),
         }
     }
+}
+
+/// Where in a deletion protocol the tier's `protect` and `!profile:` policy
+/// is asked about a candidate, and what the candidate's eligibility walk has
+/// seen by then (docs/safety.md, Filesystem candidates: protected and
+/// negated matches). A delete unlinks only entries its walk listed, so
+/// after the walk the policy needs to look for new matches only if the walk
+/// saw a change made since the matches were enumerated (TASK-200).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAt {
+    /// Under the candidate's lock(s), before the eligibility walk.
+    BeforeWalk,
+    /// After the walk, before a deletion: the newest mtime or ctime of
+    /// anything the deletion may unlink (for a Cargo target, also of its
+    /// locked profile directories and lock files); `None` when some entry's
+    /// times are unknown.
+    AfterWalk { newest_change: Option<Timestamp> },
 }
 
 /// How the reclaim of one candidate ended (a Cargo target's protocol,

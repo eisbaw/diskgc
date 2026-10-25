@@ -112,6 +112,10 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["union-b*", "union-shared*"], type: dir}
   action: delete
   examples: {match: [/tmp/union-b]}
+- name: union-exclude-child
+  find: {roots: [/tmp], paths: [union-shared-clear/late-guard], type: file}
+  action: delete
+  examples: {match: [/tmp/union-shared-clear/late-guard]}
 - name: metadata-root-allow
   find: {roots: [/tmp], paths: [repo/.git/cache-file], type: file}
   checkouts: allow
@@ -1579,7 +1583,7 @@ fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
             false,
             &mut checker,
             None,
-            &mut |_, _| Ok(None),
+            &mut |_, _, _| Ok(None),
         );
         assert!(
             matches!(done.end, ReclaimEnd::Skipped(ref skip) if skip.reason.as_str() == "contains_checkout"),
@@ -1645,7 +1649,7 @@ fn no_admitted_union_term_reports_filtered_even_inside_checkout_metadata() {
         false,
         &mut checker,
         None,
-        &mut |_, _| Ok(None),
+        &mut |_, _, _| Ok(None),
     );
     assert!(
         matches!(done.end, ReclaimEnd::Skipped(ref skip) if skip.reason.as_str() == "filtered"),
@@ -3569,18 +3573,15 @@ fn scans_and_protect_listings(candidates: usize) -> (usize, usize) {
     (host.trace_count(Op::OwnPid), protect_listings)
 }
 
-/// TASK-184: neither the process scans nor the enumerations of a protected
-/// tree may grow with the number of candidates while scans stay fresh.
-/// Red on master 4c86d74 and on the TASK-184 branch: every candidate
-/// enumerates each protected tree three times (before its lock, under it,
-/// and inside its freshness window), which on a 61,000-directory protect
-/// cost 2.2 to 3.3 s per candidate and `in_use_unknown` skips (walk
-/// 2026-10-25-t184). Ignored until the protect recheck rule is decided:
-/// the obvious fix (matches enumerated once per tier) drops the late-match
-/// guarantee `command_union_rechecks_new_negated_match_just_before_invocation`
-/// pins.
+/// TASK-184/200: neither the process scans nor the enumerations of a
+/// protected tree grow with the number of candidates while scans stay
+/// fresh and the candidates are unchanged since the tier enumerated its
+/// matches. Before TASK-200 every candidate enumerated each protected tree
+/// three times (before its lock, under it, and inside its freshness
+/// window): 7 listings for 2 candidates, 19 for 6, and on a
+/// 61,000-directory protect 2.2 to 3.3 s per candidate with
+/// `in_use_unknown` skips (walk 2026-10-25-t184).
 #[test]
-#[ignore = "red until the TASK-184 protect-recheck decision; run with --ignored"]
 fn scans_and_protect_enumerations_do_not_grow_with_candidates() {
     let (scans_2, listings_2) = scans_and_protect_listings(2);
     let (scans_6, listings_6) = scans_and_protect_listings(6);
@@ -3588,5 +3589,113 @@ fn scans_and_protect_enumerations_do_not_grow_with_candidates() {
     assert_eq!(
         listings_2, listings_6,
         "protect root listings per run (2 candidates: {listings_2}, 6: {listings_6})"
+    );
+}
+
+/// A `protect` entry for `keep-me` anywhere one level below a `/tmp`
+/// candidate directory.
+fn protect_keep_me() -> Vec<executor::ProtectedSource> {
+    let config = diskgc_core::config::parse(
+        Path::new("/tmp/protect.yaml"),
+        br#"version: 1
+profiles:
+  - name: keep-me
+    find: {roots: [/tmp], paths: ["*/keep-me"], type: any}
+    action: delete
+    examples: {match: [/tmp/pytest-of-mark/keep-me]}
+protect: [keep-me]
+"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// TASK-200: a delete judges its candidate against the tier's enumerated
+/// matches, but a protected match created inside the candidate after that
+/// enumeration and before the eligibility walk is a change the walk sees
+/// (its time is not older than the enumeration): the matches are
+/// enumerated again before the deletion, and the candidate is kept.
+#[test]
+fn a_protected_match_made_in_a_candidate_before_its_walk_keeps_it() {
+    let tree = format!("  /tmp/pytest-of-u0: {}\n", old_dir("1M"));
+    let event = "events:\n  - {at: {op: flock, path: /tmp/pytest-of-u0, when: after}, \
+                 create: /tmp/pytest-of-u0/keep-me}\n";
+    let host = host(&yaml("", &tree, event));
+    let mut request = tmp("profile:pytest-of-dir");
+    request.tier.protections = protect_keep_me();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-u0"),
+        Some(Reason::Protected)
+    );
+    assert!(exists(&host, "/tmp/pytest-of-u0/keep-me"));
+    assert!(exists(&host, "/tmp/pytest-of-u0/f"));
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+/// TASK-200: a protected match created inside the candidate after its walk
+/// is not looked for again (an unchanged candidate is judged against the
+/// tier's matches), and it does not need to be: the delete unlinks only
+/// what the walk listed, so the match survives and its directory cannot
+/// be removed (`ENOTEMPTY`, an error of this candidate).
+#[test]
+fn a_protected_match_made_in_a_candidate_after_its_walk_is_never_unlinked() {
+    let tree = format!("  /tmp/pytest-of-u0: {}\n", old_dir("1M"));
+    // The first scan starts after the walk, under the lock.
+    let event = "events:\n  - {at: {op: own_pid, nth: 1, when: after}, \
+                 create: /tmp/pytest-of-u0/keep-me}\n";
+    let host = host(&yaml("", &tree, event));
+    let mut request = tmp("profile:pytest-of-dir");
+    request.tier.protections = protect_keep_me();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(exists(&host, "/tmp/pytest-of-u0/keep-me"), "{report:#?}");
+    assert!(!exists(&host, "/tmp/pytest-of-u0/f"), "{report:#?}");
+    assert!(exists(&host, "/tmp/pytest-of-u0"));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("ENOTEMPTY")),
+        "{report:#?}"
+    );
+}
+
+/// TASK-200, a union's `!profile:` term: the same as for `protect`. A
+/// negated match created inside the candidate between the tier's
+/// enumeration and the walk excludes it; one created after the walk is
+/// never unlinked.
+#[test]
+fn a_negated_match_made_in_a_union_candidate_is_seen_or_never_unlinked() {
+    let tree = format!("  /tmp/union-shared-clear: {}\n", old_dir("1M"));
+    let selection = "(profile:union-allow && !profile:union-exclude-child) || \
+                     (profile:union-refuse && !profile:union-exclude-child)";
+    let before_walk = "events:\n  - {at: {op: flock, path: /tmp/union-shared-clear, when: after}, \
+                       create: /tmp/union-shared-clear/late-guard}\n";
+    let host_before = host(&yaml("", &tree, before_walk));
+    let report = ensure(&host_before, &tmp(selection));
+    assert!(host_before.unfired_events().is_empty());
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/union-shared-clear"),
+        Some(Reason::Excluded)
+    );
+    assert!(calls(&host_before, Op::Unlinkat).is_empty());
+
+    let after_walk = "events:\n  - {at: {op: own_pid, nth: 1, when: after}, \
+                      create: /tmp/union-shared-clear/late-guard}\n";
+    let host_after = host(&yaml("", &tree, after_walk));
+    let report = ensure(&host_after, &tmp(selection));
+    assert!(host_after.unfired_events().is_empty());
+    assert!(exists(&host_after, "/tmp/union-shared-clear/late-guard"));
+    assert!(!exists(&host_after, "/tmp/union-shared-clear/f"));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("ENOTEMPTY")),
+        "{report:#?}"
     );
 }

@@ -36,6 +36,8 @@
 //! `Stopped(Failed)` errors of the run, which stop it;
 //! `Stopped(DeadlinePassed)` the deadline path.
 
+mod tier_policy;
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -65,6 +67,7 @@ use crate::resolve::{
 };
 use crate::select::{self, Factor};
 use crate::units::{Size, format_age, format_bytes};
+use tier_policy::{DeletePolicy, Protection};
 
 fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
     // Usage errors precede a run. Once work has started, interruption wins
@@ -1645,7 +1648,7 @@ fn ensure_inner<H: Delete>(
     }
     let tier = roots.filtered_tier(&request.tier);
     let started = host.now();
-    let protections = scan_protections(host, &request.tier.protections, deadline);
+    let protections = Protection::enumerate(host, &request.tier.protections, deadline);
     record_deadline_overrun(
         host,
         &mut report,
@@ -1657,8 +1660,8 @@ fn ensure_inner<H: Delete>(
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
     }
-    let protection_matches = match protections {
-        Ok(matches) => matches,
+    let protection = match protections {
+        Ok(protection) => protection,
         Err(error) => {
             record_error(&mut report, log, run_error(&request.tier, error));
             report.avail_after_bytes =
@@ -1674,7 +1677,7 @@ fn ensure_inner<H: Delete>(
         tally_budget: request.tally_budget,
         command_ready,
         docker_bound: None,
-        protection_matches: &protection_matches,
+        protection: &protection,
         report: &mut report,
         log,
         deadline_hit: false,
@@ -1858,7 +1861,7 @@ fn ensure_grouped_inner<H: Delete>(
         return deadline_before_reclaim(host, &measured, deadline, report, log, first);
     }
     let started = host.now();
-    let protections = scan_protections(host, &first.protections, deadline);
+    let protections = Protection::enumerate(host, &first.protections, deadline);
     record_deadline_overrun(
         host,
         &mut report,
@@ -1870,8 +1873,11 @@ fn ensure_grouped_inner<H: Delete>(
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, first);
     }
-    let protection_matches = match protections {
-        Ok(matches) => matches,
+    // Enumerated before any tier may delete (a protect that cannot be
+    // enumerated stops the run first), then again before each later tier:
+    // a tier's delete actions judge against its own (TASK-200).
+    let mut protection = match protections {
+        Ok(protection) => protection,
         Err(error) => {
             record_error(&mut report, log, run_error(first, error));
             report.avail_after_bytes =
@@ -2037,6 +2043,7 @@ fn ensure_grouped_inner<H: Delete>(
         prepared.push(Some((filtered_tier, ready, docker_bound)));
     }
     let mut deadline_hit = false;
+    let mut a_tier_ran = false;
     for ((_, tier_timeout), ready) in tiers.iter().zip(tier_timeouts).zip(prepared) {
         if host.interrupted().is_some() {
             break;
@@ -2076,6 +2083,30 @@ fn ensure_grouped_inner<H: Delete>(
             (run, None) => run,
             (None, own) => own,
         };
+        if a_tier_ran {
+            let started = host.now();
+            let enumerated = Protection::enumerate(host, &first.protections, deadline);
+            record_deadline_overrun(
+                host,
+                &mut report,
+                deadline,
+                started,
+                "protect",
+                &request.path,
+            );
+            if deadline_passed(host, deadline) {
+                deadline_hit = true;
+                break;
+            }
+            match enumerated {
+                Ok(enumerated) => protection = enumerated,
+                Err(error) => {
+                    record_error(&mut report, log, run_error(tier, error));
+                    break;
+                }
+            }
+        }
+        a_tier_ran = true;
         let mut run = Reclaim {
             host,
             tier,
@@ -2084,7 +2115,7 @@ fn ensure_grouped_inner<H: Delete>(
             tally_budget: request.tally_budget,
             command_ready: ready,
             docker_bound,
-            protection_matches: &protection_matches,
+            protection: &protection,
             report: &mut report,
             log,
             deadline_hit: false,
@@ -3070,8 +3101,11 @@ fn excluded_by_until<H: Host>(
 }
 
 /// Called by each kind while it still holds its candidate lock and before
-/// its final action. Protection is global; negation belongs to the selected
-/// source term. Uncertain discovery or identity stops the run.
+/// its final action, enumerating every `protect` and `!profile:` match
+/// again: before a command action, which may touch anything in the
+/// candidate (a delete action asks [`tier_policy::DeletePolicy`] instead).
+/// Protection is global; negation belongs to the selected source term.
+/// Uncertain discovery or identity stops the run.
 fn policy_skip<H: Host>(
     host: &H,
     protections: &[ProtectedSource],
@@ -3079,26 +3113,60 @@ fn policy_skip<H: Host>(
     deadline: Option<MonoTime>,
     path: &Path,
 ) -> Result<Option<Skip>, Stop> {
-    let failed = |what: &'static str, detail: String| Stop::Failed {
-        path: path.to_owned(),
-        error: HostError::invalid(what, path.display(), detail),
-    };
     let protected = scan_protections(host, protections, deadline)
-        .map_err(|error| failed("protect recheck", error))?;
-    if overlaps_checked_until(host, path, &protected, deadline)
-        .map_err(|error| failed("protect overlap", error))?
-    {
-        return Ok(Some(Skip::new(
+        .map_err(|error| policy_failed(path, "protect recheck", error))?;
+    if let Some(skip) = protected_verdict(host, &protected, deadline, path)? {
+        return Ok(Some(skip));
+    }
+    let negated_matches = scan_negated(host, negated, deadline)
+        .map_err(|error| policy_failed(path, "!profile recheck", error))?;
+    excluded_verdict(host, negated, &negated_matches, deadline, path)
+}
+
+/// `path` judged against enumerated `protect` and `!profile:` matches (one
+/// list per `negated` source) at the final action check. Uncertain identity
+/// stops the run.
+fn policy_verdict<H: Host>(
+    host: &H,
+    protected: &[PathBuf],
+    negated: &[NegatedSource],
+    negated_matches: &[Vec<PathBuf>],
+    deadline: Option<MonoTime>,
+    path: &Path,
+) -> Result<Option<Skip>, Stop> {
+    if let Some(skip) = protected_verdict(host, protected, deadline, path)? {
+        return Ok(Some(skip));
+    }
+    excluded_verdict(host, negated, negated_matches, deadline, path)
+}
+
+fn protected_verdict<H: Host>(
+    host: &H,
+    protected: &[PathBuf],
+    deadline: Option<MonoTime>,
+    path: &Path,
+) -> Result<Option<Skip>, Stop> {
+    let overlaps = overlaps_checked_until(host, path, protected, deadline)
+        .map_err(|error| policy_failed(path, "protect overlap", error))?;
+    Ok(overlaps.then(|| {
+        Skip::new(
             Reason::Protected,
             path.to_owned(),
             "overlaps a protected match at final action check".to_owned(),
-        )));
-    }
-    let negated_matches =
-        scan_negated(host, negated, deadline).map_err(|error| failed("!profile recheck", error))?;
+        )
+    }))
+}
+
+fn excluded_verdict<H: Host>(
+    host: &H,
+    negated: &[NegatedSource],
+    negated_matches: &[Vec<PathBuf>],
+    deadline: Option<MonoTime>,
+    path: &Path,
+) -> Result<Option<Skip>, Stop> {
     Ok(
-        excluded_by_until(host, negated, &negated_matches, path, deadline)
-            .map_err(|error| failed("!profile overlap", error))?
+        excluded_by_until(host, negated, negated_matches, path, deadline)
+            .map_err(|error| policy_failed(path, "!profile overlap", error))?
             .map(|profile| {
                 Skip::new(
                     Reason::Excluded,
@@ -3107,6 +3175,13 @@ fn policy_skip<H: Host>(
                 )
             }),
     )
+}
+
+fn policy_failed(path: &Path, what: &'static str, detail: String) -> Stop {
+    Stop::Failed {
+        path: path.to_owned(),
+        error: HostError::invalid(what, path.display(), detail),
+    }
 }
 
 fn scan_union_negated<H: Host>(
@@ -3717,7 +3792,8 @@ struct Reclaim<'a, 'l, H: Delete> {
     tally_budget: Option<Duration>,
     command_ready: Option<Ready>,
     docker_bound: Option<Bound>,
-    protection_matches: &'a [PathBuf],
+    /// The tier's `protect` matches ([`DeletePolicy`]).
+    protection: &'a Protection,
     report: &'a mut Report,
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
@@ -3745,6 +3821,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         false
     }
 
+    /// Whether the tier's action deletes only entries its eligibility walk
+    /// listed (`delete`, the Cargo protocol), so that its candidates can be
+    /// judged against the tier's enumerated `protect` and `!profile:`
+    /// matches ([`DeletePolicy`]). A command, or a Docker prune, acts on
+    /// what it finds when it runs: every check enumerates them again.
+    fn unlinks_only_walked_entries(&self) -> bool {
+        match self.tier.action {
+            Action::Delete { .. } | Action::CargoLockProtocol => true,
+            Action::Command { .. }
+            | Action::DockerBuilderPrune
+            | Action::DockerImagePrune { .. } => false,
+        }
+    }
+
     /// Recheck immediately before entering a kind's reclaim protocol. A
     /// changed or unreadable protected tree stops the entire run.
     fn protected_before_reclaim(&mut self, candidate: &Path) -> bool {
@@ -3763,7 +3853,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.tier.protections.is_empty() {
             return false;
         }
-        match overlaps_checked_until(self.host, candidate, self.protection_matches, self.deadline) {
+        match overlaps_checked_until(
+            self.host,
+            candidate,
+            &self.protection.matches,
+            self.deadline,
+        ) {
             Ok(true) => {
                 self.skip(
                     candidate,
@@ -3780,6 +3875,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.run_error(error);
                 return true;
             }
+        }
+        if self.unlinks_only_walked_entries() {
+            // Judged against the tier's matches again under the lock and
+            // after the walk ([`DeletePolicy`]): enumerating them here too
+            // would only repeat the tier's enumeration per candidate.
+            return false;
         }
         match scan_protections(self.host, &self.tier.protections, self.deadline) {
             Ok(matches) => {
@@ -4275,7 +4376,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
             let started = self.host.now();
-            let overlap = overlaps_checked(self.host, &target.path, self.protection_matches);
+            let overlap = overlaps_checked(self.host, &target.path, &self.protection.matches);
             self.record_overrun("protect", &target.path, started, self.host.now());
             if self.past_deadline() {
                 return self.stop(&Stop::DeadlinePassed {
@@ -4448,14 +4549,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     deadline: self.deadline,
                 },
                 checker,
-                &mut |path| {
-                    policy_skip(
-                        self.host,
-                        &self.tier.protections,
-                        &self.tier.negated,
-                        self.deadline,
-                        path,
-                    )
+                &mut |path, at| {
+                    DeletePolicy {
+                        protections: &self.tier.protections,
+                        protected: &self.protection.matches,
+                        negated: &self.tier.negated,
+                        negated_matches: &negated_matches,
+                        enumerated: self.protection.enumerated,
+                    }
+                    .skip(self.host, self.deadline, path, at)
                 },
             );
             let held = format!(
@@ -4535,7 +4637,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
             let started = self.host.now();
-            let overlap = overlaps_checked(self.host, path, self.protection_matches);
+            let overlap = overlaps_checked(self.host, path, &self.protection.matches);
             self.record_overrun("protect", path, started, self.host.now());
             if self.past_deadline() {
                 return self.stop(&Stop::DeadlinePassed { path: path.clone() });
@@ -4669,8 +4771,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         *make_writable,
                         checker,
                         self.deadline,
-                        &mut |_, path| {
-                            policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
+                        &mut |_, path, at| {
+                            DeletePolicy {
+                                protections: &self.tier.protections,
+                                protected: &self.protection.matches,
+                                negated: &[],
+                                negated_matches: &[],
+                                enumerated: self.protection.enumerated,
+                            }
+                            .skip(self.host, self.deadline, path, at)
                         },
                     );
                     Outcome {
@@ -4800,7 +4909,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         for candidate in &candidates {
             let path = &candidate.found_by[0].1.path;
             let started = self.host.now();
-            let overlap = overlaps_checked(self.host, path, self.protection_matches);
+            let overlap = overlaps_checked(self.host, path, &self.protection.matches);
             self.record_overrun("protect", path, started, self.host.now());
             if self.past_deadline() {
                 return self.stop(&Stop::DeadlinePassed { path: path.clone() });
@@ -5055,15 +5164,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         *make_writable,
                         checker,
                         self.deadline,
-                        &mut |selected, path| {
-                            let source = &sources[contributors[selected].0];
-                            policy_skip(
-                                self.host,
-                                &self.tier.protections,
-                                source.negated,
-                                self.deadline,
-                                path,
-                            )
+                        &mut |selected, path, at| {
+                            let index = contributors[selected].0;
+                            DeletePolicy {
+                                protections: &self.tier.protections,
+                                protected: &self.protection.matches,
+                                negated: sources[index].negated,
+                                negated_matches: &negated_matches[index],
+                                enumerated: self.protection.enumerated,
+                            }
+                            .skip(self.host, self.deadline, path, at)
                         },
                     );
                     (done.selected, done.removed_entries, false, done.end)

@@ -1030,7 +1030,11 @@ Claude Code's session directories (the matching set of the withdrawn
 `claude-code-tmp`); diskgc 0.1 has no user profiles, so it can protect only
 its own built-ins, such as `{profile: cargo-target, roots: [...]}` in the
 0.1 example. The packaged `example.yaml` has no `protect` entry. Filesystem and Cargo reclaim
-re-enumerate matches under candidate locks and just before deletion; Docker
+judge each candidate against the matches under its locks and just before
+deletion: a `delete` against the matches enumerated for its tier, enumerating
+them again when the candidate changed since; a `command` against matches
+enumerated again at each check ([safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate),
+Not protected, not excluded). Docker
 rechecks protection before invoking prune. An incomplete scan stops the
 run. Concurrent changes in an independently writable protected tree cannot
 be made atomic with deletion of another tree; do not rely on this rule as a

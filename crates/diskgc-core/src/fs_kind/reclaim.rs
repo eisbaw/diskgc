@@ -54,7 +54,7 @@ use crate::host::{Base, Delete, Host, MonoTime};
 use crate::inuse::{
     Checker, FreshAttempts, NotDeleted, clear_and_delete, lock_candidate, locked_is_walked,
 };
-use crate::outcome::{Judged, ReclaimEnd, Stop};
+use crate::outcome::{Judged, PolicyAt, ReclaimEnd, Stop};
 use std::path::Path;
 
 /// What [`reclaim`] did.
@@ -219,20 +219,22 @@ pub fn reclaim_alternatives<H: Delete>(
         make_writable,
         checker,
         deadline,
-        &mut |_, _| Ok(None),
+        &mut |_, _, _| Ok(None),
     )
 }
 
 /// Recheck runtime policy while holding the candidate lock, first while
-/// judging and again after the fresh walk immediately before deletion. A
-/// refusal carries its exact reason; an uncertain lookup stops the whole run.
+/// judging ([`PolicyAt::BeforeWalk`]) and again after the fresh walk
+/// immediately before deletion ([`PolicyAt::AfterWalk`], with the newest
+/// change the walk saw). A refusal carries its exact reason; an uncertain
+/// lookup stops the whole run.
 pub fn reclaim_alternatives_checked<H: Delete>(
     host: &H,
     alternatives: &[Alternative<'_>],
     make_writable: bool,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
-    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
+    policy: &mut impl FnMut(usize, &Path, PolicyAt) -> Result<Option<Skip>, Stop>,
 ) -> Reclaimed {
     assert!(alternatives.first().is_some_and(|source| source.admitted));
     let mut done = Reclaimed {
@@ -262,7 +264,7 @@ fn protocol<H: Delete>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
     done: &mut Reclaimed,
-    policy: &mut impl FnMut(usize, &Path) -> Result<Option<Skip>, Stop>,
+    policy: &mut impl FnMut(usize, &Path, PolicyAt) -> Result<Option<Skip>, Stop>,
 ) -> Result<(), ReclaimEnd> {
     let found = alternatives[0].found;
     let path = &found.path;
@@ -358,7 +360,9 @@ fn protocol<H: Delete>(
                 continue;
             }
         }
-        if let Some(skip) = policy(index, &found.path).map_err(ReclaimEnd::Stopped)? {
+        if let Some(skip) =
+            policy(index, &found.path, PolicyAt::BeforeWalk).map_err(ReclaimEnd::Stopped)?
+        {
             first_skip.get_or_insert(skip);
             continue;
         }
@@ -420,6 +424,11 @@ fn protocol<H: Delete>(
         .filter(|(_, a)| a.admitted)
         .unzip();
     let mut attempts = FreshAttempts::new(deadline);
+    // The delete unlinks only what this walk listed (a file created in the
+    // candidate since is never unlinked): the policy learns what it saw.
+    let after_walk = PolicyAt::AfterWalk {
+        newest_change: record.newest_change(),
+    };
     let deletion = match clear_and_delete(
         host,
         checker,
@@ -439,7 +448,9 @@ fn protocol<H: Delete>(
                 .again(host, found, &reached, &mounts, deadline)
                 .map_err(NotDeleted::Stopped)?
                 .map_err(NotDeleted::Skipped)?;
-            if let Some(skip) = policy(index, &found.path).map_err(NotDeleted::Stopped)? {
+            if let Some(skip) =
+                policy(index, &found.path, after_walk).map_err(NotDeleted::Stopped)?
+            {
                 return Err(NotDeleted::Skipped(skip));
             }
             // Every discovering source's contract, on this same scan.
