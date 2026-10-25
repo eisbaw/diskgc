@@ -928,3 +928,88 @@ proptest! {
         prop_assert_eq!(stats.singles as u64 + stats.members, found as u64, "{:?}", stats);
     }
 }
+
+/// Letters only (`a`..`z`), one-to-one: a family stem that no digit run or
+/// suffix rule folds into another.
+fn letters(mut i: usize) -> String {
+    let mut out = String::new();
+    loop {
+        out.push(char::from(b'a' + u8::try_from(i % 26).unwrap()));
+        i /= 26;
+        if i == 0 {
+            return out;
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 6, ..ProptestConfig::default() })]
+
+    /// TASK-230: a crowded plan. Beneath `/tmp/d`, more name families than
+    /// a pass plans steps (`PLAN_LIMIT`), each of two singles of profile `a`
+    /// with a long family name whose trie nodes stay (each holds a single of
+    /// profile `b` beneath it): every family step would grow the index and
+    /// all of them sort before the all-names steps that shrink it. Filled to
+    /// the ceiling, more insertions must still collapse (never refused
+    /// above the floor), the budget holding after each.
+    #[test]
+    fn a_crowded_plan_never_refuses_an_insertion_above_the_floor(
+        extra_families in 1usize..64,
+        stem_len in 120usize..240,
+        slack in 0usize..170,
+        inserts in 2usize..12,
+    ) {
+        use diskgc_core::index::collapse::PLAN_LIMIT;
+        let families = PLAN_LIMIT + extra_families;
+        let stem = "s".repeat(stem_len);
+        let mut model = parse_yaml(&format!(
+            "{HEADER}tree:\n  /tmp/x: {{inner: {{f: {{size: 1K}}}}}}\n  /tmp/e: {{.: {{}}}}\n"
+        ))
+        .unwrap();
+        let unit = model.tree.remove(Path::new("/tmp/x")).unwrap();
+        let mut outer: Vec<PathBuf> = Vec::new();
+        for i in 0..families {
+            for suffix in ["abcde", "fghij"] {
+                let path = Path::new("/tmp/d").join(format!("{stem}{}.{suffix}", letters(i)));
+                model.tree.insert(path.clone(), unit.clone());
+                outer.push(path);
+            }
+        }
+        let extra: Vec<PathBuf> = (0..inserts)
+            .map(|i| Path::new("/tmp/e").join(format!("late-{}", letters(i))))
+            .collect();
+        for path in &extra {
+            model.tree.insert(path.clone(), unit.clone());
+        }
+        let host = ModelHost::new(&model).unwrap();
+        let mount = tmp_mount(&host);
+        let (a, b) = (finder("a", "/tmp"), finder("b", "/tmp"));
+        let fill = |index: &mut Index| {
+            for path in &outer {
+                for (finder, path) in [(&a, path.clone()), (&b, path.join("inner"))] {
+                    let done = index
+                        .insert(&host, &mount, &path, finder, discovered(&host, &path))
+                        .unwrap();
+                    assert_eq!(done.outcome, Inserted::New);
+                }
+            }
+        };
+        let mut sizing = Index::new(1 << 30);
+        fill(&mut sizing);
+        let mut index = Index::new(sizing.accounted_bytes() + slack);
+        fill(&mut index);
+        index.assert_consistent();
+        for path in &extra {
+            let done = index
+                .insert(&host, &mount, path, &a, discovered(&host, path))
+                .unwrap();
+            prop_assert!(
+                !matches!(done.outcome, Inserted::NoRoom | Inserted::Lumped),
+                "{:?} ({:?}) with {} families: the crowded plan stopped above the floor",
+                done.outcome, done.collapse, families
+            );
+            prop_assert!(index.accounted_bytes() <= index.budget_bytes());
+            index.assert_consistent();
+        }
+    }
+}

@@ -26,7 +26,12 @@
 //!    known to be below [`BIG_UNIT_BYTES`] first, then the deepest, then the
 //!    path, then family before all names before lump (ties: finder set,
 //!    family). A pass plans at most [`PLAN_LIMIT`] steps (a bounded working
-//!    set); the next pass plans again from what is left.
+//!    set): the first ones in that order **that would shrink the index**
+//!    now (the gain of step 4, counted at planning). A step that would not
+//!    shrink it never takes a place in the window, so a crowd of such steps
+//!    (long family names over singles whose nodes stay) cannot fill it and
+//!    stop the run above the low-water mark while a shrinking step exists
+//!    (TASK-230). The next pass plans again from what is left.
 //! 2. **Reach `D`** (Host): from its mount's root without following a
 //!    symlink or crossing a mount ([`crate::resolve`]), after screening the
 //!    mount chain from mountinfo (read again every pass). Gone,
@@ -44,7 +49,9 @@
 //!    that error and evicts nothing more.
 //! 4. **Absorb** (pure): the step is taken only if it shrinks the index,
 //!    counted exactly (what the taken units and their emptied nodes free,
-//!    against the new block and a new union finder set); a long family name
+//!    against the new block and, for a lump, its union finder set: charged
+//!    unless that set already exists and units outside the step keep it,
+//!    and the sets only the step's units use credited); a long family name
 //!    over singles whose nodes stay could grow it. The units become one
 //!    block at `D` whose totals are the sums of theirs. The same check runs
 //!    before any I/O, so a hopeless step costs no `statx`.
@@ -293,12 +300,17 @@ pub(super) fn to_target<H: Host>(
         let before = (index.units(), index.accounted_bytes());
         // Read again every pass: a mount made since must not be statted.
         let mounts = host.mountinfo()?;
-        for step in plan(index, PLAN_LIMIT, lumps) {
+        // Kept exact through the pass (one walk of the index per pass, not
+        // per step: TASK-230).
+        let mut users = index.set_users();
+        for step in plan(index, PLAN_LIMIT, lumps, &users) {
             if done(index) {
                 break;
             }
-            execute(index, host, &mounts, &step, &mut report)?;
+            execute(index, host, &mounts, &step, &mut users, &mut report)?;
         }
+        users.retain(|_, n| *n > 0);
+        assert_eq!(users, index.set_users(), "finder-set users drifted");
         index.sweep_tables();
         if done(index) {
             break;
@@ -316,8 +328,12 @@ pub(super) fn to_target<H: Host>(
 
 // ---- Plan (pure) ----
 
-/// The best `limit` steps, in key order.
-fn plan(index: &Index, limit: usize, lumps: bool) -> Vec<Step> {
+/// How many units use each finder set.
+type Users = BTreeMap<FinderSetId, usize>;
+
+/// The first `limit` steps in key order that would shrink the index now.
+fn plan(index: &Index, limit: usize, lumps: bool, users: &Users) -> Vec<Step> {
+    assert!(limit >= 1, "a plan window of no step");
     let ranks = index.set_ranks();
     let mut best: BinaryHeap<Step> = BinaryHeap::new();
     for (mount, trie) in index.mounts.iter().enumerate() {
@@ -326,31 +342,31 @@ fn plan(index: &Index, limit: usize, lumps: bool) -> Vec<Step> {
         let mut planner = Planner {
             index,
             ranks: &ranks,
+            users,
             mount,
             root_depth: depth,
             lumps,
-            emit: &mut |step| {
-                best.push(step);
-                if best.len() > limit {
-                    best.pop();
-                }
-            },
+            limit,
+            best: &mut best,
         };
         planner.node(&trie.root, &mut path, depth);
     }
     best.into_sorted_vec()
 }
 
-struct Planner<'a, F: FnMut(Step)> {
+struct Planner<'a> {
     index: &'a Index,
     ranks: &'a BTreeMap<FinderSetId, usize>,
+    users: &'a Users,
     mount: usize,
     root_depth: usize,
     lumps: bool,
-    emit: &'a mut F,
+    limit: usize,
+    /// The window: a max-heap by key, so its top is the step to drop.
+    best: &'a mut BinaryHeap<Step>,
 }
 
-impl<F: FnMut(Step)> Planner<'_, F> {
+impl Planner<'_> {
     /// Plans the steps at `node` and below; returns the units of each finder
     /// set in its subtree (its own single included).
     fn node(
@@ -381,10 +397,10 @@ impl<F: FnMut(Step)> Planner<'_, F> {
             }
         }
         for ((set, family), agg) in families {
-            self.step(path, depth, Scope::Family(family), Some(set), agg);
+            self.step(node, path, depth, Scope::Family(family), Some(set), agg);
         }
         for (set, agg) in &beneath {
-            self.step(path, depth, Scope::Any, Some(*set), *agg);
+            self.step(node, path, depth, Scope::Any, Some(*set), *agg);
         }
         if self.lumps {
             let mut all = Agg::NONE;
@@ -395,7 +411,7 @@ impl<F: FnMut(Step)> Planner<'_, F> {
             let already_one_lump =
                 all.count == 1 && node.blocks.len() == 1 && node.blocks[0].family == Family::Any;
             if all.count >= 2 || (at_mount_root && all.count == 1 && !already_one_lump) {
-                self.emit_step(path, depth, Scope::Lump, None, all);
+                self.emit_step(node, path, depth, Scope::Lump, None, all);
             }
         }
         if let Some(single) = &node.single {
@@ -410,6 +426,7 @@ impl<F: FnMut(Step)> Planner<'_, F> {
 
     fn step(
         &mut self,
+        site: &Node,
         path: &Path,
         depth: usize,
         scope: Scope,
@@ -418,26 +435,39 @@ impl<F: FnMut(Step)> Planner<'_, F> {
     ) {
         let set_id = set.expect("a family or all-names step has a set");
         if agg.count >= 2 && self.index.site_within_roots(set_id, path) {
-            self.emit_step(path, depth, scope, set, agg);
+            self.emit_step(site, path, depth, scope, set, agg);
         }
     }
 
+    /// Puts the step into the window if its key places it there and it
+    /// would shrink the index (the gain is counted only then: it walks the
+    /// step's scope).
     fn emit_step(
         &mut self,
+        site: &Node,
         path: &Path,
         depth: usize,
         scope: Scope,
         set: Option<FinderSetId>,
         agg: Agg,
     ) {
-        (self.emit)(Step {
+        let step = Step {
             big: !agg.small,
             depth,
             mount: self.mount,
             path: path.to_path_buf(),
             set_rank: set.map_or(0, |s| self.ranks[&s]),
             takes: Takes { scope, set },
-        });
+        };
+        let placed =
+            self.best.len() < self.limit || self.best.peek().is_some_and(|worst| step < *worst);
+        if !placed || gain(self.index, site, &step.takes, self.users) <= 0 {
+            return;
+        }
+        self.best.push(step);
+        if self.best.len() > self.limit {
+            self.best.pop();
+        }
     }
 }
 
@@ -552,24 +582,36 @@ fn trie_gain(site: &Node, takes: &Takes) -> isize {
 }
 
 /// The step's gain over the trie and over the finder-set table:
-/// positive when the index shrinks. A lump's union set is charged as new
-/// (with an allocation, conservatively), and the sets only units in scope
-/// use are credited: the lump's own sweep frees them.
-fn gain(index: &Index, site: &Node, takes: &Takes) -> isize {
+/// positive when the index shrinks. `users` counts the units of each set
+/// in the whole index. The sets only units in scope use are credited (the
+/// lump's own sweep frees them). A lump's union set costs nothing when it
+/// exists and a unit outside the scope keeps it (TASK-230); otherwise it
+/// is charged as new, with an allocation more (conservatively).
+fn gain(index: &Index, site: &Node, takes: &Takes, users: &Users) -> isize {
     let signed = |b: usize| isize::try_from(b).expect("fits");
     let trie = trie_gain(site, takes);
     if takes.set.is_some() {
         return trie;
     }
-    let mut in_scope_users: BTreeMap<FinderSetId, usize> = BTreeMap::new();
+    let mut in_scope_users: Users = BTreeMap::new();
     count_in_scope(site, takes, &mut in_scope_users);
+    let only_in_scope = |set: &FinderSetId, n: &usize| {
+        let all = users.get(set).copied().unwrap_or(0);
+        assert!(all >= *n, "finder-set users undercounted");
+        all == *n
+    };
     let union = index.set_union(in_scope_users.keys().copied());
-    let cost =
-        Index::push_cost(&index.finder_sets, finder_set_bytes(&union)) + ALLOC_OVERHEAD_BYTES;
-    let users = index.set_users();
+    let kept_union = index
+        .find_set(&union)
+        .is_some_and(|id| !only_in_scope(&id, in_scope_users.get(&id).unwrap_or(&0)));
+    let cost = if kept_union {
+        0
+    } else {
+        Index::push_cost(&index.finder_sets, finder_set_bytes(&union)) + ALLOC_OVERHEAD_BYTES
+    };
     let credit: usize = in_scope_users
         .iter()
-        .filter(|(set, n)| users.get(set) == Some(n))
+        .filter(|(set, n)| only_in_scope(set, n))
         .map(|(set, _)| finder_set_bytes(index.finder_set(*set)))
         .sum();
     trie - signed(cost) + signed(credit)
@@ -655,6 +697,7 @@ fn execute<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     step: &Step,
+    users: &mut Users,
     report: &mut CollapseReport,
 ) -> Result<(), HostError> {
     let key = index.mounts[step.mount].key.clone();
@@ -668,8 +711,8 @@ fn execute<H: Host>(
         // plans it again in its right place.
         return Ok(());
     }
-    if gain(index, site, &step.takes) <= 0 {
-        // Would not shrink the index: no I/O for it.
+    if gain(index, site, &step.takes, users) <= 0 {
+        // Would not shrink the index (any more): no I/O for it.
         return Ok(());
     }
     let recorded = site.single.as_ref().map(|s| s.identity);
@@ -681,6 +724,7 @@ fn execute<H: Host>(
         // everything at and beneath it is evicted.
         let before = index.units();
         index.edit_at(&key, &step.path, |node, delta| {
+            for_each_set(node, &mut |set| unuse(users, set));
             let (bytes, units) = node.subtree_cost();
             *node = Node::default();
             delta.add(Delta {
@@ -700,6 +744,7 @@ fn execute<H: Host>(
         mount_points: &mount_points,
         takes: &step.takes,
         delta: &mut delta,
+        users,
         evicted: 0,
         error: None,
     };
@@ -713,7 +758,7 @@ fn execute<H: Host>(
     let error = walk.error.take();
     index.apply(delta);
     if error.is_none() {
-        absorb_step(index, step, &key, &names, identity, report);
+        absorb_step(index, step, &key, &names, identity, users, report);
     }
     // The site itself may be empty now (everything beneath was evicted).
     index.edit_at(&key, &step.path, |_, _| {});
@@ -728,22 +773,22 @@ fn absorb_step(
     key: &MountKey,
     names: &[&[u8]],
     identity: Identity,
+    users: &mut Users,
     report: &mut CollapseReport,
 ) {
     let site = node_at(&index.mounts[step.mount].root, names).expect("still there");
     if in_scope(site, &step.takes).count < min_units(step, key) {
         return;
     }
-    let union = match step.takes.set {
-        Some(_) => None,
-        None => {
-            let mut counts = BTreeMap::new();
-            count_in_scope(site, &step.takes, &mut counts);
-            Some(index.set_union(counts.into_keys()))
-        }
-    };
+    let mut counts: Users = BTreeMap::new();
+    count_in_scope(site, &step.takes, &mut counts);
+    let union = step
+        .takes
+        .set
+        .is_none()
+        .then(|| index.set_union(counts.keys().copied()));
     let trie = trie_gain(site, &step.takes);
-    if gain(index, site, &step.takes) <= 0 {
+    if gain(index, site, &step.takes, users) <= 0 {
         return;
     }
     let accounted_before = index.accounted_bytes();
@@ -761,6 +806,12 @@ fn absorb_step(
         }
         (None, None) => unreachable!("a lump has a union"),
     };
+    for (taken_set, n) in &counts {
+        for _ in 0..*n {
+            unuse(users, *taken_set);
+        }
+    }
+    *users.entry(set).or_default() += 1;
     let units = taken.len();
     let mut taken = taken.into_iter().map(|mut b| {
         b.finders = set;
@@ -916,6 +967,8 @@ struct Revalidate<'a, H: Host> {
     mount_points: &'a BTreeSet<PathBuf>,
     takes: &'a Takes,
     delta: &'a mut Delta,
+    /// The pass's count of units per finder set, kept exact on eviction.
+    users: &'a mut Users,
     evicted: usize,
     /// A failure of the host: the walk stops, the step absorbs nothing.
     error: Option<HostError>,
@@ -1015,14 +1068,24 @@ impl<H: Host> Revalidate<'_, H> {
     }
 
     fn evict_single(&mut self, node: &mut Node) {
-        node.take_single(self.delta);
+        let single = node.take_single(self.delta).expect("a single to evict");
+        unuse(self.users, single.finders);
         self.evicted += 1;
     }
 
     /// Evicts the blocks at `node` that `failed` names.
     fn evict_blocks_where(&mut self, node: &mut Node, failed: impl Fn(&Block) -> bool) {
         let before = node.blocks.len();
-        node.change_blocks(self.delta, |blocks| blocks.retain(|b| !failed(b)));
+        let users = &mut *self.users;
+        node.change_blocks(self.delta, |blocks| {
+            blocks.retain(|b| {
+                let evict = failed(b);
+                if evict {
+                    unuse(users, b.finders);
+                }
+                !evict
+            });
+        });
         self.evicted += before - node.blocks.len();
     }
 
@@ -1048,6 +1111,25 @@ impl<H: Host> Revalidate<'_, H> {
         for name in emptied {
             node.remove_child(&name, self.delta);
         }
+    }
+}
+
+/// One unit of `set` fewer.
+fn unuse(users: &mut Users, set: FinderSetId) {
+    let n = users.get_mut(&set).expect("a unit of a counted set");
+    *n = n.checked_sub(1).expect("finder-set users went negative");
+}
+
+/// Calls `f` with the finder set of every unit at and beneath `node`.
+fn for_each_set(node: &Node, f: &mut impl FnMut(FinderSetId)) {
+    if let Some(single) = &node.single {
+        f(single.finders);
+    }
+    for block in &node.blocks {
+        f(block.finders);
+    }
+    for child in node.children.values() {
+        for_each_set(child, f);
     }
 }
 
