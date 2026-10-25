@@ -1035,7 +1035,10 @@
           // {
             src = workspaceTestSrc;
             cargoArtifacts = workspaceDeps;
-            cargoTestExtraArgs = "--workspace";
+            # --no-fail-fast: one failing test binary must not hide the
+            # rest (TASK-133: diskgc-model and diskgc-core integration
+            # binaries never ran while diskgc-linux failed).
+            cargoTestExtraArgs = "--workspace --no-fail-fast";
           }
         );
 

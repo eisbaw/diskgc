@@ -5029,7 +5029,20 @@ mod tests {
             table.namespace(),
             table.unreadable().len()
         );
-        assert_eq!(table.carrier(holder.pid().0), Some(holder.pid()));
+        if table.preconditions_hold() {
+            assert_eq!(table.carrier(holder.pid().0), Some(holder.pid()));
+        } else {
+            // Not the initial PID namespace (the Nix build sandbox, a
+            // container) or hidepid: Owner PID reads no `NSpid`, so the
+            // table must stay empty (TASK-133). The facts themselves are
+            // checked against the namespace inode in
+            // `pid_namespace_agrees_with_the_namespace_inode`.
+            eprintln!(
+                "skipping the carrier check: Owner PID's preconditions fail here ({:?})",
+                table.namespace()
+            );
+            assert_eq!(table.carrier(holder.pid().0), None, "a table built anyway");
+        }
         if table.namespace().is_ok_and(|facts| !facts.hidepid) {
             assert_eq!(
                 table.unreadable(),
