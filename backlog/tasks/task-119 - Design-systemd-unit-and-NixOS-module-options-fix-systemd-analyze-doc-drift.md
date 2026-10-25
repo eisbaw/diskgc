@@ -4,7 +4,7 @@ title: 'Design: systemd unit and NixOS module options; fix systemd-analyze doc d
 status: To Do
 assignee: []
 created_date: '2026-10-23 16:19'
-updated_date: '2026-10-23 21:01'
+updated_date: '2026-10-25 20:16'
 labels:
   - design
 dependencies: []
@@ -28,4 +28,6 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 
 <!-- SECTION:NOTES:BEGIN -->
 Mark's design decisions (2026-10-23, binding): Default shape: USER SERVICE BY DEFAULT (diskgc watch under systemd --user for the laptop owner: sees own processes, non-root), plus a SYSTEM TEMPLATE UNIT (instance per filesystem) as an option for CI runners and --allow-root use. The NixOS module must model both. Sandboxing options must not break /proc and pidfd needs; state which hardening is compatible.
+
+Mark's decisions 2026-10-25 (his own) on the watch design: the systemd unit must use Restart=always and RestartPreventExitStatus=2 (SIGHUP = restart with fresh config).
 <!-- SECTION:NOTES:END -->
