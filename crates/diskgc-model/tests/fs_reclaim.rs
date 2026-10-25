@@ -3538,3 +3538,55 @@ fn a_mount_at_or_inside_a_candidate_is_never_touched() {
         "a candidate with a mount inside was locked or listed"
     );
 }
+
+/// What a reclaim of `candidates` old `/tmp/pytest-of-*` directories
+/// costs in process scans and in listings of a `protect` root (a Cargo
+/// project tree), with the model clock standing still (every scan stays
+/// inside its reuse window).
+fn scans_and_protect_listings(candidates: usize) -> (usize, usize) {
+    let tree: String = (0..candidates)
+        .map(|n| format!("  /tmp/pytest-of-u{n}: {}\n", old_dir("1M")))
+        .chain([
+            "  /home/mark/src/app/Cargo.toml: {}\n".to_owned(),
+            "  /home/mark/src/app/src/main.rs: {}\n".to_owned(),
+        ])
+        .collect();
+    let host = host(&yaml("", &tree, ""));
+    let config = diskgc_core::config::parse(
+        Path::new("/tmp/protect.yaml"),
+        b"version: 1\nprotect: [{profile: cargo-target, roots: [/home/mark/src]}]\n",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut request = tmp("profile:pytest-of-dir");
+    request.tier.protections =
+        executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"));
+    let report = ensure(&host, &request);
+    assert_eq!(report.actions.len(), candidates, "{report:#?}");
+    let protect_listings = calls(&host, Op::ReadDir)
+        .iter()
+        .filter(|call| call.path.as_deref() == Some(Path::new("/home/mark/src")))
+        .count();
+    (host.trace_count(Op::OwnPid), protect_listings)
+}
+
+/// TASK-184: neither the process scans nor the enumerations of a protected
+/// tree may grow with the number of candidates while scans stay fresh.
+/// Red on master 4c86d74 and on the TASK-184 branch: every candidate
+/// enumerates each protected tree three times (before its lock, under it,
+/// and inside its freshness window), which on a 61,000-directory protect
+/// cost 2.2 to 3.3 s per candidate and `in_use_unknown` skips (walk
+/// 2026-10-25-t184). Ignored until the protect recheck rule is decided:
+/// the obvious fix (matches enumerated once per tier) drops the late-match
+/// guarantee `command_union_rechecks_new_negated_match_just_before_invocation`
+/// pins.
+#[test]
+#[ignore = "red until the TASK-184 protect-recheck decision; run with --ignored"]
+fn scans_and_protect_enumerations_do_not_grow_with_candidates() {
+    let (scans_2, listings_2) = scans_and_protect_listings(2);
+    let (scans_6, listings_6) = scans_and_protect_listings(6);
+    assert_eq!(scans_2, scans_6, "process scans per run");
+    assert_eq!(
+        listings_2, listings_6,
+        "protect root listings per run (2 candidates: {listings_2}, 6: {listings_6})"
+    );
+}
