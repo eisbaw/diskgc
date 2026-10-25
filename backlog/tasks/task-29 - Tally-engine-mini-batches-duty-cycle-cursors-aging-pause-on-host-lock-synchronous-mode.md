@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 14:19'
+updated_date: '2026-10-25 16:43'
 labels:
   - wave-3
   - architecture
@@ -49,6 +49,8 @@ Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/arc
 Mark's decisions 2026-10-25 (his own): background tally backs off on measured pressure (PSI cpu/io/memory where available) in addition to the duty cycle and priorities; ensure with a valid but old snapshot re-sizes only the first tier's stale units.
 
 2026-10-25: pressure-brake AC added (Mark's decision; design 076c5ec).
+
+Mark's answers 2026-10-25 (his own) on TASK-28's open points: a complete discovery listing of a block's site recounts the block's members and estimates; partial listings leave them (TASK-28 open point 1).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
