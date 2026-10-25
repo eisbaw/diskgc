@@ -57,7 +57,7 @@ pub(super) fn single_bytes() -> usize {
     heap(size_of::<Single>())
 }
 
-fn family_bytes(family: &Family) -> usize {
+pub(super) fn family_bytes(family: &Family) -> usize {
     match family {
         Family::Name(name) => heap(name.len()),
         Family::Any => 0,

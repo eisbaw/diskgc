@@ -631,6 +631,10 @@ impl Index {
                 checked_at: found.checked_at,
                 refusal: None,
             };
+            // Blocks sited here were made under the old directory.
+            self.edit_at(mount, path, |node, delta| {
+                node.change_blocks(delta, |blocks| blocks.retain(|b| b.site == found.identity));
+            });
             return Some(Inserted::Replaced);
         }
         let Some(trie_cost) = self.new_single_cost(mount, &names, finder) else {

@@ -321,8 +321,16 @@ fn oldest_order_with_blocks_by_their_oldest_member_and_hints_last() {
     // negated one by its newest.
     let idle = derive(&index, &tier(&src, AgeFilter::IdleSince(ts(20))));
     assert_eq!(paths(&idle.ready), ["/tmp/a", "/tmp/b", "/tmp/d"]);
+    // Untallied singles' stored change is a lower bound: a negated filter
+    // keeps them; the tallied block passes by its newest member.
     let changed = derive(&index, &tier(&src, AgeFilter::ChangedSince(ts(100))));
-    assert_eq!(paths(&changed.ready), ["/tmp/d"]);
+    assert_eq!(
+        paths(&changed.ready),
+        ["/tmp/a", "/tmp/b", "/tmp/d", "/tmp/c"]
+    );
+    tally(&mut index, "/tmp/a", 1);
+    let changed = derive(&index, &tier(&src, AgeFilter::ChangedSince(ts(100))));
+    assert_eq!(paths(&changed.ready), ["/tmp/b", "/tmp/d", "/tmp/c"]);
 
     // Another profile hash or bound root, or another filesystem: nothing.
     assert!(

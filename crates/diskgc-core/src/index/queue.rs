@@ -5,8 +5,9 @@
 //! A unit enters when one of its finders is a source of the tier (same
 //! profile, profile hash and bound root), it lies on the tier's filesystem,
 //! and its age range could pass the tier's idle filter (a block by its
-//! oldest member for a positive filter, its newest for a negated one;
-//! the per-member filters run after expansion, never on the block).
+//! oldest member for a positive filter, its newest for a negated one, an
+//! untallied unit never excluded by a negated one; the per-member filters
+//! run after expansion, never on the block).
 //!
 //! [`TierQueue::ready`] is in `oldest` order: by `newest_change` (a block
 //! by its `oldest_change`), then mount, path, singles before blocks, then
@@ -120,11 +121,14 @@ fn selected(index: &Index, set: FinderSetId, tier: &TierQuery<'_>) -> bool {
     })
 }
 
-fn may_pass(oldest: Timestamp, newest: Timestamp, age: AgeFilter) -> bool {
+/// Whether the stored ages could pass `age`. Before a tally the stored
+/// change is the root's own, a lower bound of the tree's newest change, so
+/// an untallied unit is never excluded by a negated filter.
+fn may_pass(oldest: Timestamp, newest: Timestamp, tallied: bool, age: AgeFilter) -> bool {
     match age {
         AgeFilter::None => true,
         AgeFilter::IdleSince(cutoff) => oldest <= cutoff,
-        AgeFilter::ChangedSince(cutoff) => newest > cutoff,
+        AgeFilter::ChangedSince(cutoff) => !tallied || newest > cutoff,
     }
 }
 
@@ -135,11 +139,12 @@ pub fn derive(index: &Index, tier: &TierQuery<'_>) -> TierQueue {
         if mount.dev != tier.dev {
             return;
         }
-        let (set, oldest, newest, hinted, queued) = match unit {
+        let (set, oldest, newest, tallied, hinted, queued) = match unit {
             UnitRef::Single(s) => (
                 s.finders,
                 s.newest_change,
                 s.newest_change,
+                s.tally.is_some(),
                 s.refusal.is_some(),
                 Queued::Single(s.clone()),
             ),
@@ -147,11 +152,12 @@ pub fn derive(index: &Index, tier: &TierQuery<'_>) -> TierQueue {
                 b.finders,
                 b.oldest_change,
                 b.newest_change,
+                b.tallied_at.is_some(),
                 false,
                 Queued::Block(b.clone()),
             ),
         };
-        if !selected(index, set, tier) || !may_pass(oldest, newest, tier.age) {
+        if !selected(index, set, tier) || !may_pass(oldest, newest, tallied, tier.age) {
             return;
         }
         let entry = QueueEntry {

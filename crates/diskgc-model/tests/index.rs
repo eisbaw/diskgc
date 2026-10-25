@@ -403,6 +403,191 @@ fn a_climbing_collapse_evicts_a_finer_block_whose_site_was_replaced() {
     assert!(report.evicted >= 1, "{report:?}");
 }
 
+/// A family step over singles whose trie nodes stay (another profile's
+/// units lie beneath them) frees only their boxes; with a long family name
+/// the new block would cost more. Such a step is not taken (before the fix
+/// it panicked on the budget assertion); the room comes from the
+/// all-names steps instead (review of 884a59b).
+#[test]
+fn a_collapse_that_would_grow_the_index_is_not_taken() {
+    let stem = "a".repeat(240);
+    let (n1, n2) = (format!("{stem}.Abcde"), format!("{stem}.Xyzwv"));
+    let host = host(&format!(
+        "{HEADER}tree:\n  /tmp/{n1}/y: {{.: {{}}}}\n  /tmp/{n2}/y: {{.: {{}}}}\n  /tmp/z: {{.: {{}}}}\n"
+    ));
+    let fill = |index: &mut Index| {
+        let outer = finder(index, "p1", "/tmp");
+        let inner = finder(index, "p2", "/tmp");
+        let mount = tmp_mount(&host);
+        for name in [&n1, &n2] {
+            let path = Path::new("/tmp").join(name);
+            index
+                .insert(&host, &mount, &path, &outer, discovered(&host, &path))
+                .unwrap();
+            let below = path.join("y");
+            index
+                .insert(&host, &mount, &below, &inner, discovered(&host, &below))
+                .unwrap();
+        }
+        outer
+    };
+    let mut roomy = Index::new(1 << 30);
+    fill(&mut roomy);
+    let mut index = Index::new(roomy.accounted_bytes());
+    let outer = fill(&mut index);
+    let z = Path::new("/tmp/z");
+    let done = index
+        .insert(&host, &tmp_mount(&host), z, &outer, discovered(&host, z))
+        .unwrap();
+    index.assert_consistent();
+    // The long family step was skipped; the all-names steps (no family
+    // name to pay for) made room, and z is in the outer `any` block.
+    assert_eq!(done.outcome, Inserted::Covered, "{done:?}");
+    assert!(
+        blocks(&index).iter().all(|(_, b)| b.family == Family::Any),
+        "{:?}",
+        blocks(&index)
+    );
+    assert!(index.accounted_bytes() <= index.budget_bytes());
+}
+
+/// A block sited at a directory that was replaced (and found again as a
+/// single of the new identity) is never absorbed under the new identity:
+/// it goes when the single is replaced (review of 884a59b).
+#[test]
+fn a_block_of_a_replaced_site_is_never_absorbed_under_the_new_identity() {
+    let old = host(&format!(
+        "{HEADER}tree:\n  /tmp/D/x1: {{.: {{}}}}\n  /tmp/D/x2: {{.: {{}}}}\n"
+    ));
+    // The same names, D on another inode.
+    let new = host(&format!(
+        "{HEADER}tree:\n  /tmp/0pad/q/r: {{.: {{}}}}\n  /tmp/D/x1: {{.: {{}}}}\n  \
+         /tmp/D/x2: {{.: {{}}}}\n  /tmp/D/y: {{.: {{}}}}\n"
+    ));
+    let d = Path::new("/tmp/D");
+    assert_ne!(discovered(&old, d).identity, discovered(&new, d).identity);
+    let fill = |index: &mut Index| {
+        let a = finder(index, "a", "/tmp");
+        let b = finder(index, "b", "/tmp");
+        for (path, f) in [("/tmp/D", &a), ("/tmp/D/x1", &b), ("/tmp/D/x2", &b)] {
+            let path = Path::new(path);
+            index
+                .insert(&old, &tmp_mount(&old), path, f, discovered(&old, path))
+                .unwrap();
+        }
+        (a, b)
+    };
+    let mut index = tight_index(|index| {
+        fill(index);
+    });
+    let (a, b) = (index_finder(&mut index, "a"), index_finder(&mut index, "b"));
+    index.collapse_to_low_water(&old).unwrap();
+    assert_eq!(blocks(&index).len(), 1, "x1 and x2 collapsed at D");
+    let mount = tmp_mount(&new);
+    let done = index
+        .insert(&new, &mount, d, &a, discovered(&new, d))
+        .unwrap();
+    assert_eq!(done.outcome, Inserted::Replaced);
+    index.assert_consistent();
+    assert!(
+        blocks(&index).is_empty(),
+        "the old site's block went with it"
+    );
+    let y = Path::new("/tmp/D/y");
+    let done = index
+        .insert(&new, &mount, y, &b, discovered(&new, y))
+        .unwrap();
+    assert_eq!(done.outcome, Inserted::New, "not covered by a stale block");
+}
+
+/// The same without a single at the site: a family block sited at `D`
+/// is the only record of `D`'s identity. `D` is replaced (and refilled)
+/// after the first collapse; the next collapse at `D` evicts the old block
+/// instead of absorbing it under the new identity.
+#[test]
+fn a_collapse_evicts_a_block_sited_at_a_replaced_site() {
+    let mut yaml = format!("{HEADER}tree:\n  /tmp/D/x1: {{.: {{}}}}\n  /tmp/D/x2: {{.: {{}}}}\n");
+    for i in 0..20 {
+        writeln!(yaml, "  /tmp/f{i}: {{.: {{}}}}").unwrap();
+    }
+    for i in 0..60 {
+        writeln!(yaml, "  /tmp/g/g{i}: {{.: {{}}}}").unwrap();
+    }
+    // Fired by the test's own mountinfo, after the first collapse.
+    yaml.push_str(
+        "events:\n\
+         \x20 - {at: {op: mountinfo, nth: 2, when: after}, replace: /tmp/D}\n\
+         \x20 - {at: {op: mountinfo, nth: 2, when: after}, mkdir: /tmp/D/y1}\n\
+         \x20 - {at: {op: mountinfo, nth: 2, when: after}, mkdir: /tmp/D/y2}\n",
+    );
+    let host = host(&yaml);
+    let mount = tmp_mount(&host);
+    let phase_one = |index: &mut Index| {
+        let b = finder(index, "b", "/tmp");
+        let c = finder(index, "c", "/tmp");
+        for path in ["/tmp/D/x1", "/tmp/D/x2"] {
+            let path = Path::new(path);
+            index
+                .insert(&host, &mount, path, &b, discovered(&host, path))
+                .unwrap();
+        }
+        for i in 0..20 {
+            let path = PathBuf::from(format!("/tmp/f{i}"));
+            index
+                .insert(&host, &mount, &path, &c, discovered(&host, &path))
+                .unwrap();
+        }
+        b
+    };
+    let mut index = tight_index(|index| {
+        phase_one(index);
+    });
+    let b = finder(&mut index, "b", "/tmp");
+    let first = index.collapse_to_low_water(&host).unwrap();
+    let x_family = Family::Name(b"x#".to_vec().into());
+    assert!(
+        blocks(&index)
+            .iter()
+            .any(|(site, blk)| site == Path::new("/tmp/D") && blk.family == x_family),
+        "{first:?} {:?}",
+        blocks(&index)
+    );
+    let _ = host.mountinfo().unwrap();
+    for path in ["/tmp/D/y1", "/tmp/D/y2"] {
+        let path = Path::new(path);
+        let done = index
+            .insert(&host, &mount, path, &b, discovered(&host, path))
+            .unwrap();
+        assert_eq!(done.outcome, Inserted::New);
+    }
+    // Fill (another profile, elsewhere) until the next collapse must run.
+    let c = finder(&mut index, "c", "/tmp");
+    for i in 0..60 {
+        if !index.at_low_water() {
+            break;
+        }
+        let path = PathBuf::from(format!("/tmp/g/g{i}"));
+        index
+            .insert(&host, &mount, &path, &c, discovered(&host, &path))
+            .unwrap();
+    }
+    assert!(!index.at_low_water(), "the next collapse must run");
+    let second = index.collapse_to_low_water(&host).unwrap();
+    index.assert_consistent();
+    assert!(host.unfired_events().is_empty());
+    for (site, blk) in blocks(&index) {
+        if site == Path::new("/tmp/D") {
+            assert_ne!(blk.family, x_family, "{second:?}");
+            assert_eq!(blk.members, 2, "only y1 and y2: {second:?} {blk:?}");
+        }
+    }
+    assert!(second.evicted >= 1, "{second:?}");
+}
+
+fn index_finder(index: &mut Index, profile: &str) -> Finder {
+    finder(index, profile, "/tmp")
+}
+
 /// A name that became a mount point is never `statx`ed or opened: its unit
 /// is evicted from the mountinfo line alone.
 #[test]
@@ -457,6 +642,8 @@ fn gen_unit() -> impl Strategy<Value = GenUnit> {
         (0u8..3).prop_map(|d| format!("d{d}")),
         (0u32..40).prop_map(|n| format!("nix-shell.ab{n:03}x")),
         (0u32..40).prop_map(|n| format!("pytest-{n}")),
+        // Long families: a family block's name can outweigh the singles.
+        (0u32..8).prop_map(|n| format!("{}.Ab{n:03}", "l".repeat(200))),
     ];
     (prop::collection::vec(name, 1..4), any::<bool>())
         .prop_map(|(names, profile_b)| GenUnit { names, profile_b })

@@ -16,17 +16,23 @@
 //!    the next pass plans again from what is left.
 //! 2. **Reach `D`** (Host): from its mount's root without following a
 //!    symlink or crossing a mount ([`crate::resolve`]), after screening the
-//!    mount chain from mountinfo. Gone, unreachable, on another mount, or
-//!    of another identity than a unit recorded at `D`: every unit at and
-//!    beneath `D` is evicted and nothing is collapsed there.
+//!    mount chain from mountinfo (read again every pass). Gone,
+//!    unreachable, on another mount, or of another identity than a single
+//!    recorded at `D`: every unit at and beneath `D` is evicted and nothing
+//!    is collapsed there. A block sited at `D` with another site identity
+//!    (made before `D` was replaced) is evicted, whatever its finders.
 //! 3. **Re-validate** (Host): every unit the step would absorb is reached
 //!    again beneath `D` (a single by `statx` of its name in its parent, a
 //!    finer block's site by opening it) and must have its recorded
 //!    identity. A name that is a mount point now is never touched. A unit
-//!    that fails, for any reason, is **evicted** before anything is
-//!    absorbed, so it contributes nothing to the block.
-//! 4. **Absorb** (pure): if at least two units are left, they become one
-//!    block at `D` whose totals are the sums of theirs.
+//!    that fails (gone, replaced, not permitted) is **evicted** before
+//!    anything is absorbed, so it contributes nothing to the block. A
+//!    failure of the host itself (EMFILE, ENOMEM, EIO) stops the run with
+//!    that error and evicts nothing more.
+//! 4. **Absorb** (pure): if at least two units are left and absorbing them
+//!    shrinks the index (a long family name over singles whose trie nodes
+//!    stay could grow it: such a step is not taken), they become one block
+//!    at `D` whose totals are the sums of theirs.
 //!
 //! A collapse never makes a check weaker: a block's members are found and
 //! judged afresh when the reclaim walk expands it. Re-validation keeps the
@@ -38,14 +44,16 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::ffi::OsStr;
+use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::trie::{Delta, Name, Node};
+use super::memory::ALLOC_OVERHEAD_BYTES;
+use super::trie::{Delta, Name, Node, family_bytes, single_bytes};
 use super::unit::{Block, Family, FinderSetId, Identity};
 use super::{Index, MountKey, name_family};
-use crate::host::{Access, Base, Host, HostError, MountEntry};
-use crate::resolve::{Want, mount_for, open_beneath, resolve_in, screen_mount_chain};
+use crate::host::{Access, Base, Errno, Host, HostError, MountEntry};
+use crate::resolve::{ResolveError, Want, mount_for, open_beneath, resolve_in, screen_mount_chain};
 
 /// Units estimated at or above this (64 MiB) keep their exact places
 /// longest: they matter most to freeing space and to `best-fit`.
@@ -183,7 +191,6 @@ pub(super) fn to_low_water<H: Host>(
         report.reached_low_water = true;
         return Ok(report);
     }
-    let mounts = host.mountinfo()?;
     let max_passes = index.units() + 1;
     loop {
         report.passes += 1;
@@ -193,11 +200,13 @@ pub(super) fn to_low_water<H: Host>(
             report.passes
         );
         let units_before = index.units();
+        // Read again every pass: a mount made since must not be statted.
+        let mounts = host.mountinfo()?;
         for step in plan(index, PLAN_LIMIT) {
             if index.at_low_water() {
                 break;
             }
-            execute(index, host, &mounts, &step, &mut report);
+            execute(index, host, &mounts, &step, &mut report)?;
         }
         if index.at_low_water() {
             report.reached_low_water = true;
@@ -359,109 +368,209 @@ fn node_at_mut<'n>(root: &'n mut Node, names: &[&[u8]]) -> Option<&'n mut Node> 
         .try_fold(root, |node, name| node.children.get_mut(*name))
 }
 
+/// Whether a failed call means the object is gone or cannot be validated
+/// (its unit is evicted), rather than a failure of the host (the run
+/// stops with the error, evicting nothing more: EMFILE, ENOMEM or EIO must
+/// not empty a subtree).
+fn means_gone(e: &HostError) -> bool {
+    matches!(
+        e.kernel_errno(),
+        Some(
+            Errno::ENOENT
+                | Errno::ENOTDIR
+                | Errno::EACCES
+                | Errno::EPERM
+                | Errno::ELOOP
+                | Errno::EXDEV
+        )
+    )
+}
+
+/// A traversal failure: `Ok` if it means gone, the host error otherwise.
+fn gone_or_error(e: ResolveError) -> Result<(), HostError> {
+    match e {
+        ResolveError::Host(e) if !means_gone(&e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 fn execute<H: Host>(
     index: &mut Index,
     host: &H,
     mounts: &[MountEntry],
     step: &Step,
     report: &mut CollapseReport,
-) {
+) -> Result<(), HostError> {
     let key = index.mounts[step.mount].key.clone();
     let names = super::rel_names(&key.mount_point, &step.path);
     let Some(site) = node_at(&index.mounts[step.mount].root, &names) else {
-        return;
+        return Ok(());
     };
     let now = in_scope(site, step.finders, &step.scope);
     if now.count < 2 || !now.small != step.big {
         // Taken by an earlier step, or its key changed: the next pass
         // plans it again in its right place.
-        return;
+        return Ok(());
     }
-    let recorded = site
-        .single
-        .as_ref()
-        .map(|s| s.identity)
-        .or_else(|| site.blocks.first().map(|b| b.site));
-    let reached = reach_site(host, mounts, &key, &step.path);
-    let mut delta = Delta::default();
-    let identity = match reached {
-        Some((fd, mount_id, identity)) if recorded.is_none_or(|r| r == identity) => {
-            let mount_points = mount_points_beneath(mounts, &key, &step.path);
-            let site =
-                node_at_mut(&mut index.mounts[step.mount].root, &names).expect("still there");
-            let mut walk = Revalidate {
-                host,
-                mount_id,
-                mount_points: &mount_points,
-                finders: step.finders,
-                scope: &step.scope,
-                delta: &mut delta,
-                evicted: 0,
-            };
-            let mut path = step.path.clone();
-            walk.children(site, &fd, identity.ino, &mut path);
-            report.evicted += walk.evicted;
-            identity
-        }
-        _ => {
-            // Gone, unreachable or replaced: nothing is collapsed there.
-            let before = index.units();
-            index.edit_at(&key, &step.path, |node, delta| {
-                let (bytes, units) = node.subtree_cost();
-                *node = Node::default();
-                delta.add(Delta {
-                    bytes: -isize::try_from(bytes).expect("fits"),
-                    units: -isize::try_from(units).expect("fits"),
-                });
+    let recorded = site.single.as_ref().map(|s| s.identity);
+    let reached = reach_site(host, mounts, &key, &step.path)?;
+    let Some((fd, mount_id, identity)) =
+        reached.filter(|(_, _, i)| recorded.is_none_or(|r| r == *i))
+    else {
+        // Gone, unreachable or replaced: nothing is collapsed there, and
+        // everything at and beneath it is evicted.
+        let before = index.units();
+        index.edit_at(&key, &step.path, |node, delta| {
+            let (bytes, units) = node.subtree_cost();
+            *node = Node::default();
+            delta.add(Delta {
+                bytes: -isize::try_from(bytes).expect("fits"),
+                units: -isize::try_from(units).expect("fits"),
             });
-            report.evicted += before - index.units();
-            return;
-        }
+        });
+        report.evicted += before - index.units();
+        return Ok(());
     };
+    let mount_points = mount_points_beneath(mounts, &key, &step.path);
+    let mut delta = Delta::default();
     let site = node_at_mut(&mut index.mounts[step.mount].root, &names).expect("still there");
-    if in_scope(site, step.finders, &step.scope).count >= 2 {
-        report.absorbed += absorb(site, step.finders, &step.scope, identity, &mut delta);
-        report.collapses += 1;
+    let mut walk = Revalidate {
+        host,
+        mount_id,
+        mount_points: &mount_points,
+        finders: step.finders,
+        scope: &step.scope,
+        delta: &mut delta,
+        evicted: 0,
+        error: None,
+    };
+    // Blocks sited here stand for this directory's identity: one of
+    // another (made before the directory was replaced) goes, whatever its
+    // finders, before anything is absorbed.
+    walk.evict_blocks_where(site, |b| b.site != identity);
+    let mut path = step.path.clone();
+    walk.children(site, &fd, identity.ino, &mut path);
+    report.evicted += walk.evicted;
+    let error = walk.error.take();
+    if error.is_none() && in_scope(site, step.finders, &step.scope).count >= 2 {
+        let (freed_at_least, costs_at_most) = absorb_gain(site, step.finders, &step.scope);
+        if freed_at_least > costs_at_most {
+            let mut absorbed = Delta::default();
+            report.absorbed += absorb(site, step.finders, &step.scope, identity, &mut absorbed);
+            assert!(
+                absorbed.bytes < 0,
+                "a collapse grew the index: {absorbed:?}"
+            );
+            delta.add(absorbed);
+            report.collapses += 1;
+        }
     }
     index.apply(delta);
     // The site itself may be empty now (everything beneath was evicted).
     index.edit_at(&key, &step.path, |_, _| {});
+    error.map_or(Ok(()), Err)
+}
+
+/// What absorbing the units in scope at `site` frees at least, and what
+/// the new block costs at most. A single frees its box; a block frees its
+/// slot and family name (pruned nodes only free more). The new block costs
+/// one slot, one allocation and its family name. A step that would not
+/// shrink the index (a long family name over singles whose nodes stay) is
+/// not taken.
+fn absorb_gain(site: &Node, finders: FinderSetId, scope: &Scope) -> (usize, usize) {
+    fn block_frees(block: &Block) -> usize {
+        size_of::<Block>() + family_bytes(&block.family)
+    }
+    let mut freed = site
+        .blocks
+        .iter()
+        .filter(|b| block_in_scope(b, finders, scope))
+        .map(block_frees)
+        .sum::<usize>();
+    fn below(node: &Node, finders: FinderSetId, scope: &Scope, freed: &mut usize) {
+        for (name, child) in &node.children {
+            if child.single.as_ref().is_some_and(|s| {
+                s.finders == finders
+                    && match scope {
+                        Scope::Any => true,
+                        Scope::Family(f) => name_family(name) == *f,
+                    }
+            }) {
+                *freed += single_bytes();
+            }
+            if *scope == Scope::Any {
+                *freed += child
+                    .blocks
+                    .iter()
+                    .filter(|b| b.finders == finders)
+                    .map(block_frees)
+                    .sum::<usize>();
+                below(child, finders, scope, freed);
+            }
+        }
+    }
+    below(site, finders, scope, &mut freed);
+    let family = match scope {
+        Scope::Family(f) => Family::Name(f.clone()),
+        Scope::Any => Family::Any,
+    };
+    let costs = size_of::<Block>() + ALLOC_OVERHEAD_BYTES + family_bytes(&family);
+    (freed, costs)
 }
 
 /// Reaches the site directory: its fd, its mount's id and its identity.
 /// `None` for anything that is not the same mount's directory, reached
-/// safely.
+/// safely; an error for a failure of the host.
 fn reach_site<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     key: &MountKey,
     site: &Path,
-) -> Option<(H::Fd, u64, Identity)> {
-    screen_mount_chain(mounts, site).ok()?;
-    let mount = mount_for(mounts, site).ok()?;
+) -> Result<Option<(H::Fd, u64, Identity)>, HostError> {
+    if screen_mount_chain(mounts, site).is_err() {
+        return Ok(None);
+    }
+    let Ok(mount) = mount_for(mounts, site) else {
+        return Ok(None);
+    };
     if mount.mount_point != key.mount_point || mount.dev != key.dev {
-        return None;
+        return Ok(None);
     }
     if site == key.mount_point {
-        let resolved = resolve_in(host, mounts, site, Want::Directory).ok()?;
-        let ino = resolved.stat.ino?;
-        let identity = Identity::of(&resolved.stat, ino)?;
-        return Some((resolved.fd, resolved.mount.id, identity));
+        let resolved = match resolve_in(host, mounts, site, Want::Directory) {
+            Ok(resolved) => resolved,
+            Err(e) => return gone_or_error(e).map(|()| None),
+        };
+        let found = resolved
+            .stat
+            .ino
+            .and_then(|ino| Identity::of(&resolved.stat, ino))
+            .map(|identity| (resolved.fd, resolved.mount.id, identity));
+        return Ok(found);
     }
-    let parent = resolve_in(host, mounts, site.parent()?, Want::Directory).ok()?;
-    let parent_ino = parent.stat.ino?;
-    let name = Path::new(site.file_name()?);
-    let (fd, stat) = open_beneath(
+    let (Some(parent_path), Some(name)) = (site.parent(), site.file_name()) else {
+        return Ok(None);
+    };
+    let parent = match resolve_in(host, mounts, parent_path, Want::Directory) {
+        Ok(parent) => parent,
+        Err(e) => return gone_or_error(e).map(|()| None),
+    };
+    let Some(parent_ino) = parent.stat.ino else {
+        return Ok(None);
+    };
+    match open_beneath(
         host,
         &parent.fd,
         parent.mount.id,
-        name,
+        Path::new(name),
         Access::Path,
         Want::Directory,
-    )
-    .ok()?;
-    let identity = Identity::of(&stat, parent_ino)?;
-    Some((fd, parent.mount.id, identity))
+    ) {
+        Ok((fd, stat)) => {
+            Ok(Identity::of(&stat, parent_ino).map(|identity| (fd, parent.mount.id, identity)))
+        }
+        Err(e) => gone_or_error(e).map(|()| None),
+    }
 }
 
 /// Mount points strictly beneath `site` other than the trie's own mount.
@@ -484,6 +593,8 @@ struct Revalidate<'a, H: Host> {
     scope: &'a Scope,
     delta: &'a mut Delta,
     evicted: usize,
+    /// A failure of the host: the walk stops, the step absorbs nothing.
+    error: Option<HostError>,
 }
 
 impl<H: Host> Revalidate<'_, H> {
@@ -492,6 +603,9 @@ impl<H: Host> Revalidate<'_, H> {
     fn children(&mut self, dir: &mut Node, fd: &H::Fd, dir_ino: u64, path: &mut PathBuf) {
         let mut emptied: Vec<Name> = Vec::new();
         for (name, child) in dir.children.iter_mut() {
+            if self.error.is_some() {
+                break;
+            }
             let single_in_scope = child.single.as_ref().is_some_and(|s| {
                 s.finders == self.finders
                     && match self.scope {
@@ -516,13 +630,18 @@ impl<H: Host> Revalidate<'_, H> {
             } else {
                 if single_in_scope {
                     let recorded = child.single.as_ref().map(|s| s.identity);
-                    let found = self
+                    match self
                         .host
                         .statx(Base::Dir(fd), Path::new(OsStr::from_bytes(name)))
-                        .ok()
-                        .and_then(|stat| Identity::of(&stat, dir_ino));
-                    if found.is_none() || found != recorded {
-                        self.evict_single(child);
+                    {
+                        Ok(stat) => {
+                            let found = Identity::of(&stat, dir_ino);
+                            if found.is_none() || found != recorded {
+                                self.evict_single(child);
+                            }
+                        }
+                        Err(e) if means_gone(&e) => self.evict_single(child),
+                        Err(e) => self.error = Some(e),
                     }
                 }
                 if below_in_scope {
@@ -533,18 +652,24 @@ impl<H: Host> Revalidate<'_, H> {
                         Path::new(OsStr::from_bytes(name)),
                         Access::Path,
                         Want::Directory,
-                    )
-                    .ok()
-                    .and_then(|(child_fd, stat)| {
-                        let ino = stat.ino?;
-                        Some((child_fd, ino, Identity::of(&stat, dir_ino)?))
-                    });
+                    );
                     match opened {
-                        Some((child_fd, ino, identity)) => {
-                            self.evict_blocks(child, |b| b.site != identity);
-                            self.children(child, &child_fd, ino, path);
+                        Ok((child_fd, stat)) => {
+                            let ids = stat
+                                .ino
+                                .and_then(|ino| Some((ino, Identity::of(&stat, dir_ino)?)));
+                            match ids {
+                                Some((ino, identity)) => {
+                                    self.evict_blocks(child, |b| b.site != identity);
+                                    self.children(child, &child_fd, ino, path);
+                                }
+                                None => self.evict_below(child),
+                            }
                         }
-                        None => self.evict_below(child),
+                        Err(e) => match gone_or_error(e) {
+                            Ok(()) => self.evict_below(child),
+                            Err(e) => self.error = Some(e),
+                        },
                     }
                 }
             }
@@ -561,6 +686,13 @@ impl<H: Host> Revalidate<'_, H> {
     fn evict_single(&mut self, node: &mut Node) {
         node.take_single(self.delta);
         self.evicted += 1;
+    }
+
+    /// Evicts the blocks at `node`, of any finder set, that `failed` names.
+    fn evict_blocks_where(&mut self, node: &mut Node, failed: impl Fn(&Block) -> bool) {
+        let before = node.blocks.len();
+        node.change_blocks(self.delta, |blocks| blocks.retain(|b| !failed(b)));
+        self.evicted += before - node.blocks.len();
     }
 
     fn evict_blocks(&mut self, node: &mut Node, failed: impl Fn(&Block) -> bool) {
