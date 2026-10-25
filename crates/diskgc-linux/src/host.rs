@@ -42,9 +42,9 @@ use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
-    OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus,
-    ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock, is_single_name,
-    read_proc_view,
+    OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
+    ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock,
+    is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -1290,6 +1290,33 @@ fn same_fd_table(reference: u32, tid: u32) -> Result<bool, Errno> {
     Ok(answer == 0)
 }
 
+/// `ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_IDLE)` for the calling
+/// thread (`who` 0 is the caller; Linux keeps the I/O priority per task).
+/// Only the idle class's own scheduler, BFQ, honours it; it changes no file
+/// (docs/architecture.md, The tally).
+fn lower_io_priority_ungated() -> Result<(), Errno> {
+    /// include/uapi/linux/ioprio.h.
+    const IOPRIO_WHO_PROCESS: i32 = 1;
+    const IOPRIO_CLASS_IDLE: i32 = 3;
+    const IOPRIO_CLASS_SHIFT: i32 = 13;
+    // SAFETY: ioprio_set takes three integers and dereferences no pointer.
+    let answer = unsafe {
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            IOPRIO_WHO_PROCESS,
+            0,
+            IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT,
+        )
+    };
+    if answer < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(Errno(
+            error.raw_os_error().expect("a failed syscall sets errno"),
+        ));
+    }
+    Ok(())
+}
+
 /// Whether a task's read of its three links lacks one ([`Host::proc_links_all`]).
 /// A link always names something, so one missing from a live task makes
 /// the read untrusted, as `ENOENT` from one [`Host::proc_links`] does; the
@@ -1691,6 +1718,30 @@ impl Host for LinuxHost {
 
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn pressure(&self) -> Result<Pressure, HostError> {
+        let read = |resource: &str| -> Result<u32, HostError> {
+            let path = format!("pressure/{resource}");
+            let text = self.root().read(&path)?;
+            crate::pressure::some_avg10(&text)
+                .map_err(|e| HostError::invalid("parse", ProcRoot::shown(&path), e))
+        };
+        Ok(Pressure {
+            io: read("io")?,
+            memory: read("memory")?,
+            cpu: read("cpu")?,
+        })
+    }
+
+    fn lower_priority(&self) -> Result<(), HostError> {
+        /// The lowest scheduling priority (`nice 19`).
+        const NICE_LOWEST: i32 = 19;
+        // `None`: the calling thread (Linux's setpriority with who 0).
+        rustix::process::setpriority_process(None, NICE_LOWEST)
+            .map_err(|e| HostError::errno("setpriority", "nice 19", Errno(e.raw_os_error())))?;
+        lower_io_priority_ungated()
+            .map_err(|errno| HostError::errno("ioprio_set", "idle class", errno))
     }
 
     fn kernel_release(&self) -> Result<String, HostError> {

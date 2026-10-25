@@ -80,6 +80,12 @@ impl Host for Short {
     fn sleep(&self, duration: Duration) {
         self.0.sleep(duration);
     }
+    fn pressure(&self) -> Result<diskgc_core::host::Pressure, HostError> {
+        self.0.pressure()
+    }
+    fn lower_priority(&self) -> Result<(), HostError> {
+        self.0.lower_priority()
+    }
     fn kernel_release(&self) -> Result<String, HostError> {
         self.0.kernel_release()
     }

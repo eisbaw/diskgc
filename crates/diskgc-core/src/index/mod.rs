@@ -31,21 +31,23 @@
 //! **Tables.** Finder sets and mounts that no unit uses are swept after
 //! every collapse pass ([`Index::sweep_tables`]), so the tables shrink with
 //! the units. A finder names its root by path. When each root was last
-//! listed completely (`discovered_at`) is the tally's to keep (TASK-29).
+//! listed completely (`discovered_at`) is the tally's to keep
+//! ([`crate::tally::TallyState`]).
 //!
 //! **Coverage.** A candidate found beneath a block that stands for it (one
 //! of the block's finders found it; for a family block, it lies directly
 //! beneath the site and its name is in the family) is not inserted: it is
 //! [`Inserted::Covered`], and the block is left as it is (its member count
 //! is not raised: a block stores no names, so a candidate it already
-//! counts cannot be told from a new one; recounting a block's members on a
-//! complete listing of its site is the tally's, TASK-29). A path that
+//! counts cannot be told from a new one; a complete listing recounts it,
+//! [`crate::tally::recount`]). A path that
 //! already holds a single gains the finder instead, whatever blocks lie
 //! above it.
 //!
-//! Not here yet: the tally that fills the index (TASK-29, which also adds
-//! its live cursors to the count), the snapshot and dropping finders whose
-//! profile hash changed (TASK-30), the reclaim walk's use of it (TASK-31).
+//! The tally fills it ([`crate::tally`]; its live cursor is counted here,
+//! [`Index::set_cursor_bytes`]). Not here yet: the snapshot and dropping
+//! finders whose profile hash changed (TASK-30), the reclaim walk's use of
+//! it (TASK-31).
 
 pub mod collapse;
 pub mod family;
@@ -134,6 +136,30 @@ pub enum Dissolved {
     Missing,
 }
 
+/// What [`Index::drop_finder`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderDropped {
+    /// The single keeps its other finders.
+    Kept,
+    /// That was its last finder (or the smaller set had no room).
+    Evicted,
+    /// No single there, or not of that finder.
+    Missing,
+}
+
+/// What [`Index::recount_block`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recounted {
+    Same,
+    Changed {
+        from: u64,
+        to: u64,
+    },
+    /// No member was listed: the block was evicted.
+    Evicted,
+    Missing,
+}
+
 /// What [`Index::block_member_removed`] left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRemoved {
@@ -178,6 +204,8 @@ pub struct Index {
     budget: usize,
     trie_bytes: usize,
     tables_bytes: usize,
+    /// The tally's live cursor ([`Self::set_cursor_bytes`]).
+    cursor_bytes: usize,
     units: usize,
     mounts: Vec<MountTrie>,
     /// Finder sets in the order of their ids.
@@ -263,6 +291,7 @@ impl Index {
             budget,
             trie_bytes: 0,
             tables_bytes: 0,
+            cursor_bytes: 0,
             units: 0,
             mounts: Vec::new(),
             finder_sets: Vec::new(),
@@ -274,9 +303,22 @@ impl Index {
         self.budget
     }
 
-    /// The counted size (see [`memory`]).
+    /// The counted size (see [`memory`]): the tries, the tables and the
+    /// tally's live cursor.
     pub fn accounted_bytes(&self) -> usize {
-        self.trie_bytes + self.tables_bytes
+        self.trie_bytes + self.tables_bytes + self.cursor_bytes
+    }
+
+    /// Counts the tally's live cursor at `bytes` (docs/architecture.md,
+    /// Memory budget: units, the trie and live cursors together), if that
+    /// keeps the index within its budget; `false` (nothing changed)
+    /// otherwise. `0` when no cursor is live.
+    pub fn set_cursor_bytes(&mut self, bytes: usize) -> bool {
+        if self.trie_bytes + self.tables_bytes + bytes > self.budget {
+            return false;
+        }
+        self.cursor_bytes = bytes;
+        true
     }
 
     /// Singles plus blocks.
@@ -1011,6 +1053,83 @@ impl Index {
                     outcome = MemberRemoved::Evicted;
                 } else {
                     outcome = MemberRemoved::Remaining(blocks[at].members);
+                }
+            });
+        });
+        outcome
+    }
+
+    /// A complete discovery listing by `finder` no longer finds the single
+    /// at `path` (docs/architecture.md, Eviction): it loses that finder,
+    /// and is evicted with its last one. If the set without the finder is
+    /// new and does not fit, the single is evicted too (its other finders
+    /// find it again at their next listing).
+    pub fn drop_finder(&mut self, mount: &MountKey, path: &Path, finder: &Finder) -> FinderDropped {
+        let Some(single) = self.single(mount, path) else {
+            return FinderDropped::Missing;
+        };
+        let set = single.finders;
+        let mut rest = self.finder_set(set).to_vec();
+        let Ok(at) = rest.binary_search(finder) else {
+            return FinderDropped::Missing;
+        };
+        rest.remove(at);
+        if rest.is_empty() || !self.has_room(self.set_cost(&rest)) {
+            assert!(self.evict_single(mount, path), "the single just read");
+            return FinderDropped::Evicted;
+        }
+        let id = self.intern_set(rest);
+        self.single_mut(mount, path).expect("just read").finders = id;
+        FinderDropped::Kept
+    }
+
+    /// A complete discovery listing by every finder of the block of
+    /// `finders` and `family` at `site` found `listed` candidates it
+    /// stands for (Mark, 2026-10-25: a complete listing recounts a block's
+    /// members and estimates; a partial one leaves them). None: the block
+    /// is evicted. Fewer than it counts: its estimates shrink in
+    /// proportion (the members that vanished took their share). More: the
+    /// new members are untallied, so its estimate becomes a lower bound
+    /// (`tallied_at` `None`). Its ages are left as they are.
+    pub fn recount_block(
+        &mut self,
+        mount: &MountKey,
+        site: &Path,
+        finders: FinderSetId,
+        family: &Family,
+        listed: u64,
+    ) -> Recounted {
+        let mut outcome = Recounted::Missing;
+        self.edit_at(mount, site, |node, delta| {
+            node.change_blocks(delta, |blocks| {
+                let Some(at) = blocks
+                    .iter()
+                    .position(|b| b.finders == finders && b.family == *family)
+                else {
+                    return;
+                };
+                let block = &mut blocks[at];
+                let counted = block.members;
+                outcome = Recounted::Changed {
+                    from: counted,
+                    to: listed,
+                };
+                if listed == 0 {
+                    blocks.remove(at);
+                    outcome = Recounted::Evicted;
+                } else if listed < counted {
+                    let share = |total: u64| {
+                        u64::try_from(u128::from(total) * u128::from(listed) / u128::from(counted))
+                            .expect("a share of a u64 fits a u64")
+                    };
+                    block.est_bytes = share(block.est_bytes);
+                    block.files = share(block.files);
+                    block.members = listed;
+                } else if listed > counted {
+                    block.members = listed;
+                    block.tallied_at = None;
+                } else {
+                    outcome = Recounted::Same;
                 }
             });
         });

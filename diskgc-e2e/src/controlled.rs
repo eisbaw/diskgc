@@ -60,6 +60,8 @@ pub const OPS: &[&str] = &[
     "now",
     "wall_clock",
     "sleep",
+    "pressure",
+    "lower_priority",
     "kernel_release",
     "pids",
     "proc_fds",
@@ -491,6 +493,16 @@ impl<H: Host> Host for Controlled<H> {
         self.host.sleep(duration);
     }
 
+    fn pressure(&self) -> Result<diskgc_core::host::Pressure, HostError> {
+        self.before("pressure");
+        self.host.pressure()
+    }
+
+    fn lower_priority(&self) -> Result<(), HostError> {
+        self.before("lower_priority");
+        self.host.lower_priority()
+    }
+
     fn kernel_release(&self) -> Result<String, HostError> {
         self.before("kernel_release");
         self.host.kernel_release()
@@ -713,6 +725,9 @@ processes:
                 .expect("flock_wait"),
         );
         host.sleep(Duration::from_millis(1));
+        host.pressure()
+            .expect_err("the model has no PSI unless scripted");
+        host.lower_priority().expect("lower_priority");
         host.kernel_release().expect("kernel_release");
         host.pids().expect("pids");
         host.proc_fds(Pid(42)).expect("proc_fds");

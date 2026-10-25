@@ -3,8 +3,9 @@
 //! (docs/architecture.md, Implementation).
 //!
 //! - [`host`]: [`LinuxHost`] over raw syscalls (rustix `linux_raw`).
-//! - [`mountinfo`], [`procfs`]: parsers for the `/proc` files it reads;
-//!   [`sockdiag`]: the socket-diagnostics query (request and answer).
+//! - [`mountinfo`], [`procfs`], `pressure`: parsers for the `/proc` files
+//!   it reads; [`sockdiag`]: the socket-diagnostics query (request and
+//!   answer).
 //! - [`nofile`]: the open-file limit, raised at startup and restored for
 //!   children.
 //! - [`sandbox`]: the test-sandbox markers shared by the e2e interlock and
@@ -15,6 +16,7 @@
 pub mod host;
 pub mod mountinfo;
 pub mod nofile;
+mod pressure;
 pub mod procfs;
 pub mod sandbox;
 mod scratch;

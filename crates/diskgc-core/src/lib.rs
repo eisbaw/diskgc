@@ -57,6 +57,7 @@ pub mod report;
 pub mod resolve;
 pub mod select;
 pub mod suggest;
+pub mod tally;
 pub mod units;
 
 #[cfg(test)]

@@ -196,8 +196,13 @@ Ties are broken by the trie's path order, then the family step before
 the all-families step before a lump, then the finder set and the
 family, so collapse
 is deterministic for a given index. A pass plans at most 1,024 steps
-in that order (a bounded working set) and executes them until the
-low-water mark; the next pass plans again from what is left. Further keys (most units, youngest first) wait for a
+in that order (a bounded working set), taking only steps that would
+shrink the index now (counted at planning), and executes them until the
+low-water mark; the next pass plans again from what is left. A step
+that would not shrink it never takes a place in the window, so a crowd
+of them (long family names over singles whose nodes stay) cannot stop a
+collapse above the low-water mark while a shrinking step exists
+(TASK-230). Further keys (most units, youngest first) wait for a
 measured case where these two choose badly.
 
 **Re-validation before a collapse.** The collapse first proves the
@@ -313,9 +318,22 @@ the order of work.
   ([testing.md](testing.md#5-end-to-end-tests-in-containers)). Big trees
   are tallied across many batches via their `cursor` (the path of names
   below the unit's root and the last name done in each directory, in
-  sorted order), which survives entries vanishing under it (`ENOENT`
-  ends that branch). Cursors are not persisted; a unit whose walk did
-  not finish counts as untallied.
+  byte order), which survives entries vanishing under it (`ENOENT`
+  ends that branch). A cursor holds no file descriptor between batches:
+  each batch reaches the unit's root again from its mount (checking its
+  identity), reopens the cursor's directories and lists the deepest one
+  again, so a sleeping tally never keeps a directory inside a candidate
+  open (another process's in-use check would see it). One cursor is live
+  at a time, counted against the index's budget; it enters at most 64
+  directory levels and remembers at most 16,384 hard-linked inodes (both
+  tentative constants; beyond them the estimate is coarser). A walk past
+  the deletion's entry budget stores a `too_many_entries` refusal hint.
+  Cursors are not persisted; a unit whose walk did not finish counts as
+  untallied. A listing of a (profile, root) is not resumable: it runs
+  whole, only as a batch's first job, and may exceed the batch's bounds;
+  the duty cycle charges its time like any batch's. The worker's time
+  `t` is the whole turn: the host-lock test and the pressure read
+  included.
 - **Pressure brake (background)** (Mark, 2026-10-25: duty cycle and
   priorities, and back off on measured pressure). Before each batch the
   tally reads the system-wide pressure stall information
@@ -337,7 +355,34 @@ the order of work.
   10 minutes, a re-tally of each unit every 60 minutes; plus collapse
   as memory requires. The next job is the one most overdue
   relative to its period (lateness ÷ period), so none starves the others
-  on a busy `/tmp`. Constants are tentative and live in code.
+  on a busy `/tmp`. Constants are tentative and live in code. A source
+  is scheduled by its last listing attempt (a listing that is never
+  complete must not run every batch), never listed: due from the start;
+  a single never sized: due from when it was last found; a refusal hint
+  waits a re-tally period like a tally. A listing is itself a re-check
+  of what it finds (their `checked_at` is refreshed), so
+  re-checks mostly serve units of roots the tally does not list. Blocks
+  are neither re-checked nor sized here (they have no check time and no
+  member names): collapse re-validates them and complete listings
+  recount them.
+- **What a listing means.** A listing is **complete** when discovery ran
+  to its end and refused nothing on the way (no unreadable directory, no
+  candidate whose own `where` could not be told). Every listing inserts
+  what it found; only a complete one is evidence of absence: a single of
+  that finder below its root that the listing did not find loses the
+  finder (and leaves with its last one, or when the smaller finder set
+  would not fit), and the blocks it stands for are dissolved (a block of
+  one finder whose listed members fit under the low-water mark) or
+  **recounted** (Mark, 2026-10-25: a complete listing of a block's site
+  recounts its members and estimates; partial listings leave them). A
+  listed candidate counts for the shallowest block that stands for it,
+  as insertion's coverage does. Recounting to fewer members shrinks
+  `est_bytes` and `files` in proportion; to more, the new members are
+  untallied, so the estimate becomes a lower bound (`tallied_at` none);
+  to none evicts the block; ages are left. A block of several finders is
+  recounted only when every one of them was listed completely in the
+  same round: the synchronous tally's pass 1 is one round, each
+  background listing its own.
 - **Pausing:** before each batch the background tally tests, without
   blocking, whether anyone holds the host lock (a `LOCK_SH | LOCK_NB`
   `flock` on its own read-only open of the lock file, closed at once;
@@ -345,9 +390,11 @@ the order of work.
   never excludes another prober; the probe can make one of a reclaim's
   10 to 100 ms lock retries fail, [safety.md](safety.md#host-lock)); if so, a reclaim is
   running (in this or another process) and the tally waits, polling
-  (a lock released by its holder can still look held for a moment,
-  [safety.md](safety.md#host-lock)). The background tally never speeds
-  up under pressure.
+  every second (a lock released by its holder can still look held for a
+  moment, [safety.md](safety.md#host-lock)). A missing lock file means no
+  reclaim can run either: the tally goes on, with one log line; any other
+  failure of the test pauses it. The background tally never speeds up
+  under pressure.
 - **Synchronous (in `ensure`): may load the machine; must be fast and
   useful.** It runs at full speed (no sleeps, normal priority), for at
   most `--tally-budget`, **before** taking the host lock (it is
@@ -370,7 +417,9 @@ the order of work.
      are ordered by the provisional key, after sized ones under
      `best-fit`); the reclaim walk's own checks size what it acts on.
      The same rule applies with and without a seed. The tally then
-     ends, even with budget left, so the reclaim starts sooner.
+     ends, even with budget left, so the reclaim starts sooner. Blocks
+     are not sized (their members have no names in the index); the
+     reclaim walk's checks size the members it expands.
 
   **Useful** means: when pass 1 has finished, every selected tier has a
   queue in its order and the reclaim walk can act on it; pass 2 only

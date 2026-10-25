@@ -17,7 +17,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::host::{Access, FileType, Host, HostError, LockMode, Locked, MonoTime, WaitLock};
+use crate::host::{
+    Access, FileType, Host, HostError, LockMode, Locked, MonoTime, TryLock, WaitLock,
+};
 use crate::report::Signal;
 use crate::resolve::{ResolveError, Want, open_beneath, resolve};
 
@@ -206,6 +208,29 @@ pub fn acquire<H: Host>(
         locked,
         waited: host.now().saturating_since(started),
     })
+}
+
+/// Whether another process (or another part of this one) holds the host
+/// lock now, tested without waiting and without taking it for longer than
+/// the test: a shared `flock` attempt on a fresh open of the lock file,
+/// released at once by closing it. Busy means a reclaim holds it (they take
+/// it exclusively). For the background tally's pause (docs/architecture.md,
+/// The tally: Pausing), which polls: a lock released by its holder can
+/// still look held for a moment (docs/safety.md, Host lock). A reclaim
+/// trying the lock in that instant finds it busy once and tries again (it
+/// waits by polling, [`Host::flock_wait`]).
+pub fn held_by_another<H: Host>(host: &H) -> Result<bool, LockError> {
+    let readable = open_lock(host)?;
+    match host
+        .flock_try(readable, LockMode::Shared)
+        .map_err(LockError::Failed)?
+    {
+        TryLock::Acquired(probe) => {
+            drop(probe);
+            Ok(false)
+        }
+        TryLock::Busy(_) => Ok(true),
+    }
 }
 
 /// A resolve failure on the way to the lock file: missing is its own error

@@ -444,6 +444,19 @@ pub struct Space {
     pub size_bytes: u64,
 }
 
+/// System-wide pressure stall information (`/proc/pressure/io`, `memory`
+/// and `cpu`): the `some avg10` value of each, the share of the last ten
+/// seconds in which at least one task stalled on that resource, in
+/// hundredths of a percent (`some avg10=12.34` is `1234`). What the
+/// background tally's pressure brake reads (docs/architecture.md, The
+/// tally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pressure {
+    pub io: u32,
+    pub memory: u32,
+    pub cpu: u32,
+}
+
 /// `flock` modes. There is deliberately no unlock: see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
@@ -1120,6 +1133,21 @@ pub trait Host {
 
     /// Blocks for `duration`.
     fn sleep(&self, duration: Duration);
+
+    /// The system-wide pressure stall information, read through the held
+    /// `/proc` (`pressure/io`, `pressure/memory`, `pressure/cpu`; read-only,
+    /// ungated). An error where the kernel has none: built without
+    /// `CONFIG_PSI`, booted with `psi=0`, or the files unreadable.
+    fn pressure(&self) -> Result<Pressure, HostError>;
+
+    /// Lowers the calling thread's priority to what the background tally
+    /// runs at (docs/architecture.md, The tally): `nice 19`
+    /// (`setpriority`) and the idle I/O class (`ioprio_set`). For the
+    /// calling thread only (Linux applies both per task), so a `watch`
+    /// that runs its tally on a thread of its own keeps its reclaim at
+    /// normal priority; threads it starts later inherit it. Raising it
+    /// again is not expressible.
+    fn lower_priority(&self) -> Result<(), HostError>;
 
     /// The kernel release string (`uname -r`).
     fn kernel_release(&self) -> Result<String, HostError>;

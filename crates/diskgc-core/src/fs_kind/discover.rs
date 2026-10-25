@@ -43,7 +43,7 @@ use super::judge::{
 };
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
-use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Skip};
+use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
 use crate::outcome::Stop;
 use crate::profile::EntryType;
@@ -66,6 +66,10 @@ pub struct Found {
     /// When it was found (after its `statx`): a liveness contract's scan
     /// must start no earlier (Owner PID's ordering).
     pub found_at: MonoTime,
+    /// What the index needs of the `statx` that found it (the tally,
+    /// docs/architecture.md): the inode of the directory it was found in
+    /// and `max(mtime, ctime)` of its root.
+    pub seen: Seen,
 }
 
 /// What [`discover`] found.
@@ -455,6 +459,7 @@ impl<H: Host> Walk<'_, H> {
                 identity,
                 source_evidence: None,
                 found_at: self.host.now(),
+                seen: Seen::of(stat, &dir.stat),
             });
         }
         match source_where(
@@ -505,6 +510,7 @@ impl<H: Host> Walk<'_, H> {
                 identity,
                 source_evidence,
                 found_at: self.host.now(),
+                seen: Seen::of(stat, &dir.stat),
             }),
         ));
         Ok(true)

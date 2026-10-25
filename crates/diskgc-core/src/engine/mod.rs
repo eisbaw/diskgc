@@ -214,6 +214,27 @@ pub fn networked_why(fs_type: &str) -> &'static str {
     }
 }
 
+/// The index's view of a candidate's discovery `statx`: what its identity
+/// falls back to without a birth time, and its provisional age
+/// (docs/architecture.md, The index: Identity; The tally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seen {
+    /// The inode of the directory the candidate was found in, if reported.
+    pub parent_ino: Option<u64>,
+    /// `max(mtime, ctime)` of the candidate itself, if both were reported.
+    pub changed: Option<Timestamp>,
+}
+
+impl Seen {
+    /// Of `stat`, found in the directory whose stat is `parent`.
+    pub fn of(stat: &Stat, parent: &Stat) -> Self {
+        Self {
+            parent_ino: parent.ino,
+            changed: stat.mtime.zip(stat.ctime).map(|(m, c)| m.max(c)),
+        }
+    }
+}
+
 /// What identifies an entry between the walk and its unlink, compared in
 /// full before every `unlinkat` and at every reopening of a directory
 /// (docs/safety.md, Deletion).

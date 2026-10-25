@@ -48,8 +48,8 @@ use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, Ids,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
-    OpenHow, Pid, PidNamespace, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat, Timestamp,
-    TryLock, Unlink, WaitLock, is_single_name,
+    OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat,
+    Timestamp, TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -59,7 +59,7 @@ use crate::load::{Action, Event, LoadError, Trigger};
 /// it.
 pub const CACHEDIR_TAG_CONTENT: &[u8] =
     b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n";
-use crate::spec::{GateSpec, HostModel, Op, ProcAccess, When};
+use crate::spec::{GateSpec, HostModel, Op, PressureStep, ProcAccess, When};
 
 /// What `LinuxHost` answers outside a test container: the gate's refusal,
 /// nothing attempted.
@@ -131,6 +131,12 @@ struct Inner {
     /// Targeted kernel capability fault for tests: other entries on the
     /// same filesystem can still report their type for discovery.
     missing_statx_type_at: BTreeSet<PathBuf>,
+    /// The model's `pressure` script (`None`: no PSI).
+    pressure: Option<Vec<PressureStep>>,
+    /// The model's `call_cost`.
+    call_cost: Duration,
+    /// How often `lower_priority` was called.
+    priority_lowered: usize,
 }
 
 /// A `Host` backed by a host model. Not `Send`: a run is one thread.
@@ -211,6 +217,9 @@ impl ModelHost {
                 injected: None,
                 peak_open_fds: 0,
                 missing_statx_type_at: BTreeSet::new(),
+                pressure: model.pressure.clone(),
+                call_cost: model.call_cost.map_or(Duration::ZERO, |c| c.0),
+                priority_lowered: 0,
             })),
         })
     }
@@ -300,6 +309,12 @@ impl ModelHost {
         held
     }
 
+    /// How often the code under test lowered its priority
+    /// (`Host::lower_priority`).
+    pub fn priority_lowered(&self) -> usize {
+        self.inner.borrow().priority_lowered
+    }
+
     /// Virtual time since the start of the run.
     pub fn elapsed(&self) -> Duration {
         self.inner.borrow().state.elapsed
@@ -308,6 +323,11 @@ impl ModelHost {
     /// The most fds of this host that were open at the same time so far.
     pub fn peak_open_fds(&self) -> usize {
         self.inner.borrow().peak_open_fds
+    }
+
+    /// How many fds of this host diskgc holds open now.
+    pub fn open_fds(&self) -> usize {
+        self.inner.borrow().state.own_ofds.len()
     }
 
     // ---- Calls ----
@@ -363,6 +383,10 @@ impl ModelHost {
         let index = inner.trace.len() as u64 + 1;
         inner.fire_calls(index, op, path.as_deref(), When::Before);
         let (result, object, text) = run(&mut inner);
+        if !matches!(op, Op::Now | Op::WallClock | Op::Sleep) && !inner.call_cost.is_zero() {
+            let until = inner.state.elapsed + inner.call_cost;
+            inner.advance_to(until);
+        }
         if let Some(errno) = inner.injected.take() {
             model_error(format!(
                 "a 'fail: {errno}' event fired before call #{index} ({op}), which cannot fail \
@@ -1229,6 +1253,49 @@ impl Host for ModelHost {
             let until = inner.state.elapsed + duration;
             inner.advance_to(until);
             ((), None, format!("{duration:?}"))
+        })
+    }
+
+    fn pressure(&self) -> Result<Pressure, HostError> {
+        self.call(Op::Pressure, None, None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("read", "/proc/pressure", errno)),
+                    None,
+                    errno_text(errno),
+                );
+            }
+            let elapsed = inner.state.elapsed;
+            let step = inner.pressure.as_ref().map(|steps| {
+                *steps
+                    .iter()
+                    .rev()
+                    .find(|s| s.after.0 <= elapsed)
+                    .expect("the first step is at 0s")
+            });
+            match step {
+                None => (
+                    Err(HostError::errno("read", "/proc/pressure/io", Errno::ENOENT)),
+                    None,
+                    errno_text(Errno::ENOENT),
+                ),
+                Some(s) => (
+                    Ok(Pressure {
+                        io: s.io,
+                        memory: s.memory,
+                        cpu: s.cpu,
+                    }),
+                    None,
+                    format!("io {} memory {} cpu {}", s.io, s.memory, s.cpu),
+                ),
+            }
+        })
+    }
+
+    fn lower_priority(&self) -> Result<(), HostError> {
+        self.call(Op::LowerPriority, None, None, |inner| {
+            inner.priority_lowered += 1;
+            (Ok(()), None, "ok".to_owned())
         })
     }
 

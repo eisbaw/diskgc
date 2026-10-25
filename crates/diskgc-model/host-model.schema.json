@@ -4,6 +4,17 @@
   "description": "A host model: the machine a model test runs against.",
   "type": "object",
   "properties": {
+    "call_cost": {
+      "description": "Virtual time every port call takes, but the clock reads and\n`sleep` (default none: calls take no time). For the background\ntally's duty cycle, whose batches are timed on the clock.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Elapsed"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "clock": {
       "description": "Wall-clock time when the run starts (RFC 3339, e.g.\n`2026-10-15T03:00:00Z`). Default time stamp of tree entries.",
       "$ref": "#/$defs/WallTime"
@@ -103,6 +114,16 @@
     "pid_namespace": {
       "description": "The answer of diskgc's held `/proc` to Owner PID's initial-namespace\ncheck (docs/safety.md, Producer liveness): `initial` (the default)\nor `nested`.",
       "$ref": "#/$defs/PidNamespaceSpec"
+    },
+    "pressure": {
+      "description": "The system-wide pressure stall information (`Host::pressure`) over\nthe run: each step holds from its `after` (time since the start of\nthe run) until the next step's. Absent: the kernel has no PSI\n(every read fails with `ENOENT`, as without `CONFIG_PSI`). Steps in\nincreasing `after`, the first at `0s`.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/PressureStep"
+      }
     },
     "proc_hidepid": {
       "description": "The held `/proc` is mounted with `hidepid`.",
@@ -987,7 +1008,9 @@
         "unlinkat",
         "fchmod",
         "run_command",
-        "docker_query"
+        "docker_query",
+        "pressure",
+        "lower_priority"
       ]
     },
     "PidNamespaceSpec": {
@@ -1003,6 +1026,37 @@
           "type": "string",
           "const": "nested"
         }
+      ]
+    },
+    "PressureStep": {
+      "description": "The pressure readings from `after` on: the `some avg10` of `io`,\n`memory` and `cpu`, in hundredths of a percent (`1000` is 10.00 %).",
+      "type": "object",
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/Elapsed"
+        },
+        "cpu": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "io": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "after",
+        "io",
+        "memory",
+        "cpu"
       ]
     },
     "ProcAccess": {

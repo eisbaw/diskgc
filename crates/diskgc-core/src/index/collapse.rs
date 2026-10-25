@@ -660,7 +660,7 @@ fn node_at_mut<'n>(root: &'n mut Node, names: &[&[u8]]) -> Option<&'n mut Node> 
 /// (its unit is evicted), rather than a failure of the host (the run
 /// stops with the error, evicting nothing more: EMFILE, ENOMEM or EIO must
 /// not empty a subtree).
-fn means_gone(e: &HostError) -> bool {
+pub(crate) fn means_gone(e: &HostError) -> bool {
     matches!(
         e.kernel_errno(),
         Some(
@@ -675,7 +675,7 @@ fn means_gone(e: &HostError) -> bool {
 }
 
 /// A traversal failure: `Ok` if it means gone, the host error otherwise.
-fn gone_or_error(e: ResolveError) -> Result<(), HostError> {
+pub(crate) fn gone_or_error(e: ResolveError) -> Result<(), HostError> {
     match e {
         ResolveError::Host(e) if !means_gone(&e) => Err(e),
         _ => Ok(()),
@@ -897,7 +897,7 @@ fn take_below(
 /// Reaches the site directory: its fd, its mount's id and its identity.
 /// `None` for anything that is not the same mount's directory, reached
 /// safely; an error for a failure of the host.
-pub(super) fn reach_site<H: Host>(
+pub(crate) fn reach_site<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     key: &MountKey,

@@ -16,9 +16,11 @@
 //!
 //! The bound is checked against the allocator by the counting-allocator
 //! test in diskgc-model (`tests/index_memory.rs`): the bytes allocated for
-//! an index, plus the per-allocation overhead, never exceed this count. Live
-//! memory of the tally (cursors, TASK-29) and transient memory of a
-//! collapse or a queue derivation (bounded working sets) are not part of it.
+//! an index, plus the per-allocation overhead, never exceed this count. The
+//! tally's live cursor is counted too, by the tally
+//! ([`super::Index::set_cursor_bytes`], [`crate::tally::size::Cursor`]);
+//! transient memory of a collapse, a queue derivation or one tally step
+//! (bounded working sets: listings, open directories) is not.
 
 use std::mem::size_of;
 

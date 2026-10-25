@@ -99,6 +99,18 @@ pub struct HostModel {
     /// tests. No real daemon or filesystem is contacted by ModelHost.
     #[serde(default, skip_serializing_if = "DockerSpec::is_empty")]
     pub docker: DockerSpec,
+    /// The system-wide pressure stall information (`Host::pressure`) over
+    /// the run: each step holds from its `after` (time since the start of
+    /// the run) until the next step's. Absent: the kernel has no PSI
+    /// (every read fails with `ENOENT`, as without `CONFIG_PSI`). Steps in
+    /// increasing `after`, the first at `0s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<Vec<PressureStep>>,
+    /// Virtual time every port call takes, but the clock reads and
+    /// `sleep` (default none: calls take no time). For the background
+    /// tally's duty cycle, whose batches are timed on the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_cost: Option<Elapsed>,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
@@ -142,6 +154,17 @@ impl HostModel {
     pub fn to_yaml(&self) -> String {
         serde_saphyr::to_string(self).expect("a host model always serialises")
     }
+}
+
+/// The pressure readings from `after` on: the `some avg10` of `io`,
+/// `memory` and `cpu`, in hundredths of a percent (`1000` is 10.00 %).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PressureStep {
+    pub after: Elapsed,
+    pub io: u32,
+    pub memory: u32,
+    pub cpu: u32,
 }
 
 /// The modelled sandbox gate (`sandbox_gate`).
@@ -713,6 +736,8 @@ pub enum Op {
     Fchmod,
     RunCommand,
     DockerQuery,
+    Pressure,
+    LowerPriority,
 }
 
 impl Op {
@@ -758,6 +783,8 @@ impl Op {
             Self::Fchmod => "fchmod",
             Self::RunCommand => "run_command",
             Self::DockerQuery => "docker_query",
+            Self::Pressure => "pressure",
+            Self::LowerPriority => "lower_priority",
         }
     }
 }

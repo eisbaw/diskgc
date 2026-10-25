@@ -22,7 +22,7 @@ use super::{
     Target, newest_change,
 };
 use crate::engine::{
-    self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Skip, WalkStop,
+    self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Seen, Skip, WalkStop,
     is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
 };
 use crate::host::{
@@ -107,7 +107,7 @@ pub fn discover<H: Host>(
             found: &mut found,
             seen: &mut seen,
         }
-        .run(resolved.fd)?;
+        .run(resolved.fd, resolved.stat.ino)?;
     }
     Ok(found)
 }
@@ -550,13 +550,17 @@ struct Frame<F> {
     fd: F,
     path: PathBuf,
     depth: usize,
+    /// Its inode, if reported: the parent inode of a target found in it.
+    ino: Option<u64>,
     pending: std::vec::IntoIter<OsString>,
 }
 
 impl<H: Host> Walk<'_, H> {
-    fn run(mut self, root_fd: H::Fd) -> Result<(), Stop> {
+    fn run(mut self, root_fd: H::Fd, root_ino: Option<u64>) -> Result<(), Stop> {
         let mut stack: Vec<Frame<H::Fd>> = Vec::new();
-        if let Some(frame) = self.visit(root_fd, self.root.to_owned(), 0)? {
+        // The root's own parent is not opened: a target at the root has
+        // no parent inode (only a filesystem without birth times needs it).
+        if let Some(frame) = self.visit(root_fd, self.root.to_owned(), 0, root_ino, None)? {
             stack.push(frame);
         }
         while let Some(top) = stack.last_mut() {
@@ -572,9 +576,10 @@ impl<H: Host> Walk<'_, H> {
                 continue;
             }
             let depth = top.depth + 1;
+            let parent_ino = top.ino;
             match open_dir(self.host, &top.fd, self.mount_id, Path::new(&name), &path)? {
-                Ok((fd, _)) => {
-                    if let Some(frame) = self.visit(fd, path, depth)? {
+                Ok((fd, stat)) => {
+                    if let Some(frame) = self.visit(fd, path, depth, stat.ino, parent_ino)? {
                         stack.push(frame);
                     }
                 }
@@ -600,6 +605,8 @@ impl<H: Host> Walk<'_, H> {
         fd: H::Fd,
         path: PathBuf,
         depth: usize,
+        ino: Option<u64>,
+        parent_ino: Option<u64>,
     ) -> Result<Option<Frame<H::Fd>>, Stop> {
         let names = match list(self.host, &fd, &path, self.deadline)? {
             Ok(names) => names,
@@ -609,7 +616,7 @@ impl<H: Host> Walk<'_, H> {
             }
         };
         if names.iter().any(|n| n == CACHEDIR_TAG) {
-            match self.target_at(&fd, &path)? {
+            match self.target_at(&fd, &path, parent_ino)? {
                 Ok(true) => return Ok(None),
                 Ok(false) => {}
                 Err(skip) => {
@@ -640,6 +647,7 @@ impl<H: Host> Walk<'_, H> {
             fd,
             path,
             depth,
+            ino,
             pending: pending.into_iter(),
         }))
     }
@@ -647,7 +655,7 @@ impl<H: Host> Walk<'_, H> {
     /// Records the directory open as `fd` as a target if it is one (a valid
     /// tag and a profile directory); `Ok(Ok(true))` then, so it is not
     /// descended into.
-    fn target_at(&mut self, fd: &H::Fd, path: &Path) -> Judged<bool> {
+    fn target_at(&mut self, fd: &H::Fd, path: &Path, parent_ino: Option<u64>) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
         if mount_at(self.mounts, &tag) {
             return Ok(Err(mounted(&tag)));
@@ -680,6 +688,10 @@ impl<H: Host> Walk<'_, H> {
                 path: path.to_owned(),
                 identity,
                 inspected,
+                seen: Seen {
+                    parent_ino,
+                    changed: newest_change(&stat),
+                },
             });
         } else {
             self.found.duplicates.push(path.to_owned());

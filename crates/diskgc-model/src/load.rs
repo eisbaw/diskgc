@@ -139,6 +139,15 @@ pub fn parse_yaml(text: &str) -> Result<HostModel, LoadError> {
 
 /// Builds the state and events of a model.
 pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
+    if let Some(steps) = &model.pressure {
+        let ordered = steps.windows(2).all(|w| w[0].after < w[1].after);
+        if steps.first().is_none_or(|s| !s.after.0.is_zero()) || !ordered {
+            return Err(LoadError::new(
+                "pressure",
+                "steps in increasing `after`, the first at 0s",
+            ));
+        }
+    }
     if model.host_model != crate::spec::FORMAT_VERSION {
         return Err(LoadError::new(
             "host_model",
@@ -958,6 +967,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::PidNamespace,
             Op::ProcNspid,
             Op::PidAlive,
+            Op::Pressure,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}

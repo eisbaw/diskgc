@@ -281,6 +281,8 @@ pub fn host_model(
                 command_exit: 0,
                 command_error_after_start: false,
                 docker: Default::default(),
+                pressure: None,
+                call_cost: None,
                 events: Vec::new(),
                 expect: None,
             }

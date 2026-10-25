@@ -980,6 +980,14 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
+        function: "lower_io_priority_ungated",
+        gate: Gate::Ungated(
+            "ioprio_set to the idle class for the calling thread only; changes no file",
+        ),
+        matches: 3, // syscall plus libc at the call and the syscall number
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
         function: "unlinkat_permitted",
         gate: Gate::Permit,
         matches: 1,

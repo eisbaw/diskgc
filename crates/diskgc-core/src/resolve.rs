@@ -608,6 +608,12 @@ mod tests {
         fn sleep(&self, _: Duration) {
             unreachable!()
         }
+        fn pressure(&self) -> Result<crate::host::Pressure, HostError> {
+            unreachable!()
+        }
+        fn lower_priority(&self) -> Result<(), HostError> {
+            unreachable!()
+        }
         fn kernel_release(&self) -> Result<String, HostError> {
             unreachable!()
         }

@@ -555,3 +555,71 @@ proptest! {
         prop_assert_eq!(strip(&again.ready), strip(&queue.ready));
     }
 }
+
+/// Mark's rule (2026-10-25): a complete listing recounts a block. Fewer
+/// members shrink its estimates in proportion; more make its estimate a
+/// lower bound (untallied members); none evicts it.
+#[test]
+fn a_recount_scales_the_estimates_or_marks_them_a_lower_bound() {
+    let mut index = Index::new(BUDGET);
+    let rc = finder("nix-shell-rc", "/tmp");
+    assert_eq!(put(&mut index, "/tmp/seed", &rc, 1, 1), Some(Inserted::New));
+    let set = index
+        .single(&tmp(), Path::new("/tmp/seed"))
+        .unwrap()
+        .finders();
+    let family = Family::Name(name_family(b"nix-shell.abcdef"));
+    put_block(&mut index, "/tmp", block(set, family.clone(), 40, 4000, 10));
+    let site = Path::new("/tmp");
+    let at = |index: &Index| index.blocks_at(&tmp(), site)[0].clone();
+    assert_eq!(
+        index.recount_block(&tmp(), site, set, &family, 30),
+        Recounted::Changed { from: 40, to: 30 }
+    );
+    let b = at(&index);
+    assert_eq!((b.members, b.est_bytes, b.files), (30, 3000, 30));
+    assert!(b.tallied_at.is_some());
+    assert_eq!(
+        index.recount_block(&tmp(), site, set, &family, 30),
+        Recounted::Same
+    );
+    assert_eq!(
+        index.recount_block(&tmp(), site, set, &family, 45),
+        Recounted::Changed { from: 30, to: 45 }
+    );
+    let b = at(&index);
+    assert_eq!((b.members, b.est_bytes, b.tallied_at), (45, 3000, None));
+    assert_eq!(
+        index.recount_block(&tmp(), site, set, &family, 0),
+        Recounted::Evicted
+    );
+    assert!(index.blocks_at(&tmp(), site).is_empty());
+    assert_eq!(
+        index.recount_block(&tmp(), site, set, &family, 3),
+        Recounted::Missing
+    );
+    index.assert_consistent();
+}
+
+/// A complete listing that no longer finds a single drops that finder;
+/// the single goes with its last one.
+#[test]
+fn dropping_a_finder_keeps_the_others_and_evicts_with_the_last() {
+    let mut index = Index::new(BUDGET);
+    let rc = finder("nix-shell-rc", "/tmp");
+    let entry = finder("tmp-entry", "/tmp");
+    put(&mut index, "/tmp/a", &rc, 10, 5);
+    put(&mut index, "/tmp/a", &entry, 10, 5);
+    let a = Path::new("/tmp/a");
+    assert_eq!(index.drop_finder(&tmp(), a, &rc), FinderDropped::Kept);
+    let single = index.single(&tmp(), a).unwrap();
+    assert_eq!(
+        index.finder_set(single.finders()),
+        std::slice::from_ref(&entry)
+    );
+    assert_eq!(index.drop_finder(&tmp(), a, &rc), FinderDropped::Missing);
+    assert_eq!(index.drop_finder(&tmp(), a, &entry), FinderDropped::Evicted);
+    assert!(index.single(&tmp(), a).is_none());
+    index.sweep_tables();
+    index.assert_consistent();
+}

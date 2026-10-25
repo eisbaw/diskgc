@@ -42,7 +42,7 @@ mod reclaim;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::engine::{CARGO_LOCK_NAMES, Identity};
+use crate::engine::{CARGO_LOCK_NAMES, Identity, Seen};
 use crate::host::{DevIno, FileType, Stat, Timestamp};
 
 pub use discover::{
@@ -77,6 +77,8 @@ pub struct Target {
     pub identity: Identity,
     /// What it held when found.
     pub inspected: Inspected,
+    /// What the index needs of the `statx` that found it (the tally).
+    pub seen: Seen,
 }
 
 /// What a target directory holds that the kind needs.
