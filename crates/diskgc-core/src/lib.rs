@@ -18,6 +18,8 @@
 //! one `--select` tier of kind `cargo-target` or `fs`, its [`report`] (exit codes,
 //! JSON, summary), the host lock ([`hostlock`]) and the configuration
 //! lookup with the part of schema `version: 1` loaded so far ([`config`]).
+//! The [`index`] (units, blocks, collapse at the memory ceiling, queue
+//! derivation) is built but not yet wired into `ensure` (TASK-31).
 //! [`fs_kind`] is kind `fs`: find patterns, discovery, the judgement of
 //! each candidate shared by the dry run and the reclaim, and its deletion
 //! protocol. [`outcome`] holds how a candidate's judgement or reclaim ends,
@@ -43,6 +45,7 @@ pub mod executor;
 pub mod fs_kind;
 pub mod host;
 pub mod hostlock;
+pub mod index;
 pub mod inuse;
 pub mod invocation;
 pub mod kernel;

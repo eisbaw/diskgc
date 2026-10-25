@@ -469,8 +469,11 @@ How the format reads (the schema documents every key):
   - processes come from the model or a `fork` event (no exec); memory
     maps show the mapped file's own device (a layer's device, as overlayfs
     can show, is modelled with a second filesystem);
-  - lookups cost time linear in the model, so 100,000-entry models need
-    indexes first.
+  - link counts and reachability are derived once per filesystem and
+    cached until it next changes (TASK-28's 98,000-entry index test runs
+    in seconds); a path from an inode and available space are still
+    linear per call, so 100,000-entry models that use them need indexes
+    first.
 
 Model scenarios required by [safety.md](safety.md) and
 [architecture.md](architecture.md), among others:

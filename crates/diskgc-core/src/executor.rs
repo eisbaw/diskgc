@@ -730,7 +730,7 @@ fn oldest_first<T>(items: &mut [T], last_build: impl Fn(&T) -> Option<Timestamp>
 /// every observed space sample. Unknown estimates retain discovery order
 /// after all known estimates. The key ranks singles before equal-size
 /// buckets by deletion count, then preserves discovery order.
-struct CandidateQueue<T> {
+pub(crate) struct CandidateQueue<T> {
     order: Order,
     oldest: VecDeque<T>,
     sized: BTreeMap<(u64, usize, usize), T>,
@@ -738,7 +738,7 @@ struct CandidateQueue<T> {
 }
 
 impl<T> CandidateQueue<T> {
-    fn new(
+    pub(crate) fn new(
         order: Order,
         items: impl IntoIterator<Item = T>,
         estimate: impl Fn(&T) -> Option<(u64, usize)>,
@@ -761,11 +761,11 @@ impl<T> CandidateQueue<T> {
         queue
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.oldest.is_empty() && self.sized.is_empty() && self.unknown.is_empty()
     }
 
-    fn pop(&mut self, need: u64) -> Option<T> {
+    pub(crate) fn pop(&mut self, need: u64) -> Option<T> {
         if self.order == Order::Oldest {
             return self.oldest.pop_front();
         }

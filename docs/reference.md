@@ -238,12 +238,12 @@ Read-only: takes no lock and deletes nothing. For each `PATH`:
   concrete paths, not globs. Output beyond 1,000 candidates per profile is
   truncated, and the report says how many were left out;
 - the *unmatched* top-level entries grouped by name family, so the next
-  profile worth writing is visible. A name family is the name with runs of
-  digits replaced by `#` and a trailing random-looking suffix after `.`, `-`
-  or `_` (five or more letters and digits) replaced by `*`, e.g.
-  `nix-shell.8raHjU` → `nix-shell.*`, `nix-shell-1144586-3257819220` →
-  `nix-shell-#-#`. The grouping is a hint for humans, not part of the JSON
-  contract.
+  profile worth writing is visible. A name family is the name with a
+  trailing random-looking suffix after `.`, `-` or `_` (five or more
+  letters and digits, at least one a letter) replaced by `*`, then runs of
+  digits replaced by `#`, e.g. `nix-shell.8raHjU` → `nix-shell.*`,
+  `nix-shell-1144586-3257819220` → `nix-shell-#-#`. The grouping is a hint
+  for humans, not part of the JSON contract.
 
 Without `--select`, all profiles (built-in and user) are applied; each
 `PATH` also serves as the root for `roots: required` profiles, so

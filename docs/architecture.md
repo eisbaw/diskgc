@@ -63,16 +63,22 @@ Block {                         # many candidates, collapsed
 
 - **Granularity.** One `Single` per candidate (one pytest session, one
   Cargo target, one top-level `/tmp` entry) for as long as memory
-  allows. A **block** stands for every candidate found by its finders
-  strictly beneath its site directory `D` whose name is in its family
-  (`any`: every name). Name family is the `survey` rule
-  ([reference.md](reference.md#survey)). Blocks exist only through
+  allows. A **block** stands for candidates found by its finders
+  beneath its site directory `D`: a family block for those directly
+  beneath `D` whose name is in its family, an `any` block for every one
+  at any depth. Name family is the `survey` rule
+  ([reference.md](reference.md#survey)). A candidate discovery finds
+  that a block stands for (one of the block's finders found it) is not
+  inserted again: a block stores no names, so its `members` cannot tell
+  it from one it already counts and stays as it is; a path that holds a
+  single gains the finder instead. Blocks exist only through
   collapse (below); there is no eager bucketing by size, so with memory
   to spare every candidate keeps its own place in the order. (A dry-run
   plan of 100,000 rows is a report concern, not an index one: the dry
   run judges every candidate whatever the index holds.)
 - **Identity** is (`st_dev`, inode, birth time from `statx`), falling
-  back to (`st_dev`, inode, parent identity) where the filesystem reports
+  back to (`st_dev`, inode, the parent directory's inode; for a mount's
+  root, its own inode) where the filesystem reports
   no birth time; no mount id (mount ids are per boot and reused), so the
   stored identity survives in a snapshot. ctime and size are not
   identity; a change only means the estimate is stale. The stored
@@ -121,11 +127,19 @@ injectable in model tests). It is a ceiling, never exceeded: an
 insertion that would cross it first collapses existing units until the
 index is at or below 75 % of the budget (the **low-water mark**), then
 inserts. The tally never stops adding because of memory, and
-`coverage` never reports `partial` because of it. At about 200 bytes per
-`Single` (name, identity, finders, counters) the budget holds roughly
-300,000 units: the development laptop's `/tmp` (about 155,000 top-level
-entries) fits without collapsing; collapse is for larger trees and many
-roots on one filesystem.
+`coverage` never reports `partial` because of it. The count is an upper
+bound of the heap the index owns, from the shapes of its containers
+(`diskgc-core` `index::memory`; checked against a counting allocator):
+about 370 bytes per `Single` with a 16-byte name (its trie node, name,
+identity, finders, counters; the allocator measures about 325), so the
+budget holds roughly 170,000 singles: the development laptop's `/tmp`
+(about 155,000 top-level entries) still fits without collapsing;
+collapse is for larger trees and many roots on one filesystem. The root,
+finder-set and mount tables count against the same budget. Registering
+a root takes no `Host` port and cannot collapse, so at the ceiling it is
+refused until a collapse made room; an insertion that does not fit even
+after everything collapsible is collapsed (one block per finder set and
+root) is refused and the candidate left to per-tier discovery.
 
 **What a collapse does.** It picks a **site**, a directory `D`, and a
 finder set `F`, and replaces every unit beneath `D` whose finders are
@@ -152,8 +166,11 @@ it):
    discovery at reclaim time; a block at `/tmp` itself would mean
    discovering all of `/tmp` again).
 
-Ties are broken by the trie's path order, so collapse is deterministic
-for a given index. Further keys (most units, youngest first) wait for a
+Ties are broken by the trie's path order, then the family step before
+the all-families step, then the finder set and the family, so collapse
+is deterministic for a given index. A pass plans at most 1,024 steps
+in that order (a bounded working set) and executes them until the
+low-water mark; the next pass plans again from what is left. Further keys (most units, youngest first) wait for a
 measured case where these two choose badly.
 
 **Re-validation before a collapse.** The collapse first proves the

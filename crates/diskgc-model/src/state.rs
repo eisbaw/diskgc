@@ -8,14 +8,18 @@
 //! point paths. An inode is live while a directory reaches it or anything
 //! (an open file, a process's cwd, root, exe or mapping) refers to it.
 //!
-//! Limit: derived values are recomputed from scratch, so a stat or a path
-//! lookup costs time linear in the size of its filesystem. Fine for
-//! hand-written and generated models (hundreds of entries); a model of
-//! 100,000 entries needs indexes first.
+//! Cost: reachability and link counts are derived once per filesystem and
+//! cached until the filesystem next changes (every change goes through
+//! `fs_mut` or `Fs::add`, which drop the cache), so a run of `statx` calls
+//! costs one walk of the filesystem, not one per call; the index's
+//! 98,000-entry model test (TASK-28) needs that. Other derived values (a
+//! path from an inode, available space) are still linear per call.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use diskgc_core::host::{
@@ -128,7 +132,21 @@ pub struct Fs {
     pub other_used: u64,
     pub missing: BTreeSet<StatxField>,
     pub root: u64,
-    pub inodes: BTreeMap<u64, Inode>,
+    /// Private, so every change goes through `State::fs_mut` or
+    /// [`Fs::add`], which drop the cached [`Links`].
+    inodes: BTreeMap<u64, Inode>,
+    links: RefCell<Option<Rc<Links>>>,
+}
+
+/// What reachability derives, cached per filesystem.
+#[derive(Debug, Default)]
+struct Links {
+    /// Inodes reachable from the root through directory entries.
+    reachable: BTreeSet<u64>,
+    /// Per inode, the entries naming it in reachable directories.
+    named: BTreeMap<u64, usize>,
+    /// Per directory, how many of its entries are directories.
+    subdirs: BTreeMap<u64, usize>,
 }
 
 impl Fs {
@@ -142,10 +160,52 @@ impl Fs {
             missing: BTreeSet::new(),
             root,
             inodes: BTreeMap::from([(root, Inode::new(Kind::Dir(BTreeMap::new()), now))]),
+            links: RefCell::new(None),
         }
     }
 
+    /// Drops what was derived from the inodes (before any change).
+    fn changing(&mut self) {
+        *self.links.get_mut() = None;
+    }
+
+    fn links(&self) -> Rc<Links> {
+        if let Some(links) = &*self.links.borrow() {
+            return Rc::clone(links);
+        }
+        let reachable = self.closure([self.root]);
+        let mut named: BTreeMap<u64, usize> = BTreeMap::new();
+        for entries in reachable
+            .iter()
+            .filter_map(|ino| self.inodes[ino].entries())
+        {
+            for child in entries.values() {
+                *named.entry(*child).or_default() += 1;
+            }
+        }
+        let subdirs = self
+            .inodes
+            .iter()
+            .filter_map(|(ino, inode)| {
+                let entries = inode.entries()?;
+                let dirs = entries
+                    .values()
+                    .filter(|child| self.inodes[*child].entries().is_some())
+                    .count();
+                Some((*ino, dirs))
+            })
+            .collect();
+        let links = Rc::new(Links {
+            reachable,
+            named,
+            subdirs,
+        });
+        *self.links.borrow_mut() = Some(Rc::clone(&links));
+        links
+    }
+
     fn add(&mut self, inode: Inode) -> u64 {
+        self.changing();
         let ino = self.inodes.keys().next_back().map_or(2, |last| last + 1);
         self.inodes.insert(ino, inode);
         ino
@@ -153,7 +213,7 @@ impl Fs {
 
     /// Inodes reachable from the root through directory entries.
     fn reachable(&self) -> BTreeSet<u64> {
-        self.closure([self.root])
+        self.links().reachable.clone()
     }
 
     /// `start` and everything below the directories among them.
@@ -401,7 +461,9 @@ impl State {
 
     fn fs_mut(&mut self, mnt: u64) -> &mut Fs {
         let dev = self.mount(mnt).dev;
-        self.fss.get_mut(&dev).expect("model bug: mount without fs")
+        let fs = self.fss.get_mut(&dev).expect("model bug: mount without fs");
+        fs.changing();
+        fs
     }
 
     pub fn mount_root(&self, mnt: u64) -> Loc {
@@ -672,25 +734,11 @@ impl State {
     /// (for a directory: 2 plus its subdirectories, 0 once detached).
     fn nlink(&self, loc: Loc) -> u32 {
         let fs = self.fs(loc.mnt);
-        let reachable = fs.reachable();
-        let named = reachable
-            .iter()
-            .filter_map(|ino| fs.inodes[ino].entries())
-            .flat_map(|entries| entries.values())
-            .filter(|child| **child == loc.ino)
-            .count();
+        let links = fs.links();
+        let named = links.named.get(&loc.ino).copied().unwrap_or(0);
         let count = match self.inode(loc).entries() {
-            Some(entries) => {
-                if loc.ino != fs.root && named == 0 {
-                    0
-                } else {
-                    let subdirs = entries
-                        .values()
-                        .filter(|ino| fs.inodes[*ino].entries().is_some())
-                        .count();
-                    2 + subdirs
-                }
-            }
+            Some(_) if loc.ino != fs.root && named == 0 => 0,
+            Some(_) => 2 + links.subdirs.get(&loc.ino).copied().unwrap_or(0),
             None => named,
         };
         u32::try_from(count).unwrap_or(u32::MAX)
@@ -698,7 +746,7 @@ impl State {
 
     pub fn is_linked(&self, loc: Loc) -> bool {
         let fs = self.fs(loc.mnt);
-        loc.ino == fs.root || fs.reachable().contains(&loc.ino)
+        loc.ino == fs.root || fs.links().reachable.contains(&loc.ino)
     }
 
     pub fn stat(&self, loc: Loc) -> Stat {
