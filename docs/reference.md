@@ -19,8 +19,9 @@ diskgc --help | --version
 ```
 
 `watch` and `survey` are planned commands. This version returns exit 2
-for either, naming the commands it has; their intended interfaces are
-described below for design review, not as available CLI behavior.
+for either, naming the commands it has; their interfaces are described
+below for implementation (`watch`'s is settled, `survey`'s is intended),
+not as available CLI behavior.
 
 A usage error (an unknown command or flag, a missing or malformed
 argument) exits 2 and prints, on stderr, `diskgc: error: MESSAGE`, then
@@ -189,37 +190,356 @@ process runs, even if that Cargo works in an unrelated directory; see
 
 ### `watch`
 
-Planned; this build returns exit 2. Intended syntax:
+Planned; this build returns exit 2. The contract below is settled
+(TASK-117) for implementation (TASK-32); nothing of it runs yet.
 
 ```
-diskgc watch --min-free SIZE --target-free SIZE [--interval DUR]
-             [--select EXPR] [--roots DIR]... [--config FILE] [--allow-root] PATH
-diskgc watch --tally-only [--config FILE] PATH
+diskgc watch --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]
+             [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
+diskgc watch --tally-only [--min-free SIZE]
+             [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
 ```
 
-- One process per filesystem, under any supervisor (e.g. one instance of a
-  systemd template unit per watched path; systemd is not required).
-- `--target-free` is required here: a watcher without two thresholds would
-  reclaim a sliver at every poll. The error message says so.
-- Every `--interval` (default `10s`): one `statvfs`. At or above
-  `--min-free`: no deletions; only the background tally keeps the index
-  fresh.
-- Below `--min-free`: run the reclaim walk with goal `--target-free`. No
-  overall deadline; each tier's work is bounded by its `timeout`. The wait
-  for the host lock stays interruptible by SIGTERM.
-- `--tally-only`: maintain the index and its snapshot, never reclaim (for
-  CI runners, so that `ensure` in the pre-job hook finds a warm index).
-  `--min-free` / `--target-free` are not used in this mode.
-- **Back-off:** if a reclaim ends below `--min-free` because everything left
-  is in use (`exhausted`) or with misconfiguration errors, the next one
-  starts only after available space has dropped by a further
-  `max(1 GiB, 1% of the filesystem)` or 15 minutes have passed. Backend
-  errors and `backend_unavailable` skips (a Docker or Nix daemon
-  unreachable, [Backend skips and errors](#backend-skips-and-errors))
-  shorten the wait to 1 minute,
-  since backends often recover quickly. One log line per back-off. These
-  values are fixed in code.
-- On SIGTERM/SIGINT: stop as described under Signals, exit 0.
+`watch` is the long-running form of `ensure`: it samples one filesystem
+and runs the same reclaim walk ([architecture.md](architecture.md#the-reclaim-walk))
+whenever available space falls below `--min-free`, with its own live
+index kept fresh by the background tally
+([architecture.md](architecture.md#the-tally)). It does not daemonize:
+it runs in the foreground under a supervisor (systemd, a shell, a CI
+runner's service manager); systemd is not required.
+
+#### Watch flags
+
+- `PATH`, `--select`, `--roots`, `--config`, `--allow-root`: as for
+  `ensure`. `PATH` is resolved once, at start; its filesystem is the one
+  watched for the life of the process (The reclaim cycle).
+- `--min-free` (required, except with `--tally-only`): a reclaim cycle
+  starts when a sample is below it.
+- `--target-free` (required, except with `--tally-only`, where it is a
+  usage error): the cycle's goal. Required because a watcher without two
+  thresholds would reclaim a sliver at every poll; the error message says
+  so. Equal to `--min-free` is allowed and means exactly that.
+- `--interval` (default `10s`, from `1s` to `1h`; anything else is a
+  usage error): the period of the space sample, one `statvfs`.
+- `--timeout` (default `10m`, from `1m` to `24h`; `0` and anything else
+  are usage errors, since an unbounded cycle would leave a service
+  waiting forever on a lock held by an orphaned child): the cooperative
+  deadline of each reclaim cycle, from the sample that triggered it,
+  including the wait for the host lock; the same rules as `ensure`'s
+  `--timeout` ([safety.md](safety.md#deadlines)). Per-tier `timeout`s
+  apply inside it; a tier whose `timeout` is longer is cut by the cycle's
+  deadline, and the start logs one warning per such tier. There is no
+  deadline on the process.
+- `--json`: JSON Lines on stdout, one object per reclaim cycle (Watch JSON
+  lines). The human log stays on stderr either way.
+- `--tally-only`: never reclaim (Tally only). `--interval`, `--timeout` and
+  `--target-free` are usage errors in this mode, since nothing samples
+  or reclaims; `--min-free` is optional and only bounds the snapshot
+  write.
+- Not accepted: `--dry-run` (preview a cycle with `ensure --dry-run`
+  and the same thresholds), `--tally-budget` and `--no-index` (the live
+  index replaces the synchronous tally).
+- Sizes and durations as under [Sizes and durations](#sizes-and-durations);
+  a percentage is resolved against the filesystem's size at start.
+
+**One process per filesystem and state directory.** The snapshot's
+single-writer lock `index-<fs>.lock` ([architecture.md](architecture.md#the-tally),
+Snapshot) lives in the state directory (`$XDG_STATE_HOME/diskgc`) and is
+held for the process's lifetime, whichever the mode, so a second `watch`
+(or `watch --tally-only`) with the same state directory on the same
+filesystem exits 2 at start. The rule protects warmth and tally load,
+not safety: a second watcher with another state directory runs, and the
+host lock still serialises its reclaims. The start line names the state
+directory. Two `PATH`s on one filesystem, or two btrfs
+subvolumes of one filesystem, are one filesystem: they share available
+space, so one watcher serves both. Watchers of different users or
+different filesystems run side by side; their reclaims are serialised by
+the host lock ([safety.md](safety.md#host-lock)) and their background
+tallies' duty cycles add up.
+
+**Configuration is read once.** Edits take effect on restart; there is no
+reload (Watch signals: SIGHUP stops `watch`). Validate first with
+`diskgc check`, then restart the service.
+
+#### Watch start
+
+In this order; the first failure exits with its code and deletes nothing:
+
+1. Command line, configuration and the `--select` expression: exit 2 as
+   for `ensure` (Configuration file, Selection grammar).
+2. Running as root without `--allow-root`: exit 2 (`safety`). In a
+   development build, the pre-release sandbox gate: exit 2 outside a test
+   container ([safety.md](safety.md#pre-release-sandbox-gate)); not with
+   `--tally-only`, which deletes nothing.
+3. `PATH` (absolute, reached safely, [safety.md](safety.md#path-traversal)),
+   kernel and `/proc` requirements ([architecture.md](architecture.md#deployment)):
+   exit 2 when unsupported or invalid, 3 when an operation fails before
+   `PATH` is open. The first space sample is not a start check: if it
+   fails, it is the first cycle (The reclaim cycle). Raise
+   `RLIMIT_NOFILE` as `ensure` does (Open-file limit under `ensure`).
+4. The host lock file: missing or not a regular file exits 2 (`cause:
+   provisioning`, with the commands that provision it), since a watcher
+   that can never reclaim must fail where its operator looks, not log
+   forever. Its `flock` is not taken. With `--tally-only` a missing file
+   is one stderr warning: that mode only polls the lock (a missing file
+   reads as not held).
+5. Supplied roots that do not exist: exit 2, as for `ensure`.
+6. The single-writer lock: waited for at most 10 s (an `ensure` holds it
+   only while writing); still held exits 2 (`cause: usage`, naming the
+   other process's filesystem key and the state directory). Failing to
+   create the state directory or the lock file (`ENOSPC` on a full
+   `/home` is the likely cause) is not fatal: the snapshot is a cache, so
+   `watch` logs one line, runs without loading or writing a snapshot,
+   and tries to create and take the lock again at every 5-minute
+   snapshot tick (a lock then found held is one log line, never an
+   exit).
+7. Load a valid snapshot as the seed of the live index
+   ([architecture.md](architecture.md#the-tally), Validity), start the
+   background tally, and take the first sample at once.
+
+With `--json`, a start failure prints one object as every command does on
+an error (Output: `status`, `exit_code`, `errors`). A start that succeeds
+prints nothing to stdout; stderr gets one line naming the mount, the
+thresholds, the interval, the configuration path and where the index
+started.
+
+#### The reclaim cycle
+
+Every `--interval`, one `statvfs` of the filesystem `PATH` resolved to at
+start (through the descriptor `watch` keeps open, so a mount later
+stacked on `PATH` does not change what is watched):
+
+- **At or above `--min-free`:** nothing. No lock, no deletion, no stdout,
+  no log line. The background tally keeps its duty cycle.
+- **Below `--min-free`, not in back-off:** one **reclaim cycle**: the
+  reclaim walk with `min = --min-free`, `goal = --target-free`, the
+  cycle's deadline, the live index, the configuration's tiers (or
+  `--select`). Each cycle repeats the run-time checks `ensure` makes before
+  its first deletion (roots, executables, backend binding;
+  [safety.md](safety.md#validation)), since the machine changes under a
+  long-running process; it also re-resolves `PATH` and requires the same
+  device as at start (another one is a cycle error, `host`, and nothing
+  is deleted). The background tally pauses while the host lock is held
+  (by this cycle or anyone else's reclaim) and resumes after it. Samples
+  are not taken during a cycle (the walk samples around every action);
+  the next one is at the first tick after it ends.
+- **A sample that fails** counts as below `--min-free`. Outside back-off
+  it is a cycle that ended at its first sample (status `error`, `cause:
+  host`, so back-off `retry`, with its record and log line); in back-off
+  it does nothing more, so a filesystem that stays unreadable costs one
+  record per back-off step, not one per interval.
+- **Below `--min-free`, in back-off:** no cycle until the back-off ends.
+  Sampling continues at every `--interval`: it is what ends a back-off
+  early.
+
+The cycle's outcome is the status `ensure` would report for the same run
+(Exit codes (`ensure`), JSON `status`): `met`, `exhausted`, `error`,
+`lock_timeout`, `deadline`, `interrupted`, or `usage_error` (only `cause:
+provisioning`: the host lock file vanished after start; start-time
+checks catch the rest). It never ends the process.
+
+A supplied root that existed at start and has since vanished is not the
+refusal `ensure` makes for a root that does not exist (that guards
+against a mistyped root before anything runs). In `watch` it is one
+`missing` skip row of its tier (candidate: the root), the other tiers
+run, and the status follows available space as for any skip: a deleted
+project directory must not stop every later reclaim until a restart.
+Nothing could be found there, so skipping it cannot let a later tier run
+ahead of eligible candidates.
+
+**Back-off** after a cycle that ends below `--min-free` (every status but
+`met` and `interrupted`). Each cycle is classified:
+
+| Class | When the cycle had | Why |
+|---|---|---|
+| `retry` | any of: an `errors[]` entry with cause `host`, `operation` or `provisioning`; a `backend_unavailable`, `changed` or `in_use_unknown` skip; status `lock_timeout` or `deadline` | the environment may recover without a restart: a daemon comes back, a lock holder finishes, a busy host calms down, a slow walk continues from a fresher index |
+| `hold` | none of those: status `exhausted`, or only errors with cause `config`, `safety` or `usage` (a tier excluded as misconfigured) | nothing changes until space drops further or files age into eligibility; configuration changes need a restart |
+
+The next cycle starts at the first sample, below `--min-free`, that meets
+any of:
+
+1. available space at or below the cycle's final sample minus
+   `max(1 GiB, 1 % of the filesystem)` (new cruft has probably appeared);
+   not applicable when the final sample failed;
+2. 15 minutes after the cycle ended;
+3. class `retry` only: 1 minute after the cycle ended, doubling with each
+   consecutive `retry` cycle (1, 2, 4, 8 minutes), capped by rule 2.
+
+A sample at or above `--min-free` ends the back-off and resets the
+doubling (one log line: space recovered); so does a `met` cycle. A mixed
+outcome (an exhausted Cargo tier and an unreachable Docker daemon) is
+therefore `retry`: the shortest applicable wait wins, and its cost is
+bounded by the doubling. The constants are fixed in code and tentative
+(PRD, Irreversibility map); the classes and the rule that sampling
+continues are the contract. One log line per back-off: its class, the
+causes that chose it, and both resume conditions.
+
+#### Watch JSON lines
+
+With `--json`, stdout carries [JSON Lines](https://jsonlines.org/): each
+reclaim cycle, when it ends, writes exactly one line, one compact JSON
+object terminated by `\n` and flushed. The object is the `ensure` report
+(Output: same fields, enums and rules) for that cycle, with these
+differences:
+
+- `exit_code` is `null`: the process does not exit. Scripts branch on
+  `status`.
+- `index.source` is `live`; `dry_run` is `false`; `plan` is `[]`;
+  `started_at` and `duration_ms` are the cycle's; `tally_cut_short` is
+  `false`.
+- `index.age_seconds` is the age of the least recently listed selected
+  (profile, root): seconds since its last discovery listing, or `null`
+  while one has not been listed since start.
+- One more top-level field, `watch`, present only in `watch` records
+  (never in an `ensure` report), shown here with `backoff` set; it is
+  `null` where described:
+
+  ```json
+  {"watch": {"cycle": 1, "backoff": {"class": "retry | hold", "attempt": 1, "wait_seconds": 60, "resume_below_bytes": 0}}}
+  ```
+
+  `cycle` counts reclaim cycles from 1 since start. `backoff` is `null`
+  after a `met` or `interrupted` cycle; otherwise `wait_seconds` is when
+  rules 2 and 3 next allow a cycle, `resume_below_bytes` is rule 1's
+  level (`null` when the final sample failed), and `attempt` counts
+  consecutive `retry` cycles (`0` for `hold`).
+
+What is not a record, and why:
+
+- **No record when nothing happens.** A sample at or above `--min-free`
+  is not an event; at the default interval it would be 8,640 lines a day
+  that say nothing. The stream holds what diskgc did and why, and its
+  silence means space was there.
+- **No heartbeat.** Whether `watch` is alive is the supervisor's
+  knowledge (process state, `systemctl is-active`); a heartbeat in the
+  data stream would mix liveness into the record of actions.
+- **No start or stop record.** A start failure prints the error object
+  every command prints (it has a non-null `exit_code`); a successful start
+  and a stop are stderr log lines. A cycle a signal stopped is a record
+  with status `interrupted`.
+
+Every line is therefore a cycle report, except a single start-failure
+object as the only line. Consumers ignore unknown fields; a future kind of
+record would be told apart by a new top-level field, never by reusing
+these. A failed stdout write (a closed pipe, a full disk under the
+redirect) exits 3 at once, as for every command: the machine interface
+can no longer be honoured, and a supervisor restarts the process with a
+working stdout. This is the one environment fault that ends `watch`
+after start, a deliberate exception to "keep running" (TASK-117, open
+for Mark's confirmation): a consumer of the stream would otherwise miss
+deletions without knowing. Without `--json`, stdout stays empty.
+
+#### Watch log
+
+stderr only; the line format is tentative (PRD) and not a contract;
+scripts use `--json`. journald or the supervisor adds timestamps.
+
+- start: one line (Watch start); without PSI, one line saying the tally's
+  pressure brake is off ([architecture.md](architecture.md#the-tally));
+- a cycle: one line when it starts (available space, `--min-free`, goal,
+  cycle number), then what `ensure` logs on stderr (one line per action,
+  tier search lines, child output with its prefix; Output), then one line
+  when it ends: status, space before and after, how many reclaimed and
+  kept, and the kept counted by reason (one line in all, not one per
+  candidate: a watcher that is `exhausted` every 15 minutes must not
+  flood the journal);
+- back-off: one line when it starts, one when space recovering ends it;
+- the background tally: one line when the pressure brake engages and one
+  when it releases, each with the number of batches since the previous
+  such line; a skipped or failed snapshot write: one line
+  ([architecture.md](architecture.md#the-tally), Snapshot);
+- stop: one line naming the signal, one when the process exits.
+
+A failed stderr write is ignored (the log is best effort; the process
+keeps protecting the disk).
+
+#### Watch signals
+
+- **SIGTERM, SIGINT and SIGHUP** stop `watch` the same way. In a cycle:
+  as `ensure` stops (Signals): no further candidate starts, a running
+  child gets SIGTERM and SIGKILL after 10 s, the host lock is released,
+  and the cycle's record (status `interrupted`) is written. While waiting
+  for the host lock or in back-off or between samples: at once. The
+  background tally stops at its batch boundary (at most 50 ms). Then the
+  snapshot is written (Snapshot: same space guard, at most once) and the
+  process exits 0: a stopped watcher is not a failure, for a supervisor
+  or a shell.
+- **SIGHUP is not a reload.** It stops like SIGTERM, with a log line
+  saying that diskgc does not reload and that the configuration is read
+  at start; under a supervisor that restarts the service (systemd
+  `Restart=always`) a SIGHUP therefore applies an edited configuration by
+  restart. Stopping rather than ignoring it is what a hangup does to a
+  foreground program, so a `watch` started in a terminal ends with it,
+  and nothing keeps running in a state its operator did not ask for. If
+  SIGHUP was ignored when `watch` started (`nohup`), it stays ignored.
+- **A second SIGTERM, SIGINT or SIGHUP** during the stop skips the
+  snapshot write (its temporary file is never linked in) and the rest of
+  a running child's 10 s SIGTERM grace (the child is left running with
+  the host lock it inherited, never killed unawaited), and exits 0 at
+  once. SIGKILL at any point is safe: deletions are crash-safe (the kill
+  points of [testing.md](testing.md#controlled-pause-and-kill-points))
+  and a child keeps the host lock until it exits
+  ([safety.md](safety.md#host-lock)); only the snapshot write is lost.
+- During start (the single-writer wait): exit 0 at once, writing nothing.
+- No other signal is handled; SIGPIPE is ignored, so a closed stdout is
+  a write error (Watch JSON lines), not a silent death.
+
+#### Exit codes (`watch`)
+
+| Code | Meaning |
+|---|---|
+| 0 | Stopped by SIGTERM, SIGINT or SIGHUP. |
+| 2 | Refused at start: usage, configuration, privilege (`safety`), the sandbox gate, a missing host lock file (`provisioning`), a supplied root missing, or another `watch` holding the filesystem's single-writer lock. Nothing was deleted. |
+| 3 | A host operation failed at start before `PATH` was open (`/proc`, the kernel checks), or writing stdout failed at any time. |
+
+A cycle's outcome never ends the process: environment errors (a backend
+down, the host lock held, a sample that fails, also the first one; a
+state directory that cannot be written) are cycle records, back-off or
+log lines, as above. `watch` exits with no other code; a panic (an
+internal error: an assertion that failed) exits 101, and the supervisor
+decides whether to restart.
+
+#### Tally only
+
+For CI runners, so that `ensure` in the pre-job hook starts from a warm
+snapshot instead of a cold synchronous tally.
+
+- Runs the background tally over the configuration's tiers (or
+  `--select` and `--roots`, which should be the pre-job hook's own:
+  units of profiles it does not tally are not in the snapshot) and
+  writes the snapshot every 5 minutes and at stop. Never samples for a
+  goal, never takes the host lock, never deletes (no `Delete` port call
+  at all), so the sandbox gate does not apply.
+- Holds the single-writer lock like `watch`; the pre-job `ensure` reads
+  the snapshot as its seed and, finding the lock held, skips its own
+  write (one log line; [architecture.md](architecture.md#the-tally)).
+- While any reclaim holds the host lock (the pre-job `ensure`), the tally
+  pauses, so it never competes with the reclaim it serves.
+- The snapshot write's space guard uses `--min-free` when given (pass the
+  pre-job's `--min-free`: the write never takes the filesystem below
+  it); without it, only a write that fails (`ENOSPC`) is skipped.
+- Lifecycle: run it as a service for the life of the runner, like
+  `watch`; it needs no stop between jobs (the pressure brake and duty
+  cycle yield to the job). A runner that must stop it around jobs
+  (`systemctl stop` in a post-job hook) loses nothing: a stop writes the
+  snapshot. On an ephemeral runner there is nothing to warm.
+- Its JSON stream is empty (no cycles); `--json` only makes a start
+  failure machine-readable.
+
+#### Watch beside `ensure`
+
+- **Reclaims** take turns through the host lock. A cycle that waits past
+  its `--timeout` ends `lock_timeout` (`retry`); one that gets the lock
+  re-samples and is `met` without deleting if the other freed enough. An
+  `ensure` waiting on a long `watch` cycle (a Nix GC) can exit 75.
+- **The index:** `watch` owns the snapshot; `ensure` seeds from it and
+  skips its write. What `ensure` deletes leaves stale units in the
+  watcher's live index, which its re-checks and the walk's re-match
+  (`stale`) absorb: a cost in speed, never in safety.
+- **Thresholds:** an agent's `ensure --min-free` above the watcher's
+  `--target-free` makes the agent reclaim what the watcher would not;
+  set the watcher's `--target-free` at or above the largest `--min-free`
+  the agents ask for so that their `ensure` stays an instant no-op.
 
 ### `survey`
 
@@ -533,7 +853,9 @@ development builds, the pre-release sandbox gate,
   `PATH`'s filesystem. A note of a process scan (`process scan: ...`, e.g.
   how many processes of other users were not inspected) is logged once per
   run while its text stays the same, not once per tier.
-- `watch` logs to stderr only; a supervisor such as journald collects it.
+- `watch` logs to stderr, where a supervisor such as journald collects
+  it; with `--json` it writes one JSON line per reclaim cycle on stdout
+  ([Watch JSON lines](#watch-json-lines)).
 
 JSON result (field names are part of the contract):
 
@@ -592,7 +914,9 @@ is `host`.
 
 - `exit_code` is the process's exit code for this `status` (the table
   above); it is derived from `status`, never set apart from it. A failed
-  stdout write exits 3 whatever the report says.
+  stdout write exits 3 whatever the report says. It is `null` in `watch`
+  cycle records, where no process exits
+  ([Watch JSON lines](#watch-json-lines)).
 - `dry_run` is `true` when `--dry-run` was given, also for a dry run that
   failed (`status: error` or `usage_error`, not `dry_run`); on a command
   line that was not understood it says whether `--dry-run` was among the
@@ -803,7 +1127,8 @@ evidence, never by an operator's config.
 
 On SIGINT/SIGTERM: do not start another candidate; send SIGTERM to the
 running child's process group, SIGKILL after 10 s; release locks; print the
-report; exit 130/143 (`watch`: 0). Lock inheritance by children is
+report; exit 130/143. `watch` also stops on SIGHUP and exits 0
+([Watch signals](#watch-signals)). Lock inheritance by children is
 specified in [safety.md](safety.md#host-lock).
 
 ## Sizes and durations

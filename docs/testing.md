@@ -463,7 +463,8 @@ How the format reads (the schema documents every key):
   - mtime, ctime and birth time are equal at load, so "ctime newer than
     mtime" cannot be expressed;
   - one task per process; diskgc's own process has only its fds;
-  - no signals (the port has none yet); `read_dir` lists names in name
+  - signals only as an event that sets the port's interruption flag
+    (`Host::interrupted`), with no delivery semantics; `read_dir` lists names in name
     order, while the kernel's order is the filesystem's, so callers must
     not rely on it;
   - processes come from the model or a `fork` event (no exec); memory
@@ -589,6 +590,83 @@ Model scenarios required by [safety.md](safety.md) and
   `--no-index` neither reads nor writes the snapshot; an `ensure` that
   exits 0 because space is already there makes no tally call and no
   state write (no snapshot, no lock file);
+- **watch** ([reference.md](reference.md#watch); virtual clock, a
+  scripted `other_used` curve for available space, scripted PSI, signal
+  events; each scenario asserts the deletion oracle, the JSON lines
+  parsed line by line, and the `Delete` and host-lock calls on the
+  trace):
+  - `watch_steady_between_thresholds_deletes_nothing_and_keeps_its_duty_cycle`
+    (the PRD's acceptance test): available space held between
+    `--min-free` and `--target-free` for 24 virtual hours, with
+    candidates created and aged all along so that many become eligible:
+    no `Delete` call, no exclusive host-lock `flock` and no lock held
+    across a batch (the pause probe is `LOCK_SH | LOCK_NB`, closed at
+    once, pinned on the trace), no stdout byte, one sampling `statvfs`
+    per interval (within one; the snapshot guard's samples are counted
+    apart), the tally's active time at most 5 % (plus
+    one batch) of every 100-batch window, and a snapshot write every
+    5 minutes (within one);
+  - `watch_reclaims_below_min_free_to_target_free`: one drop below
+    `--min-free` gives exactly one cycle and one record (`met`,
+    `target_met: true`, `exit_code: null`, `watch.cycle: 1`,
+    `index.source: live`), and deletion stops at the goal;
+  - `watch_hold_back_off_waits_for_a_drop_or_15_minutes`: an `exhausted`
+    cycle; samples continue every interval; no cycle before space falls
+    by the step or 15 minutes pass, whichever is first (both orders);
+    one back-off log line; `resume_below_bytes` and `wait_seconds` in the
+    record match when the next cycle starts;
+  - `watch_retry_back_off_doubles_and_caps`: a Docker tier
+    `backend_unavailable` at every cycle: cycles 1, 2, 4, 8, 15, 15
+    minutes apart; the daemon back: the next cycle reclaims it and the
+    doubling resets;
+  - `watch_mixed_outcome_takes_the_shortest_wait`: `exhausted` with one
+    `backend_unavailable` skip is class `retry`; a drop by the step
+    before its timer still starts a cycle at once;
+  - `watch_recovery_ends_back_off`: space freed by someone else during a
+    back-off: no cycle, one log line; a later drop below `--min-free`
+    starts a cycle at that sample;
+  - `watch_cycle_beside_ensure`: another process holds the host lock past
+    `--timeout`: a `lock_timeout` record, nothing deleted, class `retry`;
+    the holder frees enough before the timeout: `met` with no deletion;
+  - `watch_failed_samples_back_off`: `statvfs` failing for an hour gives
+    `error` records (`cause: host`) at 0, 1, 3, 7, 15, 30, 45, 60
+    minutes, not one per interval, and the process keeps running;
+  - `watch_cycle_deadline`: a tier slower than `--timeout`: a
+    `deadline` record, no deletion starts after the deadline, a running
+    child gets SIGTERM;
+  - `watch_path_on_another_device_deletes_nothing`: a mount stacked on
+    `PATH` after start: the sample still reads the original filesystem;
+    the cycle's re-resolution finds another device and records a `host`
+    error;
+  - `watch_start_refusals` (one case per row of the start sequence):
+    usage (no `--target-free`; `--interval 0`; `--tally-only` with
+    `--target-free`), invalid configuration, root without `--allow-root`,
+    a missing supplied root, a missing host lock file, a second `watch`
+    with the same state directory after its 10 s wait (`second_watch_exits_2`,
+    above), `--timeout 0`: the documented exit code, one
+    JSON object with that `exit_code` under `--json`, no `Delete` call;
+    the missing host lock file under `--tally-only` is one warning and a
+    running tally; an unwritable state directory and a failing first
+    sample are not refusals: one log line and no snapshot, and a first
+    cycle record (`error`, `host`) respectively, the process running;
+  - `watch_root_vanished_after_start_still_reclaims_other_tiers`: a
+    tier's supplied root removed after start: that tier is one `missing`
+    skip row, the other tiers delete to the goal, status `met`;
+  - `watch_signals`: SIGTERM between samples, during a back-off, during
+    the host-lock wait and in a cycle between two candidates: exit 0
+    within one batch (50 ms) or at the next candidate boundary, a record
+    with status `interrupted` for the cycle case only, no candidate
+    started after the signal, the snapshot written once; the same for
+    SIGINT and SIGHUP; a second signal during the snapshot write: exit 0
+    and the old snapshot unchanged; a signal during the start wait: exit
+    0, nothing written;
+  - `watch_tally_only_never_reclaims`: available space far below any
+    threshold for an hour: no `Delete` call, no exclusive host-lock
+    `flock` (only the pause probe), no
+    stdout byte, snapshots every 5 minutes; with a reclaim of another
+    process holding the host lock, no tally batch runs until it is
+    released; `--min-free` given and the state directory on the watched
+    filesystem: the write is skipped when it would take space below it;
 - a `TMPDIR` changed by `export` after `exec`: documented as invisible (the
   test pins the heuristic's known limit);
 - deadline overruns: a blocking operation that exceeds the deadline is
@@ -1619,7 +1697,26 @@ filesystem, processes and mounts from the developer's system.
     replaced after the recheck instead: the GC still reaches the original
     daemon through the pinned fd, and the decoy receives no connection.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
-  process.**
+  process.** For `watch`, the static binary in the Nix image, a scratch
+  tmpfs as the watched filesystem and the deletion oracle on every run:
+  - `watch_process_reclaims_and_streams_json`: `watch --json` started,
+    the tmpfs filled below `--min-free` with idle candidates by the
+    harness: one stdout line per cycle, each a complete JSON object, the
+    candidates gone to the goal; stdout closed by the reader: exit 3;
+  - `watch_process_stops_on_each_signal`: SIGTERM, SIGINT and SIGHUP each
+    during a slow `fs` cycle (a large candidate) and while idle: exit 0,
+    a valid snapshot at `$XDG_STATE_HOME/diskgc/`, the host lock free
+    after exit; SIGHUP with SIGHUP ignored at exec (`nohup`): still
+    running;
+  - `watch_and_ensure_share_a_filesystem`: a `watch` and an `ensure` with
+    a higher `--min-free` on the same tmpfs: their reclaims never overlap
+    (host lock, `/proc/locks` sampled by the harness), the `ensure`
+    reports `index.source: snapshot` and skips its write, and the oracle
+    holds for both;
+  - CI operator's journey with `watch --tally-only` running beside the
+    example pre-job hook: the hook's `ensure` reports `source: snapshot`
+    with fewer tally operations than a cold run (`ensure_warms_the_snapshot`'s
+    measure), and nothing is deleted outside the hook's runs.
 - **Index on the real kernel:**
   - `background_tally_does_not_load_the_system`: `watch --tally-only` over
     the 100,000-entry `/tmp` fixture for 10 minutes beside a foreground

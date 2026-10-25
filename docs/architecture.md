@@ -339,7 +339,11 @@ the order of work.
   relative to its period (lateness ÷ period), so none starves the others
   on a busy `/tmp`. Constants are tentative and live in code.
 - **Pausing:** before each batch the background tally tests, without
-  blocking, whether anyone holds the host lock; if so, a reclaim is
+  blocking, whether anyone holds the host lock (a `LOCK_SH | LOCK_NB`
+  `flock` on its own read-only open of the lock file, closed at once;
+  a reclaim holds it exclusively, so a shared probe detects it and
+  never excludes another prober; the probe can make one of a reclaim's
+  10 to 100 ms lock retries fail, [safety.md](safety.md#host-lock)); if so, a reclaim is
   running (in this or another process) and the tally waits, polling
   (a lock released by its holder can still look held for a moment,
   [safety.md](safety.md#host-lock)). The background tally never speeds
@@ -375,7 +379,8 @@ the order of work.
   discovery covers what is missing. Whether one worker or several walk
   disjoint trees is an implementation choice measured on the 100,000-
   entry fixture, not a contract.
-- **Sources of a run's index.** `watch` uses its own live index.
+- **Sources of a run's index.** `watch` uses its own live index,
+  seeded at start from a valid snapshot (the same validity rules).
   `ensure` and `survey` load the snapshot as a **seed** when it is valid
   (Snapshot, below), whatever its age, and run the synchronous tally on
   it: discovery is redone for roots not listed in the last 5 minutes,
@@ -405,7 +410,8 @@ the order of work.
     directory is on the filesystem the run works on, the writer skips
     the write (one log line) unless available space minus the
     snapshot's size stays at or above `--min-free` (in `watch`, its
-    `--min-free`). The temporary file is an `O_TMPFILE` linked in only
+    `--min-free`; in `watch --tally-only`, its optional `--min-free`,
+    and without one only a failed write skips it). The temporary file is an `O_TMPFILE` linked in only
     when complete, so a failed write leaves nothing behind; `ENOSPC` or
     any other write error is one log line and never changes the exit
     code.
@@ -526,7 +532,10 @@ reclaim(min, goal, filesystem, deadline):
   promised.
 - Every step checks the cooperative deadline
   ([safety.md](safety.md#deadlines)). `watch` calls the walk with
-  `min = --min-free`, `goal = --target-free`; `ensure` with its two flags.
+  `min = --min-free`, `goal = --target-free` and a deadline of `--timeout`
+  from the sample that triggered the cycle
+  ([reference.md](reference.md#the-reclaim-cycle)); `ensure` with its two
+  flags.
 - `exhausted` is reported only after every tier's discovery, so an index
   that missed something can delay success but never fake exhaustion.
   `stale`: the unit was gone or replaced at re-check, or no longer matches
@@ -589,7 +598,7 @@ A tier whose backend is elsewhere is skipped and reported (`other_fs`,
 | `watch` | `--min-free` triggers, `--target-free` (required) is the goal. |
 | `ensure` | Same pair; `--target-free` defaults to `--min-free` (no surprise deletions); CI hooks set it higher. |
 | Candidate eligibility | `idle-*` filters: recently used caches are not eligible. |
-| Nothing left to free | `watch` back-off until space drops further or 15 minutes pass. |
+| Nothing left to free | `watch` back-off until space drops further or 15 minutes pass; sooner after environment errors ([reference.md](reference.md#the-reclaim-cycle)). |
 | Within a reclaim | Stop as soon as the goal is observed. |
 
 Per-tier cooldowns are not included: the snapshot could carry them, but it
@@ -735,7 +744,13 @@ is accepted until measured otherwise.
   ([reference.md](reference.md#ensure), Open-file limit).
 - **Generic Linux:** the binary, a systemd template unit for `watch` (user
   or system), the tmpfiles drop-in for the host lock file, and an example
-  config. Distribution packages can follow.
+  config. Distribution packages can follow. Whatever else TASK-119
+  decides, the unit must restart a stopped watcher and not loop on a bad
+  configuration (`Restart=always`, `RestartPreventExitStatus=2`, a
+  `RestartSec` of tens of seconds), because `watch` exits 0 on SIGHUP and
+  SIGTERM and 2 on a configuration it refuses
+  ([reference.md](reference.md#watch-signals)); a test checks the shipped
+  unit for these lines.
 - **NixOS**, as one option: a module that renders the YAML, ships the
   tmpfiles rule, runs `check` at build time, and starts the `watch`
   instances.
