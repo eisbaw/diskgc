@@ -1919,9 +1919,24 @@ a Cargo lock file, and Cargo builds into it again as usual.
   remain: they are not candidates (`nix-shell-tmpdir` is excluded on
   purpose: a dormant shell can use its `TMPDIR` without visible
   evidence).
-- Throughput: **TO BE FILLED IN after the in-use pass merges** (sessions
-  per second and time to the first deletion of a `pytest-tmp` reclaim
-  under a host-shaped process load, static release binary).
+- How long it takes depends mostly on whether `/tmp` metadata is in
+  memory. On the development laptop (14 cores, ext4 on LUKS, ~620
+  processes, load 3.5 to 7, release candidate 0.1.0 from 29810c5), whose
+  `/tmp` held 193,000 entries including 54,600 ended `nix-shell.*` roots,
+  a dry run of `--select profile:pytest-tmp` judged 6,401 sessions
+  (6,052 eligible, about 17 GiB) in about 7 minutes (402 s), and in about
+  10 minutes under `nice -n 19 ionice -c 3`; it waits on the disk reading
+  directories and inodes, not on the CPU. So give a first run on a large
+  `/tmp` a `--timeout` above the default `10m`: one of the two niced dry
+  runs hit it and exited 124 with an empty plan. A dry run of
+  `nix-shell-rc` on the same `/tmp` judged 128,892 rc directories in 34
+  to 62 s. With `/tmp` in memory (a tmpfs, in a container sharing the
+  host's PID namespace beside ~290 load processes, load about 4), a
+  reclaim deleted 300 ended sessions (300 MiB) in 0.64 s, the first
+  about 0.5 s after start, and 8,005 `nix-shell-rc` directories in 6.5 s.
+  That container could not inspect the host's processes, so its scans
+  were cheaper than a laptop's own run (Known limits, Visibility without
+  root).
 
 **Known limits.**
 
