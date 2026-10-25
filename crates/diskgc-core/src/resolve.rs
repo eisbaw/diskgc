@@ -1156,7 +1156,7 @@ pub(crate) mod tests {
     }
 
     /// Source guard: the one unscreened lookup is `PATH`'s, in the executor's
-    /// `measure`. Any other caller must go through the screen; adding one
+    /// `measure` (executor/preflight.rs). Any other caller must go through the screen; adding one
     /// fails here and needs a documented reason in docs/safety.md first.
     #[test]
     fn only_path_skips_the_mount_screen() {
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
             })
             .collect();
         callers.sort();
-        assert_eq!(callers, ["crates/diskgc-core/src/executor.rs"]);
+        assert_eq!(callers, ["crates/diskgc-core/src/executor/preflight.rs"]);
     }
 
     /// The screen's one-pass prefilter judges every ancestor exactly as a
