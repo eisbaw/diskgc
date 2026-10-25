@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-24 21:10'
-updated_date: '2026-10-24 22:11'
+updated_date: '2026-10-25 00:28'
 labels:
   - shipping
 dependencies: []
@@ -30,4 +30,6 @@ Repro: just walk-up; diskgc ensure --dry-run --min-free 2G --select 'profile:car
 Also (tmp/walks/2026-10-24/24-laptop-tmp.txt): the dry run's 'held by deleted files: 1 process(es), 0 B; top: pid 4274 (python3.14, 0 B)' reports a holder of zero bytes (a live pytest's deleted temp file): noise; omit holders of 0 B from the human summary.
 
 Inconsistent: the 'checking' progress line says 'last build 1 h ago' (human) while skip lines say 'last build at 1792875820 s, 56 s before now' (tmp/walks/2026-10-24/15-ci-hook-reclaim.txt vs 11-ci-dryrun.txt).
+
+Implemented on branch t155 (04b7d8e..a372a43, not merged): report/outcome.rs folds actions/skipped (live) and plan (dry run) into one verdict per candidate; report/human.rs renders it. Walked 2026-10-25 in walk-diskgc-t155 (release-01-candidate of t155, seed 1): tmp/walks/2026-10-25-t155/ (11, 12, 15, 23, 24, 25, 26; *-before = 0.1 binary on the same data where the step is read-only). Follow-ups: TASK-160 (sizes for refused dry-run rows), TASK-161 (pid holding .cargo-build-lock).
 <!-- SECTION:NOTES:END -->

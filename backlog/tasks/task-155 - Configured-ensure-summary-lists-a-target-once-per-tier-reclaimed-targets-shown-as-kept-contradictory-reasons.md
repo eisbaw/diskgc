@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-24 22:12'
+updated_date: '2026-10-25 00:27'
 labels:
   - shipping
 dependencies: []
@@ -21,3 +22,9 @@ Found by TASK-143 walk, laptop owner journey (config with tiers stale.cargo-stal
 JSON skipped[] has one row per (tier, candidate), which is defensible for machines (the contract says rows per tier), but the human summary and its kept count must be per candidate: omit candidates a later tier reclaimed, and give each remaining one the reason from the last tier that judged it (or list the reasons per tier explicitly). Also: a locked target gives process_blockers null; naming the Cargo pid holding .cargo-build-lock would tell the user which build to wait for.
 Repro: just walk-up; wait an hour after walk-reset (idle-1h); write the two-tier config (tmp/walks/2026-10-24/laptop-from-reference.yaml minus the non-0.1 parts) and run diskgc ensure --min-free 2300M /home/tester.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented on branch t155 (04b7d8e..a372a43, not merged): report/outcome.rs folds actions/skipped (live) and plan (dry run) into one verdict per candidate; report/human.rs renders it. Walked 2026-10-25 in walk-diskgc-t155 (release-01-candidate of t155, seed 1): tmp/walks/2026-10-25-t155/ (11, 12, 15, 23, 24, 25, 26; *-before = 0.1 binary on the same data where the step is read-only). Follow-ups: TASK-160 (sizes for refused dry-run rows), TASK-161 (pid holding .cargo-build-lock).
+<!-- SECTION:NOTES:END -->
