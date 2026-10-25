@@ -404,6 +404,10 @@ they never override the Invariants.
   To share the main checkout's, use
   `nix develop -c env CARGO_TARGET_DIR=<main>/tmp/target just check`
   (TASK-178). Sharing serialises parallel builds on one cargo lock.
+- 2026-10-25: walk environments run busy loops (host-shaped load) until
+  `just walk-down NAME`; two forgotten ones burned ~4 cores for 6-10 h
+  and skewed every timing and VM probe (TASK-197 flake). Tear a walk env
+  down when its task merges; check `podman ps | grep walk` at each merge.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
