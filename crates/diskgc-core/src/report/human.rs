@@ -124,6 +124,13 @@ fn live_text(report: &Report, held: Option<String>) -> String {
             one_line(&e.message)
         ))
     )];
+    if report.status == Status::Deadline {
+        lines.push(
+            "  the deadline passed: the counts cover only the candidates reached before it; \
+             run again, with a larger --timeout, to reclaim more"
+                .to_owned(),
+        );
+    }
     let tiers: BTreeSet<&str> = report
         .actions
         .iter()
@@ -534,6 +541,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         report.target_free_bytes,
     );
     let folded = outcome::dry_run(&report.plan, needed);
+    // A deadline stops the planners part-way (TASK-227): the rows are the
+    // candidates judged before it, and the report does not count the ones
+    // found but not yet judged, so the text cannot either (TASK-229).
+    let cut = report.status == Status::Deadline;
     let [available, min_free, target_free] = human_space_values([
         report.avail_before_bytes,
         report.min_free_bytes,
@@ -548,9 +559,16 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         "{status}: {available} available on {} (min-free {min_free}, target-free {target_free}); \
          {} (took {})",
         mount_text(report),
-        dry_run_outcome(&folded.rows, needed),
+        dry_run_outcome(&folded.rows, needed, cut),
         elapsed_text(report)
     )];
+    if cut {
+        lines.push(
+            "  the deadline passed: only the candidates judged before it are listed, not any \
+             found but not yet judged; run again with a larger --timeout for a complete plan"
+                .to_owned(),
+        );
+    }
     let tiers: BTreeSet<&str> = report.plan.iter().map(|p| p.tier.as_str()).collect();
     let tier_label = |tier: &str| {
         if tiers.len() > 1 {
@@ -706,8 +724,10 @@ fn eligible_lines(
 }
 
 /// What a reclaim would do, by the estimates: how much of the shortfall
-/// the candidates it would take cover.
-fn dry_run_outcome(rows: &[Planned<'_>], needed: Option<u64>) -> String {
+/// the candidates it would take cover. `cut`: the deadline stopped the
+/// plan, so the counts and verdict are of the candidates judged before it
+/// and a goal they miss may still be reachable.
+fn dry_run_outcome(rows: &[Planned<'_>], needed: Option<u64>, cut: bool) -> String {
     let count = |verdict: Verdict| rows.iter().filter(|r| r.verdict == verdict).count();
     let kept = count(Verdict::Kept);
     let would: Vec<&PlanEntry> = rows
@@ -721,14 +741,15 @@ fn dry_run_outcome(rows: &[Planned<'_>], needed: Option<u64>) -> String {
         .filter_map(|e| e.estimated_bytes)
         .fold(0, u64::saturating_add);
     let unestimated = would.iter().filter(|e| e.estimated_bytes.is_none()).count();
-    match needed {
+    let text = match needed {
         None => format!("{eligible} eligible, {kept} kept; the space needed is unknown"),
         Some(0) => format!(
             "at least min-free already: a reclaim would take nothing ({eligible} eligible, {kept} kept)"
         ),
         Some(needed) if eligible == 0 => format!(
-            "nothing is eligible, {} needed: the goal is not reachable; {kept} kept",
-            format_bytes(needed)
+            "nothing is eligible, {} needed: the goal is not reachable{}; {kept} kept",
+            format_bytes(needed),
+            if cut { " by these" } else { "" }
         ),
         Some(needed) => {
             let estimate = if unestimated == 0 {
@@ -755,6 +776,11 @@ fn dry_run_outcome(rows: &[Planned<'_>], needed: Option<u64>) -> String {
                 format_bytes(needed)
             )
         }
+    };
+    if cut {
+        format!("judged before the deadline: {text}")
+    } else {
+        text
     }
 }
 

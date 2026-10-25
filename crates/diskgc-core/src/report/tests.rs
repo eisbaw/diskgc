@@ -1006,6 +1006,74 @@ fn a_dry_run_shows_what_would_be_reclaimed_against_the_goal() {
     assert!(text.contains("eligible, not needed /w/a"), "{text}");
 }
 
+/// TASK-229: a dry run the deadline cut lists only what it judged
+/// (TASK-227); its counts must not read as a complete plan, and the text
+/// says what to do. The report does not count the candidates found but not
+/// judged, so the text names no number.
+#[test]
+fn a_dry_run_cut_by_the_deadline_says_its_plan_is_partial() {
+    let mut report = Report::new(Status::Deadline, Some(Path::new("/tmp")), true);
+    report.mount = Some("/tmp".into());
+    report.duration_ms = Some(30_001);
+    report.avail_before_bytes = Some(100);
+    report.min_free_bytes = Some(200);
+    report.target_free_bytes = Some(250);
+    report.plan = vec![
+        plan_row("t", "/tmp/a", None, Some(100)),
+        plan_row("t", "/tmp/b", Some(Reason::NotIdle), None),
+    ];
+    let text = report.summary().expect("a dry run prints");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "dry run, deadline: 100 B available on /tmp (min-free 200 B, target-free 250 B); \
+         judged before the deadline: would reclaim 1 of 1 eligible, est. 100 B of 150 B needed: \
+         short of the goal by 50 B by estimate; 1 kept (took 30.001 s):",
+        "{text}"
+    );
+    assert_eq!(
+        lines[1],
+        "  the deadline passed: only the candidates judged before it are listed, not any found \
+         but not yet judged; run again with a larger --timeout for a complete plan",
+        "{text}"
+    );
+    // Nothing eligible among those judged is no verdict on the rest.
+    report.plan = vec![plan_row("t", "/tmp/b", Some(Reason::NotIdle), None)];
+    let text = report.summary().expect("a dry run prints");
+    assert!(
+        text.contains(
+            "judged before the deadline: nothing is eligible, 150 B needed: the goal is not \
+             reachable by these; 1 kept"
+        ),
+        "{text}"
+    );
+    // A complete dry run says none of it.
+    report.status = Status::DryRun;
+    let text = report.summary().expect("a dry run prints");
+    assert!(!text.contains("deadline"), "{text}");
+    assert!(text.contains("the goal is not reachable; 1 kept"), "{text}");
+}
+
+/// TASK-229: a reclaim the deadline stopped counts only the candidates it
+/// reached; the summary says so and what to do.
+#[test]
+fn a_reclaim_cut_by_the_deadline_says_its_counts_are_partial() {
+    let mut report = Report::new(Status::Deadline, Some(Path::new("/w")), false);
+    report.actions = vec![tier_action("t", "/w/a/target", 4096)];
+    let text = report.summary().expect("summary");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("deadline: "), "{text}");
+    assert_eq!(
+        lines[1],
+        "  the deadline passed: the counts cover only the candidates reached before it; run \
+         again, with a larger --timeout, to reclaim more",
+        "{text}"
+    );
+    report.status = Status::Exhausted;
+    let text = report.summary().expect("summary");
+    assert!(!text.contains("deadline"), "{text}");
+}
+
 /// TASK-193: whether a run was a dry run is the report's `dry_run`, not a
 /// guess from its status or plan. A dry run that failed before its first
 /// plan row (a protect scan failure) still reads as a dry run, never as a
