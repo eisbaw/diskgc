@@ -375,7 +375,9 @@ is accepted until measured otherwise.
   Nix, Docker and Cargo are optional. It needs the `/proc` of its own pid
   namespace and `pidfd_open` (not blocked by seccomp), and refuses to start
   otherwise ([safety.md](safety.md#in-use), unreadable or vanishing
-  processes).
+  processes). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
+  number of processes it can see; it raises its soft limit itself
+  ([reference.md](reference.md#ensure), Open-file limit).
 - **Generic Linux:** the binary, a systemd template unit for `watch` (user
   or system), the tmpfiles drop-in for the host lock file, and an example
   config. Distribution packages can follow.

@@ -513,6 +513,16 @@ impl StartupFailure {
 }
 
 fn startup() -> Result<LinuxHost, StartupFailure> {
+    // The in-use scan holds about one descriptor per visible process; a
+    // stock soft limit of 1024 is too low on a busy host (TASK-166,
+    // diskgc_linux::nofile). Not raising it is not fatal: a scan that runs
+    // out of descriptors is an error of the run.
+    if let Err(error) = diskgc_linux::nofile::raise_to_hard() {
+        log(&format!(
+            "warning: could not raise the open-file limit: {error}; the in-use scan fails \
+             if it runs out of descriptors on a busy host"
+        ));
+    }
     let host = LinuxHost::new().map_err(|e| StartupFailure::Host(e.to_string()))?;
     diskgc_core::kernel::require_supported(&host).map_err(kernel_failure)?;
     Ok(host)

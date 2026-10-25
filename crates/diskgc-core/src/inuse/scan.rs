@@ -389,8 +389,10 @@ fn merge_lookups(old: &[RootLookup], new: &mut Vec<RootLookup>) {
 
 /// Reads every visible process but diskgc's own (see the module docs).
 /// `users`: the uids whose files candidates may hold. Fails only when the
-/// process list itself cannot be read, or the host answers a read of
-/// several processes with another number of results.
+/// process list itself cannot be read, when diskgc runs out of file
+/// descriptors on any read of the scan ([`out_of_descriptors`]), or when
+/// the host answers a read of several processes with another number of
+/// results.
 pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Gathered, HostError> {
     // `users` is the candidate ownership allowlist, not the complete set of
     // processes that can use their files. In root mode a root process can
@@ -416,6 +418,9 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
             match $answer {
                 Ok(value) => value,
                 Err(error) => {
+                    if let Some(exhausted) = out_of_descriptors(&error) {
+                        return Err(exhausted);
+                    }
                     break $label Some(format!(
                         "a process identity could not be checked: {}",
                         identity_error(error)
@@ -542,6 +547,9 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
                 format!("the host answered with {} results", views.len()),
             ));
         }
+        if let Some(exhausted) = views.iter().find_map(view_out_of_descriptors) {
+            return Err(exhausted);
+        }
         let mut read_back = Vec::new();
         for (pid, view) in batch.iter().zip(views) {
             let entry = entries.get_mut(pid).expect("listed");
@@ -567,6 +575,11 @@ pub(crate) fn gather<H: Host>(host: &H, users: &[u32], facts: bool) -> Result<Ga
                 own_status.as_ref(),
                 host.effective_uid() == 0,
             );
+            if let Some(Err(error)) = &entry.status
+                && let Some(exhausted) = out_of_descriptors(error)
+            {
+                return Err(exhausted);
+            }
             let released = if let Some(identity) = identities.get(pid) {
                 identity_or_unsettled!('scan, host.proc_identity_released(identity))
             } else {
@@ -818,6 +831,59 @@ pub(crate) fn pytest_facts(gathered: &Gathered, users: &[u32]) -> Vec<ProcessFac
 /// Whether any of the four uids is one of `users`.
 pub(crate) fn is_users_ids(ids: crate::host::Ids, users: &[u32]) -> bool {
     ids.all().iter().any(|uid| users.contains(uid))
+}
+
+/// diskgc itself out of file descriptors (`EMFILE`: its own
+/// `RLIMIT_NOFILE`; `ENFILE`: the system's table): an error of the run,
+/// never a fact about the process being read. It says nothing about this
+/// process and would hit the next one too, so taking it as an unreadable
+/// process or an unsettled scan would quietly skip every candidate as
+/// `in_use` (TASK-166); the walk's rule for the same errors is the same
+/// (docs/safety.md, Fail closed on anything unreadable).
+/// The error comes back with what the operator can do about it.
+fn out_of_descriptors(error: &ProcError) -> Option<HostError> {
+    let (ProcError::Denied(e) | ProcError::Failed(e)) = error else {
+        return None;
+    };
+    let advice = if e.is(Errno::EMFILE) {
+        "the in-use scan holds a descriptor for every visible process and ran out under \
+         diskgc's open-file limit (RLIMIT_NOFILE): raise its hard limit"
+    } else if e.is(Errno::ENFILE) {
+        "the in-use scan holds a descriptor for every visible process and the system's \
+         open-file table (fs.file-max) is full"
+    } else {
+        return None;
+    };
+    let mut annotated = e.clone();
+    annotated.detail = if annotated.detail.is_empty() {
+        advice.to_owned()
+    } else {
+        format!("{}; {advice}", annotated.detail)
+    };
+    Some(annotated)
+}
+
+/// [`out_of_descriptors`] of any reader of one process's view: the view
+/// itself, its environment, and the pytest contract's facts.
+fn view_out_of_descriptors(view: &Result<ProcView, ProcError>) -> Option<HostError> {
+    let view = match view {
+        Ok(view) => view,
+        Err(error) => return out_of_descriptors(error),
+    };
+    let facts = view.facts.iter().flat_map(|facts| {
+        [facts.uids.as_ref().err(), facts.cmdline.as_ref().err()]
+            .into_iter()
+            .chain(
+                facts
+                    .lookups
+                    .iter()
+                    .map(|(_, _, answer)| answer.as_ref().err()),
+            )
+    });
+    std::iter::once(view.environ.as_ref().err())
+        .chain(facts)
+        .flatten()
+        .find_map(out_of_descriptors)
 }
 
 fn identity_error(error: ProcError) -> HostError {

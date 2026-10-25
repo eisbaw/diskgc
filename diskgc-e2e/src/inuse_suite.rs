@@ -675,3 +675,136 @@ mod nix_cache {
     }
 }
 pub use nix_cache::nix_evaluation_keeps_its_user_eval_cache_in_use;
+
+/// TASK-166 (docs/safety.md, In use, limit 4; reference.md, `ensure`,
+/// Open-file limit): the scan holds one pidfd per visible process, so with
+/// more processes than descriptors it runs out. The real binary, run as
+/// tester through busybox `sh` with a limit of [`FD_LIMIT`] and twice as
+/// many sleeping tester processes:
+///
+/// - hard and soft at the limit (`ulimit -n`): nothing to raise, the scan
+///   runs out, and that is an error of the run (exit 3, `EMFILE` named),
+///   never an `in_use` skip; nothing is deleted;
+/// - only the soft limit there (`ulimit -Sn`, the stock-distribution
+///   shape): diskgc raises it to the hard limit, the scan completes and the
+///   unused candidate is deleted (exit 0 or 1 by the goal, no error).
+///
+/// Before TASK-166 the first run skipped the candidate as `in_use` (exit
+/// 1, no error) and so did the second.
+pub fn inuse_running_out_of_descriptors_fails_the_run_unless_the_soft_limit_can_rise(
+    ctx: &Ctx,
+) -> TestResult {
+    let s = &ctx.scratch;
+    dir_with_file(ctx, "fdlimit-a")?;
+    ctx.home.write_file(
+        "fdlimit.yaml",
+        b"version: 1\nprofiles:\n  - name: fdlimit\n    find: {roots: [/tmp], paths: ['fdlimit-*'], type: dir}\n    action: delete\n    examples: {match: [/tmp/fdlimit-a]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let sleepers = Sleepers::start(ctx, 2 * FD_LIMIT)?;
+    let visible = std::fs::read_dir("/proc")
+        .map_err(|e| format!("list /proc: {e}"))?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
+        .count();
+    info!("{visible} processes visible, fd limit {FD_LIMIT}");
+    ensure!(
+        visible > 2 * FD_LIMIT,
+        "{visible} processes cannot exhaust {FD_LIMIT} descriptors"
+    );
+
+    let oracle = Oracle::arm(Fixture::new().eligible(s.path("fdlimit-a")))?;
+    let hard = ensure_with_limit(ctx, &format!("ulimit -n {FD_LIMIT}"))?;
+    let kept = exists(&s.path("fdlimit-a/file"));
+    let soft = ensure_with_limit(ctx, &format!("ulimit -Sn {FD_LIMIT}"))?;
+    let verdict = oracle.judge_runs(&[&hard, &soft])?;
+    drop(sleepers);
+
+    hard.expect_code(3)?;
+    let report = crate::ensure_suite::report(&hard)?;
+    ensure!(report["status"] == "error", "status: {report}");
+    let errors = report["errors"].as_array().ok_or("errors is no array")?;
+    ensure!(
+        errors
+            .iter()
+            .any(|e| e["message"].as_str().is_some_and(|m| m.contains("EMFILE"))),
+        "no error names EMFILE: {report}"
+    );
+    ensure!(
+        !hard.stdout.contains("in_use"),
+        "running out of descriptors must not read as in_use: {report}"
+    );
+    ensure!(
+        kept,
+        "the run that ran out of descriptors deleted the candidate"
+    );
+
+    let report = crate::ensure_suite::report(&soft)?;
+    // 100% of a tmpfs that is nearly empty can be met by the 4 KiB freed.
+    soft.expect_code(if report["target_met"] == true { 0 } else { 1 })?;
+    ensure!(
+        report["errors"].as_array().is_some_and(Vec::is_empty),
+        "the raised limit sufficed: {report}"
+    );
+    ensure!(
+        !exists(&s.path("fdlimit-a")),
+        "the unused candidate was not deleted: {report}"
+    );
+    verdict.assert_clean()
+}
+
+/// The descriptor limit of
+/// [`inuse_running_out_of_descriptors_fails_the_run_unless_the_soft_limit_can_rise`]:
+/// enough for diskgc's startup and the walk of one small candidate, far
+/// fewer than the processes the test starts.
+const FD_LIMIT: usize = 64;
+
+/// `diskgc ensure` (reclaiming, JSON) of the `fdlimit` profile as tester,
+/// started by busybox `sh` after `limit` (a `ulimit` command).
+fn ensure_with_limit(ctx: &Ctx, limit: &str) -> Result<Run, String> {
+    let diskgc = ctx.diskgc();
+    let script = format!(
+        "{limit} && echo \"limits: soft $(ulimit -Sn) hard $(ulimit -Hn)\" >&2 && exec {} ensure \
+         --json --config /home/tester/fdlimit.yaml --select profile:fdlimit --min-free 100% /tmp",
+        diskgc.display()
+    );
+    let run = ctx.run_as_tester(Path::new("/bin/sh"), &["-c", &script])?;
+    info!(
+        "{limit}: diskgc ensure -> {:?}\n--- stdout\n{}--- stderr\n{}",
+        run.code, run.stdout, run.stderr
+    );
+    Ok(run)
+}
+
+/// Sleeping tester processes, killed and reaped when dropped.
+struct Sleepers(Vec<std::process::Child>);
+
+impl Sleepers {
+    fn start(ctx: &Ctx, count: usize) -> Result<Self, String> {
+        let mut sleepers = Self(Vec::with_capacity(count));
+        for _ in 0..count {
+            let child = std::process::Command::new(&ctx.self_exe)
+                .args(["as-tester", "--", "/bin/sleep", "600"])
+                .env_clear()
+                .envs(crate::under_test::TESTER_ENV.iter().copied())
+                .current_dir("/")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| format!("start a sleeper: {e}"))?;
+            sleepers.0.push(child);
+        }
+        Ok(sleepers)
+    }
+}
+
+impl Drop for Sleepers {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}

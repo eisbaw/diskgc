@@ -389,6 +389,12 @@ impl ModelHost {
         let path = PathBuf::from(format!("/proc/{pid}/{what}"));
         let shown = path.display().to_string();
         self.call(op, Some(path), None, |inner| {
+            // A 'fail' event: the reader's open or read fails with that
+            // errno, classified as LinuxHost's readers classify it.
+            if let Some(errno) = inner.injected.take() {
+                let error = ProcError::from_host(HostError::errno("read", &shown, errno));
+                return (Err(error), None, errno_text(errno));
+            }
             if pid.0 == inner.state.own_pid {
                 let error = HostError::invalid(
                     "read",
@@ -1415,7 +1421,11 @@ impl Host for ModelHost {
     /// where `status` is world-readable). diskgc itself is uid 1000.
     fn proc_status(&self, pid: Pid) -> Result<ProcStatus, ProcError> {
         let path = PathBuf::from(format!("/proc/{pid}/status"));
-        self.call(Op::ProcStatus, Some(path), None, |inner| {
+        self.call(Op::ProcStatus, Some(path.clone()), None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                let error = HostError::errno("read", path.display(), errno);
+                return (Err(ProcError::from_host(error)), None, errno_text(errno));
+            }
             if pid.0 == inner.state.own_pid {
                 let status = ProcStatus {
                     name: "diskgc".into(),

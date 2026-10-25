@@ -426,7 +426,9 @@ How the format reads (the schema documents every key):
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
   trigger, `when: before`, on `openat2`, `statx`, `read_link`, `read_dir`,
   `read_head`, `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
-  `proc_identity`, `proc_identity_released`, `docker_query` or
+  `proc_identity`, `proc_identity_released`, the `/proc` readers
+  `proc_fds`, `proc_links`, `proc_maps`, `proc_environ`, `proc_status`,
+  `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `docker_query` or
   `run_command`), `mount` (`{id, at, fs, dev,
   size}`: a fresh filesystem mounted on an existing directory, e.g. a FUSE
   mount appearing in a candidate). `remove` is `rm -r`: every entry below is unlinked, and an

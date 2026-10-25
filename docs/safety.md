@@ -258,7 +258,8 @@ Immediately before acting, diskgc walks the candidate's whole tree
     nothing about this candidate and would hit the next one too, so it is
     an error of the run (reported, exit 3 if the goal is not met), never a
     skip: a low fd limit or a failing disk fails loudly instead of quietly
-    skipping every remaining candidate.
+    skipping every remaining candidate. The in-use scan follows the same
+    rule for running out of descriptors ([In use](#in-use), limit 4).
 
   A field the kernel does not report (type, inode, owner, mount id) is
   `unsupported_fs`; an entry replaced while the walk runs is `changed`; a
@@ -595,10 +596,9 @@ reach the 16-round bound and treat the process as unreadable; this can
 delay reclaim under heavy thread churn.
 The listing temporarily holds one directory fd per listed thread; the
 task reads also retain one fd (its `stat` file) per encountered tid until
-that process read ends. A highly threaded process can therefore reach `RLIMIT_NOFILE` and
-be treated as unreadable, delaying reclaim. This is an availability limit,
-not a measured threshold: other open fds and the thread count determine
-when it occurs.
+that process read ends. A highly threaded process can therefore reach
+`RLIMIT_NOFILE`; that is an error of the run (limit 4), not an unreadable
+process.
 The fd-directory owner used to classify an unreadable process is accepted
 only when the task is live and the same held `stat` file returns the
 same start time before and after that owner read. A vanished held task is
@@ -653,9 +653,23 @@ once; none of them makes diskgc take a live process for gone):
    crossing a replacement can include the newcomer's evidence; this is
    conservative for a found use. If a pin cannot be opened or checked, or
    incarnations keep changing, the scan is unsettled and blocks deletion.
-   A low file-descriptor limit can therefore prevent reclamation on a busy
-   host. A process that appears after the final identity check belongs to
-   the check-to-delete race in item 5;
+   **File descriptors.** The pins make a scan hold about one descriptor
+   per visible process for its whole length, plus the transient fds of
+   the reads in flight (measured: 2,402 at peak on a host of ~2,250
+   processes). The binary raises its soft `RLIMIT_NOFILE` to the hard
+   limit at startup ([reference.md](reference.md#ensure)), since the
+   stock soft limit of 1024 is too low on a busy host; the hard limit is
+   never raised, and children get the soft limit diskgc was started with.
+   Running out anyway (`EMFILE`, or `ENFILE` for the system's table) in
+   any read of the scan (a pin, a `/proc` reader, a status read) says
+   nothing about the process being read and would hit the next one too,
+   so it is an error of the run (exit 3 if the goal is not met), never an
+   unsettled scan or an unreadable process: the same rule as the walk's
+   ([Fail closed on anything unreadable](#the-eligibility-walk-mandatory-per-candidate)).
+   A host with more processes than the hard limit therefore reclaims
+   nothing through `fs` and Cargo tiers, loudly, until the limit is
+   raised. A process that appears after the final identity check belongs
+   to the check-to-delete race in item 5;
 5. the check and the deletion are not atomic: a process that starts using
    a candidate after its in-use check (including a thread that acquires
    files after a round's count) is not seen. The check is kept fresh (see

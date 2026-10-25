@@ -1570,6 +1570,12 @@ pub static TESTS: &[Test] = &[
         run: inuse_suite::inuse_a_held_file_cwd_mapping_or_environment_keeps_the_candidate,
     },
     Test {
+        name: "inuse_running_out_of_descriptors_fails_the_run_unless_the_soft_limit_can_rise",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: inuse_suite::inuse_running_out_of_descriptors_fails_the_run_unless_the_soft_limit_can_rise,
+    },
+    Test {
         name: "inuse_a_flocked_directory_is_locked",
         tier: Tier::Fast,
         expect: Expect::Pass,

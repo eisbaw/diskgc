@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 
 use common::{dir, host};
 use diskgc_core::engine::{Candidate, DeleteOptions, Deletion, End, Reason, Rules, Skip, walk};
-use diskgc_core::host::{Dev, Host, Pid};
+use diskgc_core::host::{Dev, Errno, Host, Pid};
 use diskgc_core::inuse::{
-    self, Checker, FreshAttempts, HeldByDeleted, MAX_LISTINGS, Options, REUSE_LIMIT, Scan,
+    self, Checker, FreshAttempts, HeldByDeleted, MAX_LISTINGS, Options, REREAD_PAUSES, REUSE_LIMIT,
+    Scan,
 };
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
@@ -964,6 +965,100 @@ fn an_identity_open_error_also_blocks_every_candidate() {
         "{:?}",
         scan.notes()
     );
+}
+
+/// diskgc out of file descriptors (`EMFILE`, `ENFILE`) anywhere in the
+/// scan says nothing about the process being read and would hit the next
+/// one too: the scan fails (an error of the run), never an unsettled scan
+/// or an unreadable process that skips every candidate as `in_use`
+/// (TASK-166; docs/safety.md, In use).
+#[test]
+fn running_out_of_descriptors_in_the_scan_is_an_error_of_the_run() {
+    // (op, nth call, errno, the process's `proc:` access)
+    let cases = [
+        ("proc_identity", 1, "EMFILE", "readable"),
+        ("proc_identity", 1, "ENFILE", "readable"),
+        ("proc_identity_released", 1, "EMFILE", "readable"),
+        ("proc_fds", 1, "EMFILE", "readable"),
+        ("proc_maps", 1, "EMFILE", "readable"),
+        ("proc_links", 1, "ENFILE", "readable"),
+        // The environment alone failing is otherwise kept as no evidence.
+        ("proc_environ", 1, "EMFILE", "readable"),
+        // The status read that classifies a refused process (the first
+        // proc_status is diskgc's own).
+        ("proc_status", 2, "EMFILE", "denied"),
+        // The pytest contract's facts, read within the scan.
+        ("proc_uids", 1, "EMFILE", "readable"),
+        ("proc_cmdline", 1, "ENFILE", "readable"),
+        ("proc_root_lookup", 1, "EMFILE", "readable"),
+    ];
+    for (op, nth, errno, access) in cases {
+        // TMPDIR makes the facts look the value up in the process's root.
+        let host = model(&format!(
+            "{}events:\n  - {{at: {{op: {op}, nth: {nth}, when: before}}, fail: {errno}}}\n",
+            processes(&[process(
+                10,
+                &[
+                    &format!("proc: {access}"),
+                    "environ: [PATH=/usr/bin, TMPDIR=/tmp/keep]",
+                ]
+            )])
+        ));
+        let options = Options {
+            pytest_facts: true,
+            ..options(true)
+        };
+        let error = inuse::scan(&host, &options)
+            .map(|scan| scan.notes())
+            .expect_err(&format!("{op} {errno}: the scan must fail"));
+        assert!(
+            error.is(Errno::from_name(errno).expect("named")),
+            "{op}: {error}"
+        );
+        let advice = if errno == "EMFILE" {
+            "RLIMIT_NOFILE"
+        } else {
+            "fs.file-max"
+        };
+        assert!(error.to_string().contains(advice), "{op}: {error}");
+    }
+}
+
+/// The same reader failing for another reason (`EIO`) on every read and
+/// re-read is the process's: unreadable, so every candidate is `in_use`,
+/// and the scan stands.
+#[test]
+fn another_reader_error_still_blocks_without_failing_the_scan() {
+    let events: String = (1..=REREAD_PAUSES.len() + 1)
+        .map(|nth| format!("  - {{at: {{op: proc_fds, nth: {nth}, when: before}}, fail: EIO}}\n"))
+        .collect();
+    let host = model(&format!(
+        "{}events:\n{events}",
+        processes(&[process(10, &[])])
+    ));
+    let (result, scan) = check_c(&host, true);
+    let skip = in_use(result);
+    assert!(skip.detail.contains("EIO"), "{skip}");
+    assert_eq!(scan.unreadable().len(), 1);
+}
+
+/// The deletion step: `pidfd_open` saying `EMFILE` stops the run
+/// (`Stop::Failed`) and deletes nothing, where before TASK-166 the
+/// candidate was quietly skipped as `in_use`.
+#[test]
+fn a_pidfd_emfile_stops_the_deletion_step_and_deletes_nothing() {
+    let host = model(&format!(
+        "{}events:\n  - {{at: {{op: proc_identity, nth: 1, when: before}}, fail: EMFILE}}\n",
+        processes(&[process(10, &[])])
+    ));
+    match reclaim(&host, "/tmp/c", true) {
+        Err(Stop::Failed(e)) => {
+            assert!(e.is(Errno::EMFILE), "{e}");
+            assert_eq!(e.op, "pidfd_open", "{e}");
+        }
+        other => panic!("expected an error of the run, got {other:?}"),
+    }
+    assert!(exists(&host, "/tmp/c"));
 }
 
 /// A process that could not be read is read again after a pause; one that

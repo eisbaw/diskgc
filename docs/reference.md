@@ -160,6 +160,16 @@ process runs, even if that Cargo works in an unrelated directory; see
   interrupted). If one configured tier exhausts its own timeout, later
   tiers are still planned, but the incomplete grouped plan exits 3; the
   overall `--timeout` still exits 124.
+- **Open-file limit.** At startup `ensure` raises its soft
+  `RLIMIT_NOFILE` to the hard limit: its in-use scan holds about one
+  descriptor per visible process, more than the stock soft limit of 1024
+  on a busy host. The hard limit is not raised, and commands `ensure`
+  runs get the soft limit it was started with. If raising fails, stderr
+  warns and the run goes on. A scan that still runs out of descriptors
+  fails the run (exit 3, an error naming `EMFILE` or `ENFILE`), never
+  skipping candidates as `in_use` ([safety.md](safety.md#in-use), limit
+  4); raise the hard limit (`LimitNOFILE=` in a systemd unit, `nofile` in
+  `limits.conf`) on a host with more processes than it.
 - `--json`: print exactly one JSON object on stdout at exit, for every exit
   code including usage errors, when stdout accepts the write. Any argument
   `--json` (or `--json=...`, a usage error) asks for it, wherever it stands,

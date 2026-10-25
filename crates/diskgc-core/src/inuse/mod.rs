@@ -188,7 +188,8 @@ pub struct Scan {
 
 /// Reads every visible process (see [`self::scan`] for the order of
 /// listings, reads and re-reads). Fails only when the process list itself
-/// cannot be read: an error of the run.
+/// cannot be read or diskgc runs out of file descriptors (`EMFILE`,
+/// `ENFILE`) in any read of the scan: an error of the run (TASK-166).
 pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError> {
     // The scan is as old as its first read.
     let started = host.now();

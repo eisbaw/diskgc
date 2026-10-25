@@ -630,7 +630,7 @@ fn check_pidfd_open(opened: Result<(), Errno>) -> Result<(), HostError> {
     })
 }
 
-fn errno_of(e: rustix::io::Errno) -> Errno {
+pub(crate) fn errno_of(e: rustix::io::Errno) -> Errno {
     Errno(e.raw_os_error())
 }
 
@@ -2567,8 +2567,8 @@ fn fchmod_permitted(_gate: &Permit, dir: &LinuxFd, mode: Mode) -> rustix::io::Re
 }
 
 /// The only child-starting site in diskgc-linux. The held `Permit` is the
-/// sandbox proof. `pre_exec` uses only the async-signal-safe `fchdir` syscall
-/// on the already checked fd; `process_group(0)` makes the child a new group
+/// sandbox proof. `pre_exec` uses only async-signal-safe syscalls: `fchdir`
+/// on the already checked fd and the open-file limit's restore; `process_group(0)` makes the child a new group
 /// leader before it can run any profile code.
 // At most one such segment is buffered for each of the two pipes. A line
 // without a newline is emitted as successive segments, rather than held
@@ -2650,6 +2650,11 @@ fn run_docker_query_ungated(
                     .map_err(std::io::Error::from)
             });
         }
+    }
+    // SAFETY: async-signal-safe (atomic loads and one syscall); runs after
+    // the closure above.
+    unsafe {
+        command.pre_exec(crate::nofile::restore_inherited_in_child);
     }
     let mut child = command
         .args(args)
@@ -2916,9 +2921,10 @@ fn run_command_permitted(
         .stderr(process::Stdio::piped());
     let cwd_fd = cwd.as_fd().as_raw_fd();
     let docker_fd: Option<RawFd> = docker_pin.as_ref().map(|pin| pin.fd.as_raw_fd());
-    // SAFETY: the closure calls one syscall on an fd held by the parent
-    // through spawn; the child inherits it until pre_exec returns. It does
-    // not allocate, lock, or inspect shared state.
+    // SAFETY: the closure calls syscalls on an fd held by the parent
+    // through spawn (the child inherits it until pre_exec returns) and
+    // `restore_inherited_in_child` (atomic loads, one syscall). It does not
+    // allocate or lock.
     unsafe {
         command.pre_exec(move || {
             // SAFETY: `cwd` is alive through `spawn`; after fork this child
@@ -2930,7 +2936,9 @@ fn run_command_permitted(
                 rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
                     .map_err(std::io::Error::from)?;
             }
-            Ok(())
+            // The profile's command gets the open-file limit diskgc was
+            // started with, not the raised one (crate::nofile).
+            crate::nofile::restore_inherited_in_child()
         });
     }
     if host.interrupted().is_some() {
