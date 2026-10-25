@@ -58,6 +58,7 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
     nix build -L --no-link .#checks.x86_64-linux.release-01-package
+    nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite fast --budget-secs 300
     just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
@@ -83,6 +84,7 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
     nix build -L --no-link .#checks.x86_64-linux.release-01-package
+    nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite full --budget-secs 3600
     just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300

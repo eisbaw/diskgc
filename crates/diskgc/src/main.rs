@@ -552,6 +552,17 @@ const CATALOG: Catalog = if cfg!(feature = "proposed-release-01-catalog") {
     Catalog::Development
 };
 
+// TASK-195: removing the sandbox gate (diskgc-linux's
+// `release-without-sandbox-gate`) is only for the release package, which
+// also narrows the catalog. Built alone it would make an ungated binary with
+// every development profile, so that build does not compile. The flake's
+// release-gate-needs-catalog check proves the refusal.
+const _: () = assert!(
+    diskgc_linux::sandbox::SANDBOX_GATE || cfg!(feature = "proposed-release-01-catalog"),
+    "diskgc-linux/release-without-sandbox-gate needs diskgc's proposed-release-01-catalog: \
+     an ungated binary must ship the release catalog"
+);
+
 /// The configuration file (docs/reference.md, Configuration file), given
 /// by `flag` (`--config`), `$DISKGC_CONFIG` or found by the search: its
 /// bytes, or the paths tried when the search found none (a given file that

@@ -384,6 +384,36 @@
         }
       );
 
+      # TASK-195: the gate-lift feature without the release catalog must not
+      # compile (main.rs's const assert), or an ad-hoc cargo build makes an
+      # ungated binary with the development catalog. The release's own
+      # feature pair must compile, so the refusal is the assert, not a
+      # broken build.
+      releaseGateNeedsCatalog = craneLib.mkCargoDerivation (
+        workspaceArgs
+        // {
+          pname = "diskgc-release-gate-needs-catalog";
+          cargoArtifacts = workspaceDeps;
+          doInstallCargoArtifacts = false;
+          buildPhaseCargoCommand = ''
+            if cargoWithProfile check --locked --offline --package diskgc \
+              --features diskgc-linux/release-without-sandbox-gate 2> refused.log; then
+              echo "error: the gate-lift feature compiled without the release catalog" >&2
+              exit 1
+            fi
+            if ! grep -F "needs diskgc's proposed-release-01-catalog" refused.log; then
+              cat refused.log >&2
+              echo "error: the build failed, but not on the gate/catalog assert" >&2
+              exit 1
+            fi
+            cargoWithProfile check --locked --offline --package diskgc \
+              --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \
+              --quiet
+          '';
+          installPhaseCommand = "touch $out";
+        }
+      );
+
       # Cargo under test (docs/testing.md, Cargo toolchains under test): the
       # toolchains the Cargo race tests run against, pinned by the locked
       # rust-overlay input (flake.lock), separate from the product toolchain
@@ -918,6 +948,8 @@
             --clock-offset-control ${lib.getExe diskgc}
           touch $out
         '';
+
+        release-gate-needs-catalog = releaseGateNeedsCatalog;
 
         release-01-package = pkgs.runCommand "diskgc-release-01-package-check"
           { nativeBuildInputs = [ pkgs.binutils ]; }

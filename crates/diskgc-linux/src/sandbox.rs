@@ -30,6 +30,13 @@ pub const CONTAINERENV_PATH: &str = "/run/.containerenv";
 /// Exact bytes the image marker must hold.
 pub const MARKER_CONTENT: &[u8] = include_bytes!("sandbox-marker");
 
+/// Whether this build has the pre-release sandbox gate: `false` only with
+/// `release-without-sandbox-gate`. The binary asserts at compile time that
+/// a build without the gate also has the release catalog (TASK-195): the
+/// gate-lift alone would ship an ungated binary with the full development
+/// catalog.
+pub const SANDBOX_GATE: bool = !cfg!(feature = "release-without-sandbox-gate");
+
 /// A test-only wall-clock advance, written inside a disposable test image.
 /// This name and its reader are omitted from feature-built release binaries.
 #[cfg(not(feature = "release-without-sandbox-gate"))]
@@ -406,23 +413,30 @@ mod tests {
         let allowed_release = "cargoExtraArgs = \"--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate\";";
         let allowed_dep_tree =
             "--features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \\";
+        // TASK-195's check: the gate-lift alone must fail to compile, and
+        // with the catalog (the dependency tree's features) compile; it
+        // builds no artifact.
+        let allowed_refused =
+            "--features diskgc-linux/release-without-sandbox-gate 2> refused.log; then";
         let unexpected: Vec<&String> = found
             .iter()
             .filter(|line| {
                 !line.starts_with("flake.nix:")
-                    || !(line.ends_with(allowed_release) || line.ends_with(allowed_dep_tree))
+                    || ![allowed_release, allowed_dep_tree, allowed_refused]
+                        .iter()
+                        .any(|allowed| line.ends_with(allowed))
             })
             .collect();
         assert!(
-            unexpected.is_empty() && found.len() <= 2,
+            unexpected.is_empty() && found.len() <= 4,
             "the sandbox gate has an unexpected build enabler:\n{}",
             found.join("\n")
         );
         if checkout {
             assert_eq!(
                 found.len(),
-                2,
-                "the release feature or matching dependency tree vanished"
+                4,
+                "the release feature, its dependency tree or the gate/catalog check vanished"
             );
             let flake = std::fs::read_to_string(repo.join("flake.nix")).expect("flake");
             let release = flake
@@ -446,6 +460,17 @@ mod tests {
             assert!(
                 dep_tree.contains(allowed_dep_tree),
                 "the dependency tree must use the candidate's features"
+            );
+            let gate_check = flake
+                .split_once("releaseGateNeedsCatalog = craneLib.mkCargoDerivation")
+                .expect("the gate/catalog check")
+                .1
+                .split_once("      );")
+                .expect("the end of the gate/catalog check")
+                .0;
+            assert!(
+                gate_check.contains(allowed_refused) && gate_check.contains(allowed_dep_tree),
+                "the gate/catalog check must try the gate-lift alone and with the catalog"
             );
         }
         if !not_seen.is_empty() {
