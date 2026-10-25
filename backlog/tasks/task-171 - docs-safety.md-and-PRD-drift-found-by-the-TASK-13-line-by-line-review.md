@@ -4,7 +4,7 @@ title: docs/safety.md and PRD drift found by the TASK-13 line-by-line review
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:14'
-updated_date: '2026-10-25 08:38'
+updated_date: '2026-10-25 12:49'
 labels:
   - hardening
   - docs
@@ -53,4 +53,29 @@ PRD (needs Mark):
 
 <!-- SECTION:NOTES:BEGIN -->
 COMPASS round 3 (2026-10-25): the 0.1 subset (items 1, 11, 12 and TASK-168's doc fix) is a 0.1 blocker; the rest is post-0.1.
+
+0.1 subset re-checked 2026-10-25 against master 3367f82 (t171, no doc or code change needed; branch t171 has no commits):
+- Item 1: already fixed by TASK-165 (2f8fe73). Principles says checks run "on the path as it is then (a directory on the way renamed since it was reached is changed)"; Deletion step 4 states the path recheck. Code agrees: fs_kind::judge::still_reached (root resolved anew, statx per level against Reached.dirs, then no_keep_markers on the held dirs) runs in Judge::again (step 4) and as the last check in the clear_and_delete callback in fs_kind::reclaim (after policy, liveness::veto, app::check, runtime_retention_guard_veto); cargo_target::reclaim::still_reached under the locks.
+- Item 11 / TASK-168 doc fix: already fixed (b5bcb7a). Reclaim step 2 says ensure hands no earlier last build; code: executor walk_cargo passes ReclaimPolicy judged_last_build: None; only the model test passes Some.
+- Item 12: already fixed by TASK-167 (b5bcb7a), code changed: engine::walk refuses any is_cargo_lock_name (.cargo-*lock*) at any depth as contains_special; Reclaim step 3 and Filesystem candidates (No special content) state that rule.
+- Gate on unchanged tree: nix develop -c just docs-check exit 0 (332 core lib tests); python3 tools/check_docs.py docs/reference.md docs/safety.md PRD.md exit 0.
+- Item 18 (PRD, needs Mark), proposed wording, PRD.md "What bad looks like":
+  - Any Cargo lock file deleted or moved; a target deleted while a Cargo
+  -   process holds any of its locks; two Cargo builds running in one target
+  -   dir because of diskgc; anything outside locked profile directories
+  -   deleted by the Cargo kind.
+  + Any Cargo lock file deleted or moved; an entry of a profile directory
+  +   deleted unless diskgc holds every lock that profile directory had when
+  +   its deletion started, or while a Cargo writes into that profile
+  +   directory; two Cargo builds running in one target dir because of
+  +   diskgc; anything outside locked profile directories deleted by the
+  +   Cargo kind.
+  and in "What good looks like":
+  - - Cargo targets only inside profile directories whose locks diskgc holds;
+  + - Cargo targets only inside profile directories whose locks diskgc holds
+  +   (every lock the directory had when its deletion started);
+  Rationale: the current text is stricter than enforced. A newer Cargo creating .cargo-build-lock, or a first release build creating release/ and its locks, mid-part holds a lock of the target while diskgc deletes debug/. Safe by the .cargo-lock invariant (safety.md Reclaim step 3: such a Cargo waits on the .cargo-lock diskgc holds having written nothing else, or works in a profile directory diskgc does not touch; diskgc stops at the next part as changed or in_use). Stopped here for the decision.
+- Post-0.1, left open: items 2-10, 13-17 (not re-checked).
+
+Item 18 decided 2026-10-25 by mark-emulator (Mark may veto): take the precise wording ('the PRD says what we guarantee, not more'); applied to PRD.md (Safety boundaries Cargo bullet and What bad looks like). 0.1 subset (1, 11, 12) already fixed by TASK-165/167/168 merges. Post-0.1 items 2-10, 13-17 remain.
 <!-- SECTION:NOTES:END -->

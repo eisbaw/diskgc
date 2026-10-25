@@ -97,8 +97,9 @@ kinds), and where those guarantees end. The protocols are in
   permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
   cache built-in ships only with a contract whose class admits it, and
   the rule applies to every built-in.
-- Cargo targets only inside profile directories whose locks diskgc holds;
-  no Cargo lock file is ever deleted or moved.
+- Cargo targets only inside profile directories whose locks diskgc holds
+  (every lock the directory had when its deletion started); no Cargo
+  lock file is ever deleted or moved.
 - No symlink followed, no mount crossed when finding, walking and
   deleting candidates. (Liveness evidence matches what a process holds
   by device and inode, climbing held directories with `..` and reading
@@ -175,9 +176,11 @@ when, and never as root.
   that overlaps a `protect` entry or a negated profile.
 - Any entry deleted that the eligibility walk did not check, or that
   belongs to an unauthorised user.
-- Any Cargo lock file deleted or moved; a target deleted while a Cargo
-  process holds any of its locks; two Cargo builds running in one target
-  dir because of diskgc; anything outside locked profile directories
+- Any Cargo lock file deleted or moved; an entry of a profile directory
+  deleted unless diskgc holds every lock that profile directory had when
+  its deletion started, or while a Cargo writes into that profile
+  directory; two Cargo builds running in one target dir because of
+  diskgc; anything outside locked profile directories
   deleted by the Cargo kind.
 - A filesystem candidate deleted while a visible process has one of its
   files open, mapped or as working directory; a socket or FIFO deleted
