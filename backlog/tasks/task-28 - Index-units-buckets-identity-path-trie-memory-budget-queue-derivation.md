@@ -1,10 +1,10 @@
 ---
 id: TASK-28
 title: 'Index: units, buckets, identity, path trie, memory budget, queue derivation'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 17:21'
+updated_date: '2026-10-25 17:26'
 labels:
   - wave-3
   - architecture
@@ -56,6 +56,8 @@ Implemented on branch t28 (884a59b, 2360fd2; not merged): crates/diskgc-core/src
 Mark's answers 2026-10-25 (his own) on TASK-28's open points: (1) a complete discovery listing of a block's site recounts its members/estimates (implement in TASK-29; partial listings leave it). (2) family blocks absorb DIRECT children only (as implemented; doc updated). (3) garbage-collect side-table entries (finder sets, roots, mounts) no unit references, so the tables shrink with the units; before TASK-30 freezes the snapshot format. (4) at the extreme, NO budget increase and NO partial index and NO refused insertion: keep collapsing/grouping into coarser lumps (beyond one block per finder set and root) until the insertion fits.
 
 Mark's answers implemented on t28 (head 7652972, rebased on 7c1920b): lumps across finder sets up to one lump per mount, last-resort Inserted::Lumped (NoRoom only below the floor: one lump per mount + tables), finder-set/mount tables swept with never-reused ids, Finder names its root by path. Re-review of deltas: ship (both blockers fixed). Open non-blockers: the 1,024-step plan window is by key not gain and a lump charges its union set as new even when it exists, so a crowded plan could stop above low water and refuse an insert above the floor (not reproduced); set_users/sweep walks make many lumps O(steps x index); u32 set id exhaustion in a pinned long-lived watch panics. TASK-31 got an AC for expanding lumps from the deeper of site and bound root.
+
+Merged to master as e0edd09 on 2026-10-25T17:26Z. AC 'collapse_keeps_every_member_checked' needs the reclaim walk on the index: carried by TASK-31.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
