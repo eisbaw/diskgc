@@ -12,10 +12,17 @@ scratch directory holding fake Cargo targets; dry runs of the fixed-root
 with --container NAME, inside a disposable walk container (`just walk-up
 NAME`), whose diskgc is the binary installed there as BIN.
 
+Host safety has one choke point, Runner: in host mode it refuses any
+diskgc argv naming `ensure` or `watch` without `--dry-run` (host_refusal),
+and any raw shell script that names the binary at all, so every host
+invocation passes the argv check. BIN may be the gate-lifted release
+artifact, so the check is the tool's, not the binary's. A refused probe is
+reported as FAILED-UNSAFE and fails the run; it is never skipped silently.
+
 The doc parsers are pure and unit-tested (test_docs_vs_binary.py). What the
 tool cannot check is printed as NOT CHECKED, so a green run is not read as
-more than it is. Exit 0: no mismatch; 1: mismatches; 2: usage or a broken
-probe environment.
+more than it is. Exit 0: no mismatch; 1: mismatches or a refused unsafe
+probe; 2: usage or a broken probe environment.
 """
 
 import argparse
@@ -334,9 +341,27 @@ class Result:
             return None
 
 
+# Commands that can delete. A token anywhere in the argv counts, not only the
+# command position: a false refusal is loud, a missed one deletes host data.
+RECLAIMING_COMMANDS = ("ensure", "watch")
+
+
+class UnsafeProbe(Exception):
+    """A probe asked to run something that could reclaim on the host. Not a
+    RuntimeError: main's broken-environment handler must not swallow it."""
+
+
+def host_refusal(argv):
+    """Why a diskgc argv must not run on the host, or None when it may."""
+    named = [a for a in argv if a in RECLAIMING_COMMANDS]
+    if named and "--dry-run" not in argv:
+        return f"`diskgc {shlex.join(argv)}`: `{named[0]}` without --dry-run could reclaim on the host"
+    return None
+
+
 class Runner:
     """Runs diskgc and shell fixture steps, on the host or in a walk container.
-    The prefix is the only difference; everything else is identical."""
+    The prefix and the host-safety refusals are the only differences."""
 
     def __init__(self, binary, scratch, container=None):
         self.binary = binary
@@ -346,6 +371,13 @@ class Runner:
                         f"walk-diskgc-{container}"] if container else [])
 
     def sh(self, script):
+        """A fixture or multi-process step. On the host it must not run the
+        binary: diskgc goes through diskgc(), where host_refusal applies."""
+        if not self.container and self.binary in script:
+            raise UnsafeProbe(f"raw shell step names the binary on the host: {script!r}")
+        return self._exec(script)
+
+    def _exec(self, script):
         # Braces: a trailing `&` inside the script must not background the cd.
         argv = self.prefix + ["sh", "-c", f"cd {shlex.quote(self.scratch)} || exit 2\n{{ {script}\n}}"]
         # Own process group, so a hung probe's diskgc dies with its shell.
@@ -360,16 +392,18 @@ class Runner:
         return Result(child.returncode, out, err)
 
     def diskgc(self, *args, env=None, redirect=""):
-        """XDG_CONFIG_HOME and DISKGC_CONFIG are pinned so no developer config
-        leaks in; callers override them to probe the lookup."""
-        base = {"XDG_CONFIG_HOME": f"{self.scratch}/xdg-empty", "DISKGC_CONFIG": ""}
+        """The only way a probe runs diskgc on the host. XDG_CONFIG_HOME and
+        DISKGC_CONFIG are pinned so no developer config leaks in; callers
+        override them to probe the lookup (None unsets, "" sets empty)."""
+        refusal = None if self.container else host_refusal(list(args))
+        if refusal:
+            raise UnsafeProbe(refusal)
+        base = {"XDG_CONFIG_HOME": f"{self.scratch}/xdg-empty", "DISKGC_CONFIG": None}
         base.update(env or {})
-        unset = "unset DISKGC_CONFIG;" if base.get("DISKGC_CONFIG") == "" else ""
-        if base.get("DISKGC_CONFIG") == "":
-            del base["DISKGC_CONFIG"]
+        unset = " ".join(f"unset {k};" for k, v in base.items() if v is None)
+        assigned = " ".join(f"{k}={shlex.quote(v)}" for k, v in base.items() if v is not None)
         argv = " ".join(shlex.quote(a) for a in (self.binary, *args))
-        return self.sh(f"{unset} env {' '.join(f'{k}={shlex.quote(v)}' for k, v in base.items())} "
-                       f"{argv} {redirect}")
+        return self._exec(f"{unset} env {assigned} {argv} {redirect}")
 
 
 # ---- Probes ----------------------------------------------------------------
@@ -378,7 +412,17 @@ class Runner:
 class Report:
     def __init__(self):
         self.mismatches = []
+        self.unsafe = []
         self.checked = 0
+
+    def guarded(self, probe, *args):
+        """Runs one probe; a host-safety refusal fails it loudly (FAILED-UNSAFE)
+        and the remaining probes still run. Returns None when refused."""
+        try:
+            return probe(*args)
+        except UnsafeProbe as refusal:
+            self.unsafe.append(f"{probe.__name__}: {refusal}")
+            return None
 
     def expect(self, ok, area, what, docs, binary):
         self.checked += 1
@@ -443,7 +487,7 @@ def probe_errors(reference, run, report):
                   "`diskgc: error: MESSAGE`", r.err.splitlines()[:1])
     report.expect("diskgc --help" in r.err.splitlines()[-1], "usage error",
                   "last stderr line points to --help", "yes", r.err.splitlines()[-1:])
-    r = run.diskgc("ensure", "--min-fre", "1G", "/tmp")
+    r = run.diskgc("ensure", "--dry-run", "--min-fre", "1G", "/tmp")
     report.expect("did you mean --min-free?" in r.err, "usage error", "`--min-fre` suggestion",
                   "did you mean --min-free?", r.err.splitlines()[:1])
     for argv in (["bogus", "--json"], ["profiles", "frob", "--json"], ["check", "--bogus", "--json"]):
@@ -461,7 +505,7 @@ def probe_errors(reference, run, report):
                               sorted(error_keys), sorted(err))
                 report.expect(err["cause"] in causes, "usage error", "cause", sorted(causes), err["cause"])
     for planned in ("watch", "survey"):
-        r = run.diskgc(planned, "--json")
+        r = run.diskgc(planned, "--dry-run", "--json")
         report.expect(r.code == 2, "planned command", f"`{planned}` exit", 2, r.code)
 
 
@@ -469,7 +513,8 @@ def probe_help_and_version(run, report):
     version = run.diskgc("--version")
     report.expect(version.code == 0 and re.fullmatch(r"diskgc \S+\n", version.out) is not None,
                   "version", "`--version`", "`diskgc VERSION`, exit 0", f"{version.out!r} exit {version.code}")
-    for argv in (["-h"], ["--json", "--help"], ["profiles", "list", "--help"], ["ensure", "-h", "--json"]):
+    for argv in (["-h"], ["--json", "--help"], ["profiles", "list", "--help"],
+                 ["ensure", "--dry-run", "-h", "--json"]):
         r = run.diskgc(*argv)
         report.expect(r.code == 0 and r.out.startswith("usage:") and r.json() is None,
                       "help", f"`{' '.join(argv)}`", "help text, exit 0", f"exit {r.code}, {r.out[:30]!r}")
@@ -747,7 +792,7 @@ def probe_config(reference, run, report, example_yaml, is_release_build):
                       ({"DISKGC_CONFIG": f"{s}/missing.yaml"}, "missing $DISKGC_CONFIG")):
         r = run.diskgc("check", env=env)
         report.expect(r.code == 2, "config lookup", what, "exit 2", f"exit {r.code}")
-    r = run.sh(f"env XDG_CONFIG_HOME={s}/xdg-empty DISKGC_CONFIG= {shlex.quote(run.binary)} check")
+    r = run.diskgc("check", env={"DISKGC_CONFIG": ""})
     report.expect(r.code == 2, "config lookup", "empty $DISKGC_CONFIG", "exit 2", f"exit {r.code}")
     r = run.diskgc("check")
     report.expect(r.code == 2, "config lookup", "check with no config", "exit 2", f"exit {r.code}")
@@ -880,18 +925,18 @@ def main(argv=None):
     report = Report()
     status_codes = status_exit_codes(section(reference, "## Exit codes (`ensure`)"))
     help_text = probe_usage(reference, run, report)
-    probe_errors(reference, run, report)
-    version = probe_help_and_version(run, report)
-    probe_sizes_and_durations(reference, run, report)
-    probe_ensure_arguments(run, report)
-    probe_report_fields(reference, run, report, version, status_codes)
+    report.guarded(probe_errors, reference, run, report)
+    version = report.guarded(probe_help_and_version, run, report)
+    report.guarded(probe_sizes_and_durations, reference, run, report)
+    report.guarded(probe_ensure_arguments, run, report)
+    report.guarded(probe_report_fields, reference, run, report, version, status_codes)
     if not args.container:
-        probe_ci_examples(reference, run, report, help_text)
+        report.guarded(probe_ci_examples, reference, run, report, help_text)
     profiles = (run.diskgc("profiles", "list", "--json").json() or {}).get("profiles", [])
     is_release_build = bool(profiles) and all(
         "0.1" in (p.get("releases") or []) for p in profiles if p["role"] == "source")
-    probe_profiles(reference, run, report, help_text)
-    probe_config(reference, run, report, example_yaml, is_release_build)
+    report.guarded(probe_profiles, reference, run, report, help_text)
+    report.guarded(probe_config, reference, run, report, example_yaml, is_release_build)
     documented_codes = probe_exit_table(reference, report)
     provoked = {0, 2, 3}
     if args.container:
@@ -911,17 +956,23 @@ def main(argv=None):
     build = "release (0.1 catalog)" if is_release_build else "development"
     print(f"docs-vs-binary: {binary} ({build} build, {version}), "
           f"{'container ' + args.container if args.container else 'host, read-only'}")
+    for line in report.unsafe:
+        print(f"FAILED-UNSAFE {line} (refused; rerun with --container NAME or add --dry-run)")
     for line in report.mismatches:
         print(f"MISMATCH {line}")
     for line in not_checked:
         print(f"NOT CHECKED {line}")
-    print(f"docs-vs-binary: {report.checked} checks, {len(report.mismatches)} mismatches")
-    return 1 if report.mismatches else 0
+    print(f"docs-vs-binary: {report.checked} checks, {len(report.mismatches)} mismatches, "
+          f"{len(report.unsafe)} refused unsafe")
+    return 1 if report.mismatches or report.unsafe else 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except UnsafeProbe as refusal:
+        print(f"docs-vs-binary: FAILED-UNSAFE {refusal} (refused; nothing ran)", file=sys.stderr)
+        sys.exit(1)
     except (RuntimeError, ValueError, OSError) as error:
         print(f"docs-vs-binary: error: {error}", file=sys.stderr)
         sys.exit(2)

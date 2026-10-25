@@ -9,9 +9,10 @@ from pathlib import Path
 import unittest
 
 from docs_vs_binary import (
-    code_blocks, config_examples, dev_only_refusals, documented_catalog, enum_values, json_schema,
-    observed_values, parse_usage, profiles_test_keys, schema_diff, section, size_grammar,
-    status_exit_codes, table_rows, tier_names,
+    Report, Result, Runner, UnsafeProbe, code_blocks, config_examples, dev_only_refusals,
+    documented_catalog, enum_values, host_refusal, json_schema, observed_values, parse_usage,
+    probe_ci_examples, profiles_test_keys, schema_diff, section, size_grammar, status_exit_codes,
+    table_rows, tier_names,
 )
 
 REFERENCE = Path(__file__).resolve().parent.parent / "docs" / "reference.md"
@@ -151,6 +152,70 @@ class ReferenceShapeTests(unittest.TestCase):
         usage = parse_usage(code_blocks(section(self.doc, "## Commands"), "")[0].splitlines())
         self.assertIn(("--min-free", False), usage["ensure"][0])
         self.assertEqual(usage["ensure"][1], ("PATH",))
+
+
+class RecordingRunner(Runner):
+    """A Runner whose process execution is recorded, not performed: the
+    host-safety rule lives above _exec, so what reaches it is what would run."""
+
+    def __init__(self, container=None):
+        super().__init__("/opt/rc/bin/diskgc", "/scratch", container)
+        self.executed = []
+
+    def _exec(self, script):
+        self.executed.append(script)
+        return Result(0, '{"status": "dry_run"}', "")
+
+
+HELP_WITHOUT_DRY_RUN = ("usage: diskgc ensure ...\n\nStart here:\n"
+                        "  diskgc ensure --min-free 50G --select profile:cargo-target \\\n"
+                        "      --roots DIR PATH\n")
+HELP_WITH_DRY_RUN = HELP_WITHOUT_DRY_RUN.replace("ensure --min-free", "ensure --dry-run --min-free")
+CI_EXAMPLE = ("## Commands\n```\ndiskgc ensure --min-free 50G --select profile:cargo-target \\\n"
+              "  --roots \"$CI_BUILDS_DIR\" \"$CI_BUILDS_DIR\"\n```\n")
+
+
+class HostSafetyTests(unittest.TestCase):
+    """The release artifact deletes outside a container: on the host, only the
+    tool stands between a help example and the developer's files."""
+
+    def test_reclaiming_argv_needs_dry_run(self):
+        self.assertIsNotNone(host_refusal(["ensure", "--min-free", "1G", "/x"]))
+        self.assertIsNotNone(host_refusal(["--json", "watch"]))
+        self.assertIsNone(host_refusal(["ensure", "--dry-run", "--min-free", "1G", "/x"]))
+        self.assertIsNone(host_refusal(["profiles", "list", "--json"]))
+
+    def test_a_help_example_without_dry_run_is_refused_on_the_host(self):
+        run, report = RecordingRunner(), Report()
+        report.guarded(probe_ci_examples, CI_EXAMPLE, run, report, HELP_WITHOUT_DRY_RUN)
+        self.assertEqual(len(report.unsafe), 1, report.unsafe)
+        self.assertIn("without --dry-run", report.unsafe[0])
+        self.assertFalse(any("--dry-run" not in cmd for cmd in run.executed), run.executed)
+
+    def test_a_help_example_with_dry_run_runs_on_the_host(self):
+        run, report = RecordingRunner(), Report()
+        report.guarded(probe_ci_examples, CI_EXAMPLE, run, report, HELP_WITH_DRY_RUN)
+        self.assertEqual(report.unsafe, [])
+        self.assertEqual(len(run.executed), 2)
+
+    def test_a_help_example_without_dry_run_runs_in_a_container(self):
+        run, report = RecordingRunner(container="walk"), Report()
+        report.guarded(probe_ci_examples, CI_EXAMPLE, run, report, HELP_WITHOUT_DRY_RUN)
+        self.assertEqual(report.unsafe, [])
+        self.assertIn("/opt/rc/bin/diskgc ensure --min-free 50G", run.executed[-1])
+
+    def test_a_raw_shell_step_may_not_run_the_binary_on_the_host(self):
+        with self.assertRaises(UnsafeProbe):
+            RecordingRunner().sh("/opt/rc/bin/diskgc ensure --min-free 1G /x")
+        RecordingRunner(container="walk").sh("/opt/rc/bin/diskgc ensure --min-free 1G /x")
+        RecordingRunner().sh("mkdir -p targets")
+
+    def test_an_empty_diskgc_config_is_set_not_unset(self):
+        run = RecordingRunner()
+        run.diskgc("check", env={"DISKGC_CONFIG": ""})
+        run.diskgc("check")
+        self.assertIn("DISKGC_CONFIG=''", run.executed[0])
+        self.assertIn("unset DISKGC_CONFIG;", run.executed[1])
 
 
 if __name__ == "__main__":
