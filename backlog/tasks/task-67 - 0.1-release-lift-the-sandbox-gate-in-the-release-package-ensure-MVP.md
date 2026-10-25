@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 12:50'
+updated_date: '2026-10-25 13:05'
 labels:
   - wave-2
   - release
@@ -90,6 +90,8 @@ Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): ipc: live-
 2026-10-25 (release-docs 353eb7d, not merged): step 5b tool 'just docs-vs-binary BIN [--container NAME]'. On release-01-candidate 26xczdv8 (host read-only: 171 checks; walk container release-docs with /usr/local/bin/diskgc: 188 checks incl. exit 1/75/130/143 and actions/skipped fields) and the dev package x6mpr05x (host: 235 checks): 0 mismatches. Not checked by it: exit 124, host-error 3, unobservable defaults (--timeout 10m etc.), human text, most skip-reason/evidence enum values (only observed ones). Rerun both modes on the final artifact before closing AC2.
 
 2026-10-25: TASK-171 removed from the dependencies: its 0.1 subset (items 1, 11, 12, 18) is done (8eb95f3); the rest is post-0.1. TASK-140 added (debug text in the 0.1 summary).
+
+2026-10-25 rc-walk clean non-Nix install walk: release-01-candidate built at rc-walk 80c858c (/nix/store/3rz5nwyfl1flv14074kcallzwffmy5b9-diskgc-release-01-candidate-0.1.0), clean container from the e2e Debian image (own uid slot 18, fresh tmpfs /run, /tmp, /home/tester; nothing installed), installed from the package files per the release notes, walked as a new user (help, check, dry runs, real ensure). Cargo: real reclaim of 2 targets met the goal, cargo run rebuilt; lock missing -> exit 2 with provisioning commands; --json exhausted report parses as documented. /tmp: in the container's own PID namespace every tester session/rc dir is producer_unknown (documented limit), exit 1; other users' dirs read 'open /tmp/X: EACCES (13)' (TASK-140 fix). Release notes fixed on rc-walk 505f6ad (install -D for tmpfiles, first-run idle expectations, reclaimed Cargo target keeps lock files). Findings filed: TASK-209..218, 221, 222 (label shipping). Not proved: a /tmp reclaim in the initial PID namespace from the package (the TASK-156 VM walk covers it), systemd boot-time tmpfiles, seccomp profiles beyond Podman 5.8.7's default (start + empty scan only). Dumps: tmp/walks/2026-10-25-rc-walk-debian/dumps/. release-01-debian runner at 80c858c: 8/8 PASS.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
