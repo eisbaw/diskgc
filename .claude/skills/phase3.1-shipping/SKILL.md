@@ -370,6 +370,11 @@ they never override the Invariants.
 - 2026-10-25: async QA in a detached worktree loses per-test container
   logs when the worktree is removed (they go to the worktree's tmp/);
   pass the runner an absolute log dir under the main checkout's tmp/.
+- 2026-10-25: feature-gated tests (`--features proposed-release-01-catalog`)
+  ran in no gate: `proposed_catalog_is_consistent_across_cli_surfaces`
+  broke when TASK-65 grew the 0.1 catalog and nothing noticed until the
+  cli-msg walk. When the release catalog changes, run the release-feature
+  tests (being added to `just check`).
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
