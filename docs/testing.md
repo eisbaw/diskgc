@@ -547,9 +547,11 @@ Model scenarios required by [safety.md](safety.md) and
     a refusal found by the run's own synchronous tally skips it for the
     run;
 - **synchronous tally** (virtual clock): `sync_tally_discovers_every_tier_before_sizing`
-  (with a budget that ends during pass 2, every selected tier has a
-  queue, and pass 2 sized the first tier's candidates in its order
-  first); `sync_tally_budget_ending_in_discovery_still_finds_the_rest`
+  (every selected tier has a queue before any tree is walked);
+  `sync_tally_sizes_only_the_first_tiers_stale_units` (with an old seed
+  and an unlimited budget, pass 2 walks only the first tier's units
+  tallied more than 60 minutes ago or never, in its order; later
+  tiers' stored sizes are kept and none of their trees is walked); `sync_tally_budget_ending_in_discovery_still_finds_the_rest`
   (the walk's per-tier discovery deletes what the tally did not list);
   the tally takes no host lock and makes no deleting call;
 - **background tally** (virtual clock): the worker's active time is at
@@ -558,6 +560,14 @@ Model scenarios required by [safety.md](safety.md) and
   while the host lock is held by another process; overdue discovery,
   re-check and re-tally jobs are all served within twice their period
   on a 100,000-entry model under constant churn (no starvation);
+- **pressure brake** (virtual clock, scripted PSI readings through the
+  `Host` query): `pressure_brake_doubles_the_sleep_and_skips_batches`
+  (with `io` at 30 %, no batch runs and the sleeps are 1, 2, 4 ... s up
+  to 60 s; one reading below every threshold runs a batch and returns
+  to 19 × *t*); each of `io`, `memory` (10 %) and `cpu` (50 %) alone
+  triggers it, and readings at the thresholds do not;
+  `no_psi_means_duty_cycle_only` (PSI unreadable: one log line, the
+  plain duty cycle); the synchronous tally never reads PSI;
 - **snapshot** (ModelHost state operation): `ensure_writes_the_snapshot_and_the_next_run_starts_from_it`
   (the second run reports `source: snapshot` and lists no root
   discovered less than 5 minutes earlier);
@@ -570,7 +580,8 @@ Model scenarios required by [safety.md](safety.md) and
   `--no-index` run's; a profile edited between runs drops only that
   profile's units; a changed tier or `--roots` drops nothing;
   `--no-index` neither reads nor writes the snapshot; an `ensure` that
-  exits 0 because space is already there writes nothing;
+  exits 0 because space is already there makes no tally call and no
+  state write (no snapshot, no lock file);
 - a `TMPDIR` changed by `export` after `exec`: documented as invisible (the
   test pins the heuristic's known limit);
 - deadline overruns: a blocking operation that exceeds the deadline is
@@ -1612,6 +1623,15 @@ filesystem, processes and mounts from the developer's system.
     and logged, not asserted (the device and scheduler decide it): the
     foreground loop's throughput and p99 latency with and without the
     tally, and the I/O scheduler of the device;
+  - `background_tally_backs_off_under_io_pressure` (kernel VM, where the
+    pressure is the guest's own and reproducible): a guest whose test
+    disk is throttled by QEMU (`iops` limit) runs `watch --tally-only`
+    over a fixture; a writer then saturates the disk until the guest's
+    `/proc/pressure/io` `some avg10` exceeds 10 %, then stops. Asserted:
+    diskgc logs the back-off, its batches per minute (from its log) fall
+    at least 4 times below the unloaded phase while pressure is high,
+    and recover within 2 minutes after it falls. A container cannot
+    prove this: `/proc/pressure` there is the host's;
   - `sync_tally_is_useful_within_its_budget`: a cold `ensure
     --tally-budget 5s` over the fixture, with two selected tiers and a
     goal that needs both, reports `coverage: complete`, acts on the first

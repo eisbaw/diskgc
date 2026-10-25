@@ -155,17 +155,22 @@ out-link is gone ([safety.md](docs/safety.md#nix-store)).
 - With available space steady between the thresholds, `watch` makes zero
   deletions and its tally keeps its duty cycle.
 - `watch`'s background tally does not load the system: it keeps its duty
-  cycle at idle priority and pauses while a reclaim runs. `ensure`'s
+  cycle at idle priority, backs off further while the kernel reports
+  I/O, memory or CPU pressure (where PSI is available; otherwise the
+  duty cycle alone applies), and pauses while a reclaim runs. `ensure`'s
   synchronous tally may load the machine, runs at full speed within
   `--tally-budget`, and yields a useful index: every selected tier
-  discovered and queued in policy order before any tree is sized.
+  discovered and queued in policy order before any tree is sized, then
+  only the first tier's stale candidates sized.
   Deletions act on that index and check every candidate live. There is
   no latency target; time to the first deletion is measured and
   reported by the scale tests.
-- Each `ensure` that tallied or acted leaves a snapshot the next run
-  starts from, so `ensure`-only machines get warmer with each call; a
-  corrupt, mismatched or other user's snapshot is ignored, never
-  trusted.
+- Each `ensure` that tallies leaves a snapshot the next run starts
+  from, so an `ensure`-only machine gets warmer each time it reclaims;
+  an `ensure` that finds the space already there stays an instant no-op
+  (no tally, no write), and warmth on rarely-full machines comes from
+  `watch` or `watch --tally-only`. A corrupt, mismatched or other
+  user's snapshot is ignored, never trusted.
 - New stale cruft created after the last tally is deleted before any
   pressure tier runs.
 - Every action produces one log line and one JSON `actions` entry; every
@@ -320,7 +325,9 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   coverage. It can also be stale or cut short by `--tally-budget`;
   per-tier discovery and live checks keep all of that a speed problem.
   The background tally's duty cycle bounds the worker, not the disk (idle
-  I/O priority does nothing on NVMe without BFQ); the synchronous tally
+  I/O priority does nothing on NVMe without BFQ); the pressure brake
+  reacts to load only where the kernel provides PSI, and only after it
+  shows in a 10-second average; the synchronous tally
   deliberately loads the machine for at most its budget.
 - **Eligibility walks on giant candidates** (and expanding large blocks)
   delay the first deletion; time to first deletion is measured, not

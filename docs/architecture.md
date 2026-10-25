@@ -259,14 +259,29 @@ the order of work.
   not the device: it does not measure device busy time, and several
   `watch` processes on one disk add up. It also runs at idle I/O
   priority and `nice 19` (idle I/O priority is honoured only by the BFQ
-  scheduler; on NVMe with scheduler `none` the duty cycle is the only
-  limit). Actual contention is measured by a container test
+  scheduler; on NVMe with scheduler `none` it does nothing). Actual
+  contention is measured by a container test
   ([testing.md](testing.md#5-end-to-end-tests-in-containers)). Big trees
   are tallied across many batches via their `cursor` (the path of names
   below the unit's root and the last name done in each directory, in
   sorted order), which survives entries vanishing under it (`ENOENT`
   ends that branch). Cursors are not persisted; a unit whose walk did
   not finish counts as untallied.
+- **Pressure brake (background)** (Mark, 2026-10-25: duty cycle and
+  priorities, and back off on measured pressure). Before each batch the
+  tally reads the system-wide pressure stall information
+  (`/proc/pressure/io`, `memory` and `cpu`, the `some avg10` value; a
+  read-only `Host` query). The system is **under pressure** when
+  `io` or `memory` is above 10 % or `cpu` above 50 % (CPU is held to a
+  higher bar: a busy laptop runs at load 5 to 18, and `nice 19` already
+  yields the CPU). Under pressure the batch is skipped and the sleep
+  doubles, from 19 × the last batch's *t* (at least 1 s) up to 60 s;
+  the first reading below all three thresholds runs a batch and returns
+  the sleep to 19 × *t*. Where PSI is absent (a kernel without
+  `CONFIG_PSI`, booted with `psi=0`, or `/proc/pressure` unreadable),
+  the duty cycle and priorities alone apply, with one log line at
+  start. The thresholds and the 60 s cap are tentative constants in
+  code. The synchronous tally ignores pressure.
 - **Schedule (background).** Three kinds of work, each with a period:
   discovery of each (profile, root) every 5 minutes (listing the profile
   roots for new and vanished candidates), a re-check of each unit every
@@ -291,25 +306,32 @@ the order of work.
      (`max(mtime, ctime)` of its root). A (profile, root) whose
      discovery in the loaded snapshot is younger than 5 minutes is not
      listed again.
-  2. **Depth (sizing):** tally the trees of the discovered candidates
-     (size, `newest_change`), tier by tier in policy order, within each
-     tier in the tier's order by the provisional key (`oldest`: oldest
-     first; `best-fit`: the snapshot's estimate, largest first, unknown
-     last). A unit tallied less than 60 minutes ago is not tallied again.
+  2. **Depth (sizing), first tier only** (Mark, 2026-10-25): tally the
+     trees (size, `newest_change`) of the **first** selected tier's
+     stale units, that is never tallied or tallied more than 60 minutes
+     ago, in the tier's order by the provisional key (`oldest`: oldest
+     first; `best-fit`: the stored estimate, largest first, unknown
+     last). The first tier is the earliest in policy order with a
+     discovered candidate: the one that will act first. Later tiers keep
+     their stored sizes and ages for their order (units without any
+     are ordered by the provisional key, after sized ones under
+     `best-fit`); the reclaim walk's own checks size what it acts on.
+     The same rule applies with and without a seed. The tally then
+     ends, even with budget left, so the reclaim starts sooner.
 
   **Useful** means: when pass 1 has finished, every selected tier has a
   queue in its order and the reclaim walk can act on it; pass 2 only
-  sharpens the order (true `newest_change`, sizes for `best-fit` and the
-  report). When the budget ends during pass 1, the walk's per-tier
+  sharpens the first tier's order (true `newest_change`, sizes for
+  `best-fit` and the report). When the budget ends during pass 1, the walk's per-tier
   discovery covers what is missing. Whether one worker or several walk
   disjoint trees is an implementation choice measured on the 100,000-
   entry fixture, not a contract.
 - **Sources of a run's index.** `watch` uses its own live index.
   `ensure` and `survey` load the snapshot as a **seed** when it is valid
   (Snapshot, below), whatever its age, and run the synchronous tally on
-  it: a fresh seed leaves little to do, an old one is re-listed and
-  re-tallied as the budget allows, and either way the seed only orders
-  work. Without a valid snapshot, or with `--no-index`, the synchronous
+  it: discovery is redone for roots not listed in the last 5 minutes,
+  and only the first tier's stale units are re-sized; either way the
+  seed only orders work. (`survey` sizes everything it reports.) Without a valid snapshot, or with `--no-index`, the synchronous
   tally starts from nothing.
 - **`--no-index`:** the run neither reads nor writes the snapshot; it
   builds its index from nothing by the synchronous tally (within
@@ -324,7 +346,10 @@ the order of work.
     once, after its reclaim walk, when its run tallied or acted on
     anything, before its deadline (never past it) and not after a
     terminating signal. A run that exits 0 at once because space is
-    already there tallied nothing and writes nothing. `survey` and
+    already there stays an instant no-op (Mark, 2026-10-25): no tally,
+    no snapshot write. Warmth on a machine that is rarely short of
+    space comes from `watch` or `watch --tally-only`, not from
+    `ensure`. `survey` and
     `--dry-run` do not write (read-only commands write no state).
   - **Never at the cost of the goal.** The snapshot is usually on
     `/home`, possibly the filesystem just reclaimed. When the state
