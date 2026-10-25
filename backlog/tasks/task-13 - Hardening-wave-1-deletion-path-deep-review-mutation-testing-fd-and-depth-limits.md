@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:40'
-updated_date: '2026-10-25 08:38'
+updated_date: '2026-10-25 20:18'
 labels:
   - wave-1
   - hardening
@@ -17,7 +17,7 @@ dependencies:
 references:
   - docs/testing.md
   - docs/safety.md
-priority: high
+priority: medium
 ---
 
 ## Description
@@ -77,6 +77,8 @@ Filed: TASK-165 (release-blocker); TASK-166 (fd limit: measured on the host, see
 AC status: #1 findings are filed (not fixed); #2 is not met (TASK-171, TASK-165); #3 is not met (2 of ~15 files swept); #4 was not assessed. Leave TASK-13 open.
 
 COMPASS round 3 (2026-10-25): dropped the TASK-60 edge (runs async now). Mutation work consolidated into TASK-177.
+
+COMPASS round 4 (2026-10-25): async under the 10-25 ruling; umbrella for TASK-177/129/170.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

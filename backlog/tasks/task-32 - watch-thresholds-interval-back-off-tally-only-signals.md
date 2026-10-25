@@ -4,13 +4,14 @@ title: 'watch: thresholds, interval, back-off, --tally-only, signals'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 17:43'
+updated_date: '2026-10-25 20:18'
 labels:
   - wave-3
   - cli
 dependencies:
   - TASK-31
   - TASK-117
+  - TASK-231
 references:
   - docs/reference.md#watch
 priority: high
@@ -35,6 +36,8 @@ Why: the laptop use case is a long-running service. Implement watch per docs/ref
 Orchestrator 2026-10-23 (design audit): now depends on TASK-117 (watch machine interface design).
 
 Design (TASK-117) settled in 2d6c1ba on branch watch-design: implement per docs/reference.md#watch and the watch scenarios in docs/testing.md; unit restart requirement for TASK-119 in architecture.md Deployment.
+
+COMPASS round 4 (2026-10-25): watch must not ship with the known finder-set id exhaustion crash (TASK-231).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

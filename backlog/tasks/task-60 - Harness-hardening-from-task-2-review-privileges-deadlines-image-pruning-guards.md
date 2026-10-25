@@ -6,14 +6,14 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 23:54'
-updated_date: '2026-10-24 07:45'
+updated_date: '2026-10-25 20:18'
 labels:
   - wave-1
   - hardening
   - testing
 dependencies:
   - TASK-2
-priority: high
+priority: medium
 ---
 
 ## Description

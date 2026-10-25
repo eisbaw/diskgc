@@ -6,13 +6,15 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 17:21'
+updated_date: '2026-10-25 20:18'
 labels:
   - wave-3
   - irreversible
   - safety
 dependencies:
-  - TASK-30
+  - TASK-29
+  - TASK-182
+  - TASK-196
 references:
   - docs/architecture.md
   - docs/testing.md
@@ -53,6 +55,8 @@ Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/arc
 AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's decisions 2026-10-25. Old #3 (meets the PRD's 10 s bound) replaced: the bound is dropped.
 
 2026-10-25: AC wording bucket -> block (collapse model, design 076c5ec).
+
+COMPASS round 4 (2026-10-25): 31 no longer waits on TASK-30 (the reclaim walk needs an index, not a saved one; stale/corrupt scenarios use injected indexes). It waits on the sync tally (29) and on the mount-screen unification (182/196 item 1) so the screen lives inside resolve_in before the index adds callers.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

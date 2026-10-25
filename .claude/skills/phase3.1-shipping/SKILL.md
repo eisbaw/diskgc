@@ -452,8 +452,9 @@ they never override the Invariants.
   not a dev build.
 - 2026-10-24: disk is the binding resource (dropped to 16-17 GiB free
   twice today; Nix store growth from static/glibc/VM builds). Run
-  `nix develop -c just scratch-tally` before heavy work; share
-  `tmp/target`; never create extra target dirs. A hook blocks `rm`;
+  `nix develop -c just scratch-tally` before heavy work; each worktree
+  has its own target (see the NEVER-share gotcha); remove merged worktrees
+  promptly. A hook blocks `rm`;
   `git worktree remove` of merged clean worktrees is the cleanup path.
 - 2026-10-25: two walk containers whose users map to the same host uid
   and that see each other's processes (`--pid=host`) make them
