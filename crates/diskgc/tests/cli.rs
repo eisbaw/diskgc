@@ -830,6 +830,13 @@ fn json_anywhere_gives_one_object() {
             &["profiles", "list", "--config", "--json"],
             "the configuration file must be an absolute path",
         ),
+        // `check` has no --json flag, but `--json` as --config's value
+        // still asks for JSON (TASK-198: this is the check arm's JSON
+        // branch, reachable only this way).
+        (
+            &["check", "--config", "--json"],
+            "the configuration file must be an absolute path",
+        ),
         (
             &["profiles", "--json"],
             "list, show NAME or test is required",
