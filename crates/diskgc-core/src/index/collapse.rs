@@ -79,7 +79,7 @@ use super::trie::{
 use super::unit::{Block, Family, FinderSetId, Identity, Single};
 use super::{Index, MountKey, finder_set_bytes, name_family};
 use crate::host::{Access, Base, Errno, Host, HostError, MountEntry};
-use crate::resolve::{ResolveError, Want, mount_for, open_beneath, resolve_in, screen_mount_chain};
+use crate::resolve::{ResolveError, Want, mount_for, open_beneath, resolve_in};
 
 /// Units estimated at or above this (64 MiB) keep their exact places
 /// longest: they matter most to freeing space and to `best-fit`.
@@ -903,9 +903,9 @@ pub(crate) fn reach_site<H: Host>(
     key: &MountKey,
     site: &Path,
 ) -> Result<Option<(H::Fd, u64, Identity)>, HostError> {
-    if screen_mount_chain(mounts, site).is_err() {
-        return Ok(None);
-    }
+    // A refused mount chain (resolve_in screens it) is `None` below: the
+    // site's own level is the trie's mount, and its parent's chain holds
+    // that mount too.
     let Ok(mount) = mount_for(mounts, site) else {
         return Ok(None);
     };

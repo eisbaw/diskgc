@@ -241,11 +241,11 @@ fn unreachable(e: ResolveError) -> LockError {
         ResolveError::Missing { .. } => LockError::Missing {
             detail: e.to_string(),
         },
-        ResolveError::UnsafePath { .. } | ResolveError::UnsupportedFs { .. } => {
-            LockError::Unusable {
-                detail: e.to_string(),
-            }
-        }
+        ResolveError::UnsafePath { .. }
+        | ResolveError::UnsupportedFs { .. }
+        | ResolveError::Screened { .. } => LockError::Unusable {
+            detail: e.to_string(),
+        },
         ResolveError::Host(error) => LockError::Failed(error),
     }
 }

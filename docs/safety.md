@@ -3117,6 +3117,19 @@ when the output pipes remain open.
 All directory work is fd-relative. To reach a configured root or a
 candidate:
 
+0. Screen the mount at every prefix of the path, from `mountinfo` alone
+   (Before the walk): a network, FUSE or untriggered automount mount, a
+   bind of systemd's PrivateTmp, or a prefix with no clear mount refuses
+   the path before anything on it is opened or `statx`ed (`unsupported_fs`
+   for the first, `unsafe_path` for the others; a root's refusal keeps the
+   wording of Before the walk). Every lookup takes this step, inside the
+   one resolution function, so no caller can skip it (TASK-182): roots,
+   protect roots, a recorded build source, a launcher link's parents, a
+   lock's parent, Docker's storage directories and its command's working
+   directory `/`, the host lock directory.
+   The one exception is `PATH`: the filesystem the operator asked about is
+   measured whatever its type; nothing is searched or deleted through it,
+   and a `PATH` on a dead network mount can block there.
 1. In `/proc/self/mountinfo`, pick the deepest mount point that is a path
    prefix of the configured path (after unescaping `\040` and friends;
    where mounts are stacked, the topmost one: the one no other mount at that

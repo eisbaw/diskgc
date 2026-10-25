@@ -51,16 +51,14 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use super::judge::{
-    check_root, mounted_at_or_inside, skip_or_stop, source_where, unreachable_root,
-};
+use super::judge::{RootRefused, mounted_at_or_inside, resolve_root, skip_or_stop, source_where};
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip, Work};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
 use crate::outcome::Stop;
 use crate::profile::EntryType;
-use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
+use crate::resolve::{ResolveError, Resolved, Want, is_mount_point, open_beneath};
 
 /// A candidate as discovery found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,24 +164,17 @@ fn discover_into<H: Host>(
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
         check_deadline(host, deadline, root)?;
-        match check_root(root, &mounts) {
-            Ok(()) => {}
-            Err(Ok(why)) => {
+        let resolved = match resolve_root(host, root, &mounts)? {
+            Ok(resolved) => resolved,
+            Err(RootRefused::PrivateTmp(why)) => {
                 // A misconfigured root (an error that excludes the tier),
                 // reported as the reach of a found candidate reports it.
                 out.private_tmp += 1;
                 out.refused.push(private_root(root, &why));
                 continue;
             }
-            Err(Err(skip)) => {
+            Err(RootRefused::Skip(skip)) => {
                 out.refused.push(skip);
-                continue;
-            }
-        }
-        let resolved = match resolve_in(host, &mounts, root, Want::Directory) {
-            Ok(resolved) => resolved,
-            Err(e) => {
-                out.refused.push(unreachable_root(root, e)?);
                 continue;
             }
         };
@@ -371,24 +362,16 @@ impl DiscoverCursor {
             error,
         })?;
         let root = self.root.clone();
-        match check_root(&root, &mounts) {
-            Ok(()) => {}
-            Err(Ok(why)) => {
+        let resolved = match resolve_root(host, &root, &mounts)? {
+            Ok(resolved) => resolved,
+            Err(RootRefused::PrivateTmp(why)) => {
                 out.private_tmp += 1;
                 out.refused.push(private_root(&root, &why));
                 self.finish();
                 return Ok(Stepped::Done);
             }
-            Err(Err(skip)) => {
+            Err(RootRefused::Skip(skip)) => {
                 out.refused.push(skip);
-                self.finish();
-                return Ok(Stepped::Done);
-            }
-        }
-        let resolved = match resolve_in(host, &mounts, &root, Want::Directory) {
-            Ok(resolved) => resolved,
-            Err(e) => {
-                out.refused.push(unreachable_root(&root, e)?);
                 self.finish();
                 return Ok(Stepped::Done);
             }
@@ -617,10 +600,6 @@ struct Walk<'a, H: Host> {
 }
 
 impl<H: Host> Walk<'_, H> {
-    fn is_mount_point(&self, at: &Path) -> bool {
-        self.mounts.iter().any(|m| m.mount_point == at)
-    }
-
     /// The entry `name` of the directory `dir` at `path`, `level` names
     /// below the root, with the patterns `active` (indices) still matching
     /// the way down.
@@ -663,7 +642,7 @@ impl<H: Host> Walk<'_, H> {
         let ends = matching
             .iter()
             .any(|&i| self.find.patterns[i].depth() == level + 1);
-        if self.is_mount_point(&at) {
+        if is_mount_point(self.mounts, &at) {
             // Never statted: a dead mount would hang it.
             if ends && !excluded {
                 self.out.candidates.push((

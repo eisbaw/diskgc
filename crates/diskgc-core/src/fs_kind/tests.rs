@@ -239,8 +239,10 @@ fn mount(
 /// task-68's QA finding); on a network filesystem; or with no mount.
 #[test]
 fn a_root_is_judged_by_its_path_and_its_mounts_line_first() {
-    use super::judge::check_root;
+    use super::judge::{RootRefused, resolve_root};
     use crate::engine::Reason;
+    use crate::resolve::screen_mount_chain;
+    use crate::resolve::tests::Scripted;
     let mounts = [
         mount(1, 0, "/", "ext4", "/"),
         mount(30, 1, "/tmp", "tmpfs", "/"),
@@ -255,25 +257,42 @@ fn a_root_is_judged_by_its_path_and_its_mounts_line_first() {
         mount(33, 1, "/home/me/remote", "fuse.sshfs", "/"),
         mount(34, 1, "/srv/plain", "tmpfs", "/srv-data"),
     ];
-    let judged = |root: &str| check_root(Path::new(root), &mounts);
-    assert_eq!(judged("/tmp"), Ok(()));
-    assert_eq!(judged("/srv/plain/x"), Ok(()));
+    // Any openat2 or statx fails the test: a refusal touches nothing.
+    let judged = |root: &str, mounts: &[crate::host::MountEntry]| {
+        let host = Scripted::never_opened(mounts.to_vec());
+        match resolve_root(&host, Path::new(root), mounts) {
+            Ok(Err(refused)) => refused,
+            Ok(Ok(_)) => panic!("{root}: resolved"),
+            Err(stop) => panic!("{root}: {stop}"),
+        }
+    };
+    for local in ["/tmp", "/srv/plain/x"] {
+        assert!(!path_in_private_tmp(Path::new(local)), "{local}");
+        assert_eq!(
+            screen_mount_chain(&mounts, Path::new(local)),
+            Ok(()),
+            "{local}"
+        );
+    }
     for private in [
         "/tmp/systemd-private-abc-x.service-y/tmp",
         "/srv/bound",
         "/srv/bound/sub",
     ] {
-        assert!(matches!(judged(private), Err(Ok(_))), "{private}");
+        assert!(
+            matches!(judged(private, &mounts), RootRefused::PrivateTmp(_)),
+            "{private}"
+        );
     }
     for network in ["/mnt/nas", "/mnt/nas/scratch", "/home/me/remote/x"] {
-        match judged(network) {
-            Err(Err(skip)) => assert_eq!(skip.reason, Reason::UnsupportedFs, "{network}"),
-            other => panic!("{network}: {other:?}"),
+        match judged(network, &mounts) {
+            RootRefused::Skip(skip) => assert_eq!(skip.reason, Reason::UnsupportedFs, "{network}"),
+            RootRefused::PrivateTmp(why) => panic!("{network}: {why}"),
         }
     }
-    match check_root(Path::new("/tmp"), &[]) {
-        Err(Err(skip)) => assert_eq!(skip.reason, Reason::UnsafePath),
-        other => panic!("{other:?}"),
+    match judged("/tmp", &[]) {
+        RootRefused::Skip(skip) => assert_eq!(skip.reason, Reason::UnsafePath),
+        RootRefused::PrivateTmp(why) => panic!("{why}"),
     }
 }
 

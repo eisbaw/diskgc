@@ -21,7 +21,7 @@ use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::{Delete, Host, MountEntry};
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
-use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in, screen_mount_chain};
+use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in};
 use crate::select;
 use crate::units::Size;
 
@@ -534,7 +534,7 @@ enum RootFinding {
 }
 
 /// Mounts first (docs/safety.md, Before the walk): a path whose mount chain
-/// [`screen_mount_chain`] refuses (a FUSE, network or untriggered automount
+/// [`crate::resolve::screen_mount_chain`] refuses (a FUSE, network or untriggered automount
 /// mount, PrivateTmp, an unclear mount) is never resolved, so it is never
 /// "missing". Opening and `statx`ing a dead FUSE mount point hangs in the
 /// kernel (TASK-178), and a lookup through an automount point mounts it
@@ -542,14 +542,11 @@ enum RootFinding {
 /// a root from the same screen without touching it. `None`: the root is
 /// there, or what is wrong with it is the executor's to report.
 fn root_finding<H: Host>(host: &H, mounts: &[MountEntry], path: &Path) -> Option<RootFinding> {
-    if let Err(why) = screen_mount_chain(mounts, path) {
-        return Some(RootFinding::NotLookedUp(why));
+    match resolve_in(host, mounts, path, Want::Directory) {
+        Err(ResolveError::Screened { why, .. }) => Some(RootFinding::NotLookedUp(why)),
+        Err(ResolveError::Missing { .. }) => Some(RootFinding::Missing),
+        _ => None,
     }
-    matches!(
-        resolve_in(host, mounts, path, Want::Directory),
-        Err(ResolveError::Missing { .. })
-    )
-    .then_some(RootFinding::Missing)
 }
 
 /// The roots `config` supplies, as written, and where ("config PATH:

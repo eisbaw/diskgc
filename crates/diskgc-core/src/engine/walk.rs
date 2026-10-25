@@ -642,6 +642,9 @@ fn open_failure(path: PathBuf, failed: OpenFailed) -> WalkStop {
                 ..
             } => (Reason::ContainsMount, e.to_string()),
             ResolveError::UnsupportedFs { .. } => (Reason::UnsupportedFs, e.to_string()),
+            // The walk descends with open_beneath, which never screens;
+            // mapped for completeness.
+            ResolveError::Screened { why, .. } => (why.skip_reason(), e.to_string()),
             // Gone, or no longer a directory (a symlink now): it changed.
             ResolveError::Missing { .. }
             | ResolveError::UnsafePath { .. }

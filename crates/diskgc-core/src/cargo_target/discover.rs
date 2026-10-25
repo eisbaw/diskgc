@@ -29,8 +29,8 @@ use crate::host::{
     Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
 };
 use crate::resolve::{
-    MountScreenError, ResolveError, Resolved, Unsafe, Want, open_beneath, resolve_in,
-    screen_mount_chain,
+    MountScreenError, ResolveError, Resolved, Unsafe, Want, is_mount_point, open_beneath,
+    resolve_in,
 };
 
 /// How far below a root discovery looks: a target at most this many
@@ -135,26 +135,22 @@ fn resolve_root<H: Host>(
         )));
     }
     let mounts = host.mountinfo().map_err(ResolveError::Host)?;
-    match screen_mount_chain(&mounts, root) {
-        Ok(()) => {}
-        Err(MountScreenError::Unsafe { why, .. }) => {
-            return Err(ResolveError::UnsafePath {
+    // resolve_in screens the mount chain before it opens anything there.
+    match resolve_in(host, &mounts, root, Want::Directory) {
+        Ok(resolved) => Ok(Ok(LocalRoot { resolved, mounts })),
+        Err(ResolveError::Screened { why, .. }) => match why {
+            MountScreenError::Unsafe { why, .. } => Err(ResolveError::UnsafePath {
                 path: root.to_owned(),
                 why,
-            });
-        }
-        Err(MountScreenError::Networked { fs_type, .. }) => {
-            return Ok(Err(network_fs(root, &fs_type)));
-        }
-        Err(MountScreenError::PrivateTmp { .. }) => {
-            return Ok(Err(private_root(
+            }),
+            MountScreenError::Networked { fs_type, .. } => Ok(Err(network_fs(root, &fs_type))),
+            MountScreenError::PrivateTmp { .. } => Ok(Err(private_root(
                 root,
                 "the mount chain includes a bind mount of systemd PrivateTmp",
-            )));
-        }
+            ))),
+        },
+        Err(error) => Err(error),
     }
-    resolve_in(host, &mounts, root, Want::Directory)
-        .map(|resolved| Ok(LocalRoot { resolved, mounts }))
 }
 
 fn private_root(root: &Path, why: &str) -> Skip {
@@ -183,6 +179,7 @@ fn unreachable_root(root: &Path, e: ResolveError) -> Result<Skip, Stop> {
         ResolveError::UnsafePath { .. } => Reason::UnsafePath,
         ResolveError::UnsupportedFs { .. } => Reason::UnsupportedFs,
         ResolveError::Missing { .. } => Reason::Missing,
+        ResolveError::Screened { why, .. } => why.skip_reason(),
         ResolveError::Host(error) => {
             return match failure::<Infallible>(root.to_owned(), "open", error)? {
                 Err(skip) => Ok(skip),
@@ -263,7 +260,7 @@ fn subdir<H: Host>(
     name: &OsString,
     path: &Path,
 ) -> Judged<Option<Stat>> {
-    if mount_at(mounts, path) {
+    if is_mount_point(mounts, path) {
         return Ok(Err(mounted(path)));
     }
     let stat = match host.statx(Base::Dir(dir), Path::new(name)) {
@@ -285,10 +282,6 @@ fn subdir<H: Host>(
         )));
     }
     Ok(Ok((file_type == FileType::Directory).then_some(stat)))
-}
-
-fn mount_at(mounts: &[MountEntry], path: &Path) -> bool {
-    mounts.iter().any(|entry| entry.mount_point == path)
 }
 
 fn mounted(path: &Path) -> Skip {
@@ -504,7 +497,7 @@ fn profile_dir_in<H: Host>(
         if is_private_tmp(&name) {
             return Ok(Err(private_entry(&at)));
         }
-        if mount_at(mounts, &at) {
+        if is_mount_point(mounts, &at) {
             return Ok(Err(mounted(&at)));
         }
         let stat = match host.statx(Base::Dir(fd), Path::new(&name)) {
@@ -797,7 +790,7 @@ impl DiscoverCursor {
                     continue;
                 };
                 let at = path.join(&name);
-                if is_private_tmp(&name) || mount_at(mounts, &at) {
+                if is_private_tmp(&name) || is_mount_point(mounts, &at) {
                     self.frames[depth].next += 1;
                     continue;
                 }
@@ -896,7 +889,7 @@ impl<H: Host> Walk<'_, H> {
     /// descended into.
     fn target_at(&mut self, fd: &H::Fd, path: &Path, parent_ino: Option<u64>) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
-        if mount_at(self.mounts, &tag) {
+        if is_mount_point(self.mounts, &tag) {
             return Ok(Err(mounted(&tag)));
         }
         if !judged!(has_valid_tag(self.host, fd, self.mount_id, path)) {
@@ -982,7 +975,7 @@ fn has_manifest<H: Host>(
     let manifest = path.join(CARGO_MANIFEST);
     // statx of a mounted file can wait forever for a dead FUSE server.
     // A manifest we cannot safely inspect does not establish attachment.
-    if mount_at(mounts, &manifest) {
+    if is_mount_point(mounts, &manifest) {
         return Ok(false);
     }
     match host.statx(Base::Dir(dir), Path::new(CARGO_MANIFEST)) {
@@ -1058,7 +1051,7 @@ pub fn reach<H: Host>(
         if is_private_tmp(name) {
             return Ok(Err(private_entry(&at)));
         }
-        if mount_at(&mounts, &at) {
+        if is_mount_point(&mounts, &at) {
             return Ok(Err(mounted(&at)));
         }
         let (fd, stat) = match open_beneath(
@@ -1155,6 +1148,7 @@ pub fn reach<H: Host>(
 mod private_tmp_tests {
     use super::*;
     use crate::host::Dev;
+    use crate::resolve::screen_mount_chain;
 
     #[test]
     fn a_bind_mounted_private_tmp_root_is_identified_without_opening_it() {

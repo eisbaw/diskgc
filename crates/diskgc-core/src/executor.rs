@@ -47,9 +47,7 @@ use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::{self, Preflight, Ready};
 use crate::config::{self, Order};
 use crate::docker_backend::{self, Binding, Bound, Storage};
-use crate::engine::{
-    Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below, may_be_networked,
-};
+use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, EntryFilter, Find, NegatedMixedFilter};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno, Host, HostError,
@@ -63,7 +61,8 @@ use crate::report::{
     Report, SkipEntry, Status, after_lock_timeout, conclude, human_space_values, signed_bytes,
 };
 use crate::resolve::{
-    ResolveError, Resolved, Want, mount_for, resolve, resolve_in, screen_mount_chain,
+    MountScreenError, ResolveError, Resolved, Want, resolve, resolve_in, resolve_unscreened,
+    screen_mount_chain,
 };
 use crate::select::{self, Factor};
 use crate::units::{Size, format_age, format_bytes};
@@ -877,13 +876,16 @@ fn measure<H: Host>(
     request: &Request,
     report: &mut Report,
 ) -> Result<Measured<H::Fd>, MeasureFailure> {
-    let at = resolve(host, &request.path, Want::Directory).map_err(|error| {
+    // PATH is the one lookup without the mount screen: the operator named
+    // this filesystem to measure (resolve_unscreened).
+    let at = resolve_unscreened(host, &request.path, Want::Directory).map_err(|error| {
         let message = format!("PATH {}: {error}", request.path.display());
         match error {
             ResolveError::Host(_) => MeasureFailure::Host(message),
             ResolveError::UnsafePath { .. }
             | ResolveError::UnsupportedFs { .. }
-            | ResolveError::Missing { .. } => MeasureFailure::Usage(message),
+            | ResolveError::Missing { .. }
+            | ResolveError::Screened { .. } => MeasureFailure::Usage(message),
         }
     })?;
     report.mount = Some(at.mount.mount_point.clone());
@@ -1126,15 +1128,8 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 message,
             })
         };
-        // A local bind mount can sit below an unsafe ancestor. Screen the
-        // full mount chain before resolve_in opens any of it.
-        if let Err(why) = screen_mount_chain(&mounts, root) {
-            error(
-                ErrorCause::Safety,
-                format!("root {}: {why}; the tier is excluded", root.display()),
-            );
-            continue;
-        }
+        // A local bind mount can sit below an unsafe ancestor: resolve_in
+        // screens the full mount chain before it opens any of it.
         match resolve_in(host, &mounts, root, Want::Directory) {
             Ok(resolved) if resolved.stat.dev != requested_dev => {
                 if !skipped
@@ -1155,6 +1150,10 @@ fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPr
                 }
             }
             Ok(_) | Err(ResolveError::Missing { .. }) => {}
+            Err(ResolveError::Screened { why, .. }) => error(
+                ErrorCause::Safety,
+                format!("root {}: {why}; the tier is excluded", root.display()),
+            ),
             Err(ResolveError::UnsafePath { why, .. }) => error(
                 ErrorCause::Safety,
                 format!(
@@ -1286,6 +1285,9 @@ fn overlaps_checked_until<H: Host>(
     })
 }
 
+/// Screens the candidate and every match before any of them is resolved,
+/// so a refused chain is an error whichever paths the comparison later
+/// needs ([`resolve_in`] screens each one it reaches as well).
 fn screen_overlap_mounts(
     mounts: &[MountEntry],
     candidate: &Path,
@@ -1293,27 +1295,26 @@ fn screen_overlap_mounts(
     mut check_time: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     for path in std::iter::once(candidate).chain(matches.iter().map(PathBuf::as_path)) {
-        for ancestor in path.ancestors() {
-            check_time()?;
-            let mount = mount_for(mounts, ancestor).map_err(|error| {
-                format!("cannot prove overlap at {}: {error}", ancestor.display())
-            })?;
-            if may_be_networked(&mount.fs_type) {
-                return Err(format!(
-                    "cannot prove overlap at {}: filesystem type {} may block on I/O",
-                    ancestor.display(),
-                    mount.fs_type
-                ));
+        check_time()?;
+        screen_mount_chain(mounts, path).map_err(|why| match why {
+            MountScreenError::Unsafe { at, why } => {
+                format!("cannot prove overlap at {}: {why}", at.display())
             }
-            if fs_kind::path_in_private_tmp(&mount.fs_root) {
-                return Err(format!(
-                    "cannot prove overlap at {}: mount {} is bound from systemd PrivateTmp root {}",
-                    ancestor.display(),
-                    mount.mount_point.display(),
-                    mount.fs_root.display()
-                ));
-            }
-        }
+            MountScreenError::Networked { at, fs_type, .. } => format!(
+                "cannot prove overlap at {}: filesystem type {fs_type} may block on I/O",
+                at.display()
+            ),
+            MountScreenError::PrivateTmp {
+                at,
+                mount_point,
+                fs_root,
+            } => format!(
+                "cannot prove overlap at {}: mount {} is bound from systemd PrivateTmp root {}",
+                at.display(),
+                mount_point.display(),
+                fs_root.display()
+            ),
+        })?;
     }
     Ok(())
 }

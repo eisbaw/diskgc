@@ -52,7 +52,7 @@ use crate::host::{
 use crate::outcome::{Judged, Stop};
 use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown, age_secs};
 use crate::resolve::{
-    MountScreenError, ResolveError, Resolved, Want, open_beneath, resolve_in, screen_mount_chain,
+    MountScreenError, ResolveError, Resolved, Want, is_mount_point, open_beneath, resolve_in,
 };
 use crate::units::{format_age, format_duration};
 
@@ -696,21 +696,38 @@ pub(super) fn mounted_at_or_inside(mounts: &[MountEntry], at: &Path) -> Option<S
     Some(Skip::new(Reason::ContainsMount, path, detail))
 }
 
-/// Whether a root may be searched, judged on its path and its mount's
-/// mountinfo line, before anything there is opened or `statx`ed: inside
-/// systemd's PrivateTmp, by a name on its path or by its mount's root (a
-/// bind mount of a `systemd-private-*` directory), `Err(Ok(why))`; on a
-/// network filesystem, or with no clear mount, `Err(Err(skip))`.
-#[allow(clippy::result_large_err)]
-pub(super) fn check_root(root: &Path, mounts: &[MountEntry]) -> Result<(), Result<String, Skip>> {
+/// Why a configured root is not searched or reached.
+pub(super) enum RootRefused {
+    /// A misconfiguration, an error that excludes the tier: inside systemd's
+    /// PrivateTmp, by a name on its path or by its mount's root (a bind
+    /// mount of a `systemd-private-*` directory).
+    PrivateTmp(String),
+    /// A skip: on a network filesystem, no clear mount, or not reachable
+    /// ([`unreachable_root`]).
+    Skip(Skip),
+}
+
+/// The configured root `root` reached under the mount table `mounts`:
+/// judged on its path, then by [`resolve_in`], whose mount screen judges
+/// every mount on the way from its mountinfo line before anything there is
+/// opened or `statx`ed; then opened with no symlink and no mount crossed.
+pub(super) fn resolve_root<H: Host>(
+    host: &H,
+    root: &Path,
+    mounts: &[MountEntry],
+) -> Result<Result<Resolved<H::Fd>, RootRefused>, Stop> {
     if path_in_private_tmp(root) {
-        return Err(Ok(format!(
+        return Ok(Err(RootRefused::PrivateTmp(format!(
             "inside systemd's PrivateTmp ({PRIVATE_TMP_PREFIX}*)"
-        )));
+        ))));
     }
-    match screen_mount_chain(mounts, root) {
-        Ok(()) => Ok(()),
-        Err(MountScreenError::Unsafe { at, why }) => Err(Err(Skip::new(
+    let why = match resolve_in(host, mounts, root, Want::Directory) {
+        Ok(resolved) => return Ok(Ok(resolved)),
+        Err(ResolveError::Screened { why, .. }) => why,
+        Err(e) => return Ok(Err(RootRefused::Skip(unreachable_root(root, e)?))),
+    };
+    Ok(Err(match why {
+        MountScreenError::Unsafe { at, why } => RootRefused::Skip(Skip::new(
             Reason::UnsafePath,
             root.to_owned(),
             format!(
@@ -718,12 +735,12 @@ pub(super) fn check_root(root: &Path, mounts: &[MountEntry]) -> Result<(), Resul
                 root.display(),
                 at.display()
             ),
-        ))),
-        Err(MountScreenError::Networked {
+        )),
+        MountScreenError::Networked {
             at,
             mount_point,
             fs_type,
-        }) => Err(Err(Skip::new(
+        } => RootRefused::Skip(Skip::new(
             Reason::UnsupportedFs,
             root.to_owned(),
             format!(
@@ -732,18 +749,18 @@ pub(super) fn check_root(root: &Path, mounts: &[MountEntry]) -> Result<(), Resul
                 networked_why(&fs_type),
                 mount_point.display()
             ),
-        ))),
-        Err(MountScreenError::PrivateTmp {
+        )),
+        MountScreenError::PrivateTmp {
             at,
             mount_point,
             fs_root,
-        }) => Err(Ok(format!(
+        } => RootRefused::PrivateTmp(format!(
             "ancestor {} is on mount {} whose root is {} in its filesystem: a bind mount of systemd's PrivateTmp ({PRIVATE_TMP_PREFIX}*)",
             at.display(),
             mount_point.display(),
             fs_root.display()
-        ))),
-    }
+        )),
+    }))
 }
 
 /// A root that cannot be reached: its skip reason (`unsafe_path`,
@@ -753,6 +770,7 @@ pub(super) fn unreachable_root(root: &Path, e: ResolveError) -> Result<Skip, Sto
         ResolveError::UnsafePath { .. } => Reason::UnsafePath,
         ResolveError::UnsupportedFs { .. } => Reason::UnsupportedFs,
         ResolveError::Missing { .. } => Reason::Missing,
+        ResolveError::Screened { why, .. } => why.skip_reason(),
         ResolveError::Host(error) => return skip_or_stop(root.to_owned(), "open", error),
     };
     Ok(Skip::new(reason, root.to_owned(), e.to_string()))
@@ -1596,7 +1614,7 @@ pub(crate) fn reach<H: Host>(
     for step in on_the_way {
         let (at, dir) = dirs.last().expect("the root at least");
         let at = at.join(step);
-        if mounts.iter().any(|m| m.mount_point == at) {
+        if is_mount_point(mounts, &at) {
             return Ok(Err(Skip::new(
                 Reason::ContainsMount,
                 at,
@@ -1657,15 +1675,11 @@ fn reach_root<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Resolved<H::Fd>> {
     check_deadline(host, deadline, root)?;
-    match check_root(root, mounts) {
-        Ok(()) => {}
-        Err(Ok(why)) => return Ok(Err(super::discover::private_root(root, &why))),
-        Err(Err(skip)) => return Ok(Err(skip)),
-    }
-    match resolve_in(host, mounts, root, Want::Directory) {
-        Ok(dir) => Ok(Ok(dir)),
-        Err(e) => Ok(Err(unreachable_root(root, e)?)),
-    }
+    Ok(match resolve_root(host, root, mounts)? {
+        Ok(dir) => Ok(dir),
+        Err(RootRefused::PrivateTmp(why)) => Err(super::discover::private_root(root, &why)),
+        Err(RootRefused::Skip(skip)) => Err(skip),
+    })
 }
 
 /// Whether the path `found.path` reaches, now, exactly what [`reach`]
@@ -1723,7 +1737,7 @@ pub(crate) fn still_reached<H: Host>(
         let name = at
             .file_name()
             .expect("a directory below the root has a name");
-        if mounts.iter().any(|m| &m.mount_point == at) {
+        if is_mount_point(mounts, at) {
             return Ok(Err(Skip::new(
                 Reason::ContainsMount,
                 at.clone(),
@@ -1776,7 +1790,7 @@ pub(crate) fn no_keep_markers<H: Host>(
                 "between the root and the candidate",
             )))
         };
-        if mounts.iter().any(|m| m.mount_point == marker) {
+        if is_mount_point(mounts, &marker) {
             return kept();
         }
         check_deadline(host, deadline, &marker)?;

@@ -45,7 +45,7 @@ use crate::host::{
 use crate::index::collapse::{gone_or_error, means_gone};
 use crate::index::memory::{btree_bytes, btree_node_bytes, heap, vec_bytes};
 use crate::index::{Identity, MountKey};
-use crate::resolve::{Resolved, Want, open_beneath, resolve_in};
+use crate::resolve::{Resolved, Want, is_mount_point, open_beneath, resolve_in};
 
 /// Directories below a unit's root the walk enters (each holds an fd
 /// during a step). Deeper ones are counted, not entered.
@@ -285,7 +285,7 @@ pub(super) fn reach<H: Host>(
     let (Some(parent_path), Some(name)) = (root.parent(), root.file_name()) else {
         return Ok(None);
     };
-    if mounts.iter().any(|m| m.mount_point == root) {
+    if is_mount_point(mounts, root) {
         return Ok(None);
     }
     budget.take(parent_path.components().count() + 1);

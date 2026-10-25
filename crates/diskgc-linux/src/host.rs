@@ -3515,7 +3515,7 @@ mod tests {
     use super::*;
     use diskgc_core::engine::Reason;
     use diskgc_core::host::{Cause, Ids};
-    use diskgc_core::resolve::{Want, resolve, resolve_in};
+    use diskgc_core::resolve::{ResolveError, Want, resolve, resolve_in};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::process::CommandExt;
@@ -4164,8 +4164,19 @@ mod tests {
             .expect("root mount")
             .clone();
         fake.mount_point = link.clone();
-        let err = resolve_in(&host, &[fake], &link, Want::Directory)
+        // The real table around the stale line: the mount screen passes
+        // every ancestor, so the refusal is step 2's (opening the point).
+        let with = |extra: MountEntry| {
+            let mut table = mounts.clone();
+            table.push(extra);
+            table
+        };
+        let err = resolve_in(&host, &with(fake), &link, Want::Directory)
             .expect_err("a symlink cannot be a mount point");
+        assert!(
+            matches!(err, ResolveError::UnsafePath { .. }),
+            "not refused by step 2: {err}"
+        );
         assert_eq!(err.skip_reason(), Some(Reason::UnsafePath), "{err}");
 
         let file = dir.0.join("regular");
@@ -4176,7 +4187,7 @@ mod tests {
             .expect("root mount")
             .clone();
         fake_file.mount_point = file.clone();
-        let err = resolve_in(&host, &[fake_file], &file, Want::Directory)
+        let err = resolve_in(&host, &with(fake_file), &file, Want::Directory)
             .expect_err("a regular file cannot be a mount point");
         assert_eq!(err.skip_reason(), Some(Reason::Missing), "{err}");
     }

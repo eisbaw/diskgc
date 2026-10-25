@@ -24,7 +24,7 @@ use diskgc_core::host::{
     Access, Base, Cause, Delete, Host, HostError, LockMode, MonoTime, Pid, ProcError, ProcLink,
     Stat, TryLock, Unlink, WaitLock,
 };
-use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
+use diskgc_core::resolve::{MountScreenError, ResolveError, Unsafe, Want, open_beneath, resolve};
 use diskgc_linux::{LinuxFd, LinuxHost};
 
 use crate::lock_release::within_release_bound;
@@ -780,7 +780,11 @@ fn want(text: &str) -> Result<Want, String> {
 /// A short, stable name for why resolution failed.
 pub fn tag(e: &ResolveError) -> &'static str {
     match e {
-        ResolveError::UnsafePath { why, .. } => match why {
+        ResolveError::UnsafePath { why, .. }
+        | ResolveError::Screened {
+            why: MountScreenError::Unsafe { why, .. },
+            ..
+        } => match why {
             Unsafe::NotAbsolute => "not_absolute",
             Unsafe::NotNormal => "not_normal",
             Unsafe::Symlink => "symlink",
@@ -790,6 +794,14 @@ pub fn tag(e: &ResolveError) -> &'static str {
             Unsafe::MountMismatch { .. } => "mount_mismatch",
             Unsafe::LeftMount { .. } => "left_mount",
         },
+        ResolveError::Screened {
+            why: MountScreenError::Networked { .. },
+            ..
+        } => "networked",
+        ResolveError::Screened {
+            why: MountScreenError::PrivateTmp { .. },
+            ..
+        } => "private_tmp",
         ResolveError::UnsupportedFs { .. } => "unanswered",
         ResolveError::Missing { .. } => "missing",
         ResolveError::Host(_) => "host",

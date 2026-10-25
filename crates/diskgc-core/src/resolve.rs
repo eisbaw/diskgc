@@ -4,6 +4,14 @@
 //!
 //! [`resolve`] reaches an absolute path:
 //!
+//! 0. screen the mount at every prefix of the path from mountinfo alone
+//!    ([`screen_mount_chain`]: no network, FUSE or untriggered automount
+//!    mount, no PrivateTmp bind, no unclear table) before anything on it is
+//!    opened or `statx`ed: a dead server would hang the first call that
+//!    reaches it, and a lookup through an automount point mounts it
+//!    (docs/safety.md, Before the walk). Every caller gets this step; it
+//!    cannot be forgotten (TASK-178, TASK-182). The one exception is
+//!    [`resolve_unscreened`], for `PATH` only;
 //! 1. pick the deepest mount point that is a path prefix in mountinfo
 //!    ([`mount_for`]; stacked mounts: the topmost);
 //! 2. open it (`O_PATH | O_DIRECTORY | O_NOFOLLOW`, `RESOLVE_NO_SYMLINKS`)
@@ -116,6 +124,13 @@ pub enum ResolveError {
     },
     /// `missing`: the path (or a directory on it) does not exist.
     Missing { path: PathBuf, errno: Errno },
+    /// Step 0 refused the mount chain from mountinfo: nothing on the path
+    /// was opened or `statx`ed. `unsupported_fs` for a network, FUSE or
+    /// automount mount, `unsafe_path` otherwise.
+    Screened {
+        path: PathBuf,
+        why: MountScreenError,
+    },
     /// Anything else (permissions, I/O errors, an unreadable mount table).
     Host(HostError),
 }
@@ -128,6 +143,7 @@ impl ResolveError {
             Self::UnsafePath { .. } => Some(Reason::UnsafePath),
             Self::UnsupportedFs { .. } => Some(Reason::UnsupportedFs),
             Self::Missing { .. } => Some(Reason::Missing),
+            Self::Screened { why, .. } => Some(why.skip_reason()),
             Self::Host(_) => None,
         }
     }
@@ -152,12 +168,25 @@ impl fmt::Display for ResolveError {
                 path.display()
             ),
             Self::Missing { path, errno } => write!(f, "missing: {}: {errno}", path.display()),
+            Self::Screened { path, why } => write!(
+                f,
+                "{}: {}: not opened: {why}",
+                why.skip_reason(),
+                path.display()
+            ),
             Self::Host(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for ResolveError {}
+
+/// Whether `path` is a mount point in the table `mounts` (mountinfo text;
+/// nothing is looked up). A name that is one is never `statx`ed or
+/// entered: a dead mount would hang it (docs/safety.md, Before the walk).
+pub fn is_mount_point(mounts: &[MountEntry], path: &Path) -> bool {
+    mounts.iter().any(|m| m.mount_point == path)
+}
 
 /// The mount a path is on: the deepest mount point that is a (component-
 /// wise) prefix of `path`; of mounts stacked on that point, the topmost (the
@@ -207,6 +236,19 @@ pub enum MountScreenError {
     },
 }
 
+impl MountScreenError {
+    /// The skip reason of a path the screen refused: a mount that may block
+    /// on I/O is `unsupported_fs` (as a root on one is, docs/safety.md, No
+    /// network filesystems); an unclear table or a PrivateTmp bind is
+    /// `unsafe_path`.
+    pub fn skip_reason(&self) -> Reason {
+        match self {
+            Self::Networked { .. } => Reason::UnsupportedFs,
+            Self::Unsafe { .. } | Self::PrivateTmp { .. } => Reason::UnsafePath,
+        }
+    }
+}
+
 impl fmt::Display for MountScreenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -238,11 +280,21 @@ impl fmt::Display for MountScreenError {
 }
 
 /// Screen the effective mount at every path prefix from the root down to
-/// `path`, using mountinfo only. The caller may then safely try to resolve
-/// the root; a local bind mount below NFS/FUSE or PrivateTmp still fails.
+/// `path`, using mountinfo only (step 0; [`resolve_in`] runs it on every
+/// path it reaches). A local bind mount below NFS/FUSE or PrivateTmp still
+/// fails. Ancestors are judged deepest first, so the first refusal is the
+/// one nearest `path`.
 pub fn screen_mount_chain(mounts: &[MountEntry], path: &Path) -> Result<(), MountScreenError> {
+    // Only a mount whose point is a prefix of `path` can be the mount of
+    // one of its ancestors: one pass over the table instead of one per
+    // ancestor, since every lookup goes through here.
+    let on_the_way: Vec<MountEntry> = mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.mount_point))
+        .cloned()
+        .collect();
     for at in path.ancestors() {
-        let mount = mount_for(mounts, at).map_err(|why| MountScreenError::Unsafe {
+        let mount = mount_for(&on_the_way, at).map_err(|why| MountScreenError::Unsafe {
             at: at.to_owned(),
             why,
         })?;
@@ -321,7 +373,7 @@ fn open_error(path: &Path, e: HostError) -> ResolveError {
     }
 }
 
-/// Reaches the absolute path `path` (steps 1 to 3 of docs/safety.md, Path
+/// Reaches the absolute path `path` (steps 0 to 3 of docs/safety.md, Path
 /// traversal) and returns an `O_PATH` fd to it.
 pub fn resolve<H: Host>(
     host: &H,
@@ -333,12 +385,11 @@ pub fn resolve<H: Host>(
     resolve_in(host, &mounts, path, want)
 }
 
-/// [`resolve`] against the mount table `mounts`, which the caller read
-/// (and may already have judged: the kind `fs` refuses a root on a network
-/// filesystem by its mountinfo line before anything there is opened or
-/// `statx`ed, docs/safety.md, Before the walk). Step 2 still confirms that
-/// the mount point is that mount, so a table that changed since it was
-/// read is `unsafe_path`, never followed.
+/// [`resolve`] against the mount table `mounts`, which the caller read.
+/// Step 0 ([`screen_mount_chain`]) refuses a path whose mount chain may
+/// block before anything on it is opened ([`ResolveError::Screened`]).
+/// Step 2 still confirms that the mount point is that mount, so a table
+/// that changed since it was read is `unsafe_path`, never followed.
 pub fn resolve_in<H: Host>(
     host: &H,
     mounts: &[MountEntry],
@@ -346,6 +397,37 @@ pub fn resolve_in<H: Host>(
     want: Want,
 ) -> Result<Resolved<H::Fd>, ResolveError> {
     check_path(path)?;
+    screen_mount_chain(mounts, path).map_err(|why| ResolveError::Screened {
+        path: path.to_owned(),
+        why,
+    })?;
+    open_resolved(host, mounts, path, want)
+}
+
+/// [`resolve`] without step 0, for `PATH` only (the source guard
+/// `only_path_skips_the_mount_screen` holds every other caller to the
+/// screen). `PATH` is the filesystem the operator asked about: measuring
+/// it is the request, whatever its type (docs/reference.md, `ensure`), and
+/// the executor never searches or deletes below it through this fd. A
+/// `PATH` on a dead network mount can block here; that is the operator's
+/// own mount, named on the command line.
+pub fn resolve_unscreened<H: Host>(
+    host: &H,
+    path: &Path,
+    want: Want,
+) -> Result<Resolved<H::Fd>, ResolveError> {
+    check_path(path)?;
+    let mounts = host.mountinfo().map_err(ResolveError::Host)?;
+    open_resolved(host, &mounts, path, want)
+}
+
+/// Steps 1 to 3, after the caller's choice about step 0.
+fn open_resolved<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    path: &Path,
+    want: Want,
+) -> Result<Resolved<H::Fd>, ResolveError> {
     let mount = mount_for(mounts, path)
         .map_err(|why| unsafe_path(path, why))?
         .clone();
@@ -467,13 +549,14 @@ impl ResolveError {
             Self::UnsafePath { why, .. } => Self::UnsafePath { path, why },
             Self::UnsupportedFs { missing, .. } => Self::UnsupportedFs { path, missing },
             Self::Missing { errno, .. } => Self::Missing { path, errno },
+            Self::Screened { why, .. } => Self::Screened { path, why },
             other @ Self::Host(_) => other,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! The decision logic against a scripted host. What the kernel does with
     //! the flags (refusing symlinks and mount crossings for real) is proven
     //! by the container tests (diskgc-e2e, `host_resolve_*`).
@@ -489,12 +572,25 @@ mod tests {
     /// A host with a fixed mount table whose `openat2` answers from a list
     /// of (base, path) → result, and whose `statx` of an fd returns the stat
     /// scripted for that fd. Records every `openat2`.
-    struct Scripted {
+    pub(crate) struct Scripted {
         mounts: Vec<MountEntry>,
         /// (path as opened, result): fds are the index into `stats`.
         opens: Vec<(&'static str, Result<usize, Errno>)>,
         stats: Vec<Stat>,
         calls: RefCell<Vec<(String, OpenHow)>>,
+    }
+
+    impl Scripted {
+        /// A host with the table `mounts` that fails the test at any
+        /// `openat2` or `statx`: for paths the mount screen must refuse.
+        pub(crate) fn never_opened(mounts: Vec<MountEntry>) -> Self {
+            Self {
+                mounts,
+                opens: Vec::new(),
+                stats: Vec::new(),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
     }
 
     fn stat(mnt_id: Option<u64>, mount_root: Option<bool>, file_type: FileType) -> Stat {
@@ -987,5 +1083,174 @@ mod tests {
             screen_mount_chain(&[base, boot_trigger, boot], Path::new("/boot/x")),
             Ok(())
         );
+    }
+
+    /// TASK-182: every lookup is screened, so no caller can reach a dead
+    /// or automount mount by forgetting to screen first. The refusal opens
+    /// and `statx`es nothing (`never_opened` fails the test at any call).
+    #[test]
+    fn resolve_screens_the_mount_chain_before_it_opens_anything() {
+        let base = mount(1, 0, "/");
+        let mut network = mount(2, 1, "/net");
+        network.fs_type = "nfs4".into();
+        let local_below_network = mount(3, 2, "/net/local");
+        let mut private = mount(4, 1, "/bound");
+        private.fs_root = "/systemd-private-abc-cups.service-x1/tmp".into();
+        let host = Scripted::never_opened(vec![base, network, local_below_network, private]);
+        for want in [Want::Directory, Want::Any] {
+            let err = resolve(&host, Path::new("/net/local/build"), want).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ResolveError::Screened {
+                        path,
+                        why: MountScreenError::Networked { at, .. },
+                    } if path == Path::new("/net/local/build") && at == Path::new("/net")
+                ),
+                "{err:?}"
+            );
+            assert_eq!(err.skip_reason(), Some(Reason::UnsupportedFs));
+            assert!(
+                err.to_string()
+                    .starts_with("unsupported_fs: /net/local/build: not opened: ancestor /net"),
+                "{err}"
+            );
+            let err = resolve(&host, Path::new("/bound/x"), want).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ResolveError::Screened {
+                        why: MountScreenError::PrivateTmp { .. },
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(err.skip_reason(), Some(Reason::UnsafePath));
+        }
+        assert!(host.calls.borrow().is_empty());
+        // A malformed path is refused as such before the table is judged.
+        assert_eq!(
+            resolve(&host, Path::new("/net/../tmp"), Want::Any).unwrap_err(),
+            unsafe_path(Path::new("/net/../tmp"), Unsafe::NotNormal)
+        );
+    }
+
+    /// The opt-out skips step 0 and nothing else.
+    #[test]
+    fn resolve_unscreened_skips_only_the_mount_screen() {
+        let mut host = tmp_host(good_mount(), Ok(good_target()));
+        host.mounts[1].fs_type = "nfs4".into();
+        assert!(matches!(
+            resolve(&host, Path::new("/tmp/a/b"), Want::Directory),
+            Err(ResolveError::Screened { .. })
+        ));
+        assert!(host.calls.borrow().is_empty());
+        let resolved = resolve_unscreened(&host, Path::new("/tmp/a/b"), Want::Directory)
+            .expect("PATH is measured whatever its type");
+        assert_eq!((resolved.fd, resolved.mount.id), (1, 30));
+        assert_eq!(
+            resolve_unscreened(&host, Path::new("tmp"), Want::Directory).unwrap_err(),
+            unsafe_path(Path::new("tmp"), Unsafe::NotAbsolute)
+        );
+    }
+
+    /// Source guard: the one unscreened lookup is `PATH`'s, in the executor's
+    /// `measure`. Any other caller must go through the screen; adding one
+    /// fails here and needs a documented reason in docs/safety.md first.
+    #[test]
+    fn only_path_skips_the_mount_screen() {
+        fn sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/");
+        let workspace = crates.parent().expect("the workspace");
+        let mut files = Vec::new();
+        for dir in [crates.to_owned(), workspace.join("diskgc-e2e")] {
+            sources(&dir, &mut files);
+        }
+        assert!(files.len() > 50, "found only {} sources", files.len());
+        let mut callers: Vec<String> = files
+            .iter()
+            .filter(|f| !f.ends_with("diskgc-core/src/resolve.rs"))
+            .filter(|f| {
+                std::fs::read_to_string(f)
+                    .expect("read source")
+                    .contains("resolve_unscreened(")
+            })
+            .map(|f| {
+                f.strip_prefix(workspace)
+                    .expect("below the workspace")
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        callers.sort();
+        assert_eq!(callers, ["crates/diskgc-core/src/executor.rs"]);
+    }
+
+    /// The screen's one-pass prefilter judges every ancestor exactly as a
+    /// lookup of that ancestor in the whole table would.
+    #[test]
+    fn the_screen_matches_a_per_ancestor_lookup_in_the_whole_table() {
+        use proptest::prelude::*;
+        fn per_ancestor(mounts: &[MountEntry], path: &Path) -> Result<(), MountScreenError> {
+            for at in path.ancestors() {
+                let mount = mount_for(mounts, at).map_err(|why| MountScreenError::Unsafe {
+                    at: at.to_owned(),
+                    why,
+                })?;
+                if may_be_networked(&mount.fs_type) {
+                    return Err(MountScreenError::Networked {
+                        at: at.to_owned(),
+                        mount_point: mount.mount_point.clone(),
+                        fs_type: mount.fs_type.clone(),
+                    });
+                }
+                if path_in_private_tmp(&mount.fs_root) {
+                    return Err(MountScreenError::PrivateTmp {
+                        at: at.to_owned(),
+                        mount_point: mount.mount_point.clone(),
+                        fs_root: mount.fs_root.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        let point = prop::collection::vec(prop::sample::select(vec!["a", "b", "ab"]), 0..4)
+            .prop_map(|names| format!("/{}", names.join("/")));
+        let entry = (
+            point,
+            0u64..8,
+            prop::sample::select(vec!["ext4", "tmpfs", "nfs4", "autofs", "fuse.sshfs"]),
+            prop::sample::select(vec!["/", "/systemd-private-x/tmp"]),
+        );
+        let table = prop::collection::vec(entry, 0..8).prop_map(|entries| {
+            entries
+                .into_iter()
+                .enumerate()
+                .map(|(i, (at, parent, fs, root))| {
+                    let mut m = mount(i as u64 + 1, parent, &at);
+                    m.fs_type = fs.into();
+                    m.fs_root = root.into();
+                    m
+                })
+                .collect::<Vec<_>>()
+        });
+        let path = prop::collection::vec(prop::sample::select(vec!["a", "b", "ab", "c"]), 0..5)
+            .prop_map(|names| format!("/{}", names.join("/")));
+        proptest!(ProptestConfig::with_cases(2048), |(mounts in table, path in path)| {
+            let path = Path::new(&path);
+            prop_assert_eq!(screen_mount_chain(&mounts, path), per_ancestor(&mounts, path));
+        });
     }
 }

@@ -1,0 +1,35 @@
+# TASK-206: the source path a candidate records (CMAKE_HOME_DIRECTORY) is
+# looked up from a fresh mount table after the cache is read. An NFS mount
+# made on the source directory in between must be refused from mountinfo
+# (the mount screen inside resolve_in, TASK-182), never opened: a dead
+# server would hang the lookup. Before TASK-182 the lookup opened the new
+# mount point and refused the candidate only afterwards (other_fs).
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/notes.txt: {}
+    /home/tester/src/p1/CMakeLists.txt: {content: "project(p1)\n"}
+    /home/tester/src/p1/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p1\n", mtime: 2026-10-01T00:00:00Z}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - at: {op: read_head, path: /home/tester/src/p1/out/CMakeCache.txt, nth: 1, when: after}
+      mount: {id: 9, at: /home/tester/src/p1, fs: nfs4, dev: "0:77", size: 1G}
+expect:
+  plan:
+    - {candidate: /home/tester/src/p1/out, reason: unsupported_fs}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/p1/out, reason: unsupported_fs}
+  # The mount hides everything below p1 from path checks.
+  preserved: [/home/tester/src/notes.txt]
