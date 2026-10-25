@@ -3,10 +3,10 @@ id: TASK-168
 title: >-
   Cargo reclaim: judged_last_build is None in production, so 'newer build since
   judged' is never changed
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 01:13'
-updated_date: '2026-10-25 09:14'
+updated_date: '2026-10-25 09:28'
 labels:
   - hardening
   - safety
@@ -32,4 +32,6 @@ Found by TASK-13 async QA (b009e59, read-only). executor walk_cargo calls reclai
 
 <!-- SECTION:NOTES:BEGIN -->
 lane-b 0068fb6 (not merged): doc fix chosen (COMPASS). safety.md Reclaim step 2 now says ensure passes no judged_last_build; a rebuild between tally and locks is caught by the idle recheck under locks only when the tier has an idle requirement (built-in cargo-target has none), otherwise only by in-use. Not a deletion hazard (mped-architect concurs): under the locks no Cargo of the lock set builds. Behaviour unchanged.
+
+Merged to master as b5bcb7a on 2026-10-25T09:28Z.
 <!-- SECTION:NOTES:END -->
