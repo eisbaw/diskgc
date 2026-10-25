@@ -429,6 +429,12 @@ they never override the Invariants.
   strings, caught only by async QA). Before reporting, grep diskgc-e2e
   and the vectors for the old string and run those tests with
   `just e2e-one`.
+- 2026-10-25: a `flake.nix` change can break a check nobody built:
+  72fccd8 turned the release package into a `runCommand` without
+  `version` and the VM check reading `release.version` failed to
+  evaluate (found only by RC QA). Before merging any `flake.nix` change
+  run `nix flake check --no-build` (evaluates every check, ~1 min) and
+  build the checks that consume what changed.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
