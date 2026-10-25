@@ -72,6 +72,11 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
 
+# Every `e2e` stage, not stopping at a failure, for async QA (TASK-199);
+# prints and saves a per-stage exit table under tmp/e2e-all/.
+e2e-all:
+    python3 tools/e2e_all.py e2e
+
 # Cold guest-cache 40k dry plan on the VM's private ext4 disk; no deletion.
 e2e-vm-cold-scale: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
