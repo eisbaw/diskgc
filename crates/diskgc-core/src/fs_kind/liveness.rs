@@ -306,7 +306,7 @@ fn pytest_session<H: Host>(
     record: &WalkRecord,
     table: &PidTable,
     users: &[u32],
-    processes: &[pytest::ProcessFacts],
+    processes: &pytest::Processes,
     magic: impl Fn() -> Result<u64, String>,
     probe: impl Fn(Pid) -> Result<bool, String>,
 ) -> Judged<()> {

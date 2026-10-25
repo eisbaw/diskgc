@@ -184,6 +184,85 @@ impl ProcessFacts {
     }
 }
 
+/// The paths a process's strings name, for row 6: each absolute command
+/// line argument and initial environment value, and each absolute
+/// `:`-separated part of one, normalised ([`normalize`]), as bytes.
+/// Derived from [`ProcessFacts`] once per scan instead of once per
+/// session: re-deriving them for every session was most of a plan's CPU
+/// on a host with thousands of sessions (TASK-184).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NamedPaths {
+    command_line: Vec<Vec<u8>>,
+    environment: Vec<Vec<u8>>,
+}
+
+impl NamedPaths {
+    fn of(process: &ProcessFacts) -> Self {
+        let mut out = Self::default();
+        for arg in process.cmdline.iter().flatten() {
+            push_named(&mut out.command_line, arg.as_bytes());
+        }
+        for (_, value) in process.environ.iter().flat_map(Environ::vars) {
+            push_named(&mut out.environment, value.as_bytes());
+        }
+        out
+    }
+}
+
+/// The paths `text` names: itself and each `:`-separated part, the
+/// absolute ones normalised. Only a text holding [`SESSION_PREFIX`] can
+/// name a session: normalising drops `.` and empty names and folds `..`
+/// but copies every name it keeps, so a path at or below `S` holds `S`'s
+/// own name, `pytest-<N>` (row 1), verbatim in the text. The filter keeps
+/// the per-scan cost a byte search over the environments instead of a
+/// normalisation of every value (a laptop: ~330 processes, ~4.5 MB).
+fn push_named(out: &mut Vec<Vec<u8>>, text: &[u8]) {
+    if !text
+        .windows(SESSION_PREFIX.len())
+        .any(|w| w == SESSION_PREFIX)
+    {
+        return;
+    }
+    let normal = |text: &[u8]| normalize(text).map(|p| p.into_os_string().into_vec());
+    out.extend(normal(text));
+    if text.contains(&b':') {
+        out.extend(text.split(|b| *b == b':').filter_map(normal));
+    }
+}
+
+/// Whether the normalised path `named` is `sought` or lies below it, both
+/// in normal form ([`normalize`]): `Path::starts_with` for such paths,
+/// compared as bytes.
+fn is_at_or_below(named: &[u8], sought: &[u8]) -> bool {
+    named.starts_with(sought)
+        && (named.len() == sought.len() || sought == b"/" || named[sought.len()] == b'/')
+}
+
+/// The process facts of one scan, with what row 6 compares derived once
+/// ([`NamedPaths`]). Built only by [`Processes::new`], so the derived
+/// part always belongs to the facts it was derived from.
+#[derive(Debug, Clone, Default)]
+pub struct Processes {
+    facts: Vec<ProcessFacts>,
+    named: Vec<NamedPaths>,
+}
+
+impl Processes {
+    pub fn new(facts: Vec<ProcessFacts>) -> Self {
+        let named = facts.iter().map(NamedPaths::of).collect();
+        Self { facts, named }
+    }
+
+    /// The facts, in the order given.
+    pub fn facts(&self) -> &[ProcessFacts] {
+        &self.facts
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&ProcessFacts, &NamedPaths)> {
+        self.facts.iter().zip(&self.named)
+    }
+}
+
 /// Everything the table decides from, for one session `S = P/pytest-<N>`
 /// in temp root `R`.
 #[derive(Debug, Clone)]
@@ -217,7 +296,7 @@ pub struct Facts<'a> {
     pub root_path: &'a Path,
     pub root_id: DevIno,
     /// Every process the scan gave facts for.
-    pub processes: &'a [ProcessFacts],
+    pub processes: &'a Processes,
 }
 
 /// The evidence of one process in a verdict's `process_blockers`.
@@ -262,12 +341,15 @@ impl Verdict {
     }
 }
 
+/// What every session name starts with (row 1).
+const SESSION_PREFIX: &[u8] = b"pytest-";
+
 /// A session name's number: `pytest-` followed by ASCII digits without a
 /// leading zero (`0` itself excepted), fitting 64 bits. Anything else is
 /// not a session (row 1), though it may count toward `M`
 /// ([`rank_number`]).
 pub fn session_number(name: &[u8]) -> Option<u64> {
-    let digits = name.strip_prefix(b"pytest-")?;
+    let digits = name.strip_prefix(SESSION_PREFIX)?;
     if digits.len() > 1 && digits[0] == b'0' {
         return None;
     }
@@ -334,14 +416,6 @@ pub fn normalize(text: &[u8]) -> Option<PathBuf> {
         out.push(b'/');
     }
     Some(PathBuf::from(OsString::from_vec(out)))
-}
-
-/// Whether the string `text`, normalised ([`normalize`]), is `sought` or
-/// lies below it (the path followed by its end or a `/`), compared as
-/// bytes. A relative string never is.
-pub fn names_path(text: &[u8], sought: &Path) -> Option<PathBuf> {
-    let normal = normalize(text)?;
-    normal.starts_with(sought).then_some(normal)
 }
 
 /// The non-empty values of [`TEMP_ROOT_VARS`] in `environ`, every
@@ -508,21 +582,16 @@ pub fn shows_pytest(process: &ProcessFacts) -> bool {
 }
 
 /// How a process names `S`, if it does (row 6): an argument or an
-/// environment value whose string names `S`'s path, or a `--basetemp`
-/// value resolved into `S`'s tree.
-fn naming(process: &ProcessFacts, facts: &Facts<'_>) -> Option<Evidence> {
-    let by_text = |text: &[u8]| {
-        names_path(text, facts.session_path).is_some()
-            || text
-                .split(|b| *b == b':')
-                .any(|part| names_path(part, facts.session_path).is_some())
-    };
-    if process
-        .cmdline
-        .iter()
-        .flatten()
-        .any(|arg| by_text(arg.as_bytes()))
-    {
+/// environment value whose string names `S`'s path ([`NamedPaths`]), or a
+/// `--basetemp` value resolved into `S`'s tree.
+fn naming(
+    process: &ProcessFacts,
+    named: &NamedPaths,
+    sought: &[u8],
+    facts: &Facts<'_>,
+) -> Option<Evidence> {
+    let names = |paths: &[Vec<u8>]| paths.iter().any(|p| is_at_or_below(p, sought));
+    if names(&named.command_line) {
         return Some(Evidence::CommandLine);
     }
     let resolved_into = |source: BasetempSource| {
@@ -535,13 +604,7 @@ fn naming(process: &ProcessFacts, facts: &Facts<'_>) -> Option<Evidence> {
     if resolved_into(BasetempSource::CommandLine) {
         return Some(Evidence::CommandLine);
     }
-    if process
-        .environ
-        .iter()
-        .flat_map(Environ::vars)
-        .any(|(_, value)| by_text(value.as_bytes()))
-        || resolved_into(BasetempSource::Addopts)
-    {
+    if names(&named.environment) || resolved_into(BasetempSource::Addopts) {
         return Some(Evidence::Environment);
     }
     None
@@ -660,16 +723,34 @@ pub fn verdict(facts: &Facts<'_>) -> Verdict {
             }
         }
     }
+    let in_set = |p: &ProcessFacts| p.uids.is_none_or(|uids| uids.all().contains(&facts.owner));
     let set: Vec<&ProcessFacts> = facts
         .processes
+        .facts()
         .iter()
-        .filter(|p| p.uids.is_none_or(|uids| uids.all().contains(&facts.owner)))
+        .filter(|p| in_set(p))
         .collect();
     let complete = facts.process_list.is_ok();
     // Row 6: a process names S.
-    let named: Vec<(Pid, Evidence)> = set
+    // S's path as diskgc found it is in normal form (roots refuse `.`,
+    // `..`, repeated and trailing slashes; names are appended): a named
+    // path compares with it as bytes.
+    let sought = facts.session_path.as_os_str().as_bytes();
+    assert_eq!(
+        facts.session_path.file_name(),
+        Some(facts.session_name),
+        "the session path ends in another name than the session's"
+    );
+    assert!(
+        normalize(sought).is_some_and(|p| p.as_os_str().as_bytes() == sought),
+        "the session path {} is not absolute and normal",
+        facts.session_path.display()
+    );
+    let named: Vec<(Pid, Evidence)> = facts
+        .processes
         .iter()
-        .filter_map(|p| naming(p, facts).map(|e| (p.pid, e)))
+        .filter(|(p, _)| in_set(p))
+        .filter_map(|(p, paths)| naming(p, paths, sought, facts).map(|e| (p.pid, e)))
         .collect();
     if !named.is_empty() {
         return Verdict::new(

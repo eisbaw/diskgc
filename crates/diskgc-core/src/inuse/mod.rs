@@ -41,7 +41,7 @@ use crate::host::{
     Locked, MonoTime, Pid, TryLock,
 };
 use crate::liveness::PidTable;
-use crate::liveness::pytest::ProcessFacts;
+use crate::liveness::pytest::Processes;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
@@ -183,7 +183,7 @@ pub struct Scan {
     pid_table: Option<PidTable>,
     /// The pytest contract's process facts, when the options asked for
     /// them (sorted by pid), with the users they were read for.
-    pytest_facts: Option<(Vec<u32>, Vec<ProcessFacts>)>,
+    pytest_facts: Option<(Vec<u32>, Processes)>,
 }
 
 /// Reads every visible process (see [`self::scan`] for the order of
@@ -205,7 +205,7 @@ pub fn scan<H: Host>(host: &H, options: &Options<'_>) -> Result<Scan, HostError>
     let pytest_facts = options.pytest_facts.then(|| {
         (
             options.users.to_vec(),
-            scan::pytest_facts(&gathered, options.users),
+            Processes::new(scan::pytest_facts(&gathered, options.users)),
         )
     });
     let mut s = Scan {
@@ -278,10 +278,10 @@ impl Scan {
     /// The pytest contract's process facts (`None`: not asked for, see
     /// [`Options::pytest_facts`]), with the users whose processes they
     /// cover: a process with none of them as a uid was not read.
-    pub fn pytest_facts(&self) -> Option<(&[u32], &[ProcessFacts])> {
+    pub fn pytest_facts(&self) -> Option<(&[u32], &Processes)> {
         self.pytest_facts
             .as_ref()
-            .map(|(users, facts)| (users.as_slice(), facts.as_slice()))
+            .map(|(users, facts)| (users.as_slice(), facts))
     }
 
     /// Whether the process list settled ([`MAX_LISTINGS`]).

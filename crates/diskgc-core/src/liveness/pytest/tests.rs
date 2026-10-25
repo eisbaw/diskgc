@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
@@ -90,6 +90,7 @@ impl Case {
 
     fn verdict(&self) -> Verdict {
         let session_path = self.session_path();
+        let processes = Processes::new(self.processes.clone());
         let facts = Facts {
             session_name: &self.name,
             listing: self.listing.as_deref().map_err(Clone::clone),
@@ -103,7 +104,7 @@ impl Case {
             session_tree: &self.tree,
             root_path: &self.root_path,
             root_id: id(ROOT),
-            processes: &self.processes,
+            processes: &processes,
         };
         verdict(&facts)
     }
@@ -273,9 +274,44 @@ fn other_users_processes_are_not_in_the_process_set() {
     assert_eq!(c.verdict().row, Row::NamingUndecidable);
 }
 
+/// Row 6's definition of a string naming `S`, as the table states it:
+/// the string or one of its `:`-separated parts, normalised, is `S` or
+/// lies below it (by path components). The oracle for [`NamedPaths`].
+fn names_path(text: &[u8], sought: &Path) -> Option<PathBuf> {
+    let one = |text: &[u8]| normalize(text).filter(|n| n.starts_with(sought));
+    one(text).or_else(|| text.split(|b| *b == b':').find_map(one))
+}
+
+/// Whether a process whose one argument is `text` names `S` by its
+/// command line, as the verdict decides it.
+fn named_by_argument(text: &[u8], sought: &Path) -> bool {
+    let p = proc(9, &[], &[]);
+    let p = ProcessFacts {
+        cmdline: Some(vec![OsString::from_vec(text.to_vec())]),
+        ..p
+    };
+    NamedPaths::of(&p)
+        .command_line
+        .iter()
+        .any(|n| is_at_or_below(n, sought.as_os_str().as_bytes()))
+}
+
 #[test]
 fn naming_by_string_is_lexical_and_bounded_by_a_separator() {
     let s = Path::new("/tmp/nix-shell.AB/pytest-of-tester/pytest-3");
+    for (text, names) in [
+        (&b"/tmp/nix-shell.AB/pytest-of-tester/pytest-3"[..], true),
+        (b"/tmp/nix-shell.AB/pytest-of-tester/pytest-3/t.py", true),
+        (b"/tmp//nix-shell.AB/./x/../pytest-of-tester/pytest-3", true),
+        (b"/tmp/nix-shell.AB/pytest-of-tester/pytest-30", false),
+        (b"/tmp/nix-shell.AB/pytest-of-tester/pytest-3x/a", false),
+        (b"nix-shell.AB/pytest-of-tester/pytest-3", false),
+        (b"/../tmp/nix-shell.AB/pytest-of-tester/pytest-3", true),
+        (b"/a:/tmp/nix-shell.AB/pytest-of-tester/pytest-3/b:c", true),
+        (b"/a:tmp/nix-shell.AB/pytest-of-tester/pytest-3", false),
+    ] {
+        assert_eq!(named_by_argument(text, s), names, "{}", text.escape_ascii());
+    }
     assert!(names_path(b"/tmp/nix-shell.AB/pytest-of-tester/pytest-3", s).is_some());
     assert!(names_path(b"/tmp/nix-shell.AB/pytest-of-tester/pytest-3/t.py", s).is_some());
     assert!(names_path(b"/tmp//nix-shell.AB/./x/../pytest-of-tester/pytest-3", s).is_some());
@@ -778,6 +814,7 @@ fn judge(g: &Generated) -> (Verdict, bool) {
             p
         })
         .collect();
+    let processes = Processes::new(processes);
     let name = OsString::from(&entry.name);
     let facts = Facts {
         session_name: &name,
@@ -803,6 +840,38 @@ fn judge(g: &Generated) -> (Verdict, bool) {
             .iter()
             .any(|(p, signs)| in_set(p) && signs.running);
     (verdict(&facts), running)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+    /// The once-per-scan [`NamedPaths`] decide row 6 exactly as its
+    /// definition does, for strings made of the separators and names that
+    /// matter (`/`, `:`, `.`, `..`, prefixes of the session's names),
+    /// including the byte filter on `pytest-`.
+    #[test]
+    fn named_paths_name_exactly_what_the_definition_names(
+        parts in proptest::collection::vec(
+            prop_oneof![
+                Just("/"), Just(":"), Just("."), Just(".."), Just("//"),
+                Just("tmp"), Just("nix-shell.AB"), Just("pytest-of-tester"),
+                Just("pytest-3"), Just("pytest-30"), Just("x"), Just("pytest"), Just("-3"),
+                Just("/x/pytest-3"), Just("/tmp/pytest-of-tester/pytest-30"),
+            ],
+            0..12,
+        ),
+        which in 0usize..3,
+    ) {
+        let text = parts.concat();
+        // Sessions only (row 1 decides every other name first).
+        let s = ["/tmp/nix-shell.AB/pytest-of-tester/pytest-3", "/tmp/pytest-of-tester/pytest-30",
+                 "/x/pytest-3"][which];
+        let s = Path::new(s);
+        prop_assert_eq!(
+            named_by_argument(text.as_bytes(), s),
+            names_path(text.as_bytes(), s).is_some(),
+            "{}", text
+        );
+    }
 }
 
 proptest! {
