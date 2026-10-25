@@ -435,6 +435,13 @@ they never override the Invariants.
   evaluate (found only by RC QA). Before merging any `flake.nix` change
   run `nix flake check --no-build` (evaluates every check, ~1 min) and
   build the checks that consume what changed.
+- 2026-10-25: a manual mutation runner that restores files with their
+  old mtime makes cargo reuse the mutant binary, so a later gate runs
+  stale code (TASK-29). After restoring, `touch` every restored file (or
+  `cargo clean -p <crate>`) before trusting any gate.
+- 2026-10-25: the 0.1 release candidate lives on the local branch
+  `release-0.1` (a11e77b); master moves on with the index chain. RC
+  fixes go to `release-0.1` first, then master.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
