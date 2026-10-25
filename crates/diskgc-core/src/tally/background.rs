@@ -332,7 +332,17 @@ fn batch<H: Host>(
                         }
                     },
                 };
-                (None, list(host, state, &sources[i], budget, work))
+                // A new round only while its source is still due (a round
+                // just ended by a redirected job must not start again).
+                let source = &sources[i];
+                let live = state.round_finder() == Some(&source.finder);
+                let due = state
+                    .listed_at(&source.finder)
+                    .is_none_or(|at| host.now().saturating_since(at) >= DISCOVERY_PERIOD);
+                if !live && !due {
+                    continue;
+                }
+                (None, list(host, state, source, budget, work))
             }
             Job::Recheck(mount, path, identity) => {
                 let done = recheck(host, state, &mounts, &mount, &path, identity, budget, work);

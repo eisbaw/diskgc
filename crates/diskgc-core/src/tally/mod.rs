@@ -369,8 +369,18 @@ impl TallyState {
         };
         for item in &step.listed {
             let inserted =
-                self.index
-                    .insert(host, &item.mount, &item.path, &source.finder, item.found)?;
+                match self
+                    .index
+                    .insert(host, &item.mount, &item.path, &source.finder, item.found)
+                {
+                    Ok(inserted) => inserted,
+                    Err(e) => {
+                        // The round is lost: the source waits its period.
+                        self.listed.insert(source.finder.clone(), host.now());
+                        self.account_cursors();
+                        return Err(e);
+                    }
+                };
             self.collapses += u64::from(inserted.collapse.is_some());
             if inserted.outcome == Inserted::Covered
                 && let Some(key) = recount::covering_block(&self.index, &source.finder, item)
@@ -389,7 +399,10 @@ impl TallyState {
         self.drop_stale_cursor();
         if !step.done {
             self.round = Some(round);
-            if !self.fit_cursors(host)? {
+            // Never collapsed for: a round's listings must not make the
+            // index coarser. One that does not fit is dropped (partial)
+            // and its source waits its period.
+            if !self.index.set_cursor_bytes(self.cursor_bytes()) {
                 self.round = None;
                 self.account_cursors();
                 self.listed.insert(source.finder.clone(), now);

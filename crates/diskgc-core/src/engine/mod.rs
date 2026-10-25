@@ -214,6 +214,20 @@ pub fn networked_why(fs_type: &str) -> &'static str {
     }
 }
 
+/// Work a resumable discovery walk reports to its pause callback
+/// (`fs_kind::DiscoverCursor`, `cargo_target::DiscoverCursor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    /// About to do this many operations of progress (a listing, a
+    /// `statx`, a candidate's checks): the callback may pause the walk
+    /// before them (`true`).
+    Next(usize),
+    /// Reopened one directory on the way down: charged, never paused.
+    Reopen,
+    /// Listed this many names: charged, never paused.
+    Listed(usize),
+}
+
 /// The index's view of a candidate's discovery `statx`: what its identity
 /// falls back to without a birth time, and its provisional age
 /// (docs/architecture.md, The index: Identity; The tally).

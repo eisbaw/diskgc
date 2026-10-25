@@ -23,7 +23,7 @@ use super::{
 };
 use crate::engine::{
     self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Seen, Skip, WalkStop,
-    is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
+    Work, is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
 };
 use crate::host::{
     Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
@@ -109,7 +109,7 @@ pub fn discover<H: Host>(
             deadline,
             &mut found,
             vec![resolved.fd],
-            &mut |_| false,
+            &mut |_: Work| false,
         );
         seen = std::mem::take(&mut cursor.seen);
         walked?;
@@ -588,6 +588,8 @@ pub struct DiscoverCursor {
     root_id: Option<DevIno>,
     frames: Vec<Frame>,
     seen: HashSet<DevIno>,
+    /// The walk reached its end (or its root was refused).
+    done: bool,
 }
 
 impl DiscoverCursor {
@@ -597,6 +599,7 @@ impl DiscoverCursor {
             root_id: None,
             frames: Vec::new(),
             seen: HashSet::new(),
+            done: false,
         }
     }
 
@@ -634,9 +637,9 @@ impl DiscoverCursor {
         &mut self,
         host: &H,
         out: &mut Discovery,
-        pause: &mut dyn FnMut(usize) -> bool,
+        pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
-        if self.frames.is_empty() && self.root_id.is_some() {
+        if self.done {
             return Ok(Stepped::Done);
         }
         let root = self.root.clone();
@@ -681,11 +684,18 @@ impl DiscoverCursor {
         let mount_id = resolved.mount.id;
         let mut open = vec![resolved.fd];
         while open.len() < self.frames.len() {
+            // Charged, never refused (bounded by DISCOVERY_DEPTH).
+            let _ = pause(Work::Reopen);
             let depth = open.len();
             let name = self.frames[depth].name.clone().expect("named");
             let at = self.path_of(depth);
             match open_dir(host, &open[depth - 1], mount_id, Path::new(&name), &at)? {
-                Ok((fd, stat)) if stat.dev_ino() == self.frames[depth].id => open.push(fd),
+                Ok((fd, stat))
+                    if self.frames[depth].id.is_some()
+                        && stat.dev_ino() == self.frames[depth].id =>
+                {
+                    open.push(fd)
+                }
                 Ok(_) => {
                     out.refused.push(Skip::new(
                         Reason::Changed,
@@ -704,17 +714,17 @@ impl DiscoverCursor {
                 }
             }
         }
-        self.walk(host, &mounts, mount_id, None, out, open, pause)
+        let walked = self.walk(host, &mounts, mount_id, None, out, open, pause)?;
+        if matches!(walked, Stepped::Done) {
+            self.done = true;
+        }
+        Ok(walked)
     }
 
+    /// Ends the walk (its root was refused).
     fn finish(&mut self) {
         self.frames.clear();
-        if self.root_id.is_none() {
-            self.root_id = Some(DevIno {
-                dev: crate::host::Dev { major: 0, minor: 0 },
-                ino: 0,
-            });
-        }
+        self.done = true;
     }
 
     fn path_of(&self, depth: usize) -> PathBuf {
@@ -734,7 +744,7 @@ impl DiscoverCursor {
         deadline: Option<MonoTime>,
         found: &mut Discovery,
         mut open: Vec<H::Fd>,
-        pause: &mut dyn FnMut(usize) -> bool,
+        pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
         assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
         let root = self.root.clone();
@@ -755,12 +765,16 @@ impl DiscoverCursor {
                     seen: &mut seen,
                 };
                 if self.frames[depth].names.is_none() {
-                    if pause(1) {
+                    if pause(Work::Next(1)) {
                         return Ok(Stepped::Paused);
                     }
                     let parent_ino = depth.checked_sub(1).and_then(|p| self.frames[p].ino);
                     match walk.visit(&open[depth], &path, self.frames[depth].depth, parent_ino)? {
-                        Some(names) => self.frames[depth].names = Some(names),
+                        Some(names) => {
+                            // Charged one operation per name listed.
+                            pause(Work::Listed(names.len()));
+                            self.frames[depth].names = Some(names);
+                        }
                         None => {
                             // A target (recorded), unreadable, or at the
                             // depth limit: nothing below to walk.
@@ -787,7 +801,7 @@ impl DiscoverCursor {
                     self.frames[depth].next += 1;
                     continue;
                 }
-                if pause(2) {
+                if pause(Work::Next(2)) {
                     return Ok(Stepped::Paused);
                 }
                 let child_depth = frame.depth + 1;

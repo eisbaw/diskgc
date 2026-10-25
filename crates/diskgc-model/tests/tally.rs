@@ -1348,3 +1348,117 @@ fn a_round_is_complete_only_if_every_step_was_clean() {
         );
     }
 }
+
+/// A listing round whose kept names do not fit the index's budget is
+/// dropped (partial) and never makes the index collapse on its behalf.
+#[test]
+fn a_round_that_does_not_fit_never_collapses_the_index() {
+    let mut tree = dirs("a", 30, 1);
+    for i in 0..400 {
+        writeln!(
+            tree,
+            "  /tmp/b/x{i:04}-a-rather-long-name-to-keep: {{.: {{}}}}"
+        )
+        .unwrap();
+    }
+    let host = host(&yaml(&tree, ""));
+    let a = source("a", "/tmp/a");
+    let b = source("b", "/tmp/b");
+    // An index just big enough for /tmp/a's 30 singles.
+    let mut sizing = state();
+    sizing.list_source(&host, &a, None).unwrap();
+    let mut state = TallyState::new(Index::new(sizing.index.accounted_bytes() + 2048));
+    state.list_source(&host, &a, None).unwrap();
+    let before = state.index.stats();
+    let mut budget = Budget::ops_only(5);
+    let outcome = state.list_round(&host, &b, &mut budget).unwrap();
+    assert_eq!(outcome, Rounded::NoRoom);
+    let after = state.index.stats();
+    assert_eq!(
+        (after.singles, after.blocks),
+        (before.singles, before.blocks),
+        "collapsed for a round"
+    );
+    assert!(state.round_finder().is_none());
+    assert!(state.listed_at(&b.finder).is_some(), "waits its period");
+}
+
+/// A round ended by a job redirected to it is not started again by its own
+/// job in the same batch: a source is listed at most once per period.
+#[test]
+fn a_source_is_not_listed_twice_in_one_period() {
+    let mut tree = dirs("a", 60, 1);
+    tree.push_str(&dirs("b", 60, 1));
+    let host = host(&yaml(&tree, "call_cost: 1ms\n"));
+    let sources = [source("a", "/tmp/a"), source("b", "/tmp/b")];
+    let mut state = state();
+    let mut events = Vec::new();
+    let mut log = |e: Event| events.push(e);
+    let mut background = Background::start(&host, &mut log);
+    let mut rounds: Vec<(usize, Duration)> = Vec::new();
+    while at(&host) < Duration::from_secs(12 * 60) {
+        let listed: Vec<_> = sources.iter().map(|s| state.listed_at(&s.finder)).collect();
+        let sleep = background.turn(&host, &mut state, &sources, &mut log);
+        for (i, s) in sources.iter().enumerate() {
+            if state.listed_at(&s.finder) != listed[i] {
+                rounds.push((i, at(&host)));
+            }
+        }
+        host.sleep(sleep);
+    }
+    for i in 0..2 {
+        let times: Vec<Duration> = rounds.iter().filter(|r| r.0 == i).map(|r| r.1).collect();
+        for pair in times.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= Duration::from_secs(5 * 60),
+                "source {i}: {times:?}"
+            );
+        }
+        assert!(times.len() >= 2, "source {i}: {times:?}");
+    }
+}
+
+/// The redirect case: a round of A is live, B is more overdue, so B's job
+/// comes first and finishes A's round; A's own job in the same batch must
+/// not start a new round of A at once.
+#[test]
+fn a_redirected_job_that_ends_a_round_does_not_restart_it() {
+    let host = host(&yaml(
+        &format!("{}{}", dirs("a", 3, 1), dirs("b", 3, 1)),
+        "",
+    ));
+    let sources = [source("a", "/tmp/a"), source("b", "/tmp/b")];
+    let mut state = state();
+    let mut events = Vec::new();
+    let mut log = |e: Event| events.push(e);
+    let mut background = Background::start(&host, &mut log);
+    // B listed at 0, A at 1 min (whole, as a snapshot seed would leave
+    // them).
+    background.turn(&host, &mut state, &sources[1..], &mut log);
+    host.sleep(Duration::from_secs(60));
+    background.turn(&host, &mut state, &sources[..1], &mut log);
+    let a_first = state.listed_at(&sources[0].finder).unwrap();
+    // At 6 min 10 s a round of A starts and pauses at once.
+    host.sleep(Duration::from_secs(5 * 60 + 10));
+    let mut budget = Budget::ops_only(0);
+    assert_eq!(
+        state.list_round(&host, &sources[0], &mut budget).unwrap(),
+        Rounded::Paused
+    );
+    host.sleep(Duration::from_secs(10));
+    // B is 1 min 20 s late, A 20 s: B's job comes first and ends A's round.
+    let calls = host.trace().len();
+    background.turn(&host, &mut state, &sources, &mut log);
+    let listings_of_a = host.trace()[calls..]
+        .iter()
+        .filter(|c| c.op == Op::ReadDir && c.path.as_deref() == Some(Path::new("/tmp/a")))
+        .count();
+    assert_eq!(listings_of_a, 1, "A listed twice in one batch");
+    let a_second = state.listed_at(&sources[0].finder).unwrap();
+    assert!(a_second > a_first, "A's round ended");
+    assert!(
+        state.round_finder().is_none(),
+        "no new round of A started: {:?}",
+        state.round_finder()
+    );
+}

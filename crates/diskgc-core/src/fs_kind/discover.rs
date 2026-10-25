@@ -56,7 +56,7 @@ use super::judge::{
 };
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
-use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip};
+use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip, Work};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
 use crate::outcome::Stop;
 use crate::profile::EntryType;
@@ -211,7 +211,7 @@ fn discover_into<H: Host>(
             deadline,
             out,
             vec![resolved],
-            &mut |_| false,
+            &mut |_: Work| false,
         );
         seen = std::mem::take(&mut cursor.seen);
         walked?;
@@ -303,6 +303,8 @@ pub struct DiscoverCursor {
     frames: Vec<Frame>,
     /// Candidates found so far, by identity (found once).
     seen: HashSet<DevIno>,
+    /// The walk reached its end (or its root was refused).
+    done: bool,
 }
 
 impl DiscoverCursor {
@@ -314,6 +316,7 @@ impl DiscoverCursor {
             root_id: None,
             frames: Vec::new(),
             seen: HashSet::new(),
+            done: false,
         }
     }
 
@@ -322,8 +325,9 @@ impl DiscoverCursor {
     }
 
     /// An upper bound of the heap the cursor owns, as the index counts its
-    /// own (`crate::index::memory`): the kept listings, the frames and the
-    /// set of candidates found.
+    /// own (`crate::index::memory`): the kept listings (only the names an
+    /// active pattern matches), the frames and the set of candidates
+    /// found.
     pub fn counted_bytes(&self) -> usize {
         use crate::index::memory::{heap, vec_bytes};
         use std::mem::size_of;
@@ -357,9 +361,9 @@ impl DiscoverCursor {
         host: &H,
         find: &Find,
         out: &mut Discovery,
-        pause: &mut dyn FnMut(usize) -> bool,
+        pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
-        if self.frames.is_empty() && self.root_id.is_some() {
+        if self.done {
             return Ok(Stepped::Done);
         }
         let mounts = host.mountinfo().map_err(|error| Stop::Failed {
@@ -414,9 +418,11 @@ impl DiscoverCursor {
             }
             Some(_) => {}
         }
-        // Reopen the way down by name.
+        // Reopen the way down by name (charged one operation each, but
+        // never refused: the way down is bounded by the patterns' depth).
         let mut open = vec![resolved];
         while open.len() < self.frames.len() {
+            let _ = pause(Work::Reopen);
             let depth = open.len();
             let frame = &self.frames[depth];
             let name = frame
@@ -434,11 +440,13 @@ impl DiscoverCursor {
                 Want::Directory,
             );
             match reopened {
-                Ok((fd, stat)) if stat.dev_ino() == frame.id => open.push(Resolved {
-                    fd,
-                    mount: parent.mount.clone(),
-                    stat,
-                }),
+                Ok((fd, stat)) if frame.id.is_some() && stat.dev_ino() == frame.id => {
+                    open.push(Resolved {
+                        fd,
+                        mount: parent.mount.clone(),
+                        stat,
+                    })
+                }
                 Ok(_) => {
                     out.refused.push(Skip::new(
                         Reason::Changed,
@@ -457,18 +465,16 @@ impl DiscoverCursor {
             }
         }
         let walked = self.walk(host, find, &mounts, None, out, open, pause)?;
+        if matches!(walked, Stepped::Done) {
+            self.done = true;
+        }
         Ok(walked)
     }
 
+    /// Ends the walk (its root was refused).
     fn finish(&mut self) {
         self.frames.clear();
-        if self.root_id.is_none() {
-            // Refused before it was reached: done all the same.
-            self.root_id = Some(DevIno {
-                dev: crate::host::Dev { major: 0, minor: 0 },
-                ino: 0,
-            });
-        }
+        self.done = true;
     }
 
     /// The path of the frame at `depth`.
@@ -490,7 +496,7 @@ impl DiscoverCursor {
         deadline: Option<MonoTime>,
         out: &mut Discovery,
         mut open: Vec<Resolved<H::Fd>>,
-        pause: &mut dyn FnMut(usize) -> bool,
+        pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
         assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
         let root = self.root.clone();
@@ -512,7 +518,7 @@ impl DiscoverCursor {
                     seen: &mut seen,
                 };
                 if self.frames[depth].names.is_none() {
-                    if pause(1) {
+                    if pause(Work::Next(1)) {
                         return Ok(Stepped::Paused);
                     }
                     check_deadline(host, deadline, &path)?;
@@ -523,7 +529,21 @@ impl DiscoverCursor {
                     // returned.
                     check_deadline(host, deadline, &path)?;
                     match names? {
-                        Ok(names) => self.frames[depth].names = Some(names),
+                        Ok(mut names) => {
+                            // Charged one operation per name; only names an
+                            // active pattern matches are kept.
+                            pause(Work::Listed(names.len()));
+                            let frame = &self.frames[depth];
+                            names.retain(|name| {
+                                frame.active.iter().any(|&i| {
+                                    find.patterns[i]
+                                        .segment(frame.level)
+                                        .is_some_and(|s| s.matches(name))
+                                })
+                            });
+                            names.shrink_to_fit();
+                            self.frames[depth].names = Some(names);
+                        }
                         Err(skip) => {
                             walk.out.refused.push(skip);
                             self.frames[depth].names = Some(Vec::new());
@@ -549,6 +569,9 @@ impl DiscoverCursor {
                     Entry::Done => self.frames[depth].next += 1,
                     Entry::Descend { child, deeper } => {
                         self.frames[depth].next += 1;
+                        // Without an inode it cannot be told from a
+                        // replacement when a later step comes back to it:
+                        // reopening refuses it then (`changed`).
                         let id = child.stat.dev_ino();
                         open.push(*child);
                         self.frames.push(Frame {
@@ -608,7 +631,7 @@ impl<H: Host> Walk<'_, H> {
         level: usize,
         active: &[usize],
         name: &OsStr,
-        pause: &mut dyn FnMut(usize) -> bool,
+        pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Entry<H::Fd>, Stop> {
         let matching: Vec<usize> = active
             .iter()
@@ -656,7 +679,7 @@ impl<H: Host> Walk<'_, H> {
         }
         // A candidate's checks are a handful of operations more; an
         // estimate, charged with its statx.
-        if pause(if ends { 4 } else { 1 }) {
+        if pause(Work::Next(if ends { 4 } else { 1 })) {
             return Ok(Entry::Paused);
         }
         // A big flat directory must not run past the deadline between

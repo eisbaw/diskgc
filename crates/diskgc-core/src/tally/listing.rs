@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::cargo_target;
-use crate::engine::{self, Seen};
+use crate::engine::{self, Seen, Work};
 use crate::fs_kind::{self, Find};
 use crate::host::{Host, HostError, MonoTime, MountEntry, Timestamp};
 use crate::index::{Birth, Discovered, Finder, Identity, MountKey};
@@ -237,14 +237,25 @@ impl ListingCursor {
             "a listing cursor of another source"
         );
         let min = if self.stalled { LISTING_STEP_MIN } else { 0 };
+        // Operations of progress this step (reopening is not progress).
         let mut done_ops = 0usize;
-        let mut pause = |ops: usize| {
-            if done_ops >= min && budget.spent(host) {
-                return true;
+        let mut pause = |work: Work| match work {
+            Work::Reopen => {
+                budget.take(1);
+                false
             }
-            budget.take(ops);
-            done_ops += ops;
-            false
+            Work::Listed(n) => {
+                budget.take(n);
+                false
+            }
+            Work::Next(ops) => {
+                if done_ops >= min && budget.spent(host) {
+                    return true;
+                }
+                budget.take(ops);
+                done_ops += ops;
+                false
+            }
         };
         let mut out = fs_kind::Discovery::default();
         let mut cargo = cargo_target::Discovery::default();

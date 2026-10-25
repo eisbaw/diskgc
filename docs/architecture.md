@@ -347,9 +347,17 @@ the order of work.
   complete; names created in a directory after it was listed are not
   found by that round. A step after a stalled one (paused before any
   operation) does at least 32 operations whatever its bounds, as for the
-  sizing cursor. What a round finds is inserted at once. One round is
-  live at a time, counted against the budget with the sizing cursor, and
-  finished before another starts. A round is **complete** when its walk
+  sizing cursor. A listing is charged one operation per name, and a
+  frame keeps only the names a pattern matches. What a round finds is
+  inserted at once. One round is live at a time, counted against the
+  budget with the sizing cursor (never collapsed for: a round that does
+  not fit is dropped, partial, and its source waits its period), and
+  finished before another starts. A round spans minutes on a big root:
+  a candidate renamed during it from a directory not yet listed into
+  one already listed is not found, so a complete round can evict a unit
+  that still exists (it is found again by the next round, and the
+  reclaim walk's own discovery finds it meanwhile: only warmth is
+  lost). A round is **complete** when its walk
   reached the end and no step of it refused anything. A job that fails with a failure of the host
   (`EIO`, `EMFILE`) waits its period (a unit's: 10 minutes) and the batch
   goes on; after a batch whose every job failed the sleep is at least
