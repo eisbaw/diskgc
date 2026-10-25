@@ -363,9 +363,13 @@ they never override the Invariants.
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->
-- 2026-10-24: `just e2e` takes ~15 min (880 s at fe0ab5f, 27 min on
-  5e81db1 incl. image reload); it includes `just check`, container suites
+- 2026-10-24: `just e2e` takes 15-33 min (880 s at fe0ab5f; 27 min on
+  5e81db1 incl. image reload; 1981 s on ce6a0cd under memory pressure,
+  ~10 GiB free RAM, 24 GiB swap, mostly the 7 VM checks); it includes `just check`, container suites
   and 7 kernel VMs. Run it async on a pinned sha, never per commit.
+- 2026-10-25: async QA in a detached worktree loses per-test container
+  logs when the worktree is removed (they go to the worktree's tmp/);
+  pass the runner an absolute log dir under the main checkout's tmp/.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
