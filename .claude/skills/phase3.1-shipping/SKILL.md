@@ -379,6 +379,17 @@ they never override the Invariants.
   Judged by: share of perf measurements inside their stated load band.
   Status: new.
 
+- 2026-10-25, COMPASS round 3: only 3 of 13 merged shas had a full-e2e
+  qa line and 2 were red from contention or the first-failure stop. ->
+  (a) async QA uses an all-stages recipe (`just e2e-all`, TASK-199) and
+  records each stage; (b) host budget at each merge: tear down merged
+  tasks' walk envs, never run VM QA during a perf measurement, at most
+  2 implementers + 1 QA job when <= 12 GiB RAM is free; (c) every sha
+  that touches an irreversible surface (JSON, exit codes, gate, deletion
+  path) gets async QA, not "every few merges". Judged by: stages per QA
+  run with an unknown result; qa-line coverage of irreversible shas.
+  Status: new.
+
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->
