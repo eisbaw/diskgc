@@ -70,6 +70,18 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
     its type names its program, not where the data is. This includes
     `fuse.fuse-overlayfs`: its backing directories can be on network
     storage.
+  - **an untriggered automount point** (`autofs`: systemd's
+    `x-systemd.automount`, the automounter daemon) is refused too, fail
+    closed (TASK-180): a path lookup through it mounts what it stands for,
+    most often NFS, and with that server down the lookup hangs in the
+    kernel before any deadline can act; mountinfo does not say what it
+    would mount. A root at or below one is refused without being looked
+    up, so it is never mounted by diskgc. Once something has triggered
+    it, the mounted filesystem is stacked on it and is the one judged: an
+    NFS share is refused as NFS, a local filesystem (an automounted
+    `/boot`) is used. Below a root, the walk never triggers one: it
+    descends with `RESOLVE_NO_XDEV`, which the kernel checks before it
+    would mount, and a mount point below a root is `contains_mount`.
   - Limit: a non-FUSE type that is neither on the list nor local (a new
     kernel network filesystem) is taken as local; the list is extended
     when one is seen.

@@ -936,4 +936,50 @@ mod tests {
             Ok(())
         );
     }
+
+    /// TASK-180: an untriggered automount point (systemd's
+    /// `x-systemd.automount` NFS, say) is `autofs` in mountinfo; a lookup
+    /// through it would mount the share and can hang, so a root at or
+    /// below it is refused from mountinfo alone. Once triggered, the real
+    /// filesystem is stacked on it and decides: NFS is refused as NFS, a
+    /// local one (an automounted /boot) is accepted.
+    #[test]
+    fn untriggered_automount_is_refused_and_a_triggered_one_is_its_filesystem() {
+        let base = mount(1, 0, "/");
+        let mut trigger = mount(2, 1, "/mnt/nas");
+        trigger.fs_type = "autofs".into();
+        let untriggered = [base.clone(), trigger.clone()];
+        for root in ["/mnt/nas", "/mnt/nas/x/build"] {
+            assert!(
+                matches!(
+                    screen_mount_chain(&untriggered, Path::new(root)),
+                    Err(MountScreenError::Networked { at, mount_point, fs_type })
+                        if at == Path::new(root)
+                            && mount_point == Path::new("/mnt/nas")
+                            && fs_type == "autofs"
+                ),
+                "{root}"
+            );
+        }
+        assert_eq!(
+            screen_mount_chain(&untriggered, Path::new("/mnt/other")),
+            Ok(())
+        );
+
+        let mut share = mount(3, 2, "/mnt/nas");
+        share.fs_type = "nfs4".into();
+        assert!(matches!(
+            screen_mount_chain(&[base.clone(), trigger.clone(), share], Path::new("/mnt/nas/x")),
+            Err(MountScreenError::Networked { fs_type, .. }) if fs_type == "nfs4"
+        ));
+
+        let mut boot_trigger = trigger;
+        boot_trigger.mount_point = "/boot".into();
+        let mut boot = mount(4, 2, "/boot");
+        boot.fs_type = "vfat".into();
+        assert_eq!(
+            screen_mount_chain(&[base, boot_trigger, boot], Path::new("/boot/x")),
+            Ok(())
+        );
+    }
 }

@@ -177,12 +177,24 @@ pub const NETWORK_FS_TYPES: &[&str] = &[
     "vmhgfs-fuse",
 ];
 
+/// mountinfo's type of an automount trigger that has not been triggered
+/// (systemd `x-systemd.automount`, the automounter daemon). Once mounted,
+/// the real filesystem is stacked on it and is the one screened.
+pub const AUTOFS: &str = "autofs";
+
 /// Whether mountinfo's filesystem type `fs_type` may hold files another
 /// host uses: a type in [`NETWORK_FS_TYPES`] (directly, or as
 /// `fuse.<type>`), or any FUSE type (`fuse`, `fuseblk`, and their subtypes).
 /// A FUSE type cannot establish where its backing data is stored.
+///
+/// An untriggered automount point ([`AUTOFS`]) too (TASK-180, fail
+/// closed): a path lookup through it mounts whatever it stands for, most
+/// often NFS, and with that server down the lookup hangs in the kernel
+/// before any deadline can act. mountinfo does not say what it would
+/// mount, so a root at or below one is refused without being looked up.
 pub fn may_be_networked(fs_type: &str) -> bool {
     NETWORK_FS_TYPES.contains(&fs_type)
+        || fs_type == AUTOFS
         || matches!(fs_type, "fuse" | "fuseblk")
         || fs_type.starts_with("fuse.")
         || fs_type.starts_with("fuseblk.")
@@ -193,6 +205,9 @@ pub fn networked_why(fs_type: &str) -> &'static str {
     let named = |name: &str| NETWORK_FS_TYPES.contains(&name);
     if named(fs_type) || fs_type.strip_prefix("fuse.").is_some_and(named) {
         "a network, cluster or shared filesystem"
+    } else if fs_type == AUTOFS {
+        "an untriggered automount point (fail closed: a lookup would mount it, often over \
+         the network)"
     } else {
         "a FUSE filesystem (fail closed: its data may be on another host)"
     }
@@ -830,6 +845,11 @@ mod tests {
         for local in ["ext4", "tmpfs", "btrfs", "xfs", "overlay", "nfsd"] {
             assert!(!may_be_networked(local), "{local}");
         }
+        assert!(
+            may_be_networked("autofs"),
+            "an untriggered automount (TASK-180)"
+        );
+        assert!(networked_why("autofs").starts_with("an untriggered automount"));
         assert!(networked_why("fuse.ceph-fuse").starts_with("a network"));
         assert!(networked_why("fuse.never-heard-of-it").starts_with("a FUSE"));
     }
