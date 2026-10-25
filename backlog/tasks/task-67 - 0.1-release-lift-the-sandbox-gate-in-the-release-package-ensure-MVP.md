@@ -4,7 +4,7 @@ title: '0.1 release: lift the sandbox gate in the release package (ensure MVP)'
 status: To Do
 assignee: []
 created_date: '2026-10-17 23:55'
-updated_date: '2026-10-25 08:38'
+updated_date: '2026-10-25 08:39'
 labels:
   - wave-2
   - release
@@ -84,6 +84,8 @@ From TASK-65 (2026-10-25): decide for 0.1 whether 'ipc: live-only' stays accepte
 Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): do not hold 0.1 for the mutation wave. TASK-13 runs async alongside and blocks the release only if it finds a real hole in the deletion path. TASK-60 is harness, not a release blocker.
 
 COMPASS round 3 (2026-10-25): AC2 rewritten to match the 2026-10-25 mark-emulator ruling (mutation/hardening async, blocks only on a found hole); dependencies set to today's 0.1 blockers (only TASK-115 before, done). TASK-138 is not a 0.1 blocker (pytest-tmp admitted by Mark himself; no emulator-admitted profile is in the catalog).
+
+Decision 2026-10-25 by mark-emulator (Mark delegated; Mark may veto): ipc: live-only stays accepted in 0.1 only if its runtime check has a vector and a container test against /tmp candidates; otherwise refuse it in the 0.1 catalog with a clear message. PRD item 18 (TASK-171 AC2): surfaced by the TASK-171 implementer as a concrete wording diff for decision.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
