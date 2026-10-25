@@ -379,9 +379,12 @@ they never override the Invariants.
   fast suite (TASK-178) left release, Debian, Docker and VM results
   missing for that sha. A red async QA means "unknown" for every later
   stage, not "pass".
-- 2026-10-25: a gate run inside a QA worktree wrote a 3.3 GB `tmp/target`
-  there despite `CARGO_TARGET_DIR` pointing at the main checkout's
-  (some recipe sets its own); budget disk for it (TASK-178 checks which).
+- 2026-10-25: the flake dev shell's hook sets `CARGO_TARGET_DIR` to
+  `<git toplevel>/tmp/target`, overriding anything set before
+  `nix develop`; in a worktree that is the worktree's own 3+ GB target.
+  To share the main checkout's, use
+  `nix develop -c env CARGO_TARGET_DIR=<main>/tmp/target just check`
+  (TASK-178). Sharing serialises parallel builds on one cargo lock.
 - 2026-10-24: `just check` only format-checks the diskgc-e2e crate; it
   does not compile it. A change to a shared type compiles in `just check`
   and breaks e2e (TASK-127 run 1). When diskgc-e2e or a type it uses
