@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:12'
+updated_date: '2026-10-25 05:33'
 labels:
   - hardening
   - limits
@@ -32,7 +33,13 @@ Proposed: (1) at startup raise the soft RLIMIT_NOFILE to the hard limit (standar
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Binary raises soft RLIMIT_NOFILE to the hard limit at startup (or a documented reason not to)
-- [ ] #2 EMFILE/ENFILE during the in-use scan is an error of the run, not a per-candidate in_use skip; docs/safety.md says one rule for both
-- [ ] #3 Container test: ensure under a low fd limit and more processes than fds exits loudly; nothing deleted
+- [x] #1 Binary raises soft RLIMIT_NOFILE to the hard limit at startup (or a documented reason not to)
+- [x] #2 EMFILE/ENFILE during the in-use scan is an error of the run, not a per-candidate in_use skip; docs/safety.md says one rule for both
+- [x] #3 Container test: ensure under a low fd limit and more processes than fds exits loudly; nothing deleted
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-25 t166 d84cba8 (not merged): measured fd need = one pidfd per visible process held for the whole scan + transient reader fds (peak 2402 at ~2250 host processes; 3694 at ~3500). Pin kept (replacing it weakens safety.md In use limit 4). Change: nofile::raise_to_hard at startup (children get inherited soft back in pre_exec); EMFILE/ENFILE anywhere in gather -> HostError with advice -> Stop::Failed -> exit 3 cause host. Tests: model vectors per scan reader + EIO control + deletion-step stop; nofile re-exec unit test; container test inuse_running_out_of_descriptors_fails_the_run_unless_the_soft_limit_can_rise (e2e-one PASS). Walk (container t166, 1897 procs, idle pytest-tmp, tmp/walks/2026-10-25-t166/4*-idle.txt): before soft1024 -> 4x in_use pidfd_open EMFILE exit 0; after soft1024 -> scan settles (producer_unknown: not initial pid ns) exit 0; after hard1024 -> exit 3 EMFILE + advice. Host read-only dry runs (host-walk.txt): after soft1024 peak 3694 fds, scan runs; after hard1024 exit 3 loud. Gates: just check exit 0 (1124 passed/0 failed/1 ignored) x2; e2e-clippy, e2e-tests exit 0. mped-architect: ship, no blockers.
+<!-- SECTION:NOTES:END -->
