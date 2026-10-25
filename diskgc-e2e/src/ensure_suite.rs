@@ -499,7 +499,7 @@ pub fn command_profile_checks_candidate_and_reports_nonzero_exit(ctx: &Ctx) -> T
     );
     ensure!(
         run.stderr
-            .contains("diskgc: --select/command-product: command-product-verified"),
+            .contains("diskgc: select/command-product: command-product-verified"),
         "command output was not prefixed on stderr: {}",
         run.stderr
     );
