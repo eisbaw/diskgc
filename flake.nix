@@ -849,6 +849,13 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
+      # TASK-29: the background tally's pressure brake on a guest whose
+      # disk is throttled (its /proc/pressure is its own).
+      vmTallyPressure = import ./diskgc-e2e/vm-tally-pressure.nix {
+        inherit pkgs;
+        image = e2eVmImage;
+        underTest = e2eUnderTest;
+      };
       mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores: extra:
         import ./diskgc-e2e/vm-old-kernel-pidfd.nix ({
           pkgs = vmPkgs;
@@ -890,6 +897,7 @@
       vmChecks = {
         vm-historical-ctime = vmHistoricalCtime;
         vm-cold-scale = vmColdScale;
+        vm-tally-pressure = vmTallyPressure;
         vm-release-tmp-reclaim = vmReleaseTmpReclaim;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;

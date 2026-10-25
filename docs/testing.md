@@ -529,6 +529,17 @@ Model scenarios required by [safety.md](safety.md) and
     above one lump per mount with its finders plus the tables (two
     mounts, three profiles), no insertion is refused, the budget holds
     after every insertion and every collapse ends;
+  - `a_crowded_plan_never_refuses_an_insertion_above_the_floor`
+    (TASK-230): more name families beneath one site than a pass plans
+    steps, each family step growing the index (long names over singles
+    whose nodes stay): insertions at the ceiling still collapse, none is
+    refused (the previous planner refused one: `NoRoom`);
+  - `a_block_is_recounted_on_a_complete_listing_only`,
+    `sync_tally_recounts_blocks_on_complete_listings_only`,
+    `background_tally_recounts_blocks_on_complete_listings_only`: a
+    listing stopped by its deadline or with an unreadable directory
+    leaves a block's count; a complete one recounts it (also counting
+    the candidates a fresh block covered without counting);
   - `discovery_dissolves_a_block_only_below_the_low_water_mark`: a
     block is replaced by its listed members only when they fit under
     the low-water mark;
@@ -561,13 +572,23 @@ Model scenarios required by [safety.md](safety.md) and
   tallied more than 60 minutes ago or never, in its order; later
   tiers' stored sizes are kept and none of their trees is walked); `sync_tally_budget_ending_in_discovery_still_finds_the_rest`
   (the walk's per-tier discovery deletes what the tally did not list);
-  the tally takes no host lock and makes no deleting call;
-- **background tally** (virtual clock): the worker's active time is at
+  the tally takes no host lock and makes no deleting call (diskgc-model
+  `tests/tally.rs`: `sync_tally_discovers_every_tier_then_sizes_only_the_first`,
+  `sync_tally_skips_a_recent_listing_and_sizes_only_stale_units`,
+  `sync_tally_sizes_the_first_tier_that_found_something`,
+  `sync_tally_budget_ends_in_either_pass`);
+- **background tally** (virtual clock, every port call costing 1 ms):
+  the worker's active time is at
   most 5 % (plus one batch) of any window of 100 batches, no batch
-  exceeds 50 ms or 2,000 operations, and it makes no filesystem call
+  exceeds 50 ms or 2,000 operations (a listing, which is not resumable,
+  excepted: its whole time is charged), and it makes no filesystem call
   while the host lock is held by another process; overdue discovery,
   re-check and re-tally jobs are all served within twice their period
-  on a 100,000-entry model under constant churn (no starvation);
+  under constant churn (no starvation; the model test is scaled down to
+  about 200 units and 600 entries over 150 minutes; the 100,000-entry
+  run is open); a sizing cursor holds
+  no fd between batches and survives a directory vanishing under it
+  (diskgc-model `tests/tally.rs`);
 - **pressure brake** (virtual clock, scripted PSI readings through the
   `Host` query): `pressure_brake_doubles_the_sleep_and_skips_batches`
   (with `io` at 30 %, no batch runs and the sleeps are 1, 2, 4 ... s up
@@ -575,7 +596,8 @@ Model scenarios required by [safety.md](safety.md) and
   to 19 × *t*); each of `io`, `memory` (10 %) and `cpu` (50 %) alone
   triggers it, and readings at the thresholds do not;
   `no_psi_means_duty_cycle_only` (PSI unreadable: one log line, the
-  plain duty cycle); the synchronous tally never reads PSI;
+  plain duty cycle); the synchronous tally never reads PSI (ModelHost's
+  `pressure` script);
 - **snapshot** (ModelHost state operation): `ensure_writes_the_snapshot_and_the_next_run_starts_from_it`
   (the second run reports `source: snapshot` and lists no root
   discovered less than 5 minutes earlier);
@@ -1735,7 +1757,13 @@ filesystem, processes and mounts from the developer's system.
     diskgc logs the back-off, its batches per minute (from its log) fall
     at least 4 times below the unloaded phase while pressure is high,
     and recover within 2 minutes after it falls. A container cannot
-    prove this: `/proc/pressure` there is the host's;
+    prove this: `/proc/pressure` there is the host's. Flake check
+    `vm-tally-pressure` (`just e2e-vm-tally-pressure`,
+    `diskgc-e2e/vm-tally-pressure.{nix,py}`): the tally runs as the e2e
+    driver's `tally-background` in a container in the guest, over a
+    fixture on a QEMU-throttled disk (so it stays busy on cold
+    metadata), and a direct-I/O writer saturates a second, tighter
+    throttled disk; the unloaded phase must itself stay below 10 %;
   - `sync_tally_is_useful_within_its_budget`: a cold `ensure
     --tally-budget 5s` over the fixture, with two selected tiers and a
     goal that needs both, reports `coverage: complete`, acts on the first

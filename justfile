@@ -78,6 +78,10 @@ e2e: check _gcroot-dev
 e2e-all:
     python3 tools/e2e_all.py e2e
 
+# Background tally pressure brake in a VM with QEMU-throttled disks (~15 min); read-only.
+e2e-vm-tally-pressure: _gcroot-dev
+    nix build -L --no-link .#checks.x86_64-linux.vm-tally-pressure
+
 # Cold guest-cache 40k dry plan on the VM's private ext4 disk; no deletion.
 e2e-vm-cold-scale: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale

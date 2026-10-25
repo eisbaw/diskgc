@@ -54,6 +54,8 @@
 //!   stopped), or, counted as failures, `I failed <tag> <path> entries=N
 //!   -- <message>` (an error for the target, the sandbox gate, or an error
 //!   of the run), `held_us` being how long the target's locks were held;
+//! - `tally-background SECONDS ROOT...`: the background tally, one line per
+//!   event ([`crate::tally_probe`]);
 //! - `host-lock GATE`: the host lock (diskgc-core `hostlock::acquire`:
 //!   `/run/diskgc/lock`, exclusive, inheritable by children), then a child
 //!   (`/bin/sh`) that waits until the file GATE exists, then the driver
@@ -119,6 +121,11 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
                                   first, as a plan would, reclaim only an
                                   eligible one and pass the protocol the
                                   last build it measured
+    tally-background SECONDS ROOT...
+                                  the background tally over the ROOTs (every
+                                  directory below each a candidate) for
+                                  SECONDS; one line per batch, brake or pause;
+                                  read-only
     host-lock GATE                take the host lock, start a child that
                                   inherits it and waits for the file GATE,
                                   close the driver's copy, exit
@@ -308,6 +315,12 @@ pub fn run<H: Delete>(
             cargo_reclaim(host, owner, flags, roots, &mut out)?;
         }
         ("host-lock", [gate]) => host_lock(host, Path::new(gate), &mut out)?,
+        ("tally-background", [seconds, roots @ ..]) if !roots.is_empty() => {
+            let seconds: u64 = seconds
+                .parse()
+                .map_err(|e| format!("tally-background SECONDS {seconds:?}: {e}"))?;
+            crate::tally_probe::run(host, seconds, roots, &mut |line| out.ok(line));
+        }
         ("command-lock", [gate, cwd]) => {
             command_lock(host, Path::new(gate), Path::new(cwd), &mut out)?;
         }
