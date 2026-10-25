@@ -120,7 +120,7 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigE
     };
     let not_shipped = |name: &str| {
         select::Catalog::withheld(&short, name)
-            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog."))
+            .unwrap_or_else(|| format!("`{name}` is not in this release's catalog"))
     };
     for policy in &config.profile_policies {
         if library.get(&policy.profile).is_none() {
@@ -186,11 +186,14 @@ impl select::Catalog for ShortRefusals<'_> {
     fn withheld(&self, name: &str) -> Option<String> {
         if self.user.iter().any(|u| u == name) {
             return Some(format!(
-                "`{name}` is a user profile, which diskgc {} refuses.",
+                "`{name}` is a user profile, which diskgc {} refuses",
                 Release::V0_1.name()
             ));
         }
-        self.library.not_shipped(name)
+        // Said inside a selection's list of problems: no full stop.
+        self.library
+            .not_shipped(name)
+            .map(|why| why.trim_end_matches('.').to_owned())
     }
 }
 

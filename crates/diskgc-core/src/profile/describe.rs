@@ -33,8 +33,8 @@ use crate::units::format_duration;
 fn more(library: &Library) -> String {
     let first = match library.release_name() {
         Some(release) => format!(
-            "diskgc {release} runs only these built-ins (no user profiles); \
-             `diskgc profiles list` lists them;"
+            "diskgc {release} runs these built-ins only, no user profiles: \
+             `diskgc profiles list`;"
         ),
         None => "User profiles from your config are listed by `diskgc profiles list`;".to_owned(),
     };

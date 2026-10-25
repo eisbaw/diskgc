@@ -782,7 +782,11 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesF
                     true,
                 )
             } else {
-                (tested_text(&run, library.profiles().count()), false)
+                let sources = library
+                    .profiles()
+                    .filter(|p| matches!(p.body, diskgc_core::profile::Body::Source(_)))
+                    .count();
+                (tested_text(&run, sources), false)
             }
         }
     })
@@ -790,13 +794,13 @@ fn profiles(args: &ProfilesArgs, json: bool) -> Result<(String, bool), ProfilesF
 
 /// `profiles test`'s line when nothing failed: what was checked, so a
 /// library without examples is not reported as passing them.
-fn tested_text(run: &diskgc_core::profile::examples::Run, profiles: usize) -> String {
-    let without = profiles - run.profiles;
+/// Filters have no examples; only source profiles are counted.
+fn tested_text(run: &diskgc_core::profile::examples::Run, sources: usize) -> String {
     if run.examples == 0 {
-        format!("no examples to test: none of the {profiles} profiles has any\n")
+        format!("no examples to test: none of the {sources} source profiles has any\n")
     } else {
         format!(
-            "{} examples of {} profiles pass ({without} profiles have none)\n",
+            "{} examples of {} of the {sources} source profiles pass\n",
             run.examples, run.profiles
         )
     }

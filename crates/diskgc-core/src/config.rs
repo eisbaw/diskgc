@@ -670,7 +670,17 @@ fn parse_inner(path: &Path, bytes: &[u8], check_examples: bool) -> Result<Config
             continue;
         };
         let Some(profile) = library.get(&name) else {
-            problems.push(line, format!("protect: unknown profile `{name}`"));
+            let close = crate::profile::describe::close_names(library, &name);
+            let hint = if close.is_empty() {
+                String::new()
+            } else {
+                let quoted: Vec<String> = close.iter().map(|n| format!("`{n}`")).collect();
+                format!("; close names: {}", quoted.join(", "))
+            };
+            problems.push(
+                line,
+                format!("protect: unknown profile `{}`{hint}", name.escape_debug()),
+            );
             continue;
         };
         let Body::Source(source) = &profile.body else {
@@ -1040,7 +1050,7 @@ mod tests {
             "a single `&`",
             "\n  /c.yaml:7: tier `old`: root `~/src`",
             "\n  /c.yaml:8: duplicate tier name `old`",
-            "\n  /c.yaml:11: protect: unknown profile `nope`",
+            "\n  /c.yaml:11: protect: unknown profile `nope`\n",
             "\n  /c.yaml:12: owners: system uid 0",
         ] {
             assert!(shown.contains(needle), "{needle:?} missing from:\n{shown}");
