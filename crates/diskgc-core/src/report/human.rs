@@ -317,7 +317,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             Verdict::Kept => format!(
                 "  kept {path}: {}{evidence}{tier}",
                 why(
-                    entry.reason.map_or("eligible", Reason::as_str),
+                    entry
+                        .reason
+                        .expect("the fold keeps only refused rows")
+                        .as_str(),
                     entry.detail.as_deref(),
                     entry.process_blockers.as_deref()
                 )
@@ -460,7 +463,7 @@ fn held_line(held: &[HeldEntry]) -> Option<String> {
 
 /// `value` on one line: control characters and backslashes escaped, so a
 /// path cannot forge a line of the summary.
-pub(super) fn one_line(value: &str) -> String {
+fn one_line(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_control() || ch == '\\' {
