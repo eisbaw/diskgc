@@ -4,7 +4,7 @@ title: 'Index: units, buckets, identity, path trie, memory budget, queue derivat
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+updated_date: '2026-10-25 13:48'
 labels:
   - wave-3
   - architecture
@@ -44,6 +44,8 @@ Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is r
 Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
 
 Orchestrator 2026-10-24 (COMPASS round 2): next cornerstone after the 0.1 batch. Bucketing matters now: nix-shell-rc would otherwise print ~105k plan rows. Index the ModelHost state first or the 98k rc-dir model test is quadratic. TASK-117 (watch design) runs alongside.
+
+Mark's decisions 2026-10-25 (his own, not the emulator): (a) Memory: finite size, but when the ceiling is met the index COLLAPSES existing entries into coarser blocks instead of stopping (coarser = more stat work at delete time); a collapse must first re-validate that the collapsed elements' files/inodes are still valid. Replaces architecture.md's 'stops adding units, coverage: partial'. (b) No latency targets: drop the PRD's '10 s to first deletion' acceptance. (c) Start now, in parallel with the 0.1 release. Index questions not answered by the docs go to Mark directly.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

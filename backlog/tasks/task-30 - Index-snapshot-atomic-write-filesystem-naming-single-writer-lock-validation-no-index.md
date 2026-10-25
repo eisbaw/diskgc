@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-23 21:15'
+updated_date: '2026-10-25 13:49'
 labels:
   - wave-3
   - architecture
@@ -14,7 +14,7 @@ dependencies:
   - TASK-29
 references:
   - docs/architecture.md
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -47,6 +47,8 @@ Orchestrator 2026-10-23 (design audit): design gaps: snapshot file format (only 
 Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is released when the LAST reference to its open file goes, which can be after close()/exit returned: any /proc/<pid>/fd reader (an in-use scan, diskgc's own included, lsof) holds a transient reference for the length of its syscall (measured up to 0.5 ms on 7.2; about 1 in 60 immediate retries busy under four readers). Never assert a release with one attempt right after a close; wait with a bound (RELEASE_BOUND, docs/testing.md Negative feedback). A held-lock assertion needs no wait. Applies to the snapshot single-writer lock: a writer taking it right after another writer exits can see it busy briefly; take it with a bounded wait.
 
 Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
+
+Mark's decisions 2026-10-25 (his own, not the emulator): ensure ALSO writes the snapshot (same atomic write and single-writer lock; skip/merge appropriately if watch holds the lock), so ensure-only setups (agent pre-job hook, CI without watch) get warmer with each call. architecture.md currently says only watch writes it: change.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
