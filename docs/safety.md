@@ -82,6 +82,9 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
     `/boot`) is used. Below a root, the walk never triggers one: it
     descends with `RESOLVE_NO_XDEV`, which the kernel checks before it
     would mount, and a mount point below a root is `contains_mount`.
+    Limit: not triggering is not never blocking; a lookup can still wait
+    on a mount that another process triggered and whose server is dead
+    (the In use and Deletion limits on dead mounts).
   - Limit: a non-FUSE type that is neither on the list nor local (a new
     kernel network filesystem) is taken as local; the list is extended
     when one is seen.
@@ -3178,7 +3181,11 @@ release catalog (`proposed-release-01-catalog`; a const assert in its
 `main.rs` on `diskgc_linux::sandbox::SANDBOX_GATE`), so an ad-hoc
 `cargo build` cannot make an ungated binary with every development profile.
 The `release-gate-needs-catalog` flake check proves both halves: the
-gate-lift alone fails on that assert, and with the catalog it compiles.
+gate-lift alone fails on that assert, and with the catalog it compiles. The
+assert guards what ships, the `diskgc` binary; it does not stop test
+builds of other crates with `--all-features` (there,
+`the_gate_is_compiled_into_this_build` fails instead) or the separate
+`diskgc-e2e` project, whose binaries have their own container interlock.
 
 How it holds:
 
