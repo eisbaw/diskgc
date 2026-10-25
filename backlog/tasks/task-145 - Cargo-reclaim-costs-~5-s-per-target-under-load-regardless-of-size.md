@@ -1,10 +1,10 @@
 ---
 id: TASK-145
 title: Cargo reclaim costs ~5 s per target under load regardless of size
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-24 21:09'
-updated_date: '2026-10-25 02:20'
+updated_date: '2026-10-25 02:57'
 labels:
   - shipping
 dependencies: []
@@ -25,4 +25,6 @@ Repro: just walk-up; diskgc ensure --min-free 2G --select profile:cargo-target -
 
 <!-- SECTION:NOTES:BEGIN -->
 TASK-145 (branch t145, 2026-10-25). Where the time goes (strace timeline, tmp/walks/2026-10-25-t145/02-before-strace.txt, 41..43-after-strace.txt): per target one scan under the locks plus one per part checked >=500 ms after the last scan's start; when a scan takes >~450 ms every part (6 per classic profile, 12 for debug+release) costs its own scan, so (parts+1) x scan = 5-13 s per target, vs one scan (~0.2-0.5 s) when scans fit. That is the Freshness rule, unchanged. Root of the scan's load sensitivity: the static musl build's allocator; each /proc read allocated fresh 32/64 KiB and growing maps buffers: ~5,400 mmap/munmap + ~25,000 futex per scan vs ~0 in the glibc build. Fix: per-thread scratch buffer for those reads (crates/diskgc-linux/src/scratch.rs) and no union copy for equal maps passes. After: ~2,000 mmap, ~8,400 futex per scan; scan_timing median 697->455 and 1076->756 ms (load 16-22), CPU per scan ~1.6->1.3 s. Cargo walk, same seed, interleaved: load 13-17 after max 425 ms per target vs before up to 2.1 s; load 18-20 after 2/3 runs all targets <=342 ms, before 1/3; load 24-34 goal met 3/7 after vs 1/7 before, in_use_unknown 18 vs 46. The cliff remains under sustained contention: TASK-173 (protocol decision), TASK-174 (remaining allocator gap), TASK-175 (walk tooling).
+
+Merged to master as 47d9bd4 on 2026-10-25T02:57Z. Partial: per-thread scratch buffers cut mmap/futex ~3x and the cliff at load 13-17; sustained load >=19 still shows 4-10 s/target; TASK-173 (one scan per target) and TASK-174 (musl gap) continue.
 <!-- SECTION:NOTES:END -->
