@@ -293,7 +293,7 @@ pub fn inuse_unreadable_processes_block_unless_their_status_explains_them(ctx: &
         "the non-dumpable process is not noted:\n{}",
         nd_run.stderr
     );
-    expect_line(&grp_run, "0 skip in_use \"/tmp/suid\" -- pid ")?;
+    expect_line(&grp_run, "0 skip in_use_unknown \"/tmp/suid\" -- pid ")?;
     ensure!(
         outcome(&grp_run)?.contains("cannot be inspected"),
         "{}",
@@ -496,7 +496,7 @@ pub fn inuse_a_more_capable_process_blocks_outside_the_initial_namespace(ctx: &C
     expect_line(
         &run,
         &format!(
-            "0 skip in_use \"/tmp/capable\" -- pid {} (diskgc-e2e) cannot be inspected",
+            "0 skip in_use_unknown \"/tmp/capable\" -- pid {} (diskgc-e2e) cannot be inspected",
             holder.pid()
         ),
     )?;
