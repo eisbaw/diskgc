@@ -409,6 +409,9 @@ they never override the Invariants.
   fast suite (TASK-178) left release, Debian, Docker and VM results
   missing for that sha. A red async QA means "unknown" for every later
   stage, not "pass".
+- 2026-10-25: parallel agents writing logs to the same scratchpad name
+  (e.g. `check1.log`) garble each other's gate evidence (lane-b vs
+  lane-c). Brief every agent to prefix logs with its task or lane name.
 - 2026-10-25: NEVER share one `CARGO_TARGET_DIR` between worktrees:
   cargo hashes a workspace crate the same in every worktree, so parallel
   builds overwrite each other and a gate can run another tree's test

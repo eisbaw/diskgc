@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:12'
+updated_date: '2026-10-25 09:15'
 labels:
   - hardening
   - safety
@@ -27,6 +28,14 @@ Fix the class: in Cargo walks (and arguably every walk) refuse any .cargo-*lock*
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A model vector: unknown .cargo-*lock* name deep in a profile directory -> target skipped contains_special, nothing removed
-- [ ] #2 docs/safety.md step 3 and Filesystem candidates state the same rule as the code
+- [x] #1 A model vector: unknown .cargo-*lock* name deep in a profile directory -> target skipped contains_special, nothing removed
+- [x] #2 docs/safety.md step 3 and Filesystem candidates state the same rule as the code
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+lane-b 0068fb6 (not merged): every walk refuses any .cargo-*lock* name at any depth, candidate included (contains_special); tag-based parent/grandparent recogniser removed as subsumed (reverses task-5's narrower rule, errs on keeping). Vector builtins/cargo-target-unknown-lock-name-deep.yaml + 2 rows in walk/nested-cargo-target-recogniser.yaml: red on 53a53dc, green on branch; reverting walk.rs fails both vectors + 3 engine tests. just check green (isolated target). Containers green: cargo_reclaim_deletes_only_inside_locked_profile_dirs@1.99.1 and @nightly-2026-10-16, cargo_race_2...@1.99.1, cargo_race_9...@1.99.1. mped-architect: ship, notes addressed. Limit: name-pattern only; a future lock named outside .cargo-*lock* is not recognised (follow-up filed).
+
+Decision 2026-10-25 by mark-emulator (Mark may veto): accept the fail-closed rule (any .cargo-*lock* name at any depth refuses its candidate), reversing task-5's narrower rule; a non-Cargo file with such a name keeping its candidate is the accepted cost (PRD: no Cargo lock file is ever deleted).
+<!-- SECTION:NOTES:END -->

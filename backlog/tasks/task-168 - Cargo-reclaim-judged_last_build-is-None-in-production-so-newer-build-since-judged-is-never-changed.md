@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-25 01:13'
+updated_date: '2026-10-25 09:14'
 labels:
   - hardening
   - safety
@@ -24,5 +25,11 @@ Found by TASK-13 async QA (b009e59, read-only). executor walk_cargo calls reclai
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ensure passes the tally's last build, with an executor-level test; or docs/safety.md step 2 is corrected
+- [x] #1 ensure passes the tally's last build, with an executor-level test; or docs/safety.md step 2 is corrected
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+lane-b 0068fb6 (not merged): doc fix chosen (COMPASS). safety.md Reclaim step 2 now says ensure passes no judged_last_build; a rebuild between tally and locks is caught by the idle recheck under locks only when the tier has an idle requirement (built-in cargo-target has none), otherwise only by in-use. Not a deletion hazard (mped-architect concurs): under the locks no Cargo of the lock set builds. Behaviour unchanged.
+<!-- SECTION:NOTES:END -->
