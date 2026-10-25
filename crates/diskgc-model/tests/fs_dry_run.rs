@@ -2277,6 +2277,97 @@ fn discovery_stops_at_the_deadline_through_every_exit() {
     }
 }
 
+/// TASK-227: a dry run that reaches the deadline while judging keeps what it
+/// judged. The host run of TASK-157 hit `--timeout 10m` after judging
+/// 5,834 sessions and reported an empty plan. Here `a` (eligible) and `b`
+/// (`in_use`: a process's cwd) are judged; the deadline passes while `c`'s eligibility
+/// walk lists it, so `c` is unjudged and absent. Exit 124, `deadline`, and
+/// an error that says the plan is incomplete.
+#[test]
+fn a_dry_run_at_the_deadline_reports_every_candidate_it_judged() {
+    let host = host(&yaml(&format!(
+        "  /tmp/pytest-of-a: {{.: {{}}}}\n  /tmp/pytest-of-b: {{.: {{}}}}\n  /tmp/pytest-of-c: \
+         {{.: {{}}}}\nprocesses:\n{}events:\n  - {{at: {{op: read_dir, path: /tmp/pytest-of-c, \
+         when: after}}, advance: 700s}}\n",
+        process(7, "/tmp/pytest-of-b", "")
+    )));
+    let report = dry_run(&host, &request("profile:pytest-of-dir", &[], "/tmp"));
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    let mut rows = plan(&report);
+    rows.sort_by(by_candidate_then_reason);
+    assert_eq!(
+        rows,
+        [
+            ("/tmp/pytest-of-a".to_owned(), None),
+            ("/tmp/pytest-of-b".to_owned(), Some(Reason::InUse)),
+            ("/var/tmp".to_owned(), Some(Reason::Missing)),
+        ],
+        "{report:#?}"
+    );
+    assert!(
+        report.errors.iter().any(|e| e.message.contains("deadline")),
+        "{:#?}",
+        report.errors
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// TASK-227: a row is reported eligible only after its protection check. A
+/// deadline that passes during the check of the first eligible row keeps
+/// that row (checked) and the skipped ones (their own reason is true), and
+/// drops the eligible rows it did not check: they are not judged.
+#[test]
+fn a_dry_run_at_the_deadline_drops_eligible_rows_not_checked_against_protections() {
+    let policy = r#"version: 1
+profiles:
+  - name: sessions
+    find: {roots: [/tmp], paths: ['pytest-of-*'], type: dir}
+    action: delete
+    examples: {match: [/tmp/pytest-of-a]}
+  - name: guard
+    find: {roots: [/tmp], paths: [guarded], type: dir}
+    action: delete
+    examples: {match: [/tmp/guarded]}
+protect: [guard]
+"#;
+    let config = config::parse(Path::new("/tmp/config.yaml"), policy.as_bytes()).unwrap();
+    let mut request = Request {
+        path: PathBuf::from("/tmp"),
+        min_free: parse_size("1G").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        tier: Tier::select("profile:sessions", &config.library, None, 1000).unwrap(),
+    };
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    // Oldest first: `a`, then `c`; `b` is in use (a skip). The first
+    // `statx` of /tmp/guarded is the protect scan's, the second the check
+    // of `a`: the deadline passes there.
+    let host = host(&yaml(&format!(
+        "  /tmp/guarded: {{.: {{}}}}\n  /tmp/pytest-of-a: {{.: {{mtime: 2026-09-01T00:00:00Z}}}}\n  \
+         /tmp/pytest-of-b: {{.: {{}}}}\n  /tmp/pytest-of-c: {{.: {{mtime: \
+         2026-10-01T00:00:00Z}}}}\nprocesses:\n{}events:\n  - {{at: {{op: statx, path: \
+         /tmp/guarded, nth: 2, when: after}}, advance: 700s}}\n",
+        process(7, "/tmp/pytest-of-b", "")
+    )));
+    let report = dry_run(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    let mut rows = plan(&report);
+    rows.sort_by(by_candidate_then_reason);
+    assert_eq!(
+        rows,
+        [
+            ("/tmp/pytest-of-a".to_owned(), None),
+            ("/tmp/pytest-of-b".to_owned(), Some(Reason::InUse)),
+        ],
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
 /// The size estimate counts each object once (docs/architecture.md, The
 /// index: `est_bytes`; task-68 found the fs estimate counting a hard link
 /// per name): a candidate holding a 1M file under two names is estimated

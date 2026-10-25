@@ -3213,6 +3213,41 @@ fn the_deadline_between_candidates_stops_before_the_next_one_is_touched() {
     assert!(exists(&host, "/tmp/pytest-of-a/f"));
 }
 
+/// TASK-227: a reclaim that reaches the deadline reports every action and
+/// skip so far. `a` (oldest) is in use, a skip; the deadline passes inside
+/// `b`'s delete, a part-way action; `c` is untouched and not reported.
+#[test]
+fn a_reclaim_at_the_deadline_reports_its_actions_and_skips_so_far() {
+    let dir_at = |at: &str| {
+        format!(
+            "{{.: {{mtime: {at}}}, f: {{size: 10K, mtime: {at}}}, g: {{size: 10K, mtime: {at}}}}}"
+        )
+    };
+    let tree = format!(
+        "  /tmp/pytest-of-a: {}\n  /tmp/pytest-of-b: {}\n  /tmp/pytest-of-c: {}\n",
+        dir_at("2026-09-01T00:00:00Z"),
+        dir_at("2026-09-15T00:00:00Z"),
+        dir_at(OLD),
+    );
+    let rest = "  - {pid: 8, exe: /usr/bin/tool, cwd: /tmp/pytest-of-a, maps: [/usr/bin/tool], fds: \
+                [{path: /usr/bin/tool}], environ: [PATH=/usr/bin]}\nevents:\n  - {at: {op: \
+                unlinkat, path: /tmp/pytest-of-b/f, when: after}, advance: 700s}\n";
+    let host = host(&yaml("", &tree, rest));
+    let report = ensure(&host, &tmp("profile:pytest-of-dir"));
+    assert!(host.unfired_events().is_empty());
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    assert_eq!(actions(&report), ["/tmp/pytest-of-b"], "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/pytest-of-a"),
+        Some(Reason::InUse),
+        "{report:#?}"
+    );
+    assert_eq!(skip_of(&report, "/tmp/pytest-of-c"), None, "{report:#?}");
+    assert_eq!(unlinked_below(&host, "/tmp/pytest-of-c"), 0);
+    assert!(exists(&host, "/tmp/pytest-of-b/g"));
+}
+
 /// An action whose space cannot be measured afterwards has a `null`
 /// change, never 0, and the run stops: the goal can no longer be observed.
 #[test]

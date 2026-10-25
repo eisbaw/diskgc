@@ -2406,9 +2406,9 @@ fn dry_run_inner<H: Host>(
         SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
     };
     record_deadline_overrun(host, &mut report, deadline, started, "plan", &request.path);
-    if deadline_passed(host, deadline) {
-        return deadline_before_plan(host, &measured, deadline, report, log, tier);
-    }
+    // A deadline here keeps what was judged (TASK-227): each planner stops
+    // at it and returns the candidates it finished judging; a candidate it
+    // was judging when the deadline passed is not among them.
     let Planned {
         mut eligible,
         skipped,
@@ -2448,16 +2448,24 @@ fn dry_run_inner<H: Host>(
         .map(|(_, e)| e)
         .chain(skipped)
         .collect();
-    for index in 0..report.plan.len() {
+    // Without protect matches nothing can overlap one: no check, no I/O.
+    let checks = if protection_matches.is_empty() {
+        0
+    } else {
+        report.plan.len()
+    };
+    let mut unchecked_from = None;
+    for index in 0..checks {
         let Some(candidate) = report.plan[index].candidate.clone() else {
             continue;
         };
+        if deadline_passed(host, deadline) {
+            unchecked_from = Some(index);
+            break;
+        }
         let started = host.now();
         let overlap = overlaps_checked(host, &candidate, &protection_matches);
         record_deadline_overrun(host, &mut report, deadline, started, "protect", &candidate);
-        if deadline_passed(host, deadline) {
-            return deadline_before_plan(host, &measured, deadline, report, log, tier);
-        }
         let protected = match overlap {
             Ok(protected) => protected,
             Err(error) => {
@@ -2474,16 +2482,42 @@ fn dry_run_inner<H: Host>(
             entry.detail = Some("overlaps a protected source match".to_owned());
         }
     }
+    if let Some(index) = unchecked_from {
+        // An eligible row is judged only once it is checked against the
+        // protect matches; past the deadline it is dropped, not guessed.
+        // A skipped row keeps its own reason, which is true either way.
+        let unchecked = report.plan.split_off(index);
+        let dropped = unchecked.iter().filter(|e| e.reason.is_none()).count();
+        report
+            .plan
+            .extend(unchecked.into_iter().filter(|e| e.reason.is_some()));
+        log(&format!(
+            "{}: the deadline passed before {dropped} eligible candidate(s) were checked \
+             against the protect matches; they are not in the plan",
+            tier.name
+        ));
+    }
     report.plan.extend(root_skips);
-    if let Some(stop) = stopped {
-        if matches!(stop, Stop::DeadlinePassed { .. }) {
-            report.status = Status::Deadline;
+    match stopped {
+        Some(stop) => {
+            if matches!(stop, Stop::DeadlinePassed { .. }) {
+                report.status = Status::Deadline;
+            }
+            record_error(
+                &mut report,
+                log,
+                stop_error(tier, &stop, format!("stopped: {stop}")),
+            );
         }
-        record_error(
-            &mut report,
-            log,
-            stop_error(tier, &stop, format!("stopped: {stop}")),
-        );
+        None if unchecked_from.is_some() => {
+            report.status = Status::Deadline;
+            record_error(
+                &mut report,
+                log,
+                run_error(tier, "deadline passed before the plan was complete"),
+            );
+        }
+        None => {}
     }
     // Unmeasured: unknown, not the earlier sample.
     report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
@@ -3616,7 +3650,8 @@ fn deadline_before_plan<H: Host>(
     log: &mut dyn FnMut(&str),
     tier: &Tier,
 ) -> Report {
-    report.plan.clear();
+    // Before planning, the plan holds only roots preflight refused: true
+    // rows, kept (TASK-227: a deadline throws no judged work away).
     report.avail_after_bytes = final_sample(host, measured, deadline, &mut report, log, tier);
     record_error(
         &mut report,

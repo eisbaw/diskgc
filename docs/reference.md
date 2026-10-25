@@ -160,7 +160,13 @@ process runs, even if that Cargo works in an unrelated directory; see
   would run. A complete plan exits 0 with JSON `status: dry_run`; a host or
   planning failure exits 3 with `status: error` and the available partial
   plan and `errors` (2 on usage errors, 124 at the deadline, 130/143 when
-  interrupted). If one configured tier exhausts its own timeout, later
+  interrupted). A dry run that reaches the deadline (124, `status:
+  deadline`) keeps the work it did: `plan` has a row for every candidate
+  judged before it, and `errors` says the plan is incomplete. Left out
+  are the candidates it found but had not judged, the one it was judging,
+  and, when protect matches apply, eligible candidates not yet checked
+  against them (an eligible row is never a guess). If one configured tier
+  exhausts its own timeout, later
   tiers are still planned, but the incomplete grouped plan exits 3; the
   overall `--timeout` still exits 124.
 - **Open-file limit.** At startup `ensure` raises its soft
@@ -449,7 +455,7 @@ The first matching row wins:
 | 130 / 143 | Interrupted by SIGINT / SIGTERM. |
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
-| 124 | Deadline reached during reclaim, below `--min-free`. |
+| 124 | Deadline reached during reclaim, below `--min-free`; or during a dry run (its plan has every candidate judged before it). |
 | 3 | A host or planning operation failed (including the first or final space sample), or a tier failed or was excluded as misconfigured below `--min-free`. A dry run may have a partial plan; a reclaim may have deleted something. The report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
@@ -1928,7 +1934,8 @@ a Cargo lock file, and Cargo builds into it again as usual.
   10 minutes under `nice -n 19 ionice -c 3`; it waits on the disk reading
   directories and inodes, not on the CPU. So give a first run on a large
   `/tmp` a `--timeout` above the default `10m`: one of the two niced dry
-  runs hit it and exited 124 with an empty plan. A dry run of
+  runs hit it and exited 124 with an empty plan (since TASK-227 such a run
+  reports every session it judged before the deadline). A dry run of
   `nix-shell-rc` on the same `/tmp` judged 128,892 rc directories in 34
   to 62 s. With `/tmp` in memory (a tmpfs, in a container sharing the
   host's PID namespace beside ~290 load processes, load about 4), a
