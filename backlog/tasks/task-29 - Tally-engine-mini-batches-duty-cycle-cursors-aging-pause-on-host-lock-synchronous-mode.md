@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 13:49'
+updated_date: '2026-10-25 14:19'
 labels:
   - wave-3
   - architecture
@@ -28,6 +28,7 @@ Why: the index must stay fresh without pounding the disk. Implement the tally pe
 - [ ] #1 The tally pauses whenever another process holds the host lock (container test)
 - [ ] #2 --tally-budget 0 runs to completion; a small budget leaves untallied candidates reported in the index block
 - [ ] #3 The duty cycle and operation counts are asserted as bounds, not exact values, in model tests with the virtual clock
+- [ ] #4 Background tally backs off under measured pressure (PSI io/memory > 10%, cpu > 50% some avg10; skip batch, doubling sleep to 60 s; reset below all thresholds); without PSI only the duty cycle applies with one log line; proven by model tests with scripted PSI and a VM test where I/O pressure drops batches/min >= 4x and recovers within 2 min
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -42,6 +43,12 @@ Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is r
 Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
 
 Mark's decisions 2026-10-25 (his own, not the emulator): the background tally (watch, async) must NOT load the system (duty cycle, nice/ionice, pause on host lock as designed); the synchronous tally (ensure) MAY load the machine and must be fast and quickly produce a USEFUL tally (one that lets the reclaim walk act). The tally updates the index; deletion enacts it.
+
+Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/architecture.md The index / Memory budget and collapse / Order within a tier / Refusals and index updates / The tally / reclaim walk; safety.md Discovery; testing.md index scenarios. Schedule decided (discovery 5 min, re-check 10 min, re-tally 60 min, lateness/period aging); sync tally = pass 1 discovery of every selected tier, pass 2 sizing; cursors not persisted.
+
+Mark's decisions 2026-10-25 (his own): background tally backs off on measured pressure (PSI cpu/io/memory where available) in addition to the duty cycle and priorities; ensure with a valid but old snapshot re-sizes only the first tier's stale units.
+
+2026-10-25: pressure-brake AC added (Mark's decision; design 076c5ec).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

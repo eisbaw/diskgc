@@ -4,7 +4,7 @@ title: 'Index: units, buckets, identity, path trie, memory budget, queue derivat
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 13:48'
+updated_date: '2026-10-25 14:18'
 labels:
   - wave-3
   - architecture
@@ -23,9 +23,9 @@ Why: freeing space must not wait for a survey. Implement the index per docs/arch
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Hitting the memory budget sets coverage: partial and the walk still finds the missing candidates via per-tier discovery
-- [ ] #2 best-fit picks the smallest covering unit, else the largest (unit tests)
-- [ ] #3 98,000 tiny rc dirs fit in at most 10 bucket units (model test)
+- [ ] #1 best-fit picks the smallest covering unit, else the largest (unit tests)
+- [ ] #2 At the memory ceiling the index collapses units into blocks (re-validating site and members first, evicting what vanished) and never exceeds the budget; coverage is never partial because of memory, and every block member is still found and checked at reclaim (model: collapse_keeps_every_member_checked, collapse_revalidates_members)
+- [ ] #3 98,000 tiny rc dirs with a model budget that fits a tenth of them stay within the budget after every insertion and collapse, and repeated collapse ends (model: index_never_exceeds_its_budget)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -46,6 +46,10 @@ Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /pro
 Orchestrator 2026-10-24 (COMPASS round 2): next cornerstone after the 0.1 batch. Bucketing matters now: nix-shell-rc would otherwise print ~105k plan rows. Index the ModelHost state first or the 98k rc-dir model test is quadratic. TASK-117 (watch design) runs alongside.
 
 Mark's decisions 2026-10-25 (his own, not the emulator): (a) Memory: finite size, but when the ceiling is met the index COLLAPSES existing entries into coarser blocks instead of stopping (coarser = more stat work at delete time); a collapse must first re-validate that the collapsed elements' files/inodes are still valid. Replaces architecture.md's 'stops adding units, coverage: partial'. (b) No latency targets: drop the PRD's '10 s to first deletion' acceptance. (c) Start now, in parallel with the 0.1 release. Index questions not answered by the docs go to Mark directly.
+
+Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/architecture.md The index / Memory budget and collapse / Order within a tier / Refusals and index updates / The tally / reclaim walk; safety.md Discovery; testing.md index scenarios. AC review needed: #1 (coverage partial no longer comes from the memory budget; collapse instead) and #3 (no eager buckets; becomes index_never_exceeds_its_budget over 98,000 rc dirs with a small budget).
+
+AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's decisions 2026-10-25. Old #1 (budget sets coverage partial) and #3 (98,000 rc dirs in at most 10 bucket units) replaced: no eager buckets; collapse at the ceiling.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

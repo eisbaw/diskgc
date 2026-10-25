@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 13:49'
+updated_date: '2026-10-25 14:18'
 labels:
   - wave-3
   - architecture
@@ -27,7 +27,7 @@ Why: ensure on a runner needs a warm index from watch. Implement the snapshot pe
 <!-- AC:BEGIN -->
 - [ ] #1 A second watch for the same filesystem and user exits 2
 - [ ] #2 A corrupted or other-user snapshot falls back to synchronous tally and the report says so
-- [ ] #3 Config changes to tiers do not invalidate the snapshot; changes to profiles or roots do
+- [ ] #3 A profile edited between runs drops only that profile's units; changing tiers or --roots invalidates nothing (per-unit finders: profile, profile hash, root)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -49,6 +49,12 @@ Forward-carried from TASK-64 (2026-10-23): a flock (or a bound Unix socket) is r
 Correction to the TASK-64 forward-carry above (2026-10-23, measured): which /proc reads hold a file reference depends on the kernel (fs/proc/fd.c): reading /proc/<pid>/fdinfo on every supported kernel, statting or reading an fd link from 5.11, listing the fd directory from 6.7. diskgc's scan lists and stats fd links, so it can delay another program's lock release only from 5.11 on; on 5.8.16 those reads gave no late release in about 1.7 million attempts. A test still waits with RELEASE_BOUND on every kernel (other readers, e.g. lsof, read fdinfo). docs/safety.md Host lock has the table.
 
 Mark's decisions 2026-10-25 (his own, not the emulator): ensure ALSO writes the snapshot (same atomic write and single-writer lock; skip/merge appropriately if watch holds the lock), so ensure-only setups (agent pre-job hook, CI without watch) get warmer with each call. architecture.md currently says only watch writes it: change.
+
+Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/architecture.md The index / Memory budget and collapse / Order within a tier / Refusals and index updates / The tally / reclaim walk; safety.md Discovery; testing.md index scenarios. AC review needed: #3 (no whole-file shape hash; per-unit finders (profile, profile hash, root): a changed profile drops its units, tiers and --roots invalidate nothing). ensure writes the snapshot; lock file by a second ungated state op; --no-index neither reads nor writes.
+
+Mark's decisions 2026-10-25 (his own): an ensure whose goal is already met stays an instant no-op (no tally, no snapshot write); warmth for rarely-full machines comes from watch / watch --tally-only.
+
+AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's decisions 2026-10-25. Old #3 (tier changes keep the snapshot; profile or root changes invalidate it) replaced: no whole-file shape hash, per-unit finders.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
