@@ -1356,7 +1356,11 @@ filesystem, processes and mounts from the developer's system.
   a disposable container with 0, 1, 4 and 8 bounded child-spawning workers.
   It timestamps each child's spawn and wait with `CLOCK_BOOTTIME` and
   requires one entire spawn-and-wait interval inside a measured scan's
-  recorded interval. An unsettled scan or checker result must block
+  recorded interval. Workers keep spawning and the probe keeps scanning
+  until a scan contains a whole child, bounded per worker count (8 s,
+  4096 scans); if no worker count is exercised within the bounds the probe
+  fails with `not exercised`, distinct from a safety failure (TASK-197).
+  An unsettled scan or checker result must block
   clearing. It reports process-list rounds, duration, whether the 16-listing bound
   was hit, and whether the checker retried. After reaping every worker,
   it requires the unused candidate to clear. This exercises the

@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use std::ffi::OsStr;
 
 use diskgc_core::host::{
-    Access, Base, Cause, Delete, Host, HostError, LockMode, Pid, ProcError, ProcLink, Stat,
-    TryLock, Unlink, WaitLock,
+    Access, Base, Cause, Delete, Host, HostError, LockMode, MonoTime, Pid, ProcError, ProcLink,
+    Stat, TryLock, Unlink, WaitLock,
 };
 use diskgc_core::resolve::{ResolveError, Unsafe, Want, open_beneath, resolve};
 use diskgc_linux::{LinuxFd, LinuxHost};
@@ -209,55 +209,101 @@ fn pidfd_release(host: &LinuxHost) -> Result<(), String> {
     result
 }
 
+/// An interval on CLOCK_BOOTTIME: a measured scan, or one child's
+/// spawn-and-wait as its worker saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    start: MonoTime,
+    end: MonoTime,
+}
+
+impl Span {
+    fn new(start: MonoTime, end: MonoTime) -> Self {
+        assert!(
+            start <= end,
+            "span ends before it starts: {start:?} > {end:?}"
+        );
+        Self { start, end }
+    }
+
+    fn length(self) -> Duration {
+        self.end.saturating_since(self.start)
+    }
+
+    /// Whether `inner` lies entirely within this span, ends included.
+    fn contains(self, inner: Span) -> bool {
+        self.start <= inner.start && inner.end <= self.end
+    }
+}
+
+/// How many of `children` lie entirely within `scan`: each such child
+/// appeared and was reaped while the scanner was listing processes.
+fn children_within(scan: Span, children: &[Span]) -> usize {
+    children
+        .iter()
+        .filter(|child| scan.contains(**child))
+        .count()
+}
+
+/// The same CLOCK_BOOTTIME representation as LinuxHost::now, so child spans
+/// can be compared with Scan::started and Scan::took.
+fn boot_time() -> MonoTime {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    MonoTime(Duration::new(
+        u64::try_from(t.tv_sec).expect("CLOCK_BOOTTIME seconds are non-negative"),
+        u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
+    ))
+}
+
 /// Measure the real process scanner while short-lived children appear, then
 /// prove that a scan after all children are reaped can clear an unused tree.
-/// This runs only in the disposable E2E container. Each worker stops
-/// launching children after 500 ms or 64 launches; the probe takes bounded
-/// scan samples until one contains a full child lifetime. The E2E runner
-/// bounds the whole test if a child itself cannot exit promptly.
+/// This runs only in the disposable E2E container.
+///
+/// Setup condition: for at least one worker count, a whole child
+/// spawn-and-wait span lies inside a measured scan, so a process appeared
+/// and vanished while the scanner listed. Whether that happens depends on a
+/// child's lifetime relative to a scan, which host load stretches unevenly
+/// (TASK-197: in a swapping host's 5.8 VM, ~50 ms children against ~60 ms
+/// scans fitted none in the former fixed 500 ms window). So workers keep
+/// spawning and the probe keeps scanning until one scan contains a whole
+/// child, bounded per worker count by OVERLAP_BUDGET and MAX_SCAN_SAMPLES and
+/// per worker by MAX_LAUNCHES. If no worker count was exercised within those
+/// bounds the probe fails with a "not exercised" error, distinct from a
+/// safety failure: a pass without the condition would prove nothing.
+///
+/// Safety assertions: no sampled scan and no checker result that ended
+/// unsettled clears the candidate; after the storm, the unused candidate
+/// clears.
 fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use diskgc_core::engine::{Candidate, Rules, walk};
-    use diskgc_core::host::MonoTime;
-    use diskgc_core::inuse::{Checker, FreshAttempts, Options, Scan, scan};
+    use diskgc_core::inuse::{Checker, FreshAttempts, Options, scan};
     use diskgc_core::resolve::{Want, resolve};
 
-    /// The same CLOCK_BOOTTIME representation as LinuxHost::now, so these
-    /// events can be compared with Scan::started and Scan::took.
-    fn boot_time() -> MonoTime {
-        let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
-        MonoTime(Duration::new(
-            u64::try_from(t.tv_sec).expect("CLOCK_BOOTTIME seconds are non-negative"),
-            u32::try_from(t.tv_nsec).expect("tv_nsec is below one second"),
-        ))
-    }
+    /// Sampling time per worker count. An unloaded host fits a child in a
+    /// scan within milliseconds; a loaded VM with ~60 ms scans gets ~130
+    /// scans here. Three counts bound the probe's sampling to ~24 s.
+    const OVERLAP_BUDGET: Duration = Duration::from_secs(8);
+    /// Bounds the scans per worker count when scans take under 2 ms.
+    const MAX_SCAN_SAMPLES: usize = 4096;
+    /// Bounds each worker's children and the span log; an unloaded host
+    /// spawns roughly one /bin/true per millisecond per worker.
+    const MAX_LAUNCHES: usize = 8192;
+    /// Time for every worker's first launch before sampling starts.
+    const READY_WAIT: Duration = Duration::from_secs(5);
 
-    struct ChildEvent {
-        before_spawn: MonoTime,
-        after_spawn: MonoTime,
-        after_wait: MonoTime,
+    /// One sampled scan, reduced to what the report and the assertions use,
+    /// so thousands of samples do not retain thousands of process indexes.
+    struct Sample {
+        span: Span,
+        listings: usize,
+        unsettled: bool,
+        blocked: bool,
+        launched_during: usize,
+        completed_during: usize,
     }
-
-    fn complete_events_in_scan(scan: &Scan, events: &[ChildEvent]) -> usize {
-        let end = scan
-            .started()
-            .checked_add(scan.took())
-            .expect("scan end fits in CLOCK_BOOTTIME");
-        events
-            .iter()
-            .filter(|event| {
-                scan.started() <= event.before_spawn
-                    && event.before_spawn <= event.after_spawn
-                    && event.after_spawn <= event.after_wait
-                    && event.after_wait <= end
-            })
-            .count()
-    }
-
-    const MAX_SCAN_SAMPLES: usize = 128;
-    const FORK_WINDOW: Duration = Duration::from_millis(500);
 
     let path = Path::new(candidate);
     let parent_path = path.parent().ok_or("candidate has no parent")?;
@@ -269,30 +315,29 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
     let record = walk(host, &candidate, &rules, None)
         .map_err(|e| format!("walk unused candidate: {e:?}"))?;
     let options = Options::from_rules(&rules);
-    let mut overlapped_scan = false;
+    let mut exercised_counts = 0;
 
     for workers in [0, 1, 4, 8] {
         let stop = Arc::new(AtomicBool::new(false));
         let launched = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
-        let events = Arc::new(Mutex::new(Vec::<ChildEvent>::new()));
+        let children = Arc::new(Mutex::new(Vec::<Span>::new()));
+        let worker_deadline = Instant::now() + READY_WAIT + OVERLAP_BUDGET + Duration::from_secs(1);
         let mut threads = Vec::new();
         for _ in 0..workers {
             let stop = Arc::clone(&stop);
             let launched = Arc::clone(&launched);
             let completed = Arc::clone(&completed);
-            let events = Arc::clone(&events);
+            let children = Arc::clone(&children);
             threads.push(std::thread::spawn(move || -> Result<(), String> {
-                let until = Instant::now() + FORK_WINDOW;
-                for _ in 0..64 {
-                    if stop.load(Ordering::Relaxed) || Instant::now() >= until {
+                for _ in 0..MAX_LAUNCHES {
+                    if stop.load(Ordering::Relaxed) || Instant::now() >= worker_deadline {
                         break;
                     }
                     let before_spawn = boot_time();
                     let mut child = std::process::Command::new("/bin/true")
                         .spawn()
                         .map_err(|e| format!("spawn /bin/true: {e}"))?;
-                    let after_spawn = boot_time();
                     launched.fetch_add(1, Ordering::SeqCst);
                     let status = child
                         .wait()
@@ -301,81 +346,101 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
                     if !status.success() {
                         return Err(format!("/bin/true exited with {status}"));
                     }
-                    events
+                    children
                         .lock()
-                        .map_err(|_| "fork event lock poisoned".to_owned())?
-                        .push(ChildEvent {
-                            before_spawn,
-                            after_spawn,
-                            after_wait,
-                        });
+                        .map_err(|_| "fork span lock poisoned".to_owned())?
+                        .push(Span::new(before_spawn, after_wait));
                     completed.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(())
             }));
         }
+        let counts = || {
+            (
+                launched.load(Ordering::SeqCst),
+                completed.load(Ordering::SeqCst),
+            )
+        };
         if workers > 0 {
-            let ready_by = Instant::now() + Duration::from_secs(5);
-            while launched.load(Ordering::SeqCst) < workers && Instant::now() < ready_by {
+            let ready_by = Instant::now() + READY_WAIT;
+            while counts().0 < workers && Instant::now() < ready_by {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
-        let overlap_deadline = Instant::now() + FORK_WINDOW;
-        let before_scan = (
-            launched.load(Ordering::SeqCst),
-            completed.load(Ordering::SeqCst),
-        );
-        let measured = scan(host, &options);
-        let after_scan = (
-            launched.load(Ordering::SeqCst),
-            completed.load(Ordering::SeqCst),
-        );
-        let mut samples = vec![(measured, before_scan, after_scan)];
+        let overlap_deadline = Instant::now() + OVERLAP_BUDGET;
+        let take_sample = || -> Result<Sample, String> {
+            let before = counts();
+            let measured =
+                scan(host, &options).map_err(|e| format!("scan with {workers} workers: {e}"))?;
+            let after = counts();
+            let start = measured.started();
+            let end = start
+                .checked_add(measured.took())
+                .expect("scan end fits in CLOCK_BOOTTIME");
+            Ok(Sample {
+                span: Span::new(start, end),
+                listings: measured.listings(),
+                unsettled: measured
+                    .notes()
+                    .iter()
+                    .any(|note| note.starts_with("process scan unsettled:")),
+                blocked: measured.check(&candidate, &record).is_err(),
+                launched_during: after.0.saturating_sub(before.0),
+                completed_during: after.1.saturating_sub(before.1),
+            })
+        };
+
+        // Every error below is held until the workers are stopped and
+        // joined, so no worker outlives the worker count it belongs to.
+        let mut failure = None;
+        let mut samples = Vec::new();
+        let mut checked = None;
+        match take_sample() {
+            Ok(sample) => samples.push(sample),
+            Err(e) => failure = Some(e),
+        }
         let mut checker = Checker::new(&rules, Duration::ZERO);
-        let before_check = (
-            launched.load(Ordering::SeqCst),
-            completed.load(Ordering::SeqCst),
-        );
-        let checked = checker.check(host, &candidate, &record, &mut FreshAttempts::new(None));
-        let after_check = (
-            launched.load(Ordering::SeqCst),
-            completed.load(Ordering::SeqCst),
-        );
-        // A single scan can be shorter than one /bin/true lifetime, even
-        // when launches occur during it. Keep sampling the same real host
-        // while workers run; only timestamped full lifetimes count as proof.
-        // Both the worker storm and number of scans are bounded.
-        let mut sample_error = None;
-        if workers > 0 && samples[0].0.is_ok() {
-            while samples.len() < MAX_SCAN_SAMPLES && Instant::now() < overlap_deadline {
-                let witnessed = match events.lock() {
-                    Ok(events) => samples.iter().any(|(scan, _, _)| {
-                        scan.as_ref()
-                            .is_ok_and(|scan| complete_events_in_scan(scan, &events) > 0)
-                    }),
-                    Err(_) => {
-                        sample_error = Some("fork event lock poisoned".to_owned());
-                        break;
-                    }
-                };
-                if witnessed || completed.load(Ordering::SeqCst) >= workers * 64 {
+        let before_check = counts();
+        if failure.is_none() {
+            checked = Some(checker.check(host, &candidate, &record, &mut FreshAttempts::new(None)));
+        }
+        let after_check = counts();
+        // Early stop only: a worker pushes its span after the wait, so a
+        // span can land after its scan was looked at. Looking at the last
+        // two samples catches most late spans; the exact count is made
+        // over every sample after the workers are joined.
+        while failure.is_none()
+            && workers > 0
+            && samples.len() < MAX_SCAN_SAMPLES
+            && Instant::now() < overlap_deadline
+            && counts().1 < workers * MAX_LAUNCHES
+        {
+            let witnessed = match children.lock() {
+                Ok(children) => samples
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .any(|sample| children_within(sample.span, &children) > 0),
+                Err(_) => {
+                    failure = Some("fork span lock poisoned".to_owned());
                     break;
                 }
-                let before = (
-                    launched.load(Ordering::SeqCst),
-                    completed.load(Ordering::SeqCst),
-                );
-                let next = scan(host, &options);
-                let after = (
-                    launched.load(Ordering::SeqCst),
-                    completed.load(Ordering::SeqCst),
-                );
-                let failed = next.is_err();
-                samples.push((next, before, after));
-                if failed {
-                    break;
-                }
+            };
+            if witnessed {
+                break;
             }
+            match take_sample() {
+                Ok(sample) => samples.push(sample),
+                Err(e) => failure = Some(e),
+            }
+        }
+        if failure.is_none()
+            && let Some(sample) = samples.iter().find(|s| s.unsettled && !s.blocked)
+        {
+            failure = Some(format!(
+                "{workers}-worker scan was unsettled but cleared the candidate ({} listings)",
+                sample.listings
+            ));
         }
         stop.store(true, Ordering::Relaxed);
         let mut worker_error = None;
@@ -387,47 +452,28 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
                 worker_error.get_or_insert(error);
             }
         }
-        if let Some(error) = worker_error {
+        if let Some(error) = failure.or(worker_error) {
             return Err(error);
         }
-        if let Some(error) = sample_error {
-            return Err(error);
-        }
-        if workers > 0 && launched.load(Ordering::SeqCst) < workers {
+        let (launched, completed) = counts();
+        if workers > 0 && launched < workers {
             return Err(format!(
-                "only {} child launches occurred with {workers} workers",
-                launched.load(Ordering::SeqCst)
+                "only {launched} child launches occurred with {workers} workers"
             ));
         }
-        let events = events
+        let children = children
             .lock()
-            .map_err(|_| "fork event lock poisoned".to_owned())?;
-        let samples: Vec<_> = samples
-            .into_iter()
-            .enumerate()
-            .map(|(index, (scan, before, after))| {
-                scan.map(|scan| (scan, before, after))
-                    .map_err(|e| format!("scan with {workers} workers, sample {}: {e}", index + 1))
-            })
-            .collect::<Result<_, _>>()?;
-        let sample_count = samples.len();
-        for (scan, _, _) in &samples {
-            let unsettled = scan
-                .notes()
-                .iter()
-                .any(|note| note.starts_with("process scan unsettled:"));
-            if unsettled && scan.check(&candidate, &record).is_ok() {
-                return Err(format!(
-                    "{workers}-worker scan was unsettled but cleared the candidate"
-                ));
-            }
-        }
-        let (measured, before_scan, after_scan) = samples
+            .map_err(|_| "fork span lock poisoned".to_owned())?;
+        let witness = samples
             .iter()
-            .find(|(scan, _, _)| complete_events_in_scan(scan, &events) > 0)
-            .unwrap_or(&samples[0]);
-        let events_within_scan = complete_events_in_scan(measured, &events);
+            .map(|sample| (sample, children_within(sample.span, &children)))
+            .find(|(_, within)| *within > 0);
+        let (measured, events_within_scan) = witness.unwrap_or((&samples[0], 0));
+        let exercised = workers > 0 && events_within_scan > 0;
+        exercised_counts += usize::from(exercised);
+
         let checker_blocked = checked
+            .expect("the checker ran when the first sample succeeded")
             .map_err(|e| format!("checker with {workers} workers: {e}"))?
             .is_err();
         let notes = checker.latest().expect("checker made a scan").notes();
@@ -435,33 +481,44 @@ fn inuse_fork_churn(host: &LinuxHost, candidate: &str) -> Result<(), String> {
         let checker_unsettled = notes
             .iter()
             .any(|note| note.starts_with("process scan unsettled:"));
-        let blocked = measured.check(&candidate, &record).is_err();
-        let unsettled = measured
-            .notes()
-            .iter()
-            .any(|note| note.starts_with("process scan unsettled:"));
         if checker_unsettled && !checker_blocked {
             return Err(format!(
                 "{workers}-worker checker ended unsettled but cleared the candidate"
             ));
         }
-        let launched_during_scan = after_scan.0.saturating_sub(before_scan.0);
-        let completed_during_scan = after_scan.1.saturating_sub(before_scan.1);
-        let launched_during_check = after_check.0.saturating_sub(before_check.0);
-        let completed_during_check = after_check.1.saturating_sub(before_check.1);
-        overlapped_scan |= workers > 0 && events_within_scan > 0;
+        // Whether a fit was possible at all: a child shorter than the
+        // longest scan. These explain a "not exercised" outcome.
+        let child_ms_min = children
+            .iter()
+            .map(|child| child.length().as_millis())
+            .min()
+            .map_or("-".to_owned(), |ms| ms.to_string());
+        let scan_ms_max = samples
+            .iter()
+            .map(|sample| sample.span.length().as_millis())
+            .max()
+            .expect("at least one sample");
         println!(
-            "workers={workers} samples={sample_count} launched={} completed={} events_within_scan={events_within_scan} launched_during_scan={launched_during_scan} completed_during_scan={completed_during_scan} launched_during_check={launched_during_check} completed_during_check={completed_during_check} listings={} took_ms={} unsettled={unsettled} blocked={blocked} checker_retried={retried} checker_unsettled={checker_unsettled} checker_blocked={checker_blocked}",
-            launched.load(Ordering::SeqCst),
-            completed.load(Ordering::SeqCst),
-            measured.listings(),
-            measured.took().as_millis()
+            "workers={workers} exercised={} samples={} launched={launched} completed={completed} events_within_scan={events_within_scan} child_ms_min={child_ms_min} scan_ms_max={scan_ms_max} launched_during_scan={} completed_during_scan={} launched_during_check={} completed_during_check={} listings={} took_ms={} unsettled={} blocked={} checker_retried={retried} checker_unsettled={checker_unsettled} checker_blocked={checker_blocked}",
+            yes(exercised),
+            samples.len(),
+            measured.launched_during,
+            measured.completed_during,
+            after_check.0.saturating_sub(before_check.0),
+            after_check.1.saturating_sub(before_check.1),
+            measured.listings,
+            measured.span.length().as_millis(),
+            measured.unsettled,
+            measured.blocked,
         );
     }
-    if !overlapped_scan {
-        return Err(
-            "no entire child spawn-and-wait interval fell within a measured in-use scan".to_owned(),
-        );
+    if exercised_counts == 0 {
+        return Err(format!(
+            "not exercised: no worker count put an entire child spawn-and-wait \
+             interval inside a measured in-use scan within {OVERLAP_BUDGET:?} or \
+             {MAX_SCAN_SAMPLES} scans per count, so the unsettled-scan assertions \
+             were not tested (compare child_ms_min with scan_ms_max above)"
+        ));
     }
 
     let settled = scan(host, &options).map_err(|e| format!("post-storm scan: {e}"))?;
@@ -1257,4 +1314,39 @@ fn wait_for_zombie_within(tid: i32, limit: Duration) -> Result<(), String> {
     Err(format!(
         "task {tid} did not become a zombie within {limit:?}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span(start_ms: u64, end_ms: u64) -> Span {
+        Span::new(
+            MonoTime(Duration::from_millis(start_ms)),
+            MonoTime(Duration::from_millis(end_ms)),
+        )
+    }
+
+    #[test]
+    fn only_a_child_wholly_inside_the_scan_counts_ends_included() {
+        let scan = span(100, 160);
+        let children = [
+            span(100, 160), // exactly the scan: spawned and reaped inside it
+            span(110, 150), // inside
+            span(90, 120),  // spawned before the scan started
+            span(150, 170), // reaped after the scan ended
+            span(90, 170),  // spans the whole scan
+            span(10, 20),   // before
+            span(200, 210), // after
+        ];
+        assert_eq!(children_within(scan, &children), 2);
+        assert_eq!(children_within(scan, &children[2..]), 0);
+        assert_eq!(children_within(scan, &[]), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "span ends before it starts")]
+    fn a_backwards_span_is_a_programming_error() {
+        span(20, 10);
+    }
 }

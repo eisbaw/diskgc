@@ -437,8 +437,10 @@ pub fn host_flock_release_only_by_close(ctx: &Ctx) -> TestResult {
 }
 
 /// TASK-64 G: measure a real in-use scan with 0, 1, 4 and 8 bounded fork
-/// workers in a disposable container. The exact counts and times are
-/// diagnostic; after all workers are reaped, an unused candidate must clear.
+/// workers in a disposable container. The probe samples until a scan holds
+/// a whole child's life, or fails as `not exercised` (TASK-197). The exact
+/// counts and times are diagnostic; after all workers are reaped, an unused
+/// candidate must clear.
 pub fn host_inuse_scan_settles_after_fork_churn(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     s.mkdir("fork-churn-free", 0o755, TESTER)?;
