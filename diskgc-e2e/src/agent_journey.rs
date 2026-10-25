@@ -18,7 +18,7 @@ const CONFIG: &str = "/home/tester/agent-diskgc.yaml";
 const READY: &str = "/tmp/agent-competitor-ready";
 const RELEASE: &str = "/tmp/agent-competitor-release";
 
-/// TASK-55: real `ensure` statuses 0/1/3/75, including a misconfigured
+/// TASK-55: real `ensure` statuses 0/1/2/3/75, including a misconfigured
 /// tier and two overlapping reclaimers. Every traced script and competing
 /// diskgc run has a deletion oracle armed before it starts.
 pub fn agent_harness_uses_json_for_all_reclaim_decisions(ctx: &Ctx) -> TestResult {
@@ -120,6 +120,28 @@ groups:
                         .is_some_and(|message| message.contains("systemd PrivateTmp"))
             })),
         "misconfigured tier was not named in JSON: {report}"
+    );
+
+    // TASK-150: a caller error (exit 2) is `abort_config`, not an invalid
+    // report; the JSON cause tells it from an unprovisioned host.
+    let oracle = Oracle::arm(Fixture::new())?;
+    let typo = agent(
+        ctx,
+        &[
+            "--min-free",
+            "100%",
+            "--config",
+            CONFIG,
+            "--select",
+            "profile:agent-emtpy",
+            "/tmp",
+        ],
+    )?;
+    oracle.judge(&typo)?.assert_clean()?;
+    let report = expect(&typo, 2, "abort_config", "usage_error")?;
+    ensure!(
+        report["errors"][0]["cause"] == "parse",
+        "typo'd selection is not a parse error: {report}"
     );
 
     // A real competing ensure enters its configured command while holding

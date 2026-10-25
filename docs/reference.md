@@ -59,7 +59,12 @@ built on this call, branching on the exit code and keeping the `--json`
 report, is [ci-pre-job.sh](ci-pre-job.sh); the CI operator's journey test
 runs it as written.
 An agent-oriented [pre-job hook](agent-pre-job.py) uses the JSON report to
-decide whether to start, defer, abort or retry after a contended host lock.
+decide, per exit code, whether to start (0), defer for capacity (1), retry
+later (75, 124), abort with an alert (3), abort for an unprovisioned host
+(2 with `cause: provisioning`) or a wrong call or configuration (other 2s),
+or stop because diskgc was interrupted (130, 143). Its example selection
+keeps an idle filter, so parallel agents' fresh targets survive each
+other's pre-jobs.
 
 For detached targets placed under `/tmp` with `CARGO_TARGET_DIR`, an
 explicit tier inside a group's `tiers` can select the same Cargo profile:

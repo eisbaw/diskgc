@@ -1514,9 +1514,12 @@ filesystem, processes and mounts from the developer's system.
 - **Agent pre-job journey** (`agent_journey.rs`, Nix image): the shipped
   [agent-pre-job.py](agent-pre-job.py) runs real `ensure --json` and decides
   from its exit code and parsed JSON alone. Separate traced runs exercise
-  `met` (0), `exhausted` (1), a runtime misconfigured tier reported as
-  `error` (3), and `lock_timeout` (75) while another real reclaim holds the
-  host lock. The deletion oracle judges every run; the competing command
+  `met` (0), `exhausted` (1), a mistyped selection (2, `abort_config`), a
+  runtime misconfigured tier reported as `error` (3), and `lock_timeout`
+  (75) while another real reclaim holds the host lock. Every documented
+  exit code, including 2 with `cause: provisioning`, 124, 130 and 143, is
+  decided against a stand-in `diskgc` by `tools/test_agent_pre_job.py`
+  (part of `just check`). The deletion oracle judges every run; the competing command
   keeps its candidate, and the test checks the agent's one-line JSON
   decision in each case.
 - **Not only Nix:** every test but the Nix-only and Docker-only ones in a container from
