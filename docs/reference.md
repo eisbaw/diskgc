@@ -284,7 +284,8 @@ stderr (`diskgc: config PATH`).
   Structural kinds and filters have no path examples. Human output reports
   every failure, or how many examples of how many profiles passed (a
   profile without examples is not counted as passing); `--json` prints `config`, `status` (`passed | failed`),
-  `exit_code`, `profiles` (count), and `failures` (strings). Exit 0 when
+  `exit_code`, `profiles` (the number of profiles in the library, filters
+  included), and `failures` (strings). Exit 0 when
   all examples pass, 1 when any fails.
 - Exit codes of `list`, `show` and `test`: 0 when the list or profile was
   printed; 2 for a usage error, a configuration that is missing (when
@@ -800,7 +801,7 @@ file serves `watch` on a laptop and `ensure` on a runner.
 
 A configuration for diskgc 0.1 uses only the 0.1 built-ins
 (`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters; see
-[Provisional 0.1 candidate release notes](#provisional-01-candidate-release-notes)).
+[0.1 release notes](#01-release-notes)).
 It extends `docs/example.yaml` (the example the package installs) with a
 laptop's roots, a protected project and a pressure group:
 
@@ -1797,31 +1798,144 @@ its task notes.
 | `maven-repo` | Maven, `mvnd`, IDEs | none: a JVM holds a jar open only while it is loaded; the repository has no lock by default | none | Not a built-in. | Excluded. |
 | `nix-garbage` | the Nix store's own garbage collector | Nix's GC roots and lock (kind `nix-store`), not a `where` predicate | delegated | Not a built-in yet. | Governed by the `nix-store` protocol (TASK-36, TASK-118). |
 
-### Provisional 0.1 candidate release notes
+### 0.1 release notes
 
-The candidate package ships a static `diskgc` binary, the tmpfiles rule and
-`example.yaml`. Its supported test scope is Cargo target reclaim, the two
-`/tmp` built-ins with a liveness contract, `nix-shell-rc` (rc directories of
-ended `nix-shell` and `nix develop` shells; Owner PID) and `pytest-tmp`
-(pytest sessions the pytest contract permits), the seven idle filters, and
-checkout policy narrowing. Both `/tmp` built-ins keep anything changed in
-the last hour (`min_idle_for: 1h`); their limits are their rows in [Liveness
-contracts](#liveness-contracts). Owner PID needs a complete process list in
-the initial PID namespace: diskgc in its own PID namespace (most
-containers) keeps every `nix-shell-rc` candidate as `producer_unknown`, and
-every `pytest-tmp` session except those without a `.lock`, below pytest's
-retention rank and older than its dead-lock age (rank row; safety.md,
-Producer liveness). The default development
-package remains sandbox gated. The candidate's gate lift is tested only in
-disposable containers and does not constitute release approval.
+**Status: draft.** 0.1 is not released until TASK-67 closes; until then
+this describes the `release-01-candidate` package built from the current
+source, and its gate lift is tested only in disposable containers. The
+default development package stays sandbox gated.
 
-Watch mode, persistent index, broader survey and catalog additions, Docker
-actions, Nix store actions, operator command actions, and operator-authored
-filesystem/delete actions are deferred. Other `/tmp` entries (`nix-shell.*`
-TMPDIRs themselves, `tmp.*`, anything else) are not 0.1 built-ins.
-Operator-authored policy rules still require an explicit release decision. The
-`docs/ci-pre-job.sh` example stays in the source tree; it is not installed by
-the package.
+**What 0.1 does.** One command frees space, two read-only ones explain
+it:
+
+- `diskgc ensure --min-free SIZE PATH` brings the filesystem of `PATH` up
+  to a free-space goal, once, and exits with a code a CI pre-job hook or
+  an agent harness branches on ([Exit codes](#exit-codes-ensure)); with
+  `--dry-run` it only plans, with `--json` it prints one report object.
+  It runs a configuration's tier groups, or one `--select` expression
+  with `--roots`, under the host lock, with a cooperative `--timeout`.
+- `diskgc check` validates a configuration without touching the machine;
+  `diskgc profiles list|show|test` shows the built-in catalog.
+- The catalog is three sources and the seven idle filters (`idle-1h` to
+  `idle-30d`): `cargo-target` (Cargo `target/` directories under supplied
+  roots, reclaimed by Cargo's lock protocol), `nix-shell-rc` (rc
+  directories of ended `nix-shell` and `nix develop` shells directly in
+  `/tmp`; Owner PID) and `pytest-tmp` (pytest sessions the pytest
+  contract permits). Both `/tmp` sources keep anything changed in the
+  last hour (`min_idle_for: 1h`); their limits are their rows in
+  [Liveness contracts](#liveness-contracts). A configuration may use
+  `profile_policies` only to narrow a built-in's checkout guard; user
+  profiles and overrides are refused.
+
+**Install.** The package holds three files:
+
+1. `bin/diskgc`, a static musl binary with no run-time dependencies: put
+   it on `PATH`.
+2. `lib/tmpfiles.d/diskgc.conf`, which creates the host lock
+   `/run/diskgc/lock`: copy it to `/etc/tmpfiles.d/` and run
+   `systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf` (without
+   systemd, create the directory and file it describes at every boot).
+   Without the lock, a run that needs to reclaim exits 2 with `cause:
+   provisioning` and prints these commands; a run whose goal is already
+   met only warns.
+3. `share/doc/diskgc/examples/example.yaml`: copy it to
+   `~/.config/diskgc/config.yaml` or `/etc/diskgc/config.yaml`, replace
+   its Cargo root with directories you own, and run `diskgc check`. It is
+   not installed as an active default.
+
+Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
+reads only and lists what a reclaim would take and why the rest is kept.
+
+**What `pytest-tmp` frees on a laptop.** Less than the size of
+`/tmp/pytest-of-<user>` suggests (TASK-65 walk, TASK-157):
+
+- Sessions directly in `/tmp/pytest-of-<user>` within pytest's own newest
+  three are kept while any process of the same user has `TMPDIR` unset:
+  such a process may run pytest with `/tmp` as its temp root, and the
+  contract's unused-root row cannot rule that out. On a desktop session
+  that is nearly always. So 0.1 frees mostly sessions under the temp
+  roots of ended `nix-shell.*` shells, and sessions older than pytest's
+  own retention of three (which pytest's next run in the same temp root
+  would also remove).
+- After a reclaim, empty `pytest-of-<user>` directories, dangling
+  `pytest-current` links and the ended `nix-shell.*` roots themselves
+  remain: they are not candidates (`nix-shell-tmpdir` is excluded on
+  purpose: a dormant shell can use its `TMPDIR` without visible
+  evidence).
+- Throughput: **TO BE FILLED IN after the in-use pass merges** (sessions
+  per second and time to the first deletion of a `pytest-tmp` reclaim
+  under a host-shaped process load, static release binary).
+
+**Known limits.**
+
+- **Seccomp in old container runtimes.** diskgc needs `pidfd_open` and
+  `pidfd_send_signal`. Where a container's seccomp profile refuses them
+  (measured: Podman 2.1.1's 2020 default profile), diskgc refuses to
+  start, fail closed. Which current runtimes do is not measured yet
+  (TASK-126); run `ensure` on the host or under a profile that allows
+  both calls.
+- **Visibility without root.** diskgc sees only the processes of the user
+  it runs as, and not those the kernel hides from it (setuid, more
+  capable or non-dumpable ones such as `sudo`, `systemd --user`,
+  `ssh-agent`); their use of a candidate is not seen
+  ([safety.md](safety.md#in-use), Visibility). `hidepid` hides more.
+- **In-use blind spots under review (TASK-169).** Kernel-held references
+  without a `/proc` descriptor or mapping (io_uring registered files, a
+  loop device backed by a candidate, overlay upper and work directories),
+  a mount point that exists only in another mount namespace, Cargo locks
+  taken through an overlay, a project directory shared over NFS or
+  virtiofs with another kernel, and a nested btrfs subvolume are not seen
+  or not fully handled. None is reproduced yet; the 0.1 `/tmp` built-ins
+  are less exposed (their contracts keep a session or rc directory on
+  their own evidence).
+- **diskgc in its own PID namespace** (most containers) keeps every
+  `nix-shell-rc` candidate as `producer_unknown`, and every `pytest-tmp`
+  session except those without a `.lock`, below pytest's retention rank
+  and older than its dead-lock age: Owner PID needs the complete process
+  list of the initial PID namespace.
+- **Deadlines are cooperative.** `--timeout` is checked between
+  operations; one filesystem operation blocked in the kernel (a dead
+  network mount, a slow disk) overruns it, and the overrun is reported
+  ([safety.md](safety.md#deadlines)).
+- **Mounts diskgc refuses.** A root on or below an untriggered automount
+  point (autofs) is refused without being looked up, so diskgc never
+  mounts it; FUSE and network filesystems are refused as roots; a mount
+  inside a candidate keeps it (`contains_mount`).
+- **A very busy host ends candidates `in_use_unknown`.** A deletion needs
+  a process scan less than a second old. On a host where one scan takes
+  longer (hundreds of processes holding thousands of descriptors; the
+  static musl binary scans slower than a glibc build), a candidate whose
+  three attempts all see a stale scan is kept `in_use_unknown`, and after
+  three such candidates in a row the rest of that tier is skipped for the
+  run. Nothing is deleted on a stale scan; the exit code follows the
+  space, and the summary says to run again when the host is less busy.
+- A program running from a Cargo target is protected by process
+  heuristics only (Cargo holds no lock while it runs), and Linux has no
+  unlink-by-inode: diskgc is not a defence against a hostile local user
+  racing it (PRD, Safety boundaries).
+
+**JSON contract.** The report's field names and enum values, the exit
+codes and their precedence, and the one error envelope every command
+uses under `--json` were frozen for 0.1 by the contract review (TASK-26)
+and the 0.1 JSON pass (TASK-192): not applicable is `null`, never an empty
+string; `--select` runs are named `select`; `find.roots` is always a
+list, with `find.backend` beside it. Scripts match `status`, `cause`,
+`reason` and the exit code; message text and human output may change.
+`index` is always `null` in 0.1 (there is no index). The command-action,
+Docker and Nix parts of the profile schema stay provisional until the v1
+release review (task-49). `just docs-vs-binary BIN` runs what this
+reference documents against a build and reports any drift.
+
+**Not in 0.1.** `watch` and `survey` (both exit 2), the index (so
+`--no-index` changes nothing and `--tally-budget` bounds only the
+synchronous tally), the Docker kinds, the Nix store kind, command actions,
+user profiles and overrides, `ipc: live-only` in `ensure`, and every other
+built-in in the [library](#built-in-profile-library), including the other
+`/tmp` entries (`nix-shell.*` TMPDIRs themselves, `tmp.*`, anything
+else). The `docs/ci-pre-job.sh` example stays in the source tree; the
+package does not install it.
+
+Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
