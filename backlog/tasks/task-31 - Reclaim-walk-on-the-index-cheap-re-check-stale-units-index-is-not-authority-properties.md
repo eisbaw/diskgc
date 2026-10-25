@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 14:19'
+updated_date: '2026-10-25 17:21'
 labels:
   - wave-3
   - irreversible
@@ -32,6 +32,7 @@ Why: the index must change speed, never safety. Integrate the index into the rec
 - [ ] #3 With an index present, new stale cruft created after the snapshot is deleted before any pressure tier runs
 - [ ] #4 Time to first deletion on the 100k-entry fixture, cold and warm, is measured and logged (not a pass criterion: no latency target); ensure reaches --min-free and exits 0 in both
 - [ ] #5 A block member opened by a process after an earlier member of the same block was deleted is skipped as in_use
+- [ ] #6 A lump (block across finder sets, TASK-28) whose site lies above a tier's bound root is expanded by that tier's own discovery from the deeper of the site and the bound root, never from above the root; every member is still checked live (model test)
 <!-- AC:END -->
 
 ## Implementation Notes
