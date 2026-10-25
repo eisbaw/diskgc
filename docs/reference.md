@@ -1844,7 +1844,9 @@ it:
 1. `bin/diskgc`, a static musl binary with no run-time dependencies: put
    it on `PATH`.
 2. `lib/tmpfiles.d/diskgc.conf`, which creates the host lock
-   `/run/diskgc/lock`: copy it to `/etc/tmpfiles.d/` and run
+   `/run/diskgc/lock`: as root, `install -Dm0644 lib/tmpfiles.d/diskgc.conf
+   /etc/tmpfiles.d/diskgc.conf` (a minimal system may have no
+   `/etc/tmpfiles.d` yet) and run
    `systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf` (without
    systemd, create the directory and file it describes at every boot).
    Without the lock, a run that needs to reclaim exits 2 with `cause:
@@ -1857,6 +1859,14 @@ it:
 
 Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
 reads only and lists what a reclaim would take and why the rest is kept.
+`--min-free` must be below the filesystem's size, or the run exits 2.
+The example's tiers take only `/tmp` leftovers idle for a day and Cargo
+targets idle for 30 days, so on a freshly set-up machine the dry run keeps
+everything as `not_idle`; `--select 'profile:cargo-target' --roots DIR`
+without a filter shows what a reclaim of Cargo targets would take now.
+A reclaimed Cargo target keeps its directory with `CACHEDIR.TAG`,
+`.rustc_info.json` and Cargo's lock files (a few KiB): diskgc never deletes
+a Cargo lock file, and Cargo builds into it again as usual.
 
 **What `pytest-tmp` frees on a laptop.** Less than the size of
 `/tmp/pytest-of-<user>` suggests (TASK-65 walk, TASK-157):
