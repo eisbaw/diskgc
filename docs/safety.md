@@ -1069,6 +1069,13 @@ complete; every precondition below fails closed (`producer_unknown`).
 8. *When.* During planning and tallying, again under the candidate lock,
    and immediately before deletion or a command action after the process
    scan, from the same scan as the in-use check, under its Freshness bound.
+   That scan must have started no earlier than the candidate was found
+   (discovery's `statx` of it): an owner alive then is in every later
+   listing. A scan kept from an earlier candidate does not serve a
+   candidate found after it started (`FreshAttempts::scan_not_before`; a
+   new scan is made); the reclaim walk on the index finds up to 64
+   candidates ahead of judging them so one scan still serves several
+   ([architecture.md](architecture.md#the-reclaim-walk), Found ahead).
    The index may order by an earlier verdict; it never decides.
 9. *Scope.* It shows that the recorded process ended, not that every
    consumer did. The in-use scan still runs, but a consumer that outlives
@@ -1799,11 +1806,16 @@ own `where`, which decides whether it is a candidate at all. A reclaim
 acts only on a discovery that completed: one stopped by the deadline or an
 error of the run reclaims nothing of the tier. With the index
 ([architecture.md](architecture.md#the-index)), a candidate taken from it
-is discovered again at reclaim time: an index unit by reaching it from
-its root (step 2) and a `statx` that must match the stored (`st_dev`,
-inode, birth time), otherwise `stale`; a block's members by the tier's
-discovery restricted to the block's site, under the same completion
-rule. The identity from that reclaim-time `statx` or listing (device,
+is discovered again at reclaim time by the tier's own discovery,
+restricted: an index unit by a walk of the tier's bound roots that looks
+up only the names leading to its path (each level judged by the same
+patterns, `where`, mount and `systemd-private-*` rules, never entering a
+candidate) and must find a candidate at that path whose (`st_dev`,
+inode, birth time) is the stored one, otherwise `stale` (never walked or
+locked); a block's members by the same discovery restricted to the
+block's site, or from the tier's bound root where the site lies above
+it, under the same completion rule. A refusal on the way leaves the unit
+to the tier's own discovery, which runs after the index's queue. The identity from that reclaim-time `statx` or listing (device,
 inode, owner, type, birth time) is what steps 2 to 4 compare against;
 an identity stored by an earlier tally is never trusted as such.
 

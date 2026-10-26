@@ -269,13 +269,10 @@ impl TallyState {
                 self.index.evict_single(mount, path);
                 Sizing::Gone
             }
-            Step::TooMany => {
+            Step::Refused(reason) => {
                 let single = self.index.single_mut(mount, path).expect("read above");
-                single.refusal = Some(Refusal {
-                    reason: Reason::TooManyEntries,
-                    at: now,
-                });
-                Sizing::Refused(Reason::TooManyEntries)
+                single.refusal = Some(Refusal { reason, at: now });
+                Sizing::Refused(reason)
             }
         };
         self.account_cursors();

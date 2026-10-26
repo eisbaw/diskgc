@@ -27,6 +27,7 @@ use std::path::Path;
 use super::Find;
 use super::discover::Found;
 use crate::engine::{ProcessBlocker, ProcessEvidence, Reason, Skip, WalkRecord};
+use crate::host::MonoTime;
 use crate::host::{Access, Base, DirListing, Errno, FileType, Host, HostError, Pid};
 use crate::inuse::Scan;
 use crate::liveness::pytest::{self, Evidence, Facts, Lock, Outcome};
@@ -145,6 +146,20 @@ pub(crate) fn veto<'a, H: Host>(
         }
     }
     Ok(Ok(()))
+}
+
+/// The earliest start of a process scan that may judge the liveness
+/// contracts of `sources` (each a find and what it found): the latest
+/// moment any source with a contract found the candidate (Owner PID's
+/// ordering, [`check`]); `None` when no source has a contract.
+pub(crate) fn contract_scan_floor<'a>(
+    sources: impl IntoIterator<Item = (&'a Find, &'a Found)>,
+) -> Option<MonoTime> {
+    sources
+        .into_iter()
+        .filter(|(find, _)| find.liveness_contract.is_some())
+        .map(|(_, found)| found.found_at)
+        .max()
 }
 
 /// Whether `find`'s contract (if any) permits reclaiming the candidate

@@ -30,8 +30,12 @@
 //! deeper than [`LEVELS_MAX`] below the root are counted but not entered,
 //! and hard links are recognised for at most [`HARDLINKS_TRACKED_MAX`]
 //! inodes (more are counted each time). A tree of more than the entry
-//! budget is [`Step::TooMany`] (the deletion would refuse it,
-//! `too_many_entries`).
+//! budget, one holding a `systemd-private-*` name, or one with an entry
+//! this user may not read (`EACCES`, `EPERM`) is [`Step::Refused`] (the
+//! deletion would refuse it: `too_many_entries`, `contains_special`,
+//! `unreadable`);
+//! such a name is never statted, as the eligibility walk never stats it
+//! (docs/safety.md, PrivateTmp).
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -39,13 +43,14 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use super::budget::Budget;
+use crate::engine::{Reason, is_private_tmp};
 use crate::host::{
-    Access, Base, DirListing, FileType, Host, HostError, MountEntry, Stat, Timestamp,
+    Access, Base, DirListing, Errno, FileType, Host, HostError, MountEntry, Stat, Timestamp,
 };
 use crate::index::collapse::{gone_or_error, means_gone};
 use crate::index::memory::{btree_bytes, btree_node_bytes, heap, vec_bytes};
 use crate::index::{Identity, MountKey};
-use crate::resolve::{Resolved, Want, is_mount_point, open_beneath, resolve_in};
+use crate::resolve::{ResolveError, Resolved, Want, is_mount_point, open_beneath, resolve_in};
 
 /// Directories below a unit's root the walk enters (each holds an fd
 /// during a step). Deeper ones are counted, not entered.
@@ -78,8 +83,12 @@ pub enum Step {
     Done(Sized),
     /// The unit's root is gone, replaced, or a mount point now.
     Gone,
-    /// More entries than the walk's entry budget.
-    TooMany,
+    /// The deletion would refuse the tree as it is: more entries than the
+    /// walk's entry budget (`too_many_entries`), a `systemd-private-*`
+    /// name inside (`contains_special`; never statted or entered, as the
+    /// eligibility walk never does), or an entry this user may not read
+    /// (`unreadable`).
+    Refused(Reason),
 }
 
 /// A directory on the cursor's path.
@@ -186,7 +195,7 @@ impl Cursor {
         };
         if self.levels.is_empty() {
             if self.count(&stat) > entries_max {
-                return Ok(Step::TooMany);
+                return Ok(Step::Refused(Reason::TooManyEntries));
             }
             if stat.file_type != Some(FileType::Directory) {
                 return Ok(Step::Done(self.sized()));
@@ -308,6 +317,19 @@ pub(super) fn reach<H: Host>(
     Ok(Some((parent, stat)))
 }
 
+/// Whether a failed call inside a unit means this user may not read it:
+/// the deletion would refuse the unit (`unreadable`, fail closed,
+/// docs/safety.md), so the estimate is a refusal, never an empty tree.
+fn unreadable(e: &HostError) -> bool {
+    e.is(Errno::EACCES) || e.is(Errno::EPERM)
+}
+
+/// Why a directory inside a unit could not be opened.
+enum Opened {
+    Unreadable,
+    Failed(HostError),
+}
+
 /// Mount points strictly beneath `root` (but the unit's own mount).
 fn mount_points_beneath(mounts: &[MountEntry], key: &MountKey, root: &Path) -> BTreeSet<PathBuf> {
     mounts
@@ -338,7 +360,12 @@ impl<H: Host> Walk<'_, H> {
             let depth = open.len();
             let name = cursor.levels[depth].name.clone().expect("named");
             budget.take(1);
-            match self.open_dir(&open[depth - 1], &name)? {
+            let opened = match self.open_dir(&open[depth - 1], &name) {
+                Err(Opened::Unreadable) => return Ok(Step::Refused(Reason::Unreadable)),
+                Err(Opened::Failed(e)) => return Err(e),
+                Ok(opened) => opened,
+            };
+            match opened {
                 Some(fd) => open.push(fd),
                 // Gone since the last step: its branch is done.
                 None => cursor.levels.truncate(depth),
@@ -372,7 +399,8 @@ impl<H: Host> Walk<'_, H> {
                 let left = self.entries_max.saturating_sub(cursor.entries as usize);
                 let mut names = match self.host.read_dir(&open[depth], left) {
                     Ok(DirListing::Names(names)) => names,
-                    Ok(DirListing::TooMany) => return Ok(Step::TooMany),
+                    Ok(DirListing::TooMany) => return Ok(Step::Refused(Reason::TooManyEntries)),
+                    Err(e) if unreadable(&e) => return Ok(Step::Refused(Reason::Unreadable)),
                     Err(e) if means_gone(&e) => Vec::new(),
                     Err(e) => return Err(e),
                 };
@@ -396,6 +424,9 @@ impl<H: Host> Walk<'_, H> {
                 }
                 continue;
             };
+            if is_private_tmp(&name) {
+                return Ok(Step::Refused(Reason::ContainsSpecial));
+            }
             let path = cursor.dir_path(depth).join(&name);
             if self.mount_points.contains(&path) {
                 cursor.levels[depth].next += 1;
@@ -408,6 +439,7 @@ impl<H: Host> Walk<'_, H> {
             *done += 1;
             let stat = match self.host.statx(Base::Dir(&open[depth]), Path::new(&name)) {
                 Ok(stat) => stat,
+                Err(e) if unreadable(&e) => return Ok(Step::Refused(Reason::Unreadable)),
                 Err(e) if means_gone(&e) => {
                     cursor.levels[depth].next += 1;
                     continue;
@@ -416,7 +448,7 @@ impl<H: Host> Walk<'_, H> {
             };
             cursor.levels[depth].next += 1;
             if cursor.count(&stat) > self.entries_max {
-                return Ok(Step::TooMany);
+                return Ok(Step::Refused(Reason::TooManyEntries));
             }
             let enter = stat.file_type == Some(FileType::Directory)
                 && stat.dev == cursor.identity.dev
@@ -428,7 +460,12 @@ impl<H: Host> Walk<'_, H> {
             // before it is listed resumes inside it, not at it again.
             budget.take(1);
             // Gone since its statx: counted, nothing below.
-            if let Some(fd) = self.open_dir(&open[depth], &name)? {
+            let opened = match self.open_dir(&open[depth], &name) {
+                Err(Opened::Unreadable) => return Ok(Step::Refused(Reason::Unreadable)),
+                Err(Opened::Failed(e)) => return Err(e),
+                Ok(opened) => opened,
+            };
+            if let Some(fd) = opened {
                 open.push(fd);
                 cursor.levels.push(Level {
                     name: Some(name),
@@ -441,7 +478,7 @@ impl<H: Host> Walk<'_, H> {
 
     /// Opens the directory `name` below `dir`; `None` if it is gone or not
     /// a directory of this mount any more.
-    fn open_dir(&self, dir: &H::Fd, name: &OsStr) -> Result<Option<H::Fd>, HostError> {
+    fn open_dir(&self, dir: &H::Fd, name: &OsStr) -> Result<Option<H::Fd>, Opened> {
         match open_beneath(
             self.host,
             dir,
@@ -451,7 +488,8 @@ impl<H: Host> Walk<'_, H> {
             Want::Directory,
         ) {
             Ok((fd, _)) => Ok(Some(fd)),
-            Err(e) => gone_or_error(e).map(|()| None),
+            Err(ResolveError::Host(e)) if unreadable(&e) => Err(Opened::Unreadable),
+            Err(e) => gone_or_error(e).map(|()| None).map_err(Opened::Failed),
         }
     }
 }

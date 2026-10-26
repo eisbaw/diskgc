@@ -150,6 +150,21 @@ pub(super) struct FsUnionSourceRef<'a> {
 }
 
 impl Tier {
+    /// The hash of the source profile's definition (kind, `find` with its
+    /// `where`, action) that the index's finders carry
+    /// (docs/architecture.md, The index: Finders): a unit enters this
+    /// tier's queue only when its finder's hash is this one. FNV-1a over
+    /// the definition's `Debug` form: stable within one build, which is all
+    /// it needs (a snapshot of another diskgc version is discarded whole).
+    pub fn profile_hash(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0100_0000_01b3;
+        let definition = format!("{:?}\0{:?}", self.source, self.action);
+        definition.bytes().fold(OFFSET, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+    }
+
     /// The action, as the report names it (`operation`, human-readable).
     pub fn operation(&self) -> String {
         self.action.to_string()

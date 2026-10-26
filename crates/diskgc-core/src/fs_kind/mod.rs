@@ -45,8 +45,11 @@ pub use command::{
     CommandResult, CommandSource, CommandSpec, run_command, run_command_alternatives_checked,
     run_command_checked,
 };
-pub use discover::{DiscoverCursor, Discovery, Found, Stepped, discover, discover_union};
+pub use discover::{
+    Beneath, DiscoverCursor, Discovery, Found, Stepped, discover, discover_beneath, discover_union,
+};
 pub use judge::{Judge, Reached, Tally, Walked};
+pub(crate) use liveness::contract_scan_floor;
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
 pub use plan::{Planned, contract_veto, judge_one, judge_walked, plan};
 pub use reclaim::{

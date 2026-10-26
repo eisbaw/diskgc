@@ -36,6 +36,7 @@
 //! `Stopped(Failed)` errors of the run, which stop it;
 //! `Stopped(DeadlinePassed)` the deadline path.
 
+mod indexed;
 mod plan;
 mod policy;
 mod preflight;
@@ -81,6 +82,7 @@ use crate::host::{
     MountEntry, Space, Timestamp,
 };
 use crate::hostlock::{self, LockError};
+use crate::index::{BUDGET_BYTES, Index};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{
@@ -88,6 +90,7 @@ use crate::report::{
     after_lock_timeout, conclude, human_space_values, signed_bytes,
 };
 use crate::resolve::{Want, resolve};
+use crate::tally::TallyState;
 use crate::units::{Size, format_age, format_bytes};
 use tier_policy::{DeletePolicy, Protection};
 
@@ -328,15 +331,33 @@ pub fn ensure<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || ensure_inner(host, request, owners, log))
+    let mut index = TallyState::new(Index::new(BUDGET_BYTES));
+    ensure_with_index(host, request, owners, &mut index, log)
+}
+
+/// [`ensure`] on `index`: the run's synchronous tally adds to it, the
+/// reclaim walk takes its queues from it and updates it (docs/architecture.md,
+/// The reclaim walk). Whatever `index` holds (a seed, or units injected by
+/// a test, stale, partial or wrong) only orders work: every candidate is
+/// found again and checked live.
+pub fn ensure_with_index<H: Delete>(
+    host: &H,
+    request: &Request,
+    owners: &[u32],
+    index: &mut TallyState,
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    timed_report(host, || ensure_inner(host, request, owners, index, log))
 }
 
 fn ensure_inner<H: Delete>(
     host: &H,
     request: &Request,
     owners: &[u32],
+    index: &mut TallyState,
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    let run_started = host.now();
     let deadline = deadline_of(host, request.timeout);
     // Not a success until a path below says so.
     let report = request.report(Status::Error, false);
@@ -522,6 +543,20 @@ fn ensure_inner<H: Delete>(
         measured.at.mount.mount_point.display(),
         min_text
     ));
+    // Read-only, before the host lock (docs/architecture.md, The tally).
+    indexed::sync_tally(
+        host,
+        index,
+        [&request.tier],
+        measured.dev,
+        request.tally_budget,
+        deadline,
+        &mut report,
+        log,
+    );
+    if host.interrupted().is_some() {
+        return report;
+    }
     let started = host.now();
     let acquired = hostlock::acquire(host, deadline);
     record_deadline_overrun(
@@ -656,6 +691,8 @@ fn ensure_inner<H: Delete>(
         deadline_hit: false,
         run_stopped: false,
         in_use_unknown_in_a_row: 0,
+        index: Some(index),
+        run_started,
     };
     run.run(owners);
     let deadline_hit = run.deadline_hit;
@@ -683,8 +720,22 @@ pub fn ensure_grouped<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    let mut index = TallyState::new(Index::new(BUDGET_BYTES));
+    ensure_grouped_with_index(host, request, tiers, tier_timeouts, owners, &mut index, log)
+}
+
+/// [`ensure_grouped`] on `index` (see [`ensure_with_index`]).
+pub fn ensure_grouped_with_index<H: Delete>(
+    host: &H,
+    request: &Request,
+    tiers: &[Tier],
+    tier_timeouts: &[Duration],
+    owners: &[u32],
+    index: &mut TallyState,
+    log: &mut dyn FnMut(&str),
+) -> Report {
     timed_report(host, || {
-        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, log)
+        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, index, log)
     })
 }
 
@@ -694,8 +745,10 @@ fn ensure_grouped_inner<H: Delete>(
     tiers: &[Tier],
     tier_timeouts: &[Duration],
     owners: &[u32],
+    index: &mut TallyState,
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    let run_started = host.now();
     let mut notes = NotesOncePerRun::new(log);
     let log: &mut dyn FnMut(&str) = &mut |line| notes.line(line);
     let deadline = deadline_of(host, request.timeout);
@@ -770,6 +823,20 @@ fn ensure_grouped_inner<H: Delete>(
         report.status = Status::Met;
         report.avail_after_bytes = Some(avail);
         warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
+        return report;
+    }
+    // Read-only, before the host lock (docs/architecture.md, The tally).
+    indexed::sync_tally(
+        host,
+        index,
+        tiers,
+        measured.dev,
+        request.tally_budget,
+        deadline,
+        &mut report,
+        log,
+    );
+    if host.interrupted().is_some() {
         return report;
     }
     let started = host.now();
@@ -1096,6 +1163,8 @@ fn ensure_grouped_inner<H: Delete>(
             deadline_hit: false,
             run_stopped: false,
             in_use_unknown_in_a_row: 0,
+            index: Some(&mut *index),
+            run_started,
         };
         run.run(owners);
         let timed_out = run.deadline_hit;
@@ -1478,6 +1547,13 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// Candidates in a row, in the order taken, whose reclaim ended
     /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
     in_use_unknown_in_a_row: usize,
+    /// The run's index, which the reclaim walk takes its queue from
+    /// ([`indexed`]); `None` for a tier that discovers only.
+    index: Option<&'a mut TallyState>,
+    /// When the run started (the first event of `ensure`, on the `Host`
+    /// port's monotonic clock): the time to the first deletion is
+    /// measured from here (docs/architecture.md, The reclaim walk).
+    run_started: MonoTime,
 }
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
@@ -2283,7 +2359,6 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// order ([`fs_kind::reclaim`], which judges every candidate again
     /// under its lock), re-sampling after each, until the goal is observed.
     fn walk_fs(&mut self, find: &Find, rules: &Rules<'_>, checker: &mut Checker<'_>) {
-        let action = &self.tier.action;
         let judge = fs_kind::Judge {
             find,
             rules,
@@ -2293,6 +2368,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             },
             dev: self.measured.dev,
         };
+        // The index's queue first, then this tier's own discovery for what
+        // the queue did not hold (docs/architecture.md, The reclaim walk).
+        let mut handled = indexed::Handled::default();
+        if self.index.is_some() && indexed::takes_index(self.tier) {
+            match self.walk_fs_index(find, &judge, checker, &mut handled) {
+                indexed::Walked::TierDone => return,
+                indexed::Walked::Discover => {}
+            }
+        }
         let started = self.host.now();
         let (found, stopped) = fs_kind::discover(self.host, &self.tier.roots, find, self.deadline);
         self.record_overrun("discover", &self.measured.path, started, self.host.now());
@@ -2333,6 +2417,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         for (path, candidate) in &found.candidates {
             if self.stop_if_interrupted() {
                 return;
+            }
+            if handled.covers(path, candidate) {
+                continue;
             }
             let started = self.host.now();
             let overlap = overlaps_checked(self.host, path, &self.protection.matches);
@@ -2415,126 +2502,155 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let (found, tally) = queue
                 .pop(self.measured.target.saturating_sub(avail))
                 .expect("nonempty candidate queue");
-            if self.protected_before_reclaim(&found.path) {
-                if self.run_stopped {
-                    return;
-                }
-                continue;
+            match self.act_fs(found, tally.as_ref(), avail, &judge, checker) {
+                Acted::Next { avail: after, .. } => avail = after,
+                Acted::Stop => return,
             }
-            if self.stop_if_interrupted() {
-                return;
+        }
+    }
+
+    /// One `fs` candidate's reclaim, after discovery (or the index's
+    /// re-match) and its tally: the protected re-check, the deadline, the
+    /// busy-host give-up, the kind's protocol (every check again under the
+    /// candidate's lock), and the record. The available space after it.
+    fn act_fs(
+        &mut self,
+        found: &fs_kind::Found,
+        tally: Option<&fs_kind::Tally>,
+        avail: u64,
+        judge: &fs_kind::Judge<'_>,
+        checker: &mut Checker<'_>,
+    ) -> Acted {
+        let action = &self.tier.action;
+        if self.protected_before_reclaim(&found.path) {
+            if self.run_stopped {
+                return Acted::Stop;
             }
-            if self.past_deadline() {
-                self.deadline_hit = true;
-                (self.log)(&format!(
-                    "{}: the deadline passed before {}",
-                    self.tier.name,
-                    found.path.display()
-                ));
-                return;
-            }
-            if self.too_busy_to_check(&found.path, &self.tier.profile.clone()) {
-                continue;
-            }
-            (self.log)(&match &tally {
-                Some(tally) => format!(
-                    "{}: checking {} (est. {}, {} entries, newest change {})",
-                    self.tier.name,
-                    found.path.display(),
-                    format_bytes(tally.bytes),
-                    tally.entries,
-                    observed_age(self.host.wall_clock(), tally.newest_change)
-                ),
-                None => format!(
-                    "{}: checking {} (not tallied)",
-                    self.tier.name,
-                    found.path.display()
-                ),
-            });
-            let started = self.host.now();
-            let idle_age_seconds = age_seconds(
-                self.host.wall_clock(),
-                tally.as_ref().and_then(|t| t.newest_change),
-            );
-            let outcome = match action {
-                Action::Delete { make_writable } => {
-                    let done = fs_kind::reclaim_alternatives_checked(
-                        self.host,
-                        &[fs_kind::Alternative {
-                            judge,
-                            found,
-                            checkouts: judge.rules.checkouts,
-                            admitted: true,
-                        }],
-                        *make_writable,
-                        checker,
-                        self.deadline,
-                        &mut |_, path, at| {
-                            DeletePolicy {
-                                protections: &self.tier.protections,
-                                protected: &self.protection.matches,
-                                negated: &[],
-                                negated_matches: &[],
-                                enumerated: self.protection.enumerated,
-                            }
-                            .skip(self.host, self.deadline, path, at)
-                        },
-                    );
-                    Outcome {
-                        started,
-                        before: avail,
-                        expected_bytes: tally.as_ref().map(|t| t.bytes),
-                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                        idle_age_seconds,
-                        removed_entries: done.removed_entries,
-                        attempted_command: false,
-                        end: done.end,
-                        note: String::new(),
-                    }
-                }
-                Action::Command { argv, cwd } => {
-                    let ready = self.command_ready.as_ref().expect("command preflighted");
-                    let done = fs_kind::run_command_checked(
-                        self.host,
-                        &judge,
-                        found,
-                        checker,
-                        fs_kind::CommandSpec {
-                            ready,
-                            argv,
-                            cwd: *cwd,
-                            need_bytes: self.measured.target.saturating_sub(avail),
-                            mount: &self.measured.at.mount.mount_point,
-                            sources: vec![fs_kind::CommandSource {
-                                profile: &self.tier.profile,
-                                output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
-                            }],
-                            deadline: self.deadline,
-                        },
-                        &mut |path| {
-                            policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
-                        },
-                    );
-                    Outcome {
-                        started,
-                        before: avail,
-                        expected_bytes: Some(self.measured.target.saturating_sub(avail)),
-                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                        idle_age_seconds,
-                        removed_entries: 0,
-                        attempted_command: done.attempted,
-                        end: done.end,
-                        note: String::new(),
-                    }
-                }
-                Action::CargoLockProtocol
-                | Action::DockerBuilderPrune
-                | Action::DockerImagePrune { .. } => unreachable!("fs action admitted by ensure"),
+            return Acted::Next {
+                avail,
+                reclaimed: false,
             };
-            match self.record(&found.path, outcome) {
-                Some(after) => avail = after,
-                None => return,
+        }
+        if self.stop_if_interrupted() {
+            return Acted::Stop;
+        }
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            (self.log)(&format!(
+                "{}: the deadline passed before {}",
+                self.tier.name,
+                found.path.display()
+            ));
+            return Acted::Stop;
+        }
+        if self.too_busy_to_check(&found.path, &self.tier.profile.clone()) {
+            return Acted::Next {
+                avail,
+                reclaimed: false,
+            };
+        }
+        (self.log)(&match &tally {
+            Some(tally) => format!(
+                "{}: checking {} (est. {}, {} entries, newest change {})",
+                self.tier.name,
+                found.path.display(),
+                format_bytes(tally.bytes),
+                tally.entries,
+                observed_age(self.host.wall_clock(), tally.newest_change)
+            ),
+            None => format!(
+                "{}: checking {} (not tallied)",
+                self.tier.name,
+                found.path.display()
+            ),
+        });
+        let started = self.host.now();
+        let idle_age_seconds = age_seconds(
+            self.host.wall_clock(),
+            tally.as_ref().and_then(|t| t.newest_change),
+        );
+        let outcome = match action {
+            Action::Delete { make_writable } => {
+                let done = fs_kind::reclaim_alternatives_checked(
+                    self.host,
+                    &[fs_kind::Alternative {
+                        judge: *judge,
+                        found,
+                        checkouts: judge.rules.checkouts,
+                        admitted: true,
+                    }],
+                    *make_writable,
+                    checker,
+                    self.deadline,
+                    &mut |_, path, at| {
+                        DeletePolicy {
+                            protections: &self.tier.protections,
+                            protected: &self.protection.matches,
+                            negated: &[],
+                            negated_matches: &[],
+                            enumerated: self.protection.enumerated,
+                        }
+                        .skip(self.host, self.deadline, path, at)
+                    },
+                );
+                Outcome {
+                    started,
+                    before: avail,
+                    expected_bytes: tally.as_ref().map(|t| t.bytes),
+                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                    idle_age_seconds,
+                    removed_entries: done.removed_entries,
+                    attempted_command: false,
+                    end: done.end,
+                    note: String::new(),
+                }
             }
+            Action::Command { argv, cwd } => {
+                let ready = self.command_ready.as_ref().expect("command preflighted");
+                let done = fs_kind::run_command_checked(
+                    self.host,
+                    judge,
+                    found,
+                    checker,
+                    fs_kind::CommandSpec {
+                        ready,
+                        argv,
+                        cwd: *cwd,
+                        need_bytes: self.measured.target.saturating_sub(avail),
+                        mount: &self.measured.at.mount.mount_point,
+                        sources: vec![fs_kind::CommandSource {
+                            profile: &self.tier.profile,
+                            output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+                        }],
+                        deadline: self.deadline,
+                    },
+                    &mut |path| {
+                        policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
+                    },
+                );
+                Outcome {
+                    started,
+                    before: avail,
+                    expected_bytes: Some(self.measured.target.saturating_sub(avail)),
+                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                    idle_age_seconds,
+                    removed_entries: 0,
+                    attempted_command: done.attempted,
+                    end: done.end,
+                    note: String::new(),
+                }
+            }
+            Action::CargoLockProtocol
+            | Action::DockerBuilderPrune
+            | Action::DockerImagePrune { .. } => unreachable!("fs action admitted by ensure"),
+        };
+        let reclaimed = matches!(outcome.end, ReclaimEnd::Complete) && !outcome.attempted_command;
+        match self.record(&found.path, outcome) {
+            Some(after) => Acted::Next {
+                avail: after,
+                reclaimed,
+            },
+            None => Acted::Stop,
         }
     }
 
@@ -3077,6 +3193,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     outcome.note
                 ));
             }
+            if self.report.actions.is_empty() && outcome.removed_entries > 0 {
+                (self.log)(&format!(
+                    "first deletion: {} ms after the run started ({})",
+                    action_finished
+                        .saturating_since(self.run_started)
+                        .as_millis(),
+                    candidate.display()
+                ));
+            }
             self.report.actions.push(ActionEntry {
                 tier: self.tier.name.clone(),
                 profile: profile.to_owned(),
@@ -3132,6 +3257,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         if self.run_stopped { None } else { after }
     }
+}
+
+/// What [`Reclaim::act_fs`] came to.
+enum Acted {
+    /// Go on, with the space available now; `reclaimed`: the candidate's
+    /// deletion completed.
+    Next { avail: u64, reclaimed: bool },
+    /// The tier (or the run) stops.
+    Stop,
 }
 
 /// How one candidate's reclaim went, for [`Reclaim::record`].

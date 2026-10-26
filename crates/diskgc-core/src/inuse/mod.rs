@@ -932,7 +932,12 @@ impl<'a> Checker<'a> {
         // of its reuse (only the first pass can reuse: every later one
         // follows a `forget`).
         for _ in 0..=FRESH_ATTEMPTS {
-            let reused = self.reusable_at(host.now());
+            let reused = self.reusable_at(host.now())
+                && attempts.not_before.is_none_or(|floor| {
+                    self.latest
+                        .as_ref()
+                        .is_some_and(|scan| scan.started >= floor)
+                });
             if !reused {
                 self.rescan(host, attempts.deadline)
                     .map_err(|e| e.at(path))?;
@@ -1195,6 +1200,9 @@ impl Stale {
 pub struct FreshAttempts {
     spent: usize,
     deadline: Option<MonoTime>,
+    /// No scan started before this serves the candidate
+    /// ([`Self::scan_not_before`]).
+    not_before: Option<MonoTime>,
     last: Option<Stale>,
     /// Gave up early: the next pause would have reached the deadline.
     cut_by_deadline: bool,
@@ -1207,9 +1215,23 @@ impl FreshAttempts {
         Self {
             spent: 0,
             deadline,
+            not_before: None,
             last: None,
             cut_by_deadline: false,
         }
+    }
+
+    /// Only a scan started at or after `at` may serve the candidate: one
+    /// kept from an earlier check is not reused if it started before
+    /// (`None`: any kept scan within the reuse limit). A liveness contract
+    /// needs it from the moment its candidate was found (Owner PID's
+    /// ordering, [`crate::fs_kind`]'s `liveness::check`): when the reclaim
+    /// walk finds each candidate again just before judging it (the
+    /// index's queue), the scan kept from the previous candidate predates
+    /// it.
+    pub fn scan_not_before(mut self, at: Option<MonoTime>) -> Self {
+        self.not_before = at;
+        self
     }
 
     /// Spends one attempt on `stale`. With attempts left and the pause

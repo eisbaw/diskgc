@@ -2,8 +2,9 @@
 # An entry replaced by another inode between the walk and the delete's
 # identity check: the replacement is never deleted, the candidate is
 # `changed` (docs/testing.md, required model scenarios).
-# The entry's third statx in reclaim is the delete's identity check (the
-# first two are the tally's and the locked walk's): VECTOR_TRACE shows it.
+# The entry's fourth statx in reclaim is the delete's identity check (the
+# first three are the synchronous tally's sizing, the candidate's tally
+# and the locked walk's): VECTOR_TRACE shows it.
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -20,7 +21,7 @@ host:
     /run/diskgc/lock: {uid: 0, gid: 0}
     /tmp/zephyr-a: {f: {size: 4K}}
   events:
-    - at: {op: statx, path: /tmp/zephyr-a/f, nth: 3, when: before}
+    - at: {op: statx, path: /tmp/zephyr-a/f, nth: 4, when: before}
       replace: /tmp/zephyr-a/f
 expect:
   plan:

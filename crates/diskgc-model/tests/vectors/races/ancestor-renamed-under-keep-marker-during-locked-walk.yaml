@@ -1,6 +1,7 @@
 # TASK-165. As ancestor-renamed-under-keep-marker-before-lock, but the
 # parent is renamed while the locked eligibility walk lists the candidate
-# (its second listing; the first is the plan's), after step 4's place and
+# (its third listing; the synchronous tally's sizing and the candidate's
+# tally list it first), after step 4's place and
 # keep-marker recheck: the recheck right before the deletion (after the
 # in-use check) must find the path changed. Nothing removed.
 profile_vector: 1
@@ -20,7 +21,7 @@ host:
     /tmp/work/p/zephyr-a: {f: {size: 4K}}
     /tmp/work/keep/.diskgc-keep: {}
   events:
-    - at: {op: read_dir, path: /tmp/work/p/zephyr-a, nth: 2, when: after}
+    - at: {op: read_dir, path: /tmp/work/p/zephyr-a, nth: 3, when: after}
       rename: {from: /tmp/work/p, to: /tmp/work/keep/p}
 expect:
   plan:

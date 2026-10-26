@@ -1,7 +1,9 @@
 # The owner is gone and the contract permits, but the directory is replaced
 # by another inode before the delete's identity check: the replacement is
 # never deleted (changed). The contract does not bypass Deletion's identity
-# checks.
+# checks. The rc's fourth statx is the delete's identity check (the
+# synchronous tally's sizing, the candidate's tally and the locked walk
+# come first).
 profile_vector: 1
 profile: nix-shell-rc
 path: /tmp
@@ -19,7 +21,7 @@ host:
   processes:
     - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
   events:
-    - at: {op: statx, path: /tmp/nix-shell-4242-17/rc, nth: 3, when: before}
+    - at: {op: statx, path: /tmp/nix-shell-4242-17/rc, nth: 4, when: before}
       replace: /tmp/nix-shell-4242-17/rc
 expect:
   plan:

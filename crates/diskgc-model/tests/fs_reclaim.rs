@@ -2104,7 +2104,11 @@ fn entry_and_version_filter_conjoin_under_reclaim_lock() {
         &changed,
         &tmp("profile:versioned && filter:tagged-keep-one"),
     );
-    assert!(report.actions.is_empty(), "{report:#?}");
+    // v3 is judged after the event: removing v1's tag made v1's directory
+    // the newest sibling, so the version rule no longer keeps v3. Each
+    // candidate is judged when it is reclaimed (TASK-31), not at a tally of
+    // all of them first.
+    assert_eq!(actions(&report), ["/tmp/versions/v3"], "{report:#?}");
     assert!(
         report.skipped.iter().any(|skip| {
             skip.candidate.as_deref() == Some(Path::new("/tmp/versions/v1"))
@@ -2752,12 +2756,13 @@ fn anchored_cmake_reads_the_locked_candidate_after_its_path_is_swapped() {
     // The swap happens under the lock after step 4 showed the path still
     // leads to the candidate (TASK-165: a swap before that is `changed`
     // without reading anything), right before the source check reads the
-    // cache: the third read of it, after discovery's and the tally's.
+    // cache: the fourth read of it, after the synchronous tally's listing,
+    // the index re-match's discovery and the candidate's tally.
     let cache_file = format!("{candidate}/CMakeCache.txt");
     let events = format!(
-        "events:\n  - {{at: {{op: read_head, path: {cache_file}, nth: 3, when: before}}, \
+        "events:\n  - {{at: {{op: read_head, path: {cache_file}, nth: 4, when: before}}, \
          rename: {{from: {candidate}, to: {moved}}}}}\n  - \
-         {{at: {{op: read_head, path: {cache_file}, nth: 3, when: before}}, \
+         {{at: {{op: read_head, path: {cache_file}, nth: 4, when: before}}, \
          rename: {{from: {replacement}, to: {candidate}}}}}\n"
     );
     let host = host(&yaml("", &tree, &events));

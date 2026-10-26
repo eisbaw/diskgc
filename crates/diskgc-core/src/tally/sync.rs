@@ -143,6 +143,12 @@ fn pass1<H: Host>(
             });
             return Ok(());
         }
+        if host.interrupted().is_some() {
+            report.stopped = Some(Stop::Interrupted {
+                path: source.finder.root.to_path_buf(),
+            });
+            return Ok(());
+        }
         let listed = state.list_source(host, source, deadline)?;
         report.inserted += listed.new + listed.replaced;
         if let Some(stop) = &listed.listing.stopped {
@@ -176,6 +182,12 @@ fn pass2<H: Host>(
     let mounts = host.mountinfo()?;
     let mut budget = Budget::until(deadline);
     for (mount, path) in stale {
+        // A signal ends the tally between units (a unit's walk is bounded
+        // by the deadline, not checked for signals).
+        if host.interrupted().is_some() {
+            report.stopped = Some(Stop::Interrupted { path });
+            break;
+        }
         let sizing = loop {
             match state.size_unit(host, &mounts, &mount, &path, &mut budget)? {
                 // Only the deadline pauses a walk without an operation bound.

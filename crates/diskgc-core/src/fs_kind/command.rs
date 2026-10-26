@@ -213,7 +213,12 @@ fn protocol<H: Delete>(
     let mut boundary_skip = None;
     // One budget for the candidate, across alternatives: a busy host does
     // not get more attempts because a policy refused a source.
-    let mut attempts = FreshAttempts::new(deadline);
+    let mut attempts = FreshAttempts::new(deadline).scan_not_before(super::contract_scan_floor(
+        alternatives
+            .iter()
+            .filter(|a| a.admitted)
+            .map(|a| (a.judge.find, a.found)),
+    ));
     loop {
         let Admitted {
             index,

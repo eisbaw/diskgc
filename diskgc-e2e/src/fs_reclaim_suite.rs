@@ -1625,6 +1625,116 @@ fn tmp_fixture(ctx: &Ctx, scale: Scale) -> TestResult {
     verdict.assert_clean()
 }
 
+/// TASK-31 AC #4 at the commit gate's size: about 8,000 entries.
+pub fn fs_reclaim_time_to_first_deletion_is_measured_cold_and_warm(ctx: &Ctx) -> TestResult {
+    first_deletion(ctx, 2_000, 2_000)
+}
+
+/// TASK-31 AC #4 on the PRD's 100,000-entry `/tmp` (the full tier).
+pub fn fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm(
+    ctx: &Ctx,
+) -> TestResult {
+    first_deletion(ctx, 10_000, 70_001)
+}
+
+/// The value of `<what> <number> ms` in the first line of `stderr` that
+/// holds `line`.
+fn logged_ms(stderr: &str, line: &str, what: &str) -> Result<u64, String> {
+    let text = stderr
+        .lines()
+        .find(|l| l.contains(line))
+        .ok_or_else(|| format!("no `{line}` line in:\n{stderr}"))?;
+    let after = text
+        .split(what)
+        .nth(1)
+        .ok_or_else(|| format!("no `{what}` in `{text}`"))?;
+    let digits: String = after
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .parse()
+        .map_err(|e| format!("`{text}`: no number after `{what}`: {e}"))
+}
+
+/// TASK-31 AC #4 (docs/testing.md, Definition of Done: Freeing works;
+/// docs/architecture.md, The reclaim walk: the time to the first
+/// deletion): a `/tmp` of `rc_dirs` nix-shell rc directories (each two
+/// 4 KiB files) among `filler` empty files (three entries per rc dir), and
+/// two `ensure` runs, each with a `--min-free` a quarter of the candidates'
+/// bytes above what is available before it: the first from nothing (no
+/// snapshot exists before TASK-30, so its synchronous tally lists and
+/// sizes everything), the second right after it ("warm": the kernel's
+/// caches, never a saved index). Both must reach `--min-free` and exit 0,
+/// judged by the deletion oracle. The time to the first deletion and the
+/// synchronous tally's time, as diskgc logs them, are logged here: a
+/// measurement, not a pass criterion (no latency target). The runs are
+/// under the harness's `strace -f`, which slows every system call: the
+/// numbers are an upper bound of an untraced run's.
+fn first_deletion(ctx: &Ctx, rc_dirs: usize, filler: usize) -> TestResult {
+    let s = &ctx.scratch;
+    write_config(ctx, Duration::from_secs(1))?;
+    let built = Instant::now();
+    let mut eligible = Vec::with_capacity(rc_dirs);
+    let mut bytes: u64 = 0;
+    for rc in 0..rc_dirs {
+        let rel = format!(
+            "nix-shell-{}-{}",
+            100_000 + rc,
+            3_000_000_000u64 + rc as u64
+        );
+        let dir = s.mkdir(&rel, 0o700, TESTER)?;
+        for file in ["rc", "env-vars"] {
+            let path = s.write_file(&format!("{rel}/{file}"), &[7u8; 4096], 0o644, TESTER)?;
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{path:?}: {e}"))?;
+            bytes += std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+        }
+        eligible.push(dir);
+    }
+    for f in 0..filler {
+        s.write_file(&format!("x.{f:06}"), b"", 0o644, TESTER)?;
+    }
+    let entries = rc_dirs * 3 + filler;
+    info!(
+        "built a /tmp of {entries} entries ({rc_dirs} candidates, {bytes} bytes in them) in {:?}",
+        built.elapsed()
+    );
+    let fixture = eligible
+        .iter()
+        .fold(Fixture::new(), |f, path| f.eligible(path.clone()));
+    let oracle = Oracle::arm(fixture)?;
+    let quarter = bytes / 4;
+    let mut runs = Vec::new();
+    for name in ["cold", "warm"] {
+        let before = crate::ensure_suite::avail(Path::new("/tmp"))?;
+        let goal = before + quarter;
+        let min_free = format!("{}K", goal.div_ceil(1024));
+        let run = ensure_tmp(
+            ctx,
+            &["--min-free", &min_free, "--select", "profile:rc-dirs"],
+        )?;
+        run.expect_code(0)?;
+        let r = report(&run)?;
+        ensure!(r["status"] == "met", "{name}: {}", r["status"]);
+        let after = crate::ensure_suite::avail(Path::new("/tmp"))?;
+        ensure!(
+            after >= goal.div_ceil(1024) * 1024,
+            "{name}: {after} bytes available after an exit 0 for --min-free {min_free}"
+        );
+        let first = logged_ms(&run.stderr, "first deletion:", "first deletion:")?;
+        let tally = logged_ms(&run.stderr, "index: synchronous tally", " in")?;
+        info!(
+            "time to first deletion ({name}, {entries} entries, under strace): {first} ms; \
+             synchronous tally {tally} ms; the run {:?}; {} -> {after} bytes available",
+            run.took, before
+        );
+        runs.push(run);
+    }
+    let verdict = oracle.judge_runs(&runs.iter().collect::<Vec<_>>())?;
+    verdict.assert_clean()
+}
+
 /// AC #5, the kernel's sockets and FIFOs: under the default policy no
 /// socket or FIFO is ever deleted. A candidate holding a stale one (its
 /// server gone, nothing holding the FIFO) is `contains_ipc`; a socket or

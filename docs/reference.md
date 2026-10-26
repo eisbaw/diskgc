@@ -123,15 +123,22 @@ process runs, even if that Cargo works in an unrelated directory; see
   cannot be interrupted and can overrun it. See [safety.md](safety.md#deadlines).
 - `--tally-budget` (default: the smaller of 30 s and a quarter of
   `--timeout`; `0` = no limit) and `--no-index`: see
-  [architecture.md](architecture.md#the-tally). Without an index (before
-  task-29), `--no-index` changes nothing, and `--tally-budget` bounds the
-  tally that orders each active tier under the host lock: candidates it
-  leaves untallied are taken after the tallied ones, in the order
-  discovery found them, each judged in full under its own locks. A
-  candidate the tally refuses (e.g. kept, another user's, too many entries) is
-  skipped with that reason for the run and never locked; a refusal that
-  stops being true later (a `.diskgc-keep` removed after the tally) is a
-  missed reclaim until the next run, never an unsafe delete. When a tallied
+  [architecture.md](architecture.md#the-tally). `--tally-budget` bounds
+  the synchronous tally that builds the run's index before the host lock
+  (`fs` tiers of one source without `!profile:`; their candidates are
+  then taken in the index's order, each found again and judged in full,
+  [architecture.md](architecture.md#the-reclaim-walk)), and, per tier,
+  the tally that orders what that tier's own discovery finds under the
+  host lock (every Cargo-target tier, union and `!profile:` tier, and
+  what an indexed tier's queue did not take): candidates it leaves
+  untallied are taken after the tallied ones, in the order discovery
+  found them, each judged in full under its own locks. Until the
+  snapshot exists (TASK-30), `--no-index` changes nothing: each run's
+  index starts empty. A candidate a tally of this run refuses (e.g.
+  kept, another user's, too many entries, unreadable) is skipped with
+  that reason for the run and never locked; a refusal that stops being
+  true later (a `.diskgc-keep` removed after the tally) is a missed
+  reclaim until the next run, never an unsafe delete. When a tallied
   Cargo target's measured last build fails the tier's idle filter, it is
   skipped (`not_idle`, `too_idle`, or an unknown-age reason) before any of
   its Cargo locks are attempted. A target left untallied is judged under
@@ -144,9 +151,10 @@ process runs, even if that Cargo works in an unrelated directory; see
   whether it is eligible or the skip reason, its estimated size and the
   operation it would run (JSON: the `plan` array); delete nothing. The
   eligible candidates come first, in the order a reclaim would take them
-  when its tally is not cut short (`--tally-budget 0`) and its index
-  holds no collapsed blocks or stored refusal hints (otherwise a
-  reclaim's order within a tier can differ;
+  in its first tier with candidates when its tally is not cut short
+  (`--tally-budget 0`) and its index holds no collapsed blocks or stored
+  refusal hints (otherwise, and in later tiers, which the synchronous
+  tally does not size, a reclaim's order within a tier can differ;
   [architecture.md](architecture.md#order-within-a-tier)), then the
   skipped ones; a reclaim stops at the goal, the plan does not.
   Takes no lock (so it cannot tell `locked`: whether a target's locks or
@@ -945,10 +953,14 @@ is `host`.
   it should: `partial` when some selected source root has no complete
   discovery listing in it (the tally budget ended first, or `watch` has
   not finished its first pass). Hitting the memory budget collapses
-  units into blocks; it never makes coverage `partial`. Builds without
-  an index (before task-29) emit `null`.
-- `tally_cut_short` is true only after the reclaim tally actually stops at
-  `--tally-budget` with at least one candidate left untallied. It is false
+  units into blocks; it never makes coverage `partial`. It is `null`
+  until the snapshot (TASK-30) defines its `source`, although `ensure`
+  builds and uses an index (TASK-31; its synchronous tally logs what it
+  did).
+- `tally_cut_short` is true only after a reclaim's tally (the
+  synchronous one before the host lock, or a tier's under it) actually
+  stops at `--tally-budget` with at least one candidate left untallied
+  (or, for the synchronous one, a source not yet listed). It is false
   for dry runs, runs that stop before tallying, and tallies that complete;
   false does not say that every possible candidate was discovered.
 - Paths are JSON strings; bytes of a path that are not UTF-8 are shown as

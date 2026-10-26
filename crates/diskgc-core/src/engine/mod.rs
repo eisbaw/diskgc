@@ -629,12 +629,17 @@ pub enum Reason {
     /// A backend tier's backend is one diskgc has not verified
     /// (docs/reference.md, Backend skips and errors).
     UnsupportedBackend,
+    /// An index unit that is not what discovery would find now: gone,
+    /// replaced by another object under its name, or no longer found by
+    /// its source under the tier's root (docs/architecture.md, The reclaim
+    /// walk). Never walked; discovery judges whatever is there now.
+    Stale,
 }
 
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 30] = [
+    pub const ALL: [Reason; 31] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -665,6 +670,7 @@ impl Reason {
         Reason::ProducerUnknown,
         Reason::RemoteBackend,
         Reason::UnsupportedBackend,
+        Reason::Stale,
     ];
 
     /// The skip reason's name in reports.
@@ -700,6 +706,7 @@ impl Reason {
             Self::ProducerUnknown => "producer_unknown",
             Self::RemoteBackend => "remote_backend",
             Self::UnsupportedBackend => "unsupported_backend",
+            Self::Stale => "stale",
         }
     }
 }
@@ -710,10 +717,7 @@ impl Reason {
 /// appear, because the report's reason is a [`Reason`]. The task that adds
 /// a producer adds the variant to [`Reason`] and removes the entry here
 /// (`every_skip_reason_has_a_vector` fails until it does).
-pub const RESERVED_REASONS: [(&str, &str); 2] = [
-    ("backend_unavailable", "TASK-36, TASK-113"),
-    ("stale", "TASK-31"),
-];
+pub const RESERVED_REASONS: [(&str, &str); 1] = [("backend_unavailable", "TASK-36, TASK-113")];
 
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

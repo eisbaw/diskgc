@@ -1,7 +1,8 @@
 # TASK-165. The configured root is renamed away (taking the candidate
 # with it) before the candidate lock, nothing left at its name: the path no
 # longer leads to the candidate, changed (not missing: it was reached under
-# this run), nothing removed.
+# this run), nothing removed. The tier's own discovery after the index's
+# queue then finds the root gone (`missing`).
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp/work"], "paths": ["p/zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/work/p/zephyr-scratch"]}}
@@ -28,4 +29,5 @@ expect:
   removed: []
   skipped:
     - {candidate: /tmp/work/p/zephyr-a, reason: changed}
+    - {candidate: /tmp/work, reason: missing}
   preserved: [/tmp/old-work/p/zephyr-a/f]

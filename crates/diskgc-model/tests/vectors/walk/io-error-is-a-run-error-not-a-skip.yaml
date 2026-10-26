@@ -1,7 +1,10 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # EIO while listing says nothing about this candidate and would hit the
 # next one too: an error of the run (exit 3), never a quiet skip
-# (docs/safety.md, Fail closed). Nothing of it is deleted.
+# (docs/safety.md, Fail closed). Nothing of it is deleted. The plan's
+# first listing fails; in the reclaim the first two do: the synchronous
+# tally's sizing (a failure there only ends the tally, with a log line)
+# and the candidate's own tally, which is the run error.
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -19,6 +22,8 @@ host:
     /tmp/zephyr-failing: {sub: {data: {size: 4K}}}
   events:
     - at: {op: read_dir, path: /tmp/zephyr-failing/sub, nth: 1, when: before}
+      fail: EIO
+    - at: {op: read_dir, path: /tmp/zephyr-failing/sub, nth: 2, when: before}
       fail: EIO
 expect:
   plan: []

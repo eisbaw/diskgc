@@ -1,0 +1,35 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# An index unit removed by someone else after the synchronous tally listed
+# it and before the reclaim walk finds it again (here as the host lock is
+# taken): `stale`, never reached or walked; the run goes on
+# (docs/architecture.md, The reclaim walk). Removed after its re-match, at its own lock, it is `missing`:
+# candidate-vanishes-before-lock.yaml.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+    /tmp/zephyr-b: {f: {size: 4K}}
+  events:
+    - at: {op: flock, path: /run/diskgc/lock, nth: 1, when: after}
+      remove: /tmp/zephyr-b
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+    - {candidate: /tmp/zephyr-b}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a]
+  skipped:
+    - {candidate: /tmp/zephyr-b, reason: stale}
+  preserved: []

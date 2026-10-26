@@ -120,8 +120,74 @@ pub fn discover<H: Host>(
     deadline: Option<MonoTime>,
 ) -> (Discovery, Option<Stop>) {
     let mut out = Discovery::default();
-    let stopped = discover_into(host, roots, find, deadline, false, &mut out).err();
+    let stopped = discover_into(host, roots, find, deadline, false, None, &mut out).err();
     (out, stopped)
+}
+
+/// How far a [`discover_beneath`] walk goes below its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Beneath {
+    /// Only the path itself: an index unit re-matched (docs/architecture.md,
+    /// The reclaim walk). Nothing below it is looked at.
+    Exact,
+    /// Everything below the path, as discovery would find it: a block
+    /// expanded (docs/architecture.md, Order within a tier: Expanding a
+    /// block).
+    Subtree,
+}
+
+/// [`discover`], restricted to `at`: the same walk of the same `roots`
+/// (each resolved and judged as discovery does, so a refused root shows
+/// in [`Discovery::refused`] whether or not it holds `at`), but on the way
+/// down from a root above `at` only the names leading to `at` are looked up
+/// (never listed), and below it `scope` decides. A root below `at` is
+/// walked whole under [`Beneath::Subtree`] (a lump's site above the bound
+/// root: never from above the root); a root beside `at` is not walked.
+///
+/// What it finds is what [`discover`] finds on that way: the patterns,
+/// `where`, the mount and `systemd-private-*` rules and the rule that a
+/// candidate is never descended into all apply level by level, so it can
+/// find a candidate above `at` (one that holds it) and never one that
+/// discovery would not. The one difference: a directory on the way that
+/// is too large to list (`too_many_entries` in [`discover`]) is not
+/// listed here, so not refused.
+pub fn discover_beneath<H: Host>(
+    host: &H,
+    roots: &[PathBuf],
+    find: &Find,
+    at: &Path,
+    scope: Beneath,
+    deadline: Option<MonoTime>,
+) -> (Discovery, Option<Stop>) {
+    assert!(at.is_absolute(), "discover_beneath of a relative path");
+    let mut out = Discovery::default();
+    let stopped = discover_into(
+        host,
+        roots,
+        find,
+        deadline,
+        false,
+        Some((at, scope)),
+        &mut out,
+    )
+    .err();
+    (out, stopped)
+}
+
+/// The names below `root` that lead to `at`, for a walk restricted to it
+/// ([`discover_beneath`]); `None` when `root` is not walked at all.
+fn way_down(root: &Path, at: &Path, scope: Beneath) -> Option<Vec<OsString>> {
+    if let Ok(rel) = at.strip_prefix(root) {
+        let names: Option<Vec<OsString>> = rel
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(name) => Some(name.to_owned()),
+                _ => None,
+            })
+            .collect();
+        return names;
+    }
+    (scope == Beneath::Subtree && root.starts_with(at)).then(Vec::new)
 }
 
 /// Discover admitted candidates and structural matches of any union term
@@ -140,6 +206,7 @@ pub fn discover_union<H: Host>(
         find,
         deadline,
         find.has_retention_guard(),
+        None,
         &mut out,
     )
     .err();
@@ -152,6 +219,7 @@ fn discover_into<H: Host>(
     find: &Find,
     deadline: Option<MonoTime>,
     record_structural: bool,
+    restrict: Option<(&Path, Beneath)>,
     out: &mut Discovery,
 ) -> Result<(), Stop> {
     let mounts = host.mountinfo().map_err(|error| Stop::Failed {
@@ -192,6 +260,18 @@ fn discover_into<H: Host>(
             continue;
         }
         let mut cursor = DiscoverCursor::new(root.to_owned(), record_structural);
+        if let Some((at, scope)) = restrict {
+            // Resolved and judged above like every root; walked only when
+            // it holds `at` or (a subtree) lies below it.
+            let Some(names) = way_down(root, at, scope) else {
+                continue;
+            };
+            if scope == Beneath::Exact && names.is_empty() {
+                continue; // a root is never its own candidate
+            }
+            cursor.way_down = names;
+            cursor.exact = scope == Beneath::Exact;
+        }
         cursor.root_id = Some(identity);
         cursor.frames.push(Frame::root(find));
         cursor.seen = std::mem::take(&mut seen);
@@ -296,6 +376,11 @@ pub struct DiscoverCursor {
     seen: HashSet<DevIno>,
     /// The walk reached its end (or its root was refused).
     done: bool,
+    /// A restricted walk ([`discover_beneath`]): the names leading to its
+    /// path, looked up one per level instead of listing.
+    way_down: Vec<OsString>,
+    /// Restricted to the path itself: nothing below it is entered.
+    exact: bool,
 }
 
 impl DiscoverCursor {
@@ -308,6 +393,8 @@ impl DiscoverCursor {
             frames: Vec::new(),
             seen: HashSet::new(),
             done: false,
+            way_down: Vec::new(),
+            exact: false,
         }
     }
 
@@ -497,6 +584,8 @@ impl DiscoverCursor {
                     mounts,
                     deadline,
                     record_structural: self.record_structural,
+                    way_down: &self.way_down,
+                    exact: self.exact,
                     out: &mut *out,
                     seen: &mut seen,
                 };
@@ -595,6 +684,9 @@ struct Walk<'a, H: Host> {
     mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
     record_structural: bool,
+    /// See [`DiscoverCursor::way_down`].
+    way_down: &'a [OsString],
+    exact: bool,
     out: &'a mut Discovery,
     seen: &'a mut HashSet<DevIno>,
 }
@@ -689,11 +781,17 @@ impl<H: Host> Walk<'_, H> {
             // Never descended into: the outer candidate is the one.
             return Ok(Entry::Done);
         }
+        // A walk restricted to one path enters nothing below it.
+        let at_the_end = self.exact && level + 1 >= self.way_down.len();
         let deeper: Vec<usize> = matching
             .into_iter()
             .filter(|&i| self.find.patterns[i].depth() > level + 1)
             .collect();
-        if deeper.is_empty() || file_type != FileType::Directory || mnt_id != dir.mount.id {
+        if at_the_end
+            || deeper.is_empty()
+            || file_type != FileType::Directory
+            || mnt_id != dir.mount.id
+        {
             return Ok(Entry::Done);
         }
         let child = match open_beneath(
@@ -737,6 +835,12 @@ impl<H: Host> Walk<'_, H> {
         level: usize,
         active: &[usize],
     ) -> Result<Result<Vec<OsString>, Skip>, Stop> {
+        if let Some(name) = self.way_down.get(level) {
+            // On the way down to a restricted walk's path: that one name,
+            // looked up as a literal is (the caller keeps it only if an
+            // active pattern matches it).
+            return Ok(Ok(vec![name.clone()]));
+        }
         let mut literals = Vec::new();
         let mut glob = false;
         for &i in active {

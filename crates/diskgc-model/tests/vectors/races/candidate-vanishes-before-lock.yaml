@@ -1,6 +1,11 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
-# The candidate is removed by someone else between planning and its
-# lock: nothing to do, nothing else touched; the run goes on.
+# The candidate is removed by someone else after its discovery (the
+# index's re-match) and its tally, right before the reach that precedes its
+# lock: `missing`, nothing to do, nothing else touched; the run goes on.
+# That reach is its ninth statx in the reclaim (the synchronous tally's
+# listing and sizing, the re-match and the tally's walk come first;
+# VECTOR_TRACE shows them). Removed before its re-match it is `stale`:
+# unit-gone-before-rematch-is-stale.yaml.
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -18,7 +23,7 @@ host:
     /tmp/zephyr-a: {f: {size: 4K}}
     /tmp/zephyr-b: {f: {size: 4K}}
   events:
-    - at: {op: flock, path: /tmp/zephyr-a, nth: 1, when: before}
+    - at: {op: statx, path: /tmp/zephyr-b, nth: 9, when: before}
       remove: /tmp/zephyr-b
 expect:
   plan:

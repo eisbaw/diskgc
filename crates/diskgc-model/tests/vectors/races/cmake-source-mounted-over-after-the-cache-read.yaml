@@ -1,9 +1,15 @@
 # TASK-206: the source path a candidate records (CMAKE_HOME_DIRECTORY) is
 # looked up from a fresh mount table after the cache is read. An NFS mount
-# made on the source directory in between must be refused from mountinfo
+# made on the source directory in between (after the second read of the
+# cache: in the plan its judgement, after discovery recorded the source;
+# in the reclaim the index re-match's discovery, the synchronous tally's
+# listing having read it first) must be refused from mountinfo
 # (the mount screen inside resolve_in, TASK-182), never opened: a dead
 # server would hang the lookup. Before TASK-182 the lookup opened the new
 # mount point and refused the candidate only afterwards (other_fs).
+# In the reclaim the re-match's discovery is refused there, so the tier's
+# own discovery decides, and finds p1 a mount point (`contains_mount`, never
+# statted); `out` beneath it is never reached.
 profile_vector: 1
 select: profile:cmake-build-anchored
 roots: [/home/tester/src]
@@ -21,15 +27,15 @@ host:
     /home/tester/src/p1/CMakeLists.txt: {content: "project(p1)\n"}
     /home/tester/src/p1/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/p1\n", mtime: 2026-10-01T00:00:00Z}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
   events:
-    - at: {op: read_head, path: /home/tester/src/p1/out/CMakeCache.txt, nth: 1, when: after}
+    - at: {op: read_head, path: /home/tester/src/p1/out/CMakeCache.txt, nth: 2, when: after}
       mount: {id: 9, at: /home/tester/src/p1, fs: nfs4, dev: "0:77", size: 1G}
 expect:
   plan:
-    - {candidate: /home/tester/src/p1/out, reason: unsupported_fs}
+    - {candidate: /home/tester/src/p1/out, reason: unsupported_fs, source: /home/tester/src/p1}
   reclaim_exit: 1
   actions: []
   removed: []
   skipped:
-    - {candidate: /home/tester/src/p1/out, reason: unsupported_fs}
+    - {candidate: /home/tester/src/p1, reason: contains_mount}
   # The mount hides everything below p1 from path checks.
   preserved: [/home/tester/src/notes.txt]

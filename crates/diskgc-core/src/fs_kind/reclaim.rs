@@ -435,7 +435,9 @@ fn protocol<H: Delete>(
         .enumerate()
         .filter(|(_, a)| a.admitted)
         .unzip();
-    let mut attempts = FreshAttempts::new(deadline);
+    let mut attempts = FreshAttempts::new(deadline).scan_not_before(super::contract_scan_floor(
+        admitted.iter().map(|a| (a.judge.find, a.found)),
+    ));
     // The delete unlinks only what this walk listed (a file created in the
     // candidate since is never unlinked): the policy learns what it saw.
     let after_walk = PolicyAt::AfterWalk {

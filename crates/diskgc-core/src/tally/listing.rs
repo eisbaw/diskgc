@@ -113,6 +113,23 @@ pub fn list<H: Host>(
     Ok(listing)
 }
 
+/// The index's identity of a candidate discovery found (docs/architecture.md,
+/// The index: Identity): its birth time, else the inode of the directory it
+/// was found in; `None` if neither was reported. The tally stores it, and
+/// the reclaim walk compares a unit's stored one with it (`stale`).
+pub fn index_identity(found: engine::Identity, seen: Seen) -> Option<Identity> {
+    let birth = match (found.btime, seen.parent_ino) {
+        (Some(t), _) => Birth::Time(t),
+        (None, Some(parent)) => Birth::ParentIno(parent),
+        (None, None) => return None,
+    };
+    Some(Identity {
+        dev: found.id.dev,
+        ino: found.id.ino,
+        birth,
+    })
+}
+
 /// The index's view of a found candidate; `None` if it cannot form one.
 fn indexed(
     mounts: &[MountEntry],
@@ -126,20 +143,11 @@ fn indexed(
     if mount.dev != found.id.dev || path == mount.mount_point {
         return None;
     }
-    let birth = match (found.btime, seen.parent_ino) {
-        (Some(t), _) => Birth::Time(t),
-        (None, Some(parent)) => Birth::ParentIno(parent),
-        (None, None) => return None,
-    };
     Some(Listed {
         path: path.to_owned(),
         mount,
         found: Discovered {
-            identity: Identity {
-                dev: found.id.dev,
-                ino: found.id.ino,
-                birth,
-            },
+            identity: index_identity(found, seen)?,
             // Unknown: as if just changed, so it is ordered last, never
             // first, by `oldest`.
             newest_change: seen.changed.unwrap_or(now_wall),

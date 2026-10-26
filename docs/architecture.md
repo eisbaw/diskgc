@@ -273,11 +273,16 @@ split step waits for a measured need (backlog).
   and a coarser order, never a weaker check.
 - **Order with blocks and hints is approximate.** A plan
   (`--dry-run`) judges and orders every candidate with full
-  information. A reclaim takes the same order when its index holds no
-  blocks and no stored refusal hints; otherwise blocks (ranked by their
-  oldest member, members by their root's times) and hints can reorder
-  candidates within a tier. Tiers and groups are never reordered, and
-  the set of candidates each tier can reach is the same.
+  information. A reclaim takes the same order in the first tier with
+  candidates when its index holds no blocks and no stored refusal hints
+  and its tally was not cut short (ties by path, not by discovery's
+  order); later tiers are ordered by their stored keys or, for units
+  this run's tally did not size, by the provisional key (`max(mtime,
+  ctime)` of the unit's root), so their order can differ from the plan's
+  too. Blocks (ranked by their oldest member, members by their root's
+  times) and hints can reorder candidates within a tier. Tiers and
+  groups are never reordered, and the set of candidates each tier can
+  reach is the same.
 
 ### Refusals and index updates
 
@@ -334,7 +339,10 @@ the order of work.
   at most 64
   directory levels and remembers at most 16,384 hard-linked inodes (both
   tentative constants; beyond them the estimate is coarser). A walk past
-  the deletion's entry budget stores a `too_many_entries` refusal hint.
+  the deletion's entry budget stores a `too_many_entries` refusal hint,
+  one holding an entry this user may not read an `unreadable` one, and
+  one holding a `systemd-private-*` name a `contains_special` one (the
+  name is never statted, as the eligibility walk never stats it).
   Cursors are not persisted; a unit whose walk did not finish counts as
   untallied. **Discovery is resumable too** (Mark, 2026-10-25): a
   listing **round** of one (profile, root) runs across batches within
@@ -571,46 +579,66 @@ reclaim(min, goal, filesystem, deadline):
   preflight all tiers (environmental validation, backend binding)
   for group in groups, tier in group (ranking):
     queue := units of this tier on this filesystem, in the tier's order
-    discovered := false
     loop:
       if avail >= goal: return met
       candidate := next from queue
                    (a block at the head is expanded first: its members,
                    found and statx'ed now, join the queue)
-                   or, once the queue is empty and not discovered yet:
-                   discover this tier's sources (bounded by their patterns)
-                   for candidates not in the queue; discovered := true
-                   or: break                            # tier done
-      re-match: its path under the tier's bound root matches a pattern
-        of a finder's source; else skip (stale)
-      cheap re-check of identity; gone or replaced: skip (stale)
+                   or: break                            # queue done
+      re-match: the tier's discovery restricted to the unit's path finds
+        it there; else skip (stale)
+      identity as stored; gone or replaced: skip (stale)
       eligibility walk + in-use + selection re-evaluated now   # safety.md
         failed: record skip with reason; update index; continue
       act(candidate, need = goal - avail); record avail_delta; update index
+    discover this tier's sources (bounded by their patterns); judge and act
+      on what the queue did not judge, as above (the tier's order)
   write the snapshot (ensure; Snapshot above)
   return met if avail >= min else (error if any errors else exhausted)
 ```
 
 - **A candidate from the index is a candidate only as discovery would
-  make it.** A unit, or a member of an expanded block, is first
-  re-matched: its path relative to the root the tier binds must match a
-  pattern of one of its finders' sources, as discovery would apply it to
-  that one path (otherwise `stale`); the identity it carries (a single's
-  recorded identity, a member's from its expansion `statx`) is then the
-  identity "discovery found" for every later check of
-  [safety.md](safety.md#deletion). From there it is judged exactly as a
-  discovered candidate. The index can thus add work and misorder it; it
-  cannot name a path that the run's own sources would not find, nor
-  skip a check.
+  make it.** A single is re-matched by the tier's own discovery
+  restricted to its path (`fs_kind::discover_beneath`, exact): the same
+  walk of the same bound roots (each root judged as discovery judges it),
+  the same patterns, `where`, mount and `systemd-private-*` rules, level
+  by level, but looking up only the names on the way instead of listing
+  each directory. It must find a candidate at exactly that path, with the
+  stored identity; otherwise the unit is `stale` (gone, replaced, no
+  longer matching, or below another candidate, which discovery would find
+  instead) and is never walked or locked. A refusal on the way (a root or
+  directory refused) leaves the unit to the tier's discovery, which
+  reports it. A block's members are found by the same discovery
+  restricted to its site (Expanding a block). The identity re-discovery
+  saw is then the identity "discovery found" for every later check of
+  [safety.md](safety.md#deletion), and the candidate is judged exactly
+  as a discovered one: read-only tally (a refusal skips it, never
+  locked), then the kind's protocol. The index can thus add work and
+  misorder it; it cannot name a path that the run's own sources would
+  not find, nor skip a check. The one difference from a listing: a
+  directory too large to list (`too_many_entries`) is not listed on the
+  way down to a unit, so not refused.
+- **Found ahead.** The queue finds up to 64 candidates again before it
+  judges the first of them, so that one in-use scan, started after all
+  of them were found, can serve them (a liveness contract takes no scan
+  started before its candidate was found, [safety.md](safety.md#in-use);
+  one scan per candidate made 6,400 pytest sessions take one to two
+  hours, TASK-203). Under `best-fit` it finds one at a time, since each
+  pick depends on the space freed by the last action; a liveness tier
+  ordered `best-fit` therefore scans once per candidate.
 
 - **Discovery is per tier.** A tier is not left until its own sources have
   been discovered afresh, so a stale index can never make a pressure tier
   run while candidates of an earlier stale tier exist but are unknown.
-  Only a complete listing made in this run counts as `discovered`: the
-  synchronous tally's pass 1 counts for the roots it actually listed,
-  never for roots it skipped because the snapshot's `discovered_at` was
-  recent, so candidates created after the snapshot are always found
-  before a later tier runs.
+  The tier's discovery runs once its queue is done, always (even when the
+  synchronous tally listed its roots in this run: one more listing, and
+  no rule about which listing counts): it finds candidates created after
+  the tally's listing or the snapshot's, ones the index could not take,
+  and whatever object now has a `stale` unit's name. It judges only what
+  the queue did not: an object the queue judged (by identity) and a path
+  the queue gave a verdict (the object there now waits for the next run,
+  one verdict per path and run, as before the index) are passed over.
+  Tiers the index does not serve (below) are this discovery alone.
   Discovery costs what the profiles' patterns cost (fixed depths, no `**`);
   for `roots: required` profiles such as `cargo-target` it is a bounded walk
   of the roots.
@@ -620,7 +648,18 @@ reclaim(min, goal, filesystem, deadline):
   candidate costs a giant walk; that is the price of checking its
   contents. There is no latency target (Mark, 2026-10-25): the time to
   the first deletion is measured and reported by the scale tests, not
-  promised.
+  promised. **Measured** on the `Host` port's monotonic clock
+  (`CLOCK_MONOTONIC` on Linux) from the run's start (the first event of
+  `ensure`'s executor, before the sandbox gate and the first `statvfs`)
+  to the end of the first action that removed anything (its candidate's
+  deletion finished, before the space is sampled), and logged once per
+  run: `first deletion: <ms> ms after the run started (<candidate>)`.
+  Command-line and configuration loading before the executor are not in
+  it; a run that deletes nothing logs nothing. Not in the JSON report.
+  The first-tier candidates are walked three times before the first
+  deletion: the synchronous tally's sizing (before the lock), the
+  candidate's own read-only tally, and the locked eligibility walk; the
+  second could reuse the first (a follow-up).
 - Every step checks the cooperative deadline
   ([safety.md](safety.md#deadlines)). `watch` calls the walk with
   `min = --min-free`, `goal = --target-free` and a deadline of `--timeout`
@@ -633,10 +672,14 @@ reclaim(min, goal, filesystem, deadline):
   its source under the tier's root. `changed`: something
   moved under a check (a Cargo lock or build appeared after the locks were
   taken, or an entry's identity changed during deletion).
-- Until the index exists (task-28 to task-31), `ensure` runs one
-  `--select` tier this way without one: after taking the lock it discovers
-  the tier's candidates and tallies each (the eligibility walk without the
-  idle and in-use checks, read-only) for the tier's order, within
+- **Tiers the index does not serve.** The index serves `fs` tiers of one
+  source without `!profile:` (`executor::indexed`). Cargo-target tiers,
+  filesystem unions and tiers with `!profile:` are not tallied by the
+  synchronous tally and take no queue (Docker tiers have nothing to
+  order); for them, and for what an indexed tier's queue did not judge,
+  `ensure` works as before the index: after taking the lock it discovers
+  the tier's candidates and tallies each (the eligibility walk without
+  the idle and in-use checks, read-only) for the tier's order, within
   `--tally-budget`; candidates the budget left untallied follow the
   tallied ones in the order discovery found them. It then acts on each in
   that order, every check made again under the candidate's own locks (a
@@ -647,9 +690,13 @@ reclaim(min, goal, filesystem, deadline):
   would take Cargo's locks on kept and other users' targets (or `flock`
   a kept directory) and walk oversized ones again. A refusal that
   stops being true after the tally (a `.diskgc-keep` removed) is a missed
-  reclaim until the next run, never an unsafe delete. The tally runs
-  under the host lock rather than before it (The tally: Synchronous
-  mode), so other reclaims wait that much longer.
+  reclaim until the next run, never an unsafe delete. This tally runs
+  under the host lock, unlike the synchronous one, so other reclaims
+  wait that much longer.
+- **A failure of the host during the synchronous tally** (`EIO`,
+  `EMFILE`) ends the tally with one log line; the walk goes on with what
+  the index holds, and each tier's own discovery and checks meet a
+  failure that persists themselves (an error of the run there).
 
 ### Measuring space
 

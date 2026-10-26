@@ -1,0 +1,697 @@
+//! The reclaim walk on the index (docs/architecture.md, The reclaim walk;
+//! docs/safety.md, Deletion: Discovery). The index orders and narrows
+//! work; it decides nothing about safety:
+//!
+//! 1. **Before the host lock**, the synchronous tally ([`sync_tally`],
+//!    [`crate::tally::sync`]) lists every indexed tier's sources and sizes
+//!    the first tier's stale units, within `--tally-budget`.
+//! 2. **Per tier, the queue** ([`Reclaim::walk_fs_index`]): the tier's units
+//!    in its order. Each is a candidate only as discovery would make it: a
+//!    single is found again by the tier's own discovery restricted to its
+//!    path ([`fs_kind::discover_beneath`], [`Beneath::Exact`]), and must
+//!    have the stored identity (`stale` otherwise, never walked); a block
+//!    is expanded by the same discovery restricted to its site, or from the
+//!    tier's bound root where a lump's site lies above it
+//!    ([`Beneath::Subtree`]), and its members join the queue. The identity
+//!    that re-discovery saw is then the one every later check compares
+//!    against; each candidate is tallied read-only and reclaimed by the
+//!    same code as a discovered one ([`Reclaim::act_fs`]).
+//! 3. **Then the tier's own discovery**, always: what it finds that the
+//!    queue did not take ([`Handled`]) is judged as before the index, so
+//!    candidates created after the tally, or missing from a stale, partial
+//!    or corrupt index, are reclaimed before any later tier runs.
+//!
+//! Which tiers take the index ([`takes_index`]): `fs` tiers of one source
+//! without `!profile:`. Cargo, filesystem unions and Docker discover only
+//! (their units are not tallied either); for them the index changes
+//! nothing.
+
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use super::{Acted, CandidateQueue, Reclaim, SourceKind, Tier, overlaps_checked, sample};
+use crate::config::Order;
+use crate::engine::{Reason, Skip};
+use crate::fs_kind::{self, Beneath, Find, Found};
+use crate::host::{Delete, Dev, DevIno, Host, MonoTime, Timestamp};
+use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery};
+use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
+use crate::inuse::Checker;
+use crate::outcome::Stop;
+use crate::report::Report;
+use crate::tally::TallyState;
+use crate::tally::listing::{SourceFind, TallySource, index_identity};
+use crate::tally::sync::{self, SyncTier};
+
+/// Candidates the queue finds again ahead of judging them
+/// ([`Reclaim::find_ahead`]). An in-use scan serves consecutive candidates
+/// for up to a second (TASK-203: one scan per candidate made 6,400 pytest
+/// sessions take one to two hours); 64 restricted re-discoveries, each a
+/// few `statx` calls, are far cheaper than one scan, and bound what is
+/// held ahead of the order (and how stale `best-fit`'s `need` gets).
+const FOUND_AHEAD_MAX: usize = 64;
+
+/// Whether the reclaim walk takes `tier`'s candidates from the index: an
+/// `fs` tier of one source without `!profile:` (see the module doc).
+pub(super) fn takes_index(tier: &Tier) -> bool {
+    matches!(tier.source, SourceKind::Fs(_)) && tier.fs_union.is_empty() && tier.negated.is_empty()
+}
+
+/// The finder `tier`'s source carries for `root`.
+fn finder(tier: &Tier, root: &Path) -> Finder {
+    Finder {
+        profile: tier.profile.as_str().into(),
+        profile_hash: tier.profile_hash(),
+        root: root.into(),
+    }
+}
+
+/// The synchronous tally's view of the indexed tiers among `tiers` (policy
+/// order): each source bound to each of its roots.
+fn sync_tiers<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<SyncTier> {
+    tiers
+        .into_iter()
+        .filter(|tier| takes_index(tier))
+        .map(|tier| {
+            let SourceKind::Fs(find) = &tier.source else {
+                unreachable!("takes_index admits fs tiers only")
+            };
+            SyncTier {
+                sources: tier
+                    .roots
+                    .iter()
+                    .map(|root| TallySource {
+                        finder: finder(tier, root),
+                        find: SourceFind::Fs(find.clone()),
+                    })
+                    .collect(),
+                order: tier.order,
+            }
+        })
+        .collect()
+}
+
+/// Runs the synchronous tally over `tiers` on the filesystem `dev`, for at
+/// most `budget` (`None`: to completion) and never past `deadline`, before
+/// the host lock (docs/architecture.md, The tally: Synchronous). A failure
+/// of the host ends it with one log line: the index only orders work, and
+/// each tier's own discovery runs anyway.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sync_tally<'t, H: Host>(
+    host: &H,
+    state: &mut TallyState,
+    tiers: impl IntoIterator<Item = &'t Tier>,
+    dev: Dev,
+    budget: Option<Duration>,
+    deadline: Option<MonoTime>,
+    report: &mut Report,
+    log: &mut dyn FnMut(&str),
+) {
+    let tiers = sync_tiers(tiers);
+    if tiers.is_empty() {
+        return;
+    }
+    let started = host.now();
+    let budget_end = budget.and_then(|b| started.checked_add(b));
+    let until = match (deadline, budget_end) {
+        (Some(d), Some(b)) => Some(d.min(b)),
+        (d, None) => d,
+        (None, b) => b,
+    };
+    let done = sync::synchronous(host, state, &tiers, dev, until);
+    let took = host.now().saturating_since(started).as_millis();
+    let stats = state.index.stats();
+    match done {
+        Ok(sync) => {
+            // Cut short by `--tally-budget`, not by the run's deadline, a
+            // signal or a failure of the host.
+            let by_budget = matches!(sync.stopped, Some(Stop::DeadlinePassed { .. }))
+                && budget_end.is_some_and(|b| host.now() >= b && deadline.is_none_or(|d| b < d));
+            if by_budget && (sync.untallied > 0 || !sync.pass1_done) {
+                report.tally_cut_short = true;
+            }
+            log(&format!(
+                "index: synchronous tally of {} tier(s) in {took} ms: {} source(s) listed, {} \
+                 recent, {} candidate(s) inserted, {} sized, {} left untallied{}; the index \
+                 holds {} unit(s), {} of them blocks",
+                tiers.len(),
+                sync.listed.len(),
+                sync.skipped_recent.len(),
+                sync.inserted,
+                sync.sized,
+                sync.untallied,
+                match &sync.stopped {
+                    Some(stop) => format!(", stopped: {stop}"),
+                    None => String::new(),
+                },
+                stats.singles + stats.blocks,
+                stats.blocks,
+            ));
+        }
+        Err(error) => log(&format!(
+            "index: synchronous tally failed after {took} ms: {error}; each tier is \
+             discovered by the reclaim walk"
+        )),
+    }
+}
+
+/// What the index's queue of a tier took, so that the tier's own discovery
+/// afterwards does not judge it again.
+#[derive(Debug, Default)]
+pub(super) struct Handled {
+    /// Candidates the queue judged, by the identity re-discovery saw (an
+    /// object judged under one name is not judged again under another).
+    ids: HashSet<DevIno>,
+    /// Paths the queue gave a verdict: those it judged, and those this
+    /// run's own tally refused (docs/architecture.md, Refusals). Whatever is
+    /// there now waits for the next run, as it did before the index (one
+    /// verdict per path and run). A `stale` unit's path is not here: the
+    /// object there now was never judged, and discovery judges it.
+    paths: HashSet<PathBuf>,
+}
+
+impl Handled {
+    /// Whether discovery's `candidate` at `path` was handled by the queue.
+    pub(super) fn covers(&self, path: &Path, candidate: &Result<Found, Skip>) -> bool {
+        self.paths.contains(path)
+            || candidate
+                .as_ref()
+                .is_ok_and(|found| self.ids.contains(&found.identity.id))
+    }
+}
+
+/// How a tier's queue ended.
+pub(super) enum Walked {
+    /// The tier ends here: the goal was observed, or the run stops.
+    TierDone,
+    /// On to the tier's own discovery.
+    Discover,
+}
+
+/// A block a member was expanded from, to update the index after an action.
+#[derive(Debug, Clone)]
+struct BlockOf {
+    mount: MountKey,
+    site: PathBuf,
+    finders: FinderSetId,
+    family: Family,
+}
+
+/// Where a candidate the queue took stands in the index.
+enum Origin {
+    Single(MountKey, PathBuf),
+    Member(BlockOf),
+}
+
+/// One item of a tier's queue: a unit of the index, or a member of an
+/// expanded block found now.
+enum Item {
+    Unit(QueueEntry),
+    Member(Box<Found>, BlockOf),
+}
+
+/// A tier's queue over the index (docs/architecture.md, Order within a
+/// tier): the units in the tier's order, then those with a stored refusal
+/// hint; an expanded block's members join it, under `oldest` by
+/// `max(mtime, ctime)` of their own root, under `best-fit` all before the
+/// next pick.
+struct TierQueue {
+    order: Order,
+    /// `oldest`: the units in the index's `oldest` order.
+    oldest: VecDeque<QueueEntry>,
+    /// `best-fit`: the units by their estimates.
+    best_fit: CandidateQueue<QueueEntry>,
+    members: BTreeMap<(Timestamp, u64), (Found, BlockOf)>,
+    hinted: VecDeque<QueueEntry>,
+    /// Ties of members keep the order expansion found them in.
+    sequence: u64,
+    /// Identities queued as members, so a member is queued once.
+    queued: HashSet<DevIno>,
+}
+
+impl TierQueue {
+    fn new(order: Order, queue: queue::TierQueue) -> Self {
+        let (oldest, best_fit) = match order {
+            Order::Oldest => (
+                queue.ready.into(),
+                CandidateQueue::new(order, Vec::new(), QueueEntry::estimate),
+            ),
+            Order::BestFit => (
+                VecDeque::new(),
+                CandidateQueue::new(order, queue.ready, QueueEntry::estimate),
+            ),
+        };
+        Self {
+            order,
+            oldest,
+            best_fit,
+            members: BTreeMap::new(),
+            hinted: queue.hinted.into(),
+            sequence: 0,
+            queued: HashSet::new(),
+        }
+    }
+
+    fn push_member(&mut self, found: Found, block: BlockOf, now: Timestamp) {
+        if !self.queued.insert(found.identity.id) {
+            return;
+        }
+        // Unknown times sort as just changed: last, never first.
+        let key = found.seen.changed.unwrap_or(now);
+        self.sequence += 1;
+        self.members.insert((key, self.sequence), (found, block));
+    }
+
+    fn pop(&mut self, need: u64) -> Option<Item> {
+        let member = |queue: &mut Self| {
+            queue
+                .members
+                .pop_first()
+                .map(|(_, (found, block))| Item::Member(Box::new(found), block))
+        };
+        match self.order {
+            Order::Oldest => {
+                let unit_first = match (self.oldest.front(), self.members.first_key_value()) {
+                    (Some(unit), Some(((key, _), _))) => unit.order_key() <= *key,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if unit_first {
+                    return self.oldest.pop_front().map(Item::Unit);
+                }
+                if let Some(item) = member(self) {
+                    return Some(item);
+                }
+            }
+            Order::BestFit => {
+                if let Some(item) = member(self) {
+                    return Some(item);
+                }
+                if let Some(unit) = self.best_fit.pop(need) {
+                    return Some(Item::Unit(unit));
+                }
+            }
+        }
+        self.hinted.pop_front().map(Item::Unit)
+    }
+}
+
+/// Whether `path` is a member of a block of `family` sited at `site`
+/// (docs/architecture.md, The index: Granularity).
+fn member_of(site: &Path, family: &Family, path: &Path) -> bool {
+    match family {
+        Family::Any => path != site && path.starts_with(site),
+        Family::Name(family) => {
+            path.parent() == Some(site)
+                && path
+                    .file_name()
+                    .is_some_and(|name| *name_family(name.as_bytes()) == **family)
+        }
+    }
+}
+
+impl<H: Delete> Reclaim<'_, '_, H> {
+    /// The tier's queue from the index (see the module doc). Every
+    /// candidate it takes is recorded in `handled`.
+    pub(super) fn walk_fs_index(
+        &mut self,
+        find: &Find,
+        judge: &fs_kind::Judge<'_>,
+        checker: &mut Checker<'_>,
+        handled: &mut Handled,
+    ) -> Walked {
+        let finders: Vec<Finder> = self
+            .tier
+            .roots
+            .iter()
+            .map(|root| finder(self.tier, root))
+            .collect();
+        let sources: Vec<Source<'_>> = finders
+            .iter()
+            .map(|f| Source {
+                profile: &f.profile,
+                profile_hash: f.profile_hash,
+                root: &f.root,
+            })
+            .collect();
+        let Some(state) = self.index.as_deref() else {
+            return Walked::Discover;
+        };
+        // The idle filters are not applied to the queue: a unit they would
+        // leave out is found by the tier's discovery and judged anyway.
+        let derived = queue::derive(
+            &state.index,
+            &TierQuery {
+                dev: self.measured.dev,
+                sources: &sources,
+                age: AgeFilter::None,
+            },
+        );
+        if derived.ready.is_empty() && derived.hinted.is_empty() {
+            return Walked::Discover;
+        }
+        let blocks = derived
+            .ready
+            .iter()
+            .filter(|e| matches!(e.unit, Queued::Block(_)))
+            .count();
+        (self.log)(&format!(
+            "{}: {} unit(s) from the index ({blocks} block(s), {} with a refusal hint), then \
+             discovery",
+            self.tier.name,
+            derived.ready.len() + derived.hinted.len(),
+            derived.hinted.len(),
+        ));
+        let mut queue = TierQueue::new(self.tier.order, derived);
+        let started = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
+        if self.past_deadline() {
+            self.stop(&Stop::DeadlinePassed {
+                path: self.measured.path.clone(),
+            });
+            return Walked::TierDone;
+        }
+        let mut avail = match sampled {
+            Ok(space) => space.avail_bytes,
+            Err(e) => {
+                self.host_failure(e);
+                return Walked::TierDone;
+            }
+        };
+        let mut ready: VecDeque<(Found, Origin)> = VecDeque::new();
+        loop {
+            if self.stop_if_interrupted() || self.goal_reached(avail) {
+                return Walked::TierDone;
+            }
+            if ready.is_empty() {
+                let need = self.measured.target.saturating_sub(avail);
+                if !self.find_ahead(find, &mut queue, &mut ready, handled, need) {
+                    return Walked::TierDone;
+                }
+            }
+            let Some((found, origin)) = ready.pop_front() else {
+                return Walked::Discover;
+            };
+            if !handled.ids.insert(found.identity.id) {
+                continue; // a single and a block member: the same object
+            }
+            // One verdict per path and run, as before the index: an object
+            // that replaces a judged one (`changed`) waits for the next run.
+            handled.paths.insert(found.path.clone());
+            match self.judge_from_index(&found, &origin, judge, checker, avail) {
+                Acted::Next { avail: after, .. } => avail = after,
+                Acted::Stop => return Walked::TierDone,
+            }
+        }
+    }
+
+    /// Takes the next candidates from `queue` into `ready`, each found
+    /// again (a single re-matched, a block expanded into the queue), up to
+    /// [`FOUND_AHEAD_MAX`] of them, before any of them is judged: then one
+    /// in-use scan started after all of them can serve them all (a
+    /// liveness contract takes no scan older than its candidate's finding,
+    /// [`crate::inuse::FreshAttempts::scan_not_before`]; TASK-203 shares a
+    /// scan among consecutive candidates). Under `best-fit` one at a time:
+    /// each pick needs `need`, the space still missing after the last
+    /// action. `false`: the run stops.
+    fn find_ahead(
+        &mut self,
+        find: &Find,
+        queue: &mut TierQueue,
+        ready: &mut VecDeque<(Found, Origin)>,
+        handled: &mut Handled,
+        need: u64,
+    ) -> bool {
+        // `best-fit` picks each candidate with the space missing after the
+        // last action (docs/architecture.md, Order within a tier): one at
+        // a time.
+        let ahead = match self.tier.order {
+            Order::Oldest => FOUND_AHEAD_MAX,
+            Order::BestFit => 1,
+        };
+        while ready.len() < ahead {
+            if self.stop_if_interrupted() {
+                return false;
+            }
+            let Some(item) = queue.pop(need) else {
+                return true;
+            };
+            match item {
+                Item::Member(found, block) => ready.push_back((*found, Origin::Member(block))),
+                Item::Unit(entry) => match &entry.unit {
+                    Queued::Block(_) => {
+                        if !self.expand(find, &entry, queue, handled) {
+                            return false;
+                        }
+                    }
+                    Queued::Single(_) => match self.rematch(find, &entry, handled) {
+                        Rematched::Candidate(found) => ready.push_back((
+                            *found,
+                            Origin::Single(entry.mount.clone(), entry.path.clone()),
+                        )),
+                        Rematched::Next => {}
+                        Rematched::Stop => return false,
+                    },
+                },
+            }
+        }
+        true
+    }
+
+    /// A single of the queue, found again by the tier's discovery
+    /// restricted to its path and compared with its stored identity.
+    fn rematch(&mut self, find: &Find, entry: &QueueEntry, handled: &mut Handled) -> Rematched {
+        let Queued::Single(single) = &entry.unit else {
+            unreachable!("rematch of a block")
+        };
+        if let Some(refusal) = single.refusal
+            && refusal.at >= self.run_started
+        {
+            // This run's own tally refused it: skipped for the run, never
+            // walked or locked again (docs/architecture.md, Refusals).
+            handled.paths.insert(entry.path.clone());
+            self.skip(
+                &entry.path,
+                &Skip::new(
+                    refusal.reason,
+                    entry.path.clone(),
+                    "refused by this run's tally",
+                ),
+            );
+            return Rematched::Next;
+        }
+        let started = self.host.now();
+        let (found, stopped) = fs_kind::discover_beneath(
+            self.host,
+            &self.tier.roots,
+            find,
+            &entry.path,
+            Beneath::Exact,
+            self.deadline,
+        );
+        self.record_overrun("discover", &entry.path, started, self.host.now());
+        if let Some(stop) = stopped {
+            // As for discovery: an incomplete one acts on nothing.
+            self.stop(&stop);
+            return Rematched::Stop;
+        }
+        if !found.refused.is_empty() {
+            // A root or a directory on the way refused: the tier's own
+            // discovery reports it and decides.
+            return Rematched::Next;
+        }
+        let candidate = found
+            .candidates
+            .into_iter()
+            .find(|(path, _)| *path == entry.path);
+        let detail = match candidate {
+            // Discovery's own refusal (a mount, an identity the kernel
+            // does not report): the tier's discovery reports it.
+            Some((_, Err(_))) => return Rematched::Next,
+            Some((_, Ok(found))) => {
+                if index_identity(found.identity, found.seen) == Some(single.identity) {
+                    return Rematched::Candidate(Box::new(found));
+                }
+                "replaced: another object under its name"
+            }
+            None => "gone, or no longer found by its source under the tier's root",
+        };
+        self.skip(
+            &entry.path,
+            &Skip::new(Reason::Stale, entry.path.clone(), detail),
+        );
+        if let Some(state) = self.index.as_deref_mut() {
+            state.evict_single(&entry.mount, &entry.path);
+        }
+        Rematched::Next
+    }
+
+    /// A block of the queue, expanded: the tier's discovery restricted to
+    /// its site (from the tier's bound root where that lies below the
+    /// site); the members it finds in the block's family join the queue.
+    /// `false`: the run stops.
+    fn expand(
+        &mut self,
+        find: &Find,
+        entry: &QueueEntry,
+        queue: &mut TierQueue,
+        handled: &Handled,
+    ) -> bool {
+        let Queued::Block(block) = &entry.unit else {
+            unreachable!("expand of a single")
+        };
+        let started = self.host.now();
+        let (found, stopped) = fs_kind::discover_beneath(
+            self.host,
+            &self.tier.roots,
+            find,
+            &entry.path,
+            Beneath::Subtree,
+            self.deadline,
+        );
+        self.record_overrun("discover", &entry.path, started, self.host.now());
+        if let Some(stop) = stopped {
+            self.stop(&stop);
+            return false;
+        }
+        if !found.refused.is_empty() {
+            // An expansion that did not complete acts on nothing it listed.
+            return true;
+        }
+        let of = BlockOf {
+            mount: entry.mount.clone(),
+            site: entry.path.clone(),
+            finders: block.finders(),
+            family: block.family.clone(),
+        };
+        let now = self.host.wall_clock();
+        let mut members = 0usize;
+        for (path, candidate) in found.candidates {
+            let Ok(found) = candidate else {
+                continue; // discovery's own refusal: the tier's discovery reports it
+            };
+            if !member_of(&entry.path, &block.family, &path)
+                || handled.ids.contains(&found.identity.id)
+            {
+                continue;
+            }
+            members += 1;
+            queue.push_member(found, of.clone(), now);
+        }
+        (self.log)(&format!(
+            "{}: block at {} ({} recorded member(s)) expanded: {members} member(s) found",
+            self.tier.name,
+            entry.path.display(),
+            block.members
+        ));
+        if members == 0
+            && let Some(state) = self.index.as_deref_mut()
+        {
+            state
+                .index
+                .evict_block(&of.mount, &of.site, of.finders, &of.family);
+        }
+        true
+    }
+
+    /// A candidate the queue took: the protected check and the read-only
+    /// tally (a refusal skips it, never locked), then the reclaim.
+    fn judge_from_index(
+        &mut self,
+        found: &Found,
+        origin: &Origin,
+        judge: &fs_kind::Judge<'_>,
+        checker: &mut Checker<'_>,
+        avail: u64,
+    ) -> Acted {
+        let next = Acted::Next {
+            avail,
+            reclaimed: false,
+        };
+        let started = self.host.now();
+        let overlap = overlaps_checked(self.host, &found.path, &self.protection.matches);
+        self.record_overrun("protect", &found.path, started, self.host.now());
+        if self.past_deadline() {
+            self.stop(&Stop::DeadlinePassed {
+                path: found.path.clone(),
+            });
+            return Acted::Stop;
+        }
+        match overlap {
+            Ok(false) => {}
+            Ok(true) => {
+                self.skip(
+                    &found.path,
+                    &Skip::new(
+                        Reason::Protected,
+                        found.path.clone(),
+                        "overlaps a protected match".to_owned(),
+                    ),
+                );
+                return next;
+            }
+            Err(error) => {
+                self.run_error(error);
+                return Acted::Stop;
+            }
+        }
+        let started = self.host.now();
+        let tallied = fs_kind::tally(self.host, judge, found, self.deadline);
+        self.record_overrun("tally", &found.path, started, self.host.now());
+        let tally = match tallied {
+            Ok(Ok(tally)) => tally,
+            Ok(Err(skip)) => {
+                self.skip(&found.path, &skip);
+                return next;
+            }
+            Err(stop) => {
+                self.stop(&stop);
+                return Acted::Stop;
+            }
+        };
+        let acted = self.act_fs(found, Some(&tally), avail, judge, checker);
+        if let Acted::Next {
+            reclaimed: true, ..
+        } = acted
+        {
+            self.reclaimed_from_index(origin, &tally);
+        }
+        acted
+    }
+
+    /// The index after a deletion from it completed (docs/architecture.md,
+    /// Index update after an action): a single is evicted; an expanded
+    /// block loses the member and its tallied size.
+    fn reclaimed_from_index(&mut self, origin: &Origin, tally: &fs_kind::Tally) {
+        let Some(state) = self.index.as_deref_mut() else {
+            return;
+        };
+        match origin {
+            Origin::Single(mount, path) => {
+                state.evict_single(mount, path);
+            }
+            Origin::Member(b) => {
+                let files = u64::try_from(tally.entries).unwrap_or(u64::MAX);
+                state.index.block_member_removed(
+                    &b.mount,
+                    &b.site,
+                    b.finders,
+                    &b.family,
+                    tally.bytes,
+                    files,
+                );
+            }
+        }
+    }
+}
+
+/// What [`Reclaim::rematch`] came to.
+enum Rematched {
+    Candidate(Box<Found>),
+    /// Skipped, or left to the tier's discovery: the next item.
+    Next,
+    Stop,
+}

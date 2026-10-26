@@ -1365,6 +1365,18 @@ pub static TESTS: &[Test] = &[
         run: fs_reclaim_suite::fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_else,
     },
     Test {
+        name: "fs_reclaim_time_to_first_deletion_is_measured_cold_and_warm",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_time_to_first_deletion_is_measured_cold_and_warm,
+    },
+    Test {
+        name: "fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: fs_reclaim_suite::fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm,
+    },
+    Test {
         name: "fs_40k_small_candidates_plan_and_reclaim_scale",
         tier: Tier::Full,
         expect: Expect::Pass,

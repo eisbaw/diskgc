@@ -327,7 +327,8 @@ value the code can produce, and diskgc-core's
 `every_status_and_reason_is_a_documented_value` pins `Reason::ALL` plus
 `RESERVED_REASONS` to reference.md's enum exactly. `RESERVED_REASONS` are
 documented reasons nothing produces yet, each naming the task that adds
-its producer (`stale`: TASK-31; `backend_unavailable`: TASK-36, TASK-113);
+its producer (`backend_unavailable`: TASK-36, TASK-113; `stale` got its
+producer and vector in TASK-31, `races/unit-gone-before-rematch-is-stale`);
 the test fails once one enters `Reason::ALL` or is shown by a vector, so a
 reservation cannot outlive its producer;
 `every_builtin_source_has_match_in_use_guarded_and_nested_vectors` needs,
@@ -489,7 +490,10 @@ Model scenarios required by [safety.md](safety.md) and
   opened by a process after an earlier member was deleted: the later member is skipped (`in_use`) when the scan
   used for the earlier member is older than the reuse limit or the run
   spans a suspend ([safety.md](safety.md#in-use), Freshness); an open within
-  the reuse window is the accepted limit 5 and is pinned as such;
+  the reuse window is the accepted limit 5 and is pinned as such
+  (`a_block_member_opened_after_an_earlier_member_was_deleted_is_in_use`;
+  candidates of a liveness tier found ahead share one scan,
+  `a_liveness_tier_from_the_index_shares_one_scan`);
 - one scan serving consecutive `fs` candidates of a `delete` (TASK-203;
   property test `no_fs_delete_starts_on_a_scan_past_the_bound`, with
   random scan, unlink and final-check durations): no deletion starts on a
@@ -504,12 +508,20 @@ Model scenarios required by [safety.md](safety.md) and
   (`vectors/inuse/busy-host-*`, TASK-144);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
-  tally): the deletion-time checks refuse what they must;
+  tally): the deletion-time checks refuse what they must, each candidate
+  taken from the index's queue (diskgc-model `tests/index_reclaim.rs`:
+  `stale_index_changes_after_the_tally_are_refused_at_deletion_time`,
+  `a_seeded_index_that_missed_the_changes_is_refused_at_deletion_time`);
 - new candidates of a stale tier created after the snapshot: they are
-  deleted before any pressure tier runs (per-tier discovery);
+  deleted before any pressure tier runs (per-tier discovery;
+  `new_cruft_after_the_snapshot_is_deleted_before_the_pressure_tier`);
 - **index and collapse** ([architecture.md](architecture.md#the-index)),
   with the memory budget made small in the model:
-  - `collapse_keeps_every_member_checked`: with a goal that needs every
+  - `collapse_keeps_every_member_checked` (TASK-31: the index-authority
+    property below runs every corrupted index, many collapsed by a small
+    budget or to lumps, against a correct run and asserts equal verdicts;
+    a kept member of a lump is refused in
+    `a_lump_above_the_bound_root_is_expanded_from_the_root_only`): with a goal that needs every
     candidate, a tier whose candidates are all collapsed into blocks
     gives every candidate the same verdict as the same run with a large
     budget (oracle on the call trace), and every member
@@ -556,15 +568,21 @@ Model scenarios required by [safety.md](safety.md) and
     unchanged; `ENOSPC` on the write likewise;
   - `block_expansion_finds_only_what_discovery_would`: a block's site
     holding a non-matching name, a symlink, a mount and a name outside
-    its family yields none of them as members;
-  - `index_unit_not_matching_its_root_is_stale`: a unit whose finder's
-    root differs from the tier's bound root, or whose path no longer
-    matches the source pattern under it, is skipped `stale` and never
-    walked;
+    its family yields none of them as members; a lump sited above the
+    tier's bound root is expanded from the root, never from above it
+    (`a_lump_above_the_bound_root_is_expanded_from_the_root_only`);
+  - `index_unit_not_matching_its_root_is_stale`: a unit whose path the
+    tier's discovery would not find under its bound root (no longer
+    matching the pattern, below another candidate, gone, or another
+    object under its name) is skipped `stale` and never walked or locked;
+    one whose finder names another profile, root or definition never
+    enters the tier's queue (diskgc-model `tests/index_reclaim.rs`
+    `a_unit_discovery_would_not_find_is_stale_and_never_walked`);
   - `stored_refusal_never_fakes_exhaustion`: a unit refused by an earlier
     tally (`kept`) whose marker is gone is deleted in the same run;
     a refusal found by the run's own synchronous tally skips it for the
-    run;
+    run (`a_stored_refusal_hint_only_ranks_the_unit_last`,
+    `a_refusal_of_this_runs_tally_skips_the_candidate_for_the_run`);
 - **synchronous tally** (virtual clock): `sync_tally_discovers_every_tier_before_sizing`
   (every selected tier has a queue before any tree is walked);
   `sync_tally_sizes_only_the_first_tiers_stale_units` (with an old seed
@@ -1294,7 +1312,14 @@ removed (the TASK-121 discipline).
   deletion still passes the deletion-time checks, and nothing is deleted
   that a run with a correct index (or `--no-index --tally-budget 0`)
   would refuse; the set deleted is a subset of what that run's own
-  discovery finds;
+  discovery finds (diskgc-modelgen `tests/index_authority.rs`, 64 cases
+  by default, `DISKGC_PROPERTY_CASES` for more: the correct run is
+  `ensure` from an empty index; the corrupted index has units at random
+  paths of the generated tree and at missing ones, with wrong
+  identities, finders of another profile, definition or root, old
+  refusal hints, shifted ages, a random small budget and sometimes a
+  collapse to one lump per mount; on a still model it also asserts that
+  the set deleted, the non-`stale` skips and the exit code are equal);
 - the exit code follows the full precedence table for the final state;
 - **selection semantics:** the eligible candidates equal a simple reference
   implementation of the rules in [reference.md](reference.md#selection-grammar);

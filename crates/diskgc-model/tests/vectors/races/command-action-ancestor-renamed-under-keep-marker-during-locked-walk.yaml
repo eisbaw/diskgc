@@ -1,5 +1,6 @@
 # TASK-165, a command action: the cache's parent is renamed under a keep
-# marker while the locked eligibility walk lists the candidate. The
+# marker while the locked eligibility walk lists the candidate (its third
+# listing, after the synchronous tally's sizing and its tally). The
 # command gets the path text, so the path is judged again right before it
 # starts: changed, no command run.
 profile_vector: 1
@@ -20,7 +21,7 @@ host:
     "/home/a/.cache/ccache": {"payload": {"size": "8K"}}
     /home/a/keep/.diskgc-keep: {}
   events:
-    - at: {op: read_dir, path: /home/a/.cache/ccache, nth: 2, when: after}
+    - at: {op: read_dir, path: /home/a/.cache/ccache, nth: 3, when: after}
       rename: {from: /home/a/.cache, to: /home/a/keep/.cache}
 expect:
   plan:
