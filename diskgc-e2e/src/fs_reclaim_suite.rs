@@ -1723,7 +1723,7 @@ fn first_deletion(ctx: &Ctx, rc_dirs: usize, filler: usize) -> TestResult {
             "{name}: {after} bytes available after an exit 0 for --min-free {min_free}"
         );
         let first = logged_ms(&run.stderr, "first deletion:", "first deletion:")?;
-        let tally = logged_ms(&run.stderr, "index: synchronous tally", " in")?;
+        let tally = logged_ms(&run.stderr, "index: synchronous tally", "tier(s) in")?;
         info!(
             "time to first deletion ({name}, {entries} entries, under strace): {first} ms; \
              synchronous tally {tally} ms; the run {:?}; {} -> {after} bytes available",
