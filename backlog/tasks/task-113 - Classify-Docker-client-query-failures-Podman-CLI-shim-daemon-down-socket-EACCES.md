@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 15:48'
-updated_date: '2026-10-23 21:01'
+updated_date: '2026-10-26 07:06'
 labels:
   - safety
   - docker
@@ -35,4 +35,6 @@ Found by TASK-35's read-only host dry run (2026-10-23): on this laptop `docker` 
 Orchestrator 2026-10-23 (design audit): TASK-120 (Docker contract leftovers design) resolves the skip-vs-error split together with the Buildx sizing conflict; coordinate.
 
 Mark's design decisions (2026-10-23, binding): client failures before a backend query become SKIPS with reason, not exit 3 (see TASK-120 notes).
+
+2026-10-26 host dry-run tally (NixOS, docker = podman 5.8.7 shim): docker-build-cache, docker-dangling, docker-unreferenced all exit 3 with errors[].cause=operation: 'query Docker docker ["context", "show"]: exited exit status: 125: Error: unrecognized command docker context show'. Mark ruled Docker client failure = skip; the shim case currently errors the whole run. Evidence: tmp/host-tally/docker-*.json.
 <!-- SECTION:NOTES:END -->

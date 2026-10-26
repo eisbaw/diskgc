@@ -1,0 +1,20 @@
+---
+id: TASK-242
+title: >-
+  cargo-target discovery descends into container storage
+  (~/.local/share/containers/storage overlay layers)
+status: To Do
+assignee: []
+created_date: '2026-10-26 07:06'
+labels:
+  - safety
+  - ux
+dependencies: []
+priority: high
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Host dry-run tally 2026-10-26 (master 5daf3ea, release build, ensure --dry-run --select profile:cargo-target --roots /home/mpedersen /): 8 candidates under ~/.local/share/containers/storage/overlay/<layer> skipped as unreadable (subuid-owned layer dirs). Only the permission bits stop it: a readable image layer holding a Cargo target (CACHEDIR.TAG + lock) would be planned for deletion, corrupting a container image. Same exposure for any home-root fs profile and for Docker's /var/lib/docker, containerd, Nix store paths (read-only), VM images. Decide: a built-in discovery exclusion for container/VM storage roots (and their reporting: one skip per root, not one unreadable per layer), or a mount/ownership rule. Evidence: tmp/host-tally/cargo-target.json.
+<!-- SECTION:DESCRIPTION:END -->
