@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: 2026-10-25 22:15
-updated_date: '2026-10-26T23:15:00Z'
+updated_date: '2026-10-30T22:29:00Z'
 labels:
   - test
   - flaky
@@ -25,7 +25,7 @@ RC QA on a11e77b: pytest_orphan_xdist_worker_keeps_session - the in_use verdict 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The live-host holder test explicitly validates InUseUnknown for blocked scans and InUse with holder attribution for settled scans; its blocked branch is reachable.
+- [x] #1 The live-host holder test explicitly validates InUseUnknown for blocked scans and InUse with holder attribution for settled scans; its blocked branch is reachable.
 - [ ] #2 Add deterministic regression coverage for both verdict branches without weakening the production fail-closed rule, and preserve raw diagnostics when investigating the broader suite-churn failures.
 <!-- AC:END -->
 
@@ -33,6 +33,8 @@ RC QA on a11e77b: pytest_orphan_xdist_worker_keeps_session - the in_use verdict 
 
 <!-- SECTION:NOTES:BEGIN -->
 Orchestrator 2026-10-25: widened to the class. Also pytest_live_basetemp_session_is_kept failed the same way on release-0.1 af3d503 (load 17-22). Product fails closed (no deletion), but on a host with sustained process churn reclaim may do nothing: investigate both the test (wait for quiescence or isolate the suite's process churn) and the product (settling rule under churn).
+
+2026-10-30: AC1 done in ab891e2 (test-only; just check exit 0, 1245 passed). AC2: the deterministic blocked-branch coverage already exists (diskgc-model tests/inuse.rs only_listings_with_new_pids_count_against_the_bound); the broader suite-churn investigation (container tests under full-suite load) remains open.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
