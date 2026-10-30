@@ -5133,22 +5133,29 @@ mod tests {
         let skip = scan
             .check(&used_candidate, &record)
             .expect_err("a held file makes its candidate in use");
-        assert_eq!(skip.reason, Reason::InUse, "{skip}");
+        let free_candidate = Candidate::new(&parent, &free).expect("a name");
+        let free_record = walk(&host, &free_candidate, &rules, None).expect("walk");
         if let Some(why) = scan.blocked() {
-            // Host process churn can exhaust the bounded listing. That
-            // correctly blocks every candidate, but has no holder-specific
-            // attribution even when every unreadable process was excused.
+            // Host process churn can exhaust the bounded listing (TASK-239).
+            // That correctly refuses every candidate as in_use_unknown,
+            // without holder-specific attribution; the model test
+            // `only_listings_with_new_pids_count_against_the_bound` pins this
+            // branch deterministically.
+            assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
             assert_eq!(skip.path, used, "{skip}");
             assert_eq!(skip.detail, why, "{skip}");
+            let free_skip = scan
+                .check(&free_candidate, &free_record)
+                .expect_err("a blocked scan refuses every candidate");
+            assert_eq!(free_skip.reason, Reason::InUseUnknown, "{free_skip}");
         } else {
+            assert_eq!(skip.reason, Reason::InUse, "{skip}");
             assert!(
                 skip.detail.starts_with(&format!("pid {} ", holder.pid())),
                 "{skip}"
             );
             assert_eq!(skip.path, file, "{skip}");
-            let free_candidate = Candidate::new(&parent, &free).expect("a name");
-            let record = walk(&host, &free_candidate, &rules, None).expect("walk");
-            assert_eq!(scan.check(&free_candidate, &record), Ok(()));
+            assert_eq!(scan.check(&free_candidate, &free_record), Ok(()));
         }
     }
 
