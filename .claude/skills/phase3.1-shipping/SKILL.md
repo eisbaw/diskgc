@@ -419,6 +419,11 @@ they never override the Invariants.
 - 2026-10-30: v0.1.0 is an annotated local tag on release-0.1 af3d503
   (tagged by Mark); TASK-67 was still To Do until closed on 10-30. The
   tracker can lag a release the user makes by hand: check `git tag`.
+- 2026-10-30: TASK-31 (index reclaim) merged after one mped round; a
+  post-merge Codex review found 3 single-event holes (TASK-252, TASK-30
+  note) that mped and the property test missed. For deletion-path merges
+  the one pre-merge round is mped AND Codex in parallel (frozen snapshot
+  worktree, `< /dev/null`), not mped alone.
 - 2026-10-30: ~23 GiB of tmp/worktrees are stale task worktrees (task16-*,
   task27-*, task58-*, task64-*, ...) with free space at 35 GiB; removing
   them needs Mark's OK (host deletion rule).
