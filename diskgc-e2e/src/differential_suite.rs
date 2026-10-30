@@ -1966,6 +1966,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
             minor: 77,
         }),
         bind_of: None,
+        uuid: None,
         size: Bytes(1 << 20),
         other_used: Bytes(0),
         parent: Some(2),

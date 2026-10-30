@@ -172,6 +172,37 @@ impl Host for Short {
     ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
         self.0.proc_root_lookup(pid, path, climb)
     }
+    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
+        self.0.fs_uuid(dev)
+    }
+
+    fn boot_id(&self) -> Result<String, HostError> {
+        self.0.boot_id()
+    }
+
+    fn state_lock(
+        &self,
+        key: &diskgc_core::host::FsKey,
+    ) -> Result<diskgc_core::host::StateLock<Self::Fd>, HostError> {
+        self.0.state_lock(key)
+    }
+
+    fn state_read(
+        &self,
+        key: &diskgc_core::host::FsKey,
+        limit: u64,
+    ) -> Result<Option<diskgc_core::host::StateFile>, HostError> {
+        self.0.state_read(key, limit)
+    }
+
+    fn state_write(
+        &self,
+        lock: &diskgc_core::host::Locked<Self::Fd>,
+        key: &diskgc_core::host::FsKey,
+        bytes: &[u8],
+    ) -> Result<(), HostError> {
+        self.0.state_write(lock, key, bytes)
+    }
 }
 
 #[test]

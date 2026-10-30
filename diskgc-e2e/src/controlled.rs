@@ -632,6 +632,43 @@ impl<H: Host> Host for Controlled<H> {
         self.before("proc_root_lookup");
         self.host.proc_root_lookup(pid, path, climb)
     }
+
+    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
+        self.before("fs_uuid");
+        self.host.fs_uuid(dev)
+    }
+
+    fn boot_id(&self) -> Result<String, HostError> {
+        self.before("boot_id");
+        self.host.boot_id()
+    }
+
+    fn state_lock(
+        &self,
+        key: &diskgc_core::host::FsKey,
+    ) -> Result<diskgc_core::host::StateLock<Self::Fd>, HostError> {
+        self.before("state_lock");
+        self.host.state_lock(key)
+    }
+
+    fn state_read(
+        &self,
+        key: &diskgc_core::host::FsKey,
+        limit: u64,
+    ) -> Result<Option<diskgc_core::host::StateFile>, HostError> {
+        self.before("state_read");
+        self.host.state_read(key, limit)
+    }
+
+    fn state_write(
+        &self,
+        lock: &diskgc_core::host::Locked<Self::Fd>,
+        key: &diskgc_core::host::FsKey,
+        bytes: &[u8],
+    ) -> Result<(), HostError> {
+        self.before("state_write");
+        self.host.state_write(lock, key, bytes)
+    }
 }
 
 impl<H: Delete> Delete for Controlled<H> {

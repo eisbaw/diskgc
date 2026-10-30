@@ -4,6 +4,13 @@
   "description": "A host model: the machine a model test runs against.",
   "type": "object",
   "properties": {
+    "boot_id": {
+      "description": "What `boot_id` reports; default a fixed id.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "call_cost": {
       "description": "Virtual time every port call takes, but the clock reads and\n`sleep` (default none: calls take no time). For the background\ntally's duty cycle, whose batches are timed on the clock.",
       "anyOf": [
@@ -139,6 +146,13 @@
     "sandbox_gate": {
       "description": "The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):\n`open` (the default; the model deletes nothing real), `closed`\n(outside a test container: `may_delete`, `unlinkat`, `fchmod` and\n`run_command` are refused with `Cause::SandboxGate`, nothing is\nattempted), or\n`refuses_deletes` (`may_delete` answers open but the deleting calls\nare refused: what a caller that asked first must still survive).",
       "$ref": "#/$defs/GateSpec"
+    },
+    "state_dir": {
+      "description": "diskgc's state directory, as `LinuxHost` is given it\n(`$XDG_STATE_HOME/diskgc`): where the state operations keep the\nindex snapshot. Absent: none (the state operations fail, as\n`LinuxHost` without one). Missing directories are created by\n`state_lock` (mode 0700, diskgc's own uid).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "tree": {
       "description": "Files and directories, keyed by absolute path. Missing parent\ndirectories are created with default attributes; a key below another\nkey adds entries to that directory.",
@@ -918,6 +932,13 @@
           "items": {
             "$ref": "#/$defs/StatxField"
           }
+        },
+        "uuid": {
+          "description": "The filesystem's UUID as `fs_uuid` reports it (the udev link\n`/dev/disk/by-uuid`); absent: none (tmpfs, no udev).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -1010,7 +1031,12 @@
         "run_command",
         "docker_query",
         "pressure",
-        "lower_priority"
+        "lower_priority",
+        "fs_uuid",
+        "boot_id",
+        "state_lock",
+        "state_read",
+        "state_write"
       ]
     },
     "PidNamespaceSpec": {

@@ -65,6 +65,7 @@ impl Errno {
     pub const EINVAL: Errno = Errno(22);
     pub const ENFILE: Errno = Errno(23);
     pub const EMFILE: Errno = Errno(24);
+    pub const ENOSPC: Errno = Errno(28);
     pub const EROFS: Errno = Errno(30);
     pub const ENOSYS: Errno = Errno(38);
     pub const ENOTEMPTY: Errno = Errno(39);
@@ -90,6 +91,7 @@ impl Errno {
         Self::EINVAL,
         Self::ENFILE,
         Self::EMFILE,
+        Self::ENOSPC,
         Self::EROFS,
         Self::ENOSYS,
         Self::ENOTEMPTY,
@@ -122,6 +124,7 @@ impl Errno {
             Self::EINVAL => "EINVAL",
             Self::ENFILE => "ENFILE",
             Self::EMFILE => "EMFILE",
+            Self::ENOSPC => "ENOSPC",
             Self::EROFS => "EROFS",
             Self::ENOSYS => "ENOSYS",
             Self::ENOTEMPTY => "ENOTEMPTY",
@@ -1320,6 +1323,146 @@ pub trait Host {
         path: &Path,
         climb: bool,
     ) -> Result<Vec<DevIno>, ProcError>;
+
+    // ---- diskgc's own state (docs/architecture.md, The Host port) ----
+
+    /// The UUID of the filesystem on the block device `dev`, where the
+    /// system names one (`/dev/disk/by-uuid`): what the snapshot's
+    /// [`FsKey`] prefers, since device numbers can change between boots.
+    /// `None`: no UUID is known (tmpfs, btrfs, whose files' `st_dev` is
+    /// not its block device, or no udev links). Read-only.
+    fn fs_uuid(&self, dev: Dev) -> Result<Option<String>, HostError>;
+
+    /// The kernel's boot id (`/proc/sys/kernel/random/boot_id`): a
+    /// snapshot of a filesystem without a UUID is valid only in the boot
+    /// that wrote it. Read-only.
+    fn boot_id(&self) -> Result<String, HostError>;
+
+    /// Opens the snapshot's single-writer lock file `index-<key>.lock` in
+    /// diskgc's state directory, creating the directory (mode 0700) and
+    /// the file (mode 0600, read-only open, never written, never renamed)
+    /// if absent, for [`Host::flock_try`] or [`Host::flock_wait`] only.
+    /// The state directory is the implementation's own, never a name from
+    /// the caller; it must be a directory owned by diskgc's user and
+    /// writable by no one else, and the file a regular file of that user,
+    /// reached without following a symlink. Ungated: diskgc's own cache,
+    /// not user data. One of the two operations that create anything
+    /// outside [`Delete`] (docs/safety.md, Pre-release sandbox gate).
+    fn state_lock(&self, key: &FsKey) -> Result<StateLock<Self::Fd>, HostError>;
+
+    /// The snapshot file `index-<key>` in the state directory, without
+    /// following a symlink, and its contents if it is a regular file of
+    /// at most `limit` bytes (a larger one is never read). `None`: there
+    /// is no state directory or no such file. Its owner and mode are the
+    /// caller's to judge. Read-only.
+    fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError>;
+
+    /// Replaces the snapshot `index-<key>` with `bytes`, atomically: a new
+    /// file (never `O_TRUNC`, mode 0600) is filled completely before it
+    /// is linked in and renamed onto `index-<key>`, the only name it ever
+    /// renames onto, so a reader sees the old file or the new one and a
+    /// failed write leaves the old one. `lock` must be this key's
+    /// single-writer lock from [`Host::state_lock`], held exclusively
+    /// (`ModelHost` fails the test otherwise). No `fsync`. Ungated, as
+    /// [`Host::state_lock`].
+    fn state_write(
+        &self,
+        lock: &Locked<Self::Fd>,
+        key: &FsKey,
+        bytes: &[u8],
+    ) -> Result<(), HostError>;
+}
+
+/// Which filesystem a snapshot is for: it names `index-<key>` and
+/// `index-<key>.lock` in diskgc's state directory (docs/architecture.md,
+/// The tally: Snapshot). A typed key, never a name from the caller: its
+/// text is `uuid-` and the filesystem's UUID in lowercase (hex digits and
+/// dashes), or `dev-<major>-<minor>`, so it can hold no `/`, `.` or `..`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FsKey(String);
+
+impl FsKey {
+    /// The key of the filesystem with this UUID; `None` unless it is 1 to
+    /// 64 hex digits and dashes.
+    pub fn uuid(uuid: &str) -> Option<Self> {
+        let ok = (1..=64).contains(&uuid.len())
+            && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+        ok.then(|| Self(format!("uuid-{}", uuid.to_ascii_lowercase())))
+    }
+
+    /// The key of a filesystem without a known UUID: its device number.
+    pub fn dev(dev: Dev) -> Self {
+        Self(format!("dev-{}-{}", dev.major, dev.minor))
+    }
+
+    /// A key as [`Self::as_str`] wrote it; `None` for any other text.
+    pub fn parse(text: &str) -> Option<Self> {
+        if let Some(uuid) = text.strip_prefix("uuid-") {
+            return Self::uuid(uuid).filter(|k| k.0 == text);
+        }
+        let (major, minor) = text.strip_prefix("dev-")?.split_once('-')?;
+        let key = Self::dev(Dev {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        });
+        // Only the canonical spelling (no sign, no leading zero).
+        (key.0 == text).then_some(key)
+    }
+
+    /// Whether the key is a UUID (otherwise a device number, valid only
+    /// within one boot for a filesystem such as tmpfs).
+    pub fn has_uuid(&self) -> bool {
+        self.0.starts_with("uuid-")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The snapshot's file name.
+    pub fn snapshot_name(&self) -> String {
+        format!("index-{}", self.0)
+    }
+
+    /// The single-writer lock's file name.
+    pub fn lock_name(&self) -> String {
+        format!("index-{}.lock", self.0)
+    }
+
+    /// The name a complete new snapshot is linked in under before it is
+    /// renamed onto [`Self::snapshot_name`].
+    pub fn new_name(&self) -> String {
+        format!("index-{}.new", self.0)
+    }
+}
+
+impl fmt::Display for FsKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The single-writer lock file [`Host::state_lock`] opened (not locked
+/// yet), and the device of the state directory's filesystem: a writer
+/// on the filesystem it reclaims guards the goal (docs/architecture.md,
+/// Snapshot: Never at the cost of the goal; [`Host::statvfs`] on `fd`
+/// samples that filesystem).
+#[derive(Debug)]
+pub struct StateLock<F> {
+    pub fd: F,
+    pub dir_dev: Dev,
+}
+
+/// What [`Host::state_read`] found at `index-<key>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateFile {
+    pub file_type: FileType,
+    pub uid: u32,
+    /// The permission bits (`st_mode & 0o7777`).
+    pub mode: u32,
+    pub size: u64,
+    /// The contents: `None` unless a regular file of at most the limit.
+    pub bytes: Option<Vec<u8>>,
 }
 
 /// How often [`Host::proc_root_lookup`] retries an `openat2` that failed

@@ -39,12 +39,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
     OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
-    ProcStatus, ProcView, Space, Stat, Timestamp, TryLock, UidMap, Unlink, WaitLock,
-    is_single_name, read_proc_view,
+    ProcStatus, ProcView, Space, Stat, StateFile, StateLock, Timestamp, TryLock, UidMap, Unlink,
+    WaitLock, is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -153,6 +153,9 @@ pub struct LinuxHost {
     kcmp_refused_errno: AtomicI32,
     #[cfg(not(feature = "release-without-sandbox-gate"))]
     clock_offset_seconds: u64,
+    /// diskgc's state directory ([`LinuxHost::with_state_dir`]); `None`:
+    /// the state operations fail, and no snapshot is read or written.
+    state_dir: Option<PathBuf>,
 }
 
 impl LinuxHost {
@@ -214,6 +217,28 @@ impl LinuxHost {
             kcmp_refused_errno: AtomicI32::new(0),
             #[cfg(not(feature = "release-without-sandbox-gate"))]
             clock_offset_seconds,
+            state_dir: None,
+        })
+    }
+
+    /// The host with diskgc's state directory at the absolute `dir`
+    /// (`$XDG_STATE_HOME/diskgc`, chosen by the binary:
+    /// `diskgc_core::snapshot::state_dir`), where the state operations keep
+    /// the index snapshot (docs/architecture.md, The Host port: diskgc's
+    /// own state). They never name anything else.
+    pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
+        assert!(dir.is_absolute(), "a state directory must be absolute");
+        self.state_dir = Some(dir);
+        self
+    }
+
+    fn state_dir(&self) -> Result<&Path, HostError> {
+        self.state_dir.as_deref().ok_or_else(|| {
+            HostError::invalid(
+                "state",
+                "$XDG_STATE_HOME/diskgc",
+                "no state directory: neither $XDG_STATE_HOME nor $HOME is an absolute path",
+            )
         })
     }
 
@@ -637,7 +662,11 @@ pub(crate) fn errno_of(e: rustix::io::Errno) -> Errno {
     Errno(e.raw_os_error())
 }
 
-fn io_error(op: &'static str, subject: impl std::fmt::Display, e: &std::io::Error) -> HostError {
+pub(crate) fn io_error(
+    op: &'static str,
+    subject: impl std::fmt::Display,
+    e: &std::io::Error,
+) -> HostError {
     match e.raw_os_error() {
         Some(raw) => HostError::errno(op, subject, Errno(raw)),
         None => HostError::invalid(op, subject, e.to_string()),
@@ -2292,6 +2321,55 @@ impl Host for LinuxHost {
                 diskgc_core::host::CLIMB_LEVELS_MAX
             ),
         )))
+    }
+
+    fn fs_uuid(&self, dev: Dev) -> Result<Option<String>, HostError> {
+        crate::state::fs_uuid(dev)
+    }
+
+    fn boot_id(&self) -> Result<String, HostError> {
+        const BOOT_ID: &str = "sys/kernel/random/boot_id";
+        let text = ProcRoot(self.proc.as_fd()).read(BOOT_ID)?;
+        let id = String::from_utf8(text)
+            .ok()
+            .map(|t| t.trim_end().to_owned())
+            .filter(|t| t.len() == 36 && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+            .ok_or_else(|| HostError::invalid("read", ProcRoot::shown(BOOT_ID), "not a boot id"))?;
+        Ok(id)
+    }
+
+    fn state_lock(&self, key: &FsKey) -> Result<StateLock<LinuxFd>, HostError> {
+        let (fd, shown, dir_dev) = crate::state::open_lock_file_ungated(self.state_dir()?, key)?;
+        Ok(StateLock {
+            fd: LinuxFd { fd, shown },
+            dir_dev,
+        })
+    }
+
+    fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError> {
+        crate::state::read_snapshot(self.state_dir()?, key, limit, self.proc.as_fd())
+    }
+
+    fn state_write(
+        &self,
+        lock: &Locked<LinuxFd>,
+        key: &FsKey,
+        bytes: &[u8],
+    ) -> Result<(), HostError> {
+        if lock.mode() != LockMode::Exclusive {
+            return Err(HostError::invalid(
+                "write",
+                key.snapshot_name(),
+                "the single-writer lock is not held exclusively",
+            ));
+        }
+        crate::state::write_snapshot_ungated(
+            self.state_dir()?,
+            key,
+            lock.fd().as_fd(),
+            bytes,
+            self.proc.as_fd(),
+        )
     }
 }
 
@@ -6213,5 +6291,187 @@ mod tests {
         let fds = u32::try_from(FIRST_BUFFER / 24).unwrap() + 500;
         let files = scripted(vec![], fds);
         assert_eq!(fd_numbers(&files, "fd").map(|v| v.len()), Ok(fds as usize));
+    }
+
+    // ---- diskgc's own state (docs/architecture.md, The Host port) ----
+
+    fn state_host(dir: &Path) -> LinuxHost {
+        LinuxHost::new()
+            .expect("host setup")
+            .with_state_dir(dir.join("state/diskgc"))
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("list")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn exclusive(host: &LinuxHost, key: &FsKey) -> Locked<LinuxFd> {
+        match host
+            .flock_try(
+                host.state_lock(key).expect("lock file").fd,
+                LockMode::Exclusive,
+            )
+            .expect("flock")
+        {
+            TryLock::Acquired(locked) => locked,
+            TryLock::Busy(_) => panic!("the single-writer lock is busy"),
+        }
+    }
+
+    #[test]
+    fn state_lock_creates_a_private_directory_and_lock_file_and_reuses_them() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let first = host.state_lock(&key).expect("first");
+        let state = tmp.0.join("state/diskgc");
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode(&state), 0o700);
+        assert_eq!(mode(&state.join("index-dev-0-42.lock")), 0o600);
+        drop(first);
+        drop(host.state_lock(&key).expect("again"));
+        assert_eq!(names_in(&state), ["index-dev-0-42.lock"]);
+        // Nothing to read yet.
+        assert_eq!(host.state_read(&key, 1 << 20).expect("read"), None);
+    }
+
+    #[test]
+    fn a_state_directory_others_may_write_to_is_refused() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        drop(host.state_lock(&key).expect("made"));
+        let state = tmp.0.join("state/diskgc");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        let refused = host.state_lock(&key).expect_err("group/other-writable");
+        assert!(
+            refused.to_string().contains("writable by no one else"),
+            "{refused}"
+        );
+        assert!(host.state_read(&key, 1 << 20).is_err());
+    }
+
+    #[test]
+    fn state_write_replaces_the_snapshot_whole_and_leaves_nothing_else() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let locked = exclusive(&host, &key);
+        host.state_write(&locked, &key, b"first snapshot")
+            .expect("write");
+        host.state_write(&locked, &key, b"second").expect("rewrite");
+        drop(locked);
+        let file = host
+            .state_read(&key, 1 << 20)
+            .expect("read")
+            .expect("a file");
+        assert_eq!(file.file_type, FileType::Regular);
+        assert_eq!(file.mode & 0o077, 0, "{:o}", file.mode);
+        assert_eq!(file.uid, rustix::process::geteuid().as_raw());
+        assert_eq!(file.bytes.as_deref(), Some(&b"second"[..]));
+        assert_eq!(
+            names_in(&tmp.0.join("state/diskgc")),
+            ["index-dev-0-42", "index-dev-0-42.lock"]
+        );
+        // Larger than the limit: not read.
+        let file = host.state_read(&key, 3).expect("read").expect("a file");
+        assert_eq!((file.size, file.bytes), (6, None));
+    }
+
+    #[test]
+    fn a_complete_leftover_new_file_is_promoted_then_replaced() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let locked = exclusive(&host, &key);
+        let state = tmp.0.join("state/diskgc");
+        std::fs::write(state.join("index-dev-0-42.new"), b"left by a crash").expect("plant");
+        host.state_write(&locked, &key, b"fresh").expect("write");
+        let file = host
+            .state_read(&key, 1 << 20)
+            .expect("read")
+            .expect("a file");
+        assert_eq!(file.bytes.as_deref(), Some(&b"fresh"[..]));
+        assert_eq!(names_in(&state), ["index-dev-0-42", "index-dev-0-42.lock"]);
+    }
+
+    #[test]
+    fn a_symlinked_snapshot_is_reported_never_followed() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        drop(host.state_lock(&key).expect("made"));
+        let target = tmp.0.join("elsewhere");
+        std::fs::write(&target, b"not a snapshot").expect("target");
+        std::os::unix::fs::symlink(&target, tmp.0.join("state/diskgc/index-dev-0-42"))
+            .expect("symlink");
+        let file = host
+            .state_read(&key, 1 << 20)
+            .expect("read")
+            .expect("an entry");
+        assert_eq!((file.file_type, file.bytes), (FileType::Symlink, None));
+    }
+
+    #[test]
+    fn state_write_refuses_another_keys_lock() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let other = FsKey::dev(Dev {
+            major: 0,
+            minor: 43,
+        });
+        let locked = exclusive(&host, &other);
+        drop(host.state_lock(&key).expect("its own lock file"));
+        let refused = host
+            .state_write(&locked, &key, b"x")
+            .expect_err("another key's lock");
+        assert!(
+            refused.to_string().contains("not this snapshot's"),
+            "{refused}"
+        );
+        assert_eq!(host.state_read(&key, 1 << 20).expect("read"), None);
+    }
+
+    #[test]
+    fn without_a_state_directory_the_state_operations_fail() {
+        let host = LinuxHost::new().expect("host setup");
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        assert!(host.state_lock(&key).is_err());
+        assert!(host.state_read(&key, 1).is_err());
+    }
+
+    #[test]
+    fn the_boot_id_is_the_kernels() {
+        let host = LinuxHost::new().expect("host setup");
+        let id = host.boot_id().expect("boot id");
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("read");
+        assert_eq!(id, kernel.trim());
     }
 }

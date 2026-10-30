@@ -788,6 +788,38 @@ pub(crate) mod tests {
         ) -> Result<Vec<crate::host::DevIno>, ProcError> {
             unreachable!()
         }
+
+        fn fs_uuid(&self, _: crate::host::Dev) -> Result<Option<String>, HostError> {
+            unreachable!()
+        }
+
+        fn boot_id(&self) -> Result<String, HostError> {
+            unreachable!()
+        }
+
+        fn state_lock(
+            &self,
+            _: &crate::host::FsKey,
+        ) -> Result<crate::host::StateLock<Self::Fd>, HostError> {
+            unreachable!()
+        }
+
+        fn state_read(
+            &self,
+            _: &crate::host::FsKey,
+            _: u64,
+        ) -> Result<Option<crate::host::StateFile>, HostError> {
+            unreachable!()
+        }
+
+        fn state_write(
+            &self,
+            _: &crate::host::Locked<Self::Fd>,
+            _: &crate::host::FsKey,
+            _: &[u8],
+        ) -> Result<(), HostError> {
+            unreachable!()
+        }
     }
 
     /// `/` (id 1) and a tmpfs at `/tmp` (id 30): `/tmp` opens as fd 0, and

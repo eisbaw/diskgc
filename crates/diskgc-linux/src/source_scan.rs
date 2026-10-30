@@ -922,6 +922,15 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Word("execve"),
     Pattern::Word("execveat"),
     Pattern::Word("posix_spawn"),
+    // Creating a name: a directory, or a second name of a file (the
+    // snapshot's `O_TMPFILE` is linked in by `linkat`).
+    Pattern::Word("mkdir"),
+    Pattern::Word("mkdirat"),
+    Pattern::Word("create_dir"),
+    Pattern::Word("create_dir_all"),
+    Pattern::Word("DirBuilder"),
+    Pattern::Word("linkat"),
+    Pattern::Word("hard_link"),
     // Creating a name: binding an AF_UNIX socket to a path makes a socket
     // file (rustix's `net` feature, std's `UnixListener::bind`). The `net`
     // feature is there for one read-only query, the socket diagnostics of
@@ -1018,6 +1027,28 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         function: "recv_datagram",
         gate: Gate::Ungated("MSG_TRUNC on a netlink recv; reads only, no file is opened"),
         matches: 1,
+    },
+    // diskgc's own state (docs/architecture.md, The Host port: diskgc's
+    // own state): the only writes, creations and renames outside `Delete`.
+    Allowed {
+        file: "crates/diskgc-linux/src/state.rs",
+        function: "open_lock_file_ungated",
+        gate: Gate::Ungated(
+            "creates only diskgc's state directory (0700) and the snapshot's lock file \
+             index-<fs>.lock (0600, read-only open, O_NOFOLLOW) named by a typed FsKey; \
+             diskgc's cache, never user data",
+        ),
+        matches: 2, // mkdir, CREATE
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/state.rs",
+        function: "write_snapshot_ungated",
+        gate: Gate::Ungated(
+            "writes only diskgc's snapshot: an O_TMPFILE (0600, never O_TRUNC) linked in as \
+             index-<fs>.new and renamed onto index-<fs> under its single-writer lock; \
+             diskgc's cache, never user data",
+        ),
+        matches: 4, // TMPFILE, WRONLY, linkat, renameat
     },
     // The deletion engine's one caller of each deleting port method: with
     // these entries the scan also checks that nothing else in the core calls
@@ -1577,6 +1608,13 @@ mod tests {
             "rustix::fs::fchmod(fd, m);",
             "rustix::fs::chmodat(d, p, m, f);",
             "std::fs::set_permissions(p, perm);",
+            "rustix::fs::mkdir(p, m);",
+            "rustix::fs::mkdirat(d, n, m);",
+            "std::fs::create_dir(p);",
+            "std::fs::create_dir_all(p);",
+            "std::fs::DirBuilder::new().create(p);",
+            "rustix::fs::linkat(d, a, d, b, f);",
+            "std::fs::hard_link(a, b);",
             "rustix::net::bind(fd, &addr);",
             "std::process::Command::new(\"docker\");",
             "let pid = unsafe { fork() };",

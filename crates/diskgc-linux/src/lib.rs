@@ -22,6 +22,7 @@ pub mod sandbox;
 mod scratch;
 pub mod sockdiag;
 mod stat;
+mod state;
 mod tasks;
 
 #[cfg(test)]

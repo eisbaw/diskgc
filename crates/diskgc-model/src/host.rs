@@ -46,10 +46,10 @@ use std::time::Duration;
 
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, Host, HostError, Ids,
-    LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
-    OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink, ProcStatus, Space, Stat,
-    Timestamp, TryLock, Unlink, WaitLock, is_single_name,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
+    Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime,
+    MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink, ProcStatus,
+    Space, Stat, StateFile, StateLock, Timestamp, TryLock, Unlink, WaitLock, is_single_name,
 };
 
 use crate::load::{Action, Event, LoadError, Trigger};
@@ -407,6 +407,16 @@ impl ModelHost {
         result
     }
 
+    /// `name` in the state directory, for the trace.
+    fn state_path(&self, name: &str) -> Option<PathBuf> {
+        self.inner
+            .borrow()
+            .state
+            .state_dir
+            .as_ref()
+            .map(|dir| dir.join(name))
+    }
+
     fn wrap(&self, ofd: u64) -> ModelFd {
         ModelFd {
             ofd,
@@ -654,6 +664,59 @@ impl Inner {
 
     fn loc_of(&self, ofd: u64) -> Loc {
         self.state.ofds[&ofd].loc
+    }
+
+    /// The state directory, created (mode 0700, diskgc's uid, with its
+    /// missing parents) when `create`; `None` when absent and not created.
+    /// Refused, as `LinuxHost` refuses it, when there is none configured,
+    /// or it is not a directory owned by diskgc's user and writable by no
+    /// one else (it is reached following symlinks, as there).
+    fn state_dir(&mut self, create: bool) -> Result<Option<Loc>, HostError> {
+        let Some(dir) = self.state.state_dir.clone() else {
+            return Err(HostError::invalid(
+                "state",
+                "$XDG_STATE_HOME/diskgc",
+                "no state directory: neither $XDG_STATE_HOME nor $HOME is an absolute path",
+            ));
+        };
+        let shown = dir.display().to_string();
+        let loc = match self.state.lookup(&dir) {
+            Ok(loc) => loc,
+            Err(Fault::Errno(Errno::ENOENT)) if create => {
+                let missing: Vec<PathBuf> = dir
+                    .ancestors()
+                    .filter(|a| self.state.lookup(a).is_err())
+                    .map(Path::to_path_buf)
+                    .collect();
+                let loc = self
+                    .state
+                    .create_path(&dir, Kind::Dir(std::collections::BTreeMap::new()))
+                    .unwrap_or_else(|f| model_error(format!("state dir {shown}: {f:?}")));
+                let uid = self.state.own_uid;
+                for made in missing {
+                    let at = self.state.lookup(&made).expect("just made");
+                    let inode = self.state.inode_mut(at);
+                    inode.uid = uid;
+                    inode.perm = 0o700;
+                }
+                loc
+            }
+            Err(Fault::Errno(Errno::ENOENT)) => return Ok(None),
+            Err(Fault::Errno(e)) => return Err(HostError::errno("open", &shown, e)),
+            Err(Fault::Model(m)) => model_error(format!("state dir {shown}: {m}")),
+        };
+        let inode = self.state.inode(loc);
+        if inode.entries().is_none() || inode.uid != self.state.own_uid || inode.perm & 0o022 != 0 {
+            return Err(HostError::invalid(
+                "open",
+                &shown,
+                format!(
+                    "the state directory must be owned by uid {} and writable by no one else",
+                    self.state.own_uid
+                ),
+            ));
+        }
+        Ok(Some(loc))
     }
 
     /// Takes `mode` on `ofd` if nothing conflicts.
@@ -1801,6 +1864,198 @@ impl Host for ModelHost {
                     (Ok(chain), Some(object), text)
                 }
             }
+        })
+    }
+
+    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
+        self.call(Op::FsUuid, None, None, |inner| {
+            let uuid = inner.state.fs_uuids.get(&dev).cloned();
+            let text = uuid.clone().unwrap_or_else(|| "none".to_owned());
+            (Ok(uuid), None, text)
+        })
+    }
+
+    fn boot_id(&self) -> Result<String, HostError> {
+        self.call(Op::BootId, None, None, |inner| {
+            let id = inner.state.boot_id.clone();
+            (Ok(id.clone()), None, id)
+        })
+    }
+
+    fn state_lock(&self, key: &FsKey) -> Result<StateLock<ModelFd>, HostError> {
+        let path = self.state_path(&key.lock_name());
+        let shown = path
+            .as_ref()
+            .map_or_else(|| key.lock_name(), |p| p.display().to_string());
+        let opened = self.call(Op::StateLock, path.clone(), None, |inner| {
+            let result = (|| {
+                let dir = inner.state_dir(true)?.expect("created");
+                let name = OsString::from(key.lock_name());
+                let loc = match inner.state.child(dir, &name) {
+                    Ok(loc) => loc,
+                    Err(Errno::ENOENT) => {
+                        let loc = inner
+                            .state
+                            .create_in(
+                                dir,
+                                &name,
+                                Kind::File {
+                                    cachedir_tag: false,
+                                    content: Vec::new(),
+                                },
+                            )
+                            .unwrap_or_else(|f| model_error(format!("state_lock: {f:?}")));
+                        let uid = inner.state.own_uid;
+                        let inode = inner.state.inode_mut(loc);
+                        inode.uid = uid;
+                        inode.perm = 0o600;
+                        loc
+                    }
+                    Err(e) => return Err(HostError::errno("open", &shown, e)),
+                };
+                let inode = inner.state.inode(loc);
+                if inode.file_type() == FileType::Symlink {
+                    return Err(HostError::errno("open", &shown, Errno::ELOOP));
+                }
+                if inode.file_type() != FileType::Regular || inode.uid != inner.state.own_uid {
+                    return Err(HostError::invalid(
+                        "open",
+                        &shown,
+                        "the lock file must be a regular file of diskgc's user",
+                    ));
+                }
+                let dev = inner.state.mount(loc.mnt).dev;
+                let ofd =
+                    inner
+                        .state
+                        .open_ofd(loc, path.clone().expect("a state dir"), Access::Read);
+                inner.state.own_ofds.insert(ofd);
+                inner.peak_open_fds = inner.peak_open_fds.max(inner.state.own_ofds.len());
+                Ok((ofd, dev))
+            })();
+            let text = match &result {
+                Ok(_) => "ok".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            (result, None, text)
+        });
+        opened.map(|(ofd, dir_dev)| StateLock {
+            fd: self.wrap(ofd),
+            dir_dev,
+        })
+    }
+
+    fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError> {
+        let path = self.state_path(&key.snapshot_name());
+        let shown = path
+            .as_ref()
+            .map_or_else(|| key.snapshot_name(), |p| p.display().to_string());
+        self.call(Op::StateRead, path, None, |inner| {
+            let result = (|| {
+                let Some(dir) = inner.state_dir(false)? else {
+                    return Ok(None);
+                };
+                let loc = match inner.state.child(dir, OsStr::new(&key.snapshot_name())) {
+                    Ok(loc) => loc,
+                    Err(Errno::ENOENT) => return Ok(None),
+                    Err(e) => return Err(HostError::errno("open", &shown, e)),
+                };
+                let inode = inner.state.inode(loc);
+                let bytes = match &inode.kind {
+                    Kind::File { content, .. } if inode.size <= limit => Some(content.clone()),
+                    _ => None,
+                };
+                Ok(Some(StateFile {
+                    file_type: inode.file_type(),
+                    uid: inode.uid,
+                    mode: inode.perm,
+                    size: inode.size,
+                    bytes,
+                }))
+            })();
+            let text = match &result {
+                Ok(Some(f)) => format!("{} {} bytes", f.file_type, f.size),
+                Ok(None) => "none".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            (result, None, text)
+        })
+    }
+
+    fn state_write(
+        &self,
+        lock: &Locked<ModelFd>,
+        key: &FsKey,
+        bytes: &[u8],
+    ) -> Result<(), HostError> {
+        let lock_ofd = self.fd_ofd(lock.fd());
+        let path = self.state_path(&key.snapshot_name());
+        let shown = path
+            .as_ref()
+            .map_or_else(|| key.snapshot_name(), |p| p.display().to_string());
+        self.call(Op::StateWrite, path.clone(), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("write", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let dir = match inner.state_dir(false) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => model_error("state_write without a state directory"),
+                Err(e) => return (Err(e), None, "refused".to_owned()),
+            };
+            // The port's shape (docs/architecture.md, The Host port): only
+            // under this key's single-writer lock, held exclusively.
+            let lock_loc = inner
+                .state
+                .child(dir, OsStr::new(&key.lock_name()))
+                .unwrap_or_else(|e| {
+                    violation(format!("state_write of {shown} without its lock file: {e}"))
+                });
+            let held = &inner.state.ofds[&lock_ofd];
+            if inner.state.dev_ino(held.loc) != inner.state.dev_ino(lock_loc)
+                || held.lock != Some(LockMode::Exclusive)
+            {
+                violation(format!(
+                    "state_write of {shown} without holding {} exclusively",
+                    key.lock_name()
+                ));
+            }
+            let size = u64::try_from(bytes.len()).expect("fits u64");
+            if inner.state.space(dir.mnt).avail_bytes
+                < size.div_ceil(crate::state::BLOCK) * crate::state::BLOCK
+            {
+                return (
+                    Err(HostError::errno("write", &shown, Errno::ENOSPC)),
+                    None,
+                    "ENOSPC".to_owned(),
+                );
+            }
+            let new = OsString::from(key.new_name());
+            let made = inner
+                .state
+                .create_in(
+                    dir,
+                    &new,
+                    Kind::File {
+                        cachedir_tag: false,
+                        content: bytes.to_vec(),
+                    },
+                )
+                .unwrap_or_else(|f| model_error(format!("state_write: {f:?}")));
+            let uid = inner.state.own_uid;
+            let inode = inner.state.inode_mut(made);
+            inode.uid = uid;
+            inode.perm = 0o600;
+            inode.size = size;
+            let dir_path = inner.state.state_dir.clone().expect("a state dir");
+            inner
+                .state
+                .rename_path(&dir_path.join(&new), &dir_path.join(key.snapshot_name()))
+                .unwrap_or_else(|f| model_error(format!("state_write rename: {f:?}")));
+            (Ok(()), None, format!("ok {size} bytes"))
         })
     }
 }

@@ -111,6 +111,16 @@ pub struct HostModel {
     /// tally's duty cycle, whose batches are timed on the clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_cost: Option<Elapsed>,
+    /// diskgc's state directory, as `LinuxHost` is given it
+    /// (`$XDG_STATE_HOME/diskgc`): where the state operations keep the
+    /// index snapshot. Absent: none (the state operations fail, as
+    /// `LinuxHost` without one). Missing directories are created by
+    /// `state_lock` (mode 0700, diskgc's own uid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dir: Option<PathBuf>,
+    /// What `boot_id` reports; default a fixed id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
     /// Changes applied between two `Host` calls, or at a point in time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<EventSpec>,
@@ -199,6 +209,10 @@ pub struct MountSpec {
     /// metadata must match that mount; subdirectory binds are unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_of: Option<u64>,
+    /// The filesystem's UUID as `fs_uuid` reports it (the udev link
+    /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
     /// Filesystem size.
     pub size: Bytes,
     /// Space used by things outside the model; available space is `size -
@@ -738,6 +752,11 @@ pub enum Op {
     DockerQuery,
     Pressure,
     LowerPriority,
+    FsUuid,
+    BootId,
+    StateLock,
+    StateRead,
+    StateWrite,
 }
 
 impl Op {
@@ -785,6 +804,11 @@ impl Op {
             Self::DockerQuery => "docker_query",
             Self::Pressure => "pressure",
             Self::LowerPriority => "lower_priority",
+            Self::FsUuid => "fs_uuid",
+            Self::BootId => "boot_id",
+            Self::StateLock => "state_lock",
+            Self::StateRead => "state_read",
+            Self::StateWrite => "state_write",
         }
     }
 }

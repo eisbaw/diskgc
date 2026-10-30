@@ -190,7 +190,19 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         Some("none") => state.own_uid_map = None,
         Some(map) => state.own_uid_map = Some(map.to_owned()),
     }
+    if let Some(dir) = &model.state_dir {
+        require_normal("state_dir", dir)?;
+        state.state_dir = Some(dir.clone());
+    }
+    if let Some(id) = &model.boot_id {
+        state.boot_id = id.clone();
+    }
     load_mounts(&mut state, model)?;
+    for spec in &model.mounts {
+        if let Some(uuid) = &spec.uuid {
+            state.fs_uuids.insert(spec.dev.0, uuid.clone());
+        }
+    }
     let deferred = load_tree(&mut state, model)?;
     load_processes(&mut state, model)?;
     load_locks(&mut state, model)?;
@@ -968,6 +980,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::ProcNspid,
             Op::PidAlive,
             Op::Pressure,
+            Op::StateWrite,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}

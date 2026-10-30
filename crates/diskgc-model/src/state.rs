@@ -398,7 +398,15 @@ pub struct State {
     pub wall_start: jiff::Timestamp,
     /// Virtual time since the start of the run.
     pub elapsed: Duration,
+    /// Filesystem UUIDs (`fs_uuid`), by device.
+    pub fs_uuids: BTreeMap<Dev, String>,
+    /// diskgc's state directory (`state_*` operations), if any.
+    pub state_dir: Option<PathBuf>,
+    pub boot_id: String,
 }
+
+/// The boot id a model reports unless it says otherwise.
+pub const DEFAULT_BOOT_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 impl State {
     pub fn new(wall_start: jiff::Timestamp, kernel: String) -> Self {
@@ -425,6 +433,9 @@ impl State {
             hostname: "model-host".to_owned(),
             wall_start,
             elapsed: Duration::ZERO,
+            fs_uuids: BTreeMap::new(),
+            state_dir: None,
+            boot_id: DEFAULT_BOOT_ID.to_owned(),
         }
     }
 
