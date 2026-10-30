@@ -3,8 +3,10 @@
 //! work; it decides nothing about safety:
 //!
 //! 1. **Before the host lock**, the synchronous tally ([`sync_tally`],
-//!    [`crate::tally::sync`]) lists every indexed tier's sources and sizes
-//!    the first tier's stale units, within `--tally-budget`.
+//!    [`crate::tally::sync`]), seeded from the snapshot when there is a
+//!    valid one ([`RunIndex::seed`]), lists every indexed tier's sources
+//!    not listed in the last 5 minutes and sizes the first tier's stale
+//!    units, within `--tally-budget`.
 //! 2. **Per tier, the queue** ([`Reclaim::walk_fs_index`]): the tier's units
 //!    in its order. Each is a candidate only as discovery would make it: a
 //!    single is found again by the tier's own discovery restricted to its
@@ -41,7 +43,7 @@ use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
 use crate::outcome::Stop;
 use crate::report::Report;
-use crate::tally::TallyState;
+use crate::snapshot::RunIndex;
 use crate::tally::listing::{SourceFind, TallySource, index_identity};
 use crate::tally::sync::{self, SyncTier};
 
@@ -125,14 +127,15 @@ pub(super) struct SyncTallied {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_tally<'t, H: Host>(
     host: &H,
-    state: &mut TallyState,
+    index: &mut RunIndex,
     tiers: impl IntoIterator<Item = &'t Tier>,
-    dev: Dev,
+    measured: (Dev, u64),
     budget: Option<Duration>,
     deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> SyncTallied {
+    let (dev, min_free) = measured;
     let tiers = sync_tiers(tiers);
     if tiers.is_empty() {
         return SyncTallied {
@@ -140,6 +143,14 @@ pub(super) fn sync_tally<'t, H: Host>(
             ..SyncTallied::default()
         };
     }
+    // The run tallies: seed from the snapshot (and write it after the run).
+    let bound: BTreeMap<&str, u64> = tiers
+        .iter()
+        .flat_map(|t| &t.sources)
+        .map(|s| (&*s.finder.profile, s.finder.profile_hash))
+        .collect();
+    index.seed(host, dev, min_free, deadline, &bound, log);
+    let state = &mut index.state;
     let started = host.now();
     let budget_end = budget.and_then(|b| started.checked_add(b));
     let until = match (deadline, budget_end) {

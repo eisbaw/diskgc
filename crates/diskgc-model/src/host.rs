@@ -309,6 +309,73 @@ impl ModelHost {
         held
     }
 
+    /// The contents of the regular file at `path` (not following a final
+    /// symlink), if there is one.
+    pub fn file_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        let inner = self.inner.borrow();
+        let loc = inner.state.lookup_link(path).ok()?;
+        match &inner.state.inode(loc).kind {
+            Kind::File { content, .. } => Some(content.clone()),
+            _ => None,
+        }
+    }
+
+    /// Puts a regular file holding `bytes` at `path` (replacing what is
+    /// there; missing parents made), owned by `uid` with mode `perm`. A
+    /// test's hand on the machine between runs: not a port call (no trace,
+    /// no events).
+    pub fn put_file(&self, path: &Path, bytes: Vec<u8>, uid: u32, perm: u32) {
+        let size = u64::try_from(bytes.len()).expect("fits u64");
+        let loc = self.replace_with(
+            path,
+            Kind::File {
+                cachedir_tag: false,
+                content: bytes,
+            },
+        );
+        let mut inner = self.inner.borrow_mut();
+        let inode = inner.state.inode_mut(loc);
+        inode.uid = uid;
+        inode.perm = perm;
+        inode.size = size;
+    }
+
+    /// Puts a symlink to `target` at `path` (replacing what is there), as
+    /// [`Self::put_file`].
+    pub fn put_symlink(&self, path: &Path, target: &Path) {
+        self.replace_with(path, Kind::Symlink(target.to_path_buf()));
+    }
+
+    /// Sets the size the file at `path` reports (its contents stay), as
+    /// [`Self::put_file`].
+    pub fn set_size(&self, path: &Path, size: u64) {
+        let mut inner = self.inner.borrow_mut();
+        let loc = inner
+            .state
+            .lookup_link(path)
+            .unwrap_or_else(|f| model_error(format!("set_size {}: {f:?}", path.display())));
+        inner.state.inode_mut(loc).size = size;
+    }
+
+    /// What `boot_id` reports from now on (a reboot, as far as the boot id
+    /// tells).
+    pub fn set_boot_id(&self, id: &str) {
+        self.inner.borrow_mut().state.boot_id = id.to_owned();
+    }
+
+    fn replace_with(&self, path: &Path, kind: Kind) -> Loc {
+        let mut inner = self.inner.borrow_mut();
+        let state = &mut inner.state;
+        if state.lookup_link(path).is_ok() {
+            state
+                .remove_path(path)
+                .unwrap_or_else(|f| model_error(format!("replace {}: {f:?}", path.display())));
+        }
+        state
+            .create_path(path, kind)
+            .unwrap_or_else(|f| model_error(format!("create {}: {f:?}", path.display())))
+    }
+
     /// How often the code under test lowered its priority
     /// (`Host::lower_priority`).
     pub fn priority_lowered(&self) -> usize {

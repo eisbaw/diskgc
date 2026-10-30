@@ -276,6 +276,7 @@ impl ProfileVector {
             roots: self.roots.clone(),
             dry_run,
             allow_root: self.allow_root,
+            no_index: false,
             path: self.path.clone(),
             test_entry_budget: self.entry_budget,
         })

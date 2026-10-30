@@ -25,6 +25,7 @@ use diskgc_core::index::{
 };
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::Report;
+use diskgc_core::snapshot::RunIndex;
 use diskgc_core::tally::TallyState;
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
@@ -354,10 +355,10 @@ proptest! {
         let correct_host = ModelHost::new(&model).expect("model loads");
         let correct = executor::ensure(&correct_host, &request, &[1000], &mut |_| {});
         let host = ModelHost::new(&model).expect("model loads");
-        let mut state = corrupted(&host, &model, &request.tier, &corruption);
+        let mut index = RunIndex::of(corrupted(&host, &model, &request.tier, &corruption));
         let mut lines = Vec::new();
         let report = executor::ensure_with_index(
-            &host, &request, &[1000], &mut state, &mut |l| lines.push(l.to_owned()),
+            &host, &request, &[1000], &mut index, &mut |l| lines.push(l.to_owned()),
         );
         let explain = || format!(
             "{}\ncorruption: {corruption:#?}\ncorrect: {correct:#?}\ncorrupted: {report:#?}\nlog:\n  {}",

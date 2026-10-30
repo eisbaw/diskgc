@@ -2365,3 +2365,122 @@ pub fn ensure_dry_run_plans_real_targets_and_deletes_nothing(
     }
     judged.assert_clean()
 }
+
+/// docs/testing.md `ensure_warms_the_snapshot` (TASK-30): three reclaiming
+/// `ensure` runs in a row on the container's `/tmp`, a new idle candidate
+/// added before each. The first starts from nothing and writes the index
+/// snapshot (mode 0600, its lock file 0600, the state directory 0700,
+/// under `$HOME/.local/state/diskgc`); the second and third start from it
+/// (their synchronous tally lists no root, the kept units are taken from
+/// the index) and still find and delete the candidate created after the
+/// snapshot. The deletion oracle judges every run: only each run's new
+/// candidate goes; the kept ones (`.diskgc-keep`) stay.
+pub fn ensure_warms_the_snapshot(ctx: &Ctx) -> TestResult {
+    let scratch = &ctx.scratch;
+    for kept in ["warm-kept-1", "warm-kept-2"] {
+        scratch.mkdir(kept, 0o755, TESTER)?;
+        scratch.write_file(&format!("{kept}/.diskgc-keep"), b"", 0o644, TESTER)?;
+        scratch.write_file(&format!("{kept}/payload"), &[3; 4096], 0o644, TESTER)?;
+    }
+    ctx.home.write_file(
+        "diskgc-warm.yaml",
+        b"version: 1\nprofiles:\n  - name: warm-source\n    find: {roots: [/tmp], paths: [\"warm-*\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/warm-1]}\ngroups:\n  - name: warm\n    tiers:\n      - name: warm-tier\n        select: profile:warm-source\n",
+        0o600,
+        TESTER,
+    )?;
+    let state = Path::new(crate::oracle::DISKGC_STATE_DIR);
+    for run_number in 1..=3 {
+        let fresh = format!("warm-{run_number}");
+        scratch.mkdir(&fresh, 0o755, TESTER)?;
+        scratch.write_file(&format!("{fresh}/payload"), &[7; 8192], 0o644, TESTER)?;
+        let oracle = Oracle::arm(Fixture::new().eligible(scratch.path(&fresh)))?;
+        let run = ensure_run(
+            ctx,
+            &[
+                "--json",
+                "--config",
+                "/home/tester/diskgc-warm.yaml",
+                "--min-free",
+                "100%",
+                "--timeout",
+                "20s",
+                "/tmp",
+            ],
+        )?;
+        let judged = oracle.judge(&run)?;
+        ensure!(
+            matches!(run.code, Some(0 | 1)),
+            "run {run_number}: exit {:?}",
+            run.code
+        );
+        judged.assert_clean()?;
+        ensure!(
+            !scratch.path(&fresh).exists(),
+            "run {run_number}: {fresh} was not reclaimed"
+        );
+        for kept in ["warm-kept-1", "warm-kept-2"] {
+            ensure!(scratch.path(kept).exists(), "run {run_number}: {kept} gone");
+        }
+        let lines: Vec<&str> = run.stderr.lines().collect();
+        let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
+        if run_number == 1 {
+            ensure!(
+                has("index: no snapshot index-dev-") && has("yet; the synchronous tally starts"),
+                "run 1 starts from nothing:\n{}",
+                run.stderr
+            );
+        } else {
+            ensure!(
+                has("index: started from snapshot index-dev-") && has("2 unit(s)"),
+                "run {run_number} starts from the snapshot:\n{}",
+                run.stderr
+            );
+            ensure!(
+                has("0 source(s) listed, 1 recent") && has("warm-tier: 2 unit(s) from the index"),
+                "run {run_number}: a warm tally and queue:\n{}",
+                run.stderr
+            );
+        }
+        ensure!(
+            has("index: snapshot index-dev-") && has("written: 2 unit(s)"),
+            "run {run_number} writes the snapshot:\n{}",
+            run.stderr
+        );
+    }
+    let mode = |p: &Path| -> Result<u32, String> {
+        Ok(std::fs::symlink_metadata(p)
+            .map_err(|e| format!("{}: {e}", p.display()))?
+            .mode()
+            & 0o7777)
+    };
+    let mut names: Vec<String> = std::fs::read_dir(state)
+        .map_err(|e| format!("{}: {e}", state.display()))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    names.sort();
+    info!("state directory {}: {names:?}", state.display());
+    ensure!(
+        names.len() == 2
+            && names[0].starts_with("index-dev-")
+            && names[1] == format!("{}.lock", names[0]),
+        "the snapshot and its lock only: {names:?}"
+    );
+    ensure!(
+        mode(state)? == 0o700,
+        "state directory mode {:o}",
+        mode(state)?
+    );
+    for name in &names {
+        let at = state.join(name);
+        ensure!(
+            mode(&at)? == 0o600,
+            "{} mode {:o}",
+            at.display(),
+            mode(&at)?
+        );
+        let uid = std::fs::metadata(&at).map_err(|e| e.to_string())?.uid();
+        ensure!(uid == TESTER.uid, "{} owned by {uid}", at.display());
+    }
+    Ok(())
+}

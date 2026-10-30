@@ -45,9 +45,9 @@
 //! above it.
 //!
 //! The tally fills it ([`crate::tally`]; its live cursor is counted here,
-//! [`Index::set_cursor_bytes`]). Not here yet: the snapshot and dropping
-//! finders whose profile hash changed (TASK-30), the reclaim walk's use of
-//! it (TASK-31).
+//! [`Index::set_cursor_bytes`]); the snapshot ([`crate::snapshot`]) saves
+//! and restores it ([`Index::restore_block`] for blocks), dropping finders
+//! whose profile hash changed as it loads.
 
 pub mod collapse;
 pub mod family;
@@ -64,7 +64,9 @@ use std::path::{Component, Path, PathBuf};
 pub use collapse::CollapseReport;
 pub use family::name_family;
 pub use memory::BUDGET_BYTES;
-pub use unit::{Birth, Block, Family, Finder, FinderSetId, Identity, Refusal, Single, Tally};
+pub use unit::{
+    Birth, Block, BlockParts, Family, Finder, FinderSetId, Identity, Refusal, Single, Tally,
+};
 
 use crate::host::{Dev, Host, HostError, MonoTime, MountEntry, Timestamp};
 use memory::{heap, low_water, vec_bytes};
@@ -1222,6 +1224,90 @@ impl Index {
             "block vanished while dissolving"
         );
         Dissolved::Done
+    }
+
+    /// Puts back a block a snapshot recorded (docs/architecture.md, The
+    /// tally: Snapshot), sited at the directory `site` (at or below the
+    /// mount point) with the finders `finders`. `false`, and nothing
+    /// changed, when it does not fit the budget or the site already holds
+    /// a block of these finders and family: a block left out costs only
+    /// warmth (the tier's discovery finds its members).
+    pub fn restore_block(
+        &mut self,
+        mount: &MountKey,
+        site: &Path,
+        mut finders: Vec<Finder>,
+        parts: BlockParts,
+    ) -> bool {
+        assert_eq!(
+            parts.site.dev, mount.dev,
+            "a block on another device than its mount"
+        );
+        finders.sort();
+        finders.dedup();
+        assert!(!finders.is_empty(), "a block without finders");
+        let names = rel_names(&mount.mount_point, site);
+        let block = Block {
+            site: parts.site,
+            finders: FinderSetId(u32::MAX),
+            family: parts.family,
+            members: parts.members,
+            est_bytes: parts.est_bytes,
+            files: parts.files,
+            oldest_change: parts.oldest_change,
+            newest_change: parts.newest_change,
+            tallied_at: parts.tallied_at,
+        };
+        let known = self.find_set(&finders);
+        // The trie nodes on the way, and the block vector at the site.
+        let mut cost = 0;
+        let mut existing: &[Block] = &[];
+        match self.find_mount(mount) {
+            None => cost += names.iter().map(|n| new_child_bytes(0, n)).sum::<usize>(),
+            Some(i) => {
+                let mut node = Some(&self.mounts[i].root);
+                for name in &names {
+                    match node {
+                        Some(n) => {
+                            if !n.children.contains_key(*name) {
+                                cost += new_child_bytes(n.children.len(), name);
+                            }
+                            node = n.children.get(*name);
+                        }
+                        None => cost += new_child_bytes(0, name),
+                    }
+                }
+                if let Some(n) = node {
+                    existing = &n.blocks;
+                }
+            }
+        }
+        if existing
+            .iter()
+            .any(|b| Some(b.finders) == known && b.family == block.family)
+        {
+            return false;
+        }
+        cost += exact_blocks_bytes(existing.iter().chain([&block])) - exact_blocks_bytes(existing);
+        if !self.has_room(cost + self.set_cost(&finders) + self.mount_cost(mount)) {
+            return false;
+        }
+        let id = self.intern_set(finders);
+        let i = self.mount_index(mount);
+        let mut delta = Delta::default();
+        let mut node = &mut self.mounts[i].root;
+        for name in &names {
+            node = node.child_entry(name, &mut delta);
+        }
+        node.change_blocks(&mut delta, |blocks| {
+            blocks.push(Block {
+                finders: id,
+                ..block
+            });
+        });
+        assert_eq!(delta.bytes, signed(cost), "restore cost mispredicted");
+        self.apply(delta);
+        true
     }
 
     /// An upper bound of the trie bytes `members` add as new singles.

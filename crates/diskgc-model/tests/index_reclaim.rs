@@ -25,6 +25,7 @@ use diskgc_core::index::{
 };
 use diskgc_core::profile::{EntryType, Library, Where, parse_profiles};
 use diskgc_core::report::Report;
+use diskgc_core::snapshot::RunIndex;
 use diskgc_core::tally::TallyState;
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
@@ -169,11 +170,23 @@ fn sized_now(host: &ModelHost, state: &mut TallyState, path: &str) {
 
 fn run(host: &ModelHost, request: &Request, state: &mut TallyState) -> (Report, Vec<String>) {
     let mut lines = Vec::new();
-    let report = executor::ensure_with_index(host, request, &[1000], state, &mut |l| {
-        lines.push(l.to_owned())
+    let report = in_run(state, |index| {
+        executor::ensure_with_index(host, request, &[1000], index, &mut |l| {
+            lines.push(l.to_owned())
+        })
     });
     eprintln!("log:\n  {}", lines.join("\n  "));
     (report, lines)
+}
+
+/// Runs `f` with `state` as the run's index (neither read from nor written
+/// to a snapshot), leaving what the run made of it in `state`.
+fn in_run<R>(state: &mut TallyState, f: impl FnOnce(&mut RunIndex) -> R) -> R {
+    let taken = std::mem::replace(state, TallyState::new(Index::new(BUDGET_BYTES)));
+    let mut index = RunIndex::of(taken);
+    let result = f(&mut index);
+    *state = index.state;
+    result
 }
 
 fn actions(report: &Report) -> Vec<String> {
@@ -457,15 +470,17 @@ fn new_cruft_after_the_snapshot_is_deleted_before_the_pressure_tier() {
     state.set_discovered_at(finder(&pressure, "/tmp"), host.now());
     let tiers = [stale.clone(), pressure];
     let mut lines = Vec::new();
-    let report = executor::ensure_grouped_with_index(
-        &host,
-        &request(stale),
-        &tiers,
-        &[Duration::ZERO, Duration::ZERO],
-        &[1000],
-        &mut state,
-        &mut |l| lines.push(l.to_owned()),
-    );
+    let report = in_run(&mut state, |index| {
+        executor::ensure_grouped_with_index(
+            &host,
+            &request(stale),
+            &tiers,
+            &[Duration::ZERO, Duration::ZERO],
+            &[1000],
+            index,
+            &mut |l| lines.push(l.to_owned()),
+        )
+    });
     eprintln!("log:\n  {}", lines.join("\n  "));
     assert!(
         lines
@@ -556,15 +571,17 @@ fn a_cached_refusal_hint_timed_in_this_run_never_suppresses_the_candidate() {
     });
     let tiers = [stale.clone(), pressure];
     let mut lines = Vec::new();
-    let report = executor::ensure_grouped_with_index(
-        &host,
-        &request(stale),
-        &tiers,
-        &[Duration::ZERO, Duration::ZERO],
-        &[1000],
-        &mut state,
-        &mut |l| lines.push(l.to_owned()),
-    );
+    let report = in_run(&mut state, |index| {
+        executor::ensure_grouped_with_index(
+            &host,
+            &request(stale),
+            &tiers,
+            &[Duration::ZERO, Duration::ZERO],
+            &[1000],
+            index,
+            &mut |l| lines.push(l.to_owned()),
+        )
+    });
     eprintln!("log:\n  {}", lines.join("\n  "));
     assert_eq!(
         actions(&report),

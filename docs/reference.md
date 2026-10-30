@@ -132,9 +132,20 @@ process runs, even if that Cargo works in an unrelated directory; see
   host lock (every Cargo-target tier, union and `!profile:` tier, and
   what an indexed tier's queue did not take): candidates it leaves
   untallied are taken after the tallied ones, in the order discovery
-  found them, each judged in full under its own locks. Until the
-  snapshot exists (TASK-30), `--no-index` changes nothing: each run's
-  index starts empty. A candidate a tally of this run refuses (e.g.
+  found them, each judged in full under its own locks. A run that
+  tallies starts from the index snapshot of `PATH`'s filesystem
+  (`$XDG_STATE_HOME/diskgc/index-<fs>`, mode 0600) when a valid one
+  exists, and writes it after the run, so the next run starts warmer; a
+  goal already met reads and writes nothing, and `--dry-run` neither
+  reads nor writes it. Each step is one stderr line (`index: ...`): the
+  snapshot started from, or ignored and why (corrupt, another user's,
+  another diskgc version, filesystem or boot, a symlink, too large), and
+  written, or not written and why (a `watch` or another `ensure` holds
+  its lock, the write would take the filesystem below `--min-free`,
+  the run was interrupted or past its deadline, a write error); none of
+  them changes the exit code ([architecture.md](architecture.md#the-tally),
+  Snapshot). `--no-index` neither reads nor writes the snapshot: the
+  run's index starts empty and is discarded. A candidate a tally of this run refuses (e.g.
   kept, another user's, too many entries, unreadable) is skipped with
   that reason for the run and never locked; a refusal that stops being
   true later (a `.diskgc-keep` removed after the tally) is a missed
@@ -954,9 +965,9 @@ is `host`.
   discovery listing in it (the tally budget ended first, or `watch` has
   not finished its first pass). Hitting the memory budget collapses
   units into blocks; it never makes coverage `partial`. It is `null`
-  until the snapshot (TASK-30) defines its `source`, although `ensure`
-  builds and uses an index (TASK-31; its synchronous tally logs what it
-  did).
+  until TASK-244 fills it, although `ensure` builds, uses and saves an
+  index (its stderr says where the index started and what its
+  synchronous tally did).
 - `tally_cut_short` is true only after a reclaim's tally (the
   synchronous one before the host lock, or a tier's under it) actually
   stops at `--tally-budget` with at least one candidate left untallied

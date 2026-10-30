@@ -138,6 +138,20 @@ pub struct Block {
     pub tallied_at: Option<MonoTime>,
 }
 
+/// A block's contents without its finder set, as a snapshot stores it
+/// ([`super::Index::restore_block`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockParts {
+    pub site: Identity,
+    pub family: Family,
+    pub members: u64,
+    pub est_bytes: u64,
+    pub files: u64,
+    pub oldest_change: Timestamp,
+    pub newest_change: Timestamp,
+    pub tallied_at: Option<MonoTime>,
+}
+
 impl Block {
     pub fn finders(&self) -> FinderSetId {
         self.finders

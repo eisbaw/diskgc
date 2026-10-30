@@ -622,20 +622,33 @@ Model scenarios required by [safety.md](safety.md) and
   `no_psi_means_duty_cycle_only` (PSI unreadable: one log line, the
   plain duty cycle); the synchronous tally never reads PSI (ModelHost's
   `pressure` script);
-- **snapshot** (ModelHost state operation): `ensure_writes_the_snapshot_and_the_next_run_starts_from_it`
-  (the second run reports `source: snapshot` and lists no root
-  discovered less than 5 minutes earlier);
-  `ensure_skips_the_write_while_watch_holds_the_lock` (one log line,
-  the snapshot unchanged); `watch_waits_for_an_ensure_writing_then_starts`
-  and `second_watch_exits_2`; corrupt (bad checksum, truncated, oversized),
-  wrong format version, another `<fs>` key, another boot for a
-  filesystem without UUID, and another user's snapshot: each ignored
-  with a log line, `source: sync`, and the run's deletions equal a
-  `--no-index` run's; a profile edited between runs drops only that
-  profile's units; a changed tier or `--roots` drops nothing;
-  `--no-index` neither reads nor writes the snapshot; an `ensure` that
-  exits 0 because space is already there makes no tally call and no
-  state write (no snapshot, no lock file);
+- **snapshot** (ModelHost state operations; diskgc-model
+  `tests/snapshot.rs`): `ensure_writes_the_snapshot_and_the_next_run_starts_from_it`
+  (mode 0600 under a 0700 state directory; the second run starts from
+  the snapshot, its tally lists no root discovered less than 5 minutes
+  earlier and both tiers take queues from it);
+  `a_second_writer_does_not_write` (another process holds the
+  single-writer lock: one log line, no write; the watch side,
+  `watch_waits_for_an_ensure_writing_then_starts` and
+  `second_watch_exits_2`, is TASK-32);
+  `a_corrupt_mismatched_or_foreign_snapshot_is_ignored_and_tallied_from_nothing`
+  (a flipped byte, truncated, another format version, another user's,
+  readable by others, a symlink, oversized, another boot for a
+  filesystem without UUID, another `<fs>` key: each ignored with a log
+  line naming why, the tally lists every root, a valid snapshot replaces
+  it); `a_snapshot_naming_a_relative_or_outside_path_is_ignored_not_trusted`
+  (valid checksum, a path the index would assert on: ignored, never
+  reaching the index); `an_edited_profile_drops_only_its_own_units`;
+  `a_run_of_other_tiers_keeps_the_units_it_does_not_use`;
+  `no_index_neither_reads_nor_writes_the_snapshot` (no state call);
+  `an_ensure_whose_goal_is_met_makes_no_state_call` (no tally, no state
+  directory, no lock file);
+  `the_write_never_takes_the_reclaimed_filesystem_below_min_free`;
+  `a_state_write_without_the_exclusive_lock_fails_the_test` (the port's
+  shape). Still open: `source: snapshot` / `source: sync` in the report
+  (TASK-244), and comparing an ignored snapshot's run with a
+  `--no-index` run's deletions (the scenarios delete nothing in either
+  run);
 - **watch** ([reference.md](reference.md#watch); virtual clock, a
   scripted `other_used` curve for available space, scripted PSI, signal
   events; each scenario asserts the deletion oracle, the JSON lines

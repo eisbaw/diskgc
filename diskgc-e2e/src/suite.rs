@@ -1413,6 +1413,12 @@ pub static TESTS: &[Test] = &[
         run: fuse_stall_suite::inuse_scan_finishes_with_a_process_in_a_stalled_fuse_mount,
     },
     Test {
+        name: "ensure_warms_the_snapshot",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_warms_the_snapshot,
+    },
+    Test {
         name: "configured_groups_reclaim_in_order",
         tier: Tier::Fast,
         expect: Expect::Pass,

@@ -494,6 +494,7 @@ fn a_report_before_any_sample_carries_the_goal_as_given() {
         roots: Vec::new(),
         dry_run: false,
         allow_root: false,
+        no_index: false,
         path: "/w".into(),
         test_entry_budget: None,
     };

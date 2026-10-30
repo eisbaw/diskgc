@@ -462,6 +462,7 @@ fn parse_ensure(args: &[OsString]) -> Result<EnsureArgs, String> {
             roots,
             dry_run,
             allow_root,
+            no_index,
             path,
             // A model-test seam: never set from the command line or config.
             test_entry_budget: None,
@@ -532,8 +533,17 @@ fn startup() -> Result<LinuxHost, StartupFailure> {
              if it runs out of descriptors on a busy host"
         ));
     }
-    let host = LinuxHost::new().map_err(|e| StartupFailure::Host(e.to_string()))?;
+    let mut host = LinuxHost::new().map_err(|e| StartupFailure::Host(e.to_string()))?;
     diskgc_core::kernel::require_supported(&host).map_err(kernel_failure)?;
+    // Where the index snapshot lives (docs/architecture.md, Snapshot);
+    // without an absolute $XDG_STATE_HOME or $HOME there is none, and a
+    // run that would read or write it says so.
+    if let Some(dir) = diskgc_core::snapshot::state_dir(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    ) {
+        host = host.with_state_dir(dir);
+    }
     Ok(host)
 }
 

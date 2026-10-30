@@ -82,7 +82,6 @@ use crate::host::{
     MountEntry, Space, Timestamp,
 };
 use crate::hostlock::{self, LockError};
-use crate::index::{BUDGET_BYTES, Index};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{
@@ -90,6 +89,7 @@ use crate::report::{
     after_lock_timeout, conclude, human_space_values, signed_bytes,
 };
 use crate::resolve::{Want, resolve};
+use crate::snapshot::RunIndex;
 use crate::tally::TallyState;
 use crate::units::{Size, format_age, format_bytes};
 use tier_policy::{DeletePolicy, Protection};
@@ -331,30 +331,35 @@ pub fn ensure<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let mut index = TallyState::new(Index::new(BUDGET_BYTES));
-    ensure_with_index(host, request, owners, &mut index, log)
+    ensure_with_index(host, request, owners, &mut RunIndex::ephemeral(), log)
 }
 
-/// [`ensure`] on `index`: the run's synchronous tally adds to it, the
-/// reclaim walk takes its queues from it and updates it (docs/architecture.md,
-/// The reclaim walk). Whatever `index` holds (a seed, or units injected by
-/// a test, stale, partial or wrong) only orders work: every candidate is
-/// found again and checked live.
+/// [`ensure`] on `index`: a run that tallies seeds it from the snapshot
+/// when `index` says so ([`RunIndex::snapshot`]), its synchronous tally
+/// adds to it, the reclaim walk takes its queues from it and updates it
+/// (docs/architecture.md, The reclaim walk), and after the run it is
+/// written as the snapshot ([`RunIndex::finish`]). Whatever it holds (a
+/// seed, or units injected by a test, stale, partial or wrong) only
+/// orders work: every candidate is found again and checked live.
 pub fn ensure_with_index<H: Delete>(
     host: &H,
     request: &Request,
     owners: &[u32],
-    index: &mut TallyState,
+    index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || ensure_inner(host, request, owners, index, log))
+    let report = timed_report(host, || {
+        ensure_inner(host, request, owners, &mut *index, &mut *log)
+    });
+    index.finish(host, log);
+    report
 }
 
 fn ensure_inner<H: Delete>(
     host: &H,
     request: &Request,
     owners: &[u32],
-    index: &mut TallyState,
+    index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let run_started = host.now();
@@ -548,7 +553,7 @@ fn ensure_inner<H: Delete>(
         host,
         index,
         [&request.tier],
-        measured.dev,
+        (measured.dev, measured.min),
         request.tally_budget,
         deadline,
         &mut report,
@@ -691,7 +696,7 @@ fn ensure_inner<H: Delete>(
         deadline_hit: false,
         run_stopped: false,
         in_use_unknown_in_a_row: 0,
-        index: tallied.usable.then_some(index),
+        index: tallied.usable.then_some(&mut index.state),
         tally_refused: &tallied.refused,
         run_started,
     };
@@ -721,7 +726,7 @@ pub fn ensure_grouped<H: Delete>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let mut index = TallyState::new(Index::new(BUDGET_BYTES));
+    let mut index = RunIndex::ephemeral();
     ensure_grouped_with_index(host, request, tiers, tier_timeouts, owners, &mut index, log)
 }
 
@@ -732,12 +737,22 @@ pub fn ensure_grouped_with_index<H: Delete>(
     tiers: &[Tier],
     tier_timeouts: &[Duration],
     owners: &[u32],
-    index: &mut TallyState,
+    index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || {
-        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, index, log)
-    })
+    let report = timed_report(host, || {
+        ensure_grouped_inner(
+            host,
+            request,
+            tiers,
+            tier_timeouts,
+            owners,
+            &mut *index,
+            &mut *log,
+        )
+    });
+    index.finish(host, log);
+    report
 }
 
 fn ensure_grouped_inner<H: Delete>(
@@ -746,7 +761,7 @@ fn ensure_grouped_inner<H: Delete>(
     tiers: &[Tier],
     tier_timeouts: &[Duration],
     owners: &[u32],
-    index: &mut TallyState,
+    index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let run_started = host.now();
@@ -831,7 +846,7 @@ fn ensure_grouped_inner<H: Delete>(
         host,
         index,
         tiers,
-        measured.dev,
+        (measured.dev, measured.min),
         request.tally_budget,
         deadline,
         &mut report,
@@ -1164,7 +1179,7 @@ fn ensure_grouped_inner<H: Delete>(
             deadline_hit: false,
             run_stopped: false,
             in_use_unknown_in_a_row: 0,
-            index: tallied.usable.then_some(&mut *index),
+            index: tallied.usable.then_some(&mut index.state),
             tally_refused: &tallied.refused,
             run_started,
         };

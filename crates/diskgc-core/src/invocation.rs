@@ -23,6 +23,7 @@ use crate::profile::{Body, Finds, Library, Release, Roots, Source};
 use crate::report::{ErrorCause, Report, Status};
 use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in};
 use crate::select;
+use crate::snapshot::RunIndex;
 use crate::units::Size;
 
 /// The built-in catalog a build ships: every built-in (development
@@ -235,6 +236,9 @@ pub struct EnsureOptions {
     pub roots: Vec<String>,
     pub dry_run: bool,
     pub allow_root: bool,
+    /// `--no-index`: the run neither reads nor writes the index snapshot
+    /// (docs/architecture.md, The tally: `--no-index`).
+    pub no_index: bool,
     pub path: PathBuf,
     /// A test seam, not an option: the eligibility walk's entry budget in
     /// place of [`crate::engine::DEFAULT_MAX_ENTRIES`], so a model vector
@@ -419,18 +423,28 @@ fn run<H: Delete>(
         tally_budget: options.tally_budget,
         tier,
     };
+    // A reclaim that tallies starts from the snapshot and writes it; a dry
+    // run neither reads nor writes it (read-only commands write no state,
+    // and its plan judges every candidate whatever an index would hold).
+    let mut index = if options.no_index {
+        RunIndex::no_index()
+    } else {
+        RunIndex::snapshot()
+    };
     let mut report = if let Some((tiers, timeouts, _)) = &configured {
         if options.dry_run {
             executor::dry_run_grouped(host, &request, tiers, timeouts, &owners, progress)
         } else {
-            executor::ensure_grouped(host, &request, tiers, timeouts, &owners, progress)
+            executor::ensure_grouped_with_index(
+                host, &request, tiers, timeouts, &owners, &mut index, progress,
+            )
         }
     } else if options.dry_run {
         // Through `Host` only: the dry run has no way to reach a deleting
         // method (the generic bound is `Delete`; this call does not use it).
         executor::dry_run(host, &request, &owners, progress)
     } else {
-        executor::ensure(host, &request, &owners, progress)
+        executor::ensure_with_index(host, &request, &owners, &mut index, progress)
     };
     report.seed = configured.as_ref().and_then(|(_, _, seed)| *seed);
     Ok(report)

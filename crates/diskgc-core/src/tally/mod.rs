@@ -28,9 +28,8 @@
 //!   sizing ([`TallyState::size_unit`]);
 //! - [`sync`] and [`background`]: the two modes.
 //!
-//! Not here: running the background tally in `watch` (TASK-32), the
-//! snapshot that seeds and saves [`TallyState`] (TASK-30), and the reclaim
-//! walk's use of the synchronous tally (TASK-31).
+//! Not here: running the background tally in `watch` (TASK-32); the
+//! snapshot that seeds and saves [`TallyState`] is [`crate::snapshot`].
 
 pub mod background;
 pub mod budget;
@@ -152,8 +151,13 @@ impl TallyState {
         self.discovered.get(finder).copied()
     }
 
+    /// Every source listed completely, and when.
+    pub fn discovered(&self) -> impl Iterator<Item = (&Finder, MonoTime)> {
+        self.discovered.iter().map(|(f, at)| (f, *at))
+    }
+
     /// Records a complete listing of `finder`'s source at `at` (a seed
-    /// from the snapshot, TASK-30).
+    /// from the snapshot).
     pub fn set_discovered_at(&mut self, finder: Finder, at: MonoTime) {
         self.discovered.insert(finder, at);
     }

@@ -56,6 +56,7 @@ pub mod profile;
 pub mod report;
 pub mod resolve;
 pub mod select;
+pub mod snapshot;
 pub mod suggest;
 pub mod tally;
 pub mod units;

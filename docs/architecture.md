@@ -289,8 +289,12 @@ split step waits for a measured need (backlog).
 - **Refusals.** A tally refusal (kept, another user's, too many entries,
   a checkout) is stored with its time as a hint. A refusal found by this
   run's own synchronous tally skips the candidate for the run, as
-  before the index existed. One from an earlier tally (the snapshot, a
-  long-running `watch`) only ranks the unit after the tier's other units;
+  before the index existed: the walk knows these by the tally's own list,
+  never by a hint's time (a hint timed in the run by a clock step or a
+  corrupt snapshot would otherwise suppress an eligible candidate and let
+  a later tier run first; Codex review of TASK-31). One from an earlier
+  tally (the snapshot, a long-running `watch`), whatever its time, only
+  ranks the unit after the tier's other units;
   before the tier is done it is tallied again, read-only and without
   taking any lock (a kept or another user's Cargo target is never
   locked for this), and then treated as any other candidate, so a
@@ -486,24 +490,38 @@ the order of work.
   and only the first tier's stale units are re-sized; either way the
   seed only orders work. (`survey` sizes everything it reports.) Without a valid snapshot, or with `--no-index`, the synchronous
   tally starts from nothing.
-- **`--no-index`:** the run neither reads nor writes the snapshot; it
-  builds its index from nothing by the synchronous tally (within
-  `--tally-budget`) and discards it at exit. For diagnosing a suspect
-  index; never needed for safety.
+- **`--no-index`:** the run neither reads nor writes the snapshot (no
+  state operation at all); it builds its index from nothing by the
+  synchronous tally (within `--tally-budget`) and discards it at exit;
+  a run that tallies says so in one log line. The live index is used as
+  in any run. For diagnosing a suspect index; never needed for safety.
 - **Snapshot:** the index written atomically to
-  `$XDG_STATE_HOME/diskgc/index-<fs>` (mode 0600: it lists paths of the
-  user's files, no contents). `<fs>` is the filesystem's UUID where it
-  has one, otherwise its device number; not `f_fsid`, which is 0 on
-  tmpfs on older kernels, and not the mount path.
+  `$XDG_STATE_HOME/diskgc/index-<fs>` (`$HOME/.local/state/diskgc` when
+  `XDG_STATE_HOME` is unset or not absolute; no snapshot at all when
+  neither is absolute; mode 0600: it lists paths of the user's files, no
+  contents). The state directory is created mode 0700 when a writer first
+  needs it, and must be a directory of diskgc's user that no one else
+  may write to (otherwise nothing is read or written there, with a log
+  line). `<fs>` is `uuid-<uuid>`, the filesystem's UUID where the system
+  names one (the udev link `/dev/disk/by-uuid` whose block device is the
+  filesystem's device), otherwise `dev-<major>-<minor>`; not `f_fsid`,
+  which is 0 on tmpfs on older kernels, and not the mount path. tmpfs,
+  btrfs (whose files' `st_dev` is not its block device) and containers
+  without udev links get the device number, so their snapshots are
+  valid within one boot only (Validity).
   - **Who writes, when.** `watch` every 5 minutes and on exit. `ensure`
-    once, after its reclaim walk, when its run tallied or acted on
-    anything, before its deadline (never past it) and not after a
-    terminating signal. A run that exits 0 at once because space is
+    once, after its reclaim walk, when its run tallied, before its
+    deadline (never past it) and not after a terminating signal. A run that exits 0 at once because space is
     already there stays an instant no-op (Mark, 2026-10-25): no tally,
     no snapshot write. Warmth on a machine that is rarely short of
     space comes from `watch` or `watch --tally-only`, not from
     `ensure`. `survey` and
-    `--dry-run` do not write (read-only commands write no state).
+    `--dry-run` do not write (read-only commands write no state); a
+    dry run does not read it either (its plan judges every candidate
+    whatever an index holds). Not after a terminating signal, and not
+    at or past the run's deadline (checked again right before the
+    write). `ensure` seeds and writes only when its run tallies (it
+    selects a tier the index serves).
   - **Never at the cost of the goal.** The snapshot is usually on
     `/home`, possibly the filesystem just reclaimed. When the state
     directory is on the filesystem the run works on, the writer skips
@@ -518,36 +536,71 @@ the order of work.
     never renamed. `watch` holds it exclusively for its lifetime; at
     start it waits for it at most 10 seconds (an `ensure` holds it only
     while writing) and then fails (exit 2: another `watch` for the same
-    filesystem and user). `ensure` tries it without waiting just before
-    writing: held (a `watch` runs, or another `ensure` is writing) means
-    it skips the write with one log line, losing only warmth: a running
-    `watch` keeps its own index and re-checks what `ensure` deleted.
+    filesystem and user). `ensure` tries it just before writing, for at
+    most 100 ms (a lock its last holder just released can look held for
+    the length of another process's `/proc` read,
+    [safety.md](safety.md#host-lock)): still held (a `watch` runs, or
+    another `ensure` is writing) means it skips the write with one log
+    line, losing only warmth: a running `watch` keeps its own index and
+    re-checks what `ensure` deleted. The lock file is created by its own
+    state operation (The `Host` port).
   - **Replace, never merge.** The writer's index already started from
     the seed and carries this run's tally and actions, so it replaces
     the file whole (temporary file + rename). Two `ensure` runs that
     overlap can overwrite each other's warmth (last writer wins); each
     file is a complete, valid index.
   - **Atomicity and integrity.** A reader sees the old file or the new
-    one. There is no `fsync` (it can stall on unrelated I/O); a file
-    torn by a crash fails its checksum and is ignored. Two mounts with
+    one: the `O_TMPFILE` is filled, linked in as `index-<fs>.new` and
+    renamed onto `index-<fs>`; a crash between the link and the rename
+    leaves a complete `.new`, which the next write renames onto the
+    snapshot before linking its own. There is no `fsync` (it can stall
+    on unrelated I/O); a file torn by a crash fails its checksum and is
+    ignored. Two mounts with
     one UUID (btrfs subvolumes) share a file name; the boot-independent
     identity includes `st_dev`, so units of the other mount do not match
     and cost only warmth.
   - **Format.** Binary (paths are bytes, not UTF-8): a header (magic,
     format version, diskgc version, the `<fs>` key, the owner's uid,
-    the boot id, the write time), the units with their finders and
-    roots' `discovered_at`, and a trailing checksum. No fixed size
-    beyond the budget: a file larger than twice the budget is refused
-    unread.
-  - **Validity.** Loaded as a seed only if magic, format version,
-    checksum, `<fs>` key and owner uid match; for a filesystem without
-    a UUID (tmpfs), also the boot id, since its device number and inode
-    numbers repeat after a reboot. Units whose finders' profile hashes no
-    longer match are dropped on load (Finders). A snapshot of another
-    user is unreadable, and the report says so. A mismatched, corrupt or
-    oversized snapshot is ignored with a log line; the report's `index`
-    says the run started from nothing. Age never invalidates a snapshot:
-    the tally re-lists and re-tallies by age.
+    the boot id, the write time), a table of finders with each source's
+    `discovered_at`, a table of mounts, the singles and the blocks, and a
+    trailing 64-bit FNV-1a checksum (it detects tearing and damage, not
+    tampering: the file is the user's own and grants nothing). The byte
+    layout is in `diskgc-core` `snapshot::format`. No fixed size beyond
+    the budget: a file larger than twice the budget is refused unread.
+    Cursors and listing rounds are not written.
+  - **Times.** Monotonic times mean nothing in another process's boot,
+    so none is written: each is written as the wall-clock time it
+    corresponds to at the write, and read back as the monotonic time
+    that is the same age at the load, at least one nanosecond before the
+    load (so before the loading run started). A time that cannot be read
+    back so is unknown: in the future (the wall clock was set back) or
+    older than the monotonic clock's origin (this boot). Unknown is as
+    if never: no `discovered_at` (listed again), no tally (sized again),
+    no refusal hint. Refusal hints decide nothing about this run either
+    way (Refusals).
+  - **Validity.** Loaded as a seed only if it is a regular file (never
+    through a symlink) owned by diskgc's user that no one else may read
+    or write (`mode & 0o077 == 0`), and magic, format version, checksum,
+    diskgc version (profile hashes are stable only within one build),
+    `<fs>` key and owner uid match; for a filesystem without a UUID
+    (tmpfs), also the boot id, since its device number and inode
+    numbers repeat after a reboot. Every path must be absolute and
+    canonical (no `.`, `..`, empty or doubled component, no trailing
+    `/`), a unit strictly below its mount point and below each of its
+    finders' roots, a block's site at or below its mount point, every
+    identity on its mount's device, every index in range: one entry that
+    is not is a bug or tampering, so the whole snapshot is ignored (the
+    index asserts these shapes; a loaded file must never reach that
+    assertion). A finder whose profile this run binds under another hash
+    (the profile was edited) is dropped on load with its
+    `discovered_at`, and a unit left without a finder is not restored
+    (Finders); finders of profiles this run does not bind stay for the
+    runs that do (they enter no queue with a wrong hash anyway). An
+    ignored snapshot (missing, another user's, mismatched, corrupt,
+    oversized) is one log line naming why, and the run's synchronous
+    tally starts from nothing; the report's `index` block (its `source:
+    sync`) is TASK-244. A valid write replaces it. Age never invalidates
+    a snapshot: the tally re-lists and re-tallies by age.
 - **Docker units** carry the reclaimable size the bound backend reports
   (`docker buildx du`, `docker system df`), or no size if unknown; TASK-120
   settles which query, since Buildx writes client configuration.
@@ -711,8 +764,7 @@ reclaim(min, goal, filesystem, deadline):
   the run) can come after queued candidates of that tier were deleted;
   each of them passed every live check, and the discovery's error still
   stops the tier and the run (exit 3). The same holds for a root the
-  tally did not list because a seed's listing was recent (reachable once
-  the snapshot exists, TASK-30).
+  tally did not list because the snapshot's listing of it was recent.
 
 ### Measuring space
 
@@ -819,20 +871,25 @@ is accepted until measured otherwise.
   test driver's wrapper passes the call through to it unless a pause or
   kill point names a reader.
 - **diskgc's own state** (the index snapshot) is written through one port
-  operation that takes only a typed key (no fd or name from the caller):
-  `LinuxHost` opens the state directory itself, creates the temporary file
-  with `O_CREAT|O_EXCL` (or `O_TMPFILE` and `linkat`), never `O_TRUNC`, and
-  renames only onto `index-<fs>`; `ModelHost` checks the same shape. It is
-  not gated (it is diskgc's
-  cache, not user data, and `watch --tally-only` must work anywhere).
-  The single-writer lock file is a second typed operation beside it:
-  `LinuxHost` opens (creating if absent) `index-<fs>.lock` beneath the
-  same state-directory fd, `O_RDONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC`, mode
-  0600, for `flock` only; nothing is ever written to it or renamed onto
-  it. Each of the two is its own ungated entry in the source scan's
-  allowlist, with its reason and exact match count; they will be the
-  only writes, creations or renames the scan allows outside `Delete`.
-  Until the snapshot exists, the scan allows none.
+  operation, `state_write`, that takes only a typed key (`FsKey`; no fd
+  or name from the caller) and the held single-writer lock: `LinuxHost`
+  opens the state directory itself (given to it by the binary at
+  construction), creates the temporary file with `O_TMPFILE` (mode 0600)
+  and links it in as `index-<fs>.new` with `linkat`, never `O_TRUNC`, and
+  renames only onto `index-<fs>`; the lock must be that key's lock file
+  (same object) held exclusively, which `ModelHost` checks (a test fails
+  otherwise). It is not gated (it is diskgc's cache, not user data, and
+  `watch --tally-only` must work anywhere). The single-writer lock file
+  is a second typed operation beside it, `state_lock`: `LinuxHost` opens
+  (creating if absent, with the state directory, mode 0700)
+  `index-<fs>.lock` beneath the state-directory fd,
+  `O_RDONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC`, mode 0600, for `flock` only;
+  nothing is ever written to it or renamed onto it. Each of the two is
+  its own ungated entry in the source scan's allowlist
+  (`diskgc-linux/src/state.rs`, with its reason and exact match count);
+  they are the only writes, creations or renames the scan allows outside
+  `Delete`. Read-only beside them: `state_read` (the snapshot, never
+  through a symlink, with its owner and mode), `fs_uuid` and `boot_id`.
 - **Time is part of the port.** The clock, every blocking operation (host
   lock wait, child wait, the SIGTERM → 10 s → SIGKILL sequence, re-sampling)
   and the tally's batch timing and sleeps are port operations; `ModelHost`
