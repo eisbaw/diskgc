@@ -1492,6 +1492,12 @@ skip, exit, and deletion diff. The clock and mount geometry are intentionally
 projected away in this outcome-only
 path; literal replay is not claimed. Adding a checked-in vector requires a
 new classification and parity evidence.
+That inventory covers `tests/models/profiles`. A corpus vector below
+`tests/vectors` is replayed the same way only where its own container case
+names it: `container_storage_vector_matches_linux_outcomes_and_deletion_diff`
+replays `walk/container-storage-cargo-targets-in-layers.yaml` (TASK-242:
+Cargo targets in Podman, Docker and containerd storage roots, one refusal
+per storage root, no deletion inside one).
 
 The other checked-in host-model YAMLs are classified separately:
 `sketch/locked-cargo-target.yaml` uses a call-time event and exact external

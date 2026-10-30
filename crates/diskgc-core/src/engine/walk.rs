@@ -26,6 +26,11 @@
 //!    marker's name ([`CHECKOUT_MARKERS`], whatever its type, anywhere, the
 //!    candidate itself included) (`contains_checkout`).
 //!
+//! Before those, each directory's complete listing, the candidate's own
+//! first, is judged as a whole: a container storage root
+//! ([`super::container_storage`]) refuses the candidate
+//! (`contains_special`).
+//!
 //! The first entry that fails stops the walk. Host errors on the way are
 //! classified in one place, [`host_failure`]: fail closed, never treated as
 //! empty.
@@ -420,6 +425,17 @@ impl<H: Host> Walker<'_, H> {
             Err(e) => return Err(host_failure(stack.path(i, None), "list", &e)),
         };
         names.sort();
+        // By the whole listing, before any entry is admitted: a storage
+        // root is told by names side by side (container_storage), and the
+        // candidate itself is the first directory listed.
+        if let Some(storage) = super::container_storage::in_listing(&names) {
+            return Err(Skip::new(
+                Reason::ContainsSpecial,
+                stack.path(i, None),
+                storage.detail(),
+            )
+            .into());
+        }
         let mut entries = Vec::with_capacity(names.len());
         for name in names {
             let path = || stack.path(i, Some(&name));

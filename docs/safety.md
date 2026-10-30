@@ -152,6 +152,68 @@ Immediately before acting, diskgc walks the candidate's whole tree
   directory may remove. Content that a `command` profile would clean (e.g. a
   Go cache inside a deleted `/tmp` directory) is *not* protected by
   nesting; protect it with `protect:` or `!profile:` if it matters.
+- **No container storage** (`contains_special`, TASK-242): no directory in
+  the candidate, the candidate itself included, and neither the root nor
+  any directory between it and the candidate, is a container storage
+  root; of every kind and action, and no profile, tier or flag turns it
+  off. Rootless Podman and rootless Docker keep image layers and
+  containers below the home directory
+  (`~/.local/share/containers/storage`, `~/.local/share/docker`), and a
+  file a container's root wrote belongs to the user there: a layer that
+  ran `cargo build` holds a Cargo target that discovery finds, the
+  ownership walk admits and the idle measure calls old (layer times are
+  the image's). Deleting it corrupts the image; deleting any other part of
+  the storage corrupts the engine's own bookkeeping. Rootful storage
+  (`/var/lib/containers/storage`, `/var/lib/docker`,
+  `/var/lib/containerd`) is the same under `--allow-root`.
+  - **By names, not paths:** every engine lets its storage be moved
+    (`graphroot`, `data-root`, containerd's `root`), so a storage root is
+    the directory that holds both names of one pair
+    (`container_storage` in the engine): a containers/storage graphroot
+    (Podman, Buildah, CRI-O) holds `storage.lock` and a driver's
+    `<driver>-layers` (`overlay`, `vfs`, `btrfs`, `zfs`, `aufs`,
+    `devicemapper`); a Docker data root holds `image` and a graph driver's
+    directory (`overlay2`, `fuse-overlayfs`, `vfs`, `btrfs`, `zfs`,
+    `aufs`, `devicemapper`), or `engine-id` and `containers`; a containerd
+    root (Docker's own with the containerd image store is
+    `<data-root>/containerd/daemon`) holds
+    `io.containerd.metadata.v1.bolt` or
+    `io.containerd.content.v1.content`. Names only, whatever their type:
+    a project that happens to hold both names of a pair is kept, and the
+    skip names them; one name alone (a project's `storage.lock`) is no
+    storage root. Evidence: the rootless and rootful Podman 5.8.7
+    graphroots on the development machine (2026-10-30); the classic
+    `vfs` and the containerd-store layouts of the Docker 29.8.2 fixture
+    ([Docker kinds](#docker-kinds)). `engine-id` (Docker 23 and later) is
+    from Moby's source, not measured here.
+  - **Where it is checked.** In the walk, each directory's complete
+    listing, the candidate's first, before any entry of it is admitted.
+    On the way, each directory from the root down to the candidate's
+    parent, the root included, as the keep markers on the way are: for
+    an `fs` candidate a `statx` of each marker name in the directories it
+    was reached through, the first name of each pair first and its
+    partner only where that held (a handful of calls per level), fail
+    closed like a keep marker (a mount point of that name counts, a name
+    that cannot be told refuses the candidate), at its approach and again
+    under its lock and before acting (Deletion, steps 2 and 4); for a
+    Cargo target the
+    listings its reach already makes, and the target, its triple
+    directories and its profile directories, which its inspection lists.
+    Discovery of both kinds does not descend into a storage root it lists
+    and reports it once, with the storage root as the candidate, however
+    many roots reach it (by device and inode): one skip for
+    `~/.local/share/containers/storage` instead of one `unreadable` per
+    subuid-owned layer. A pattern whose literal names lead into storage
+    is not listed there; its candidates are refused one by one at their
+    judgement.
+  - **Limits.** The root's own ancestors are not looked at: a root named
+    inside a storage root (`--roots ~/.local/share/containers/storage/overlay`)
+    is taken as meant, as for a keep marker. A storage root diskgc cannot
+    list (`/var/lib/docker` is mode `0710`, root's) is `unreadable`, never
+    entered either. Other engines' layouts (LXD/Incus, a standalone
+    BuildKit's `/var/lib/buildkit`, VM disk images) are not recognised.
+    A storage root made after the last check of a level is the window
+    after the check, as for a keep marker.
 - **No source checkout** (`contains_checkout`), unless the candidate's
   source profile says `checkouts: allow` (below); of every kind and
   action, plain `delete`, command actions (Mark, 2026-10-18:
@@ -1845,8 +1907,10 @@ filesystem as it is then, whatever the tally or a plan said:
    traversal; the root's `mountinfo` line judged first), and it must be
    the object discovery found (identity; `changed`, or `missing` when
    gone). No keep marker in the root or any directory on the way (`kept`):
-   a `statx` of the name in each directory reached, never a listing. A kept
-   candidate is never locked.
+   a `statx` of the name in each directory reached, never a listing; nor
+   container storage there (`contains_special`, No container storage), by
+   `statx` of its marker names the same way. A kept candidate is never
+   locked.
 3. **Lock.** Take an exclusive `flock` on the candidate (directories),
    opened below its parent, without waiting, as systemd-tmpfiles does, so
    cooperating tools see it is being removed: held by anyone else, shared
@@ -1855,8 +1919,8 @@ filesystem as it is then, whatever the tally or a plan said:
    locked.
 4. **Judged again under the lock:** the mount table read again; the
    **path** again (below); the place again on it (a mount made since
-   step 1 is `contains_mount`, never looked into); the keep markers on the
-   way again; the source's own `where` (no longer
+   step 1 is `contains_mount`, never looked into); the keep markers and
+   container storage on the way again; the source's own `where` (no longer
    passing it: `changed`); the eligibility walk (above), whose root must be
    the object found and the one locked (`changed`); the idle requirement
    on its newest change (none known: never idle). Then the in-use check
@@ -1882,8 +1946,9 @@ filesystem as it is then, whatever the tally or a plan said:
    followed) in the directory held above it must be the directory held for
    it, and the candidate's name in its parent the object found (identity:
    device, inode, owner, type, birth time where reported). Anything else,
-   a name gone included, is `changed`. The keep markers are then looked
-   for in the directories held, which are the directories on the path. One
+   a name gone included, is `changed`. The keep markers and container
+   storage are then looked for in the directories held, which are the
+   directories on the path. One
    `statx` per level and a transient resolution of the root; nothing
    stays open, so the fd budget is step 2's. Each level is checked at its
    own instant: the guarantee is that every level led to the next during
@@ -2226,7 +2291,7 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   holding a `.cargo-*lock*` file, known name or not (a target whose only
   lock name is unknown is listed as `unsupported_layout`, not missed). A target is at most six directories
   below its root (the root itself is depth 0). Do not descend into a found
-  target. Hidden directories are walked like any other (agent worktrees
+  target or a container storage root (below). Hidden directories are walked like any other (agent worktrees
   hold targets). Never follow symlinks or cross mounts: a mount below a
   root is not entered. A root on a network filesystem is refused without
   being read (`unsupported_fs`): Cargo does not lock there. A target
@@ -2245,6 +2310,12 @@ as whole; a Cargo using it as a half then still conflicts with diskgc on
   removed or replaced since discovery is `changed`. A directory of another
   mount one or two levels inside the target (where a profile directory
   could hide) is `contains_mount`.
+- **Container storage** (`contains_special`, [No container
+  storage](#the-eligibility-walk-mandatory-per-candidate)): in the root or
+  any directory between it and the target (the listings of the reach), in
+  the target, a triple directory or a profile directory (the listings of
+  its inspection), or in what would be deleted (the walks). Discovery does
+  not descend into one and reports it once.
 - **Keep markers** (`kept`): in the root or any directory between it and
   the target, in the target directory or a directory directly in it, or in
   what would be deleted (a profile directory's entries, walked). A marker

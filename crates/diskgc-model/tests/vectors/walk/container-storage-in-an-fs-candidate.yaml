@@ -1,0 +1,46 @@
+# TASK-242. A plain-delete candidate that holds container storage
+# (`vm-store`, a graphroot two levels down) or is a storage root itself
+# (`graph`) is refused by the eligibility walk (`contains_special`):
+# container storage is never deleted, whatever profile found the
+# directory around it. A directory holding only a file named
+# `storage.lock` (`plain`) is no storage root and is deleted.
+profile_vector: 1
+user_profiles:
+  - name: data-star
+    find: {roots: [/home/tester/data], paths: ["*"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/data/anything]}
+profile: data-star
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/data/vm-store/containers/storage:
+      storage.lock: {}
+      vfs-layers: {layers.json: {}}
+      vfs: {dir: {e5f6: {usr: {bin: {app: {size: 1M}}}}}}
+    /home/tester/data/graph:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {app: {size: 1M}}}}
+    /home/tester/data/plain: {storage.lock: {}, notes: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /home/tester/data/graph, reason: contains_special}
+    - {candidate: /home/tester/data/plain}
+    - {candidate: /home/tester/data/vm-store, reason: contains_special}
+  reclaim_exit: 1
+  actions: [/home/tester/data/plain]
+  removed: [/home/tester/data/plain]
+  skipped:
+    - {candidate: /home/tester/data/graph, reason: contains_special}
+    - {candidate: /home/tester/data/vm-store, reason: contains_special}
+  preserved:
+    - /home/tester/data/vm-store/containers/storage/vfs/dir/e5f6/usr/bin/app
+    - /home/tester/data/graph/overlay/0a1b2c/diff/app

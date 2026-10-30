@@ -1,0 +1,106 @@
+# TASK-242. Rootless container storage lives below the home directory,
+# and a file a container's root wrote belongs to the user there: a Cargo
+# target inside an image layer looks like the user's own, idle target.
+# Container storage is never searched or deleted (docs/safety.md, The
+# eligibility walk: no container storage): discovery refuses each storage
+# root once (`contains_special`, candidate: the storage root) and walks
+# nothing below it, whether a root lies above it (containers, containerd)
+# or is the storage root itself (docker, docker29). `share`, a root above
+# all of them, reaches each again: still one refusal per storage root.
+#
+# - a containers/storage graphroot: `storage.lock` and `overlay-layers`
+#   (the layout measured on the development machine, Podman 5.8.7);
+# - a classic Docker data root: `image` and `overlay2`;
+# - a Docker 23+ data root with the containerd image store: `engine-id`
+#   and `containers` (a target in a named volume);
+# - a containerd root: `io.containerd.metadata.v1.bolt`.
+#
+# A target whose profile directory is itself shaped like a graphroot
+# (`weird`) is refused when discovery inspects it. No false positive: a
+# project holding only `storage.lock` (`lockproj`), or `image` beside a
+# directory that is no graph driver (`imgproj`), is reclaimed as usual.
+profile_vector: 1
+profile: cargo-target
+roots:
+  - /home/tester/.local/share
+  - /home/tester/.local/share/containers
+  - /home/tester/.local/share/docker
+  - /home/tester/.local/share/docker29
+  - /home/tester/.local/share/containerd-root
+  - /home/tester/src
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      userns.lock: {}
+      db.sql: {}
+      libpod: {.: {}}
+      overlay-images: {images.json: {}, images.lock: {}}
+      overlay-layers: {layers.json: {}, layers.lock: {}}
+      overlay:
+        l: {.: {}}
+        0a1b2c: {link: {}, diff: {app: {Cargo.toml: {}, target: {CACHEDIR.TAG: {cachedir_tag: true}, release: {.cargo-lock: {}, .fingerprint: {app-1: {}}, deps: {app: {size: 1M}}, app: {size: 1M}}}}}}
+    /home/tester/.local/share/docker:
+      image: {overlay2: {imagedb: {.: {}}}}
+      containers: {.: {}}
+      volumes: {.: {}}
+      overlay2:
+        3d4e5f: {link: {}, diff: {app: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}
+    /home/tester/.local/share/docker29:
+      engine-id: {}
+      containers: {.: {}}
+      volumes: {cache: {_data: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}
+    /home/tester/.local/share/containerd-root:
+      io.containerd.metadata.v1.bolt: {meta.db: {}}
+      io.containerd.snapshotter.v1.overlayfs:
+        snapshots: {"7": {fs: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}
+    /home/tester/src/weird/Cargo.toml: {}
+    /home/tester/src/weird/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}, storage.lock: {}, overlay-layers: {layers.json: {}}}
+    /home/tester/src/lockproj:
+      Cargo.toml: {}
+      storage.lock: {}
+      target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+    /home/tester/src/imgproj:
+      Cargo.toml: {}
+      image: {logo.png: {}}
+      overlay: {x: {}}
+      target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker29, reason: contains_special}
+    - {candidate: /home/tester/.local/share/containerd-root, reason: contains_special}
+    - {candidate: /home/tester/src/weird/target/debug, reason: contains_special}
+    - {candidate: /home/tester/src/lockproj/target}
+    - {candidate: /home/tester/src/imgproj/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/lockproj/target, /home/tester/src/imgproj/target]
+  removed: [/home/tester/src/lockproj/target/debug/deps, /home/tester/src/imgproj/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker29, reason: contains_special}
+    - {candidate: /home/tester/.local/share/containerd-root, reason: contains_special}
+    - {candidate: /home/tester/src/weird/target/debug, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/release/deps/app
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/release/app
+    - /home/tester/.local/share/docker/overlay2/3d4e5f/diff/app/target/debug/deps/app
+    - /home/tester/.local/share/docker29/volumes/cache/_data/target/debug/deps/app
+    - /home/tester/.local/share/containerd-root/io.containerd.snapshotter.v1.overlayfs/snapshots/7/fs/target/debug/deps/app
+    - /home/tester/src/weird/target/debug/deps/app
+    - /home/tester/src/weird/target/debug/storage.lock
+    - /home/tester/src/weird/target/debug/overlay-layers/layers.json
+    - /home/tester/src/lockproj/storage.lock
+    - /home/tester/src/imgproj/image/logo.png

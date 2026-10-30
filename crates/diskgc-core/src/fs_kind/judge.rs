@@ -19,7 +19,9 @@
 //!    network filesystem, a `systemd-private-*` bind mount), and the
 //!    candidate itself `statx`ed: gone (`missing`) or not the object found
 //!    (`changed`, [`same_object`]); then [`no_keep_markers`]: a keep marker
-//!    in the root or any directory on the way (`kept`);
+//!    in the root or any directory on the way (`kept`); then
+//!    [`outside_container_storage`]: the root or a directory on the way is
+//!    a container storage root (`contains_special`);
 //! 3. [`Judge::source_where`]: the source's own entry predicates again; a
 //!    candidate that no longer passes it is `changed`;
 //! 4. [`Judge::walk`]: the deletion engine's eligibility walk with the
@@ -165,6 +167,7 @@ impl Judge<'_> {
         }
         let reached = judged!(reach(host, found, mounts, deadline));
         judged!(no_keep_markers(host, &reached, mounts, deadline));
+        judged!(outside_container_storage(host, &reached, mounts, deadline));
         Ok(Ok(reached))
     }
 
@@ -1767,7 +1770,8 @@ pub(crate) fn still_reached<H: Host>(
         Err(e) if e.is(Errno::ENOENT) => return changed(&found.path, "is gone"),
         Err(e) => return Ok(Err(skip_or_stop(found.path.clone(), "stat", &e)?)),
     }
-    no_keep_markers(host, reached, mounts, deadline)
+    judged!(no_keep_markers(host, reached, mounts, deadline));
+    outside_container_storage(host, reached, mounts, deadline)
 }
 
 /// No keep marker in the root or any directory on the way to the
@@ -1798,6 +1802,57 @@ pub(crate) fn no_keep_markers<H: Host>(
             Ok(_) => return kept(),
             Err(e) if e.is(Errno::ENOENT) => {}
             Err(e) => return Ok(Err(skip_or_stop(marker.clone(), "stat", &e)?)),
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// The candidate lies inside no container storage
+/// ([`engine::container_storage`], `contains_special`): the root and every
+/// directory on the way to the candidate, the directories [`reach`] went
+/// through, is asked for the recogniser's marker names, a `statx` of each
+/// (not followed, whatever it is), and a mount point of that name counts
+/// without being touched, as a keep marker does. A rule's later names are
+/// asked only where its first held, so a directory that is no storage root
+/// costs a handful of `statx` calls. Fail closed as [`no_keep_markers`]:
+/// a marker that cannot be told refuses the candidate.
+pub(crate) fn outside_container_storage<H: Host>(
+    host: &H,
+    reached: &Reached<H::Fd>,
+    mounts: &[MountEntry],
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    enum Halt {
+        Skip(Skip),
+        Stop(Stop),
+    }
+    for (path, dir) in &reached.dirs {
+        let found = engine::container_storage::recognise(|name| {
+            let marker = path.join(name);
+            if is_mount_point(mounts, &marker) {
+                return Ok(true);
+            }
+            check_deadline(host, deadline, &marker).map_err(Halt::Stop)?;
+            match host.statx(Base::Dir(&dir.fd), Path::new(name)) {
+                Ok(_) => Ok(true),
+                Err(e) if e.is(Errno::ENOENT) => Ok(false),
+                Err(e) => Err(match skip_or_stop(marker, "stat", &e) {
+                    Ok(skip) => Halt::Skip(skip),
+                    Err(stop) => Halt::Stop(stop),
+                }),
+            }
+        });
+        match found {
+            Ok(None) => {}
+            Ok(Some(storage)) => {
+                return Ok(Err(Skip::new(
+                    Reason::ContainsSpecial,
+                    path.clone(),
+                    storage.inside_detail(path),
+                )));
+            }
+            Err(Halt::Skip(skip)) => return Ok(Err(skip)),
+            Err(Halt::Stop(stop)) => return Err(stop),
         }
     }
     Ok(Ok(()))

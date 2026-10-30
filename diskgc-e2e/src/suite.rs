@@ -513,6 +513,12 @@ pub static TESTS: &[Test] = &[
         run: differential_suite::bun_vector_matches_linux_outcomes_and_deletion_diff,
     },
     Test {
+        name: "container_storage_vector_matches_linux_outcomes_and_deletion_diff",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: differential_suite::container_storage_vector_matches_linux_outcomes_and_deletion_diff,
+    },
+    Test {
         name: "mypy_vector_matches_linux_outcomes_and_deletion_diff",
         tier: Tier::Fast,
         expect: Expect::Pass,

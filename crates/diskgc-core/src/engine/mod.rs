@@ -41,6 +41,7 @@
 //! and a writer filling a directory faster than it is read cannot keep the
 //! walk going.
 
+pub mod container_storage;
 mod delete;
 mod frames;
 mod walk;
@@ -553,7 +554,10 @@ pub enum Reason {
     /// and it (`keep_marker`; named `kept` before 0.1, TASK-192).
     KeepMarker,
     /// A PrivateTmp entry, a Cargo lock file name (`.cargo-*lock*`, known
-    /// or not) anywhere, or a device node or an object of unknown type.
+    /// or not) anywhere, or a device node or an object of unknown type; or
+    /// container storage ([`container_storage`]) in the candidate, the
+    /// candidate itself, or the root or a directory between it and the
+    /// candidate (TASK-242).
     ContainsSpecial,
     /// A version-control checkout is inside ([`CHECKOUT_MARKERS`]
     /// anywhere, the candidate itself included), or the candidate lies

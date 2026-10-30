@@ -21,7 +21,8 @@
 //! a mount point is never `statx`ed (a dead FUSE mount cannot hang the
 //! walk), and as a candidate it is `contains_mount`, like a candidate with
 //! a mount inside, before the source's own `where` would look into it.
-//! `systemd-private-*` is never a candidate and never entered.
+//! `systemd-private-*` is never a candidate and never entered, nor is a
+//! container storage root the walk lists (`contains_special`, refused once).
 //!
 //! Per candidate, in this order: its identity (a type, inode or owner the
 //! kernel does not report is `unsupported_fs`), found once (a candidate
@@ -54,6 +55,7 @@ use std::path::{Path, PathBuf};
 use super::judge::{RootRefused, mounted_at_or_inside, resolve_root, skip_or_stop, source_where};
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
+use crate::engine::container_storage::in_listing;
 use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip, Work};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
 use crate::outcome::Stop;
@@ -101,6 +103,9 @@ pub struct Discovery {
     /// Candidates found again (another root or pattern reached the same
     /// object): listed once.
     pub duplicates: Vec<PathBuf>,
+    /// Container storage roots refused so far (in `refused`), by identity:
+    /// one reached again through another root is not refused twice.
+    pub storage_roots: HashSet<DevIno>,
     /// `systemd-private-*` names a pattern matched, and roots inside one
     /// (by their path, or a bind mount of one by their mount's root; those
     /// are in `refused` too, as `unsafe_path`): never searched, never
@@ -828,6 +833,11 @@ impl<H: Host> Walk<'_, H> {
 
     /// The names to look at in `dir`, sorted: the whole listing when an
     /// active pattern has a `*` at this level, otherwise the literal names.
+    /// A whole listing that shows a container storage root refuses `dir`
+    /// (`contains_special`, [`crate::engine::container_storage`]): nothing
+    /// below it is looked at. Literal names are not a listing, so a
+    /// pattern that names its way into storage is refused per candidate,
+    /// at its judgement.
     fn names(
         &mut self,
         dir: &Resolved<H::Fd>,
@@ -856,6 +866,19 @@ impl<H: Host> Walk<'_, H> {
             return Ok(Ok(literals));
         }
         Ok(match self.host.read_dir(&dir.fd, DEFAULT_MAX_ENTRIES) {
+            // Container storage is never searched: one refusal for the
+            // storage root, not one per layer below it (TASK-242).
+            // Overlapping roots that reach it again do not refuse it twice.
+            Ok(DirListing::Names(names)) if let Some(storage) = in_listing(&names) => {
+                match dir.stat.dev_ino() {
+                    Some(id) if !self.out.storage_roots.insert(id) => Ok(Vec::new()),
+                    _ => Err(Skip::new(
+                        Reason::ContainsSpecial,
+                        path.to_owned(),
+                        storage.detail(),
+                    )),
+                }
+            }
             Ok(DirListing::Names(mut names)) => {
                 names.sort();
                 Ok(names)

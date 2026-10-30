@@ -1,0 +1,38 @@
+# TASK-242. Deletion-time checks are the authority (PRD, The index never
+# decides safety): a directory on the way to a planned target becomes a
+# container storage root (its `storage.lock` appears beside its
+# `overlay-layers`) after the plan and before the target's lock files are
+# taken. The recheck under the locks lists every directory from the root
+# down to the target's parent again and refuses it (`contains_special`):
+# nothing removed.
+profile_vector: 1
+profile: cargo-target
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/store/overlay-layers: {.: {}}
+    /home/tester/src/store/overlay/0a1b2c/diff/app/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+  events:
+    - at: {op: flock, path: /home/tester/src/store/overlay/0a1b2c/diff/app/target/debug/.cargo-lock, nth: 1, when: before}
+      create: /home/tester/src/store/storage.lock
+expect:
+  plan:
+    - {candidate: /home/tester/src/store/overlay/0a1b2c/diff/app/target}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/store/overlay/0a1b2c/diff/app/target, reason: contains_special}
+  preserved:
+    - /home/tester/src/store/overlay/0a1b2c/diff/app/target/debug/deps/app
+    - /home/tester/src/store/storage.lock

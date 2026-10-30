@@ -7,7 +7,8 @@
 //! engine's listing budget per directory; it never follows a symlink,
 //! never crosses a mount (every directory is opened with `open_beneath`
 //! below its parent, and only directories on the root's mount are
-//! entered), never descends into a found target, and refuses a root on a
+//! entered), never descends into a found target or a container storage
+//! root (refused once, `contains_special`), and refuses a root on a
 //! network filesystem without reading it. Hidden directories are walked
 //! like any other: agent worktrees (`~/.claude/worktrees/*/target`) hold
 //! targets too.
@@ -51,6 +52,9 @@ pub struct Discovery {
     /// roots, a bind mount of the same directory): the same object as a
     /// target listed in `targets`, so not listed twice.
     pub duplicates: Vec<PathBuf>,
+    /// Container storage roots refused so far (in `refused`), by identity:
+    /// one reached again through another root is not refused twice.
+    pub storage_roots: HashSet<DevIno>,
 }
 
 /// Finds the Cargo targets below `roots` (absolute paths). Errors of the
@@ -361,7 +365,9 @@ fn has_valid_tag<H: Host>(host: &H, dir: &H::Fd, mount_id: u64, path: &Path) -> 
 /// `.cargo-*lock*` file in it, known name or not; the other directories
 /// directly in it; and a keep marker in it or in one of those. A directory
 /// of another mount one or two levels down (where a profile directory
-/// could hide) is `contains_mount`; anything unreadable fails closed.
+/// could hide) is `contains_mount`; a container storage root among the
+/// directories listed, the target itself included, `contains_special`;
+/// anything unreadable fails closed.
 pub fn inspect<H: Host>(
     host: &H,
     target: &H::Fd,
@@ -385,6 +391,9 @@ fn inspect_in<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Inspected> {
     let names = judged!(list(host, target, path, deadline));
+    if let Err(skip) = not_container_storage(path, &names) {
+        return Ok(Err(skip));
+    }
     let mut inspected = Inspected {
         profiles: Vec::new(),
         dirs: Vec::new(),
@@ -404,6 +413,9 @@ fn inspect_in<H: Host>(
         }
         let (fd, stat) = judged!(open_dir(host, target, mount_id, &rel, &at));
         let inside = judged!(list(host, &fd, &at, deadline));
+        if let Err(skip) = not_container_storage(&at, &inside) {
+            return Ok(Err(skip));
+        }
         if inside.iter().any(|n| is_cargo_lock_name(n)) {
             inspected.profiles.push(judged!(profile_dir_in(
                 host, &fd, mounts, rel, &at, &stat, inside
@@ -433,6 +445,9 @@ fn inspect_in<H: Host>(
             let (child_fd, child_stat) =
                 judged!(open_dir(host, &fd, mount_id, Path::new(child), &child_at));
             let grandchildren = judged!(list(host, &child_fd, &child_at, deadline));
+            if let Err(skip) = not_container_storage(&child_at, &grandchildren) {
+                return Ok(Err(skip));
+            }
             if grandchildren.iter().any(|n| is_cargo_lock_name(n)) {
                 inspected.profiles.push(judged!(profile_dir_in(
                     host,
@@ -448,6 +463,20 @@ fn inspect_in<H: Host>(
     }
     inspected.profiles.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(Ok(inspected))
+}
+
+/// The directory at `path`, whose complete listing is `names`, is no
+/// container storage root (`contains_special` otherwise,
+/// [`engine::container_storage`]).
+fn not_container_storage(path: &Path, names: &[OsString]) -> Result<(), Skip> {
+    match engine::container_storage::in_listing(names) {
+        None => Ok(()),
+        Some(storage) => Err(Skip::new(
+            Reason::ContainsSpecial,
+            path.to_owned(),
+            storage.detail(),
+        )),
+    }
 }
 
 fn private_entry(path: &Path) -> Skip {
@@ -762,7 +791,15 @@ impl DiscoverCursor {
                         return Ok(Stepped::Paused);
                     }
                     let parent_ino = depth.checked_sub(1).and_then(|p| self.frames[p].ino);
-                    match walk.visit(&open[depth], &path, self.frames[depth].depth, parent_ino)? {
+                    let dir = Visited {
+                        path: &path,
+                        depth: self.frames[depth].depth,
+                        id: self.frames[depth]
+                            .id
+                            .or(self.root_id.filter(|_| depth == 0)),
+                        parent_ino,
+                    };
+                    match walk.visit(&open[depth], dir)? {
                         Some(names) => {
                             // Charged one operation per name listed.
                             pause(Work::Listed(names.len()));
@@ -831,6 +868,15 @@ impl DiscoverCursor {
     }
 }
 
+/// A directory [`Walk::visit`] looks at: its path, depth below the root,
+/// identity when entered (`None` if not reported) and its parent's inode.
+struct Visited<'a> {
+    path: &'a Path,
+    depth: usize,
+    id: Option<DevIno>,
+    parent_ino: Option<u64>,
+}
+
 /// One step's view of the walk of one root.
 struct Walk<'a, H: Host> {
     host: &'a H,
@@ -853,14 +899,15 @@ impl<H: Host> Walk<'_, H> {
 
     /// Looks at the directory open as `fd`: a target is recorded (`None`:
     /// not descended into); otherwise its names to walk, sorted, unless it
-    /// is at the depth limit or cannot be listed (`None`).
-    fn visit(
-        &mut self,
-        fd: &H::Fd,
-        path: &Path,
-        depth: usize,
-        parent_ino: Option<u64>,
-    ) -> Result<Option<Vec<OsString>>, Stop> {
+    /// is at the depth limit, cannot be listed or is a container storage
+    /// root (`None`).
+    fn visit(&mut self, fd: &H::Fd, dir: Visited<'_>) -> Result<Option<Vec<OsString>>, Stop> {
+        let Visited {
+            path,
+            depth,
+            id,
+            parent_ino,
+        } = dir;
         let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
             Err(skip) => {
@@ -868,6 +915,15 @@ impl<H: Host> Walk<'_, H> {
                 return Ok(None);
             }
         };
+        // Container storage is never searched: one refusal for the storage
+        // root, not one per layer below it (TASK-242), and one per storage
+        // root when overlapping roots reach it again.
+        if let Err(skip) = not_container_storage(path, &names) {
+            if id.is_none_or(|id| self.found.storage_roots.insert(id)) {
+                self.refuse(skip);
+            }
+            return Ok(None);
+        }
         if names.iter().any(|n| n == CACHEDIR_TAG) {
             match self.target_at(fd, path, parent_ino)? {
                 Ok(true) => return Ok(None),
@@ -991,7 +1047,8 @@ fn has_manifest<H: Host>(
 /// resolved (`unsafe_path`, `missing`, `unsupported_fs` for a network
 /// filesystem), then one directory at a time below it, no symlink, no
 /// mount crossing. Every directory from the root down to the target's
-/// parent is listed for a keep marker (`kept`), and the directory reached
+/// parent is listed for a keep marker (`kept`) and for container storage
+/// (`contains_special`, [`engine::container_storage`]), and the directory reached
 /// must still be the one found (`changed` otherwise). The project
 /// directory is the target's parent: its identity, and whether it holds a
 /// `Cargo.toml` ([`Project`]).
@@ -1045,6 +1102,13 @@ pub fn reach<H: Host>(
                 Reason::KeepMarker,
                 at.join(KEEP_MARKER),
                 "between the root and the target",
+            )));
+        }
+        if let Some(storage) = engine::container_storage::in_listing(&listing) {
+            return Ok(Err(Skip::new(
+                Reason::ContainsSpecial,
+                at.clone(),
+                storage.inside_detail(&at),
             )));
         }
         at.push(name);

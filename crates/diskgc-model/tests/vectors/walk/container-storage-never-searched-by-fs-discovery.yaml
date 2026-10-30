@@ -1,0 +1,45 @@
+# TASK-242. A broad pattern whose walk lists a container storage root
+# refuses that root once (`contains_special`, candidate: the storage
+# root) and finds nothing below it, instead of one candidate (or one
+# `unreadable`) per image layer. Two roots of the profile reach the same
+# graphroot (`/home/tester/.local/share/containers` and, through it,
+# `/home/tester/.local/share`): still one refusal. The same shape without
+# `storage.lock` (`notstore`) is searched as usual.
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/home/tester/.local/share, /home/tester/.local/share/containers], paths: ["*/*/*/diff/cache", "*/*/*/*/diff/cache"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/.local/share/containers/x/overlay/y/diff/cache]}
+profile: layer-cache
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay:
+        0a1b2c: {diff: {cache: {blob: {size: 1M}}}}
+        3d4e5f: {diff: {cache: {blob: {size: 1M}}}}
+    /home/tester/.local/share/containers/notstore:
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {cache: {blob: {size: 1M}}}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/.local/share/containers/notstore/overlay/0a1b2c/diff/cache}
+  reclaim_exit: 1
+  actions: [/home/tester/.local/share/containers/notstore/overlay/0a1b2c/diff/cache]
+  removed: [/home/tester/.local/share/containers/notstore/overlay/0a1b2c/diff/cache]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache/blob
+    - /home/tester/.local/share/containers/storage/overlay/3d4e5f/diff/cache/blob

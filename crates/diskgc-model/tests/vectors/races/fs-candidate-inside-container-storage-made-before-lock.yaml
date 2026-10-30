@@ -1,0 +1,38 @@
+# TASK-242. As cargo-target-inside-container-storage-made-before-locks,
+# for a plain-delete candidate: a directory between the root and the
+# planned candidate becomes a container storage root after the plan and
+# before the candidate's lock. The recheck under the lock asks every
+# directory on the way again and refuses it (`contains_special`).
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/home/tester/src], paths: ["store/overlay/*/diff/cache"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/store/overlay/x/diff/cache]}
+profile: layer-cache
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/store/overlay-layers: {.: {}}
+    /home/tester/src/store/overlay/0a1b2c/diff/cache: {blob: {size: 1M}}
+  events:
+    - at: {op: flock, path: /home/tester/src/store/overlay/0a1b2c/diff/cache, nth: 1, when: before}
+      create: /home/tester/src/store/storage.lock
+expect:
+  plan:
+    - {candidate: /home/tester/src/store/overlay/0a1b2c/diff/cache}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/store/overlay/0a1b2c/diff/cache, reason: contains_special}
+  preserved:
+    - /home/tester/src/store/overlay/0a1b2c/diff/cache/blob
+    - /home/tester/src/store/storage.lock

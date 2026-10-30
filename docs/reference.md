@@ -1916,10 +1916,11 @@ the working directory, so the command must name the location explicitly
 -cache`). A non-zero exit is an error in the report (exit 3 if the goal is
 not met).
 
-No Podman image-prune example ships yet. A read-only dry run on rootless
-Podman storage found subuid-owned overlay files, so a command profile using
-`containers/storage` as its candidate fails the required ownership walk with
-`not_owner`. Running `podman image prune` against a different checked path
+No Podman image-prune example ships yet. A command profile using
+`containers/storage` as its candidate is refused as container storage
+(`contains_special`, [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)),
+and a read-only dry run on rootless Podman storage found subuid-owned
+overlay files that would fail the ownership walk (`not_owner`) too. Running `podman image prune` against a different checked path
 would not protect the image store it changes. Task-93 covers a Podman-specific
 protocol that uses Podman's own pruning rules.
 

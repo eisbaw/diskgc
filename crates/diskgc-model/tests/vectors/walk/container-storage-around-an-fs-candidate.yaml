@@ -1,0 +1,42 @@
+# TASK-242. A pattern that names its way into container storage
+# (literal segments down to the graphroot, so discovery never lists it)
+# finds candidates inside image layers. Each is refused at its judgement
+# (`contains_special`): the root and every directory on the way to the
+# candidate is asked for the storage markers, and `storage` holds
+# `storage.lock` and `overlay-layers`. The same pattern under a directory
+# that holds only `overlay-layers` (`fake`) finds a deletable candidate.
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/home/tester], paths: [".local/share/containers/storage/overlay/*/diff/cache", "fake/overlay/*/diff/cache"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/fake/overlay/x/diff/cache]}
+profile: layer-cache
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {cache: {blob: {size: 1M}}}}}
+    /home/tester/fake:
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {cache: {blob: {size: 1M}}}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache, reason: contains_special}
+    - {candidate: /home/tester/fake/overlay/0a1b2c/diff/cache}
+  reclaim_exit: 1
+  actions: [/home/tester/fake/overlay/0a1b2c/diff/cache]
+  removed: [/home/tester/fake/overlay/0a1b2c/diff/cache]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache/blob

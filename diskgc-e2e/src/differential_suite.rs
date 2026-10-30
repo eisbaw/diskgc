@@ -38,6 +38,9 @@ const BUN_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/bun-cache-match.yaml");
 const MYPY_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/mypy-cache-match.yaml");
+const CONTAINER_STORAGE_VECTOR: &str = include_str!(
+    "../../crates/diskgc-model/tests/vectors/walk/container-storage-cargo-targets-in-layers.yaml"
+);
 const PYTHON_IN_USE_VECTOR: &str =
     include_str!("../../crates/diskgc-model/tests/models/profiles/python-pycache-in-use.yaml");
 const BRAVE_BROWSER_VECTOR: &str =
@@ -1424,6 +1427,15 @@ pub fn python_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> Test
 /// Exercise a time-qualified cache root on both hosts.
 pub fn bun_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
     replay_vector(ctx, BUN_VECTOR, false)
+}
+
+/// TASK-242: Cargo targets inside container storage roots (a Podman
+/// graphroot, Docker data roots, a containerd root) on a real filesystem.
+/// The storage roots are told by real listings, each refused once, and the
+/// false-positive projects are reclaimed; the oracle sees no deletion
+/// inside any storage root.
+pub fn container_storage_vector_matches_linux_outcomes_and_deletion_diff(ctx: &Ctx) -> TestResult {
+    replay_vector(ctx, CONTAINER_STORAGE_VECTOR, false)
 }
 
 /// Exercise a cache marker and explicit old mtimes on both hosts.
