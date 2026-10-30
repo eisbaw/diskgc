@@ -5,8 +5,8 @@ title: >-
   validation, --no-index
 status: To Do
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-26 08:12'
+created_date: 2026-10-16 22:41
+updated_date: '2026-10-30T22:54:00Z'
 labels:
   - wave-3
   - architecture
@@ -29,6 +29,11 @@ Why: ensure on a runner needs a warm index from watch. Implement the snapshot pe
 - [ ] #2 A corrupted or other-user snapshot falls back to synchronous tally and the report says so
 - [ ] #3 A profile edited between runs drops only that profile's units; changing tiers or --roots invalidates nothing (per-unit finders: profile, profile hash, root)
 <!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
 
 ## Implementation Notes
 
@@ -57,9 +62,6 @@ Mark's decisions 2026-10-25 (his own): an ensure whose goal is already met stays
 AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's decisions 2026-10-25. Old #3 (tier changes keep the snapshot; profile or root changes invalidate it) replaced: no whole-file shape hash, per-unit finders.
 
 From TASK-31 review (2026-10-26, mped-architect on e2bb85d): (a) Refusal.at is a MonoTime; 'this run's refusal' = at >= run_started. Persisted across reboot a monotonic time can compare as this run and suppress a unit (fails safe, but it is a format decision): store wall time + boot id, or clear hints on load. (b) fs_kind::discover_beneath asserts an absolute path; a corrupted relative path in a loaded snapshot would crash the run: validate paths at load, treat bad entries as stale or discard the snapshot.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+Codex review of TASK-31 at 82cb9af (2026-10-30, finding 3, single event: one index corruption): Reclaim::rematch treats a refusal with at >= run_started as 'refused by this run's tally' and handled.paths then suppresses the tier's real discovery result for that path, so a pressure tier can run while an earlier tier's eligible candidate remains. Fix with the snapshot: refusals produced by this invocation are tracked separately from cached/persisted hints; a cached hint never suppresses discovery. Model test red first.
+<!-- SECTION:NOTES:END -->
