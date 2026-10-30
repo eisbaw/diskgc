@@ -518,6 +518,64 @@ fn a_stored_refusal_hint_only_ranks_the_unit_last() {
     );
 }
 
+/// Codex review of TASK-31 (finding 3, a single index corruption): a
+/// refusal hint whose time reads as this run's (a clock that went back, a
+/// snapshot written by a later boot, a corrupt value) must not stand for
+/// this run's own tally refusing the unit. Only refusals this invocation's
+/// tally produced skip a candidate; a cached hint only ranks it last. So
+/// the stale tier's eligible candidate is judged and deleted before the
+/// pressure tier runs (PRD, What bad looks like: a pressure tier running
+/// while an earlier tier still had eligible candidates).
+#[test]
+fn a_cached_refusal_hint_timed_in_this_run_never_suppresses_the_candidate() {
+    let tree = format!(
+        "  /tmp/a-hinted: {d}\n  /tmp/b-pressure: {d}\n",
+        d = old_dir()
+    );
+    let host = host(&yaml(&tree, ""));
+    let mut stale = tier("profile:tmp-a && filter:idle-1d");
+    stale.name = "stale".to_owned();
+    let mut pressure = tier("profile:tmp-b");
+    pressure.name = "pressure".to_owned();
+    let mut state = seeded(&host, &finder(&stale, "/tmp"), &["/tmp/a-hinted"]);
+    put(
+        &host,
+        &mut state,
+        &finder(&pressure, "/tmp"),
+        &["/tmp/b-pressure"],
+    );
+    state.set_discovered_at(finder(&pressure, "/tmp"), host.now());
+    // At or after any run start this test can have.
+    state
+        .index
+        .single_mut(&tmp_mount(), Path::new("/tmp/a-hinted"))
+        .expect("a single")
+        .refusal = Some(Refusal {
+        reason: Reason::KeepMarker,
+        at: MonoTime(Duration::from_secs(1 << 40)),
+    });
+    let tiers = [stale.clone(), pressure];
+    let mut lines = Vec::new();
+    let report = executor::ensure_grouped_with_index(
+        &host,
+        &request(stale),
+        &tiers,
+        &[Duration::ZERO, Duration::ZERO],
+        &[1000],
+        &mut state,
+        &mut |l| lines.push(l.to_owned()),
+    );
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    assert_eq!(
+        actions(&report),
+        ["/tmp/a-hinted", "/tmp/b-pressure"],
+        "{report:#?}"
+    );
+    let tiers: Vec<&str> = report.actions.iter().map(|a| a.tier.as_str()).collect();
+    assert_eq!(tiers, ["stale", "pressure"]);
+    assert_eq!(skip_of(&report, "/tmp/a-hinted"), None, "{report:#?}");
+}
+
 /// docs/architecture.md, Refusals: a refusal this run's own synchronous
 /// tally found skips the candidate for the run, though the tree reads
 /// fine later: it is never walked or locked again in this run.

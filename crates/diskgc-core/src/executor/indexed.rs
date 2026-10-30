@@ -93,10 +93,26 @@ fn sync_tiers<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<SyncTier> {
         .collect()
 }
 
+/// What the run's synchronous tally came to, for the reclaim walk.
+#[derive(Debug, Default)]
+pub(super) struct SyncTallied {
+    /// Whether the reclaim walk may take queues from the index.
+    pub(super) usable: bool,
+    /// The candidates this invocation's own tally refused, by path: they
+    /// are skipped for the run (docs/architecture.md, Refusals). Only
+    /// these: a refusal hint already in the index (an earlier tally's, a
+    /// snapshot's) only ranks its unit last, whatever its time says
+    /// (Codex review of TASK-31: a hint timed in this run, by a clock
+    /// step or a corrupt snapshot, suppressed an eligible candidate and
+    /// let a pressure tier run before it).
+    pub(super) refused: BTreeMap<PathBuf, Reason>,
+}
+
 /// Runs the synchronous tally over `tiers` on the filesystem `dev`, for at
 /// most `budget` (`None`: to completion) and never past `deadline`, before
 /// the host lock (docs/architecture.md, The tally: Synchronous). Returns
-/// whether the reclaim walk may take queues from the index.
+/// whether the reclaim walk may take queues from the index, and what this
+/// tally refused.
 ///
 /// A failure of the host (`EIO`, `EMFILE`, `ENOMEM`: no skip, an error of
 /// the run, docs/safety.md, Fail closed) ends the tally with one log line
@@ -116,10 +132,13 @@ pub(super) fn sync_tally<'t, H: Host>(
     deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
-) -> bool {
+) -> SyncTallied {
     let tiers = sync_tiers(tiers);
     if tiers.is_empty() {
-        return true;
+        return SyncTallied {
+            usable: true,
+            ..SyncTallied::default()
+        };
     }
     let started = host.now();
     let budget_end = budget.and_then(|b| started.checked_add(b));
@@ -145,7 +164,7 @@ pub(super) fn sync_tally<'t, H: Host>(
                 "index: the synchronous tally failed after {took} ms: {why}; no tier takes \
                  candidates from the index in this run (each tier's own discovery decides)"
             ));
-            return false;
+            return SyncTallied::default();
         }
     };
     // Cut short by `--tally-budget`, not by the run's deadline, a signal or
@@ -172,7 +191,10 @@ pub(super) fn sync_tally<'t, H: Host>(
         stats.singles + stats.blocks,
         stats.blocks,
     ));
-    true
+    SyncTallied {
+        usable: true,
+        refused: sync.refused.into_iter().collect(),
+    }
 }
 
 /// What the index's queue of a tier took, so that the tier's own discovery
@@ -485,19 +507,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let Queued::Single(single) = &entry.unit else {
             unreachable!("rematch of a block")
         };
-        if let Some(refusal) = single.refusal
-            && refusal.at >= self.run_started
-        {
-            // This run's own tally refused it: skipped for the run, never
-            // walked or locked again (docs/architecture.md, Refusals).
+        if let Some(&reason) = self.tally_refused.get(&entry.path) {
+            // This invocation's own tally refused it: skipped for the run,
+            // never walked or locked again (docs/architecture.md,
+            // Refusals). A hint already in the index is not this: it only
+            // ranked the unit last, and the unit is judged like any other.
             handled.paths.insert(entry.path.clone());
             self.skip(
                 &entry.path,
-                &Skip::new(
-                    refusal.reason,
-                    entry.path.clone(),
-                    "refused by this run's tally",
-                ),
+                &Skip::new(reason, entry.path.clone(), "refused by this run's tally"),
             );
             return Rematched::Next;
         }

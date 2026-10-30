@@ -8,9 +8,10 @@
 //! from an empty index, whose synchronous tally builds the index (the
 //! equivalent of `--no-index --tally-budget 0`).
 //!
-//! A refusal hint "from this run" cannot be corrupted into an index: a
-//! seed's hints predate the run (docs/architecture.md, Refusals), so the
-//! generated ones do.
+//! Refusal hints are generated with an old time or one at or after the
+//! run's start (a clock step, a corrupt snapshot): only refusals the run's
+//! own tally produced may skip a candidate for the run; a hint of either
+//! time only ranks its unit last (Codex review of TASK-31, finding 3).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -83,8 +84,8 @@ enum Id {
 }
 
 /// One unit of the corrupted index: a path of the model (or one that does
-/// not exist), with its finder, identity, a tally or not, an old refusal
-/// hint or not, and a stored change shifted to misorder it.
+/// not exist), with its finder, identity, a tally or not, a refusal hint
+/// (old, or timed in the run) or not, and a stored change shifted to misorder it.
 #[derive(Debug, Clone)]
 struct Unit {
     path: usize,
@@ -92,6 +93,8 @@ struct Unit {
     id: Id,
     sized: bool,
     hint: Option<Reason>,
+    /// The hint is timed at or after the run's start, not before it.
+    hint_in_run: bool,
     shift_days: i64,
 }
 
@@ -134,16 +137,20 @@ fn unit() -> impl Strategy<Value = Unit> {
             1 => Just(Some(Reason::KeepMarker)),
             1 => Just(Some(Reason::TooManyEntries))
         ],
+        any::<bool>(),
         -40i64..40,
     )
-        .prop_map(|(path, who, id, sized, hint, shift_days)| Unit {
-            path,
-            who,
-            id,
-            sized,
-            hint,
-            shift_days,
-        })
+        .prop_map(
+            |(path, who, id, sized, hint, hint_in_run, shift_days)| Unit {
+                path,
+                who,
+                id,
+                sized,
+                hint,
+                hint_in_run,
+                shift_days,
+            },
+        )
 }
 
 fn corruption() -> impl Strategy<Value = Corruption> {
@@ -278,7 +285,11 @@ fn corrupted(
             }
             single.refusal = unit.hint.map(|reason| Refusal {
                 reason,
-                at: MonoTime(Duration::ZERO),
+                at: if unit.hint_in_run {
+                    MonoTime(Duration::from_secs(1 << 40))
+                } else {
+                    MonoTime(Duration::ZERO)
+                },
             });
         }
     }

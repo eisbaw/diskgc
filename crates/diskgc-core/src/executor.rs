@@ -544,7 +544,7 @@ fn ensure_inner<H: Delete>(
         min_text
     ));
     // Read-only, before the host lock (docs/architecture.md, The tally).
-    let index_usable = indexed::sync_tally(
+    let tallied = indexed::sync_tally(
         host,
         index,
         [&request.tier],
@@ -691,7 +691,8 @@ fn ensure_inner<H: Delete>(
         deadline_hit: false,
         run_stopped: false,
         in_use_unknown_in_a_row: 0,
-        index: index_usable.then_some(index),
+        index: tallied.usable.then_some(index),
+        tally_refused: &tallied.refused,
         run_started,
     };
     run.run(owners);
@@ -826,7 +827,7 @@ fn ensure_grouped_inner<H: Delete>(
         return report;
     }
     // Read-only, before the host lock (docs/architecture.md, The tally).
-    let index_usable = indexed::sync_tally(
+    let tallied = indexed::sync_tally(
         host,
         index,
         tiers,
@@ -1163,7 +1164,8 @@ fn ensure_grouped_inner<H: Delete>(
             deadline_hit: false,
             run_stopped: false,
             in_use_unknown_in_a_row: 0,
-            index: index_usable.then_some(&mut *index),
+            index: tallied.usable.then_some(&mut *index),
+            tally_refused: &tallied.refused,
             run_started,
         };
         run.run(owners);
@@ -1550,6 +1552,9 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
+    /// The candidates this invocation's synchronous tally refused: skipped
+    /// for the run ([`indexed::SyncTallied::refused`]).
+    tally_refused: &'a BTreeMap<PathBuf, Reason>,
     /// When the run started (the first event of `ensure`, on the `Host`
     /// port's monotonic clock): the time to the first deletion is
     /// measured from here (docs/architecture.md, The reclaim walk).
