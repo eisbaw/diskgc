@@ -366,18 +366,21 @@ they never override the Invariants.
   run the mount/FUSE/network container tests (`just e2e-one`, e.g.
   `fs_protected_dead_fuse_root_is_refused_without_opening_it`, the network
   and FUSE refusal tests) before merge. Adds rigour. Judged by:
-  regressions found by async QA next window (target 0). Status: new.
+  regressions found by async QA next window (target 0). Status: kept
+  (Retro TASK-250: 6 async-QA findings, none mount/FUSE/resolution;
+  judged next on those only).
 - 2026-10-25, Retro TASK-188: TASK-155 took 2.8 h, mostly two rebase
   conflicts with TASK-144 (both edited report/mod.rs in parallel). ->
   Before launching parallel implementers, compare the files each brief
   will touch; never two in the same module at once. Judged by: rebase
-  conflicts next window (target 0). Status: new.
+  conflicts next window (target 0). Status: extend (TASK-250: no
+  conflict data recorded).
 - 2026-10-25, Retro TASK-188: TASK-145/173 performance walks ran at load
   29-65 instead of 15-25 because other implementers were building, making
   before/after noisy. -> Performance tasks record load with every
   measurement, and while one measures, at most 2 other implementers run.
   Judged by: share of perf measurements inside their stated load band.
-  Status: new.
+  Status: extend (TASK-250: band share not computable from notes).
 
 - 2026-10-25, COMPASS round 3: only 3 of 13 merged shas had a full-e2e
   qa line and 2 were red from contention or the first-failure stop. ->
@@ -388,11 +391,37 @@ they never override the Invariants.
   that touches an irreversible surface (JSON, exit codes, gate, deletion
   path) gets async QA, not "every few merges". Judged by: stages per QA
   run with an unknown result; qa-line coverage of irreversible shas.
-  Status: new.
+  Status: (a) kept; (b) extend (not measured); (c) not met, 3 of 26 shas
+  (TASK-250), replaced by the standing master QA entry below.
+
+- 2026-10-30, Retro TASK-250: TASK-31's review-fix round sat
+  uncommitted in tmp/worktrees/t31 for 4 days after the session ended;
+  its review findings survived only partly in task notes. -> Implementers
+  commit WIP on their own branch whenever they stop (report, interruption,
+  hand-back); briefs say so. Judged by: worktrees with uncommitted changes
+  and no live agent at the next retro (target 0). Status: new.
+- 2026-10-30, Retro TASK-250: only 3 of 26 merged shas got a qa line;
+  master after the RC (index chain, TASK-182/196) had none. -> Standing
+  master QA: after each merge touching an irreversible surface, start
+  `just e2e-all` async on that master sha if no QA job is running; record
+  `qa:` on it. Judged by: qa-line coverage of irreversible shas (target
+  >= 80%). Status: new.
+- 2026-10-30, Retro TASK-250: `just check` went red under host load from
+  a live-host test asserting a settled /proc scan (TASK-239 AC1; found by
+  the 10-27 review, not a gate). -> Live-host tests assert per branch of
+  what the host may legitimately return (settled vs blocked scan), with
+  the branch the host cannot force pinned by a model test. Judged by:
+  fast-check failures not reproducible solo (target 0). Status: new.
 
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->
+- 2026-10-30: v0.1.0 is an annotated local tag on release-0.1 af3d503
+  (tagged by Mark); TASK-67 was still To Do until closed on 10-30. The
+  tracker can lag a release the user makes by hand: check `git tag`.
+- 2026-10-30: ~23 GiB of tmp/worktrees are stale task worktrees (task16-*,
+  task27-*, task58-*, task64-*, ...) with free space at 35 GiB; removing
+  them needs Mark's OK (host deletion rule).
 - 2026-10-24: `just e2e` takes 15-33 min (880 s at fe0ab5f; 27 min on
   5e81db1 incl. image reload; 1981 s on ce6a0cd under memory pressure,
   ~10 GiB free RAM, 24 GiB swap, mostly the 7 VM checks); it includes `just check`, container suites
