@@ -694,9 +694,25 @@ reclaim(min, goal, filesystem, deadline):
   under the host lock, unlike the synchronous one, so other reclaims
   wait that much longer.
 - **A failure of the host during the synchronous tally** (`EIO`,
-  `EMFILE`) ends the tally with one log line; the walk goes on with what
-  the index holds, and each tier's own discovery and checks meet a
-  failure that persists themselves (an error of the run there).
+  `EMFILE`, `ENOMEM`: an error of the run, not a skip;
+  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate),
+  Fail closed) ends the tally with one log line, and **no tier takes a
+  queue from the index in that run**: each tier is its own discovery
+  alone, which meets a failure that persists and stops the tier with
+  nothing of it reclaimed, as without the index. Otherwise a queued unit
+  could be deleted before discovery of the same root stops on another
+  branch, which discovery alone never does (it acts only on a listing
+  that completed). The rule is coarse on purpose (every tier, not only
+  those whose roots failed): the others lose only speed. Not reported in
+  the JSON beyond the run error discovery records (TASK-247).
+- **Remaining limit: a failure that first appears after the tally.** A
+  host failure on a branch the tally listed cleanly that first shows when
+  the tier's discovery lists it after the queue (a disk going bad during
+  the run) can come after queued candidates of that tier were deleted;
+  each of them passed every live check, and the discovery's error still
+  stops the tier and the run (exit 3). The same holds for a root the
+  tally did not list because a seed's listing was recent (reachable once
+  the snapshot exists, TASK-30).
 
 ### Measuring space
 

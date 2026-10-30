@@ -95,9 +95,17 @@ fn sync_tiers<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<SyncTier> {
 
 /// Runs the synchronous tally over `tiers` on the filesystem `dev`, for at
 /// most `budget` (`None`: to completion) and never past `deadline`, before
-/// the host lock (docs/architecture.md, The tally: Synchronous). A failure
-/// of the host ends it with one log line: the index only orders work, and
-/// each tier's own discovery runs anyway.
+/// the host lock (docs/architecture.md, The tally: Synchronous). Returns
+/// whether the reclaim walk may take queues from the index.
+///
+/// A failure of the host (`EIO`, `EMFILE`, `ENOMEM`: no skip, an error of
+/// the run, docs/safety.md, Fail closed) ends the tally with one log line
+/// and returns `false`: no tier then takes a queue, so each tier's own
+/// discovery meets the failure first, and a tier whose discovery stops
+/// reclaims nothing, as without the index. Otherwise a queued unit could
+/// be deleted before discovery of the same root stops on another branch.
+/// Coarse on purpose: any tier, not only the one whose roots failed (the
+/// run's other tiers lose only speed).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_tally<'t, H: Host>(
     host: &H,
@@ -108,10 +116,10 @@ pub(super) fn sync_tally<'t, H: Host>(
     deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
-) {
+) -> bool {
     let tiers = sync_tiers(tiers);
     if tiers.is_empty() {
-        return;
+        return true;
     }
     let started = host.now();
     let budget_end = budget.and_then(|b| started.checked_add(b));
@@ -123,38 +131,48 @@ pub(super) fn sync_tally<'t, H: Host>(
     let done = sync::synchronous(host, state, &tiers, dev, until);
     let took = host.now().saturating_since(started).as_millis();
     let stats = state.index.stats();
-    match done {
-        Ok(sync) => {
-            // Cut short by `--tally-budget`, not by the run's deadline, a
-            // signal or a failure of the host.
-            let by_budget = matches!(sync.stopped, Some(Stop::DeadlinePassed { .. }))
-                && budget_end.is_some_and(|b| host.now() >= b && deadline.is_none_or(|d| b < d));
-            if by_budget && (sync.untallied > 0 || !sync.pass1_done) {
-                report.tally_cut_short = true;
-            }
+    let sync = match done {
+        Ok(sync) if !matches!(sync.stopped, Some(Stop::Failed { .. })) => sync,
+        failed => {
+            let why = match failed {
+                Ok(sync) => sync
+                    .stopped
+                    .map(|stop| stop.to_string())
+                    .unwrap_or_default(),
+                Err(error) => error.to_string(),
+            };
             log(&format!(
-                "index: synchronous tally of {} tier(s) in {took} ms: {} source(s) listed, {} \
-                 recent, {} candidate(s) inserted, {} sized, {} left untallied{}; the index \
-                 holds {} unit(s), {} of them blocks",
-                tiers.len(),
-                sync.listed.len(),
-                sync.skipped_recent.len(),
-                sync.inserted,
-                sync.sized,
-                sync.untallied,
-                match &sync.stopped {
-                    Some(stop) => format!(", stopped: {stop}"),
-                    None => String::new(),
-                },
-                stats.singles + stats.blocks,
-                stats.blocks,
+                "index: the synchronous tally failed after {took} ms: {why}; no tier takes \
+                 candidates from the index in this run (each tier's own discovery decides)"
             ));
+            return false;
         }
-        Err(error) => log(&format!(
-            "index: synchronous tally failed after {took} ms: {error}; each tier is \
-             discovered by the reclaim walk"
-        )),
+    };
+    // Cut short by `--tally-budget`, not by the run's deadline, a signal or
+    // a failure of the host.
+    let by_budget = matches!(sync.stopped, Some(Stop::DeadlinePassed { .. }))
+        && budget_end.is_some_and(|b| host.now() >= b && deadline.is_none_or(|d| b < d));
+    if by_budget && (sync.untallied > 0 || !sync.pass1_done) {
+        report.tally_cut_short = true;
     }
+    log(&format!(
+        "index: synchronous tally of {} tier(s) in {took} ms: {} source(s) listed, {} recent, \
+         {} candidate(s) inserted, {} sized, {} left untallied{}; the index holds {} unit(s), \
+         {} of them blocks",
+        tiers.len(),
+        sync.listed.len(),
+        sync.skipped_recent.len(),
+        sync.inserted,
+        sync.sized,
+        sync.untallied,
+        match &sync.stopped {
+            Some(stop) => format!(", stopped: {stop}"),
+            None => String::new(),
+        },
+        stats.singles + stats.blocks,
+        stats.blocks,
+    ));
+    true
 }
 
 /// What the index's queue of a tier took, so that the tier's own discovery

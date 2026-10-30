@@ -544,7 +544,7 @@ fn ensure_inner<H: Delete>(
         min_text
     ));
     // Read-only, before the host lock (docs/architecture.md, The tally).
-    indexed::sync_tally(
+    let index_usable = indexed::sync_tally(
         host,
         index,
         [&request.tier],
@@ -691,7 +691,7 @@ fn ensure_inner<H: Delete>(
         deadline_hit: false,
         run_stopped: false,
         in_use_unknown_in_a_row: 0,
-        index: Some(index),
+        index: index_usable.then_some(index),
         run_started,
     };
     run.run(owners);
@@ -826,7 +826,7 @@ fn ensure_grouped_inner<H: Delete>(
         return report;
     }
     // Read-only, before the host lock (docs/architecture.md, The tally).
-    indexed::sync_tally(
+    let index_usable = indexed::sync_tally(
         host,
         index,
         tiers,
@@ -1163,7 +1163,7 @@ fn ensure_grouped_inner<H: Delete>(
             deadline_hit: false,
             run_stopped: false,
             in_use_unknown_in_a_row: 0,
-            index: Some(&mut *index),
+            index: index_usable.then_some(&mut *index),
             run_started,
         };
         run.run(owners);

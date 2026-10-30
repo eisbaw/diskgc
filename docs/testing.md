@@ -1318,8 +1318,20 @@ removed (the TASK-121 discipline).
   paths of the generated tree and at missing ones, with wrong
   identities, finders of another profile, definition or root, old
   refusal hints, shifted ages, a random small budget and sometimes a
-  collapse to one lump per mount; on a still model it also asserts that
-  the set deleted, the non-`stale` skips and the exit code are equal);
+  collapse to one lump per mount, under a plain, an idle-filtered and a
+  `keep_newest` selection (a retention guard ranking siblings); on a
+  still model it also asserts that the set deleted, the non-`stale`
+  skips and the exit code are equal). Two stated exceptions to "what
+  that run's own discovery finds", both outside the generated models:
+  re-matching a unit looks names up on the way down instead of listing,
+  so a directory over the listing limit is not refused there
+  (`too_many_entries`; every per-candidate check still applies); and a
+  host failure that first appears after the synchronous tally can follow
+  deletions of queued candidates (one the tally meets, listing or
+  sizing, keeps the run off the index's queue:
+  `a_host_error_in_the_tally_keeps_the_tier_off_its_queue`,
+  `a_host_error_in_the_tallys_sizing_keeps_the_tier_off_its_queue`;
+  [architecture.md](architecture.md#the-reclaim-walk));
 - the exit code follows the full precedence table for the final state;
 - **selection semantics:** the eligible candidates equal a simple reference
   implementation of the rules in [reference.md](reference.md#selection-grammar);

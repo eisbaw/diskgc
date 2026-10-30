@@ -40,6 +40,8 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp/gen], paths: ["*"], type: any}
   action: delete
   examples: {match: [/tmp/gen/x]}
+- name: prop-keep-one
+  where: {keep_newest: 1}
 "#;
 
 fn cases() -> u32 {
@@ -102,8 +104,19 @@ struct Corruption {
     budget: Option<usize>,
     /// Collapse to one lump per mount at the end.
     lumps: bool,
-    idle_filter: bool,
+    /// The tier's selection ([`SELECTIONS`]).
+    select: usize,
 }
+
+/// The tier's selection: plain, with an idle filter, and with a version
+/// filter (`keep_newest`, a retention guard ranking a candidate among its
+/// siblings: judged per candidate when it is reclaimed, so a corrupt
+/// order must not change which siblings it keeps).
+const SELECTIONS: [&str; 3] = [
+    "profile:prop-idx",
+    "profile:prop-idx && filter:idle-1d",
+    "profile:prop-idx && filter:prop-keep-one",
+];
 
 fn unit() -> impl Strategy<Value = Unit> {
     (
@@ -139,14 +152,14 @@ fn corruption() -> impl Strategy<Value = Corruption> {
         any::<bool>(),
         proptest::option::of(1024usize..6000),
         any::<bool>(),
-        any::<bool>(),
+        0..SELECTIONS.len(),
     )
-        .prop_map(|(units, listed, budget, lumps, idle_filter)| Corruption {
+        .prop_map(|(units, listed, budget, lumps, select)| Corruption {
             units,
             listed,
             budget,
             lumps,
-            idle_filter,
+            select,
         })
 }
 
@@ -326,12 +339,7 @@ proptest! {
         (model, corruption) in host_model(3, 6, 1).prop_flat_map(|m| (Just(m), corruption()))
     ) {
         let model = provisioned(model);
-        let select = if corruption.idle_filter {
-            "profile:prop-idx && filter:idle-1d"
-        } else {
-            "profile:prop-idx"
-        };
-        let request = request(select);
+        let request = request(SELECTIONS[corruption.select]);
         let correct_host = ModelHost::new(&model).expect("model loads");
         let correct = executor::ensure(&correct_host, &request, &[1000], &mut |_| {});
         let host = ModelHost::new(&model).expect("model loads");

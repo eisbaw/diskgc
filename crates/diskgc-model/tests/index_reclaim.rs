@@ -39,6 +39,10 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["b*"], type: dir}
   action: delete
   examples: {match: [/tmp/b0]}
+- name: two-level-a
+  find: {roots: [/tmp], paths: ["*/a*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/p/a0]}
 - name: deep-a
   find: {roots: [/tmp/w/r], paths: ["a*"], type: dir}
   action: delete
@@ -754,4 +758,75 @@ fn sync_tally_budget_ending_in_discovery_still_finds_the_rest() {
     );
     assert!(report.tally_cut_short, "{report:#?}");
     assert_eq!(report.actions.len(), 10, "{report:#?}");
+}
+
+/// Fail closed on a failure of the host (docs/safety.md, Fail closed; the
+/// reclaim walk acts only on a discovery that completed): an `EIO` while
+/// listing a branch of the tier's root that holds no queued unit. Without
+/// the index the tier's discovery stops and nothing of the tier is
+/// reclaimed; with a seeded unit elsewhere under that root the same must
+/// hold. The synchronous tally lists the root first and meets the `EIO`:
+/// the tier then takes no queue and its own discovery stops it, an error
+/// of the run (exit 3), nothing deleted.
+#[test]
+fn a_host_error_in_the_tally_keeps_the_tier_off_its_queue() {
+    let tree = format!("  /tmp/p/a-x: {d}\n  /tmp/z/a-y: {d}\n", d = old_dir());
+    let events = "events:\n  \
+                  - {at: {op: read_dir, path: /tmp/z, nth: 1, when: before}, fail: EIO}\n  \
+                  - {at: {op: read_dir, path: /tmp/z, nth: 2, when: before}, fail: EIO}\n";
+    let host = host(&yaml(&tree, events));
+    let tier = tier("profile:two-level-a");
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    put(&host, &mut state, &finder(&tier, "/tmp"), &["/tmp/p/a-x"]);
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(exists(&host, "/tmp/p/a-x/f"));
+    assert_eq!(report.exit_code(), 3, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|e| e.message.contains("/tmp/z")),
+        "{report:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("index: ") && l.contains("/tmp/z")),
+        "the tally's failure is logged: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("unit(s) from the index")),
+        "no queue: {lines:#?}"
+    );
+}
+
+/// The same rule when the failure comes from the tally's sizing (pass 2)
+/// rather than its listing: an `EIO` while sizing a stale unit ends the
+/// tally with an error, and no tier takes a queue. The `EIO` is transient
+/// here, so the tier's own discovery and each candidate's live walk read
+/// fine and reclaim both candidates.
+#[test]
+fn a_host_error_in_the_tallys_sizing_keeps_the_tier_off_its_queue() {
+    let tree = format!(
+        "  /tmp/a-bad: {{.: {{mtime: {OLD}}}, sub: {{.: {{mtime: {OLD}}}, f: {{size: 1K, mtime: {OLD}}}}}}}\n  \
+         /tmp/a-plain: {d}\n",
+        d = old_dir()
+    );
+    let events = "events:\n  - {at: {op: read_dir, path: /tmp/a-bad/sub, nth: 1, when: before}, fail: EIO}\n";
+    let host = host(&yaml(&tree, events));
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request(tier("profile:tmp-a")), &mut state);
+    assert!(host.unfired_events().is_empty());
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("synchronous tally failed") && l.contains("/tmp/a-bad/sub")),
+        "the tally's failure is logged: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("unit(s) from the index")),
+        "no queue: {lines:#?}"
+    );
+    let mut deleted = actions(&report);
+    deleted.sort();
+    assert_eq!(deleted, ["/tmp/a-bad", "/tmp/a-plain"], "{report:#?}");
+    assert!(report.errors.is_empty(), "{report:#?}");
 }
