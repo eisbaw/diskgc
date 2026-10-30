@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 20:18'
+updated_date: '2026-10-26 08:22'
 labels:
   - wave-3
   - irreversible
@@ -27,9 +27,14 @@ priority: high
 Why: the index must change speed, never safety. Integrate the index into the reclaim walk: queue per tier, cheap identity re-check, stale skips, per-tier discovery after the queue, live checks unchanged; property tests with randomly stale/partial/corrupted indexes; the stale-index model scenarios from docs/testing.md.
 <!-- SECTION:DESCRIPTION:END -->
 
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
+
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Property: with a corrupted index nothing is deleted that a correct-index run would refuse
+- [ ] #1 Property: with a corrupted index nothing is deleted that a correct-index run would refuse; the deleted set is within what that run's own discovery finds, with two stated exceptions (docs/testing.md, Property tests): re-matching a unit looks names up instead of listing, so a directory over the listing limit is not refused on the way down (too_many_entries; every per-candidate check still applies), and a host failure first appearing after the synchronous tally can follow deletions of queued candidates (one the tally meets keeps the run off the queue)
 - [ ] #2 Stale-index scenarios (deep change, new keep file, new Cargo target inside, new protected match) are refused at deletion time
 - [ ] #3 With an index present, new stale cruft created after the snapshot is deleted before any pressure tier runs
 - [ ] #4 Time to first deletion on the 100k-entry fixture, cold and warm, is measured and logged (not a pass criterion: no latency target); ensure reaches --min-free and exits 0 in both
@@ -57,9 +62,6 @@ AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's de
 2026-10-25: AC wording bucket -> block (collapse model, design 076c5ec).
 
 COMPASS round 4 (2026-10-25): 31 no longer waits on TASK-30 (the reclaim walk needs an index, not a saved one; stale/corrupt scenarios use injected indexes). It waits on the sync tally (29) and on the mount-screen unification (182/196 item 1) so the screen lives inside resolve_in before the index adds callers.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+Implemented on branch t31 (worktree tmp/worktrees/t31, not merged): e2bb85d e2e: parse the synchronous tally's time after 'tier(s) in' (TASK-31) bb6e2dd Reclaim walk on the index: re-match, stale units, per-tier discovery (TASK-31) . Design: executor/indexed.rs (sync tally before the host lock over indexed tiers; per-tier queue from index::queue::derive; single re-matched by fs_kind::discover_beneath Exact + stored identity, else skip stale and evict; blocks/lumps expanded by discover_beneath Subtree from the deeper of site and bound root; candidates found ahead up to 64 (oldest; best-fit 1) then read-only tally + act_fs (extracted from walk_fs); tier discovery always runs after the queue and passes over judged ids/paths). Index serves fs single-source tiers without !profile: only; Cargo/union/negated tiers discover only (TASK-243). Root-cause fixes found by existing tests: sizing walk statted systemd-private-* names and read EACCES as empty (now Step::Refused contains_special/unreadable); liveness Owner-PID ordering broken by per-candidate re-discovery with reused scans (now FreshAttempts::scan_not_before + find-ahead batches keep TASK-203 reuse). Reason::Stale added (RESERVED_REASONS drops it), vector races/unit-gone-before-rematch-is-stale. 9 count-based vectors/tests retargeted to the call they pin (the tally adds earlier calls). AC tests: AC1 diskgc-modelgen tests/index_authority.rs (64 cases default, ran 3000 green); AC2 index_reclaim stale_index_changes_after_the_tally_are_refused_at_deletion_time + a_seeded_index_that_missed_the_changes...; AC3 new_cruft_after_the_snapshot_is_deleted_before_the_pressure_tier; AC4 e2e fs_reclaim_(100k_entry_)time_to_first_deletion_is_measured_cold_and_warm; AC5 a_block_member_opened_after_an_earlier_member_was_deleted_is_in_use; AC6 a_lump_above_the_bound_root_is_expanded_from_the_root_only. Red->green by mutation: AC1 (restricted walk trusts index path) red; AC2 (keep marker inside not refused) red; AC3 (no discovery after queue) red; AC5 needs all three freshness guards off (reuse limit, is_fresh_at, clear expiry) to go red - defence in depth; AC6 (expand from site) red; find-ahead=1 makes the scan-sharing test red. Gate: nix develop -c just check exit 0 (1256 passed). Container (just e2e-one, PASS): fs_reclaim_time_to_first_deletion_is_measured_cold_and_warm, fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm, fs_reclaim_tmp_fixture_deletes_every_eligible_candidate_and_nothing_else, fs_reclaim_100k_entry_tmp_deletes_every_eligible_candidate_and_nothing_else, fs_reclaim_never_enters_private_tmp_inside_a_candidate, fs_reclaim_never_deletes_a_socket_or_fifo, nix_shell_rc_lifecycle_is_pinned, pytest_lifecycle_is_pinned, pytest_live_basetemp_session_is_kept. AC4 measured (rootless podman container, tmpfs /tmp, under the harness strace -f, dev build, 2026-10-26): 100,001 entries / 10,000 rc candidates: first deletion cold 592 ms (sync tally 570 ms), warm 389 ms (371 ms), both exit 0 at --min-free; 8,000 entries: 125 / 91 ms. Warm = second run (kernel caches); no saved index exists before TASK-30. Not the static musl release binary (TASK-115 note). Full just e2e not run (per instructions). Follow-ups: TASK-243, TASK-244, TASK-245, TASK-246.
+<!-- SECTION:NOTES:END -->

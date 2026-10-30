@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 14:18'
+updated_date: '2026-10-26 08:12'
 labels:
   - wave-3
   - architecture
@@ -55,6 +55,8 @@ Design settled 2026-10-25 in fe54fe6 (branch index-design, not merged): docs/arc
 Mark's decisions 2026-10-25 (his own): an ensure whose goal is already met stays an instant no-op (no tally, no snapshot write); warmth for rarely-full machines comes from watch / watch --tally-only.
 
 AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's decisions 2026-10-25. Old #3 (tier changes keep the snapshot; profile or root changes invalidate it) replaced: no whole-file shape hash, per-unit finders.
+
+From TASK-31 review (2026-10-26, mped-architect on e2bb85d): (a) Refusal.at is a MonoTime; 'this run's refusal' = at >= run_started. Persisted across reboot a monotonic time can compare as this run and suppress a unit (fails safe, but it is a format decision): store wall time + boot id, or clear hints on load. (b) fs_kind::discover_beneath asserts an absolute path; a corrupted relative path in a loaded snapshot would crash the run: validate paths at load, treat bad entries as stale or discard the snapshot.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
