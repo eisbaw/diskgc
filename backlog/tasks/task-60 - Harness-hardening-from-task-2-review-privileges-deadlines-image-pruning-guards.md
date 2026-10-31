@@ -5,8 +5,8 @@ title: >-
   guards
 status: To Do
 assignee: []
-created_date: '2026-10-16 23:54'
-updated_date: '2026-10-25 20:18'
+created_date: 2026-10-16 23:54
+updated_date: '2026-10-31T22:15:00Z'
 labels:
   - wave-1
   - hardening
@@ -24,8 +24,13 @@ Why: lower-priority findings from the task-2 review, fixed once the harness is s
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each of the six items is implemented with a test or a recorded reason for not doing it
+- [x] #1 Each of the six items is implemented with a test or a recorded reason for not doing it
 <!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
 
 ## Implementation Notes
 
@@ -43,9 +48,13 @@ H2 (per-image opt-out of the /nix/store bind mount and the toolchain manifest) m
 Orchestrator 2026-10-23 (COMPASS consult): raised to High: TASK-13 (on the release path) depends on it.
 
 Orchestrator 2026-10-24 (COMPASS round 2): tmp/worktrees/task60-harness holds 644 lines of uncommitted TASK-60 changes on a base ~40 commits behind master. Compare with HEAD and the tracker before restarting; do not redo or discard it blindly.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+2026-10-31 port of WIP 7e4bd72 onto master (branch t60-harness-port, worktree tmp/worktrees/t60; not merged). Per item:
+(1) DONE. runner podman_run_args adds --security-opt no-new-privileges for every runtime; probe whoami prints CapInh/CapAmb/NoNewPrivs; tester_cannot_read_other_users_mode000_dir requires all four cap sets 0 and NoNewPrivs 1 (Nix and Debian images pass). Bite: runner without the flag -> that test FAILs naming the flag. Buildah spool test passes under it (its setuid newuidmap copies are now inert); Docker dind (--privileged) fast suite passes.
+(2) DONE. Runner setup (canary, podman info x2, image exists/load, listing) runs via output_by: own process group, SIGKILL at the run deadline (suite budget; 15 min setup for one). Unit tests incl. a bite (leader-only kill -> red). Cleanup podman kill/rm bounded and reported. Gate recipes run check under tools/deadline.py 3600 (forwards Ctrl-C; coreutils timeout would orphan cargo); justfile appends max-silent-time = 1800 to NIX_CONFIG (verified: a silent builder fails 'timed out after 3 seconds' with max-silent-time 3). Not bounded: Nix evaluation and substitution.
+(3) DONE as an explicit tool, not automatic: just e2e-images [--apply] (tools/e2e_images.py, unit-tested with a fake rmi). Dry run on this host listed one old tag, localhost/diskgc-e2e-base:c55xq8rnqgjks8ndvlycwhjvihlc7wi5 (<= 4.18 GiB). --apply NOT run on the host (host deletion needs Mark's authorization). Runner does not prune itself: parallel worktrees on other inputs would thrash and race.
+(4) DONE. Scratch::mount/mount_sized call sandbox::check() first; unit test asserts the refusal message (Nix build sandbox).
+(5) DONE. diskgc-e2e/clippy.toml disallows std fs mutators (write, File::create[_new], create_dir[_all], DirBuilder::create, remove_*, rename, copy, hard_link, set_permissions, unix symlink/chown/lchown); scratch.rs allowed; every other use has #[expect(..., reason)]. e2e-clippy went red at each site before the expectations; an unfulfilled expectation also fails. Not covered: OpenOptions::open, rustix, spawned processes.
+(6) DONE. Tier::Probe test runner_failure_probe_fails_on_purpose (in no suite; unit test) plus tools/e2e_one_retention.py in e2e and e2e-full: failed one keeps an exited container with the probe message; passing one leaves none; removes only its own containers. Bite: runner removing failed containers -> check red.
+Forward-carried items NOT done (follow-ups): std::process::Command outside under_test.rs / Ledger only via Ctx; CHURN_BOUND 10 s wall-time check; let_underscore_must_use; CreatedDuringRun-is-inferred doc; task-4 H1, H3-H6.
+<!-- SECTION:NOTES:END -->
