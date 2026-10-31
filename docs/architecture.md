@@ -1011,19 +1011,345 @@ is accepted until measured otherwise.
   processes). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
   number of processes it can see; it raises its soft limit itself
   ([reference.md](reference.md#ensure), Open-file limit).
-- **Generic Linux:** the binary, a systemd template unit for `watch` (user
-  or system), the tmpfiles drop-in for the host lock file, and an example
-  config. Distribution packages can follow. Whatever else TASK-119
-  decides, the unit must restart a stopped watcher and not loop on a bad
-  configuration (`Restart=always`, `RestartPreventExitStatus=2`, a
-  `RestartSec` of tens of seconds), because `watch` exits 0 on SIGHUP and
-  SIGTERM and 2 on a configuration it refuses
-  ([reference.md](reference.md#watch-signals)); a test checks the shipped
-  unit for these lines.
-- **NixOS**, as one option: a module that renders the YAML, ships the
-  tmpfiles rule, runs `check` at build time, and starts the `watch`
+- **Generic Linux:** the binary, the two `watch` units below, the tmpfiles
+  drop-in for the host lock file, and an example config. Distribution
+  packages can follow.
+- **NixOS**, as one option: the module below. It renders the YAML, ships
+  the tmpfiles rule, runs `check` at build time, and starts the `watch`
   instances.
 - **CI runners:** binary, YAML, the tmpfiles drop-in (or equivalent), and
   `diskgc ensure --min-free 50G --target-free 80G "$CI_BUILDS_DIR"` in the
-  pre-job hook; optionally `watch --tally-only` between jobs for a warm
-  index.
+  pre-job hook; optionally a `watch --tally-only` instance between jobs for
+  a warm index (below).
+
+Designed by TASK-119; Mark's decisions (2026-10-23, 2026-10-25) are the
+user service by default, the system template as the option, both in the
+module, and `Restart=always` with `RestartPreventExitStatus=2`. The rest
+is listed under Choices to confirm. TASK-44 ships the units, TASK-45 the
+module; their tests are in [testing.md](testing.md#deployment-units).
+
+### The `watch` units
+
+A **user service by default**: the laptop owner runs `watch` under
+`systemd --user`, as themselves, so it sees their processes and never
+needs root. A **system template** is the option for CI runners and
+`--allow-root`. Both are templates with one instance per watched
+filesystem and carry the same name, so the commands read alike:
+
+| Package file (source in `packaging/systemd/`) | Manager | Start one |
+|---|---|---|
+| `lib/systemd/user/diskgc-watch@.service` | `systemd --user` | `systemctl --user enable --now "diskgc-watch@$(systemd-escape --path /home).service"` |
+| `lib/systemd/system/diskgc-watch@.service` | system | `systemctl enable --now "diskgc-watch@$(systemd-escape --path /srv/ci).service"`, after a `User=` drop-in |
+
+Install by copying the user file to `/etc/systemd/user/` (every user) or
+`~/.config/systemd/user/`, the system file to `/etc/systemd/system/`.
+
+**The instance is `PATH`.** The instance name is `PATH` escaped by
+`systemd-escape --path` (`/` is `-`, `/home` is `home`, `/srv/ci-builds`
+is `srv-ci\x2dbuilds`), and `%f` turns it back into `PATH`. One watcher
+serves a filesystem ([reference.md](reference.md#watch), One process per
+filesystem), so start one instance per filesystem: any `PATH` on it
+selects it, and the mount point reads best. The thresholds and
+every other flag come from the instance's environment file
+`%E/diskgc/watch/%i.env` (`~/.config/diskgc/watch/home.env` for the user
+manager, `/etc/diskgc/watch/srv-ci\x2dbuilds.env` for the system one),
+which holds one variable:
+
+```
+DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G
+```
+
+systemd splits it at whitespace and honours no quotes inside it, so a
+`--select` expression with spaces does not survive: keep selections in
+the configuration's tiers, or replace `ExecStart=` in a drop-in (as the
+NixOS module does). The file is optional (`-`): without it `watch` has no
+thresholds, exits 2 naming `--min-free`, and the unit stays failed with
+diskgc's message instead of looping.
+
+The user unit, in full:
+
+```ini
+[Unit]
+Description=diskgc watch of %f
+
+[Service]
+Type=exec
+EnvironmentFile=-%E/diskgc/watch/%i.env
+ExecStart=/usr/local/bin/diskgc watch $DISKGC_WATCH_ARGS "%f"
+Restart=always
+RestartSec=30s
+RestartPreventExitStatus=2
+KillMode=mixed
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target
+```
+
+- **`ExecStart`** names the README's install path; the NixOS module
+  replaces the line. `Type=exec` makes a missing binary a failed start.
+- **Restart** (Mark, 2026-10-25). `watch` exits 0 on SIGTERM, SIGINT and
+  SIGHUP and reads its configuration only at start, so anything that
+  stops it outside `systemctl stop` (a `kill -HUP` after editing the
+  configuration) restarts it with the configuration read afresh. Exit 2
+  (usage, configuration, privilege, the sandbox gate, a missing host lock
+  file, a missing root, another watcher holding the filesystem's
+  single-writer lock: [reference.md](reference.md#exit-codes-watch)) is
+  not restarted: the unit stays failed and `systemctl status` shows why.
+  Exit 3 and a panic (101) restart after 30 s; at one start per 30 s the
+  default start limit (5 in 10 s) never trips, so a fault that persists
+  costs one journal entry per 30 s. There is no `ExecReload=`: diskgc
+  does not reload, and `systemctl restart` does what SIGHUP does.
+- **Stop.** `KillMode=mixed` sends SIGTERM to diskgc alone, so its own
+  stop runs (a child gets SIGTERM and SIGKILL after 10 s, then the
+  snapshot is written; [reference.md](reference.md#watch-signals)); at
+  `TimeoutStopSec=30s` systemd SIGKILLs what is left, which is safe. The
+  default `control-group` would signal the children alongside diskgc.
+- **Configuration and state.** The user unit sets neither: the
+  configuration is the usual lookup (`~/.config/diskgc/config.yaml`, then
+  `/etc/diskgc/config.yaml`) and the state directory
+  `$XDG_STATE_HOME/diskgc` (`~/.local/state/diskgc`), the same ones the
+  user's agents' `ensure` uses, so the watcher's snapshot warms them.
+- **Priority.** No `Nice=`, `IOSchedulingClass=`, `CPUSchedulingPolicy=`,
+  `CPUWeight=` or `IOWeight=`. The background tally lowers only its own
+  thread (`nice 19`, idle I/O class; The tally); the reclaim runs on the
+  main thread at the unit's priority and must not inherit idle priority
+  at the moment the disk is full and builds compete for it.
+- **`LimitNOFILE=`** is left at systemd's default hard limit (524288),
+  above the in-use scan's one descriptor per visible process.
+- **Lingering.** A user manager runs only while its user has a session;
+  `loginctl enable-linger USER` keeps it (and the watcher) running for
+  overnight agents after logout.
+
+The system template is the same file with these lines added:
+
+```ini
+[Unit]
+After=local-fs.target
+RequiresMountsFor=%f
+
+[Service]
+Environment=DISKGC_CONFIG=/etc/diskgc/config.yaml
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **`User=`** is not in the template: each instance gets a drop-in
+  (`systemctl edit diskgc-watch@srv-ci.service`: `[Service]`,
+  `User=gitlab-runner`). Its supplementary groups (such as `docker`)
+  apply. An instance without one runs as root without capabilities and
+  exits 2 (root without `--allow-root`), so a forgotten `User=` is a
+  failed unit that says so, never a root watcher.
+- **Root.** `--allow-root` in `DISKGC_WATCH_ARGS`, an `owners:` list in
+  the configuration ([reference.md](reference.md#configuration-file)),
+  and a drop-in with `CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+  CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_CHECKPOINT_RESTORE`: read
+  and delete in the owners' trees (`CAP_FOWNER` for the sticky `/tmp` and
+  `make_writable`), read the owners' `/proc/<pid>` entries and `kcmp`
+  them (`CAP_SYS_PTRACE`), read `map_files` links
+  (`CAP_CHECKPOINT_RESTORE`). `CAP_SYS_PTRACE` is mandatory: without it a
+  root process holding a capability diskgc lacks is excused at the "more
+  capable" boundary ([safety.md](safety.md#in-use)) and its open files go
+  unseen. Each of the others fails safe when missing (an unreadable tree
+  is refused, an unreadable `map_files` link retains). `--allow-root`
+  also requires the configuration file and every directory above it to
+  be root-owned and not group- or world-writable
+  ([safety.md](safety.md#privileges)): `/etc/diskgc/config.yaml`
+  qualifies; a `/nix/store` path does not (the store is writable by
+  group `nixbld`).
+- **Configuration and state.** `DISKGC_CONFIG` pins one file whatever the
+  `User=`'s home holds; an environment file may set another. The state
+  directory is not overridden: it is `~/.local/state/diskgc` of `User=`,
+  the one a pre-job `ensure` run by the same user reads. A user without a
+  writable home gets a watcher without a snapshot
+  ([reference.md](reference.md#watch-start), step 6) unless its
+  environment file sets `XDG_STATE_HOME` to what the hook uses. No
+  `StateDirectory=`: under `/var/lib` it would split the watcher's
+  snapshot from the hook's, and instances of different users would fight
+  over its owner.
+- **Ordering.** Default dependencies already order the unit after
+  `sysinit.target` and so after `systemd-tmpfiles-setup.service`, which
+  creates the host lock from the package's `lib/tmpfiles.d/diskgc.conf`
+  ([safety.md](safety.md#host-lock)); `After=local-fs.target` says so
+  explicitly and `RequiresMountsFor=%f` waits for `PATH`'s mount. Nothing
+  orders it after `docker.service` or the Nix daemon: a backend that is
+  not up yet is a `retry` back-off
+  ([reference.md](reference.md#the-reclaim-cycle)).
+
+### Hardening
+
+The rule: **no option that gives diskgc a namespace of its own** (mount,
+user, PID, network). diskgc must see the user's processes and files as
+they are; what protects them is the code ([safety.md](safety.md)), not a
+narrowed view. A user manager cannot set up a mount namespace without a
+user namespace (systemd.exec, Sandboxing), and a user namespace is fatal
+(below), so only seccomp-based options remain there; they are the
+shipped list in both units. Checked against `systemd-analyze
+syscall-filter` and systemd.exec of systemd 260.
+
+| Option | Verdict | Why, by what diskgc reads and writes |
+|---|---|---|
+| `ProtectProc=` other than `default` | no (unsafe) | mounts the unit's `/proc` with `hidepid`, which hides the user's own processes the kernel will not let diskgc read, a shell started with `newgrp` or `sg` and its children among them. Visible, such a process makes candidates `in_use_unknown`; hidden, its open files go unseen. Liveness contracts then keep everything ([safety.md](safety.md#producer-liveness), precondition 4). System units only. |
+| `ProcSubset=pid` | no | hides `/proc/sys/kernel/random/boot_id` (snapshot validity) and `/proc/pressure` (the pressure brake goes off and the tally loads the system). |
+| `PrivateTmp=` | fatal | an empty private `/tmp`: every `/tmp` candidate (`pytest-tmp`, `nix-shell-rc`) is invisible to discovery and walks. |
+| `ProtectHome=` | no | hides or freezes `/home`, `/root`, `/run/user`: Cargo roots, the user's configuration and the state directory vanish, or deleting and the snapshot write fail `EROFS`. |
+| `ProtectSystem=strict` | no | every candidate tree read-only, deletions fail `EROFS`. Reopening them with `ReadWritePaths=` would copy the configuration's roots into the unit (two sources of truth) and make each a mount point in diskgc's own mount table. |
+| `ProtectSystem=yes` or `full` | works, not shipped | no candidate lies under `/usr`, `/boot`, `/efi` or `/etc`, and the configuration is only read. It costs a mount namespace: diskgc's `mountinfo` then differs from every judged process's, so held paths always take the other-namespace translation ([safety.md](safety.md#producer-liveness), A process's paths). The gain is small: a non-root watcher cannot write there, and a root one refuses root-owned entries. |
+| `ReadWritePaths=` | not used | meaningful only with `ProtectSystem=strict` (above). |
+| `PrivateDevices=` | works, not shipped | hides `/dev/disk/by-uuid`, so the snapshot key falls back to the device number (warmth only); a mount namespace. |
+| `ProtectKernelTunables=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectHostname=`, `PrivateMounts=`, `PrivateIPC=` | not shipped | harmless to what diskgc reads (`/proc/sys` stays readable), but each needs a namespace: the rule, and in a user manager a user namespace. |
+| `PrivateUsers=` (any value) | fatal, silently | in a child user namespace the kernel refuses the ptrace-read access to `/proc/<pid>/fd`, `maps`, `environ`, `cwd` of every process of the initial namespace, the user's own included (a reader in another user namespace needs `CAP_SYS_PTRACE` in the target's), and the "more capable" excuse is off there ([safety.md](safety.md#in-use)): every filesystem and Cargo candidate is `in_use_unknown`. Nothing is deleted wrongly, and only the daemon-side kinds (Docker, Nix) still reclaim. |
+| `PrivatePIDs=` | no (unsafe) | a new PID namespace with its own `/proc`: the in-use scan sees only the unit's processes, so every other process's open files, maps and working directories go unseen; liveness contracts keep everything ([safety.md](safety.md#producer-liveness), precondition 3). |
+| `PrivateNetwork=` | no (unsafe under `ipc: live-only`) | `bound_unix_sockets` dumps the Unix sockets bound in diskgc's network namespace; a private one is empty, so a socket another process has bound looks stale. Daemon sockets would still connect (path sockets cross network namespaces). |
+| `DynamicUser=` | fatal | implies `PrivateTmp=`, `ProtectSystem=strict` and `ProtectHome=read-only`, and its uid owns no candidate. |
+| `NoNewPrivileges=yes` | shipped | diskgc never gains privileges; it also keeps a command action from becoming root through `sudo` or a setuid helper. |
+| `SystemCallFilter=@system-service`, `SystemCallErrorNumber=EPERM`, `SystemCallArchitectures=native` | shipped | the group holds what diskgc calls: `pidfd_open` and `pidfd_send_signal` (`@process`), `kcmp`, `flock`, `openat2` and `statx` (`@file-system`), `setpriority`, `ioprio_set` and `prlimit64` (`@resources`), `socket` for `NETLINK_SOCK_DIAG`. Not with the common `~@resources`: the tally then runs at normal priority (one log line) and the soft `RLIMIT_NOFILE` is not raised (a busy host's scan fails `EMFILE`). Any filter without `pidfd_open` makes diskgc refuse to start, as under Podman 2.1.1's profile ([safety.md](safety.md#in-use)). Children (the Docker CLI, Nix, command actions) run under the same filter. |
+| `RestrictNamespaces=yes` | shipped | the source scan forbids `setns` and `unshare`; a command action that needs namespaces (`bwrap`) fails loudly. |
+| `RestrictAddressFamilies=AF_UNIX AF_NETLINK` | shipped | `NETLINK_SOCK_DIAG`; the Docker and Nix daemon sockets; nscd. A command action that needs the network fails loudly. |
+| `LockPersonality=yes`, `RestrictRealtime=yes` | shipped | diskgc uses neither. |
+| `RestrictSUIDSGID=yes` | no | `make_writable` passes the directory's mode with the owner-write bit added (`st_mode & 0o7777 \| 0o200`), set-group-ID bit included, so its `fchmod` is denied on a read-only setgid directory and that candidate's deletion fails. |
+| `MemoryDenyWriteExecute=yes` | works, not shipped | diskgc does not need writable executable memory, but children inherit the flag, and a command action on a JIT runtime (Node, a JVM) crashes. |
+| `CapabilityBoundingSet=` | system: shipped empty | a non-root watcher needs no capability; root's set is above. In a user unit it would need a user namespace. |
+| `Nice=`, `IOSchedulingClass=`, `CPUSchedulingPolicy=`, `CPUWeight=`, `IOWeight=` | not set | they apply to the reclaim too (Priority, above). |
+| `LimitNOFILE=` | not lowered | a limit below the visible process count fails the in-use scan. |
+
+### NixOS module
+
+`nixosModules.default`, under `services.diskgc`:
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `enable` | bool | `false` | the package on `PATH` (agents and hooks call `ensure`), its tmpfiles rule (`systemd.tmpfiles.packages`) and both templates (`systemd.packages`) |
+| `package` | package | the flake's `packages.default` | a reclaiming instance needs a release package: a development package refuses to delete outside test containers, so the instance exits 2 naming the sandbox gate and stays failed. `tallyOnly` instances work with either. |
+| `settings` | null or YAML value | `null` | rendered to `/etc/diskgc/config.yaml` and checked at build time |
+| `instances` | attribute set of instances | `{}` | one `watch` each |
+
+`instances.<name>`:
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `scope` | `"user"` or `"system"` | `"user"` | which manager runs it |
+| `user` | string | required | user scope: the account whose manager runs it (`ConditionUser=`); system scope: `User=` |
+| `path` | absolute path, as a string | required | `PATH`; names the unit |
+| `minFree` | null or size | `null` | `--min-free`; required unless `tallyOnly` |
+| `targetFree` | null or size | `null` | `--target-free`; required unless `tallyOnly`, refused with it |
+| `interval` | null or duration | `null` (10 s) | `--interval`; refused with `tallyOnly` |
+| `timeout` | null or duration | `null` (10 min) | `--timeout`; refused with `tallyOnly` |
+| `select` | null or string | `null` | `--select` |
+| `roots` | list of absolute paths, as strings | `[]` | one `--roots` each |
+| `tallyOnly` | bool | `false` | `--tally-only` |
+| `allowRoot` | bool | `false` | `--allow-root` and root's capability set; requires `scope = "system"` and `user = "root"` |
+| `settings` | null or YAML value | `null` | this instance's own configuration (an `allowRoot` instance needs `owners:`), rendered to `/etc/diskgc/watch-<name>.yaml` and checked at build time |
+| `configFile` | null or absolute path, as a string | `null` | a file the module does not manage or check; a string, so it is never copied into the store |
+
+- **Instances to units.** Each instance is the packaged template's
+  instance `diskgc-watch@${utils.escapeSystemdPath path}.service` in its
+  scope, with a module drop-in (`overrideStrategy = "asDropin"`) that
+  resets `ExecStart=` to the full command line (quoted by
+  `utils.escapeSystemdExecArgs`, so a `--select` with spaces survives),
+  always with `--config`: `configFile`, else the instance's `settings`
+  file, else `/etc/diskgc/config.yaml`. It also adds `User=` (system) or
+  `ConditionUser=` (user), root's capability set for `allowRoot`, and
+  `wantedBy` `multi-user.target` or `default.target`. There is no
+  environment file. Restart and hardening lines come from the packaged
+  template, so generic Linux and NixOS share one unit text. A system
+  instance restarts on `nixos-rebuild switch` when its configuration
+  changes (`restartTriggers`); a user instance picks it up at its next
+  restart.
+- **Assertions** (evaluation fails, naming the instance): `path` and
+  `roots` absolute; one instance per unit name in each scope (user units
+  live in `/etc/systemd/user` for every user, so two users cannot both
+  have a user instance of one `path`); the `tallyOnly` rules above;
+  `allowRoot` exactly when `scope = "system"` and `user = "root"`; at most
+  one of `settings` and `configFile` per instance, and a configuration
+  from somewhere.
+- **Build-time check** (TASK-45). Each rendered file is the output of a
+  derivation that runs `diskgc check --config FILE` with the instance's
+  package and copies the file only when it exits 0; `environment.etc`
+  takes its source from that output, so an invalid configuration fails
+  the system build before anything is deployed. `check` needs nothing
+  from the machine ([reference.md](reference.md#check)): roots absent from
+  the build sandbox only warn, and `owners:` names resolve at run time.
+  The files are copied into `/etc` (`mode = "0644"`), not linked to the
+  store, so `--allow-root`'s ownership rule holds for them. Not checked at
+  build time: `configFile`, and everything diskgc checks at run time.
+
+### CI runner: a warm index
+
+A system instance with `--tally-only`, as the runner user, on the
+runner's builds directory. Generic Linux:
+
+```ini
+# /etc/systemd/system/diskgc-watch@home-gitlab\x2drunner-builds.service.d/user.conf
+[Service]
+User=gitlab-runner
+```
+
+```
+# /etc/diskgc/watch/home-gitlab\x2drunner-builds.env
+DISKGC_WATCH_ARGS=--tally-only --min-free 50G
+```
+
+NixOS:
+
+```nix
+services.diskgc = {
+  enable = true;
+  settings = { /* the pre-job hook's configuration */ };
+  instances.runner = {
+    scope = "system";
+    user = "gitlab-runner";
+    path = "/home/gitlab-runner/builds";
+    tallyOnly = true;
+    minFree = "50G";  # the pre-job hook's --min-free
+  };
+};
+```
+
+It must agree with the pre-job hook's `ensure` on the user (so both use
+`~gitlab-runner/.local/state/diskgc`), the configuration (the hook passes
+`--config /etc/diskgc/config.yaml`, or its lookup finds that file),
+`--select` and `--roots`, and the filesystem
+([reference.md](reference.md#tally-only)). It never samples for a goal,
+takes the host lock or deletes, so the sandbox gate does not apply and it
+runs from a development package too. `--min-free` only bounds the
+snapshot write.
+
+### Choices to confirm
+
+Not covered by Mark's decisions; each is the simplest sound option found.
+
+1. Instance name = escaped `PATH`, flags in an optional environment file
+   per instance; no `--select` with spaces through that file.
+2. One unit name, `diskgc-watch@.service`, for both managers.
+3. No namespacing in either unit, `ProtectSystem=full` included.
+4. Shipped `ExecStart=/usr/local/bin/diskgc` (the README's path);
+   distribution packages and the module replace it.
+5. The system template has no `User=`: unset means root without
+   capabilities, which exits 2.
+6. Root instances get the five-capability bounding set above (unproved
+   until the module's VM test).
+7. `RestartSec=30s`, `KillMode=mixed`, `TimeoutStopSec=30s`, no
+   `ExecReload=`.
+8. State stays in `User=`'s home (no `StateDirectory=`); system units pin
+   `DISKGC_CONFIG=/etc/diskgc/config.yaml`, user units use the normal
+   lookup.
+9. `RestrictAddressFamilies=` and `RestrictNamespaces=` shipped although
+   they bind command actions; `MemoryDenyWriteExecute=` and
+   `RestrictSUIDSGID=` not shipped.
+10. Module: one `instances` set with `scope` (default `"user"`), per
+    instance `settings`, configuration files copied into `/etc`; it does
+    not set `users.users.<name>.linger`.
+11. One NixOS VM test for the module (TASK-45), run like
+    `vm-release-tmp-reclaim`, although the PRD lists a VM test suite as a
+    non-goal for now; deferred while disk is tight.

@@ -1967,7 +1967,7 @@ filesystem, processes and mounts from the developer's system.
 
 **Not covered end-to-end (for now):** deletion on real block filesystems
 (ext4 or xfs as separate mounts, btrfs), network filesystems, and live
-systemd. A private ext4 VM disk covers the 40k dry-plan cost only. Rootless
+systemd (planned: Deployment units, below). A private ext4 VM disk covers the 40k dry-plan cost only. Rootless
 container behavior follows the test host's kernel; the pinned VM cases above
 cover the listed kernels. Other cases rest on model tests with model-only
 fields.
@@ -1987,6 +1987,58 @@ dead (a `statx` of it gets no answer for 2 s).
 
 Container tests cannot run inside the Nix build sandbox, so they run from
 `just e2e`, not as `nix flake check` checks.
+
+### Deployment units
+
+Planned with the units and the module
+([architecture.md](architecture.md#deployment)); none of these exist yet.
+"Possible here" means it needs neither a VM nor more than the flake
+already builds.
+
+1. **Unit lint** (TASK-44; a unit test in `just check`; possible here).
+   Both packaged templates carry `Type=exec`, `Restart=always`,
+   `RestartSec=30s`, `RestartPreventExitStatus=2`, `KillMode=mixed` and
+   the shipped hardening lines, and none that the hardening table rejects
+   (`ProtectProc=`, `ProcSubset=`, `PrivateTmp=`, `ProtectHome=`,
+   `ProtectSystem=strict`, `PrivateUsers=`, `PrivatePIDs=`,
+   `PrivateNetwork=`, `DynamicUser=`, `RestrictSUIDSGID=`, `Nice=`,
+   `IOSchedulingClass=`, `CPUSchedulingPolicy=`, a `SystemCallFilter=`
+   with `~@resources`). This is the check of the shipped unit's lines that
+   Deployment requires.
+2. **`systemd-analyze verify`** (TASK-44; a flake check that `just e2e`
+   builds; possible here: `pkgs.systemd` is already in the flake for the
+   Nix image, so no new build input). Each template is linked under
+   instance names (`diskgc-watch@srv-ci\x2dbuilds.service`, and
+   `diskgc-watch@-.service` for `/`), its `ExecStart` pointed at the
+   built binary, and verified in system and `--user` mode; TASK-45 adds
+   the units the module renders for an example configuration, taken from
+   the system toplevel without booting it. Design evidence only, not this
+   check: on 2026-10-31 a draft of both templates (ExecStart pointed at
+   `true`) passed `systemd-analyze verify` and `systemd-analyze --user
+   verify` with systemd 260 on the development host.
+3. **tmpfiles create**: exists (`shipped_tmpfiles_and_example_work_in_container`,
+   Shipped files above). TASK-44 adds both unit files to the package's
+   installed-file check.
+4. **Module evaluation and build-time check** (TASK-45; flake checks, no
+   VM; possible here): the module evaluates for a user instance, a system
+   `tallyOnly` instance and an `allowRoot` instance; an invalid `settings`
+   makes the system build fail with `diskgc check`'s message
+   (`testers.testBuildFailure`); each assertion fires on its own example.
+5. **NixOS VM test** (TASK-45; one `nixosTest` flake check, like
+   `vm-release-tmp-reclaim`; deferred, not run here while the development
+   machine's disk is tight). Boot provisions `/run/diskgc/lock`; a
+   lingering user's user instance and a runner user's system `tallyOnly`
+   instance are active; the `tallyOnly` instance's snapshot lands in the
+   runner's `~/.local/state/diskgc` and that user's `ensure` starts from
+   it; SIGHUP makes an instance active again (`NRestarts=1`) with an
+   edited configuration in effect; a second instance on the same
+   filesystem and user, and a root instance without `--allow-root`, exit 2
+   and stay failed (`NRestarts=0`); `systemctl show` reports the hardening
+   properties. With the release package only (the sandbox gate refuses
+   deletion in a VM, which is not a test container): a reclaiming
+   instance keeps a candidate a process holds and deletes an unheld one,
+   as the user and as an `allowRoot` instance with its capability set,
+   which is what proves that set.
 
 ## Cargo toolchains under test
 
@@ -2512,7 +2564,7 @@ snapshot, not proof that a path is safe to move.
 | `just` recipe | What | When |
 |---|---|---|
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
-| `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, `systemd-analyze verify` of the shipped unit, in the dev shell | constantly; seconds |
+| `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus fast Nix-image tests, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
