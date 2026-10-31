@@ -655,9 +655,18 @@ impl<H: Host> Host for Controlled<H> {
         self.before("state_lock");
         self.host.state_lock(key)
     }
-    fn user_lock(&self) -> Result<diskgc_core::host::UserLock<Self::Fd>, HostError> {
+    fn user_lock_path(&self) -> Option<std::path::PathBuf> {
+        self.before("user_lock_path");
+        self.host.user_lock_path()
+    }
+
+    fn user_lock(
+        &self,
+        make: diskgc_core::host::MakeUserLock,
+    ) -> Result<Option<diskgc_core::host::UserLock<Self::Fd>>, diskgc_core::host::UserLockError>
+    {
         self.before("user_lock");
-        self.host.user_lock()
+        self.host.user_lock(make)
     }
 
     fn state_read(

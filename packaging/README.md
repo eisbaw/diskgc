@@ -29,8 +29,7 @@ As root, from the unpacked package (a minimal system may have no
 Without systemd-tmpfiles, create what `diskgc.conf` describes at every
 boot. The tmpfiles steps are needed only for root and system services.
 Without them, and without root, put the binary anywhere on your `PATH`:
-a reclaim then takes a per-user lock in `$XDG_RUNTIME_DIR/diskgc`
-(otherwise in `~/.local/state/diskgc`), which serialises your own
+a reclaim then takes a per-user lock of its own, which serialises your
 reclaims but not other users' (`safety.md`, Host lock).
 
 ## First run

@@ -248,13 +248,40 @@ fn background_pauses_while_another_process_holds_the_per_user_lock() {
         "{}  /usr/bin/diskgc: {{}}\n  /run/user/1000: {{.: {{mode: \"0700\"}}, diskgc: {{.: {{mode: \"0700\"}}, lock: {{mode: \"0600\"}}}}}}\n",
         dirs("a", 3, 2)
     );
-    let model = yaml(
-        &tree,
-        &format!("runtime_dir: /run/user/1000\n{}", held_until_30s(LOCK)),
-    )
-    .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    let model =
+        yaml(&tree, &held_until_30s(LOCK)).replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
     let host = host(&model);
     pauses_until_the_release(&host, &ReclaimLock::User(PathBuf::from(LOCK)));
+}
+
+/// TASK-277 review: the probe makes nothing. A per-user lock that does not
+/// exist is held by no one: the tally runs, and no directory or file is
+/// made for it (`--tally-only` must not write a lock).
+#[test]
+fn background_probe_makes_no_per_user_lock() {
+    let tree = format!(
+        "{}  /run/user/1000: {{.: {{mode: \"0700\"}}}}\n",
+        dirs("a", 3, 2)
+    );
+    let model =
+        yaml(&tree, "call_cost: 1ms\n").replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    let host = host(&model);
+    let sources = [source("a", "/tmp/a")];
+    let mut state = state();
+    let mut events = Vec::new();
+    let mut log = |e: Event| events.push(e);
+    let mut background = Background::start(&host, &mut log);
+    for _ in 0..5 {
+        let sleep = background.turn(&host, &mut state, &sources, &mut log);
+        host.sleep(sleep);
+    }
+    assert!(host.trace_count(Op::UserLock) > 0, "it probed");
+    assert!(host.stat_path(Path::new("/run/user/1000/diskgc")).is_none());
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Paused(_))),
+        "{events:?}"
+    );
+    assert!(state.listed_at(&sources[0].finder).is_some());
 }
 
 /// Process 4242 holds `lock` exclusively until it exits at 30 s.

@@ -17,12 +17,13 @@
 //! gate). They are not behind the sandbox gate: they write diskgc's cache,
 //! never user data, and `watch --tally-only` must work anywhere.
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use diskgc_core::host::{Dev, FileType, FsKey, HostError, StateFile};
+use diskgc_core::host::{Dev, FileType, FsKey, HostError, MakeUserLock, StateFile, UserLockError};
 use diskgc_core::hostlock::USER_LOCK_NAME;
 use rustix::fs::{AtFlags, Mode, OFlags};
 
@@ -141,75 +142,125 @@ fn make_dirs_ungated(dir: &Path) -> Result<(), HostError> {
     Ok(())
 }
 
-/// A refusal of the per-user lock: not a kernel answer ([`HostError`]'s
-/// `Invalid`), so the core reports it as a provisioning error.
-fn refused(subject: &Path, why: impl Into<String>) -> HostError {
-    HostError::invalid("open", subject.display(), why)
+/// What [`open_user_lock_ungated`] found at one name, through an `O_PATH`
+/// open that never follows a symlink.
+enum Inspected {
+    Absent,
+    /// The object, its `fstat`.
+    Present(OwnedFd, rustix::fs::Stat),
 }
 
-/// Opens (creating it, and its directory, if absent) the per-user reclaim
-/// lock `dir/lock` (docs/safety.md, Host lock), read-only, for `flock`
-/// only: nothing is ever written to it or renamed onto it. `dir` is the
-/// per-user lock directory the binary chose (`$XDG_RUNTIME_DIR/diskgc`, or
-/// the state directory); its parent is reached following symlinks (made
-/// with its missing parents, mode 0700), its own name and the file never:
-/// a symlink there is refused, as is a directory that is not this user's
-/// or that others may write to, and a file that is not a regular file of
-/// this user or that others may open (`mode & 0o077`: they could hold the
-/// lock and stall this user's reclaims). The directory is made mode 0700,
-/// the file 0600. Every refusal is `Invalid`; a kernel failure carries its
-/// errno.
-pub(crate) fn open_user_lock_ungated(dir: &Path) -> Result<(OwnedFd, PathBuf), HostError> {
+/// `name` beneath `dir`, inspected without opening it for reading: an
+/// `O_PATH | O_NOFOLLOW` open (a symlink is opened as itself) and `fstat`.
+/// Needs search permission on `dir` only, so another user's object is
+/// inspected and refused, never an `EACCES` (TASK-277 review, Codex 1).
+fn inspect(dir: BorrowedFd<'_>, name: &OsStr, shown: &Path) -> Result<Inspected, UserLockError> {
+    let failed = |op, e| UserLockError::Failed {
+        path: shown.to_path_buf(),
+        error: HostError::errno(op, shown.display(), errno_of(e)),
+    };
+    match rustix::fs::openat(
+        dir,
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => {
+            let st = rustix::fs::fstat(&fd).map_err(|e| failed("fstat", e))?;
+            Ok(Inspected::Present(fd, st))
+        }
+        Err(rustix::io::Errno::NOENT) => Ok(Inspected::Absent),
+        Err(e) => Err(failed("open", e)),
+    }
+}
+
+/// Opens the per-user reclaim lock `dir/lock` (docs/safety.md, Host lock),
+/// read-only, for `flock` only: nothing is ever written to it or renamed
+/// onto it. `dir` is the per-user lock directory `LinuxHost` found
+/// (`/run/user/<uid>/diskgc` or `<home>/.local/state/diskgc`). Its parent
+/// is reached following symlinks (made, mode 0700 with its missing
+/// parents, when `make` allows). The directory and the file are inspected
+/// before anything opens them for reading ([`inspect`]): the directory must
+/// be a directory of this user that no one else may write to, the file a
+/// regular file of this user that no one else may open (`mode & 0o077`:
+/// they could hold the lock); anything else, whoever owns it, is
+/// [`UserLockError::Unsafe`]. Then the checked file is reopened read-only
+/// through `/proc/self/fd` and checked to be the same object. What is
+/// missing is made when `make` is [`MakeUserLock::IfAbsent`] (the directory
+/// mode 0700, the file mode 0600 with `O_EXCL`, so never over something
+/// else; a name made meanwhile by another run is inspected like any), and
+/// is `Ok(None)` otherwise. A kernel failure is [`UserLockError::Failed`].
+pub(crate) fn open_user_lock_ungated(
+    dir: &Path,
+    make: MakeUserLock,
+    proc: BorrowedFd<'_>,
+) -> Result<Option<(OwnedFd, PathBuf)>, UserLockError> {
+    let path = dir.join(USER_LOCK_NAME);
+    let failed = |op, at: &Path, e| UserLockError::Failed {
+        path: path.clone(),
+        error: HostError::errno(op, at.display(), errno_of(e)),
+    };
+    let unsafe_ = |at: &Path, why: String| UserLockError::Unsafe {
+        path: path.clone(),
+        error: HostError::invalid("open", at.display(), why),
+    };
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
-        return Err(refused(dir, "the per-user lock directory has no parent"));
+        return Err(unsafe_(
+            dir,
+            "the per-user lock directory has no parent".into(),
+        ));
     };
     let open_parent = || {
         rustix::fs::open(
             parent,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )
     };
     let parent_fd = match open_parent() {
-        Err(rustix::io::Errno::NOENT) => {
-            make_dirs_ungated(parent)?;
-            open_parent()
-        }
-        other => other,
-    }
-    .map_err(|e| HostError::errno("open", parent.display(), errno_of(e)))?;
-    match rustix::fs::mkdirat(&parent_fd, name, Mode::from_raw_mode(DIR_MODE)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(e) => return Err(HostError::errno("mkdir", dir.display(), errno_of(e))),
-    }
-    let dir_fd = match rustix::fs::openat(
-        &parent_fd,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
         Ok(fd) => fd,
-        // `O_DIRECTORY | O_NOFOLLOW` on a symlink is `ENOTDIR` (measured,
-        // Linux 7.2), as on a file: tell the two apart for the message.
-        Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
-            let is_link = rustix::fs::statat(&parent_fd, name, AtFlags::SYMLINK_NOFOLLOW)
-                .is_ok_and(|st| file_type_of(st.st_mode) == FileType::Symlink);
-            return Err(refused(
-                dir,
-                if is_link {
-                    "the per-user lock directory is a symlink"
-                } else {
-                    "the per-user lock directory is not a directory"
-                },
-            ));
+        Err(rustix::io::Errno::NOENT) if make == MakeUserLock::Never => return Ok(None),
+        Err(rustix::io::Errno::NOENT) => {
+            make_dirs_ungated(parent).map_err(|error| UserLockError::Failed {
+                path: path.clone(),
+                error,
+            })?;
+            open_parent().map_err(|e| failed("open", parent, e))?
         }
-        Err(e) => return Err(HostError::errno("open", dir.display(), errno_of(e))),
+        Err(e) => return Err(failed("open", parent, e)),
     };
     let uid = rustix::process::geteuid().as_raw();
-    let st = rustix::fs::fstat(&dir_fd)
-        .map_err(|e| HostError::errno("fstat", dir.display(), errno_of(e)))?;
+    // The directory: inspected; made if absent and allowed, then inspected.
+    let mut made = false;
+    let (dir_fd, st) = loop {
+        match inspect(parent_fd.as_fd(), name, dir)? {
+            Inspected::Present(fd, st) => break (fd, st),
+            Inspected::Absent if make == MakeUserLock::Never || made => return Ok(None),
+            Inspected::Absent => {
+                match rustix::fs::mkdirat(&parent_fd, name, Mode::from_raw_mode(DIR_MODE)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => made = true,
+                    Err(e) => return Err(failed("mkdir", dir, e)),
+                }
+            }
+        }
+    };
+    match file_type_of(st.st_mode) {
+        FileType::Directory => {}
+        FileType::Symlink => {
+            return Err(unsafe_(
+                dir,
+                "the per-user lock directory is a symlink".into(),
+            ));
+        }
+        other => {
+            return Err(unsafe_(
+                dir,
+                format!("the per-user lock directory is not a directory (a {other})"),
+            ));
+        }
+    }
     if st.st_uid != uid || st.st_mode & 0o022 != 0 {
-        return Err(refused(
+        return Err(unsafe_(
             dir,
             format!(
                 "the per-user lock directory must be owned by uid {uid} and writable by no \
@@ -219,53 +270,49 @@ pub(crate) fn open_user_lock_ungated(dir: &Path) -> Result<(OwnedFd, PathBuf), H
             ),
         ));
     }
-    let path = dir.join(USER_LOCK_NAME);
-    let fd = match rustix::fs::openat(
-        &dir_fd,
-        USER_LOCK_NAME,
-        OFlags::RDONLY
-            | OFlags::CREATE
-            | OFlags::NOFOLLOW
-            | OFlags::NONBLOCK
-            | OFlags::NOCTTY
-            | OFlags::CLOEXEC,
-        Mode::from_raw_mode(FILE_MODE),
-    ) {
-        Ok(fd) => fd,
-        Err(rustix::io::Errno::LOOP) => {
-            return Err(refused(&path, "the per-user lock is a symlink"));
-        }
-        // Something that is no regular file and cannot be opened so (a
-        // directory: `EISDIR`; a socket: `ENXIO`) is refused by its type.
-        Err(e) => {
-            return Err(
-                match rustix::fs::statat(&dir_fd, USER_LOCK_NAME, AtFlags::SYMLINK_NOFOLLOW) {
-                    Ok(st) if file_type_of(st.st_mode) != FileType::Regular => refused(
-                        &path,
-                        format!(
-                            "the per-user lock must be a regular file of uid {uid} (a {})",
-                            file_type_of(st.st_mode)
-                        ),
-                    ),
-                    _ => HostError::errno("open", path.display(), errno_of(e)),
-                },
-            );
+    // The file: inspected; made exclusively if absent and allowed.
+    let mut made = false;
+    let (file, st) = loop {
+        match inspect(dir_fd.as_fd(), OsStr::new(USER_LOCK_NAME), &path)? {
+            Inspected::Present(fd, st) => break (fd, st),
+            Inspected::Absent if make == MakeUserLock::Never || made => return Ok(None),
+            Inspected::Absent => {
+                match rustix::fs::openat(
+                    &dir_fd,
+                    USER_LOCK_NAME,
+                    OFlags::RDONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::NOCTTY
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(FILE_MODE),
+                ) {
+                    // Made: inspected like one found, below.
+                    Ok(fd) => drop(fd),
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(e) => return Err(failed("open", &path, e)),
+                }
+                made = true;
+            }
         }
     };
-    let st = rustix::fs::fstat(&fd)
-        .map_err(|e| HostError::errno("fstat", path.display(), errno_of(e)))?;
-    if file_type_of(st.st_mode) != FileType::Regular || st.st_uid != uid {
-        return Err(refused(
+    let file_type = file_type_of(st.st_mode);
+    if file_type == FileType::Symlink {
+        return Err(unsafe_(&path, "the per-user lock is a symlink".into()));
+    }
+    if file_type != FileType::Regular || st.st_uid != uid {
+        return Err(unsafe_(
             &path,
             format!(
-                "the per-user lock must be a regular file of uid {uid} (a {}, owner {})",
-                file_type_of(st.st_mode),
+                "the per-user lock must be a regular file of uid {uid} (a {file_type}, owner {})",
                 st.st_uid
             ),
         ));
     }
     if st.st_mode & 0o077 != 0 {
-        return Err(refused(
+        return Err(unsafe_(
             &path,
             format!(
                 "no one else may open the per-user lock, or they could hold it (mode {:04o}; \
@@ -274,7 +321,22 @@ pub(crate) fn open_user_lock_ungated(dir: &Path) -> Result<(OwnedFd, PathBuf), H
             ),
         ));
     }
-    Ok((fd, path))
+    // Reopened for reading through the checked object, never by name again.
+    let readable = rustix::fs::openat(
+        proc,
+        format!("self/fd/{}", file.as_raw_fd()).as_str(),
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| failed("open", &path, e))?;
+    let opened = rustix::fs::fstat(&readable).map_err(|e| failed("fstat", &path, e))?;
+    if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino) {
+        return Err(unsafe_(
+            &path,
+            "the per-user lock changed between checking it and opening it".into(),
+        ));
+    }
+    Ok(Some((readable, path)))
 }
 
 /// What is at `index-<key>` in the state directory, never following a

@@ -568,14 +568,13 @@ fn startup_in(state_dir: Option<PathBuf>) -> Result<LinuxHost, StartupFailure> {
     // Where the index snapshot lives (docs/architecture.md, Snapshot);
     // without an absolute $XDG_STATE_HOME or $HOME there is none, and a
     // run that would read or write it says so.
-    // The per-user lock a non-root reclaim takes on a host without the
-    // provisioned host lock (docs/safety.md, Host lock):
-    // $XDG_RUNTIME_DIR/diskgc, otherwise the state directory.
-    if let Some(dir) = diskgc_core::hostlock::user_lock_dir(
-        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
-        state_dir.as_deref(),
-    ) {
-        host = host.with_user_lock_dir(dir);
+    // The per-user lock's home when the account database has none for this
+    // user (docs/safety.md, Host lock); $XDG_* are never read for it.
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+    {
+        host = host.with_home_fallback(home);
     }
     if let Some(dir) = state_dir {
         host = host.with_state_dir(dir);

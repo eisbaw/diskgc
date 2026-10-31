@@ -110,23 +110,16 @@ process runs, even if that Cargo works in an unrelated directory; see
   is unusable, or missing as root, stderr warns with the provisioning
   detail and the commands that provision it; exit 0 and the JSON `met`
   report are unchanged. A later run needing to reclaim exits 2 (`cause:
-  provisioning`) if it is still so. Missing is no fault for a user: a
-  user's reclaim takes a per-user lock instead (The lock, below), and the
-  met run neither makes it nor mentions it. This readiness check does not
+  provisioning`) if it is still so. Missing is no fault for a user (The
+  lock, below): the met run makes no lock and says nothing. This readiness check does not
   take a `flock`.
-- **The lock** a reclaim takes ([safety.md](safety.md#host-lock)): the
-  host lock `/run/diskgc/lock` when it is provisioned (the tmpfiles
-  drop-in), so reclaims of every user take turns. Without it, a user's
-  reclaim takes that user's per-user lock, `$XDG_RUNTIME_DIR/diskgc/lock`
-  (otherwise `lock` in the state directory, `~/.local/state/diskgc/lock`),
-  which diskgc makes (directory 0700, file 0600) and names in one log
-  line, saying that reclaims by other users are not serialised with it.
-  Root (`--allow-root`) has no fallback. `provisioning` (exit 2) is then
-  what remains: the host lock missing as root, something other than a
-  regular file at `/run/diskgc/lock`, or a per-user lock that is refused
-  (a symlink, another user's, open to others, or no place for one).
-  `--dry-run` takes and makes no lock; it says once what a reclaim would
-  lock (a user without the host lock gets a note, not a fix to apply).
+- **The lock** a reclaim takes (the rule and its limits:
+  [safety.md](safety.md#host-lock)): the host lock `/run/diskgc/lock`
+  when it is provisioned; without it, for a user (never root), that
+  user's per-user lock, `/run/user/<uid>/diskgc/lock` or
+  `~/.local/state/diskgc/lock`, which diskgc makes and names in one log
+  line; where that cannot be made for a reason of the environment, none,
+  with a warning. Exit 2 (`provisioning`) and exit 3 (`host`) as there.
 - `--target-free` (default: same as `--min-free`): once triggered, keep
   reclaiming until this much is available. Setting it higher is the
   hysteresis: a fleet of CI jobs then does one larger cleanup instead of a
@@ -317,15 +310,16 @@ In this order; the first failure exits with its code and deletes nothing:
    `PATH` is open. The first space sample is not a start check: if it
    fails, it is the first cycle (The reclaim cycle). Raise
    `RLIMIT_NOFILE` as `ensure` does (Open-file limit under `ensure`).
-4. The lock its cycles take (`ensure`, The lock): the host lock file not a
-   regular file, missing as root, or (for a user without it) a per-user
-   lock that is refused exits 2 (`cause: provisioning`, with what to fix),
-   since a watcher that can never reclaim must fail where its operator
-   looks, not log forever. A user's per-user lock is made here, and one
-   line says the cycles take it and that reclaims by other users are not
-   serialised with this watch's. No `flock` is taken. With `--tally-only`
-   any of these is one stderr warning: that mode only polls the lock (a
-   missing one reads as not held).
+4. The lock its cycles take ([safety.md](safety.md#host-lock)): one its
+   cycles could never take (the host lock not a regular file or missing
+   as root, an unsafe per-user lock) exits 2 (`cause: provisioning`,
+   with what to fix), since a watcher that can never reclaim must fail
+   where its operator looks, not log forever. A user's per-user lock is
+   made here and named in one line (a warning when it cannot be made:
+   the cycles then run without a lock while it cannot). No `flock` is
+   taken. `--tally-only` makes nothing: it names the lock it polls, or
+   warns about a host lock it cannot use (a missing one reads as not
+   held).
 5. Supplied roots that do not exist: exit 2, as for `ensure`.
 6. The single-writer lock: waited for at most 10 s (an `ensure` holds it
    only while writing); still held exits 2 (`cause: usage`, naming the
@@ -380,8 +374,8 @@ stacked on `PATH` does not change what is watched):
 The cycle's outcome is the status `ensure` would report for the same run
 (Exit codes (`ensure`), JSON `status`): `met`, `exhausted`, `error`,
 `lock_timeout`, `deadline`, `interrupted`, or `usage_error` (only `cause:
-provisioning`: the host lock file vanished after start (as root), or the
-per-user lock was refused since; start-time checks catch the rest). It never ends the process.
+provisioning`: the lock became unusable after start,
+[safety.md](safety.md#host-lock); start-time checks catch the rest). It never ends the process.
 
 A supplied root that existed at start and has since vanished is not the
 refusal `ensure` makes for a root that does not exist (that guards
@@ -540,7 +534,7 @@ keeps protecting the disk).
 | Code | Meaning |
 |---|---|
 | 0 | Stopped by SIGTERM, SIGINT or SIGHUP. |
-| 2 | Refused at start: usage, configuration, privilege (`safety`), the sandbox gate, a lock its cycles cannot take (`provisioning`: the host lock file missing as root or not a regular file, or a refused per-user lock), a supplied root missing, or another `watch` holding the filesystem's single-writer lock. Nothing was deleted. |
+| 2 | Refused at start: usage, configuration, privilege (`safety`), the sandbox gate, a lock its cycles cannot take (`provisioning`: [safety.md](safety.md#host-lock)), a supplied root missing, or another `watch` holding the filesystem's single-writer lock. Nothing was deleted. |
 | 3 | A host operation failed at start before `PATH` was open (`/proc`, the kernel checks), or writing stdout failed at any time. |
 
 A cycle's outcome never ends the process: environment errors (a backend
@@ -626,13 +620,11 @@ install -Dm0644 lib/systemd/system/diskgc-watch@.service /etc/systemd/system/dis
 
 `systemd-tmpfiles --create` makes the host lock now; at every boot
 systemd does it. The tmpfiles steps are needed only for the system
-template (which refuses to start without the host lock:
-`AssertPathExists=`) and for root; they let every user's reclaims take
-turns. Without them a user's watcher and `ensure` work all the same,
-each user's reclaims serialised only among themselves by a per-user lock
-in `$XDG_RUNTIME_DIR/diskgc` ([safety.md](safety.md#host-lock)). A user
-may instead keep the user template in `~/.config/systemd/user/`, and
-needs no root at all then.
+template (which does not start without the host lock) and for root; they
+let every user's reclaims take turns. Without them a user's watcher and
+`ensure` work all the same, on a per-user lock
+([safety.md](safety.md#host-lock)). A user may instead keep the user
+template in `~/.config/systemd/user/`, and needs no root at all then.
 
 **Laptop owner**, as themselves, from the package. `watch` needs a
 configuration (the example's Cargo root replaced with directories you
@@ -939,9 +931,9 @@ or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
 run as root, or to run `--allow-root` other than as root or without
-`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), a lock a needed reclaim cannot take, with
-`cause: provisioning`: the host lock file missing as root or not a regular
-file, or a refused per-user lock, and, in
+`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), a lock a needed
+reclaim cannot take, with `cause: provisioning`,
+[safety.md](safety.md#host-lock), and, in
 development builds, the pre-release sandbox gate,
 [safety.md](safety.md#pre-release-sandbox-gate)),
 130 / 143 `interrupted`, 75 `lock_timeout`, 0 `met` (or `dry_run`), 124
@@ -1042,17 +1034,15 @@ precondition refused the run, `host` means a typed operating-system path,
 sampling or startup failure, `operation` means a tier planning, action or
 backend failure without a more specific typed cause, and `usage` covers
 other invalid caller inputs, including `--roots` binding and an unsupported
-kernel. `provisioning` means the host lacks a lock a reclaim needs (exit
-2, status `usage_error`; `ensure`, The lock): the host lock
-`/run/diskgc/lock` is missing for root, or is not the regular file its
-tmpfiles line makes; or, for a user on a host without the host lock, the
-per-user lock (`$XDG_RUNTIME_DIR/diskgc/lock`, otherwise in the state
-directory) is refused: a symlink, another user's, open to others, or no
-place for one (neither `$XDG_RUNTIME_DIR` nor `$XDG_STATE_HOME` nor
-`$HOME` absolute). A user without the host lock is not a `provisioning`
-error: the reclaim falls back to the per-user lock. The fix is the
-environment's, not the caller's call: the message says what is wrong
-and prints the commands that provision the host lock (the package's
+kernel. `provisioning` means the host lacks a usable lock a reclaim
+needs (exit 2, status `usage_error`; which cases:
+[safety.md](safety.md#host-lock)): the host lock missing for root or not
+the regular file its tmpfiles line makes, or an unsafe per-user lock. A
+user without the host lock is not a `provisioning` error: the reclaim
+falls back to its per-user lock, or runs without one. A failure of the
+host while locking is `host` (exit 3). The fix is the environment's, not
+the caller's call: the message says what is wrong and prints the
+commands that provision the host lock (the package's
 tmpfiles.d drop-in, written out, installed in `/etc/tmpfiles.d` and
 applied with `systemd-tmpfiles --create`; or `mkdir`/`touch`/`chmod`
 until the next boot), so a harness alerts ops rather than retrying or
@@ -2370,11 +2360,10 @@ it:
    `systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf` (without
    systemd, create the directory and file it describes at every boot).
    Needed for root and the system service; without it a user's reclaim
-   takes a per-user lock in `$XDG_RUNTIME_DIR/diskgc` (otherwise in
-   `~/.local/state/diskgc`) instead, which serialises only that user's
-   reclaims. As root without the lock, a run that needs to reclaim exits
-   2 with `cause: provisioning` and prints these commands; a run whose
-   goal is already met only warns.
+   takes a per-user lock instead, which serialises only that user's
+   reclaims ([safety.md](safety.md#host-lock)). As root without the lock,
+   a run that needs to reclaim exits 2 with `cause: provisioning` and
+   prints these commands; a run whose goal is already met only warns.
 3. `share/doc/diskgc/examples/example.yaml`: copy it to
    `~/.config/diskgc/config.yaml` or `/etc/diskgc/config.yaml`, replace
    its Cargo root with directories you own, and run `diskgc check`. It is

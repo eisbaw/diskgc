@@ -201,8 +201,10 @@ impl Background {
                 return LOCK_POLL;
             }
             Err(e) => {
-                let no_reclaim =
-                    matches!(e, LockError::Missing { .. } | LockError::UserLockRefused(_));
+                let no_reclaim = matches!(
+                    e,
+                    LockError::Missing { .. } | LockError::UserLockRefused { .. }
+                );
                 let kind = std::mem::discriminant(&e);
                 if self.lock_error_logged != Some(kind) {
                     self.lock_error_logged = Some(kind);

@@ -828,8 +828,9 @@ pub fn ensure_above_min_free_exits_0_without_the_host_lock(ctx: &Ctx) -> TestRes
     judged.assert_clean()
 }
 
-/// tester's per-user lock (docs/safety.md, Host lock): in the state
-/// directory, since the harness gives tester no `$XDG_RUNTIME_DIR`.
+/// tester's per-user lock (docs/safety.md, Host lock): under the account's
+/// home (`/home/tester` in the image's passwd), since the container has no
+/// `/run/user/1000`.
 const USER_LOCK: &str = "/home/tester/.local/state/diskgc/lock";
 
 /// No per-user lock was made: a run that needed no reclaim (or a dry run)
@@ -1018,8 +1019,9 @@ pub fn ensure_as_root_without_the_host_lock_file_exits_2_printing_the_tmpfiles_l
 
 /// TASK-277 (Mark: "any user shall be able to garbage collect his own
 /// files"): on a host without `/run/diskgc/lock`, tester's reclaiming
-/// `ensure` makes its per-user lock (`$XDG_RUNTIME_DIR` is unset here, so
-/// in the state directory: directory 0700, file 0600, tester's), takes it,
+/// `ensure` makes its per-user lock (no `/run/user/1000` here, so under
+/// the account's home: `~/.local/state/diskgc`, directory 0700, file 0600,
+/// tester's), takes it,
 /// deletes the one eligible candidate and exits 0 at the goal, saying in
 /// one line which lock it took and that other users' reclaims are not
 /// serialised with it. The deletion oracle allows only the candidate (and
@@ -1090,6 +1092,127 @@ pub fn ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock(
             meta.uid()
         );
     }
+    Ok(())
+}
+
+/// The arguments of a reclaiming `ensure` that needs a lock and has nothing
+/// to delete (no target below `/tmp/w`).
+const RECLAIM_NOTHING: [&str; 7] = [
+    "--min-free",
+    "100%",
+    "--json",
+    "--select",
+    "profile:cargo-target",
+    "--roots",
+    "/tmp/w",
+];
+
+/// TASK-277 review (Codex 1): another user's object at tester's per-user
+/// lock, a root-owned `lock` file (0600) in tester's directory and then a
+/// root-owned directory (0700), which tester cannot even read, is inspected
+/// through `O_PATH` and refused as unsafe: exit 2, `provisioning`, the
+/// message naming the owner; never an `EACCES` (`usage` or a run without a
+/// lock). Nothing is deleted, the objects stay.
+pub fn ensure_as_a_user_refuses_another_users_per_user_lock(ctx: &Ctx) -> TestResult {
+    work_dir(ctx)?;
+    unprovision(ctx)?;
+    ctx.home.mkdirs(".local/state/diskgc", 0o700, TESTER)?;
+    ctx.home
+        .write_file(".local/state/diskgc/lock", b"", 0o600, ROOT)?;
+    let mut args = RECLAIM_NOTHING.to_vec();
+    args.push("/tmp/w");
+    for (case, why) in [
+        ("root's lock file", "must be a regular file of uid 1000"),
+        ("root's directory", "must be owned by uid 1000"),
+    ] {
+        if case == "root's directory" {
+            ctx.home.remove_file(".local/state/diskgc/lock")?;
+            ctx.home.chown(".local/state/diskgc", ROOT)?;
+        }
+        let oracle = Oracle::arm(Fixture::new())?;
+        let run = ensure_run(ctx, &args)?;
+        oracle.judge(&run)?.assert_clean()?;
+        run.expect_code(2)?;
+        let r = report(&run)?;
+        ensure!(
+            r["status"] == "usage_error"
+                && r["errors"]
+                    .as_array()
+                    .is_some_and(|errors| errors.iter().any(|e| {
+                        e["cause"] == "provisioning"
+                            && e["message"].as_str().is_some_and(|m| {
+                                m.contains(&format!("per-user lock {USER_LOCK}")) && m.contains(why)
+                            })
+                    })),
+            "{case}: {r}"
+        );
+    }
+    ensure!(
+        std::fs::symlink_metadata(crate::oracle::DISKGC_STATE_DIR)
+            .map_err(|e| e.to_string())?
+            .uid()
+            == ROOT.uid,
+        "the root-owned directory was replaced"
+    );
+    Ok(())
+}
+
+/// TASK-277 review (the orchestrator's rule): a per-user lock that cannot
+/// be made for a reason of the environment (here `EACCES`: tester's
+/// `~/.local` is root's, so `~/.local/state` cannot be made) does not stop
+/// a user's reclaim: it runs without a lock, with one warning naming the
+/// path and the reason, deletes the eligible candidate and exits 0 at the
+/// goal. The oracle allows only the candidate to go.
+pub fn ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made(
+    ctx: &Ctx,
+) -> TestResult {
+    let scratch = &ctx.scratch;
+    work_dir(ctx)?;
+    unprovision(ctx)?;
+    ctx.home.mkdir(".local", 0o755, ROOT)?;
+    scratch.mkdir("userlock-1", 0o755, TESTER)?;
+    scratch.write_file("userlock-1/payload", &[5; 16384], 0o644, TESTER)?;
+    ctx.home.write_file(
+        "diskgc-userlock.yaml",
+        b"version: 1\nprofiles:\n  - name: userlock-source\n    find: {roots: [/tmp], paths: [\"userlock-*\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/userlock-1]}\ngroups:\n  - name: userlock\n    tiers:\n      - name: userlock-tier\n        select: profile:userlock-source\n",
+        0o600,
+        TESTER,
+    )?;
+    let goal = format!("{}K", (avail(Path::new("/tmp"))? + 4096).div_ceil(1024));
+    let oracle = Oracle::arm(Fixture::new().eligible(scratch.path("userlock-1")))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-userlock.yaml",
+            "--min-free",
+            &goal,
+            "--timeout",
+            "20s",
+            "/tmp/w",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    judged.assert_clean()?;
+    let r = report(&run)?;
+    ensure!(r["status"] == "met", "{r}");
+    ensure!(
+        column(&r, "actions", "candidate") == [&Value::from("/tmp/userlock-1")],
+        "{r}"
+    );
+    let warned: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|l| l.contains("runs without a lock"))
+        .collect();
+    ensure!(
+        warned.len() == 1 && warned[0].contains(USER_LOCK) && warned[0].contains("EACCES"),
+        "one warning naming the path and the reason:\n{}",
+        run.stderr
+    );
+    ensure!(!Path::new(USER_LOCK).exists(), "{USER_LOCK} was made");
     Ok(())
 }
 

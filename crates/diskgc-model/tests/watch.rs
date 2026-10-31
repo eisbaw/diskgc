@@ -317,7 +317,8 @@ fn a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock() {
     let events = "events:\n  - {at: {elapsed: 90s}, other_used: {mount: /tmp, bytes: 6656M}}\n  \
                   - {at: {elapsed: 10m}, signal: term}\n";
     let model = yaml("4G", &old_candidates(10, "300M"), events)
-        .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+        .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "")
+        .replace("state_dir: ", "home: /home/u\nstate_dir: ");
     let host = host(&model);
     let run = watch(&host, &reclaim("1G", "2G", "10s"));
     assert_eq!(
@@ -374,6 +375,9 @@ fn a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock() {
         run.lines
     );
     assert_eq!(deletions(&tally_only), 0);
+    // It polls the per-user lock but makes none (TASK-277 review).
+    assert!(tally_only.stat_path(Path::new(USER_LOCK)).is_none());
+    assert!(tally_only.trace_count(Op::UserLock) > 0);
 }
 
 /// Root (`--allow-root`) never falls back: a watch without the host lock
@@ -394,7 +398,7 @@ fn watch_as_root_without_the_host_lock_exits_2_at_start() {
     let model = yaml(
         "5G",
         "  /run/user/0: {.: {uid: 0, mode: \"0700\"}}\n",
-        "own_uid: 0\nusers: {tester: 2000}\nruntime_dir: /run/user/0\nevents:\n  - {at: {elapsed: 1m}, signal: term}\n",
+        "own_uid: 0\nusers: {tester: 2000}\nevents:\n  - {at: {elapsed: 1m}, signal: term}\n",
     )
     .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
     let root = host(&model);
@@ -760,7 +764,7 @@ fn watch_start_refusals() {
     let unprovisioned = yaml(
         "5G",
         "  /run/user/1000: {.: {mode: \"0700\"}, x: {.: {mode: \"0700\"}}, diskgc: {symlink: /run/user/1000/x}}\n",
-        "runtime_dir: /run/user/1000\nevents:\n  - {at: {elapsed: 1m}, signal: term}\n",
+        "events:\n  - {at: {elapsed: 1m}, signal: term}\n",
     )
     .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
     let host3 = host(&unprovisioned);
@@ -775,7 +779,12 @@ fn watch_start_refusals() {
     let host4 = host(&unprovisioned);
     let run = watch(&host4, &Mode::TallyOnly { min_free: None });
     assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
-    assert!(run.has("warning: the host lock"), "{:?}", run.lines);
+    // Its probe finds the unsafe lock and says so once; it makes nothing.
+    assert!(
+        run.has("per-user lock directory is a symlink"),
+        "{:?}",
+        run.lines
+    );
     // --target-free below --min-free.
     let host5 = host(&yaml("5G", "", ""));
     assert_eq!(watch(&host5, &reclaim("3G", "2G", "10s")).ended, Err(2));

@@ -970,6 +970,10 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Word("move_into_link_name_space"),
     Pattern::Word("move_into_thread_name_spaces"),
     Pattern::Path("rustix", "mount"),
+    // diskgc's own ungated state writers (TASK-277 review): named only by
+    // their definition and their reviewed callers.
+    Pattern::Word("make_dirs_ungated"),
+    Pattern::Word("open_user_lock_ungated"),
     // Escape hatches: raw syscalls, code the scan does not see.
     Pattern::Word("libc"),
     Pattern::CallOrMacro("syscall"),
@@ -1002,6 +1006,15 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         function: "lookup_account",
         gate: Gate::Ungated(
             "getpwnam_r reads NSS user records; no filesystem mutation or child process",
+        ),
+        matches: 3,
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "account_home",
+        gate: Gate::Ungated(
+            "getpwuid_r reads NSS user records (the per-user lock's home); no filesystem \
+             mutation or child process",
         ),
         matches: 3,
     },
@@ -1082,17 +1095,18 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
              O_NOFOLLOW) named by a typed FsKey in the state directory (made by \
              make_dirs_ungated); diskgc's cache, never user data",
         ),
-        matches: 1, // CREATE
+        matches: 2, // CREATE, the make_dirs_ungated call
     },
     Allowed {
         file: "crates/diskgc-linux/src/state.rs",
         function: "open_user_lock_ungated",
         gate: Gate::Ungated(
-            "creates only the per-user reclaim lock (TASK-277): the directory the binary \
-             chose (mkdirat 0700) and `lock` in it (0600, read-only open, O_NOFOLLOW), no \
+            "creates only the per-user reclaim lock (TASK-277) where user_lock_path found it: \
+             the directory (mkdirat 0700, its parent by make_dirs_ungated) and `lock` in it \
+             (0600, O_EXCL, read-only, O_NOFOLLOW), each inspected through O_PATH first; no \
              name from a caller; diskgc's own state, never user data",
         ),
-        matches: 2, // mkdirat, CREATE
+        matches: 3, // mkdirat, CREATE, the make_dirs_ungated call
     },
     Allowed {
         file: "crates/diskgc-linux/src/state.rs",
@@ -1103,6 +1117,16 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
              diskgc's cache, never user data",
         ),
         matches: 5, // TMPFILE, WRONLY, io::write, linkat, renameat
+    },
+    // The one caller of the per-user lock's writer (TASK-277 review).
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "user_lock",
+        gate: Gate::Ungated(
+            "calls open_user_lock_ungated with the place user_lock_path found, never a \
+             name from a caller",
+        ),
+        matches: 1,
     },
     // The deletion engine's one caller of each deleting port method: with
     // these entries the scan also checks that nothing else in the core calls
@@ -1709,6 +1733,8 @@ mod tests {
             "libc::open(p, f);",
             "let r = syscall(87, p);",
             "include!(\"more.rs\");",
+            "crate::state::make_dirs_ungated(p);",
+            "crate::state::open_user_lock_ungated(d, m, p);",
             // Grouped imports name the operation without its path.
             "use std::fs::{copy, read};",
             "use std::fs::{self, write};",

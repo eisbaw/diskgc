@@ -1,7 +1,7 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # TASK-277: root (`--allow-root`) never falls back to a per-user lock.
 # Without the host lock file it exits 2 (`provisioning`) with the commands
-# that provision it, as before TASK-277, even with $XDG_RUNTIME_DIR set;
+# that provision it, as before TASK-277, even with a runtime directory of its own;
 # nothing deleted.
 profile_vector: 1
 allow_root: true
@@ -21,7 +21,6 @@ host:
   users: {tester: 1000}
   clock: 2026-10-15T03:00:00Z
   own_uid: 0
-  runtime_dir: /run/user/0
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}

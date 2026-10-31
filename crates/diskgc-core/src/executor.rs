@@ -341,70 +341,69 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
 }
 
 /// A reclaim lock that could not be taken for a reason other than the
-/// deadline or a signal: exit 2. A lock the installation did not provide
-/// (the host lock missing for root, or not the regular file the tmpfiles
-/// line makes; a per-user lock refused) is `provisioning`, so a harness
-/// tells "alert ops" from "my call is wrong" without parsing the message
-/// (TASK-151, TASK-277).
-fn lock_refusal(
-    request: &Request,
-    report: Report,
-    log: &mut dyn FnMut(&str),
-    error: LockError,
-) -> Report {
-    // In a `watch` cycle a usage error is only the lock file gone or
-    // refused (`provisioning`); a host failure while locking is the environment,
-    // which may recover: status `error`, cause `host`, back-off `retry`
-    // (docs/reference.md, The reclaim cycle).
-    if request.watch.is_some()
-        && let LockError::Failed(_) = &error
-    {
-        let message = error.to_string();
-        log(&format!("error: {message}"));
-        let mut report = report;
-        report.status = Status::Error;
-        report
-            .errors
-            .push(ErrorEntry::run(ErrorCause::Host, message));
-        return report;
-    }
-    let cause = match &error {
-        LockError::Missing { .. } | LockError::Unusable { .. } | LockError::UserLockRefused(_) => {
-            ErrorCause::Provisioning
+/// deadline or a signal. A lock the installation did not provide (the host
+/// lock missing for root, or not the regular file the tmpfiles line makes;
+/// an unsafe per-user lock) is exit 2 `provisioning`, so a harness tells
+/// "alert ops" from "my call is wrong" without parsing the message
+/// (TASK-151, TASK-277). A failure of the host while locking is status
+/// `error`, cause `host` (exit 3; in a `watch` cycle back-off `retry`): the
+/// environment, which may recover (TASK-277 review, Codex 2; it was exit 2
+/// `usage` before).
+fn lock_refusal(report: Report, log: &mut dyn FnMut(&str), error: LockError) -> Report {
+    let message = error.to_string();
+    log(&format!("error: {message}"));
+    match &error {
+        LockError::Missing { .. }
+        | LockError::Unusable { .. }
+        | LockError::UserLockRefused { .. } => {
+            report.usage_error_with_cause(ErrorCause::Provisioning, message)
         }
-        // Unchanged contract (exit 2, `usage`) for a host failure while
-        // locking; a TASK-151 follow-up asks whether it should be `host`/3.
-        LockError::Failed(_) => ErrorCause::Usage,
+        LockError::Failed(..) => {
+            let mut report = report;
+            report.status = Status::Error;
+            report
+                .errors
+                .push(ErrorEntry::run(ErrorCause::Host, message));
+            report
+        }
         LockError::DeadlinePassed(_) | LockError::Interrupted(_) => {
             unreachable!("the caller handles the deadline and signals: {error}")
         }
-    };
-    let message = error.to_string();
-    log(&format!("error: {message}"));
-    report.usage_error_with_cause(cause, message)
+    }
 }
 
-/// The path of the lock [`hostlock::acquire`] took or waited for, for an
-/// overrun entry: the host lock's unless the per-user lock was reached.
+/// The path of the lock [`hostlock::acquire`] took, waited for or failed
+/// on, for an overrun entry.
 fn attempted_lock<F>(acquired: &Result<HeldLock<F>, LockError>) -> PathBuf {
     match acquired {
         Ok(held) => held.lock.path(),
-        Err(LockError::DeadlinePassed(lock)) => lock.path(),
+        Err(LockError::DeadlinePassed(lock) | LockError::Failed(lock, _)) => lock.path(),
+        Err(LockError::UserLockRefused { path, .. }) => path.clone(),
         Err(_) => hostlock::host_lock_path(),
     }
 }
 
 /// The one line that says which lock the reclaim took (docs/safety.md,
-/// Host lock): a per-user lock says why and what it does not serialise.
+/// Host lock): a per-user lock says why and what it does not serialise;
+/// none at all is a warning.
 fn taken<F>(held: &HeldLock<F>) -> String {
     let waited = held.waited.as_millis();
+    let host_lock = hostlock::host_lock_path();
     match &held.lock {
         ReclaimLock::Host => format!("{} taken after {waited} ms", held.lock),
         ReclaimLock::User(_) => format!(
             "{} taken after {waited} ms: the host lock {} is not provisioned, so reclaims by \
              other users are not serialised with this one",
             held.lock,
-            hostlock::host_lock_path().display()
+            host_lock.display()
+        ),
+        ReclaimLock::Unlocked(hostlock::Unlocked { path, why }) => format!(
+            "warning: the host lock {} is not provisioned and the per-user lock{} cannot be \
+             made ({why}): this reclaim runs without a lock, serialised with no other \
+             (docs/safety.md, Host lock)",
+            host_lock.display(),
+            path.as_ref()
+                .map_or_else(String::new, |p| format!(" {}", p.display()))
         ),
     }
 }
@@ -639,7 +638,7 @@ fn ensure_inner<H: Delete>(
     }
     let [avail_text, min_text, _] = human_space_values([Some(avail), Some(measured.min), None]);
     log(&format!(
-        "{} available on {}, below --min-free {}: taking the host lock",
+        "{} available on {}, below --min-free {}: taking the reclaim lock",
         avail_text,
         measured.at.mount.mount_point.display(),
         min_text
@@ -691,7 +690,7 @@ fn ensure_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return lock_refusal(request, report, log, e);
+            return lock_refusal(report, log, e);
         }
     };
     log(&taken(&lock));
@@ -976,7 +975,7 @@ fn ensure_grouped_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return lock_refusal(request, report, log, error);
+            return lock_refusal(report, log, error);
         }
     };
     log(&taken(&lock));
@@ -3756,56 +3755,29 @@ mod best_fit_tests {
 
 #[cfg(test)]
 mod lock_refusal_tests {
-    use super::{
-        Dev, ErrorCause, HostError, LockError, MonoTime, Report, Request, Status, Tier, Timestamp,
-        WatchCycle, lock_refusal,
-    };
-    use crate::profile::Library;
-    use crate::units::Size;
-    use std::path::PathBuf;
-    use std::time::Duration;
+    use super::{ErrorCause, HostError, LockError, Report, Status, lock_refusal};
 
-    fn request(watch: bool) -> Request {
-        let library = Library::builtin().expect("built-ins");
-        Request {
-            path: PathBuf::from("/tmp"),
-            min_free: Size::Bytes(1),
-            target_free: None,
-            timeout: None,
-            tally_budget: None,
-            watch: watch.then_some(WatchCycle {
-                expect_dev: Dev { major: 0, minor: 1 },
-                origin: MonoTime(Duration::ZERO),
-                origin_wall: Timestamp { secs: 0, nanos: 0 },
-            }),
-            tier: Tier::select(
-                "profile:cargo-target",
-                &library,
-                Some(&["/r".to_owned()]),
-                1000,
-            )
-            .expect("a tier"),
-        }
-    }
-
-    /// mped S5 (TASK-32 review): a host failure while locking (EACCES, EIO)
-    /// stays `ensure`'s usage error (exit 2), but in a `watch` cycle it is
-    /// the environment: status `error`, cause `host`, so back-off `retry`.
-    /// A missing lock file is `provisioning` in both.
+    /// mped S5 (TASK-32 review), TASK-277 review (Codex 2): a host failure
+    /// while locking (EIO) is the environment, in `ensure` and in a `watch`
+    /// cycle alike: status `error` (exit 3), cause `host`, so a cycle backs
+    /// off `retry`. A missing lock file is `provisioning`, exit 2.
     #[test]
-    fn a_failing_host_lock_is_a_host_error_in_a_watch_cycle() {
-        let failed = || LockError::Failed(HostError::invalid("flock", "/run/diskgc/lock", "EIO"));
+    fn a_failing_host_lock_is_a_host_error() {
+        let failed = || {
+            LockError::Failed(
+                crate::hostlock::ReclaimLock::Host,
+                HostError::errno("flock", "/run/diskgc/lock", crate::host::Errno::EIO),
+            )
+        };
         let report = || Report::new(Status::Error, None, false);
-        let ensure = lock_refusal(&request(false), report(), &mut |_| {}, failed());
-        assert_eq!(ensure.status, Status::UsageError);
-        assert_eq!(ensure.errors[0].cause, ErrorCause::Usage);
-        let watch = lock_refusal(&request(true), report(), &mut |_| {}, failed());
-        assert_eq!(watch.status, Status::Error);
-        assert_eq!(watch.errors[0].cause, ErrorCause::Host);
+        let failure = lock_refusal(report(), &mut |_| {}, failed());
+        assert_eq!(failure.status, Status::Error);
+        assert_eq!(failure.exit_code(), 3);
+        assert_eq!(failure.errors[0].cause, ErrorCause::Host);
         let missing = || LockError::Missing {
             detail: "ENOENT".into(),
         };
-        let gone = lock_refusal(&request(true), report(), &mut |_| {}, missing());
+        let gone = lock_refusal(report(), &mut |_| {}, missing());
         assert_eq!(gone.status, Status::UsageError);
         assert_eq!(gone.errors[0].cause, ErrorCause::Provisioning);
     }

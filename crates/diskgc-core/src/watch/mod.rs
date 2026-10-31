@@ -42,7 +42,7 @@ use crate::executor::{
     self, MeasureFailure, WatchCycle, goal_bytes, reach_path, timed_report_from,
 };
 use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
-use crate::hostlock::{self, LockError, ReclaimLock};
+use crate::hostlock::{self, LockError, Readiness, ReclaimLock};
 use crate::invocation::{ConfigFile, Platform, Prepared, Selection, prepare};
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
@@ -301,41 +301,59 @@ pub fn start<H: Delete>(
         },
         (Mode::Reclaim { .. }, None) => unreachable!("a reclaiming watch has a goal"),
     };
-    // 4. The lock reclaims take: the host lock, or (a non-root watch
-    // without it) the per-user lock, made now (docs/safety.md, Host lock).
-    match (hostlock::prepare(host), goal.is_some()) {
-        (Ok(ReclaimLock::Host), _) => {}
-        (Ok(lock @ ReclaimLock::User(_)), true) => log(&format!(
-            "the host lock {} is not provisioned: reclaims take the {lock} instead, so \
-             reclaims by other users are not serialised with this watch's",
-            hostlock::host_lock_path().display()
-        )),
-        (Ok(lock @ ReclaimLock::User(_)), false) => log(&format!(
-            "the host lock {} is not provisioned: the tally pauses only while the {lock} \
-             is held (this user's reclaims), not for other users' reclaims",
-            hostlock::host_lock_path().display()
-        )),
-        (
+    // 4. The lock reclaims take (docs/safety.md, Host lock): the host lock,
+    // or for a non-root watch without it the per-user lock, made now in
+    // reclaim mode; --tally-only makes nothing, it only names what it polls.
+    let host_lock = hostlock::host_lock_path();
+    if goal.is_some() {
+        match hostlock::prepare(host) {
+            Ok(ReclaimLock::Host) => {}
+            Ok(lock @ ReclaimLock::User(_)) => log(&format!(
+                "the host lock {} is not provisioned: reclaims take the {lock} instead, so \
+                 reclaims by other users are not serialised with this watch's",
+                host_lock.display()
+            )),
+            Ok(ReclaimLock::Unlocked(hostlock::Unlocked { path, why })) => log(&format!(
+                "warning: the host lock {} is not provisioned and the per-user lock{} cannot be \
+                 made ({why}): each cycle tries again, and runs without a lock while it cannot",
+                host_lock.display(),
+                path.as_ref()
+                    .map_or_else(String::new, |p| format!(" {}", p.display()))
+            )),
             Err(
                 e @ (LockError::Missing { .. }
                 | LockError::Unusable { .. }
-                | LockError::UserLockRefused(_)),
-            ),
-            true,
-        ) => {
-            return Err(Refused::usage(
-                ErrorCause::Provisioning,
-                path,
-                format!("a watch that can never reclaim does not start: {e}"),
-            ));
+                | LockError::UserLockRefused { .. }),
+            ) => {
+                return Err(Refused::usage(
+                    ErrorCause::Provisioning,
+                    path,
+                    format!("a watch that can never reclaim does not start: {e}"),
+                ));
+            }
+            Err(e) => log(&format!(
+                "warning: {e}; each cycle tries it again (a cycle that cannot take it is an \
+                 error and backs off)"
+            )),
         }
-        (Err(e), false) => log(&format!(
-            "warning: {e} (--tally-only only polls it: the tally pauses while it is held)"
-        )),
-        (Err(e), true) => log(&format!(
-            "warning: {e}; each cycle tries it again (a cycle that cannot take it is an error \
-             and backs off)"
-        )),
+    } else {
+        match hostlock::readiness(host) {
+            Ok(Readiness::Host) => {}
+            Ok(Readiness::FallsBack(Some(lock))) => log(&format!(
+                "the host lock {} is not provisioned: the tally pauses only while the \
+                 per-user lock {} is held (this user's reclaims), not for other users' reclaims",
+                host_lock.display(),
+                lock.display()
+            )),
+            Ok(Readiness::FallsBack(None)) => log(&format!(
+                "the host lock {} is not provisioned and there is no place for a per-user \
+                 lock: the tally pauses for no reclaim",
+                host_lock.display()
+            )),
+            Err(e) => log(&format!(
+                "warning: {e} (--tally-only only polls it: the tally pauses while it is held)"
+            )),
+        }
     }
     // 5. Supplied roots.
     prepared

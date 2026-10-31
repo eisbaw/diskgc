@@ -1509,6 +1509,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock,
     },
     Test {
+        name: "ensure_as_a_user_refuses_another_users_per_user_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_as_a_user_refuses_another_users_per_user_lock,
+    },
+    Test {
+        name: "ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made,
+    },
+    Test {
         name: "ensure_goal_met_warns_about_an_unready_host_lock",
         tier: Tier::Fast,
         expect: Expect::Pass,

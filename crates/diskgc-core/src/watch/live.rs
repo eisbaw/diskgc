@@ -164,7 +164,7 @@ impl std::fmt::Display for Named<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             ReclaimLock::Host => f.write_str("the host lock"),
-            lock @ ReclaimLock::User(_) => write!(f, "the {lock}"),
+            lock @ (ReclaimLock::User(_) | ReclaimLock::Unlocked(_)) => write!(f, "the {lock}"),
         }
     }
 }

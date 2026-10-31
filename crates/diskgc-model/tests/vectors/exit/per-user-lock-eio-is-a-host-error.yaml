@@ -1,0 +1,31 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-277 review (Codex 2): a failure of the host while making the
+# per-user lock (EIO, not the environment's ENOSPC/EROFS/EACCES) is an
+# error of the run: exit 3 (status error), cause `host`; nothing deleted.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  home: /home/tester
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /home/tester: {.: {mode: "0700"}}
+    /tmp/zephyr-a: {f: {size: 4K}}
+  events:
+    - {at: {op: user_lock, nth: 1, when: before}, fail: EIO}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 3
+  errors: [{cause: host, contains: "taking the per-user lock /home/tester/.local/state/diskgc/lock: open /home/tester/.local/state/diskgc: EIO"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

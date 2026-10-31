@@ -47,10 +47,10 @@ use std::time::Duration;
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
-    Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime,
-    MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink, ProcStatus,
-    Space, Stat, StateFile, StateLock, Timestamp, TryLock, Unlink, UserLock, WaitLock,
-    is_single_name,
+    Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
+    MonoTime, MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
+    ProcStatus, Space, Stat, StateFile, StateLock, Timestamp, TryLock, Unlink, UserLock,
+    UserLockError, WaitLock, is_single_name,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 
@@ -811,43 +811,70 @@ impl Inner {
         Ok(Some(loc))
     }
 
-    /// Opens (making them if absent) the per-user lock directory `dir` and
-    /// `lock` in it, as `LinuxHost::user_lock` does (docs/safety.md, Host
-    /// lock): missing parents made mode 0700; the directory's own name and
-    /// the file never followed; a symlink, another user's or a
-    /// group/other-writable directory, a file that is not this user's
-    /// regular file or that others may open, refused (`Invalid`); no
-    /// directory at all refused too. Returns the read-only open file
-    /// description. (The model follows no symlink on the way to the
-    /// parent, unlike `LinuxHost`.)
-    fn user_lock(&mut self, dir: Option<&Path>) -> Result<u64, HostError> {
-        let Some(dir) = dir else {
-            return Err(HostError::invalid(
-                "open",
-                "$XDG_RUNTIME_DIR/diskgc",
-                "no place for a per-user lock: neither $XDG_RUNTIME_DIR nor $XDG_STATE_HOME \
-                 nor $HOME is an absolute path",
-            ));
-        };
-        let refused =
-            |subject: &Path, why: String| HostError::invalid("open", subject.display(), why);
+    /// Where the per-user lock is, as `LinuxHost::user_lock_path` decides
+    /// it: `/run/user/<own_uid>/diskgc/lock` when `/run/user/<own_uid>` is a
+    /// directory of diskgc's user with mode 0700, otherwise
+    /// `<home>/.local/state/diskgc/lock`; `None` without a home.
+    fn user_lock_path(&self) -> Option<PathBuf> {
         let uid = self.state.own_uid;
-        let (parent, name) = (
-            dir.parent().expect("an absolute directory below /"),
-            dir.file_name().expect("a named directory"),
-        );
+        let runtime = PathBuf::from(format!("/run/user/{uid}"));
+        let is_users = self.state.lookup_link(&runtime).is_ok_and(|loc| {
+            let inode = self.state.inode(loc);
+            inode.file_type() == FileType::Directory && inode.uid == uid && inode.perm == 0o700
+        });
+        if is_users {
+            return Some(diskgc_core::hostlock::runtime_user_lock(uid));
+        }
+        self.state
+            .home
+            .as_deref()
+            .map(diskgc_core::hostlock::home_user_lock)
+    }
+
+    /// Opens the per-user lock at `path` as `LinuxHost::user_lock` does
+    /// (docs/safety.md, Host lock): what exists is inspected without
+    /// following a symlink before it is opened, and a symlink, another
+    /// type, another owner, a group/other-writable directory or a file
+    /// others may open is [`UserLockError::Unsafe`]; what is missing is
+    /// made (missing parents and the directory mode 0700, the file 0600)
+    /// with [`MakeUserLock::IfAbsent`], and is `Ok(None)` otherwise. A
+    /// failure is an errno ([`UserLockError::Failed`]): an injected one
+    /// (`fail:` at `user_lock`), or one the model's tree gives (a file
+    /// on the way). Returns the read-only open file description. (The model
+    /// follows no symlink on the way to the parent, unlike `LinuxHost`.)
+    fn user_lock(&mut self, path: &Path, make: MakeUserLock) -> Result<Option<u64>, UserLockError> {
+        let failed = |op: &'static str, at: &Path, errno: Errno| UserLockError::Failed {
+            path: path.to_path_buf(),
+            error: HostError::errno(op, at.display(), errno),
+        };
+        let unsafe_ = |at: &Path, why: String| UserLockError::Unsafe {
+            path: path.to_path_buf(),
+            error: HostError::invalid("open", at.display(), why),
+        };
+        let dir = path.parent().expect("the lock is in a directory");
+        if let Some(errno) = self.injected.take() {
+            return Err(failed("open", dir, errno));
+        }
+        let uid = self.state.own_uid;
+        let parent = dir.parent().expect("an absolute directory below /");
+        let name = dir.file_name().expect("a named directory");
         let parent_loc = match self.state.lookup(parent) {
             Ok(loc) => loc,
+            Err(Fault::Errno(Errno::ENOENT)) if make == MakeUserLock::Never => return Ok(None),
             Err(Fault::Errno(Errno::ENOENT)) => {
                 let missing: Vec<PathBuf> = parent
                     .ancestors()
                     .filter(|a| self.state.lookup(a).is_err())
                     .map(Path::to_path_buf)
                     .collect();
-                let loc = self
+                let loc = match self
                     .state
                     .create_path(parent, Kind::Dir(std::collections::BTreeMap::new()))
-                    .unwrap_or_else(|f| model_error(format!("user lock parent: {f:?}")));
+                {
+                    Ok(loc) => loc,
+                    Err(Fault::Errno(e)) => return Err(failed("mkdir", parent, e)),
+                    Err(Fault::Model(m)) => model_error(format!("user lock parent: {m}")),
+                };
                 for made in missing {
                     let at = self.state.lookup(&made).expect("just made");
                     let inode = self.state.inode_mut(at);
@@ -856,11 +883,15 @@ impl Inner {
                 }
                 loc
             }
-            Err(Fault::Errno(e)) => return Err(HostError::errno("open", parent.display(), e)),
+            Err(Fault::Errno(e)) => return Err(failed("open", parent, e)),
             Err(Fault::Model(m)) => model_error(format!("user lock parent: {m}")),
         };
+        if self.state.inode(parent_loc).entries().is_none() {
+            return Err(failed("open", parent, Errno::ENOTDIR));
+        }
         let dir_loc = match self.state.child(parent_loc, name) {
             Ok(loc) => loc,
+            Err(Errno::ENOENT) if make == MakeUserLock::Never => return Ok(None),
             Err(Errno::ENOENT) => {
                 let loc = self
                     .state
@@ -869,32 +900,35 @@ impl Inner {
                         name,
                         Kind::Dir(std::collections::BTreeMap::new()),
                     )
-                    .unwrap_or_else(|f| model_error(format!("user lock dir: {f:?}")));
+                    .map_err(|f| match f {
+                        Fault::Errno(e) => failed("mkdir", dir, e),
+                        Fault::Model(m) => model_error(format!("user lock dir: {m}")),
+                    })?;
                 let inode = self.state.inode_mut(loc);
                 inode.uid = uid;
                 inode.perm = 0o700;
                 loc
             }
-            Err(e) => return Err(HostError::errno("mkdir", dir.display(), e)),
+            Err(e) => return Err(failed("open", dir, e)),
         };
         let inode = self.state.inode(dir_loc);
         match inode.file_type() {
             FileType::Directory => {}
             FileType::Symlink => {
-                return Err(refused(
+                return Err(unsafe_(
                     dir,
                     "the per-user lock directory is a symlink".into(),
                 ));
             }
-            _ => {
-                return Err(refused(
+            other => {
+                return Err(unsafe_(
                     dir,
-                    "the per-user lock directory is not a directory".into(),
+                    format!("the per-user lock directory is not a directory (a {other})"),
                 ));
             }
         }
         if inode.uid != uid || inode.perm & 0o022 != 0 {
-            return Err(refused(
+            return Err(unsafe_(
                 dir,
                 format!(
                     "the per-user lock directory must be owned by uid {uid} and writable by no \
@@ -903,9 +937,9 @@ impl Inner {
                 ),
             ));
         }
-        let path = dir.join(USER_LOCK_NAME);
         let file_loc = match self.state.child(dir_loc, OsStr::new(USER_LOCK_NAME)) {
             Ok(loc) => loc,
+            Err(Errno::ENOENT) if make == MakeUserLock::Never => return Ok(None),
             Err(Errno::ENOENT) => {
                 let loc = self
                     .state
@@ -917,21 +951,24 @@ impl Inner {
                             content: Vec::new(),
                         },
                     )
-                    .unwrap_or_else(|f| model_error(format!("user lock: {f:?}")));
+                    .map_err(|f| match f {
+                        Fault::Errno(e) => failed("open", path, e),
+                        Fault::Model(m) => model_error(format!("user lock: {m}")),
+                    })?;
                 let inode = self.state.inode_mut(loc);
                 inode.uid = uid;
                 inode.perm = 0o600;
                 loc
             }
-            Err(e) => return Err(HostError::errno("open", path.display(), e)),
+            Err(e) => return Err(failed("open", path, e)),
         };
         let inode = self.state.inode(file_loc);
         if inode.file_type() == FileType::Symlink {
-            return Err(refused(&path, "the per-user lock is a symlink".into()));
+            return Err(unsafe_(path, "the per-user lock is a symlink".into()));
         }
         if inode.file_type() != FileType::Regular || inode.uid != uid {
-            return Err(refused(
-                &path,
+            return Err(unsafe_(
+                path,
                 format!(
                     "the per-user lock must be a regular file of uid {uid} (a {}, owner {})",
                     inode.file_type(),
@@ -940,8 +977,8 @@ impl Inner {
             ));
         }
         if inode.perm & 0o077 != 0 {
-            return Err(refused(
-                &path,
+            return Err(unsafe_(
+                path,
                 format!(
                     "no one else may open the per-user lock, or they could hold it (mode \
                      {:04o}; chmod 0600 it)",
@@ -949,10 +986,12 @@ impl Inner {
                 ),
             ));
         }
-        let ofd = self.state.open_ofd(file_loc, path, Access::Read);
+        let ofd = self
+            .state
+            .open_ofd(file_loc, path.to_path_buf(), Access::Read);
         self.state.own_ofds.insert(ofd);
         self.peak_open_fds = self.peak_open_fds.max(self.state.own_ofds.len());
-        Ok(ofd)
+        Ok(Some(ofd))
     }
 
     /// Takes `mode` on `ofd` if nothing conflicts.
@@ -2223,21 +2262,34 @@ impl Host for ModelHost {
         })
     }
 
-    fn user_lock(&self) -> Result<UserLock<ModelFd>, HostError> {
-        let dir = self.inner.borrow().state.user_lock_dir.clone();
-        let path = dir.as_ref().map(|d| d.join(USER_LOCK_NAME));
+    fn user_lock_path(&self) -> Option<PathBuf> {
+        self.call(Op::UserLockPath, None, None, |inner| {
+            let path = inner.user_lock_path();
+            let text = path
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |p| p.display().to_string());
+            (path, None, text)
+        })
+    }
+
+    fn user_lock(&self, make: MakeUserLock) -> Result<Option<UserLock<ModelFd>>, UserLockError> {
+        let path = self.inner.borrow().user_lock_path();
         let opened = self.call(Op::UserLock, path.clone(), None, |inner| {
-            let result = inner.user_lock(dir.as_deref());
+            let result = match &path {
+                None => Err(UserLockError::NoPlace),
+                Some(path) => inner.user_lock(path, make),
+            };
             let text = match &result {
-                Ok(_) => "ok".to_owned(),
+                Ok(Some(_)) => "ok".to_owned(),
+                Ok(None) => "absent".to_owned(),
                 Err(e) => e.to_string(),
             };
             (result, None, text)
         });
-        opened.map(|ofd| UserLock {
+        Ok(opened?.map(|ofd| UserLock {
             fd: self.wrap(ofd),
-            path: path.expect("a per-user lock directory"),
-        })
+            path: path.expect("opened at a path"),
+        }))
     }
 
     fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError> {

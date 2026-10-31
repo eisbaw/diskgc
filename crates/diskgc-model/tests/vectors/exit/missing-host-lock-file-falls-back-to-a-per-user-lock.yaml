@@ -1,7 +1,8 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
 # TASK-277 (Mark: "any user shall be able to garbage collect his own
 # files"): without the host lock file a non-root run reclaims under its
-# per-user lock, $XDG_RUNTIME_DIR/diskgc/lock, which it makes (directory
+# per-user lock, /run/user/1000/diskgc/lock (that runtime directory is the
+# user's, 0700), which it makes (directory
 # 0700, file 0600). The goal (100 %) cannot be met: exit 1 after the one
 # candidate, as with the host lock.
 profile_vector: 1
@@ -13,7 +14,6 @@ min_free: 100%
 host:
   host_model: 1
   clock: 2026-10-15T03:00:00Z
-  runtime_dir: /run/user/1000
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}

@@ -1165,8 +1165,16 @@ impl Host for Gated {
     ) -> Result<diskgc_core::host::StateLock<Self::Fd>, HostError> {
         self.0.state_lock(key)
     }
-    fn user_lock(&self) -> Result<diskgc_core::host::UserLock<Self::Fd>, HostError> {
-        self.0.user_lock()
+    fn user_lock_path(&self) -> Option<std::path::PathBuf> {
+        self.0.user_lock_path()
+    }
+
+    fn user_lock(
+        &self,
+        make: diskgc_core::host::MakeUserLock,
+    ) -> Result<Option<diskgc_core::host::UserLock<Self::Fd>>, diskgc_core::host::UserLockError>
+    {
+        self.0.user_lock(make)
     }
 
     fn state_read(

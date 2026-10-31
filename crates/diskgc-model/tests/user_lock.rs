@@ -1,10 +1,14 @@
 //! TASK-277 (docs/safety.md, Host lock): a non-root run on a host without
 //! the provisioned host lock `/run/diskgc/lock` reclaims under a per-user
-//! lock it makes itself (`$XDG_RUNTIME_DIR/diskgc/lock`, otherwise in the
-//! state directory); root still needs the host lock; a provisioned host
-//! lock is always preferred; a per-user lock directory or file that is a
-//! symlink, another user's, or open to others is refused. Asserted on the
-//! trace and the model's filesystem, not on the report alone.
+//! lock it makes itself (`/run/user/<uid>/diskgc/lock` when that runtime
+//! directory is the user's, 0700; otherwise `<home>/.local/state/diskgc/
+//! lock`); where that lock cannot be made for a reason of the environment
+//! (no place, `ENOSPC`, ...) the reclaim runs without a lock and warns; a
+//! failure of the host is exit 3; root still needs the host lock; a
+//! provisioned host lock is always preferred; a per-user lock directory or
+//! file that is a symlink, another user's, or open to others is refused.
+//! Asserted on the trace and the model's filesystem, not on the report
+//! alone.
 
 mod common;
 
@@ -41,8 +45,9 @@ fn profile(size: &str, at: &str) -> String {
 /// `/home` (100G, 80G used by others) holds one idle 8G Cargo target
 /// below `SRC`, so 8G is available; `/run` is a tmpfs holding the
 /// provisioned host lock when `host_lock`; the state directory is
-/// `STATE` (absent until made). `head`: top-level keys before the rest
-/// (`own_uid`, `runtime_dir`); `tree`: more tree entries.
+/// `STATE` (absent until made), and the home of the per-user lock is
+/// `/home/mark`. `head`: top-level keys before the rest (`own_uid`);
+/// `tree`: more tree entries (a `/run/user/1000`).
 fn yaml(host_lock: bool, head: &str, tree: &str) -> String {
     let lock = if host_lock {
         format!("  {HOST_LOCK}: {{uid: 0, gid: 0}}\n")
@@ -53,6 +58,7 @@ fn yaml(host_lock: bool, head: &str, tree: &str) -> String {
         r#"host_model: 1
 clock: 2026-10-15T03:00:00Z
 {head}state_dir: {STATE}
+home: /home/mark
 mounts:
   - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}}
   - {{id: 2, at: /home, fs: ext4, dev: "254:2", size: 100G, other_used: 80G, parent: 1}}
@@ -68,11 +74,14 @@ tree:
     )
 }
 
-/// `$XDG_RUNTIME_DIR` as logind makes it: `/run/user/1000`, 0700.
+/// No top-level key is needed for the runtime directory: whether
+/// `/run/user/1000` is the user's (0700) decides (`runtime_tree`).
 fn runtime_head() -> String {
-    format!("runtime_dir: {RUNTIME}\n")
+    String::new()
 }
 
+/// The user's runtime directory as logind makes it: `/run/user/1000`,
+/// 0700, holding `inside`.
 fn runtime_tree(inside: &str) -> String {
     format!("  {RUNTIME}: {{.: {{mode: \"0700\"}}{inside}}}\n")
 }
@@ -117,12 +126,13 @@ fn dry_run(host: &ModelHost, request: &Request, root: bool) -> (Report, Vec<Stri
     (report, lines)
 }
 
-/// The paths `flock`ed exclusively and acquired, in order.
+/// The reclaim locks (not a candidate's) `flock`ed and acquired, in order.
 fn locked(host: &ModelHost) -> Vec<PathBuf> {
     host.trace()
         .into_iter()
         .filter(|c| c.op == Op::Flock && c.result == "acquired")
         .filter_map(|c| c.path)
+        .filter(|p| !p.starts_with(SRC))
         .collect()
 }
 
@@ -156,7 +166,7 @@ fn per_user_line<'a>(lines: &'a [String], path: &str) -> &'a str {
 }
 
 /// The headline: Mark's laptop (TASK-277). No `/run/diskgc`, no
-/// `$XDG_RUNTIME_DIR`: the reclaim makes `lock` in the state directory
+/// `/run/user/1000`: the reclaim makes `lock` in `~/.local/state/diskgc`
 /// (directory 0700, file 0600, the user's), takes it, deletes, and says in
 /// one line which lock it took and that other users' reclaims are not
 /// serialised with it.
@@ -190,9 +200,9 @@ fn a_non_root_run_without_the_host_lock_reclaims_under_a_per_user_lock() {
     assert!(!line.contains("sudo"), "{line}");
 }
 
-/// With `$XDG_RUNTIME_DIR` the per-user lock lives there (a tmpfs: making
-/// it costs the full filesystem nothing), and nothing is made in the state
-/// directory for it.
+/// With the user's runtime directory the per-user lock lives there (a
+/// tmpfs: making it costs the full filesystem nothing), and nothing is made
+/// in the home for it.
 #[test]
 fn the_per_user_lock_is_in_the_runtime_directory_when_there_is_one() {
     let host = host(&yaml(false, &runtime_head(), &runtime_tree("")));
@@ -328,18 +338,104 @@ fn a_symlinked_or_foreign_per_user_lock_directory_is_refused() {
     }
 }
 
-/// Without `$XDG_RUNTIME_DIR` and without a state directory there is no
-/// place for a per-user lock: exit 2 (`provisioning`), saying so.
+/// A `/run/user/1000` that is not the user's runtime directory as logind
+/// makes it (another mode, another owner, a symlink) is not used: the
+/// lock is in the home. Nothing of the environment is read.
 #[test]
-fn without_any_per_user_lock_location_a_reclaim_exits_2() {
-    let model = yaml(false, "", "").replace(&format!("state_dir: {STATE}\n"), "");
+fn a_runtime_directory_that_is_not_the_users_is_not_used() {
+    for (case, tree) in [
+        (
+            "mode 0755",
+            format!("  {RUNTIME}: {{.: {{mode: \"0755\"}}}}\n"),
+        ),
+        (
+            "another owner",
+            format!("  {RUNTIME}: {{.: {{uid: 1001, mode: \"0700\"}}}}\n"),
+        ),
+        (
+            "a symlink",
+            format!(
+                "  /run/elsewhere: {{.: {{mode: \"0700\"}}}}\n  {RUNTIME}: {{symlink: /run/elsewhere}}\n"
+            ),
+        ),
+    ] {
+        let host = host(&yaml(false, "", &tree));
+        let (report, lines) = ensure(&host, &cargo("12G"), false);
+        assert_eq!(report.status, Status::Met, "{case}: {report:#?}");
+        assert_eq!(
+            locked(&host).first().map(PathBuf::as_path),
+            Some(Path::new(STATE_LOCK)),
+            "{case}"
+        );
+        per_user_line(&lines, STATE_LOCK);
+    }
+}
+
+/// No runtime directory and no home: no place for a per-user lock. That is
+/// the environment's, not an unsafe object: the reclaim runs without a
+/// lock (TASK-277 review: a user must still be able to reclaim), with one
+/// warning, and reaches the goal.
+#[test]
+fn without_a_place_for_a_per_user_lock_the_reclaim_runs_unlocked_and_warns() {
+    let model = yaml(false, "", "").replace("home: /home/mark\n", "");
     let host = host(&model);
+    let (report, lines) = ensure(&host, &cargo("12G"), false);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.exit_code(), 0);
+    assert!(report.errors.is_empty(), "{:#?}", report.errors);
+    assert!(unlinks(&host) > 0);
+    assert!(locked(&host).is_empty(), "{:?}", locked(&host));
+    let warned: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("runs without a lock"))
+        .collect();
+    assert_eq!(warned.len(), 1, "{lines:#?}");
+    assert!(warned[0].starts_with("warning:"), "{}", warned[0]);
+    assert!(
+        warned[0].contains("no place for a per-user lock"),
+        "{}",
+        warned[0]
+    );
+    assert!(!warned[0].contains("sudo"), "{}", warned[0]);
+}
+
+/// A per-user lock that cannot be made for a reason of the environment
+/// (`ENOSPC`: Mark's full disk): the reclaim runs without a lock, the
+/// warning names the path and the reason. A failure of the host (`EIO`)
+/// is exit 3, cause `host`, nothing deleted (TASK-277 review, Codex 2).
+#[test]
+fn a_per_user_lock_that_cannot_be_made_runs_unlocked_and_a_host_failure_is_exit_3() {
+    let fail = |errno: &str| {
+        host(&format!(
+            "{}events:\n  - {{at: {{op: user_lock, nth: 1, when: before}}, fail: {errno}}}\n",
+            yaml(false, "", "")
+        ))
+    };
+    for errno in ["ENOSPC", "EDQUOT", "EROFS", "EACCES"] {
+        let host = fail(errno);
+        let (report, lines) = ensure(&host, &cargo("12G"), false);
+        assert_eq!(report.status, Status::Met, "{errno}: {report:#?}");
+        assert!(unlinks(&host) > 0, "{errno}");
+        assert!(locked(&host).is_empty(), "{errno}");
+        let warned: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("runs without a lock"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{errno}: {lines:#?}");
+        assert!(warned[0].contains(STATE_LOCK), "{}", warned[0]);
+        assert!(warned[0].contains(errno), "{}", warned[0]);
+    }
+    let host = fail("EIO");
     let (report, _) = ensure(&host, &cargo("12G"), false);
-    assert_eq!(report.exit_code(), 2, "{report:#?}");
-    assert_eq!(report.errors[0].cause, ErrorCause::Provisioning);
-    let message = &report.errors[0].message;
-    assert!(message.contains("per-user lock"), "{message}");
-    assert!(message.contains("XDG_RUNTIME_DIR"), "{message}");
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
+    assert!(
+        report.errors[0].message.contains(STATE_LOCK),
+        "{:#?}",
+        report.errors
+    );
     assert_eq!(unlinks(&host), 0);
 }
 
@@ -374,7 +470,11 @@ fn a_dry_run_says_a_user_falls_back_and_tells_root_to_provision() {
         .collect();
     assert_eq!(said.len(), 1, "{lines:#?}");
     assert!(said[0].contains("not provisioned"), "{}", said[0]);
-    assert!(said[0].contains("per-user lock"), "{}", said[0]);
+    assert!(
+        said[0].contains(&format!("per-user lock {RUNTIME_LOCK}")),
+        "{}",
+        said[0]
+    );
     assert!(!said[0].contains("sudo"), "{}", said[0]);
     assert!(!lines.iter().any(|l| l.contains("sudo")), "{lines:#?}");
 

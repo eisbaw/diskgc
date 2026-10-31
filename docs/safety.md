@@ -3430,9 +3430,14 @@ these features backported, and an unparseable release is refused too.
 
 ## Host lock
 
-- One reclaim per host at a time, via `flock` on the fixed path
-  `/run/diskgc/lock`, opened read-only. Not configurable: two configs naming
-  two lock files would silently break mutual exclusion.
+This section is the one home of the rule for the lock a reclaim takes;
+the other documents link here.
+
+- With the host lock provisioned, one reclaim per host at a time, via
+  `flock` on the fixed path `/run/diskgc/lock`, opened read-only. Not
+  configurable: two configs naming two lock files would silently break
+  mutual exclusion. Without it, reclaims are serialised only per user
+  (the per-user lock, below), with the limits stated there.
 - The lock file is provisioned by whatever installs diskgc: on systemd
   machines a tmpfiles.d drop-in (`/run` is emptied on reboot), elsewhere the
   equivalent boot-time step:
@@ -3449,66 +3454,100 @@ these features backported, and an unparseable release is refused too.
   symlink or mount on the way) is exit 2 (JSON `cause: provisioning`)
   when reclaim is needed, for every user: it is provisioned wrong, and
   nothing falls back from it.
-- **Without it, a user falls back to a per-user lock** (TASK-277: any
-  user may reclaim their own files without root). When the host lock is
-  missing (no `/run/diskgc`, or no `lock` in it) and diskgc does not run
-  as root, a reclaim takes a per-user lock instead, which it makes
-  itself: `lock` in `$XDG_RUNTIME_DIR/diskgc` when `$XDG_RUNTIME_DIR` is
-  an absolute path, otherwise in the state directory
-  (`$XDG_STATE_HOME/diskgc` or `~/.local/state/diskgc`,
-  [architecture.md](architecture.md#the-tally), Snapshot). The
-  directory's parent is reached following symlinks, as the state
-  directory is (and made, mode 0700, if missing); the directory itself is
-  made mode 0700 and opened without following a symlink, and must be the
-  user's and writable by no one else; the file is made mode 0600, opened
-  read-only with `O_NOFOLLOW`, and must be a regular file of the user
-  that no one else may open (`mode & 0o077 == 0`: anyone who can open it
-  can hold it). Anything else, or no place for it (neither
-  `$XDG_RUNTIME_DIR` nor `$XDG_STATE_HOME` nor `$HOME` absolute), is exit
-  2 (`cause: provisioning`), naming the per-user lock and why, and still
-  printing the host lock's commands. Making the directory and the file is
-  a state write (Pre-release sandbox gate: an ungated wrapper of its own,
-  like the snapshot's). The reclaim says in one log line which lock it
-  took and, for a per-user lock, that the host lock is not provisioned,
-  so reclaims by other users are not serialised with this one; a
-  reclaiming `watch` says so once at start, where it makes the lock.
-  Which lock a run takes is decided at each use (each `ensure`, each
-  `watch` cycle, each pause probe of the background tally): a host lock
-  provisioned while a `watch` runs is taken from its next cycle on.
 - **Root never falls back.** As root (and so with `--allow-root`, which
   is for root: Privileges), a missing host lock is exit 2 (`cause:
   provisioning`), printing the two lines above in the commands that
   install them in `/etc/tmpfiles.d` and apply them, and the
   `mkdir`/`touch`/`chmod` equivalent for a host without
-  systemd-tmpfiles. The system `watch` template refuses to start without
-  the host lock whatever its `User=` (`AssertPathExists=`,
-  [architecture.md](architecture.md#the-watch-units)), so a fleet's
-  system instances take turns through it. The user template needs no
-  provisioning.
-- **Limits of the per-user lock.** It serialises the reclaims of one
-  user that resolve the same path: an `ensure` with `$XDG_RUNTIME_DIR`
-  (a login session, a user service) and one without (a cron job, a CI
-  job started outside a session) take different per-user locks and are
-  not serialised with each other. Reclaims by different users are never
-  serialised by it. Neither is a safety boundary: every check is per
-  candidate and made under the candidate's own locks (Cargo's lock
-  files, an `fs` candidate's `flock`; [Deletion](#deletion)), and no
-  user can delete another's files (ownership of every entry). What
-  serialisation buys is the goal: two reclaims on one filesystem at once
-  each measure the space the other is freeing, so together they may free
-  more than either needed, and their walks compete for the same
-  candidates (one skips what the other holds or deleted). Provision the
-  host lock where several users or contexts reclaim one filesystem.
-- An `ensure` whose space goal is already met checks the host lock
-  without taking a `flock`; missing (as root) or unusable provisioning
-  warns on stderr but preserves exit 0 and the `met` report. For a user
-  a missing host lock is not a fault: the met run makes no per-user lock
-  (a state write; it stays an instant no-op) and says nothing. It does
-  not check the per-user lock either, so one that a reclaim would refuse
-  is found only by that reclaim. A dry run (no lock taken or made) says,
-  once, what its reclaim would lock: for a user without the host lock a
-  note that reclaims fall back to a per-user lock, without telling the
-  user to provision anything; as root the warning with the commands.
+  systemd-tmpfiles.
+- **Without it, a user falls back to a per-user lock** (TASK-277: any
+  user may reclaim their own files without root). When the host lock is
+  missing (no `/run/diskgc`, or no `lock` in it) and diskgc does not run
+  as root, a reclaim takes a per-user lock, which it makes itself. Its
+  place depends on the system only, never on the environment's
+  `$XDG_RUNTIME_DIR` or `$XDG_STATE_HOME`, so a login session, a cron job
+  and a `su` of one user resolve the same lock:
+  - `/run/user/<uid>/diskgc/lock` when `/run/user/<uid>` is a directory
+    (not a symlink) of the user with mode 0700, as logind makes it;
+  - otherwise `<home>/.local/state/diskgc/lock`, the home being the
+    user's account entry's (`getpwuid_r`), and `$HOME` only when that
+    lookup finds none (a static musl build without nscd cannot resolve
+    NSS-only accounts).
+
+  The place is decided at each use: while the user has a session the
+  lock is in `/run/user/<uid>`, after the last session ends (without
+  lingering) in the home, so a reclaim that started in one is not
+  serialised with one started in the other across that moment.
+- **The per-user lock is checked before it is used.** The directory's
+  parent is reached following symlinks (`~/.local` may be one), and made,
+  mode 0700, if missing. The directory and the file are inspected
+  through an `O_PATH` open that never follows a symlink, before anything
+  opens them for reading, so another user's object is seen as such and
+  never fails with `EACCES`: the directory must be a directory of the
+  user that no one else may write to, the file a regular file of the
+  user that no one else may open (`mode & 0o077 == 0`: anyone who can
+  open it can hold it). The checked file is then reopened read-only
+  through `/proc/self/fd` and checked to be the same object. What is
+  missing is made: the directory mode 0700, the file mode 0600 with
+  `O_EXCL`, never over something else. Making them is a state write (Pre-release
+  sandbox gate: an ungated wrapper of its own, like the snapshot's).
+- **Unsafe is refused; unavailable is not.** The per-user lock only
+  serialises; it is not a safety boundary: every check is per candidate
+  and made under the candidate's own locks (Cargo's lock files, an `fs`
+  candidate's `flock`; [Deletion](#deletion)), and no user can delete
+  another's files (ownership of every entry). So (the orchestrator's
+  rule, TASK-277 review):
+  - something **unsafe** at its place (a symlink, another type, another
+    owner, a directory others may write to, a file others may open) is
+    exit 2 (`cause: provisioning`), naming the lock and why, and still
+    printing the host lock's commands; a reclaiming `watch` refuses it
+    at start;
+  - a lock that **cannot be made** for a reason of the environment (no
+    place for it: no such `/run/user/<uid>` and no home; or `ENOSPC`,
+    `EDQUOT`, `EROFS`, `EACCES`, `EPERM`, `ENOTDIR` on the way) does not
+    stop the reclaim: it runs **without a lock**, with one warning naming
+    the path and the reason. A user whose disk is full must still be
+    able to reclaim (Mark, 2026-10-31);
+  - any other failure of the host (`EIO`, `ENOMEM`, `EMFILE`, ...),
+    making or locking the per-user lock or the host lock, is exit 3
+    (status `error`, `cause: host`); in a `watch` cycle a `retry`
+    back-off.
+- **One line says which.** The reclaim says in one log line which lock it
+  took and, for a per-user lock, that the host lock is not provisioned,
+  so reclaims by other users are not serialised with this one; a run
+  without a lock says so in a warning. A reclaiming `watch` says it once
+  at start, where it makes the lock. Which lock a run takes is decided
+  at each use (each `ensure`, each `watch` cycle, each pause probe of the
+  background tally): a host lock provisioned while a `watch` runs is
+  taken from its next cycle on, and one removed is fallen back from.
+- **Limits of the per-user lock.** It serialises the reclaims of one user
+  that resolve the same place at the same time (above); reclaims by
+  different users are never serialised by it, and a run without a lock
+  is serialised with nothing. What serialisation buys is the goal: two
+  reclaims on one filesystem at once each measure the space the other is
+  freeing, so together they may free more than either needed, and their
+  walks compete for the same candidates (one skips what the other holds
+  or deleted). Provision the host lock where several users reclaim one
+  filesystem. The system `watch` template asserts the host lock at start
+  (`AssertPathExists=`, [architecture.md](architecture.md#the-watch-units)):
+  without it the instance does not start, whatever its `User=`; a host
+  lock removed after the start makes the running instance fall back to
+  its `User=`'s per-user lock from its next cycle on. The user template
+  needs no provisioning.
+- **Taking no lock, making none.** An `ensure` whose space goal is already
+  met checks the host lock without taking a `flock`; missing (as root) or
+  unusable provisioning warns on stderr but preserves exit 0 and the
+  `met` report. For a user a missing host lock is not a fault: the met
+  run makes no per-user lock (a state write; it stays an instant no-op)
+  and says nothing. A dry run (no lock taken or made) says, once, what
+  its reclaim would lock: for a user without the host lock a note naming
+  the per-user lock, without telling the user to provision anything, or
+  a warning that it would run without a lock when there is no place for
+  one; as root the warning with the commands. Neither checks the
+  per-user lock itself, so an unsafe one is found by the reclaim. The
+  background tally's pause probe opens an existing per-user lock and
+  makes none: one that does not exist is held by no one, and
+  `watch --tally-only` writes no lock.
 - Any local user who can read the host lock file can hold it and stall
   reclaims; `ensure` then exits 75 at its deadline. Only the user (and
   root) can open a per-user lock.

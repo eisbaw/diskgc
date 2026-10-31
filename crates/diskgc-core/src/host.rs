@@ -70,6 +70,7 @@ impl Errno {
     pub const ENOSYS: Errno = Errno(38);
     pub const ENOTEMPTY: Errno = Errno(39);
     pub const ELOOP: Errno = Errno(40);
+    pub const EDQUOT: Errno = Errno(122);
 
     /// Every errno value with a [`Errno::name`].
     pub const NAMED: &[Errno] = &[
@@ -96,6 +97,7 @@ impl Errno {
         Self::ENOSYS,
         Self::ENOTEMPTY,
         Self::ELOOP,
+        Self::EDQUOT,
     ];
 
     /// The errno called `name` (one of [`Errno::NAMED`]).
@@ -129,6 +131,7 @@ impl Errno {
             Self::ENOSYS => "ENOSYS",
             Self::ENOTEMPTY => "ENOTEMPTY",
             Self::ELOOP => "ELOOP",
+            Self::EDQUOT => "EDQUOT",
             _ => return None,
         })
     }
@@ -1389,21 +1392,43 @@ pub trait Host {
         bytes: &[u8],
     ) -> Result<(), HostError>;
 
-    /// Opens diskgc's per-user reclaim lock, `lock` in the per-user lock
-    /// directory the implementation was given (`$XDG_RUNTIME_DIR/diskgc`,
-    /// otherwise the state directory: [`crate::hostlock::user_lock_dir`]),
-    /// creating the directory (mode 0700, with its missing parents) and the
-    /// file (mode 0600, read-only open, never written, never renamed) if
-    /// absent, for [`Host::flock_try`] or [`Host::flock_wait`] only
-    /// (docs/safety.md, Host lock). It takes no name from the caller. The
-    /// directory's own name and the file are reached without following a
-    /// symlink; the directory must be owned by diskgc's user and writable
-    /// by no one else, the file a regular file of that user that no one
-    /// else may open (`mode & 0o077 == 0`). Every such refusal, and having
-    /// no per-user lock directory at all, is [`Cause::Invalid`]; a kernel
-    /// failure carries its errno. Ungated, as [`Host::state_lock`]: one of
-    /// the three operations that create anything outside [`Delete`].
-    fn user_lock(&self) -> Result<UserLock<Self::Fd>, HostError>;
+    /// Where diskgc's per-user reclaim lock is now (docs/safety.md, Host
+    /// lock), decided by the implementation from the system, never from
+    /// the environment's `XDG_*` variables: `lock` in
+    /// `/run/user/<euid>/diskgc` when `/run/user/<euid>` is a directory of
+    /// diskgc's user with mode 0700, otherwise in
+    /// `<home>/.local/state/diskgc`, the home being the user's account
+    /// entry's (`$HOME` only when that lookup fails). `None`: no place for
+    /// one. Read-only: it creates and opens nothing.
+    fn user_lock_path(&self) -> Option<PathBuf>;
+
+    /// Opens diskgc's per-user reclaim lock at [`Host::user_lock_path`],
+    /// read-only, for [`Host::flock_try`] or [`Host::flock_wait`] only:
+    /// nothing is ever written to it or renamed onto it. It takes no name
+    /// from the caller. What exists is inspected before it is opened for
+    /// reading (an `O_PATH` open that never follows a symlink): the
+    /// directory must be a directory of diskgc's user writable by no one
+    /// else, the file a regular file of that user that no one else may
+    /// open (`mode & 0o077 == 0`); anything else is
+    /// [`UserLockError::Unsafe`], whoever owns it. With
+    /// [`MakeUserLock::IfAbsent`] what is missing is made (the directory
+    /// mode 0700, with its missing parents; the file mode 0600, exclusively,
+    /// never over something else); with [`MakeUserLock::Never`] a missing
+    /// directory or file is `Ok(None)` and nothing is made. Ungated, as
+    /// [`Host::state_lock`]: one of the three operations that create
+    /// anything outside [`Delete`].
+    fn user_lock(&self, make: MakeUserLock) -> Result<Option<UserLock<Self::Fd>>, UserLockError>;
+}
+
+/// Whether [`Host::user_lock`] makes what is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MakeUserLock {
+    /// Make the directory and the file if absent (a reclaim, `watch`'s
+    /// start in reclaim mode).
+    IfAbsent,
+    /// Make nothing (the background tally's probe: a lock no one made is
+    /// held by no one).
+    Never,
 }
 
 /// The per-user reclaim lock [`Host::user_lock`] opened (not locked yet),
@@ -1412,6 +1437,34 @@ pub trait Host {
 pub struct UserLock<F> {
     pub fd: F,
     pub path: PathBuf,
+}
+
+/// Why [`Host::user_lock`] opened nothing. `path` is the lock file's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserLockError {
+    /// No place for a per-user lock ([`Host::user_lock_path`] is `None`).
+    NoPlace,
+    /// Something unsafe stands at the lock's directory or file: a symlink,
+    /// another type, another owner, or a mode that lets others write the
+    /// directory or open the file. Never opened for reading, never made
+    /// over.
+    Unsafe { path: PathBuf, error: HostError },
+    /// The kernel refused (an errno): making the lock where it cannot be
+    /// made (`ENOSPC`, `EROFS`, `EACCES`, ...) or a failure of the host;
+    /// the caller tells the two apart.
+    Failed { path: PathBuf, error: HostError },
+}
+
+impl fmt::Display for UserLockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPlace => f.write_str(
+                "no place for a per-user lock: no /run/user/<uid> of this user (its own, mode \
+                 0700) and no home directory",
+            ),
+            Self::Unsafe { error, .. } | Self::Failed { error, .. } => write!(f, "{error}"),
+        }
+    }
 }
 
 /// Which filesystem a snapshot is for: it names `index-<key>` and

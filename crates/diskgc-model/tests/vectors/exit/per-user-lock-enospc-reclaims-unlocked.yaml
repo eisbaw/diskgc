@@ -1,0 +1,33 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-277 review (the orchestrator's rule, docs/safety.md, Host lock):
+# without the host lock, a user's per-user lock that cannot be made for a
+# reason of the environment (here ENOSPC: the home's filesystem is full)
+# does not stop the reclaim: it runs without a lock, with one warning
+# naming the path and the reason, and deletes as it would under one. The
+# goal (100 %) cannot be met: exit 1.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  home: /home/tester
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /home/tester: {.: {mode: "0700"}}
+    /tmp/zephyr-a: {f: {size: 4K}}
+  events:
+    - {at: {op: user_lock, nth: 1, when: before}, fail: ENOSPC}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-a}
+  reclaim_exit: 1
+  actions: [/tmp/zephyr-a]
+  removed: [/tmp/zephyr-a]
+  skipped: []
+  preserved: []

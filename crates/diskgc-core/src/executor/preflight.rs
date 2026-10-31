@@ -297,21 +297,32 @@ pub(super) fn warn_if_host_lock_unready_timed<H: Host>(
 
 /// The dry run's word on the lock its reclaim would take (it takes and
 /// makes none): [`warn_if_host_lock_unready_timed`], and for a non-root
-/// run without the host lock one note that its reclaims fall back to a
-/// per-user lock, without telling the user to provision anything.
+/// run without the host lock one line naming the per-user lock its
+/// reclaims take, without telling the user to provision anything, or, with
+/// no place for one, a warning that they would run without a lock
+/// (docs/safety.md, Host lock).
 pub(super) fn say_lock_readiness<H: Host>(
     host: &H,
     report: &mut Report,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) {
-    if warn_if_host_lock_unready_timed(host, report, deadline, log) == Some(Readiness::FallsBack) {
-        log(&format!(
-            "note: the host lock {} is not provisioned: a reclaim by this user takes a \
-             per-user lock instead, which does not serialise it with other users' reclaims \
+    let host_lock = hostlock::host_lock_path();
+    match warn_if_host_lock_unready_timed(host, report, deadline, log) {
+        Some(Readiness::FallsBack(Some(path))) => log(&format!(
+            "note: the host lock {} is not provisioned: a reclaim by this user takes the \
+             per-user lock {} instead, which does not serialise it with other users' reclaims \
              (docs/safety.md, Host lock)",
-            hostlock::host_lock_path().display()
-        ));
+            host_lock.display(),
+            path.display()
+        )),
+        Some(Readiness::FallsBack(None)) => log(&format!(
+            "warning: the host lock {} is not provisioned and there is no place for a \
+             per-user lock (no /run/user/<uid> of this user, no home directory): a reclaim \
+             would run without a lock (docs/safety.md, Host lock)",
+            host_lock.display()
+        )),
+        Some(Readiness::Host) | None => {}
     }
 }
 

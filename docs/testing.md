@@ -780,9 +780,12 @@ Model scenarios required by [safety.md](safety.md) and
     running tally; a user's watch without the host lock is no refusal: it
     reclaims under its per-user lock
     (`a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock`;
-    TASK-277, the rest in `crates/diskgc-model/tests/user_lock.rs` and the
-    container test
-    `ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock`); an unwritable state directory and a failing first
+    TASK-277, the rest in `crates/diskgc-model/tests/user_lock.rs`, the
+    `per-user-lock-*` exit vectors and the container tests
+    `ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock`,
+    `ensure_as_a_user_refuses_another_users_per_user_lock` (another
+    user's directory and file, which only a container can make) and
+    `ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made`); an unwritable state directory and a failing first
     sample are not refusals: one log line and no snapshot, and a first
     cycle record (`error`, `host`) respectively, the process running;
   - `watch_root_vanished_after_start_still_reclaims_other_tiers` (*open*): a
