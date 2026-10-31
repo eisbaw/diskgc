@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T04:49:00Z'
-updated_date: '2026-10-31T22:47:00Z'
+updated_date: '2026-10-31T23:33:00Z'
 labels:
   - release
 dependencies: []
@@ -23,4 +23,6 @@ TASK-44 review (mped S3): the development package's reclaiming watch exits 2 at 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-31 correction: the TASK-260 backport patch is no longer at tmp/reviews/ (tmp/ cleaned); it is preserved as branch wip/t260-backport-0.1 (f8efc61 on top of release-0.1; untested). 0.1.x safety list so far: TASK-242 (container storage), TASK-260 (protect/bind), TASK-44's two --allow-root gaps, TASK-277 (non-root without provisioning).
+
+2026-11-01 (TASK-280 review): a branch build with a plain version prints the same --version as the tag; before any build of wip/t260-backport-0.1 counts as evidence, bump it to 0.1.1-dev (release procedure in architecture.md, TASK-280). Until TASK-276 decides, the gate-lifted master build refuses a reclaiming watch (fail closed; only --tally-only), so a host watch dogfood needs Mark's go and that refusal lifted.
 <!-- SECTION:NOTES:END -->
