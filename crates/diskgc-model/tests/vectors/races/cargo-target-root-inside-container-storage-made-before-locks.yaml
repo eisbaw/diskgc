@@ -1,0 +1,36 @@
+# TASK-242 review. A directory above the root becomes a container storage
+# root (`storage.lock` appears beside `overlay-layers`) after the plan and
+# before the target's locks. The recheck under the locks resolves the root
+# again, asks every directory above it, and refuses the target
+# (`contains_special`, the storage root as the skip's path): nothing removed.
+profile_vector: 1
+profile: cargo-target
+roots: [/home/tester/store/overlay/0a1b2c/diff]
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/store/overlay-layers: {.: {}}
+    /home/tester/store/overlay/0a1b2c/diff/app/target:
+      CACHEDIR.TAG: {cachedir_tag: true}
+      debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}
+  events:
+    - at: {op: flock, path: /home/tester/store/overlay/0a1b2c/diff/app/target/debug/.cargo-lock, nth: 1, when: before}
+      create: /home/tester/store/storage.lock
+expect:
+  plan:
+    - {candidate: /home/tester/store/overlay/0a1b2c/diff/app/target}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/store/overlay/0a1b2c/diff/app/target, reason: contains_special}
+  preserved:
+    - /home/tester/store/overlay/0a1b2c/diff/app/target/debug/deps/app
+    - /home/tester/store/storage.lock

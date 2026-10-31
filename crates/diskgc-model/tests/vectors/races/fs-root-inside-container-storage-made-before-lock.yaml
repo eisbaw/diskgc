@@ -1,0 +1,40 @@
+# TASK-242 review. As cargo-target-root-inside-container-storage-made-before-
+# locks, for a plain-delete candidate: the root's ancestors are asked again
+# under the candidate's lock, so storage made above the root after the plan
+# refuses the candidate (`contains_special`). The tier's discovery after
+# it resolves the root again and reports the root itself, once, with the
+# storage root as the candidate.
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/home/tester/store/overlay], paths: ["*/diff/cache"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/store/overlay/x/diff/cache]}
+profile: layer-cache
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/store/overlay-layers: {.: {}}
+    /home/tester/store/overlay/0a1b2c/diff/cache: {blob: {size: 1M}}
+  events:
+    - at: {op: flock, path: /home/tester/store/overlay/0a1b2c/diff/cache, nth: 1, when: before}
+      create: /home/tester/store/storage.lock
+expect:
+  plan:
+    - {candidate: /home/tester/store/overlay/0a1b2c/diff/cache}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/store/overlay/0a1b2c/diff/cache, reason: contains_special}
+    - {candidate: /home/tester/store, reason: contains_special}
+  preserved:
+    - /home/tester/store/overlay/0a1b2c/diff/cache/blob
+    - /home/tester/store/storage.lock

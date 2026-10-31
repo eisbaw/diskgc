@@ -494,6 +494,29 @@ pub fn open_beneath<H: Host>(
     open_below(host, dir, mount_id, rel, access, want)
 }
 
+/// Whether the name `name` is in the open directory `dir` (at `path`): a
+/// `statx` of it, not followed, whatever it is. A mount point of that name
+/// (by the table `mounts`) counts without being touched: a dead mount would
+/// hang its `statx`. `ENOENT` is no; any other error is the caller's to
+/// classify, never taken as no (fail closed). The one probe of the names
+/// diskgc looks for on a candidate's way (keep markers, container storage).
+pub fn name_present<H: Host>(
+    host: &H,
+    dir: &H::Fd,
+    path: &Path,
+    name: &std::ffi::OsStr,
+    mounts: &[MountEntry],
+) -> Result<bool, HostError> {
+    if is_mount_point(mounts, &path.join(name)) {
+        return Ok(true);
+    }
+    match host.statx(Base::Dir(dir), Path::new(name)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.is(Errno::ENOENT) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Whether a `/`-separated segment of `path` is `.` or `..`. Checked on the
 /// text: `Path::components` silently drops interior `.` segments.
 fn has_dot_segments(path: &Path) -> bool {
@@ -543,7 +566,7 @@ fn open_below<H: Host>(
 impl ResolveError {
     /// Reports the error against `path` (the full configured path) instead
     /// of the relative remainder it was found on.
-    fn at(self, path: &Path) -> Self {
+    pub(crate) fn at(self, path: &Path) -> Self {
         let path = path.to_owned();
         match self {
             Self::UnsafePath { why, .. } => Self::UnsafePath { path, why },

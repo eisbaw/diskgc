@@ -112,7 +112,9 @@ Immediately before acting, diskgc walks the candidate's whole tree
 - **No keep marker** (`.diskgc-keep`) in the candidate, anywhere inside
   it, or in any directory between the profile root and the candidate
   (`kept`).
-- **No special content** (`contains_special`):
+- **No special content** (`contains_special`; container storage is
+  `contains_special` too, [below](#the-eligibility-walk-mandatory-per-candidate),
+  No container storage):
   - no `systemd-private-*` entry anywhere in a plain-delete candidate,
     even when every entry belongs to the caller; its name is refused before
     it is `statx`ed;
@@ -153,10 +155,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
   Go cache inside a deleted `/tmp` directory) is *not* protected by
   nesting; protect it with `protect:` or `!profile:` if it matters.
 - **No container storage** (`contains_special`, TASK-242): no directory in
-  the candidate, the candidate itself included, and neither the root nor
-  any directory between it and the candidate, is a container storage
-  root; of every kind and action, and no profile, tier or flag turns it
-  off. Rootless Podman and rootless Docker keep image layers and
+  the candidate, the candidate itself included, no directory between the
+  root and the candidate, the root included, and no directory above the
+  root, up to `/`, is a container storage root; of every kind and action,
+  and no profile, tier, root or flag turns it off. Rootless Podman and rootless Docker keep image layers and
   containers below the home directory
   (`~/.local/share/containers/storage`, `~/.local/share/docker`), and a
   file a container's root wrote belongs to the user there: a layer that
@@ -168,52 +170,74 @@ Immediately before acting, diskgc walks the candidate's whole tree
   `/var/lib/containerd`) is the same under `--allow-root`.
   - **By names, not paths:** every engine lets its storage be moved
     (`graphroot`, `data-root`, containerd's `root`), so a storage root is
-    the directory that holds both names of one pair
+    the directory that holds the names of one rule
     (`container_storage` in the engine): a containers/storage graphroot
     (Podman, Buildah, CRI-O) holds `storage.lock` and a driver's
     `<driver>-layers` (`overlay`, `vfs`, `btrfs`, `zfs`, `aufs`,
-    `devicemapper`); a Docker data root holds `image` and a graph driver's
-    directory (`overlay2`, `fuse-overlayfs`, `vfs`, `btrfs`, `zfs`,
-    `aufs`, `devicemapper`), or `engine-id` and `containers`; a containerd
+    `devicemapper`); a containers/storage image store (`imagestore=` in
+    `containers-storage.conf`, or an additional image store), which has no
+    `storage.lock` of its own, holds `<driver>-layers` and
+    `<driver>-images`; a Docker data root holds `image`, a graph
+    driver's directory (`overlay2`, Docker 20's legacy `overlay`,
+    `fuse-overlayfs`, `vfs`, `btrfs`, `zfs`, `aufs`, `devicemapper`) and
+    `containers` (the daemon makes it at start; without it, U-Boot's
+    `test/`, which holds `image/` and `overlay/`, would count), or
+    `engine-id` and `containers`; a containerd
     root (Docker's own with the containerd image store is
     `<data-root>/containerd/daemon`) holds
     `io.containerd.metadata.v1.bolt` or
     `io.containerd.content.v1.content`. Names only, whatever their type:
-    a project that happens to hold both names of a pair is kept, and the
+    a project that happens to hold the names of a rule is kept, and the
     skip names them; one name alone (a project's `storage.lock`) is no
     storage root. Evidence: the rootless and rootful Podman 5.8.7
     graphroots on the development machine (2026-10-30); the classic
     `vfs` and the containerd-store layouts of the Docker 29.8.2 fixture
-    ([Docker kinds](#docker-kinds)). `engine-id` (Docker 23 and later) is
-    from Moby's source, not measured here.
+    ([Docker kinds](#docker-kinds)). From upstream source, not measured
+    here: `engine-id` (Docker 23 and later; TASK-253), the separate image
+    store (containers/storage `store.go`, `containers-storage.conf(5)`),
+    Docker 20's `overlay` driver.
   - **Where it is checked.** In the walk, each directory's complete
     listing, the candidate's first, before any entry of it is admitted.
     On the way, each directory from the root down to the candidate's
     parent, the root included, as the keep markers on the way are: for
     an `fs` candidate a `statx` of each marker name in the directories it
-    was reached through, the first name of each pair first and its
-    partner only where that held (a handful of calls per level), fail
-    closed like a keep marker (a mount point of that name counts, a name
-    that cannot be told refuses the candidate), at its approach and again
-    under its lock and before acting (Deletion, steps 2 and 4); for a
-    Cargo target the
-    listings its reach already makes, and the target, its triple
-    directories and its profile directories, which its inspection lists.
+    was reached through, the first group of each rule first and the
+    next only where that held (about a dozen calls per level that is no
+    storage root), fail closed like a keep marker (a mount point of that
+    name counts, a name that cannot be told refuses the candidate), at
+    its approach and again under its lock and before acting (Deletion,
+    steps 2 and 4); for a Cargo target the listings its reach already
+    makes, and the target, its triple directories and its profile
+    directories, which its inspection lists.
+    **Above the root**, when a discovery starts (a resumable round's
+    first step) and every time a candidate's root is resolved again (its
+    approach and every recheck, for both kinds): each directory from `/`
+    down to the root's parent, reached as a root is (Path traversal) and
+    asked by the same `statx` probe. A root inside
+    storage (`--roots ~/.local/share/containers/storage/overlay`) is
+    refused (`contains_special`, the storage root as the candidate),
+    never searched; a directory above it that cannot be reached or asked
+    refuses the root as an unreachable root is (fail closed). Its cost is
+    one open and the probe per level, per resolution.
     Discovery of both kinds does not descend into a storage root it lists
     and reports it once, with the storage root as the candidate, however
-    many roots reach it (by device and inode): one skip for
-    `~/.local/share/containers/storage` instead of one `unreadable` per
+    many roots reach it, from above or from inside (by its path): one skip
+    for `~/.local/share/containers/storage` instead of one `unreadable` per
     subuid-owned layer. A pattern whose literal names lead into storage
     is not listed there; its candidates are refused one by one at their
-    judgement.
-  - **Limits.** The root's own ancestors are not looked at: a root named
-    inside a storage root (`--roots ~/.local/share/containers/storage/overlay`)
-    is taken as meant, as for a keep marker. A storage root diskgc cannot
-    list (`/var/lib/docker` is mode `0710`, root's) is `unreadable`, never
-    entered either. Other engines' layouts (LXD/Incus, a standalone
-    BuildKit's `/var/lib/buildkit`, VM disk images) are not recognised.
-    A storage root made after the last check of a level is the window
-    after the check, as for a keep marker.
+    judgement. Excluded on purpose, not unread: a discovery listing whose
+    only refusals are storage roots is still complete for the index, so
+    a recount forgets what it held inside storage
+    ([architecture.md](architecture.md)).
+  - **Limits.** A storage root diskgc cannot list (`/var/lib/docker` is
+    mode `0710`, root's) is `unreadable`, never entered either. Not
+    recognised (TASK-254): containers/storage's runroot
+    (`/run/containers/storage`, rootless `$XDG_RUNTIME_DIR/containers` or
+    `/tmp/storage-run-$UID`: mount points and locks, no layers), a
+    rootless or standalone BuildKit root (`~/.local/share/buildkit`,
+    `/var/lib/buildkit`), LXD/Incus storage pools, VM disk images. A
+    storage root made after the last check of a level is the window after
+    the check, as for a keep marker.
 - **No source checkout** (`contains_checkout`), unless the candidate's
   source profile says `checkouts: allow` (below); of every kind and
   action, plain `delete`, command actions (Mark, 2026-10-18:

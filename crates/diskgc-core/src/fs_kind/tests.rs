@@ -260,7 +260,12 @@ fn a_root_is_judged_by_its_path_and_its_mounts_line_first() {
     // Any openat2 or statx fails the test: a refusal touches nothing.
     let judged = |root: &str, mounts: &[crate::host::MountEntry]| {
         let host = Scripted::never_opened(mounts.to_vec());
-        match resolve_root(&host, Path::new(root), mounts) {
+        match resolve_root(
+            &host,
+            Path::new(root),
+            mounts,
+            crate::engine::container_storage::Above::Ask,
+        ) {
             Ok(Err(refused)) => refused,
             Ok(Ok(_)) => panic!("{root}: resolved"),
             Err(stop) => panic!("{root}: {stop}"),
@@ -288,11 +293,13 @@ fn a_root_is_judged_by_its_path_and_its_mounts_line_first() {
         match judged(network, &mounts) {
             RootRefused::Skip(skip) => assert_eq!(skip.reason, Reason::UnsupportedFs, "{network}"),
             RootRefused::PrivateTmp(why) => panic!("{network}: {why}"),
+            RootRefused::Storage(skip) => panic!("{network}: {skip}"),
         }
     }
     match judged("/tmp", &[]) {
         RootRefused::Skip(skip) => assert_eq!(skip.reason, Reason::UnsafePath),
         RootRefused::PrivateTmp(why) => panic!("{why}"),
+        RootRefused::Storage(skip) => panic!("{skip}"),
     }
 }
 

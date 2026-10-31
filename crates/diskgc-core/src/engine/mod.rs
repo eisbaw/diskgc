@@ -41,7 +41,7 @@
 //! and a writer filling a directory faster than it is read cannot keep the
 //! walk going.
 
-pub mod container_storage;
+pub(crate) mod container_storage;
 mod delete;
 mod frames;
 mod walk;

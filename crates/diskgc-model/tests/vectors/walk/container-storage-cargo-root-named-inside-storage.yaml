@@ -1,0 +1,39 @@
+# TASK-242 review. As container-storage-root-named-inside-storage, for the
+# Cargo kind: a root inside an image layer (`.../overlay/0a1b2c/diff`)
+# finds the layer's target unless the directories above the root are
+# asked. The outer root (`containers`) refuses the graphroot by its
+# listing, the inner one by its ancestors: one refusal, the storage root.
+# `src/proj`, under a directory holding only `storage.lock`, is reclaimed.
+profile_vector: 1
+profile: cargo-target
+roots:
+  - /home/tester/.local/share/containers
+  - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff
+  - /home/tester/src/proj
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {app: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}}
+    /home/tester/src/storage.lock: {}
+    /home/tester/src/proj/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/src/proj/target}
+  reclaim_exit: 1
+  actions: [/home/tester/src/proj/target]
+  removed: [/home/tester/src/proj/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/debug/deps/app

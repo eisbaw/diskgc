@@ -1260,13 +1260,15 @@ fn a_round_survives_entries_changing_under_it_and_a_replacement_makes_it_partial
             writeln!(tree, "  /tmp/a/g{g}/c{i:03}: {{.: {{}}}}").unwrap();
         }
     }
-    // At 1 ms a call: g0 is entered and listed within the first few ms,
-    // g1 at about 45 ms, g2 at about 90 ms.
+    // At 1 ms a call: the round's first step asks the directories above
+    // the root for container storage (`/` and the `/tmp` mount, about
+    // 30 calls, TASK-242), so g0 is entered and listed at about 30 ms,
+    // g1 at about 75 ms, g2 at about 120 ms.
     let events = "events:\n\
-        - {at: {elapsed: 20ms}, replace: /tmp/a/g0}\n\
-        - {at: {elapsed: 20ms}, remove: /tmp/a/g2}\n\
-        - {at: {elapsed: 70ms}, remove: /tmp/a/g1/c039}\n\
-        - {at: {elapsed: 70ms}, mkdir: /tmp/a/g1/c040}\n";
+        - {at: {elapsed: 50ms}, replace: /tmp/a/g0}\n\
+        - {at: {elapsed: 50ms}, remove: /tmp/a/g2}\n\
+        - {at: {elapsed: 100ms}, remove: /tmp/a/g1/c039}\n\
+        - {at: {elapsed: 100ms}, mkdir: /tmp/a/g1/c040}\n";
     let host = host(&yaml(
         &tree,
         &format!("call_cost: 1ms\n{}", events.replace("\n-", "\n  -")),
@@ -1461,4 +1463,43 @@ fn a_redirected_job_that_ends_a_round_does_not_restart_it() {
         "no new round of A started: {:?}",
         state.round_finder()
     );
+}
+
+/// TASK-242: container storage is excluded on purpose, never unread. A
+/// listing whose walk meets a storage root (and refuses it) is still
+/// complete, so its recount evicts what the index held inside storage.
+/// Both kinds, in one call and in steps.
+#[test]
+fn a_listing_that_meets_container_storage_is_still_complete() {
+    let mut tree = cargo_tree(2);
+    // A rootless graphroot below the Cargo root, a target in a layer.
+    tree.push_str(
+        "  /tmp/w/store/storage.lock: {}\n  /tmp/w/store/overlay-layers: {.: {}}\n  \
+         /tmp/w/store/overlay/l1/target/CACHEDIR.TAG: {cachedir_tag: true}\n  \
+         /tmp/w/store/overlay/l1/target/debug/.cargo-lock: {}\n",
+    );
+    // An fs root that is a separate image store itself.
+    tree.push_str(
+        "  /tmp/a/overlay-layers: {.: {}}\n  /tmp/a/overlay-images: {.: {}}\n  \
+         /tmp/a/overlay/l1: {.: {}}\n",
+    );
+    let host = host(&yaml(&tree, ""));
+    for (source, expected) in [(cargo_source("/tmp/w"), 2), (source("a", "/tmp/a"), 0)] {
+        let listed = state().list_source(&host, &source, None).unwrap();
+        assert!(listed.listing.complete, "{:?}", source.finder);
+        assert_eq!(listed.listing.listed.len(), expected, "{:?}", source.finder);
+        assert!(
+            listed
+                .listing
+                .listed
+                .iter()
+                .all(|l| !l.path.starts_with("/tmp/w/store")),
+            "nothing inside storage is listed"
+        );
+        for ops in [1, 7, 1000] {
+            let (found, complete, _) = round_in_steps(&host, &source, ops);
+            assert!(complete, "{:?} in steps of {ops}", source.finder);
+            assert_eq!(found.len(), expected);
+        }
+    }
 }

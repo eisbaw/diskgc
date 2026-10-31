@@ -13,7 +13,7 @@
 //! like any other: agent worktrees (`~/.claude/worktrees/*/target`) hold
 //! targets too.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -22,6 +22,7 @@ use super::{
     CACHEDIR_TAG_SIGNATURE, Dir, Inspected, Judged, LockFile, ProfileDir, ProfileEntry, Stop,
     Target, newest_change,
 };
+use crate::engine::container_storage::{Above, check_listing, in_listing};
 use crate::engine::{
     self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Seen, Skip, WalkStop,
     Work, is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
@@ -52,9 +53,35 @@ pub struct Discovery {
     /// roots, a bind mount of the same directory): the same object as a
     /// target listed in `targets`, so not listed twice.
     pub duplicates: Vec<PathBuf>,
-    /// Container storage roots refused so far (in `refused`), by identity:
-    /// one reached again through another root is not refused twice.
-    pub storage_roots: HashSet<DevIno>,
+    /// Container storage roots refused so far (each in `refused` once):
+    /// listed, or above a root. One reached again through another root is
+    /// not refused twice ([`Discovery::refuse_storage`]).
+    pub storage_roots: BTreeSet<PathBuf>,
+}
+
+impl Discovery {
+    /// Refuses a container storage root (`skip`: `contains_special`, the
+    /// storage root as its path), once however many roots reach it.
+    fn refuse_storage(&mut self, skip: Skip) {
+        if self.storage_roots.insert(skip.path.clone()) {
+            self.refused.push(skip);
+        }
+    }
+
+    /// A root that is not searched.
+    fn refuse_root(&mut self, refused: Unsearched) {
+        match refused {
+            Unsearched::Skip(skip) => self.refused.push(skip),
+            Unsearched::Storage(skip) => self.refuse_storage(skip),
+        }
+    }
+
+    /// Nothing was refused but container storage, which is excluded on
+    /// purpose, not left unread: a listing without other refusals is
+    /// evidence of absence (the tally's recount, [`crate::tally`]).
+    pub fn nothing_refused_but_storage(&self) -> bool {
+        self.refused.len() == self.storage_roots.len()
+    }
 }
 
 /// Finds the Cargo targets below `roots` (absolute paths). Errors of the
@@ -78,10 +105,10 @@ pub fn discover<H: Host>(
     let mut ordered: Vec<&PathBuf> = roots.iter().collect();
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
-        let LocalRoot { resolved, mounts } = match resolve_root(host, root) {
+        let LocalRoot { resolved, mounts } = match resolve_root(host, root, Above::Ask) {
             Ok(Ok(resolved)) => resolved,
-            Ok(Err(skip)) => {
-                found.refused.push(skip);
+            Ok(Err(refused)) => {
+                found.refuse_root(refused);
                 continue;
             }
             Err(e) => {
@@ -128,30 +155,64 @@ struct LocalRoot<F> {
     mounts: Vec<MountEntry>,
 }
 
+/// Why a root is not searched or reached: a skip, or (excluded on
+/// purpose) inside container storage.
+enum Unsearched {
+    Skip(Skip),
+    Storage(Skip),
+}
+
+impl From<Skip> for Unsearched {
+    fn from(skip: Skip) -> Self {
+        Self::Skip(skip)
+    }
+}
+
+impl Unsearched {
+    fn into_skip(self) -> Skip {
+        match self {
+            Self::Skip(skip) | Self::Storage(skip) => skip,
+        }
+    }
+}
+
+/// The root resolved now. A root inside container storage (a directory
+/// above it is a storage root, [`engine::container_storage::storage_above`])
+/// is refused at every resolution: discovery, the reach and the recheck
+/// under the locks (docs/safety.md, No container storage).
 fn resolve_root<H: Host>(
     host: &H,
     root: &Path,
-) -> Result<Result<LocalRoot<H::Fd>, Skip>, ResolveError> {
+    above: Above,
+) -> Result<Result<LocalRoot<H::Fd>, Unsearched>, ResolveError> {
     if path_in_private_tmp(root) {
         return Ok(Err(private_root(
             root,
             "a systemd PrivateTmp name on its path",
-        )));
+        )
+        .into()));
     }
     let mounts = host.mountinfo().map_err(ResolveError::Host)?;
     // resolve_in screens the mount chain before it opens anything there.
     match resolve_in(host, &mounts, root, Want::Directory) {
-        Ok(resolved) => Ok(Ok(LocalRoot { resolved, mounts })),
+        Ok(resolved) if above == Above::Skip => Ok(Ok(LocalRoot { resolved, mounts })),
+        Ok(resolved) => match engine::container_storage::storage_above(host, &mounts, root)? {
+            None => Ok(Ok(LocalRoot { resolved, mounts })),
+            Some(inside) => Ok(Err(Unsearched::Storage(inside))),
+        },
         Err(ResolveError::Screened { why, .. }) => match why {
             MountScreenError::Unsafe { why, .. } => Err(ResolveError::UnsafePath {
                 path: root.to_owned(),
                 why,
             }),
-            MountScreenError::Networked { fs_type, .. } => Ok(Err(network_fs(root, &fs_type))),
+            MountScreenError::Networked { fs_type, .. } => {
+                Ok(Err(network_fs(root, &fs_type).into()))
+            }
             MountScreenError::PrivateTmp { .. } => Ok(Err(private_root(
                 root,
                 "the mount chain includes a bind mount of systemd PrivateTmp",
-            ))),
+            )
+            .into())),
         },
         Err(error) => Err(error),
     }
@@ -391,7 +452,7 @@ fn inspect_in<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Inspected> {
     let names = judged!(list(host, target, path, deadline));
-    if let Err(skip) = not_container_storage(path, &names) {
+    if let Err(skip) = check_listing(path, &names) {
         return Ok(Err(skip));
     }
     let mut inspected = Inspected {
@@ -413,7 +474,7 @@ fn inspect_in<H: Host>(
         }
         let (fd, stat) = judged!(open_dir(host, target, mount_id, &rel, &at));
         let inside = judged!(list(host, &fd, &at, deadline));
-        if let Err(skip) = not_container_storage(&at, &inside) {
+        if let Err(skip) = check_listing(&at, &inside) {
             return Ok(Err(skip));
         }
         if inside.iter().any(|n| is_cargo_lock_name(n)) {
@@ -445,7 +506,7 @@ fn inspect_in<H: Host>(
             let (child_fd, child_stat) =
                 judged!(open_dir(host, &fd, mount_id, Path::new(child), &child_at));
             let grandchildren = judged!(list(host, &child_fd, &child_at, deadline));
-            if let Err(skip) = not_container_storage(&child_at, &grandchildren) {
+            if let Err(skip) = check_listing(&child_at, &grandchildren) {
                 return Ok(Err(skip));
             }
             if grandchildren.iter().any(|n| is_cargo_lock_name(n)) {
@@ -463,20 +524,6 @@ fn inspect_in<H: Host>(
     }
     inspected.profiles.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(Ok(inspected))
-}
-
-/// The directory at `path`, whose complete listing is `names`, is no
-/// container storage root (`contains_special` otherwise,
-/// [`engine::container_storage`]).
-fn not_container_storage(path: &Path, names: &[OsString]) -> Result<(), Skip> {
-    match engine::container_storage::in_listing(names) {
-        None => Ok(()),
-        Some(storage) => Err(Skip::new(
-            Reason::ContainsSpecial,
-            path.to_owned(),
-            storage.detail(),
-        )),
-    }
 }
 
 fn private_entry(path: &Path) -> Skip {
@@ -665,10 +712,17 @@ impl DiscoverCursor {
             return Ok(Stepped::Done);
         }
         let root = self.root.clone();
-        let LocalRoot { resolved, mounts } = match resolve_root(host, &root) {
+        // The round's first step asks above the root; the deletion-time
+        // checks ask again whatever a later step skips.
+        let above = if self.root_id.is_none() {
+            Above::Ask
+        } else {
+            Above::Skip
+        };
+        let LocalRoot { resolved, mounts } = match resolve_root(host, &root, above) {
             Ok(Ok(resolved)) => resolved,
-            Ok(Err(skip)) => {
-                out.refused.push(skip);
+            Ok(Err(refused)) => {
+                out.refuse_root(refused);
                 self.finish();
                 return Ok(Stepped::Done);
             }
@@ -791,15 +845,7 @@ impl DiscoverCursor {
                         return Ok(Stepped::Paused);
                     }
                     let parent_ino = depth.checked_sub(1).and_then(|p| self.frames[p].ino);
-                    let dir = Visited {
-                        path: &path,
-                        depth: self.frames[depth].depth,
-                        id: self.frames[depth]
-                            .id
-                            .or(self.root_id.filter(|_| depth == 0)),
-                        parent_ino,
-                    };
-                    match walk.visit(&open[depth], dir)? {
+                    match walk.visit(&open[depth], &path, self.frames[depth].depth, parent_ino)? {
                         Some(names) => {
                             // Charged one operation per name listed.
                             pause(Work::Listed(names.len()));
@@ -868,15 +914,6 @@ impl DiscoverCursor {
     }
 }
 
-/// A directory [`Walk::visit`] looks at: its path, depth below the root,
-/// identity when entered (`None` if not reported) and its parent's inode.
-struct Visited<'a> {
-    path: &'a Path,
-    depth: usize,
-    id: Option<DevIno>,
-    parent_ino: Option<u64>,
-}
-
 /// One step's view of the walk of one root.
 struct Walk<'a, H: Host> {
     host: &'a H,
@@ -901,13 +938,13 @@ impl<H: Host> Walk<'_, H> {
     /// not descended into); otherwise its names to walk, sorted, unless it
     /// is at the depth limit, cannot be listed or is a container storage
     /// root (`None`).
-    fn visit(&mut self, fd: &H::Fd, dir: Visited<'_>) -> Result<Option<Vec<OsString>>, Stop> {
-        let Visited {
-            path,
-            depth,
-            id,
-            parent_ino,
-        } = dir;
+    fn visit(
+        &mut self,
+        fd: &H::Fd,
+        path: &Path,
+        depth: usize,
+        parent_ino: Option<u64>,
+    ) -> Result<Option<Vec<OsString>>, Stop> {
         let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
             Err(skip) => {
@@ -918,10 +955,8 @@ impl<H: Host> Walk<'_, H> {
         // Container storage is never searched: one refusal for the storage
         // root, not one per layer below it (TASK-242), and one per storage
         // root when overlapping roots reach it again.
-        if let Err(skip) = not_container_storage(path, &names) {
-            if id.is_none_or(|id| self.found.storage_roots.insert(id)) {
-                self.refuse(skip);
-            }
+        if let Err(skip) = check_listing(path, &names) {
+            self.found.refuse_storage(skip);
             return Ok(None);
         }
         if names.iter().any(|n| n == CACHEDIR_TAG) {
@@ -1060,9 +1095,9 @@ pub fn reach<H: Host>(
     let LocalRoot {
         resolved: root,
         mounts,
-    } = match resolve_root(host, &target.root) {
+    } = match resolve_root(host, &target.root, Above::Ask) {
         Ok(Ok(root)) => root,
-        Ok(Err(skip)) => return Ok(Err(skip)),
+        Ok(Err(refused)) => return Ok(Err(refused.into_skip())),
         Err(e) => return Ok(Err(unreachable_root(&target.root, e)?)),
     };
     let rel = target
@@ -1104,12 +1139,8 @@ pub fn reach<H: Host>(
                 "between the root and the target",
             )));
         }
-        if let Some(storage) = engine::container_storage::in_listing(&listing) {
-            return Ok(Err(Skip::new(
-                Reason::ContainsSpecial,
-                at.clone(),
-                storage.inside_detail(&at),
-            )));
+        if let Some(storage) = in_listing(&listing) {
+            return Ok(Err(storage.inside(&at, &target.path)));
         }
         at.push(name);
         if is_private_tmp(name) {
@@ -1166,7 +1197,8 @@ pub fn reach<H: Host>(
         }
         // The target is the root: its parent is above it.
         None => match target.path.parent() {
-            Some(path) => match resolve_root(host, path) {
+            // The project directory is no root: nothing above it to ask.
+            Some(path) => match resolve_root(host, path, Above::Skip) {
                 Ok(Ok(parent)) => Project {
                     id: parent.resolved.stat.dev_ino(),
                     detached: !has_manifest(host, &parent.resolved.fd, &parent.mounts, path)?,

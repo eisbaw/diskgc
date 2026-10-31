@@ -43,9 +43,10 @@ use super::discover::{Found, check_deadline};
 use super::pattern::path_matches;
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, PRIVATE_TMP_PREFIX, path_in_private_tmp};
+use crate::engine::container_storage::Above;
 use crate::engine::{
     self, Candidate, KEEP_MARKER, Reason, Rules, Skip, WalkRecord, WalkStop,
-    checkout_metadata_below, networked_why,
+    checkout_metadata_below, container_storage, networked_why,
 };
 use crate::host::{
     Access, Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry,
@@ -54,7 +55,8 @@ use crate::host::{
 use crate::outcome::{Judged, Stop};
 use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown, age_secs};
 use crate::resolve::{
-    MountScreenError, ResolveError, Resolved, Want, is_mount_point, open_beneath, resolve_in,
+    MountScreenError, ResolveError, Resolved, Want, is_mount_point, name_present, open_beneath,
+    resolve_in,
 };
 use crate::units::{format_age, format_duration};
 
@@ -167,7 +169,9 @@ impl Judge<'_> {
         }
         let reached = judged!(reach(host, found, mounts, deadline));
         judged!(no_keep_markers(host, &reached, mounts, deadline));
-        judged!(outside_container_storage(host, &reached, mounts, deadline));
+        judged!(outside_container_storage(
+            host, &reached, found, mounts, deadline
+        ));
         Ok(Ok(reached))
     }
 
@@ -706,8 +710,13 @@ pub(super) enum RootRefused {
     /// mount of a `systemd-private-*` directory).
     PrivateTmp(String),
     /// A skip: on a network filesystem, no clear mount, or not reachable
-    /// ([`unreachable_root`]).
+    /// ([`unreachable_root`]), including a directory above it that could
+    /// not be asked whether it is container storage.
     Skip(Skip),
+    /// Inside container storage (`contains_special`, the storage root as
+    /// its path): excluded on purpose, as a storage root its discovery
+    /// lists is ([`container_storage::storage_above`]).
+    Storage(Skip),
 }
 
 /// The configured root `root` reached under the mount table `mounts`:
@@ -718,6 +727,7 @@ pub(super) fn resolve_root<H: Host>(
     host: &H,
     root: &Path,
     mounts: &[MountEntry],
+    above: Above,
 ) -> Result<Result<Resolved<H::Fd>, RootRefused>, Stop> {
     if path_in_private_tmp(root) {
         return Ok(Err(RootRefused::PrivateTmp(format!(
@@ -725,7 +735,19 @@ pub(super) fn resolve_root<H: Host>(
         ))));
     }
     let why = match resolve_in(host, mounts, root, Want::Directory) {
-        Ok(resolved) => return Ok(Ok(resolved)),
+        // A root inside container storage is refused like a candidate
+        // inside it (docs/safety.md, No container storage), at every
+        // resolution: discovery, the approach and each recheck.
+        Ok(resolved) => {
+            if above == Above::Skip {
+                return Ok(Ok(resolved));
+            }
+            return Ok(match container_storage::storage_above(host, mounts, root) {
+                Ok(None) => Ok(resolved),
+                Ok(Some(inside)) => Err(RootRefused::Storage(inside)),
+                Err(e) => Err(RootRefused::Skip(unreachable_root(root, e)?)),
+            });
+        }
         Err(ResolveError::Screened { why, .. }) => why,
         Err(e) => return Ok(Err(RootRefused::Skip(unreachable_root(root, e)?))),
     };
@@ -1678,10 +1700,10 @@ fn reach_root<H: Host>(
     deadline: Option<MonoTime>,
 ) -> Judged<Resolved<H::Fd>> {
     check_deadline(host, deadline, root)?;
-    Ok(match resolve_root(host, root, mounts)? {
+    Ok(match resolve_root(host, root, mounts, Above::Ask)? {
         Ok(dir) => Ok(dir),
         Err(RootRefused::PrivateTmp(why)) => Err(super::discover::private_root(root, &why)),
-        Err(RootRefused::Skip(skip)) => Err(skip),
+        Err(RootRefused::Skip(skip) | RootRefused::Storage(skip)) => Err(skip),
     })
 }
 
@@ -1771,7 +1793,7 @@ pub(crate) fn still_reached<H: Host>(
         Err(e) => return Ok(Err(skip_or_stop(found.path.clone(), "stat", &e)?)),
     }
     judged!(no_keep_markers(host, reached, mounts, deadline));
-    outside_container_storage(host, reached, mounts, deadline)
+    outside_container_storage(host, reached, found, mounts, deadline)
 }
 
 /// No keep marker in the root or any directory on the way to the
@@ -1787,72 +1809,43 @@ pub(crate) fn no_keep_markers<H: Host>(
 ) -> Judged<()> {
     for (path, dir) in &reached.dirs {
         let marker = path.join(KEEP_MARKER);
-        let kept = || {
-            Ok(Err(Skip::new(
-                Reason::KeepMarker,
-                marker.clone(),
-                "between the root and the candidate",
-            )))
-        };
-        if is_mount_point(mounts, &marker) {
-            return kept();
-        }
         check_deadline(host, deadline, &marker)?;
-        match host.statx(Base::Dir(&dir.fd), Path::new(KEEP_MARKER)) {
-            Ok(_) => return kept(),
-            Err(e) if e.is(Errno::ENOENT) => {}
-            Err(e) => return Ok(Err(skip_or_stop(marker.clone(), "stat", &e)?)),
+        match name_present(host, &dir.fd, path, OsStr::new(KEEP_MARKER), mounts) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Ok(Err(Skip::new(
+                    Reason::KeepMarker,
+                    marker,
+                    "between the root and the candidate",
+                )));
+            }
+            Err(e) => return Ok(Err(skip_or_stop(marker, "stat", &e)?)),
         }
     }
     Ok(Ok(()))
 }
 
-/// The candidate lies inside no container storage
+/// The candidate `found` lies inside no container storage
 /// ([`engine::container_storage`], `contains_special`): the root and every
 /// directory on the way to the candidate, the directories [`reach`] went
-/// through, is asked for the recogniser's marker names, a `statx` of each
-/// (not followed, whatever it is), and a mount point of that name counts
-/// without being touched, as a keep marker does. A rule's later names are
-/// asked only where its first held, so a directory that is no storage root
-/// costs a handful of `statx` calls. Fail closed as [`no_keep_markers`]:
-/// a marker that cannot be told refuses the candidate.
+/// through, is asked for the recogniser's marker names
+/// ([`container_storage::storage_in`]: a `statx` of each, a rule's later
+/// names only where its first held). Fail closed as [`no_keep_markers`]:
+/// a marker that cannot be told refuses the candidate. Above the root,
+/// [`resolve_root`] asks.
 pub(crate) fn outside_container_storage<H: Host>(
     host: &H,
     reached: &Reached<H::Fd>,
+    found: &Found,
     mounts: &[MountEntry],
     deadline: Option<MonoTime>,
 ) -> Judged<()> {
-    enum Halt {
-        Skip(Skip),
-        Stop(Stop),
-    }
     for (path, dir) in &reached.dirs {
-        let found = engine::container_storage::recognise(|name| {
-            let marker = path.join(name);
-            if is_mount_point(mounts, &marker) {
-                return Ok(true);
-            }
-            check_deadline(host, deadline, &marker).map_err(Halt::Stop)?;
-            match host.statx(Base::Dir(&dir.fd), Path::new(name)) {
-                Ok(_) => Ok(true),
-                Err(e) if e.is(Errno::ENOENT) => Ok(false),
-                Err(e) => Err(match skip_or_stop(marker, "stat", &e) {
-                    Ok(skip) => Halt::Skip(skip),
-                    Err(stop) => Halt::Stop(stop),
-                }),
-            }
-        });
-        match found {
+        check_deadline(host, deadline, path)?;
+        match container_storage::storage_in(host, &dir.fd, path, mounts) {
             Ok(None) => {}
-            Ok(Some(storage)) => {
-                return Ok(Err(Skip::new(
-                    Reason::ContainsSpecial,
-                    path.clone(),
-                    storage.inside_detail(path),
-                )));
-            }
-            Err(Halt::Skip(skip)) => return Ok(Err(skip)),
-            Err(Halt::Stop(stop)) => return Err(stop),
+            Ok(Some(storage)) => return Ok(Err(storage.inside(path, &found.path))),
+            Err((marker, e)) => return Ok(Err(skip_or_stop(marker, "stat", &e)?)),
         }
     }
     Ok(Ok(()))

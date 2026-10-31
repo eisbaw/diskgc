@@ -1918,11 +1918,13 @@ not met).
 
 No Podman image-prune example ships yet. A command profile using
 `containers/storage` as its candidate is refused as container storage
-(`contains_special`, [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)),
-and a read-only dry run on rootless Podman storage found subuid-owned
-overlay files that would fail the ownership walk (`not_owner`) too. Running `podman image prune` against a different checked path
-would not protect the image store it changes. Task-93 covers a Podman-specific
-protocol that uses Podman's own pruning rules.
+(`contains_special`,
+[safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)), and
+a read-only dry run on rootless Podman storage found subuid-owned overlay
+files that would fail the ownership walk (`not_owner`) too. Running
+`podman image prune` against a different checked path would not protect
+the image store it changes. Task-93 covers a Podman-specific protocol
+that uses Podman's own pruning rules.
 
 ### Built-in profile library
 

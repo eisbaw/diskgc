@@ -428,14 +428,7 @@ impl<H: Host> Walker<'_, H> {
         // By the whole listing, before any entry is admitted: a storage
         // root is told by names side by side (container_storage), and the
         // candidate itself is the first directory listed.
-        if let Some(storage) = super::container_storage::in_listing(&names) {
-            return Err(Skip::new(
-                Reason::ContainsSpecial,
-                stack.path(i, None),
-                storage.detail(),
-            )
-            .into());
-        }
+        super::container_storage::check_listing(&stack.path(i, None), &names)?;
         let mut entries = Vec::with_capacity(names.len());
         for name in names {
             let path = || stack.path(i, Some(&name));

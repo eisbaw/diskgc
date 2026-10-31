@@ -16,7 +16,13 @@
 //! every engine lets its root be moved (`graphroot`, `data-root`, `root`).
 //! Each rule is a set of groups of names; a directory is a storage root
 //! when, for every group of one rule, it holds at least one name of that
-//! group. Only names count, whatever their type, so a check needs a
+//! group.
+
+//! Where it is asked (docs/safety.md, No container storage): every listing
+//! of the eligibility walk and of discovery ([`check_listing`]); every
+//! directory between a root and a candidate ([`storage_in`]); and every
+//! directory above a root, from `/` down ([`storage_above`]), so a root
+//! named inside container storage is refused too. Only names count, whatever their type, so a check needs a
 //! listing of the directory or one `statx` per name and nothing else, and
 //! errs on the side of keeping (a project that happens to hold such names
 //! is kept, and the skip names the markers).
@@ -25,8 +31,11 @@
 //!
 //! - a containers/storage graphroot (Podman, Buildah, CRI-O, Skopeo):
 //!   `storage.lock` and a driver's layer store, `<driver>-layers`;
-//! - a Docker (Moby) data root with the classic layer store: `image` and a
-//!   graph driver's directory;
+//! - a containers/storage image store (`imagestore=`, or an additional
+//!   image store), which holds no `storage.lock`: a driver's layer store
+//!   and image store, `<driver>-layers` and `<driver>-images`;
+//! - a Docker (Moby) data root with the classic layer store: `image`, a
+//!   graph driver's directory and `containers`;
 //! - a Docker data root of 23.0 or later whatever its store: `engine-id`
 //!   and `containers`;
 //! - a containerd root (also Docker's own, `<data-root>/containerd/daemon`,
@@ -35,6 +44,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::path::{Path, PathBuf};
+
+use super::{Reason, Skip};
+use crate::host::{Access, Host, HostError, MountEntry};
+use crate::resolve::{
+    ResolveError, Resolved, Want, mount_for, name_present, open_beneath, resolve_in,
+};
 
 /// One kind of storage root and the names that make one: for every group,
 /// at least one of its names.
@@ -54,10 +70,21 @@ const CONTAINERS_STORAGE_LAYERS: &[&str] = &[
     "devicemapper-layers",
 ];
 
+/// Their image stores (`<driver>-images`, containers/storage `images.go`).
+const CONTAINERS_STORAGE_IMAGES: &[&str] = &[
+    "overlay-images",
+    "vfs-images",
+    "btrfs-images",
+    "zfs-images",
+    "aufs-images",
+    "devicemapper-images",
+];
+
 /// Moby's graph driver directories (`<data-root>/<driver>`, beside
-/// `<data-root>/image/<driver>`).
+/// `<data-root>/image/<driver>`); `overlay` is Docker 20's legacy driver.
 const DOCKER_GRAPH_DRIVERS: &[&str] = &[
     "overlay2",
+    "overlay",
     "fuse-overlayfs",
     "vfs",
     "btrfs",
@@ -72,8 +99,16 @@ const RULES: &[Rule] = &[
         groups: &[&["storage.lock"], CONTAINERS_STORAGE_LAYERS],
     },
     Rule {
+        what: "a containers/storage image store (Podman, Buildah, CRI-O)",
+        groups: &[CONTAINERS_STORAGE_LAYERS, CONTAINERS_STORAGE_IMAGES],
+    },
+    // `containers` too: the daemon makes it at start, and `image` beside
+    // a directory named like a driver is common in source trees (U-Boot's
+    // `test/` holds `image/` and `overlay/`, seen on the development
+    // machine).
+    Rule {
         what: "a Docker data root",
-        groups: &[&["image"], DOCKER_GRAPH_DRIVERS],
+        groups: &[&["image"], DOCKER_GRAPH_DRIVERS, &["containers"]],
     },
     Rule {
         what: "a Docker data root",
@@ -109,21 +144,29 @@ impl fmt::Display for ContainerStorage {
 }
 
 impl ContainerStorage {
-    /// The skip detail of a directory that is this storage root.
-    pub fn detail(&self) -> String {
-        format!(
-            "container storage, {self}: its image layers and containers are never searched or \
-             deleted, whoever owns them"
+    /// The refusal of the directory at `at`, which is this storage root.
+    pub fn refusal(&self, at: &Path) -> Skip {
+        Skip::new(
+            Reason::ContainsSpecial,
+            at.to_owned(),
+            format!(
+                "container storage, {self}: its image layers and containers are never searched \
+                 or deleted, whoever owns them"
+            ),
         )
     }
 
-    /// The skip detail of a candidate that lies inside this storage root,
-    /// at `root`.
-    pub fn inside_detail(&self, root: &std::path::Path) -> String {
-        format!(
-            "lies inside container storage at {}, {self}: its image layers and containers are \
-             never deleted",
-            root.display()
+    /// The refusal of `inside` (a candidate, or a root), which lies inside
+    /// this storage root at `at`. The skip's path is the storage root.
+    pub fn inside(&self, at: &Path, inside: &Path) -> Skip {
+        Skip::new(
+            Reason::ContainsSpecial,
+            at.to_owned(),
+            format!(
+                "{} lies inside container storage, {self}: its image layers and containers are \
+                 never searched or deleted",
+                inside.display()
+            ),
         )
     }
 }
@@ -174,6 +217,94 @@ pub fn in_listing(names: &[OsString]) -> Option<ContainerStorage> {
         Ok(found) => found,
         Err(never) => match never {},
     }
+}
+
+/// The directory at `path`, whose complete listing is `names`, is no
+/// storage root; its refusal otherwise (`contains_special`, the storage
+/// root as its path). One rule for the walk and both discoveries.
+pub fn check_listing(path: &Path, names: &[OsString]) -> Result<(), Skip> {
+    match in_listing(names) {
+        None => Ok(()),
+        Some(storage) => Err(storage.refusal(path)),
+    }
+}
+
+/// Whether the open directory `dir` (at `path`) is a storage root, asked
+/// by [`name_present`] (a `statx` per name, not followed; a mount point of
+/// that name counts without being touched). A name that cannot be told is
+/// the error, with the path it was asked at: fail closed is the caller's.
+pub fn storage_in<H: Host>(
+    host: &H,
+    dir: &H::Fd,
+    path: &Path,
+    mounts: &[MountEntry],
+) -> Result<Option<ContainerStorage>, (PathBuf, HostError)> {
+    recognise(|name| {
+        name_present(host, dir, path, OsStr::new(name), mounts).map_err(|e| (path.join(name), e))
+    })
+}
+
+/// Whether a root's resolution asks the directories above it
+/// ([`storage_above`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Above {
+    /// Every resolution that judges a candidate (its approach, every
+    /// recheck) and the first of a discovery round.
+    Ask,
+    /// A later step of a resumable discovery round, whose first step asked
+    /// (the deletion-time checks ask again), or a path that is no root.
+    Skip,
+}
+
+/// The refusal of `root` when a directory strictly above it, from `/` down
+/// to its parent, is a storage root: the root lies inside container storage
+/// (`contains_special`, the storage root as its path). Each directory is
+/// reached as a root is (no symlink, no mount crossed but at a mount
+/// point, where its mount is resolved anew) and asked by [`storage_in`].
+/// A directory that cannot be reached or asked is the error: the caller
+/// refuses the root as it refuses one it cannot reach (fail closed). It
+/// costs one open and a handful of `statx` calls per level; it holds
+/// nothing open when it returns.
+pub fn storage_above<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    root: &Path,
+) -> Result<Option<Skip>, ResolveError> {
+    let mut above: Vec<&Path> = root.ancestors().skip(1).collect();
+    above.reverse();
+    let mut held: Option<Resolved<H::Fd>> = None;
+    for at in above {
+        let same_mount = |dir: &Resolved<H::Fd>| {
+            mount_for(mounts, at).is_ok_and(|mount| mount.id == dir.mount.id)
+        };
+        let dir = match (held.take(), at.file_name()) {
+            (Some(parent), Some(name)) if same_mount(&parent) => {
+                let (fd, stat) = open_beneath(
+                    host,
+                    &parent.fd,
+                    parent.mount.id,
+                    Path::new(name),
+                    Access::Path,
+                    Want::Directory,
+                )
+                .map_err(|e| e.at(at))?;
+                Resolved {
+                    fd,
+                    mount: parent.mount,
+                    stat,
+                }
+            }
+            // `/`, or a mount point: resolved from its mount.
+            _ => resolve_in(host, mounts, at, Want::Directory)?,
+        };
+        match storage_in(host, &dir.fd, at, mounts) {
+            Ok(None) => {}
+            Ok(Some(storage)) => return Ok(Some(storage.inside(at, root))),
+            Err((_, e)) => return Err(ResolveError::Host(e)),
+        }
+        held = Some(dir);
+    }
+    Ok(None)
 }
 
 fn is_marker(name: &OsStr) -> bool {
@@ -229,14 +360,31 @@ mod tests {
     }
 
     #[test]
+    fn a_separate_podman_image_store_without_storage_lock_is_recognised() {
+        // `imagestore=` in containers-storage.conf: the layers and images
+        // live there, `storage.lock` stays in the graphroot.
+        let store = names(&["overlay", "overlay-images", "overlay-layers"]);
+        assert_eq!(
+            in_listing(&store).expect("image store").markers,
+            ["overlay-layers", "overlay-images"]
+        );
+    }
+
+    #[test]
     fn docker_and_containerd_roots_are_recognised() {
         let classic = names(&["containers", "image", "network", "overlay2", "volumes"]);
         assert_eq!(
             in_listing(&classic).expect("classic").markers,
-            ["image", "overlay2"]
+            ["image", "overlay2", "containers"]
         );
-        let vfs = names(&["image", "vfs"]);
+        let vfs = names(&["containers", "image", "vfs"]);
         assert!(in_listing(&vfs).is_some());
+        // Docker 20's legacy `overlay` graph driver.
+        let legacy = names(&["containers", "image", "overlay", "volumes"]);
+        assert_eq!(
+            in_listing(&legacy).expect("legacy overlay").markers,
+            ["image", "overlay", "containers"]
+        );
         let snapshotter = names(&[
             "buildkit",
             "containerd",
@@ -260,7 +408,12 @@ mod tests {
         for alone in [
             &["storage.lock", "src", "Cargo.toml"][..],
             &["overlay-layers"],
-            &["image", "overlay"],
+            &["image", "layers"],
+            // U-Boot's `test/` on the development machine.
+            &[
+                "Makefile", "cmd", "dm", "image", "overlay", "py", "run", "ut.c",
+            ],
+            &["overlay-images", "overlay"],
             &["image", "docs"],
             &["engine-id"],
             &["containers", "volumes"],
@@ -282,6 +435,12 @@ mod tests {
             asked,
             [
                 "storage.lock",
+                "overlay-layers",
+                "vfs-layers",
+                "btrfs-layers",
+                "zfs-layers",
+                "aufs-layers",
+                "devicemapper-layers",
                 "image",
                 "engine-id",
                 "io.containerd.metadata.v1.bolt",

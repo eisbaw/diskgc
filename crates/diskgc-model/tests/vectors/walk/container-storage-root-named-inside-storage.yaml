@@ -1,0 +1,50 @@
+# TASK-242 review. A root named inside container storage is refused, not
+# taken as meant: every directory above a root, from `/` down, is asked for
+# the storage markers when the root is resolved. `overlay`, inside the
+# rootless graphroot, and `layers-only`, inside a separate image store
+# (`overlay-layers` and `overlay-images`, no `storage.lock`), are each
+# refused once (`contains_special`, candidate: the storage root) and
+# nothing below them is searched. `proj/build`, under a directory that
+# only holds a `storage.lock`, is searched as usual.
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/home/tester/.local/share/containers/storage/overlay, /home/tester/imgstore/overlay, /home/tester/proj/build], paths: ["*/diff/cache", "cache"], type: dir}
+    action: delete
+    examples: {match: [/home/tester/proj/build/cache]}
+profile: layer-cache
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay: {0a1b2c: {diff: {cache: {blob: {size: 1M}}}}}
+    /home/tester/imgstore:
+      overlay-images: {images.json: {}}
+      overlay-layers: {layers.json: {}}
+      overlay: {3d4e5f: {diff: {cache: {blob: {size: 1M}}}}}
+    /home/tester/proj:
+      storage.lock: {}
+      build: {cache: {blob: {size: 1M}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/imgstore, reason: contains_special}
+    - {candidate: /home/tester/proj/build/cache}
+  reclaim_exit: 1
+  actions: [/home/tester/proj/build/cache]
+  removed: [/home/tester/proj/build/cache]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /home/tester/imgstore, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache/blob
+    - /home/tester/imgstore/overlay/3d4e5f/diff/cache/blob

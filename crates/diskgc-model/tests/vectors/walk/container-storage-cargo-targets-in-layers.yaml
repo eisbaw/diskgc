@@ -10,7 +10,10 @@
 #
 # - a containers/storage graphroot: `storage.lock` and `overlay-layers`
 #   (the layout measured on the development machine, Podman 5.8.7);
-# - a classic Docker data root: `image` and `overlay2`;
+# - a separate Podman image store (`imagestore=`), which has no
+#   `storage.lock`: `overlay-layers` and `overlay-images`;
+# - a classic Docker data root: `image` and `overlay2`, and Docker 20's
+#   legacy driver: `image` and `overlay`;
 # - a Docker 23+ data root with the containerd image store: `engine-id`
 #   and `containers` (a target in a named volume);
 # - a containerd root: `io.containerd.metadata.v1.bolt`.
@@ -18,7 +21,8 @@
 # A target whose profile directory is itself shaped like a graphroot
 # (`weird`) is refused when discovery inspects it. No false positive: a
 # project holding only `storage.lock` (`lockproj`), or `image` beside a
-# directory that is no graph driver (`imgproj`), is reclaimed as usual.
+# directory that is no graph driver (`imgproj`: `layers`), is reclaimed
+# as usual.
 profile_vector: 1
 profile: cargo-target
 roots:
@@ -54,6 +58,14 @@ host:
       volumes: {.: {}}
       overlay2:
         3d4e5f: {link: {}, diff: {app: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}
+    /home/tester/.local/share/imagestore:
+      overlay-images: {images.json: {}}
+      overlay-layers: {layers.json: {}}
+      overlay: {9f8e7d: {diff: {app: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}}
+    /home/tester/.local/share/docker20:
+      image: {overlay: {imagedb: {.: {}}}}
+      containers: {.: {}}
+      overlay: {6c7d8e: {root: {target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}}}}
     /home/tester/.local/share/docker29:
       engine-id: {}
       containers: {.: {}}
@@ -73,13 +85,15 @@ host:
     /home/tester/src/imgproj:
       Cargo.toml: {}
       image: {logo.png: {}}
-      overlay: {x: {}}
+      layers: {x: {}}
       target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
 expect:
   plan:
     - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
     - {candidate: /home/tester/.local/share/docker, reason: contains_special}
     - {candidate: /home/tester/.local/share/docker29, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker20, reason: contains_special}
+    - {candidate: /home/tester/.local/share/imagestore, reason: contains_special}
     - {candidate: /home/tester/.local/share/containerd-root, reason: contains_special}
     - {candidate: /home/tester/src/weird/target/debug, reason: contains_special}
     - {candidate: /home/tester/src/lockproj/target}
@@ -91,12 +105,16 @@ expect:
     - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
     - {candidate: /home/tester/.local/share/docker, reason: contains_special}
     - {candidate: /home/tester/.local/share/docker29, reason: contains_special}
+    - {candidate: /home/tester/.local/share/docker20, reason: contains_special}
+    - {candidate: /home/tester/.local/share/imagestore, reason: contains_special}
     - {candidate: /home/tester/.local/share/containerd-root, reason: contains_special}
     - {candidate: /home/tester/src/weird/target/debug, reason: contains_special}
   preserved:
     - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/release/deps/app
     - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/release/app
     - /home/tester/.local/share/docker/overlay2/3d4e5f/diff/app/target/debug/deps/app
+    - /home/tester/.local/share/imagestore/overlay/9f8e7d/diff/app/target/debug/deps/app
+    - /home/tester/.local/share/docker20/overlay/6c7d8e/root/target/debug/deps/app
     - /home/tester/.local/share/docker29/volumes/cache/_data/target/debug/deps/app
     - /home/tester/.local/share/containerd-root/io.containerd.snapshotter.v1.overlayfs/snapshots/7/fs/target/debug/deps/app
     - /home/tester/src/weird/target/debug/deps/app

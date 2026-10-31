@@ -48,14 +48,14 @@
 //! so a listing over it is never complete. Names created in a directory
 //! after it was listed are not found by this walk.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use super::judge::{RootRefused, mounted_at_or_inside, resolve_root, skip_or_stop, source_where};
 use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
-use crate::engine::container_storage::in_listing;
+use crate::engine::container_storage::{Above, check_listing};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip, Work};
 use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
 use crate::outcome::Stop;
@@ -103,14 +103,33 @@ pub struct Discovery {
     /// Candidates found again (another root or pattern reached the same
     /// object): listed once.
     pub duplicates: Vec<PathBuf>,
-    /// Container storage roots refused so far (in `refused`), by identity:
-    /// one reached again through another root is not refused twice.
-    pub storage_roots: HashSet<DevIno>,
+    /// Container storage roots refused so far (each in `refused` once):
+    /// listed, or above a root. One reached again through another root is
+    /// not refused twice ([`Discovery::refuse_storage`]).
+    pub storage_roots: BTreeSet<PathBuf>,
     /// `systemd-private-*` names a pattern matched, and roots inside one
     /// (by their path, or a bind mount of one by their mount's root; those
     /// are in `refused` too, as `unsafe_path`): never searched, never
     /// candidates.
     pub private_tmp: usize,
+}
+
+impl Discovery {
+    /// Refuses a container storage root (`skip`: `contains_special`, the
+    /// storage root as its path), once however many roots reach it.
+    fn refuse_storage(&mut self, skip: Skip) {
+        if self.storage_roots.insert(skip.path.clone()) {
+            self.refused.push(skip);
+        }
+    }
+
+    /// Nothing was refused but container storage, which is excluded on
+    /// purpose (like `systemd-private-*`), not left unread: a listing
+    /// without other refusals is evidence of absence (the tally's
+    /// recount, [`crate::tally`]).
+    pub fn nothing_refused_but_storage(&self) -> bool {
+        self.refused.len() == self.storage_roots.len()
+    }
 }
 
 /// Finds the candidates of `find` below `roots` (absolute, `{uid}`
@@ -237,7 +256,7 @@ fn discover_into<H: Host>(
     ordered.sort_by_key(|root| root.components().count());
     for root in ordered {
         check_deadline(host, deadline, root)?;
-        let resolved = match resolve_root(host, root, &mounts)? {
+        let resolved = match resolve_root(host, root, &mounts, Above::Ask)? {
             Ok(resolved) => resolved,
             Err(RootRefused::PrivateTmp(why)) => {
                 // A misconfigured root (an error that excludes the tier),
@@ -248,6 +267,10 @@ fn discover_into<H: Host>(
             }
             Err(RootRefused::Skip(skip)) => {
                 out.refused.push(skip);
+                continue;
+            }
+            Err(RootRefused::Storage(skip)) => {
+                out.refuse_storage(skip);
                 continue;
             }
         };
@@ -454,7 +477,14 @@ impl DiscoverCursor {
             error,
         })?;
         let root = self.root.clone();
-        let resolved = match resolve_root(host, &root, &mounts)? {
+        // The round's first step asks above the root; the deletion-time
+        // checks ask again whatever a later step skips.
+        let above = if self.root_id.is_none() {
+            Above::Ask
+        } else {
+            Above::Skip
+        };
+        let resolved = match resolve_root(host, &root, &mounts, above)? {
             Ok(resolved) => resolved,
             Err(RootRefused::PrivateTmp(why)) => {
                 out.private_tmp += 1;
@@ -464,6 +494,11 @@ impl DiscoverCursor {
             }
             Err(RootRefused::Skip(skip)) => {
                 out.refused.push(skip);
+                self.finish();
+                return Ok(Stepped::Done);
+            }
+            Err(RootRefused::Storage(skip)) => {
+                out.refuse_storage(skip);
                 self.finish();
                 return Ok(Stepped::Done);
             }
@@ -868,21 +903,16 @@ impl<H: Host> Walk<'_, H> {
         Ok(match self.host.read_dir(&dir.fd, DEFAULT_MAX_ENTRIES) {
             // Container storage is never searched: one refusal for the
             // storage root, not one per layer below it (TASK-242).
-            // Overlapping roots that reach it again do not refuse it twice.
-            Ok(DirListing::Names(names)) if let Some(storage) = in_listing(&names) => {
-                match dir.stat.dev_ino() {
-                    Some(id) if !self.out.storage_roots.insert(id) => Ok(Vec::new()),
-                    _ => Err(Skip::new(
-                        Reason::ContainsSpecial,
-                        path.to_owned(),
-                        storage.detail(),
-                    )),
+            Ok(DirListing::Names(mut names)) => match check_listing(path, &names) {
+                Ok(()) => {
+                    names.sort();
+                    Ok(names)
                 }
-            }
-            Ok(DirListing::Names(mut names)) => {
-                names.sort();
-                Ok(names)
-            }
+                Err(storage) => {
+                    self.out.refuse_storage(storage);
+                    Ok(Vec::new())
+                }
+            },
             Ok(DirListing::TooMany) => Err(Skip::new(
                 Reason::TooManyEntries,
                 path.to_owned(),

@@ -5,7 +5,8 @@
 //! index:
 //!
 //! - every candidate found is inserted (collapsing first at the ceiling);
-//! - only a **complete** listing (no stop, nothing on the way refused) is
+//! - only a **complete** listing (no stop, nothing on the way refused but
+//!   container storage, which is excluded on purpose, never unread) is
 //!   evidence of absence: a single of this finder below the root that it no
 //!   longer finds loses the finder (and goes with its last one), and the
 //!   blocks it stands for are recounted or dissolved
@@ -76,6 +77,7 @@ pub fn list<H: Host>(
     match &source.find {
         SourceFind::Fs(find) => {
             let (discovery, stopped) = fs_kind::discover(host, &roots, find, deadline);
+            let read_all = discovery.nothing_refused_but_storage();
             for (path, candidate) in discovery.candidates {
                 match candidate {
                     Ok(f) => found.push((f.path, f.identity, f.seen, f.found_at)),
@@ -84,12 +86,12 @@ pub fn list<H: Host>(
                     }
                 }
             }
-            listing.complete = stopped.is_none() && discovery.refused.is_empty();
+            listing.complete = stopped.is_none() && read_all;
             listing.stopped = stopped;
         }
         SourceFind::CargoTarget => match cargo_target::discover(host, &roots, deadline) {
             Ok(discovery) => {
-                listing.complete = discovery.refused.is_empty();
+                listing.complete = discovery.nothing_refused_but_storage();
                 for target in discovery.targets {
                     found.push((target.path, target.identity, target.seen, host.now()));
                 }
@@ -290,6 +292,7 @@ impl ListingCursor {
         self.stalled = !done && done_ops == 0;
         let mut found: Vec<(PathBuf, engine::Identity, Seen, MonoTime)> = Vec::new();
         let mut step = ListingStep::default();
+        let read_all = out.nothing_refused_but_storage() && cargo.nothing_refused_but_storage();
         for (path, candidate) in out.candidates {
             match candidate {
                 Ok(f) => found.push((f.path, f.identity, f.seen, f.found_at)),
@@ -302,7 +305,7 @@ impl ListingCursor {
         for target in cargo.targets {
             found.push((target.path, target.identity, target.seen, now));
         }
-        if !out.refused.is_empty() || !cargo.refused.is_empty() {
+        if !read_all {
             self.clean = false;
         }
         if !found.is_empty() {

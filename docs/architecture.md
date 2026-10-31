@@ -412,7 +412,11 @@ the order of work.
   recount them.
 - **What a listing means.** A listing is **complete** when discovery ran
   to its end and refused nothing on the way (no unreadable directory, no
-  candidate whose own `where` could not be told). Every listing inserts
+  candidate whose own `where` could not be told) but container storage,
+  which is excluded on purpose, never unread (TASK-242,
+  [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)):
+  a root below `~` that holds rootless Docker or Podman storage still
+  completes, and what the index held inside storage is forgotten. Every listing inserts
   what it found; only a complete one is evidence of absence: a single of
   that finder below its root that the listing did not find loses the
   finder (and leaves with its last one, or when the smaller finder set
