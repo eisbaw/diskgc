@@ -60,6 +60,7 @@ pub mod snapshot;
 pub mod suggest;
 pub mod tally;
 pub mod units;
+pub mod watch;
 
 #[cfg(test)]
 mod doc;
