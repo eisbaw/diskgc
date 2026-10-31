@@ -112,9 +112,10 @@ pub(super) fn overlaps_checked_until<H: Host>(
     if overlaps_in_filesystem(&mounts, candidate, matches)? {
         return Ok(true);
     }
-    // Every path compared above is resolved here against the same table, and
-    // `resolve_in` refuses one whose live mount is not the table's: a "no
-    // overlap" rests on mounts confirmed live, not on the table alone.
+    // The candidate and every match are resolved here against the same
+    // table, and `resolve_in` refuses a path whose live mount is not the
+    // table's, so their places above rest on mounts confirmed live. A mount
+    // made after the table was read is not seen (docs/safety.md, limits).
     overlaps_with(candidate, matches, |path| {
         check_time()?;
         let at = resolve_in(host, &mounts, path, Want::Any)
@@ -167,18 +168,31 @@ pub(super) fn screen_overlap_mounts(
 /// it is on and its path from that filesystem's root (the mount's mountinfo
 /// root field joined with the rest of the path), then compared by name. A
 /// bind mount of a protected tree's subdirectory, or of one of its
-/// ancestors, maps back to the protected tree. A filesystem mounted inside a
-/// match needs no translation: discovery refuses such a match, which stops
-/// the run (`protect`) or excludes the tier (`!profile:`).
+/// ancestors, maps back to the protected tree. A filesystem mounted at or
+/// below a match is part of what the match shows, so a mount of the
+/// candidate's filesystem there whose root overlaps the candidate's place
+/// is an overlap too (a mount deep in a protected Cargo target, which
+/// discovery does not look into, bound again elsewhere).
 pub(super) fn overlaps_in_filesystem(
     mounts: &[MountEntry],
     candidate: &Path,
     matches: &[PathBuf],
 ) -> Result<bool, String> {
     let (dev, at) = place_in_filesystem(mounts, candidate)?;
+    // The mount points where the candidate's place, or a directory holding
+    // it or held by it, is shown: few, so each match is checked cheaply.
+    let mut shown_at = Vec::new();
+    for mount in mounts.iter().filter(|mount| mount.dev == dev) {
+        if select::overlaps(&at, absolute_root(mount, candidate)?) {
+            shown_at.push(mount.mount_point.as_path());
+        }
+    }
     for protected in matches {
         let (protected_dev, protected_at) = place_in_filesystem(mounts, protected)?;
         if protected_dev == dev && select::overlaps(&at, &protected_at) {
+            return Ok(true);
+        }
+        if shown_at.iter().any(|point| point.starts_with(protected)) {
             return Ok(true);
         }
     }
@@ -191,18 +205,25 @@ pub(super) fn overlaps_in_filesystem(
 fn place_in_filesystem(mounts: &[MountEntry], path: &Path) -> Result<(Dev, PathBuf), String> {
     let mount = mount_for(mounts, path)
         .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))?;
-    if !mount.fs_root.is_absolute() {
-        return Err(format!(
+    let below = path
+        .strip_prefix(&mount.mount_point)
+        .expect("mount_for returns a mount whose point is a prefix");
+    Ok((mount.dev, absolute_root(mount, path)?.join(below)))
+}
+
+/// The mount's root field, which must be an absolute path to translate
+/// anything on that filesystem (`path`: what was being proved).
+fn absolute_root<'m>(mount: &'m MountEntry, path: &Path) -> Result<&'m Path, String> {
+    if mount.fs_root.is_absolute() {
+        Ok(&mount.fs_root)
+    } else {
+        Err(format!(
             "cannot prove overlap at {}: mount {} has filesystem root {}, not an absolute path",
             path.display(),
             mount.mount_point.display(),
             mount.fs_root.display()
-        ));
+        ))
     }
-    let below = path
-        .strip_prefix(&mount.mount_point)
-        .expect("mount_for returns a mount whose point is a prefix");
-    Ok((mount.dev, mount.fs_root.join(below)))
 }
 
 pub(super) fn overlaps_with(

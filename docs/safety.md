@@ -372,15 +372,20 @@ Immediately before acting, diskgc walks the candidate's whole tree
   which also catches a hard link to a protected file. A path the table
   cannot place (no mount, mounts stacked with no topmost, a root field
   that is not an absolute path) cannot prove anything: an error, like an
-  unresolvable identity. Every path placed by the table is then resolved
-  on the mount the table names, so "no overlap" rests on live mounts.
-  A filesystem mounted inside a match is not translated: discovery
-  refuses such a match (`contains_mount`), which stops the run or
-  excludes the tier. Limits: the translation knows only what mountinfo
-  shows, so an overlay's upper directory reached through the overlay,
-  and a protected file used as a loop-mounted image, are other devices to
-  it and do not overlap. Btrfs subvolumes are reasoned (mountinfo names
-  the subvolume in the root field), not tested on one.
+  unresolvable identity. The candidate and every match are then resolved
+  on the mount the table names, so their places rest on live mounts.
+  A filesystem mounted at or below a match is part of it: a mount of the
+  candidate's filesystem there whose root field overlaps the candidate's
+  place is an overlap too (a mount deep in a protected Cargo target,
+  where discovery does not look, bound again elsewhere; an `fs` match
+  holding a mount is refused at enumeration, `contains_mount`, which
+  stops the run or excludes the tier). Limits: the translation knows only
+  the mount table read for the check (a bind made after it is the
+  enumeration limit below) and compares places on one device only, so an
+  overlay's upper directory reached through the overlay, and a protected
+  file used as a loop-mounted image, do not overlap. Btrfs subvolumes are
+  reasoned (mountinfo names the subvolume in the root field), not tested
+  on one.
   `protect` matches are enumerated
   before the first deletion of the run and again before each later tier;
   a tier's negated profiles at its start. An incomplete enumeration stops

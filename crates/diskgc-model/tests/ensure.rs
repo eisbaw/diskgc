@@ -236,6 +236,47 @@ fn a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree() {
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
+/// Cargo discovery never descends into a found target, so a protected
+/// target holding a mount is still a match (an `fs` match holding one stops
+/// the run). A second mount of that filesystem elsewhere shows part of the
+/// protected target: `/home/mark/src/old/target/debug/deps/fast` is a tmpfs
+/// (0:60) that `/mnt/fast` binds too.
+#[test]
+fn a_filesystem_mounted_inside_a_protected_cargo_target_is_protected_elsewhere() {
+    let model = yaml(
+        true,
+        "  /home/mark/src/old/target/debug/deps/fast/y/f: {}\n",
+    )
+    .replacen(
+        "tree:\n",
+        "  - {id: 60, at: /home/mark/src/old/target/debug/deps/fast, fs: tmpfs, dev: \"0:60\", \
+         size: 1G, parent: 2}\n  - {id: 61, at: /mnt/fast, fs: tmpfs, dev: \"0:60\", size: 1G, \
+         parent: 1, bind_of: 60}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    let text = format!("{CARGO_BIND_POLICY}protect: [{{profile: cargo-target, roots: [{SRC}]}}]\n");
+    let config = config::parse(Path::new("/tmp/protect.yaml"), text.as_bytes()).unwrap();
+    let roots = ["/mnt/fast".to_owned()];
+    let mut request = Request {
+        path: PathBuf::from("/mnt/fast"),
+        min_free: size("100%"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select("profile:projects", &config.library, Some(&roots), 1000)
+            .unwrap_or_else(|e| panic!("{e}")),
+    };
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    let report = dry_run(&host, &request);
+    assert_eq!(
+        plan_reason(&report, "/mnt/fast/y"),
+        Some(Some(Reason::Protected)),
+        "{report:#?}"
+    );
+}
+
 /// Runs `ensure` (privileges first, as the binary does); the log lines
 /// are printed for a failing test.
 fn ensure(host: &ModelHost, request: &Request) -> Report {

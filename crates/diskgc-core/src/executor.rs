@@ -3557,6 +3557,11 @@ mod best_fit_tests {
             mount(2, 1, "/tmp", 42, "/"),
             mount(3, 1, "/mnt/x", 42, "/gen/x"),
             mount(4, 1, "/other", 43, "/"),
+            // A filesystem mounted deep in a (Cargo target) match, shown
+            // again at /mnt/fast, and a directory of it at /proj/other/m.
+            mount(5, 1, "/proj/target/deps/fast", 60, "/"),
+            mount(6, 1, "/mnt/fast", 60, "/"),
+            mount(7, 1, "/proj/other/m", 60, "/elsewhere"),
         ]
     }
 
@@ -3577,6 +3582,14 @@ mod best_fit_tests {
         assert!(!overlaps("/mnt/x/y", "/tmp/other"));
         // The same path from the root of another filesystem.
         assert!(!overlaps("/other/gen/x/y", "/tmp/gen"));
+        // A filesystem mounted inside a match, reached through another
+        // mount of it; only the part a mount inside the match shows.
+        assert!(overlaps("/mnt/fast/y", "/proj/target"));
+        assert!(!overlaps("/mnt/fast/y", "/proj/other"));
+        assert!(overlaps("/mnt/fast/elsewhere/z", "/proj/other"));
+        assert!(overlaps("/mnt/fast", "/proj/other"));
+        // Another filesystem whose root path overlaps the candidate's place.
+        assert!(!overlaps("/other/q", "/proj/target"));
     }
 
     #[test]
@@ -3597,15 +3610,20 @@ mod best_fit_tests {
             "{error}"
         );
 
+        // A relative root field, met on the match's side, on the
+        // candidate's, or on another mount of the candidate's filesystem.
         let mut relative = bind_table();
         relative[2].fs_root = PathBuf::from("gen/x");
-        let error = overlaps_in_filesystem(
-            &relative,
-            Path::new("/tmp/other"),
-            &[PathBuf::from("/mnt/x/y")],
-        )
-        .unwrap_err();
-        assert!(error.contains("not an absolute path"), "{error}");
+        for (candidate, matched) in [
+            ("/other/q", "/mnt/x/y"),
+            ("/mnt/x/y", "/other/q"),
+            ("/tmp/q", "/other/q"),
+        ] {
+            let error =
+                overlaps_in_filesystem(&relative, Path::new(candidate), &[PathBuf::from(matched)])
+                    .unwrap_err();
+            assert!(error.contains("not an absolute path"), "{error}");
+        }
     }
 
     #[test]

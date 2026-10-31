@@ -518,13 +518,16 @@ Model scenarios required by [safety.md](safety.md) and
   `/tmp/gen`, and a candidate holding the source is `protected` while the
   match lies under the bind; a reclaim through the bind deletes nothing
   protected; the same for `!profile:` (`excluded`) and for kind
-  `cargo-target` on either side; a filesystem mounted inside a match
-  stops the run at enumeration (diskgc-model `tests/fs_dry_run.rs`
+  `cargo-target` on either side; a filesystem mounted deep inside a
+  protected Cargo target and mounted again elsewhere is `protected` there,
+  and one mounted inside an `fs` match stops the run at enumeration
+  (diskgc-model `tests/fs_dry_run.rs`
   `protect_covers_a_bind_mount_of_a_protected_subdirectory` and its
   neighbours, `tests/fs_reclaim.rs`
   `a_reclaim_through_a_bind_of_a_protected_subdirectory_deletes_nothing_protected`,
   `tests/ensure.rs` `a_cargo_target_under_a_bind_of_a_protected_subdirectory_is_protected`,
-  `a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree`);
+  `a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree`,
+  `a_filesystem_mounted_inside_a_protected_cargo_target_is_protected_elsewhere`);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must, each candidate

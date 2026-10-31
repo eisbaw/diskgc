@@ -1299,12 +1299,11 @@ fn protect_covers_a_candidate_holding_the_source_of_a_protected_bind() {
     nothing_locked_or_deleted(&host);
 }
 
-/// A filesystem mounted inside a protected match is part of what the match
-/// shows, and a second mount of it elsewhere is an alias the translation to
-/// (device, path) does not see: the match itself is refused at enumeration
-/// (`contains_mount`), so the run stops before judging anything. The
-/// translation relies on that (docs/safety.md, Not protected, not
-/// excluded).
+/// A filesystem mounted inside a protected `fs` match is part of what the
+/// match shows, so a second mount of it elsewhere is an alias. The match
+/// itself is refused at enumeration (`contains_mount`): the run stops before
+/// judging anything (for a Cargo target, whose inside discovery does not
+/// look into, the verdict catches it: tests/ensure.rs).
 #[test]
 fn protect_stops_the_run_on_a_filesystem_mounted_inside_a_match() {
     let model = subdir_bind_model().replacen(
