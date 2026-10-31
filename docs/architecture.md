@@ -447,15 +447,19 @@ the order of work.
   round (the blocks changed under the counts: they are left as they are);
   background rounds never dissolve a block (no member list).
 - **Pausing:** before each batch the background tally tests, without
-  blocking, whether anyone holds the host lock (a `LOCK_SH | LOCK_NB`
+  blocking, whether anyone holds the lock a reclaim of its user takes:
+  the host lock, or, for a user on a host without it, the user's
+  per-user lock ([safety.md](safety.md#host-lock); made by the probe if
+  absent) (a `LOCK_SH | LOCK_NB`
   `flock` on its own read-only open of the lock file, closed at once;
   a reclaim holds it exclusively, so a shared probe detects it and
   never excludes another prober; the probe can make one of a reclaim's
   10 to 100 ms lock retries fail, [safety.md](safety.md#host-lock)); if so, a reclaim is
   running (in this or another process) and the tally waits, polling
   every second (a lock released by its holder can still look held for a
-  moment, [safety.md](safety.md#host-lock)). A missing lock file means no
-  reclaim can run either: the tally goes on, with one log line; any other
+  moment, [safety.md](safety.md#host-lock)). A missing host lock for
+  root, or a per-user lock that is refused, means no reclaim of this user
+  can run either: the tally goes on, with one log line; any other
   failure of the test pauses it. The background tally never speeds up
   under pressure.
 - **Synchronous (in `ensure`): may load the machine; must be fast and
@@ -501,7 +505,9 @@ the order of work.
   seed only orders work. (`survey` sizes everything it reports.) Without a valid snapshot, or with `--no-index`, the synchronous
   tally starts from nothing.
 - **`--no-index`:** the run neither reads nor writes the snapshot (no
-  state operation at all); it builds its index from nothing by the
+  snapshot operation at all; a user's reclaim on a host without the host
+  lock still makes its per-user lock, which may be in the state
+  directory, [safety.md](safety.md#host-lock)); it builds its index from nothing by the
   synchronous tally (within `--tally-budget`) and discards it at exit;
   a run that tallies says so in one log line. The live index is used as
   in any run. For diagnosing a suspect index; never needed for safety.
@@ -555,7 +561,9 @@ the order of work.
     the new directory entry: a file of a few hundred bytes still takes
     a block (TASK-30 review). The state directory and the lock file
     are made before the walk (above), so what they take is already in
-    the samples the walk acts on. "The filesystem the run works on" is
+    the samples the walk acts on; so is a per-user reclaim lock made
+    there ([safety.md](safety.md#host-lock)), which is made when the
+    reclaim locks. "The filesystem the run works on" is
     compared by the device mountinfo names for each mount (the
     superblock's), not by `st_dev`, which differs between btrfs
     subvolumes of one filesystem. The temporary file is an `O_TMPFILE` linked in only
@@ -659,7 +667,7 @@ reclaim(min, goal, filesystem, deadline):
   if avail(filesystem) >= min: return met            # no lock taken
   index := live index (watch)
            | synchronous tally (budget) seeded by a valid snapshot, or from nothing
-  lock /run/diskgc/lock, waiting until deadline
+  lock /run/diskgc/lock (a user without it: the per-user lock), waiting until deadline
     on timeout: return met if avail >= min else lock_timeout
   if avail(filesystem) >= min: return met            # someone else freed it
   preflight all tiers (environmental validation, backend binding)
@@ -945,7 +953,14 @@ is accepted until measured otherwise.
   nothing is ever written to it or renamed onto it. Each of the two is
   its own ungated entry in the source scan's allowlist
   (`diskgc-linux/src/state.rs`, with its reason and exact match count);
-  they are the only writes, creations or renames the scan allows outside
+  the per-user reclaim lock is a third ([safety.md](safety.md#host-lock)):
+  `user_lock`, which takes no argument at all (`LinuxHost` is given the
+  directory by the binary: `$XDG_RUNTIME_DIR/diskgc` or the state
+  directory) and makes the directory (mode 0700) and `lock` in it (mode
+  0600, `O_RDONLY|O_CREAT|O_NOFOLLOW`), for `flock` only; `ModelHost`
+  has the same operation, refusals included. With the `mkdir -p` the
+  state directory and that directory's parent share, these are the only
+  writes, creations or renames the scan allows outside
   `Delete`. Read-only beside them: `state_read` (the snapshot, never
   through a symlink, with its owner and mode), `fs_uuid` and `boot_id`.
 - **Time is part of the port.** The clock, every blocking operation (host
@@ -1013,11 +1028,16 @@ is accepted until measured otherwise.
   ([reference.md](reference.md#ensure), Open-file limit).
 - **Generic Linux:** the binary, the two `watch` units below, the tmpfiles
   drop-in for the host lock file, and an example config. Distribution
-  packages can follow.
+  packages can follow. The drop-in is needed for root and for the system
+  template; a user's `ensure` and the user template work without it,
+  each user's reclaims then taking turns through a per-user lock only
+  ([safety.md](safety.md#host-lock)).
 - **NixOS**, as one option: the module below. It renders the YAML, ships
   the tmpfiles rule, runs `check` at build time, and starts the `watch`
   instances.
-- **CI runners:** binary, YAML, the tmpfiles drop-in (or equivalent), and
+- **CI runners:** binary, YAML, the tmpfiles drop-in (or equivalent: it
+  serialises the runner's reclaims with every other user's, and the
+  system template requires it), and
   `diskgc ensure --min-free 50G --target-free 80G "$CI_BUILDS_DIR"` in the
   pre-job hook; optionally a `watch --tally-only` instance between jobs for
   a warm index (below).
@@ -1032,7 +1052,9 @@ module; their tests are in [testing.md](testing.md#deployment-units).
 
 A **user service by default**: the laptop owner runs `watch` under
 `systemd --user`, as themselves, so it sees their processes and never
-needs root. A **system template** is the option for CI runners and
+needs root, not even to provision the host lock: without it the user's
+reclaims take their per-user lock in `$XDG_RUNTIME_DIR/diskgc`, which
+the user manager provides ([safety.md](safety.md#host-lock)). A **system template** is the option for CI runners and
 `--allow-root`. Both are templates with one instance per watched
 filesystem and carry the same name, so the commands read alike:
 
@@ -1123,7 +1145,8 @@ WantedBy=default.target
   stops it outside `systemctl stop` (a `kill -HUP` after editing the
   configuration) restarts it with the configuration read afresh. Exit 2
   (usage, configuration, privilege, the sandbox gate, a missing host lock
-  file, a missing root, another watcher holding the filesystem's
+  file as root or an unusable one, a refused per-user lock, a missing
+  root, another watcher holding the filesystem's
   single-writer lock: [reference.md](reference.md#exit-codes-watch)) is
   not restarted: the unit stays failed and `systemctl status` shows why.
   Exit 3 and a panic (101) restart after 30 s; at one start per 30 s the
@@ -1160,6 +1183,7 @@ lines below added and its `[Install]` section replaced:
 ```ini
 [Unit]
 RequiresMountsFor=%f
+AssertPathExists=/run/diskgc/lock
 
 [Service]
 Environment=DISKGC_CONFIG=/etc/diskgc/config.yaml
@@ -1168,6 +1192,15 @@ CapabilityBoundingSet=
 [Install]
 WantedBy=multi-user.target
 ```
+
+- **The host lock is required** (`AssertPathExists=`): a system instance
+  never falls back to a per-user lock, whatever its `User=`, so the
+  instances of a fleet and its pre-job hooks take turns through the host
+  lock. Without the tmpfiles drop-in the start fails (`systemctl status`
+  shows the failed assertion; diskgc does not run), `--tally-only`
+  instances included. A path, not the file's type: something other
+  than a regular file there passes the assertion and is diskgc's exit 2
+  (`provisioning`), as for root.
 
 - **`User=`** is not in the template: each instance gets a drop-in
   (`systemctl edit diskgc-watch@srv-ci.service`: `[Service]`,
@@ -1209,7 +1242,8 @@ WantedBy=multi-user.target
 - **Ordering.** Default dependencies already order the unit after
   `sysinit.target` and so after `systemd-tmpfiles-setup.service`, which
   creates the host lock from the package's `lib/tmpfiles.d/diskgc.conf`
-  ([safety.md](safety.md#host-lock)), and `sysinit.target` is itself
+  ([safety.md](safety.md#host-lock)) before the system template's
+  assertion is checked, and `sysinit.target` is itself
   after `local-fs.target`, so an `After=local-fs.target` would add
   nothing. `RequiresMountsFor=%f` waits for `PATH`'s own mount. Nothing
   orders it after `docker.service` or the Nix daemon: a backend that is

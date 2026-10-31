@@ -91,6 +91,12 @@ FORBIDDEN_USER = {
     "LogNamespace",
 }
 
+# The host lock (docs/safety.md, Host lock; TASK-277): the system template
+# requires it, so a fleet's instances never fall back to per-user locks;
+# the user template must work without it (a user's reclaims fall back).
+HOST_LOCK = "/run/diskgc/lock"
+REQUIRED_SYSTEM_UNIT = {"AssertPathExists": HOST_LOCK}
+
 SECTION = re.compile(r"^\[([A-Za-z]+)\]$")
 
 
@@ -143,6 +149,21 @@ def check_hardening(entries, manager):
             errors.append(
                 f"user: [{section}] {key}= implies PrivateUsers= in a user manager (fatal)"
             )
+        if manager == "user" and HOST_LOCK in value:
+            errors.append(
+                f"user: [{section}] {key}= names {HOST_LOCK}: the user template must work "
+                "without the host lock (a user's reclaims fall back to a per-user lock)"
+            )
+    if manager == "system":
+        unit = {key: value for section, key, value in entries if section == "Unit"}
+        for key, want in REQUIRED_SYSTEM_UNIT.items():
+            got = unit.get(key)
+            if got != want:
+                shown = "missing" if got is None else f"{key}={got}"
+                errors.append(
+                    f"system: [Unit] needs {key}={want} ({shown}): the system template "
+                    "never falls back to a per-user lock"
+                )
     return errors
 
 

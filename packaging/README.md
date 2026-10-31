@@ -9,8 +9,9 @@ goal once and exits with a code a CI hook or an agent script can branch on.
 ## This package
 
 - `bin/diskgc`: a static binary with no run-time dependencies.
-- `lib/tmpfiles.d/diskgc.conf`: creates the host lock `/run/diskgc/lock`
-  that every reclaiming run takes.
+- `lib/tmpfiles.d/diskgc.conf`: creates the host lock `/run/diskgc/lock`,
+  through which the reclaims of every user take turns. Root needs it; a
+  user's reclaim without it takes a per-user lock of its own instead.
 - `share/doc/diskgc/`: this README; `RELEASE-NOTES.md` (what this version
   does, install, known limits, the JSON contract); `reference.md` (commands,
   exit codes, JSON output, configuration, profiles); `safety.md` (every
@@ -26,7 +27,11 @@ As root, from the unpacked package (a minimal system may have no
     systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf
 
 Without systemd-tmpfiles, create what `diskgc.conf` describes at every
-boot.
+boot. The tmpfiles steps are needed only for root and system services.
+Without them, and without root, put the binary anywhere on your `PATH`:
+a reclaim then takes a per-user lock in `$XDG_RUNTIME_DIR/diskgc`
+(otherwise in `~/.local/state/diskgc`), which serialises your own
+reclaims but not other users' (`safety.md`, Host lock).
 
 ## First run
 

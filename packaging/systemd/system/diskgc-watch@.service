@@ -1,6 +1,7 @@
 [Unit]
 Description=diskgc watch of %f
 RequiresMountsFor=%f
+AssertPathExists=/run/diskgc/lock
 
 [Service]
 Type=exec

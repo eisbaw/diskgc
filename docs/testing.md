@@ -770,12 +770,19 @@ Model scenarios required by [safety.md](safety.md) and
     `ensure`'s are the `allow-root-*` vectors and
     `allow_root_needs_root_and_cap_sys_ptrace_in_the_effective_set`; in a container
     `allow_root_without_cap_sys_ptrace_is_refused_in_every_mode`, root with
-    every container capability but that one), a missing supplied root, a missing host lock file, a second `watch`
+    every container capability but that one), a missing supplied root, a lock its cycles cannot take
+    (a refused per-user lock: `watch_start_refusals`; root without the
+    host lock: `watch_as_root_without_the_host_lock_exits_2_at_start`), a second `watch`
     with the same state directory after its 10 s wait (`second_watch_exits_2`,
     above), `--timeout 0`: the documented exit code, one
     JSON object with that `exit_code` under `--json`, no `Delete` call;
-    the missing host lock file under `--tally-only` is one warning and a
-    running tally; an unwritable state directory and a failing first
+    the same lock problem under `--tally-only` is one warning and a
+    running tally; a user's watch without the host lock is no refusal: it
+    reclaims under its per-user lock
+    (`a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock`;
+    TASK-277, the rest in `crates/diskgc-model/tests/user_lock.rs` and the
+    container test
+    `ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock`); an unwritable state directory and a failing first
     sample are not refusals: one log line and no snapshot, and a first
     cycle record (`error`, `host`) respectively, the process running;
   - `watch_root_vanished_after_start_still_reclaims_other_tiers` (*open*): a
@@ -2041,7 +2048,9 @@ more than the flake already builds.
    "fatal" row of the hardening table
    ([architecture.md](architecture.md#hardening)), nor one its "not set"
    rows exclude, nor, in the user template, one that implies
-   `PrivateUsers=`. The user template is exactly Deployment's "The user
+   `PrivateUsers=`. The system template requires the host lock
+   (`AssertPathExists=/run/diskgc/lock`) and the user template names it
+   nowhere (TASK-277). The user template is exactly Deployment's "The user
    unit, in full" block, and the system template that text with the next
    block's additions, so the doc and the files cannot drift. The test
    also bites each rule on edited copies.

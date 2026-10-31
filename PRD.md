@@ -350,6 +350,10 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
 - **No real block filesystems, network filesystems or kernel versions in
   e2e**; those cases rest on the model.
 - **Lock stalling.** Any local user can hold `/run/diskgc/lock`.
+  Without it, a user's reclaims take a per-user lock instead, which
+  serialises only that user's own; two users reclaiming one filesystem
+  at once may free more than either needed
+  ([safety.md](docs/safety.md#host-lock)).
 
 ## Irreversibility map
 
@@ -359,7 +363,8 @@ Hard to walk back (deep review, tests before features):
   the per-entry identity check, and the structural recognisers.
 - **The CLI contract used by CI and harnesses:** `ensure` flags, exit codes
   and their precedence, JSON field names and enums, `.diskgc-keep`, the lock
-  path.
+  paths (the host lock, and the per-user lock a user without it falls
+  back to).
 - **YAML schema `version: 1`:** groups, tiers, the selection grammar and its
   semantics, the profile schema, `protect` entries, predicate names, and the
   names of built-in profiles and kinds.

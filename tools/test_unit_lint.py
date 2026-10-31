@@ -48,6 +48,20 @@ class UnitLintTests(unittest.TestCase):
                 errors = lint(spiked, system, spiked_doc)
                 self.assertTrue(any(f"{key}=" in e and "forbidden" in e for e in errors), errors)
 
+    def test_the_host_lock_is_required_by_the_system_template_only(self):
+        user, system, doc = files()
+        # Gone from both the doc and the file: still caught.
+        line = "AssertPathExists=/run/diskgc/lock\n"
+        errors = lint(user, edit(system, line, ""), edit(doc, line, ""))
+        self.assertTrue(
+            any("AssertPathExists=/run/diskgc/lock (missing)" in e for e in errors), errors
+        )
+        # The user template must work without it.
+        spiked = edit(user, "[Unit]\n", "[Unit]\nConditionPathExists=/run/diskgc/lock\n")
+        spiked_doc = edit(doc, "[Unit]\nDescription", "[Unit]\nConditionPathExists=/run/diskgc/lock\nDescription")
+        errors = lint(spiked, system, spiked_doc)
+        self.assertTrue(any("must work without the host lock" in e for e in errors), errors)
+
     def test_the_user_unit_may_not_touch_capabilities(self):
         user, system, doc = files()
         spiked = edit(user, "KillMode=mixed\n", "KillMode=mixed\nCapabilityBoundingSet=\n")
