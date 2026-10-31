@@ -6696,9 +6696,21 @@ mod tests {
         let lock_dir = |root: &Path| {
             std::fs::create_dir_all(root.join("run/diskgc/lock")).expect("a directory");
         };
+        // Opened (read-only, non-blocking) like a file: refused by its type.
+        let lock_fifo = |root: &Path| {
+            std::fs::create_dir_all(root.join("run/diskgc")).expect("dir");
+            rustix::fs::mknodat(
+                CWD,
+                root.join("run/diskgc/lock"),
+                rustix::fs::FileType::Fifo,
+                Mode::from_raw_mode(0o600),
+                0,
+            )
+            .expect("mkfifo");
+        };
         // (case, what to plant below the test root, why it is refused)
         type Plant = dyn Fn(&Path);
-        let cases: [(&str, &Plant, &str); 6] = [
+        let cases: [(&str, &Plant, &str); 7] = [
             ("symlinked directory", &symlinked_dir, "is a symlink"),
             ("a file as the directory", &file_as_dir, "not a directory"),
             ("open directory", &open_dir, "writable by no one else"),
@@ -6709,6 +6721,7 @@ mod tests {
                 &lock_dir,
                 "must be a regular file",
             ),
+            ("a FIFO as the lock", &lock_fifo, "must be a regular file"),
         ];
         for (case, plant, why) in cases {
             let tmp = TempDir::new();
