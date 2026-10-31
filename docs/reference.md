@@ -64,7 +64,11 @@ from the initial sample and cannot predict the exact reclaim order. Before
 the first deletion, it checks
 all configured roots, command executables and Docker bindings under the
 host lock. A tier with an unsafe root or failed environment check is
-excluded and reported while the other tiers remain eligible. Protected and
+excluded and reported while the other tiers remain eligible. `--select`
+runs the same way, as one group of its one tier without a timeout of its
+own: a command's executable is looked up only once the run needs to
+reclaim, under the host lock (a tool not installed is a `missing` skip of
+the tier, exit 1 when nothing else frees the space). Protected and
 negated source matches are rechecked during reclaim. `ipc: live-only` remains
 refused by `ensure` until its runtime check is implemented.
 
@@ -146,7 +150,7 @@ process runs, even if that Cargo works in an unrelated directory; see
   found them, each judged in full under its own locks. A run that
   tallies starts from the index snapshot of `PATH`'s filesystem
   (`$XDG_STATE_HOME/diskgc/index-<fs>`, mode 0600) when a valid one
-  exists, and writes it after its reclaim walk, so the next run starts
+  exists, and writes it once its run under the host lock ends, so the next run starts
   warmer; when it is read, ignored, written or not written is in
   [architecture.md](architecture.md#the-tally) (Snapshot). Each of those
   is one stderr line (`index: ...`), and none changes the exit code

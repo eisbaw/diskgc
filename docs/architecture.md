@@ -533,12 +533,15 @@ the order of work.
   (`EACCES` on the udev links) or used (not hex digits and dashes) falls
   back to the device number with one log line.
   - **Who writes, when.** `watch` every 5 minutes and on exit. `ensure`
-    once, after its reclaim walk and before the run's final space
-    sample (so the sample, the exit code, a signal's status and the
-    report's `duration_ms` include the write), when its run tallied,
-    before its deadline (never past it) and not after a terminating
-    signal; not on a run that ended before its walk (the host lock's
-    deadline, a refusal, an error before the walk). An index whose
+    once, when its run tallied, at the run's one exit after the tally
+    and before its final space sample (so the sample, the exit code, a
+    signal's status and the report's `duration_ms` include the write):
+    after the reclaim walk, and equally when the run ends earlier under
+    the host lock (the space found there, a root or `protect` refusing
+    the run) or because the host lock was refused. Never past the
+    deadline and not after a terminating signal: a run that waited for
+    the host lock until its deadline, or was interrupted, writes none and
+    says so in one line (TASK-270). An index whose
     encoding is larger than a snapshot may be (twice the budget) is
     not written, with one log line. A run that exits 0 at once because space is
     already there stays an instant no-op (Mark, 2026-10-25): no tally,
@@ -669,13 +672,13 @@ reclaim(min, goal, filesystem, deadline):
   index := live index (watch)
            | synchronous tally (budget) seeded by a valid snapshot, or from nothing
   lock /run/diskgc/lock (a user without it: the per-user lock), waiting until deadline
-    on timeout: return met if avail >= min else lock_timeout
-  if avail(filesystem) >= min: return met            # someone else freed it
+    on timeout: end (met if avail >= min else lock_timeout)
+  if avail(filesystem) >= min: end (met)             # someone else freed it
   preflight all tiers (environmental validation, backend binding)
   for group in groups, tier in group (ranking):
     queue := units of this tier on this filesystem, in the tier's order
     loop:
-      if avail >= goal: return met
+      if avail >= goal: end (met)
       candidate := next from queue
                    (a block at the head is expanded first: its members,
                    found and statx'ed now, join the queue)
@@ -688,8 +691,9 @@ reclaim(min, goal, filesystem, deadline):
       act(candidate, need = goal - avail); record avail_delta; update index
     discover this tier's sources (bounded by their patterns); judge and act
       on what the queue did not judge, as above (the tier's order)
-  write the snapshot (ensure; Snapshot above)
-  return met if avail >= min else (error if any errors else exhausted)
+  end: (every way out after the tally, TASK-270)
+    write the snapshot (ensure; Snapshot above)
+    return met if avail >= min else (error if any errors else exhausted)
 ```
 
 - **A candidate from the index is a candidate only as discovery would
