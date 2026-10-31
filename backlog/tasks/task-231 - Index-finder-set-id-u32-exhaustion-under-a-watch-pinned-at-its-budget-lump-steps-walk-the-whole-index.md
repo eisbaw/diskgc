@@ -3,9 +3,10 @@ id: TASK-231
 title: >-
   Index: finder-set id u32 exhaustion under a watch pinned at its budget; lump
   steps walk the whole index
-status: To Do
+status: Done
 assignee: []
-created_date: '2026-10-25 17:22'
+created_date: 2026-10-25 17:22
+updated_date: '2026-10-31T01:54:00Z'
 labels:
   - index
 dependencies: []
@@ -17,3 +18,9 @@ priority: low
 <!-- SECTION:DESCRIPTION:BEGIN -->
 From TASK-28 re-review: finder-set ids are never reused (u32), so a watch that stays at its budget would eventually exhaust them and crash (far off); each lump step costs a walk of the whole index. Address before long-running watch soak tests (TASK-34).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-31: merged 6e90a69 (64-bit ids, never reused; lump steps sweep from pass counts). Bite: emulated 32-bit ceiling panics.
+<!-- SECTION:NOTES:END -->
