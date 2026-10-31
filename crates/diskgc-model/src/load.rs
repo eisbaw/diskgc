@@ -127,6 +127,11 @@ pub enum Action {
         mount: u64,
         bytes: u64,
     },
+    /// An account's uid changes (`None`: it is gone).
+    Account {
+        name: String,
+        uid: Option<u32>,
+    },
 }
 
 /// A validated event; `index` is its position in the model's `events`.
@@ -1019,11 +1024,17 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             bytes: o.bytes.0,
         });
     }
+    if let Some(a) = &spec.account {
+        actions.push(Action::Account {
+            name: a.name.clone(),
+            uid: a.uid,
+        });
+    }
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
             "no action (signal, create, mkdir, remove, rename, replace, replace_reusing_inode, chown, open, close, \
-                  exit, fork, dumpable, access, advance, fail, mount, other_used)"
+                  exit, fork, dumpable, access, advance, fail, mount, other_used, account)"
                 .to_owned(),
         ),
         _ => Err("more than one action; use one event per action".to_owned()),

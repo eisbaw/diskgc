@@ -78,6 +78,7 @@ fn request(select: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library(), None, 1000).expect("supported selection"),
     }
 }

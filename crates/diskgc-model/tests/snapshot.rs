@@ -98,6 +98,7 @@ fn request(tier: Tier, min_free: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     }
 }

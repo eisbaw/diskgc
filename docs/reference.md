@@ -211,10 +211,7 @@ process runs, even if that Cargo works in an unrelated directory; see
 The contract below was settled by TASK-117 and is implemented (TASK-32),
 with these limits in this build: the record's `index` block is `null`
 as in `ensure`'s report (TASK-244 defines it for both); a second signal
-during the stop does not skip the snapshot write; a mount stacked on
-`PATH` is detected by a check right before each cycle, so one made
-between that check and the cycle's own resolution of `PATH` is not seen
-by it.
+during the stop does not skip the snapshot write.
 
 ```
 diskgc watch --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]
@@ -263,7 +260,8 @@ runner's service manager); systemd is not required.
   and the same thresholds), `--tally-budget` and `--no-index` (the live
   index replaces the synchronous tally).
 - Sizes and durations as under [Sizes and durations](#sizes-and-durations);
-  a percentage is resolved against the filesystem's size at start.
+  a percentage is resolved against the filesystem's size at start (at the
+  first sample that works, when the start's failed).
 
 **One process per filesystem and state directory.** The snapshot's
 single-writer lock `index-<fs>.lock` ([architecture.md](architecture.md#the-tally),
@@ -383,7 +381,8 @@ any of:
 
 1. available space at or below the cycle's final sample minus
    `max(1 GiB, 1 % of the filesystem)` (new cruft has probably appeared);
-   not applicable when the final sample failed;
+   not applicable when the final sample failed or was below that step
+   (a full filesystem cannot drop by it);
 2. 15 minutes after the cycle ended;
 3. class `retry` only: 1 minute after the cycle ended, doubling with each
    consecutive `retry` cycle (1, 2, 4, 8 minutes), capped by rule 2.
@@ -424,7 +423,8 @@ differences:
   `cycle` counts reclaim cycles from 1 since start. `backoff` is `null`
   after a `met` or `interrupted` cycle; otherwise `wait_seconds` is when
   rules 2 and 3 next allow a cycle, `resume_below_bytes` is rule 1's
-  level (`null` when the final sample failed), and `attempt` counts
+  level (`null` when rule 1 cannot apply: the final sample failed, or it
+  was below the step, so available space cannot fall by it), and `attempt` counts
   consecutive `retry` cycles (`0` for `hold`).
 
 What is not a record, and why:
@@ -469,7 +469,11 @@ scripts use `--json`. journald or the supervisor adds timestamps.
 - back-off: one line when it starts, one when space recovering ends it;
 - the background tally: one line when the pressure brake engages and one
   when it releases, each with the number of batches since the previous
-  such line; a skipped or failed snapshot write: one line
+  such line; one when it pauses for the host lock and one when it
+  resumes; when it does not let go of the live index within 1 s (a turn
+  blocked in the kernel), one line, and the cycle runs without the index
+  (each tier's discovery alone) or the snapshot write is skipped; a
+  skipped or failed snapshot write: one line
   ([architecture.md](architecture.md#the-tally), Snapshot);
 - stop: one line naming the signal, one when the process exits.
 

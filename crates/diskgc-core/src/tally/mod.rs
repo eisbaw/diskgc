@@ -78,6 +78,13 @@ pub struct TallyState {
     /// so a failing unit is not retried every batch. Pruned to the index's
     /// singles ([`Self::prune_failed`]).
     failed: BTreeMap<(MountKey, PathBuf), MonoTime>,
+    /// Sources whose last background listing step failed with a failure of
+    /// the host (`EIO`, `EMFILE`), and why; cleared by that source's next
+    /// complete listing. While a selected source has one, a `watch` cycle
+    /// takes no queue from the index (TASK-31's rule for the synchronous
+    /// tally: a queued unit must not be deleted before the tier's own
+    /// discovery meets the failure; [`Self::source_failure`]).
+    source_failed: BTreeMap<Finder, String>,
 }
 
 /// What listing one source did to the index.
@@ -143,6 +150,7 @@ impl TallyState {
             round: None,
             collapses: 0,
             failed: BTreeMap::new(),
+            source_failed: BTreeMap::new(),
         }
     }
 
@@ -160,6 +168,12 @@ impl TallyState {
     /// from the snapshot).
     pub fn set_discovered_at(&mut self, finder: Finder, at: MonoTime) {
         self.discovered.insert(finder, at);
+    }
+
+    /// Why the last background listing of `finder`'s source failed with a
+    /// failure of the host, unless a complete listing of it came since.
+    pub fn source_failure(&self, finder: &Finder) -> Option<&str> {
+        self.source_failed.get(finder).map(String::as_str)
     }
 
     /// When `finder`'s source was last listed at all (this process).
@@ -364,6 +378,8 @@ impl TallyState {
             Ok(step) => step,
             Err(e) => {
                 self.listed.insert(source.finder.clone(), host.now());
+                self.source_failed
+                    .insert(source.finder.clone(), e.to_string());
                 self.account_cursors();
                 return Err(e);
             }
@@ -378,6 +394,8 @@ impl TallyState {
                     Err(e) => {
                         // The round is lost: the source waits its period.
                         self.listed.insert(source.finder.clone(), host.now());
+                        self.source_failed
+                            .insert(source.finder.clone(), e.to_string());
                         self.account_cursors();
                         return Err(e);
                     }
@@ -415,6 +433,7 @@ impl TallyState {
         self.account_cursors();
         let mut recount = Recount::default();
         if step.complete {
+            self.source_failed.remove(&source.finder);
             self.discovered
                 .insert(source.finder.clone(), round.cursor.started());
             recount = recount::apply_round(

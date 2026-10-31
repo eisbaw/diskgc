@@ -720,6 +720,13 @@ impl Inner {
                 state.set_other_used(*mount, *bytes);
                 Ok(())
             }
+            Action::Account { name, uid } => {
+                match uid {
+                    Some(uid) => state.users.insert(name.clone(), *uid),
+                    None => state.users.remove(name),
+                };
+                Ok(())
+            }
         };
         if let Err(fault) = outcome {
             model_error(format!(

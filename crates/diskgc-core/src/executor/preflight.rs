@@ -10,12 +10,16 @@ use crate::host::{Dev, Host, MonoTime};
 use crate::hostlock;
 use crate::report::{ErrorCause, ErrorEntry, Final, Report, SkipEntry, Status, conclude};
 use crate::resolve::{ResolveError, Resolved, Want, resolve_in, resolve_unscreened};
+use crate::units::Size;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::{Request, Tier, host_error, record_deadline_overrun, usage};
 
-pub(super) enum MeasureFailure {
+/// Why `PATH` could not be measured: a usage error (exit 2) or a failure
+/// of the host (exit 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeasureFailure {
     Usage(String),
     Host(String),
 }
@@ -65,18 +69,12 @@ pub(super) struct Measured<F> {
     pub(super) target: u64,
 }
 
-/// Reaches `PATH`, samples its filesystem and turns the sizes into bytes;
-/// fills the report's `mount`, sizes and `avail_before_bytes`. Host sampling
-/// failures remain distinct from invalid path and size requests.
-pub(super) fn measure<H: Host>(
-    host: &H,
-    request: &Request,
-    report: &mut Report,
-) -> Result<Measured<H::Fd>, MeasureFailure> {
-    // PATH is the one lookup without the mount screen: the operator named
-    // this filesystem to measure (resolve_unscreened).
-    let at = resolve_unscreened(host, &request.path, Want::Directory).map_err(|error| {
-        let message = format!("PATH {}: {error}", request.path.display());
+/// `PATH` reached safely (the one lookup without the mount screen,
+/// [`crate::resolve::resolve_unscreened`]: the operator named this
+/// filesystem to measure), held. `watch` holds it for its life.
+pub fn reach_path<H: Host>(host: &H, path: &Path) -> Result<Resolved<H::Fd>, MeasureFailure> {
+    resolve_unscreened(host, path, Want::Directory).map_err(|error| {
+        let message = format!("PATH {}: {error}", path.display());
         match error {
             ResolveError::Host(_) => MeasureFailure::Host(message),
             ResolveError::UnsafePath { .. }
@@ -84,29 +82,76 @@ pub(super) fn measure<H: Host>(
             | ResolveError::Missing { .. }
             | ResolveError::Screened { .. } => MeasureFailure::Usage(message),
         }
-    })?;
-    report.mount = Some(at.mount.mount_point.clone());
-    let space = host
-        .statvfs(&at.fd)
-        .map_err(|e| MeasureFailure::Host(format!("PATH {}: {e}", request.path.display())))?;
-    report.avail_before_bytes = Some(space.avail_bytes);
-    let min = request
-        .min_free
-        .bytes(space.size_bytes)
-        .map_err(|e| MeasureFailure::Usage(format!("--min-free {}: {e}", request.min_free)))?;
-    report.min_free_bytes = Some(min);
-    let target = match request.target_free {
+    })
+}
+
+/// `--min-free` and `--target-free` (`None`: the same) in bytes on a
+/// filesystem of `size_bytes`; the target below the minimum is a usage
+/// error.
+pub fn goal_bytes(
+    min_free: Size,
+    target_free: Option<Size>,
+    size_bytes: u64,
+) -> Result<(u64, u64), MeasureFailure> {
+    let min = min_free
+        .bytes(size_bytes)
+        .map_err(|e| MeasureFailure::Usage(format!("--min-free {min_free}: {e}")))?;
+    let target = match target_free {
         None => min,
         Some(size) => size
-            .bytes(space.size_bytes)
+            .bytes(size_bytes)
             .map_err(|e| MeasureFailure::Usage(format!("--target-free {size}: {e}")))?,
     };
-    report.target_free_bytes = Some(target);
     if target < min {
         return Err(MeasureFailure::Usage(format!(
             "--target-free ({target} bytes) is below --min-free ({min} bytes)"
         )));
     }
+    Ok((min, target))
+}
+
+/// Reaches `PATH` ([`reach_path`]), samples its filesystem and turns the
+/// sizes into bytes ([`goal_bytes`]); fills the report's `mount`, sizes and
+/// `avail_before_bytes`. Host sampling failures remain distinct from
+/// invalid path and size requests. In a `watch` cycle, `PATH` must be on
+/// the device it was on at start ([`super::WatchCycle::expect_dev`]): this
+/// is the resolution the cycle measures and reclaims on, so no mount made
+/// on `PATH` meanwhile goes unseen.
+pub(super) fn measure<H: Host>(
+    host: &H,
+    request: &Request,
+    report: &mut Report,
+) -> Result<Measured<H::Fd>, MeasureFailure> {
+    let at = reach_path(host, &request.path)?;
+    report.mount = Some(at.mount.mount_point.clone());
+    if let Some(cycle) = request.watch
+        && at.stat.dev != cycle.expect_dev
+    {
+        return Err(MeasureFailure::Host(format!(
+            "PATH {} is on device {}, not on the filesystem watched since start (device {}): \
+             nothing is reclaimed there (a mount stacked on PATH?)",
+            request.path.display(),
+            at.stat.dev,
+            cycle.expect_dev
+        )));
+    }
+    let space = host
+        .statvfs(&at.fd)
+        .map_err(|e| MeasureFailure::Host(format!("PATH {}: {e}", request.path.display())))?;
+    report.avail_before_bytes = Some(space.avail_bytes);
+    let (min, target) = match goal_bytes(request.min_free, request.target_free, space.size_bytes) {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            // What could be resolved stays in the report.
+            report.min_free_bytes = request.min_free.bytes(space.size_bytes).ok();
+            report.target_free_bytes = request
+                .target_free
+                .map_or(report.min_free_bytes, |t| t.bytes(space.size_bytes).ok());
+            return Err(failure);
+        }
+    };
+    report.min_free_bytes = Some(min);
+    report.target_free_bytes = Some(target);
     Ok(Measured {
         dev: at.stat.dev,
         at,

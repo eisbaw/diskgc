@@ -85,6 +85,7 @@ fn request(select: &str, roots: &[&str], path: &str, min: &str, target: Option<&
         target_free: target.map(size),
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library, Some(&roots), 1000).unwrap_or_else(|e| panic!("{e}")),
     }
 }

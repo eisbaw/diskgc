@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
-use diskgc_core::invocation::{Catalog, ConfigFile, EnsureOptions, Platform};
+use diskgc_core::invocation::{Catalog, ConfigFile, Platform, Selection};
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::Signal;
-use diskgc_core::units::{Size, parse_size};
+use diskgc_core::units::parse_size;
 use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
@@ -86,19 +86,22 @@ fn reclaim(min: &str, target: &str, interval: &str) -> Mode {
     }
 }
 
-fn options() -> EnsureOptions {
-    EnsureOptions {
-        min_free: Size::Bytes(0),
-        target_free: None,
-        timeout: None,
-        tally_budget: None,
+fn selection() -> Selection {
+    Selection {
+        path: PathBuf::from("/tmp"),
         select: Some(SELECT.to_owned()),
         roots: Vec::new(),
-        dry_run: false,
         allow_root: false,
-        no_index: false,
-        path: PathBuf::from("/tmp"),
         test_entry_budget: None,
+    }
+}
+
+/// Seeds 1, 2, 3, ... for `ranking: random` (the first is the start's).
+fn counting_seeds() -> impl Fn() -> Result<u64, String> {
+    let next = std::cell::Cell::new(0);
+    move || {
+        next.set(next.get() + 1);
+        Ok(next.get())
     }
 }
 
@@ -123,21 +126,36 @@ impl Watched {
 /// Starts and runs `watch` in `mode` on `host` until it ends (a SIGTERM
 /// event of the model).
 fn watch(host: &ModelHost, mode: &Mode) -> Watched {
+    watch_with(
+        host,
+        mode,
+        &selection(),
+        &ConfigFile::NotFound { tried: Vec::new() },
+    )
+}
+
+/// [`watch`] with its own selection and configuration file.
+fn watch_with(
+    host: &ModelHost,
+    mode: &Mode,
+    selection: &Selection,
+    config: &ConfigFile,
+) -> Watched {
     let library = library();
     let builtins = || Ok(library.clone());
+    let seeds = counting_seeds();
     let platform = Platform {
         catalog: Catalog::Development,
-        draw_seed: &|| Ok(0),
+        draw_seed: &seeds,
         builtins: &builtins,
     };
-    let config = ConfigFile::NotFound { tried: Vec::new() };
     let mut lines: Vec<String> = Vec::new();
     let mut records: Vec<(Duration, Value)> = Vec::new();
     let started = watch::start(
         host,
         mode,
-        &options(),
-        &config,
+        selection,
+        config,
         &platform,
         Some(Path::new("/home/u/.local/state/diskgc")),
         &mut |l| lines.push(l.to_owned()),
@@ -156,9 +174,10 @@ fn watch(host: &ModelHost, mode: &Mode) -> Watched {
                 records.push((host.elapsed(), value));
                 Ok(())
             };
-            let (ended, _) = watch::run_inline(host, started, Some(&mut record), &mut |l| {
-                lines.push(l.to_owned())
-            });
+            let (ended, _) =
+                watch::run_inline(host, started, &seeds, Some(&mut record), &mut |l| {
+                    lines.push(l.to_owned())
+                });
             Ok(ended)
         }
     };
@@ -236,7 +255,10 @@ fn watch_steady_between_thresholds_deletes_nothing_and_keeps_its_duty_cycle() {
         .filter(|c| c.op == Op::ReadDir && c.path.as_deref() == Some(Path::new("/tmp")))
         .count();
     assert!(listings >= 24 * 12 - 2, "{listings} listings of /tmp");
-    assert_eq!(host.priority_lowered(), 1, "the tally lowered its priority");
+    // Inline (the model's one thread) never lowers the priority: the
+    // reclaim shares that thread. The tally's own thread does (diskgc-linux
+    // tests/tally_thread.rs).
+    assert_eq!(host.priority_lowered(), 0);
     // Every port call but the clock's costs 1 ms: all of them together,
     // the tally's and the watcher's, stay far inside the duty cycle's 5 %.
     let busy_ms = host
@@ -396,43 +418,16 @@ fn watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing() {
 
 /// [`watch`] with another `PATH`.
 fn watch_at(host: &ModelHost, mode: &Mode, path: &str) -> Watched {
-    let library = library();
-    let builtins = || Ok(library.clone());
-    let platform = Platform {
-        catalog: Catalog::Development,
-        draw_seed: &|| Ok(0),
-        builtins: &builtins,
-    };
-    let config = ConfigFile::NotFound { tried: Vec::new() };
-    let mut lines: Vec<String> = Vec::new();
-    let mut records: Vec<(Duration, Value)> = Vec::new();
-    let options = EnsureOptions {
+    let selection = Selection {
         path: PathBuf::from(path),
-        ..options()
+        ..selection()
     };
-    let started = watch::start(
+    watch_with(
         host,
         mode,
-        &options,
-        &config,
-        &platform,
-        Some(Path::new("/home/u/.local/state/diskgc")),
-        &mut |l| lines.push(l.to_owned()),
+        &selection,
+        &ConfigFile::NotFound { tried: Vec::new() },
     )
-    .unwrap_or_else(|r| panic!("refused: {r:?}"));
-    let mut record = |line: &str| {
-        records.push((host.elapsed(), serde_json::from_str(line).unwrap()));
-        Ok(())
-    };
-    let (ended, _) = watch::run_inline(host, started, Some(&mut record), &mut |l| {
-        lines.push(l.to_owned())
-    });
-    eprintln!("log:\n  {}", lines.join("\n  "));
-    Watched {
-        lines,
-        records,
-        ended: Ok(ended),
-    }
 }
 
 /// Another process holds the host lock past `--timeout`: a `lock_timeout`
@@ -540,14 +535,16 @@ fn watch_tally_only_min_free_guards_the_write_on_the_watched_filesystem() {
         &Mode::TallyOnly {
             min_free: Some(parse_size("1G").unwrap()),
         },
-        &options(),
+        &selection(),
         &ConfigFile::NotFound { tried: Vec::new() },
         &platform,
         Some(Path::new("/tmp/u/state")),
         &mut |l: &str| lines.push(l.to_owned()),
     )
     .expect("starts");
-    watch::run_inline(&host, started, None, &mut |l| lines.push(l.to_owned()));
+    watch::run_inline(&host, started, &|| Ok(0), None, &mut |l| {
+        lines.push(l.to_owned())
+    });
     assert_eq!(host.trace_count(Op::StateWrite), 0, "{lines:#?}");
     assert!(
         lines
@@ -707,7 +704,7 @@ fn a_failed_record_write_ends_watch_at_once() {
     let started = watch::start(
         &host,
         &reclaim("2G", "3G", "10s"),
-        &options(),
+        &selection(),
         &ConfigFile::NotFound { tried: Vec::new() },
         &platform,
         None,
@@ -715,7 +712,7 @@ fn a_failed_record_write_ends_watch_at_once() {
     )
     .expect("starts");
     let mut broken = |_: &str| Err("Broken pipe (os error 32)".to_owned());
-    let (ended, _) = watch::run_inline(&host, started, Some(&mut broken), &mut |l| {
+    let (ended, _) = watch::run_inline(&host, started, &|| Ok(0), Some(&mut broken), &mut |l| {
         lines.push(l.to_owned())
     });
     assert_eq!(
@@ -724,4 +721,261 @@ fn a_failed_record_write_ends_watch_at_once() {
     );
     assert!(host.elapsed() < Duration::from_secs(60), "ended at once");
     assert_eq!(host.trace_count(Op::StateWrite), 0, "{lines:#?}");
+}
+
+// ---- Review of TASK-32 ----
+
+/// mped B1: the background tally's listing of a source failed with a
+/// failure of the host (EIO on one branch) after an earlier complete
+/// listing filled the index. The next cycle takes no queue from the index:
+/// its own discovery meets the failure first and nothing is deleted. (With
+/// the queue, the units of the healthy branch would be deleted before the
+/// discovery stops.) A complete listing later makes the index usable again.
+#[test]
+fn a_failed_background_listing_keeps_the_next_cycle_off_the_index() {
+    let profiles = r#"
+- name: tmp-deep
+  find: {roots: [/tmp], paths: ["*/a*"], type: dir}
+  action: delete
+  examples: {match: [/tmp/p/a0]}
+"#;
+    let candidate = |path: &str| {
+        format!("  {path}: {{.: {{mtime: {OLD}}}, f: {{size: 100M, mtime: {OLD}}}}}\n")
+    };
+    let tree = format!(
+        "  /tmp/p1: {{.: {{mtime: {OLD}}}}}\n  /tmp/p2: {{.: {{mtime: {OLD}}}}}\n{}{}{}{}",
+        candidate("/tmp/p1/a0"),
+        candidate("/tmp/p1/a1"),
+        candidate("/tmp/p1/a2"),
+        candidate("/tmp/p2/a9"),
+    );
+    // Listing 1 (start) reads /tmp/p2 cleanly; listing 2 (5 min) and the
+    // cycle's discovery (6 min) fail there.
+    let events = "events:\n  \
+                  - {at: {op: read_dir, path: /tmp/p2, nth: 2, when: before}, fail: EIO}\n  \
+                  - {at: {op: read_dir, path: /tmp/p2, nth: 3, when: before}, fail: EIO}\n  \
+                  - {at: {elapsed: 6m}, other_used: {mount: /tmp, bytes: 9G}}\n  \
+                  - {at: {elapsed: 390s}, signal: term}\n";
+    let host = host(&yaml("5G", &tree, events));
+    let specs = parse_profiles(profiles).unwrap();
+    let library = Library::with_user_profiles(&specs).unwrap();
+    let builtins = || Ok(library.clone());
+    let platform = Platform {
+        catalog: Catalog::Development,
+        draw_seed: &|| Ok(0),
+        builtins: &builtins,
+    };
+    let selection = Selection {
+        select: Some("profile:tmp-deep && filter:idle-1h".to_owned()),
+        ..selection()
+    };
+    let mut lines = Vec::new();
+    let started = watch::start(
+        &host,
+        &reclaim("2G", "3G", "10s"),
+        &selection,
+        &ConfigFile::NotFound { tried: Vec::new() },
+        &platform,
+        None,
+        &mut |l: &str| lines.push(l.to_owned()),
+    )
+    .expect("starts");
+    let mut records = Vec::new();
+    let mut record = |line: &str| {
+        records.push(serde_json::from_str::<Value>(line).unwrap());
+        Ok(())
+    };
+    watch::run_inline(&host, started, &|| Ok(0), Some(&mut record), &mut |l| {
+        lines.push(l.to_owned())
+    });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("the background tally's last listing of /tmp")),
+        "{lines:#?}"
+    );
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["status"], "error");
+    assert_eq!(records[0]["watch"]["backoff"]["class"], "retry");
+    assert_eq!(
+        deletions(&host),
+        0,
+        "nothing deleted before discovery's EIO"
+    );
+}
+
+/// Codex 6: a full filesystem (0 bytes available) after an `exhausted`
+/// cycle: the drop of rule 1 cannot happen, so cycles come 15 minutes
+/// apart, not at every interval; the record says `resume_below_bytes:
+/// null` and the log why.
+#[test]
+fn a_full_filesystem_backs_off_15_minutes_not_every_interval() {
+    let fresh: String = (0..3)
+        .map(|i| format!("  /tmp/a{i:02}: {{f: {{size: 10M}}}}\n"))
+        .collect();
+    let events = "events:\n  - {at: {elapsed: 40m}, signal: term}\n";
+    let host = host(&yaml("10G", &fresh, events));
+    assert_eq!(avail(&host), 0);
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    let starts: Vec<u64> = run.records.iter().map(|(t, _)| t.as_secs()).collect();
+    assert_eq!(starts.len(), 3, "{starts:?}");
+    for (_, r) in &run.records {
+        assert_eq!(r["status"], "exhausted");
+        assert_eq!(r["watch"]["backoff"]["resume_below_bytes"], Value::Null);
+    }
+    assert!(run.has("cannot fall by the step"), "{:?}", run.lines);
+}
+
+/// Codex 9: `ranking: random` shuffles on each reclaim: every cycle draws
+/// its own seed (the record's `seed`), as each `ensure` would.
+#[test]
+fn a_random_group_is_shuffled_again_for_each_cycle() {
+    let config = format!(
+        "version: 1\nprofiles:\n{}groups:\n  - name: g\n    ranking: random\n    tiers:\n      \
+         - {{name: a, select: \"profile:tmp-a && filter:idle-1h\"}}\n      \
+         - {{name: b, select: \"profile:tmp-b && filter:idle-1h\"}}\n",
+        "  - {name: tmp-a, find: {roots: [/tmp], paths: [\"a*\"], type: dir}, action: delete, examples: {match: [/tmp/a0]}}\n  \
+         - {name: tmp-b, find: {roots: [/tmp], paths: [\"b*\"], type: dir}, action: delete, examples: {match: [/tmp/b0]}}\n"
+    );
+    let fresh: String = (0..2)
+        .map(|i| format!("  /tmp/a{i}: {{f: {{size: 10M}}}}\n  /tmp/b{i}: {{f: {{size: 10M}}}}\n"))
+        .collect();
+    let events = "events:\n  - {at: {elapsed: 35m}, signal: term}\n";
+    let host = host(&yaml("9G", &fresh, events));
+    let selection = Selection {
+        select: None,
+        ..selection()
+    };
+    let file = ConfigFile::Read {
+        path: PathBuf::from("/home/u/.config/diskgc/config.yaml"),
+        bytes: config.into_bytes(),
+    };
+    let run = watch_with(&host, &reclaim("2G", "3G", "10s"), &selection, &file);
+    let seeds: Vec<&Value> = run.records.iter().map(|(_, r)| &r["seed"]).collect();
+    // The start drew 1; the three cycles 2, 3, 4.
+    assert_eq!(seeds, [&Value::from(2), &Value::from(3), &Value::from(4)]);
+}
+
+/// Codex 2: under `--allow-root`, `owners:` names resolve again before
+/// each cycle's first deletion. The account `tester` is gone by the
+/// cycle: it refuses (an error of `config`, back-off `hold`), nothing
+/// deleted for the uid the name had at start.
+#[test]
+fn an_owner_name_gone_since_start_refuses_the_cycle() {
+    let config = "version: 1\nowners: [tester]\nprofiles:\n  - {name: tmp-a, find: {roots: [/tmp], paths: [\"a*\"], type: dir}, action: delete, examples: {match: [/tmp/a0]}}\ngroups:\n  - name: g\n    tiers:\n      - {name: a, select: \"profile:tmp-a && filter:idle-1h\"}\n";
+    let tree: String = (0..3)
+        .map(|i| {
+            format!(
+                "  /tmp/a{i:02}: {{.: {{mtime: {OLD}, uid: 2000}}, f: {{size: 100M, mtime: {OLD}, uid: 2000}}}}\n"
+            )
+        })
+        .collect();
+    let events = "own_uid: 0\nusers: {tester: 2000}\nevents:\n  \
+                  - {at: {elapsed: 1m}, account: {name: tester, uid: null}}\n  \
+                  - {at: {elapsed: 2m}, other_used: {mount: /tmp, bytes: 9G}}\n  \
+                  - {at: {elapsed: 3m}, signal: term}\n";
+    let host = host(&yaml("5G", &tree, events));
+    let selection = Selection {
+        select: None,
+        allow_root: true,
+        ..selection()
+    };
+    let file = ConfigFile::Read {
+        path: PathBuf::from("/etc/diskgc/config.yaml"),
+        bytes: config.as_bytes().to_vec(),
+    };
+    let run = watch_with(&host, &reclaim("2G", "3G", "10s"), &selection, &file);
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let r = &run.records[0].1;
+    assert_eq!(r["status"], "error");
+    assert_eq!(r["errors"][0]["cause"], "config");
+    assert!(
+        r["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("\"tester\" does not exist"),
+        "{r}"
+    );
+    assert_eq!(r["watch"]["backoff"]["class"], "hold");
+    assert_eq!(deletions(&host), 0);
+}
+
+/// Codex 7 / mped N2: the first sample is not a start check. It fails at
+/// start, with percentage thresholds: `watch` starts (no exit 3); the
+/// loop's first sample fails too and is the first cycle (`error`, `host`,
+/// `retry`); the next one that works resolves the goal against the
+/// filesystem's real size, which the back-off's 1 % then uses.
+#[test]
+fn a_failing_first_sample_is_the_first_cycle_and_the_goal_resolves_later() {
+    let events = "events:\n  \
+                  - {at: {op: statvfs, path: /tmp, nth: 1, when: before}, fail: EIO}\n  \
+                  - {at: {op: statvfs, path: /tmp, nth: 2, when: before}, fail: EIO}\n  \
+                  - {at: {elapsed: 5m}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(2, "1M"), events));
+    let mode = Mode::Reclaim {
+        min_free: parse_size("20%").unwrap(),
+        target_free: parse_size("30%").unwrap(),
+        interval: Duration::from_secs(10),
+        timeout: Duration::from_secs(60),
+    };
+    let run = watch(&host, &mode);
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert!(run.has("warning: the first sample of PATH /tmp failed"));
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let r = &run.records[0].1;
+    assert_eq!(r["status"], "error");
+    assert_eq!(r["errors"][0]["cause"], "host");
+    assert_eq!(r["min_free_bytes"], Value::Null, "not resolved yet: {r}");
+    assert_eq!(r["watch"]["backoff"]["class"], "retry");
+    // About 4.5 GiB available is above 20 % of 10 GiB: the next sample that
+    // works ends the back-off.
+    assert!(run.has("space recovered"), "{:?}", run.lines);
+    assert_eq!(deletions(&host), 0);
+}
+
+/// docs/testing.md `watch_failed_samples_back_off`: `statvfs` of the
+/// watched filesystem failing for an hour gives `error` records (`cause:
+/// host`) at 0, 1, 3, 7, 15, 30, 45 and 60 minutes, not one per interval,
+/// and the process keeps running.
+#[test]
+fn watch_failed_samples_back_off() {
+    let mut events = String::from("events:\n");
+    for nth in 1..=370 {
+        events += &format!(
+            "  - {{at: {{op: statvfs, path: /tmp, nth: {nth}, when: before}}, fail: EIO}}\n"
+        );
+    }
+    events += "  - {at: {elapsed: 61m}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(2, "1M"), &events));
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
+    let minutes: Vec<u64> = run
+        .records
+        .iter()
+        .map(|(t, _)| (t.as_secs() + 30) / 60)
+        .collect();
+    assert_eq!(
+        minutes,
+        [0, 1, 3, 7, 15, 30, 45, 60],
+        "{:?}",
+        run.records.len()
+    );
+    for (_, r) in &run.records {
+        assert_eq!(r["status"], "error");
+        assert_eq!(r["errors"][0]["cause"], "host");
+        assert_eq!(r["watch"]["backoff"]["class"], "retry");
+    }
+    assert_eq!(deletions(&host), 0);
 }

@@ -397,6 +397,7 @@ fn evidence_request(profiles: &str, selection: &str, protect: bool) -> Result<Re
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     })
 }
@@ -671,6 +672,7 @@ fn request(yaml: &str, expr: &str, shapes: [u8; 3], protect: bool) -> Result<Req
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     })
 }
@@ -757,6 +759,7 @@ fn user_profiles_keep_the_whole_claude_container_in_plan_and_reclaim() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(selection, &library, None, 1000).expect("supported selection"),
     };
     let planned_host = ModelHost::new(&model).expect("saved host loads");
@@ -1081,6 +1084,7 @@ proptest! {
             path: PathBuf::from("/tmp"), min_free: parse_size("100%").unwrap(),
             target_free: None, timeout: Some(Duration::from_secs(600)),
             tally_budget: None,
+            watch: None,
             tier: Tier::select(&selection, &library, None, 1000)
                 .map_err(|e| TestCaseError::fail(format!("{e}\n{replay}")))?,
         };
@@ -1138,6 +1142,7 @@ proptest! {
             path: PathBuf::from("/tmp"), min_free: parse_size("100%").unwrap(),
             target_free: None, timeout: Some(Duration::from_secs(600)),
             tally_budget: None, tier,
+            watch: None,
         };
         let root = PathBuf::from(format!("/tmp/owner-{uid}"));
         let expected: BTreeSet<_> = ["cache", "other"].into_iter()

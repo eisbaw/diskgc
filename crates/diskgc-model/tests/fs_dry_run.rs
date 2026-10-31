@@ -160,6 +160,7 @@ fn request(select: &str, roots: &[&str], path: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library(), roots, 1000).unwrap_or_else(|e| panic!("{e}")),
     }
 }
@@ -175,6 +176,7 @@ fn built_in_request(select: &str, root: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library, Some(&roots), 1000).unwrap_or_else(|e| panic!("{e}")),
     }
 }
@@ -221,6 +223,7 @@ processes:
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let report = dry_run(&host, &request);
@@ -1181,6 +1184,7 @@ protect: [guard]
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select("profile:all-top", &config.library, None, 1000).unwrap(),
     };
     top.tier.protections = protections.clone();
@@ -2339,6 +2343,7 @@ protect: [guard]
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select("profile:sessions", &config.library, None, 1000).unwrap(),
     };
     request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();

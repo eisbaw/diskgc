@@ -1249,13 +1249,10 @@ pub(crate) mod tests {
             })
             .collect();
         naming.sort();
-        assert_eq!(naming, ["executor/preflight.rs", "watch/mod.rs"]);
+        assert_eq!(naming, ["executor/preflight.rs"]);
         let preflight =
             std::fs::read_to_string(src.join("executor/preflight.rs")).expect("read preflight");
         assert_eq!(preflight.matches("resolve_unscreened(").count(), 1);
-        // `watch`'s PATH at start and its device check before a cycle.
-        let watch = std::fs::read_to_string(src.join("watch/mod.rs")).expect("read watch");
-        assert_eq!(watch.matches("resolve_unscreened(").count(), 2);
     }
 
     /// The screen's one-pass prefilter judges every ancestor exactly as a

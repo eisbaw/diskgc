@@ -109,9 +109,9 @@ pub struct Backoff {
     pub attempt: u32,
     /// When the cycle that started it ended.
     pub ended: MonoTime,
-    /// Rule 1's level: a sample at or below it starts a cycle. `None` when
-    /// the cycle's final sample failed.
-    pub resume_below_bytes: Option<u64>,
+    /// The cycle's final sample (`None`: it failed) and rule 1's step.
+    pub final_avail: Option<u64>,
+    pub step: u64,
     /// What chose the class, for the log line.
     pub causes: Vec<String>,
 }
@@ -139,7 +139,8 @@ impl Backoff {
             class,
             attempt,
             ended,
-            resume_below_bytes: final_avail.map(|a| a.saturating_sub(step(size_bytes))),
+            final_avail,
+            step: step(size_bytes),
             causes,
         }
     }
@@ -155,11 +156,19 @@ impl Backoff {
         }
     }
 
+    /// Rule 1's level: a sample at or below it starts a cycle. `None` when
+    /// rule 1 cannot apply: the final sample failed, or it was below the
+    /// step, so available space cannot fall by it (a full filesystem must
+    /// not run a cycle at every interval).
+    pub fn resume_below_bytes(&self) -> Option<u64> {
+        self.final_avail?.checked_sub(self.step)
+    }
+
     /// Whether a sample taken at `now` (`None`: it failed) below
     /// `--min-free` starts a cycle.
     pub fn allows(&self, now: MonoTime, avail: Option<u64>) -> bool {
         let dropped = matches!(
-            (avail, self.resume_below_bytes),
+            (avail, self.resume_below_bytes()),
             (Some(a), Some(level)) if a <= level
         );
         dropped || now.saturating_since(self.ended) >= self.wait()
@@ -173,7 +182,7 @@ impl Backoff {
             ("wait_seconds", Json::U64(self.wait().as_secs())),
             (
                 "resume_below_bytes",
-                Json::opt(self.resume_below_bytes, Json::U64),
+                Json::opt(self.resume_below_bytes(), Json::U64),
             ),
         ])
     }
@@ -181,9 +190,14 @@ impl Backoff {
     /// The one log line of a back-off: its class, the causes that chose
     /// it, and both resume conditions.
     pub fn log_line(&self) -> String {
-        let drop = match self.resume_below_bytes {
-            Some(level) => format!("at a sample at or below {}", format_bytes(level)),
-            None => "not on a drop (the final sample failed)".to_owned(),
+        let drop = match (self.final_avail, self.resume_below_bytes()) {
+            (_, Some(level)) => format!("at a sample at or below {}", format_bytes(level)),
+            (None, None) => "not on a drop (the final sample failed)".to_owned(),
+            (Some(avail), None) => format!(
+                "not on a drop (the {} available cannot fall by the step of {})",
+                format_bytes(avail),
+                format_bytes(self.step)
+            ),
         };
         format!(
             "back-off {} (attempt {}; {}): the next cycle starts {drop}, or at the first sample \
@@ -329,17 +343,32 @@ mod tests {
             200 * GIB,
             None,
         );
-        assert_eq!(b.resume_below_bytes, Some(8 * GIB));
+        assert_eq!(b.resume_below_bytes(), Some(8 * GIB));
         assert!(!b.allows(at(101), Some(8 * GIB + 1)));
         assert!(b.allows(at(101), Some(8 * GIB)));
         // Small filesystem: 1 GiB.
         let b = Backoff::after(Class::Hold, vec![], at(100), Some(3 * GIB), 10 * GIB, None);
-        assert_eq!(b.resume_below_bytes, Some(2 * GIB));
+        assert_eq!(b.resume_below_bytes(), Some(2 * GIB));
         // A failed final sample: rule 1 never applies, not even to 0.
         let b = Backoff::after(Class::Retry, vec![], at(100), None, 10 * GIB, None);
-        assert_eq!(b.resume_below_bytes, None);
+        assert_eq!(b.resume_below_bytes(), None);
         assert!(!b.allows(at(101), Some(0)));
         assert!(!b.allows(at(101), None));
+        // A final sample below the step: available space cannot fall by it,
+        // so rule 1 never applies, not even to an unchanged 0 (Codex review
+        // of TASK-32: it used to saturate to a level of 0).
+        let full = Backoff::after(Class::Hold, vec![], at(100), Some(0), 10 * GIB, None);
+        assert_eq!(full.resume_below_bytes(), None);
+        assert!(!full.allows(at(101), Some(0)));
+        assert!(full.log_line().contains("cannot fall by the step"));
+        assert!(
+            full.to_json()
+                .to_text()
+                .contains("\"resume_below_bytes\":null")
+        );
+        let short = Backoff::after(Class::Hold, vec![], at(100), Some(GIB - 1), GIB, None);
+        assert!(!short.allows(at(101), Some(0)));
+        assert!(short.allows(at(100 + 900), Some(0)));
     }
 
     #[test]

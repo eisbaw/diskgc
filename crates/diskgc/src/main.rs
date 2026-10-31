@@ -537,7 +537,22 @@ impl StartupFailure {
     }
 }
 
+/// diskgc's state directory from the environment (docs/architecture.md,
+/// Snapshot): `$XDG_STATE_HOME/diskgc` or `$HOME/.local/state/diskgc`;
+/// `None` without an absolute one of them.
+fn env_state_dir() -> Option<PathBuf> {
+    diskgc_core::snapshot::state_dir(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
 fn startup() -> Result<LinuxHost, StartupFailure> {
+    startup_in(env_state_dir())
+}
+
+/// [`startup`] with the state directory already found.
+fn startup_in(state_dir: Option<PathBuf>) -> Result<LinuxHost, StartupFailure> {
     // The in-use scan holds about one descriptor per visible process; a
     // stock soft limit of 1024 is too low on a busy host (TASK-166,
     // diskgc_linux::nofile). Not raising it is not fatal: a scan that runs
@@ -553,10 +568,7 @@ fn startup() -> Result<LinuxHost, StartupFailure> {
     // Where the index snapshot lives (docs/architecture.md, Snapshot);
     // without an absolute $XDG_STATE_HOME or $HOME there is none, and a
     // run that would read or write it says so.
-    if let Some(dir) = diskgc_core::snapshot::state_dir(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    ) {
+    if let Some(dir) = state_dir {
         host = host.with_state_dir(dir);
     }
     Ok(host)

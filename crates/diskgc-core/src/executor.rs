@@ -45,7 +45,7 @@ mod tier_policy;
 
 pub use indexed::tally_sources;
 pub use plan::{dry_run, dry_run_grouped};
-pub use preflight::privileges;
+pub use preflight::{MeasureFailure, goal_bytes, privileges, reach_path};
 pub use tier::{
     FsUnionSource, NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, SELECT_TIER,
     SelectionFailure, SourceKind, Tier, bind_protections,
@@ -109,11 +109,19 @@ fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
 
 /// Measure an entire public run, including early returns and final signal
 /// precedence. The wall clock is used only to label its start; elapsed time
-/// comes from the host's monotonic clock. Public for `watch`'s cycles that
-/// end before the executor runs (a failed sample).
-pub fn timed_report<H: Host>(host: &H, run: impl FnOnce() -> Report) -> Report {
-    let wall = host.wall_clock();
-    let started = host.now();
+/// comes from the host's monotonic clock.
+fn timed_report<H: Host>(host: &H, run: impl FnOnce() -> Report) -> Report {
+    timed_report_from(host, None, run)
+}
+
+/// [`timed_report`] from an earlier start (`watch`'s triggering sample,
+/// [`WatchCycle::origin`]), when given.
+pub fn timed_report_from<H: Host>(
+    host: &H,
+    origin: Option<(MonoTime, Timestamp)>,
+    run: impl FnOnce() -> Report,
+) -> Report {
+    let (started, wall) = origin.unwrap_or_else(|| (host.now(), host.wall_clock()));
     let mut report = run();
     report.started_at = i32::try_from(wall.nanos)
         .ok()
@@ -187,9 +195,44 @@ pub struct Request {
     /// found them. The dry run judges every target fully and ignores it.
     pub tally_budget: Option<Duration>,
     pub tier: Tier,
+    /// Set by `watch` for one reclaim cycle ([`WatchCycle`]); `None` for
+    /// `ensure`.
+    pub watch: Option<WatchCycle>,
+}
+
+/// What a `watch` cycle adds to a request (docs/reference.md, The reclaim
+/// cycle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchCycle {
+    /// The device `PATH` resolved to at start. The cycle's own resolution
+    /// of `PATH` must find it (the one the cycle measures and reclaims
+    /// on); another one is an error of the host before anything is
+    /// deleted (a mount stacked on `PATH`).
+    pub expect_dev: Dev,
+    /// The sample that triggered the cycle: the cycle's deadline
+    /// (`--timeout`) and its `started_at` and `duration_ms` count from it,
+    /// through the lock wait and the reclaim.
+    pub origin: MonoTime,
+    /// The wall clock at [`Self::origin`], for `started_at`.
+    pub origin_wall: Timestamp,
 }
 
 impl Request {
+    /// When the run started: the triggering sample of a `watch` cycle, now
+    /// otherwise.
+    fn origin<H: Host>(&self, host: &H) -> MonoTime {
+        self.watch.map_or_else(|| host.now(), |w| w.origin)
+    }
+
+    /// The run's deadline: `--timeout` from [`Self::origin`].
+    fn deadline<H: Host>(&self, host: &H) -> Option<MonoTime> {
+        self.timeout.map(|t| {
+            self.origin(host)
+                .checked_add(t)
+                .unwrap_or(MonoTime(Duration::MAX))
+        })
+    }
+
     /// The report a run of this request starts from: its path and the goal
     /// as far as it is known before anything is measured.
     fn report(&self, status: Status, dry_run: bool) -> Report {
@@ -299,7 +342,28 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
 /// (missing, or not the regular file the tmpfiles line makes) is
 /// `provisioning`, so a harness tells "alert ops" from "my call is wrong"
 /// without parsing the message (TASK-151).
-fn lock_refusal(report: Report, log: &mut dyn FnMut(&str), error: LockError) -> Report {
+fn lock_refusal(
+    request: &Request,
+    report: Report,
+    log: &mut dyn FnMut(&str),
+    error: LockError,
+) -> Report {
+    // In a `watch` cycle a usage error is only the host lock file gone
+    // (`provisioning`); a host failure while locking is the environment,
+    // which may recover: status `error`, cause `host`, back-off `retry`
+    // (docs/reference.md, The reclaim cycle).
+    if request.watch.is_some()
+        && let LockError::Failed(_) = &error
+    {
+        let message = error.to_string();
+        log(&format!("error: {message}"));
+        let mut report = report;
+        report.status = Status::Error;
+        report
+            .errors
+            .push(ErrorEntry::run(ErrorCause::Host, message));
+        return report;
+    }
     let cause = match &error {
         LockError::Missing { .. } | LockError::Unusable { .. } => ErrorCause::Provisioning,
         // Unchanged contract (exit 2, `usage`) for a host failure while
@@ -350,7 +414,10 @@ pub fn ensure_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || ensure_inner(host, request, owners, index, log))
+    let origin = request.watch.map(|w| (w.origin, w.origin_wall));
+    timed_report_from(host, origin, || {
+        ensure_inner(host, request, owners, index, log)
+    })
 }
 
 fn ensure_inner<H: Delete>(
@@ -360,8 +427,8 @@ fn ensure_inner<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let run_started = host.now();
-    let deadline = deadline_of(host, request.timeout);
+    let run_started = request.origin(host);
+    let deadline = request.deadline(host);
     // Not a success until a path below says so.
     let report = request.report(Status::Error, false);
     // Before anything else (the gate, the first sample, the host lock):
@@ -593,7 +660,7 @@ fn ensure_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return lock_refusal(report, log, e);
+            return lock_refusal(request, report, log, e);
         }
     };
     log(&format!(
@@ -745,7 +812,8 @@ pub fn ensure_grouped_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed_report(host, || {
+    let origin = request.watch.map(|w| (w.origin, w.origin_wall));
+    timed_report_from(host, origin, || {
         ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, index, log)
     })
 }
@@ -759,10 +827,10 @@ fn ensure_grouped_inner<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let run_started = host.now();
+    let run_started = request.origin(host);
     let mut notes = NotesOncePerRun::new(log);
     let log: &mut dyn FnMut(&str) = &mut |line| notes.line(line);
-    let deadline = deadline_of(host, request.timeout);
+    let deadline = request.deadline(host);
     let mut report = request.report(Status::Error, false);
     if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
         return usage(report, log, "configuration has no tiers to run".to_owned());
@@ -881,7 +949,7 @@ fn ensure_grouped_inner<H: Delete>(
                 report.status = Status::Interrupted(signal);
                 return report;
             }
-            return lock_refusal(report, log, error);
+            return lock_refusal(request, report, log, error);
         }
     };
     log(&format!(
@@ -3493,5 +3561,62 @@ mod best_fit_tests {
         .unwrap_err();
         assert!(error.contains("/remote"));
         assert!(error.contains("nfs"));
+    }
+}
+
+#[cfg(test)]
+mod lock_refusal_tests {
+    use super::{
+        Dev, ErrorCause, HostError, LockError, MonoTime, Report, Request, Status, Tier, Timestamp,
+        WatchCycle, lock_refusal,
+    };
+    use crate::profile::Library;
+    use crate::units::Size;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn request(watch: bool) -> Request {
+        let library = Library::builtin().expect("built-ins");
+        Request {
+            path: PathBuf::from("/tmp"),
+            min_free: Size::Bytes(1),
+            target_free: None,
+            timeout: None,
+            tally_budget: None,
+            watch: watch.then_some(WatchCycle {
+                expect_dev: Dev { major: 0, minor: 1 },
+                origin: MonoTime(Duration::ZERO),
+                origin_wall: Timestamp { secs: 0, nanos: 0 },
+            }),
+            tier: Tier::select(
+                "profile:cargo-target",
+                &library,
+                Some(&["/r".to_owned()]),
+                1000,
+            )
+            .expect("a tier"),
+        }
+    }
+
+    /// mped S5 (TASK-32 review): a host failure while locking (EACCES, EIO)
+    /// stays `ensure`'s usage error (exit 2), but in a `watch` cycle it is
+    /// the environment: status `error`, cause `host`, so back-off `retry`.
+    /// A missing lock file is `provisioning` in both.
+    #[test]
+    fn a_failing_host_lock_is_a_host_error_in_a_watch_cycle() {
+        let failed = || LockError::Failed(HostError::invalid("flock", "/run/diskgc/lock", "EIO"));
+        let report = || Report::new(Status::Error, None, false);
+        let ensure = lock_refusal(&request(false), report(), &mut |_| {}, failed());
+        assert_eq!(ensure.status, Status::UsageError);
+        assert_eq!(ensure.errors[0].cause, ErrorCause::Usage);
+        let watch = lock_refusal(&request(true), report(), &mut |_| {}, failed());
+        assert_eq!(watch.status, Status::Error);
+        assert_eq!(watch.errors[0].cause, ErrorCause::Host);
+        let missing = || LockError::Missing {
+            detail: "ENOENT".into(),
+        };
+        let gone = lock_refusal(&request(true), report(), &mut |_| {}, missing());
+        assert_eq!(gone.status, Status::UsageError);
+        assert_eq!(gone.errors[0].cause, ErrorCause::Provisioning);
     }
 }

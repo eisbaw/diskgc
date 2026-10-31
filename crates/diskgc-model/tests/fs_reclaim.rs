@@ -308,6 +308,7 @@ fn request(select: &str, roots: &[&str], path: &str, min: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library(), roots, 1000).unwrap_or_else(|e| panic!("{e}")),
     }
 }
@@ -2055,6 +2056,7 @@ fn version_reclaim_keeps_linked_and_newest_files() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select("profile:claude-code-versions", &library, Some(&roots), 1000)
             .expect("version tier"),
     };
@@ -2681,6 +2683,7 @@ fn anchored_west_build_directory_marker_is_rechecked_under_lock() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select("profile:west-build-anchored", &library, Some(&roots), 1000)
             .expect("west-build-anchored tier"),
     };
@@ -2720,6 +2723,7 @@ fn anchored_cmake_source_identity_is_rechecked_under_lock() {
             target_free: None,
             timeout: Some(Duration::from_secs(600)),
             tally_budget: None,
+            watch: None,
             tier: Tier::select("profile:cmake-build-anchored", &library, Some(&roots), 1000)
                 .expect("anchored CMake tier"),
         };
@@ -2774,6 +2778,7 @@ fn anchored_cmake_reads_the_locked_candidate_after_its_path_is_swapped() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select("profile:cmake-build-anchored", &library, Some(&roots), 1000)
             .expect("anchored CMake tier"),
     };
@@ -3549,6 +3554,7 @@ fn each_kind_reaches_only_its_own_protocol() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(
             "profile:cargo-target",
             &library,

@@ -152,6 +152,13 @@ impl Background {
         if let Err(e) = host.lower_priority() {
             log(Event::PriorityNotLowered(e));
         }
+        Self::start_at_caller_priority(host, log)
+    }
+
+    /// [`Self::start`] without lowering the priority: for a tally that
+    /// shares its thread with work that must keep it (`watch` on the model,
+    /// [`crate::watch::live::Inline`]).
+    pub fn start_at_caller_priority<H: Host>(host: &H, log: &mut dyn FnMut(Event)) -> Self {
         let psi = match host.pressure() {
             Ok(_) => Psi::Present,
             Err(e) => {

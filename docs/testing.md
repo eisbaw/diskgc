@@ -662,11 +662,8 @@ Model scenarios required by [safety.md](safety.md) and
   events; each scenario asserts the deletion oracle, the JSON lines
   parsed line by line, and the `Delete` and host-lock calls on the
   trace). In diskgc-model `tests/watch.rs` (TASK-32), with the
-  background tally inline on the model's one thread; the retry doubling
-  is driven by a mount stacked on `PATH` (no backend reports
-  `backend_unavailable` yet). Still open: `watch_cycle_deadline`,
-  `watch_root_vanished_after_start_still_reclaims_other_tiers`, and of
-  `watch_signals` SIGINT, SIGHUP and a second signal during the stop:
+  background tally inline on the model's one thread. Each entry names the
+  test that covers it, or says *open*:
   - `watch_steady_between_thresholds_deletes_nothing_and_keeps_its_duty_cycle`
     (the PRD's acceptance test): available space held between
     `--min-free` and `--target-free` for 24 virtual hours, with
@@ -677,40 +674,59 @@ Model scenarios required by [safety.md](safety.md) and
     per interval (within one; the snapshot guard's samples are counted
     apart), the tally's active time at most 5 % (plus
     one batch) of every 100-batch window, and a snapshot write every
-    5 minutes (within one);
+    5 minutes (within one). As written; the duty cycle is bounded by all
+    port calls staying under 5 % of the 24 hours, the per-window bound is
+    the background tally's own test;
   - `watch_reclaims_below_min_free_to_target_free`: one drop below
     `--min-free` gives exactly one cycle and one record (`met`,
-    `target_met: true`, `exit_code: null`, `watch.cycle: 1`,
-    `index.source: live`), and deletion stops at the goal;
-  - `watch_hold_back_off_waits_for_a_drop_or_15_minutes`: an `exhausted`
+    `target_met: true`, `exit_code: null`, `watch.cycle: 1`), and
+    deletion stops at the goal (the record's `index` block is `null`
+    until TASK-244). As written;
+  - `watch_hold_back_off_waits_for_a_drop_or_15_minutes` (as
+    `watch_hold_back_off_waits_for_15_minutes` and
+    `watch_hold_back_off_ends_on_a_drop_by_the_step`; a full filesystem,
+    whose drop by the step cannot happen:
+    `a_full_filesystem_backs_off_15_minutes_not_every_interval`): an `exhausted`
     cycle; samples continue every interval; no cycle before space falls
     by the step or 15 minutes pass, whichever is first (both orders);
     one back-off log line; `resume_below_bytes` and `wait_seconds` in the
     record match when the next cycle starts;
-  - `watch_retry_back_off_doubles_and_caps`: a Docker tier
+  - `watch_retry_back_off_doubles_and_caps` (*open* with a Docker tier, no
+    backend reports `backend_unavailable` yet; the doubling and cap as
+    `watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing`): a Docker tier
     `backend_unavailable` at every cycle: cycles 1, 2, 4, 8, 15, 15
     minutes apart; the daemon back: the next cycle reclaims it and the
     doubling resets;
-  - `watch_mixed_outcome_takes_the_shortest_wait`: `exhausted` with one
+  - `watch_mixed_outcome_takes_the_shortest_wait` (the class: a unit test
+    in `watch::backoff`; *open* as a scenario): `exhausted` with one
     `backend_unavailable` skip is class `retry`; a drop by the step
     before its timer still starts a cycle at once;
-  - `watch_recovery_ends_back_off`: space freed by someone else during a
+  - `watch_recovery_ends_back_off` (as written): space freed by someone else during a
     back-off: no cycle, one log line; a later drop below `--min-free`
     starts a cycle at that sample;
-  - `watch_cycle_beside_ensure`: another process holds the host lock past
+  - `watch_cycle_beside_ensure` (the timeout as
+    `watch_cycle_beside_another_reclaim_times_out_and_retries`; the
+    holder freeing enough: *open*): another process holds the host lock past
     `--timeout`: a `lock_timeout` record, nothing deleted, class `retry`;
     the holder frees enough before the timeout: `met` with no deletion;
-  - `watch_failed_samples_back_off`: `statvfs` failing for an hour gives
+  - `watch_failed_samples_back_off` (as written; a failing first sample:
+    `a_failing_first_sample_is_the_first_cycle_and_the_goal_resolves_later`): `statvfs` failing for an hour gives
     `error` records (`cause: host`) at 0, 1, 3, 7, 15, 30, 45, 60
     minutes, not one per interval, and the process keeps running;
-  - `watch_cycle_deadline`: a tier slower than `--timeout`: a
+  - `watch_cycle_deadline` (*open*): a tier slower than `--timeout`: a
     `deadline` record, no deletion starts after the deadline, a running
     child gets SIGTERM;
-  - `watch_path_on_another_device_deletes_nothing`: a mount stacked on
-    `PATH` after start: the sample still reads the original filesystem;
-    the cycle's re-resolution finds another device and records a `host`
+  - `watch_path_on_another_device_deletes_nothing` (as
+    `watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing`):
+    a mount stacked on `PATH` after start: the sample still reads the
+    original filesystem; the cycle's own resolution of `PATH` (the one it
+    measures and reclaims on) finds another device and records a `host`
     error;
-  - `watch_start_refusals` (one case per row of the start sequence):
+  - `watch_start_refusals` (the gate, the host lock file, a target below
+    the minimum: `watch_start_refusals`; the usage errors: the binary's
+    `watch_usage_errors_say_why`; `second_watch_exits_2` and
+    `a_signal_during_the_start_wait_exits_0_writing_nothing`; the rest
+    *open*; one case per row of the start sequence):
     usage (no `--target-free`; `--interval 0`; `--tally-only` with
     `--target-free`), invalid configuration, root without `--allow-root`,
     a missing supplied root, a missing host lock file, a second `watch`
@@ -721,10 +737,13 @@ Model scenarios required by [safety.md](safety.md) and
     running tally; an unwritable state directory and a failing first
     sample are not refusals: one log line and no snapshot, and a first
     cycle record (`error`, `host`) respectively, the process running;
-  - `watch_root_vanished_after_start_still_reclaims_other_tiers`: a
+  - `watch_root_vanished_after_start_still_reclaims_other_tiers` (*open*): a
     tier's supplied root removed after start: that tier is one `missing`
     skip row, the other tiers delete to the goal, status `met`;
-  - `watch_signals`: SIGTERM between samples, during a back-off, during
+  - `watch_signals` (SIGTERM in a cycle:
+    `watch_sigterm_in_a_cycle_writes_an_interrupted_record_and_stops`;
+    between samples: every scenario's end; the rest *open*, the second
+    signal TASK-257): SIGTERM between samples, during a back-off, during
     the host-lock wait and in a cycle between two candidates: exit 0
     within one batch (50 ms) or at the next candidate boundary, a record
     with status `interrupted` for the cycle case only, no candidate
@@ -732,13 +751,25 @@ Model scenarios required by [safety.md](safety.md) and
     SIGINT and SIGHUP; a second signal during the snapshot write: exit 0
     and the old snapshot unchanged; a signal during the start wait: exit
     0, nothing written;
-  - `watch_tally_only_never_reclaims`: available space far below any
+  - `watch_tally_only_never_reclaims` (as
+    `watch_tally_only_never_reclaims_and_keeps_the_snapshot_fresh` and
+    `watch_tally_only_min_free_guards_the_write_on_the_watched_filesystem`): available space far below any
     threshold for an hour: no `Delete` call, no exclusive host-lock
     `flock` (only the pause probe), no
     stdout byte, snapshots every 5 minutes; with a reclaim of another
     process holding the host lock, no tally batch runs until it is
     released; `--min-free` given and the state directory on the watched
     filesystem: the write is skipped when it would take space below it;
+  - from the TASK-32 review: `a_failed_background_listing_keeps_the_next_cycle_off_the_index`
+    (a background listing that failed with a failure of the host keeps
+    every tier off the live index until a complete listing),
+    `a_random_group_is_shuffled_again_for_each_cycle`,
+    `an_owner_name_gone_since_start_refuses_the_cycle`,
+    `a_failed_record_write_ends_watch_at_once`; on the real kernel
+    (diskgc-linux `tests/tally_thread.rs`): the tally thread at nice 19 and
+    the caller not, a panic in the watcher's loop stopping the tally
+    thread, and a tally turn that does not end never holding the watcher
+    past its 1 s bound;
 - a `TMPDIR` changed by `export` after `exec`: documented as invisible (the
   test pins the heuristic's known limit);
 - deadline overruns: a blocking operation that exceeds the deadline is

@@ -16,12 +16,14 @@
 //!   state operations only.
 //!
 //! `watch` (TASK-32, [`crate::watch`]) seeds its live index with
-//! [`RunIndex::seed`] once at start and writes it through [`encode`] and
-//! [`write_held`] every 5 minutes under the single-writer lock it holds
-//! for its lifetime. Not here: the report's `index` block (TASK-244).
+//! [`RunIndex::seed`] once at start and writes it through
+//! [`writer::Writer`] ([`encode`] and [`write_held`]) every 5 minutes under
+//! the single-writer lock it holds for its lifetime. Not here: the
+//! report's `index` block (TASK-244).
 
 pub mod format;
 pub mod restore;
+pub mod writer;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -404,7 +406,9 @@ impl RunIndex {
                 None
             }
         };
-        write_held(host, &self.state, held, guard, &bytes, &last_check, log);
+        let stats = self.state.index.stats();
+        let units = stats.singles + stats.blocks;
+        write_held(host, units, held, guard, &bytes, &last_check, log);
     }
 }
 
@@ -451,7 +455,7 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
     Ok(bytes)
 }
 
-/// Writes `bytes` (`state` [`encode`]d) as the snapshot under the held
+/// Writes `bytes` (an index of `units` units, [`encode`]d) as the snapshot under the held
 /// single-writer lock, unless the space [`Guard`] says no or `last_check`
 /// names a reason right before the write. Every skip or failure is one log
 /// line; nothing else changes (docs/architecture.md, Snapshot). What the
@@ -459,7 +463,7 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
 /// for the new directory entry.
 pub fn write_held<H: Host>(
     host: &H,
-    state: &TallyState,
+    units: usize,
     held: Held<'_, H::Fd>,
     guard: Guard,
     bytes: &[u8],
@@ -491,14 +495,10 @@ pub fn write_held<H: Host>(
         return log(&skipped(why));
     }
     match host.state_write(held.locked, held.key, bytes) {
-        Ok(()) => {
-            let stats = state.index.stats();
-            log(&format!(
-                "index: snapshot {name} written: {} unit(s), {}",
-                stats.singles + stats.blocks,
-                format_bytes(size)
-            ));
-        }
+        Ok(()) => log(&format!(
+            "index: snapshot {name} written: {units} unit(s), {}",
+            format_bytes(size)
+        )),
         Err(e) => log(&skipped(&e.to_string())),
     }
 }

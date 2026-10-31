@@ -13,14 +13,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::invocation::{EnsureOptions, Platform};
+use diskgc_core::invocation::{Platform, Selection};
 use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
-use diskgc_core::units::{Size, parse_duration, parse_size};
+use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_linux::LinuxHost;
 
 use super::{
-    CATALOG, EXIT_OUTPUT_ERROR, builtins, draw_seed, read_config, set, startup, text, unknown_flag,
+    CATALOG, EXIT_OUTPUT_ERROR, builtins, draw_seed, env_state_dir, read_config, set, startup_in,
+    text, unknown_flag,
 };
 
 /// `--interval`'s default and bounds (docs/reference.md, Watch flags).
@@ -57,9 +58,9 @@ pub(super) const WATCH_FLAGS: [&str; 10] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WatchArgs {
     pub(super) mode: Mode,
-    /// `PATH`, `--select`, `--roots` and `--allow-root` as for `ensure`; the
-    /// goal fields are not used (the mode holds the goal).
-    pub(super) options: EnsureOptions,
+    /// `PATH`, `--select`, `--roots` and `--allow-root` as for `ensure`
+    /// (the mode holds the goal).
+    pub(super) selection: Selection,
     pub(super) config: Option<OsString>,
 }
 
@@ -202,18 +203,12 @@ pub(super) fn parse_watch(args: &[OsString]) -> Result<WatchArgs, String> {
     }
     Ok(WatchArgs {
         mode,
-        options: EnsureOptions {
-            // Unused by watch (the mode holds the goal); placeholders.
-            min_free: Size::Bytes(0),
-            target_free: None,
-            timeout: None,
-            tally_budget: None,
+        selection: Selection {
+            path,
             select,
             roots,
-            dry_run: false,
             allow_root,
-            no_index: false,
-            path,
+            // A model-test seam: never set from the command line.
             test_entry_budget: None,
         },
         config,
@@ -242,7 +237,7 @@ fn refused(report: Option<Report>, exit_code: u8, json: bool) -> ExitCode {
 /// Runs `watch` until a signal (exit 0), a start refusal (2 or 3) or a
 /// failed stdout write (3).
 pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
-    let path = args.options.path.as_path();
+    let path = args.selection.path.as_path();
     let fail = |status: Status, cause: ErrorCause, why: String| {
         log(&format!("error: {why}"));
         let mut report = Report::new(status, Some(path), false);
@@ -261,11 +256,14 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
             );
         }
     }
-    let host = match startup() {
-        Ok(host) => host,
+    let state_dir = env_state_dir();
+    // `'static`: the background tally's thread may outlive the loop if it
+    // is blocked in the kernel at the end (it is then left to the exit).
+    let host: &'static LinuxHost = match startup_in(state_dir.clone()) {
+        Ok(host) => Box::leak(Box::new(host)),
         Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
     };
-    let config = match read_config(args.config.as_deref(), args.options.allow_root) {
+    let config = match read_config(args.config.as_deref(), args.selection.allow_root) {
         Ok(config) => config,
         Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
     };
@@ -274,15 +272,11 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
         draw_seed: &draw_seed,
         builtins: &builtins,
     };
-    let state_dir = diskgc_core::snapshot::state_dir(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    );
     let mut log_mut = log;
     let started = match watch::start(
-        &host,
+        host,
         &args.mode,
-        &args.options,
+        &args.selection,
         &config,
         &platform,
         state_dir.as_deref(),
@@ -305,10 +299,14 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
             .map_err(|e| e.to_string())
     };
     let record: Option<watch::Record<'_>> = if json { Some(&mut write_record) } else { None };
-    match watch::run_threaded(&host, started, record, &log) {
+    match watch::run_threaded(host, started, &draw_seed, record, &log) {
         Ended::Stopped(_) => {
             log("stopped");
             ExitCode::SUCCESS
+        }
+        Ended::Refused(why) => {
+            log(&format!("error: {why}"));
+            ExitCode::from(super::EXIT_USAGE)
         }
         Ended::OutputFailed(why) => {
             log(&format!(
@@ -353,7 +351,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(t.mode, Mode::TallyOnly { min_free: None });
-        assert_eq!(t.options.roots, ["/r"]);
+        assert_eq!(t.selection.roots, ["/r"]);
         let t = parse(&["--tally-only", "--min-free=5G", "/home"]).unwrap();
         assert_eq!(
             t.mode,

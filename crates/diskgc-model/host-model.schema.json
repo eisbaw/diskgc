@@ -197,6 +197,27 @@
         "proc"
       ]
     },
+    "AccountSpec": {
+      "description": "An account name and its uid from now on (`None`: no such account).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "uid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
     "At": {
       "description": "When an event fires: at the `nth` call of `op` (on `path`, if given), at\nthe `call`-th call of any kind, or once the clock has run `elapsed`\nsince the start. Call triggers need `when`.",
       "type": "object",
@@ -444,6 +465,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/AccessSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account": {
+          "description": "An account of the name service appears, changes its uid, or\n(`uid: null`) disappears (`owners:` names resolve again at every\nreclaim of a `watch`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountSpec"
             },
             {
               "type": "null"

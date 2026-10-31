@@ -260,6 +260,31 @@ impl EnsureOptions {
     }
 }
 
+/// What both `ensure` and `watch` take from the command line besides the
+/// goal: `PATH`, `--select`, `--roots`, `--allow-root` (and the model's
+/// entry-budget seam, [`EnsureOptions::test_entry_budget`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    pub path: PathBuf,
+    pub select: Option<String>,
+    pub roots: Vec<String>,
+    pub allow_root: bool,
+    pub test_entry_budget: Option<usize>,
+}
+
+impl EnsureOptions {
+    /// What [`prepare`] takes from these options.
+    pub fn selection(&self) -> Selection {
+        Selection {
+            path: self.path.clone(),
+            select: self.select.clone(),
+            roots: self.roots.clone(),
+            allow_root: self.allow_root,
+            test_entry_budget: self.test_entry_budget,
+        }
+    }
+}
+
 /// What `ensure` needs from the build and its environment besides the
 /// `Host` port. Each function is called only when the run needs it.
 pub struct Platform<'a> {
@@ -309,14 +334,22 @@ fn run<H: Delete>(
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
-    let prepared = prepare(host, options, config_file, platform, log)?;
-    prepared.refuse_missing_roots(host, options)?;
+    let selection = options.selection();
+    let prepared = prepare(host, &selection, config_file, platform, log)?;
+    prepared.refuse_missing_roots(host, &selection)?;
     let mut index = if options.no_index {
         RunIndex::no_index()
     } else {
         RunIndex::snapshot()
     };
-    Ok(prepared.execute(host, options.dry_run, &mut index, progress))
+    let request = prepared.request(
+        options.min_free,
+        options.target_free,
+        options.timeout,
+        options.tally_budget,
+        None,
+    );
+    Ok(prepared.execute(host, &request, options.dry_run, &mut index, progress))
 }
 
 /// Everything `ensure` and `watch` decide from the command line and the
@@ -326,13 +359,18 @@ fn run<H: Delete>(
 /// at every reclaim cycle ([`Prepared::execute`]).
 #[derive(Debug, Clone)]
 pub struct Prepared {
-    request: Request,
+    path: PathBuf,
+    /// The `--select` tier, or the first configured one.
+    tier: Tier,
     /// The configured tiers, their timeouts and the random seed; `None`
-    /// under `--select` (the request's tier alone).
+    /// under `--select` (the tier alone).
     configured: Option<(Vec<Tier>, Vec<Duration>, Option<u64>)>,
     owners: Vec<u32>,
     uid: u32,
+    allow_root: bool,
     config: Option<Config>,
+    protections: Vec<executor::ProtectedSource>,
+    max_entries: usize,
 }
 
 impl Prepared {
@@ -341,7 +379,7 @@ impl Prepared {
     pub fn tiers(&self) -> (Vec<&Tier>, Vec<Duration>) {
         match &self.configured {
             Some((tiers, timeouts, _)) => (tiers.iter().collect(), timeouts.clone()),
-            None => (vec![&self.request.tier], vec![Duration::ZERO]),
+            None => (vec![&self.tier], vec![Duration::ZERO]),
         }
     }
 
@@ -350,20 +388,68 @@ impl Prepared {
         self.config.as_ref().map(|c| c.path.as_path())
     }
 
-    /// The request a run makes (its `PATH`, goal and deadlines).
-    pub fn request(&self) -> &Request {
-        &self.request
+    /// The request of one run toward a goal: `--min-free`, `--target-free`,
+    /// `--timeout`, `--tally-budget` and, for a `watch` cycle, what the
+    /// cycle adds.
+    pub fn request(
+        &self,
+        min_free: Size,
+        target_free: Option<Size>,
+        timeout: Option<Duration>,
+        tally_budget: Option<Duration>,
+        watch: Option<executor::WatchCycle>,
+    ) -> Request {
+        Request {
+            path: self.path.clone(),
+            min_free,
+            target_free,
+            timeout,
+            tally_budget,
+            watch,
+            tier: self.tier.clone(),
+        }
     }
 
-    /// The same, with `watch`'s goal and cycle deadline: `--min-free` and
-    /// `--target-free` in bytes (resolved at start) and `--timeout`; no
-    /// synchronous tally (the live index replaces it).
-    pub fn with_goal(mut self, min_free: u64, target_free: u64, timeout: Duration) -> Self {
-        self.request.min_free = Size::Bytes(min_free);
-        self.request.target_free = Some(Size::Bytes(target_free));
-        self.request.timeout = Some(timeout);
-        self.request.tally_budget = None;
-        self
+    /// The decisions again for one `watch` cycle, before its first
+    /// deletion (docs/safety.md, Validation: Environmental, at the start of
+    /// every reclaim): `owners:` names resolved again (a name gone or now
+    /// a system uid refuses the cycle, cause `config`; a name now another
+    /// uid is that uid, said in one line), and groups with `ranking:
+    /// random` shuffled again with a fresh seed from `draw_seed` (a fixed
+    /// `DISKGC_SEED` stays fixed: docs/reference.md, Tier fields).
+    pub fn for_cycle<H: Delete>(
+        &self,
+        host: &H,
+        draw_seed: &dyn Fn() -> Result<u64, String>,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Self, (ErrorCause, String)> {
+        let mut next = self.clone();
+        if self.allow_root {
+            let config = self.config.as_ref().expect("root mode has a config");
+            let owners = resolved_owners(host, config).map_err(|why| (ErrorCause::Config, why))?;
+            if owners != self.owners {
+                log(&format!(
+                    "owners: now resolve to uid(s) {owners:?} (were {:?})",
+                    self.owners
+                ));
+            }
+            next.owners = owners;
+        }
+        if let (Some(config), Some(_)) = (&self.config, &self.configured)
+            && config.groups.iter().any(|g| g.ranking == Ranking::Random)
+        {
+            let seed = draw_seed().map_err(|why| (ErrorCause::Config, why))?;
+            let (mut tiers, timeouts) =
+                configured_tiers(config, self.uid, self.allow_root, Some(seed))
+                    .map_err(|why| (ErrorCause::Config, why))?;
+            for tier in &mut tiers {
+                tier.protections = self.protections.clone();
+                tier.max_entries = self.max_entries;
+            }
+            next.tier = tiers[0].clone();
+            next.configured = Some((tiers, timeouts, Some(seed)));
+        }
+        Ok(next)
     }
 
     /// A supplied root that does not exist refuses the run (exit 2,
@@ -371,22 +457,22 @@ impl Prepared {
     pub fn refuse_missing_roots<H: Host>(
         &self,
         host: &H,
-        options: &EnsureOptions,
+        selection: &Selection,
     ) -> Result<(), (ErrorCause, String)> {
-        refuse_missing_roots(host, self.config.as_ref(), options, self.uid)
+        refuse_missing_roots(host, self.config.as_ref(), selection, self.uid)
     }
 
-    /// Runs the executor: the dry run, or the reclaim on `index`
-    /// (docs/architecture.md, The reclaim walk). Every error is in the
-    /// report.
+    /// Runs the executor on `request` ([`Self::request`]): the dry run, or
+    /// the reclaim on `index` (docs/architecture.md, The reclaim walk).
+    /// Every error is in the report.
     pub fn execute<H: Delete>(
         &self,
         host: &H,
+        request: &Request,
         dry_run: bool,
         index: &mut RunIndex,
         progress: &mut dyn FnMut(&str),
     ) -> Report {
-        let request = &self.request;
         let owners = &self.owners;
         let mut report = if let Some((tiers, timeouts, _)) = &self.configured {
             if dry_run {
@@ -411,7 +497,7 @@ impl Prepared {
 /// The decisions of [`Prepared`], or the refusal before the executor.
 pub fn prepare<H: Delete>(
     host: &H,
-    options: &EnsureOptions,
+    options: &Selection,
     config_file: &ConfigFile,
     platform: &Platform<'_>,
     log: &mut dyn FnMut(&str),
@@ -519,22 +605,18 @@ pub fn prepare<H: Delete>(
             .map_err(|why| (ErrorCause::Safety, why))?;
         tier
     };
-    tier.protections = protections;
+    tier.protections = protections.clone();
     tier.max_entries = max_entries;
-    let request = Request {
-        path: options.path.clone(),
-        min_free: options.min_free,
-        target_free: options.target_free,
-        timeout: options.timeout,
-        tally_budget: options.tally_budget,
-        tier,
-    };
     Ok(Prepared {
-        request,
+        path: options.path.clone(),
+        tier,
         configured,
         owners,
         uid,
+        allow_root: options.allow_root,
         config: loaded,
+        protections,
+        max_entries,
     })
 }
 
@@ -555,7 +637,7 @@ pub fn prepare<H: Delete>(
 fn refuse_missing_roots<H: Host>(
     host: &H,
     config: Option<&Config>,
-    options: &EnsureOptions,
+    options: &Selection,
     uid: u32,
 ) -> Result<(), (ErrorCause, String)> {
     // (root as written, where), in the order the operator wrote them.
@@ -760,7 +842,7 @@ fn resolve_owner<H: Delete>(host: &H, name: &str) -> Result<u32, String> {
 
 /// The tier `--select` makes, against `library`.
 fn selected_tier(
-    options: &EnsureOptions,
+    options: &Selection,
     library: &Library,
     uid: u32,
     log: &mut dyn FnMut(&str),

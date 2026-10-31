@@ -533,6 +533,7 @@ fn excluded_leaf_and_other_root_negation_leave_only_first_root_y_file() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let model = model(&case);
@@ -581,6 +582,7 @@ fn grouped_union_applies_its_factor_to_every_member() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let host = ModelHost::new(&model(&case)).expect("saved model");
@@ -635,6 +637,7 @@ fn source_where_rejecting_outer_match_allows_its_second_pattern_to_find_child() 
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let model = model(&case);
@@ -695,6 +698,7 @@ fn config_protect_uses_raw_outer_match_even_when_source_where_rejects_it() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let model = model(&case);
@@ -737,6 +741,7 @@ fn mixed_marker_filter_complements_the_whole_known_conjunction() {
             target_free: None,
             timeout: Some(Duration::from_secs(600)),
             tally_budget: None,
+            watch: None,
             tier: Tier::select(&expression(&case), &library, None, 1000).expect("saved selection"),
         };
         let model = model(&case);
@@ -793,6 +798,7 @@ fn unknown_marker_type_passes_neither_filter_polarity_or_source_where() {
             target_free: None,
             timeout: Some(Duration::from_secs(600)),
             tally_budget: None,
+            watch: None,
             tier: Tier::select(&expression(&case), &library, None, 1000).expect("selection"),
         };
         let model = model(&case);
@@ -849,6 +855,7 @@ fn uncertain_negated_source_discovery_stops_instead_of_selecting() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(&expression(&case), &library, None, 1000).expect("selection"),
     };
     let model = model(&case);
@@ -892,6 +899,7 @@ fn unknown_type_below_selected_directory_refuses_whole_tree() {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(&expression(&case), &library, None, 1000).expect("selection"),
     };
     let model = model(&case);
@@ -960,7 +968,7 @@ proptest! {
                 .map_err(|e| TestCaseError::fail(format!("{e}\n{replay}")))?;
         }
         let request = Request { path: PathBuf::from("/tmp"), min_free: parse_size("100%").unwrap(),
-            target_free: None, timeout: Some(Duration::from_secs(600)), tally_budget: None, tier };
+            target_free: None, timeout: Some(Duration::from_secs(600)), tally_budget: None, watch: None, tier };
         let host = ModelHost::new(&model).map_err(|e| TestCaseError::fail(format!("{e}\n{replay}")))?;
         inject_unknown_tags(&host, &case);
         let plan = executor::dry_run(&host, &request, &[1000], &mut |_| {});

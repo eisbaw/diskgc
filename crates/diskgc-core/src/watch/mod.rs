@@ -12,42 +12,42 @@
 //! - [`live`]: the live index shared by the background tally and the
 //!   cycles, on a thread of its own on a real host ([`live::Threaded`])
 //!   or inline on the model ([`live::Inline`]);
-//! - [`Writer`]: the single-writer lock, held for the process's life, and
-//!   the snapshot writes every [`SNAPSHOT_PERIOD`] and at stop;
+//! - [`crate::snapshot::writer`]: the single-writer lock, held for the
+//!   process's life, and the snapshot writes every [`SNAPSHOT_PERIOD`] and
+//!   at the stop;
 //! - [`start`]: the start sequence (docs/reference.md, Watch start), whose
 //!   first failure exits with its code and deletes nothing;
-//! - [`run`]: the loop of samples, cycles and snapshot ticks until a
-//!   signal.
+//! - [`cycle_once`]: one cycle from its triggering sample, and [`run`]: the
+//!   loop of samples, cycles and snapshot ticks until a signal.
 //!
-//! A cycle is `ensure`'s reclaim, not a copy of it: the caller passes it
-//! in (`cycle`, [`crate::invocation::Prepared::execute`] on
-//! [`crate::snapshot::RunIndex::live`]), so this module never holds a
-//! [`crate::host::Delete`] and cannot delete. Its decisions, its checks
-//! and its report are `ensure`'s; only the index (live, no synchronous
-//! tally, no write) and the record (`exit_code` `null`, the `watch`
-//! field) differ.
+//! A cycle is `ensure`'s reclaim, not a copy of it: [`reclaim_cycle`] runs
+//! [`Prepared::execute`] on [`RunIndex::live`] with a request that carries
+//! the cycle ([`WatchCycle`]: the device `PATH` must still be on, and the
+//! triggering sample the deadline counts from). Only [`run_threaded`] and
+//! [`run_inline`] build it, and only for a reclaiming `watch`; the loop
+//! itself holds no [`Delete`] and cannot delete.
 //!
-//! Known gaps against the contract, each filed: a second signal during the
-//! stop does not skip the snapshot write (TASK-257); the report's `index`
-//! block stays `null` (TASK-244 defines it for `ensure` and `watch`
-//! alike); a mount stacked on `PATH` is detected right before a cycle, not
-//! inside the executor's own measurement, so a mount made between the two
-//! is not seen by this check (TASK-259).
+//! Known gaps against the contract: a second signal during the stop does
+//! not skip the snapshot write (TASK-257); the report's `index` block stays
+//! `null` (TASK-244 defines it for `ensure` and `watch` alike).
 
 pub mod backoff;
 pub mod live;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::executor::{self, timed_report};
-use crate::host::{Delete, Dev, FsKey, Host, LockMode, Locked, MonoTime, WaitLock};
+use crate::executor::{
+    self, MeasureFailure, WatchCycle, goal_bytes, reach_path, timed_report_from,
+};
+use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
 use crate::hostlock::{self, LockError};
-use crate::invocation::{ConfigFile, EnsureOptions, Platform, Prepared, prepare};
+use crate::invocation::{ConfigFile, Platform, Prepared, Selection, prepare};
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
-use crate::resolve::{ResolveError, Want, resolve_unscreened};
-use crate::snapshot::{self, Guard, Held, Reclaimed, RunIndex};
+use crate::snapshot::writer::{StartLock, Writer};
+use crate::snapshot::{self, Guard, Reclaimed, RunIndex};
 use crate::tally::TallyState;
 use crate::tally::listing::TallySource;
 use crate::units::{Size, format_bytes};
@@ -59,22 +59,19 @@ use live::LiveIndex;
 /// at once ([`Ended::OutputFailed`]).
 pub type Record<'a> = &'a mut dyn FnMut(&str) -> Result<(), String>;
 
-/// One reclaim cycle on the live index, its progress lines to the log
-/// ([`reclaim_cycle`]).
-pub type Cycle<'a> = &'a mut dyn FnMut(&mut TallyState, &mut dyn FnMut(&str)) -> Report;
+/// One reclaim cycle ([`reclaim_cycle`]).
+pub type Cycle<'a> = &'a mut dyn FnMut(CycleRun<'_>) -> Report;
 
 /// How often the snapshot is written (and, without the single-writer
 /// lock, how often it is tried again).
 pub const SNAPSHOT_PERIOD: Duration = Duration::from_secs(5 * 60);
-/// How long the start waits for the single-writer lock: an `ensure` holds
-/// it only while writing.
-pub const START_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// What a `watch` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     /// Reclaim below `--min-free` up to `--target-free`, sampling every
-    /// `interval`; each cycle's deadline is `timeout` from its start.
+    /// `interval`; each cycle's deadline is `timeout` from its triggering
+    /// sample.
     Reclaim {
         min_free: Size,
         target_free: Size,
@@ -86,18 +83,59 @@ pub enum Mode {
     TallyOnly { min_free: Option<Size> },
 }
 
-/// The goal of a reclaiming `watch`, in bytes (resolved at start).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The goal of a reclaiming `watch`. A percentage is resolved against the
+/// filesystem's size at the first sample that succeeds (at start, or
+/// later when that one failed), and that size is rule 1's 1 % of the
+/// back-off ([`backoff::step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
+    pub min_free: Size,
+    pub target_free: Size,
+    pub interval: Duration,
+    pub timeout: Duration,
+    resolved: Option<GoalBytes>,
+}
+
+/// [`Goal`] in bytes, and the filesystem's size it was resolved with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalBytes {
     pub min_free: u64,
     pub target_free: u64,
-    pub interval: Duration,
+    pub size_bytes: u64,
+}
+
+impl Goal {
+    /// Resolves the goal against a filesystem of `size_bytes`, once; a
+    /// target below the minimum is a usage error.
+    fn resolve(&mut self, size_bytes: u64) -> Result<GoalBytes, String> {
+        if let Some(bytes) = self.resolved {
+            return Ok(bytes);
+        }
+        let (min_free, target_free) = goal_bytes(self.min_free, Some(self.target_free), size_bytes)
+            .map_err(|e| match e {
+                MeasureFailure::Usage(why) | MeasureFailure::Host(why) => why,
+            })?;
+        let bytes = GoalBytes {
+            min_free,
+            target_free,
+            size_bytes,
+        };
+        self.resolved = Some(bytes);
+        Ok(bytes)
+    }
+
+    /// The goal as the report shows it before anything is measured.
+    fn report(&self, path: &Path) -> Report {
+        Report::new(Status::Error, Some(path), false)
+            .with_goal(self.min_free, Some(self.target_free))
+    }
 }
 
 /// The filesystem watched: `PATH` as reached at start, whose descriptor is
 /// what every sample reads (a mount later stacked on `PATH` does not
-/// change it), its device, the device mountinfo names for its mount (the
-/// snapshot's space guard), and its size at start.
+/// change it), its device (every cycle's resolution of `PATH` must find
+/// it), and the device mountinfo names for its mount (the snapshot's space
+/// guard).
 #[derive(Debug)]
 pub struct Watched<F> {
     pub fd: F,
@@ -105,7 +143,6 @@ pub struct Watched<F> {
     pub mount: PathBuf,
     pub dev: Dev,
     pub fs: Dev,
-    pub size_bytes: u64,
 }
 
 /// Why `watch` did not start: its exit code (0 for a signal during the
@@ -135,6 +172,13 @@ impl Refused {
         Self::with(Status::UsageError, cause, path, why)
     }
 
+    fn measure(path: &Path, failure: MeasureFailure) -> Self {
+        match failure {
+            MeasureFailure::Usage(why) => Self::usage(ErrorCause::Usage, path, why),
+            MeasureFailure::Host(why) => Self::with(Status::Error, ErrorCause::Host, path, why),
+        }
+    }
+
     fn stopped() -> Self {
         Self {
             exit_code: 0,
@@ -143,14 +187,21 @@ impl Refused {
     }
 }
 
+/// What a reclaiming `watch` reclaims with: its goal and `watch`'s
+/// decisions (made once at start; each cycle refreshes what must be
+/// checked again, [`Prepared::for_cycle`]).
+#[derive(Debug)]
+pub struct Reclaim {
+    pub goal: Goal,
+    pub prepared: Prepared,
+}
+
 /// A started `watch`: everything [`run`] needs.
 #[derive(Debug)]
 pub struct Started<F> {
     pub watched: Watched<F>,
-    /// `None` under `--tally-only`.
-    pub goal: Option<Goal>,
-    /// `watch`'s decisions, with the cycle's goal and deadline.
-    pub prepared: Prepared,
+    /// `None` under `--tally-only`: nothing in it can delete.
+    pub reclaim: Option<Reclaim>,
     pub writer: Writer<F>,
     /// The live index, seeded from a valid snapshot.
     pub state: TallyState,
@@ -159,24 +210,38 @@ pub struct Started<F> {
 }
 
 /// The start sequence (docs/reference.md, Watch start), in its order; the
-/// first failure is the refusal. `options` carries `PATH`, `--select`,
-/// `--roots` and `--allow-root` as for `ensure` (its goal fields are
-/// unused); `state_dir` names the state directory for the log.
+/// first failure is the refusal. `state_dir` names the state directory for
+/// the log.
 pub fn start<H: Delete>(
     host: &H,
     mode: &Mode,
-    options: &EnsureOptions,
+    selection: &Selection,
     config: &ConfigFile,
     platform: &Platform<'_>,
     state_dir: Option<&Path>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Started<H::Fd>, Refused> {
-    let path = options.path.as_path();
+    let path = selection.path.as_path();
     let refuse = |(cause, why): (ErrorCause, String)| Refused::usage(cause, path, why);
     // 1, and privileges: the configuration, the selection, root.
-    let prepared = prepare(host, options, config, platform, log).map_err(refuse)?;
+    let prepared = prepare(host, selection, config, platform, log).map_err(refuse)?;
+    let mut goal = match mode {
+        Mode::Reclaim {
+            min_free,
+            target_free,
+            interval,
+            timeout,
+        } => Some(Goal {
+            min_free: *min_free,
+            target_free: *target_free,
+            interval: *interval,
+            timeout: *timeout,
+            resolved: None,
+        }),
+        Mode::TallyOnly { .. } => None,
+    };
     // 2. The pre-release sandbox gate, unless nothing can be deleted.
-    if let Mode::Reclaim { .. } = mode
+    if goal.is_some()
         && let Err(gate) = host.may_delete()
     {
         return Err(Refused::usage(
@@ -188,100 +253,84 @@ pub fn start<H: Delete>(
             ),
         ));
     }
-    // 3. PATH, reached safely and held.
-    let at = resolve_unscreened(host, path, Want::Directory).map_err(|e| {
-        let why = format!("PATH {}: {e}", path.display());
-        match e {
-            ResolveError::Host(_) => Refused::with(Status::Error, ErrorCause::Host, path, why),
-            _ => Refused::usage(ErrorCause::Usage, path, why),
-        }
-    })?;
+    // 3. PATH, reached safely and held. The first sample is not a start
+    //    check: a goal whose percentage needs it waits for one that works.
+    let at = reach_path(host, path).map_err(|e| Refused::measure(path, e))?;
     let first = host.statvfs(&at.fd);
-    let size_bytes = first.as_ref().map_or(0, |s| s.size_bytes);
-    let bytes = |size: Size, flag: &str| -> Result<u64, Refused> {
-        match (size, &first) {
-            (Size::Bytes(b), _) => Ok(b),
-            (_, Ok(space)) => size.bytes(space.size_bytes).map_err(|e| {
-                Refused::usage(ErrorCause::Usage, path, format!("{flag} {size}: {e}"))
-            }),
-            (_, Err(e)) => Err(Refused::with(
-                Status::Error,
-                ErrorCause::Host,
-                path,
-                format!(
-                    "{flag} {size}: a percentage needs the filesystem's size, and sampling \
-                     PATH {} failed: {e}",
+    if let Some(goal) = &mut goal {
+        match &first {
+            Ok(space) => {
+                goal.resolve(space.size_bytes)
+                    .map_err(|why| Refused::usage(ErrorCause::Usage, path, why))?;
+            }
+            Err(e) => {
+                if let (Size::Bytes(min), Size::Bytes(target)) = (goal.min_free, goal.target_free)
+                    && target < min
+                {
+                    return Err(Refused::usage(
+                        ErrorCause::Usage,
+                        path,
+                        format!("--target-free ({target} bytes) is below --min-free ({min} bytes)"),
+                    ));
+                }
+                log(&format!(
+                    "warning: the first sample of PATH {} failed ({e}); it is the first cycle, \
+                     and the goal is resolved at the first sample that works",
                     path.display()
-                ),
-            )),
-        }
-    };
-    let goal = match mode {
-        Mode::Reclaim {
-            min_free,
-            target_free,
-            interval,
-            ..
-        } => {
-            let min_free = bytes(*min_free, "--min-free")?;
-            let target_free = bytes(*target_free, "--target-free")?;
-            if target_free < min_free {
-                return Err(Refused::usage(
-                    ErrorCause::Usage,
-                    path,
-                    format!(
-                        "--target-free ({target_free} bytes) is below --min-free ({min_free} \
-                         bytes)"
-                    ),
                 ));
             }
-            Some(Goal {
-                min_free,
-                target_free,
-                interval: *interval,
-            })
         }
-        Mode::TallyOnly { .. } => None,
-    };
-    let guard_min = match mode {
-        Mode::Reclaim { .. } => goal.map(|g| g.min_free),
-        Mode::TallyOnly { min_free } => min_free.map(|m| bytes(m, "--min-free")).transpose()?,
+    }
+    let guard_min = match (mode, &goal) {
+        (_, Some(goal)) => goal.resolved.map(|g| g.min_free),
+        (Mode::TallyOnly { min_free: None }, _) => None,
+        (Mode::TallyOnly { min_free: Some(m) }, _) => match (&first, m) {
+            (_, Size::Bytes(b)) => Some(*b),
+            (Ok(space), m) => Some(m.bytes(space.size_bytes).map_err(|e| {
+                Refused::usage(ErrorCause::Usage, path, format!("--min-free {m}: {e}"))
+            })?),
+            (Err(e), m) => {
+                log(&format!(
+                    "warning: --min-free {m} cannot be resolved (sampling PATH failed: {e}); \
+                     snapshot writes skip only on a failed write"
+                ));
+                None
+            }
+        },
+        (Mode::Reclaim { .. }, None) => unreachable!("a reclaiming watch has a goal"),
     };
     // 4. The host lock file.
-    match (hostlock::readiness(host), mode) {
+    match (hostlock::readiness(host), goal.is_some()) {
         (Ok(()), _) => {}
-        (
-            Err(e @ (LockError::Missing { .. } | LockError::Unusable { .. })),
-            Mode::Reclaim { .. },
-        ) => {
+        (Err(e @ (LockError::Missing { .. } | LockError::Unusable { .. })), true) => {
             return Err(Refused::usage(
                 ErrorCause::Provisioning,
                 path,
                 format!("a watch that can never reclaim does not start: {e}"),
             ));
         }
-        (Err(e), Mode::TallyOnly { .. }) => log(&format!(
+        (Err(e), false) => log(&format!(
             "warning: {e} (--tally-only only polls it: the tally pauses while it is held)"
         )),
-        (Err(e), Mode::Reclaim { .. }) => log(&format!(
+        (Err(e), true) => log(&format!(
             "warning: {e}; each cycle tries it again (a cycle that cannot take it is an error \
              and backs off)"
         )),
     }
     // 5. Supplied roots.
     prepared
-        .refuse_missing_roots(host, options)
+        .refuse_missing_roots(host, selection)
         .map_err(refuse)?;
     let (tiers, timeouts) = prepared.tiers();
-    if let Mode::Reclaim { timeout, .. } = mode {
+    if let Some(goal) = &goal {
         for (tier, own) in tiers.iter().zip(&timeouts) {
-            if *own > *timeout {
+            if *own > goal.timeout {
                 log(&format!(
                     "warning: tier `{}`: its timeout {} s is longer than --timeout {} s; the \
                      cycle's deadline cuts it",
                     tier.name,
                     own.as_secs(),
-                    timeout.as_secs()
+                    goal.timeout.as_secs()
                 ));
             }
         }
@@ -299,10 +348,11 @@ pub fn start<H: Delete>(
         fs: at.mount.dev,
         min_free: guard_min,
     };
-    let writer = Writer::start(host, key, guard, state_dir, log).map_err(|e| match e {
-        StartLock::Held(why) => Refused::usage(ErrorCause::Usage, path, why),
-        StartLock::Interrupted => Refused::stopped(),
-    })?;
+    let writer =
+        Writer::start(host, key, guard, state_dir, SNAPSHOT_PERIOD, log).map_err(|e| match e {
+            StartLock::Held(why) => Refused::usage(ErrorCause::Usage, path, why),
+            StartLock::Interrupted => Refused::stopped(),
+        })?;
     // 7. The seed.
     let mut state = TallyState::new(crate::index::Index::new(crate::index::BUDGET_BYTES));
     if writer.has_lock() {
@@ -320,33 +370,25 @@ pub fn start<H: Delete>(
         seed.seed(host, run, &bound, log);
         state = seed.state;
     }
-    let prepared = match (mode, goal) {
-        (Mode::Reclaim { timeout, .. }, Some(goal)) => {
-            prepared.with_goal(goal.min_free, goal.target_free, *timeout)
-        }
-        _ => prepared,
-    };
     let stats = state.index.stats();
     let config = prepared
         .config_path()
         .map_or_else(|| "none (--select)".to_owned(), |p| p.display().to_string());
     let state_dir = state_dir.map_or_else(|| "none".to_owned(), |d| d.display().to_string());
-    log(&match goal {
+    let units = stats.singles + stats.blocks;
+    let mount = at.mount.mount_point.display();
+    log(&match &goal {
         Some(g) => format!(
-            "watch {}: --min-free {}, --target-free {}, every {} s; config {config}; state \
-             directory {state_dir}; index starts with {} unit(s)",
-            at.mount.mount_point.display(),
-            format_bytes(g.min_free),
-            format_bytes(g.target_free),
+            "watch {mount}: --min-free {}, --target-free {}, every {} s; config {config}; state \
+             directory {state_dir}; index starts with {units} unit(s)",
+            shown(g.min_free, g.resolved.map(|r| r.min_free)),
+            shown(g.target_free, g.resolved.map(|r| r.target_free)),
             g.interval.as_secs(),
-            stats.singles + stats.blocks,
         ),
         None => format!(
-            "watch --tally-only {}: {} source(s); config {config}; state directory \
-             {state_dir}; index starts with {} unit(s)",
-            at.mount.mount_point.display(),
+            "watch --tally-only {mount}: {} source(s); config {config}; state directory \
+             {state_dir}; index starts with {units} unit(s)",
             sources.len(),
-            stats.singles + stats.blocks,
         ),
     });
     Ok(Started {
@@ -355,158 +397,18 @@ pub fn start<H: Delete>(
             mount: at.mount.mount_point.clone(),
             dev: at.stat.dev,
             fs: at.mount.dev,
-            size_bytes,
             fd: at.fd,
         },
-        goal,
-        prepared,
+        reclaim: goal.map(|goal| Reclaim { goal, prepared }),
         writer,
         state,
         sources,
     })
 }
 
-/// Why the single-writer lock was not taken at start.
-#[derive(Debug)]
-pub enum StartLock {
-    /// Still held after [`START_LOCK_WAIT`]: another `watch` (exit 2).
-    Held(String),
-    /// A signal during the wait (exit 0, nothing written).
-    Interrupted,
-}
-
-/// The snapshot's single-writer lock, held for the life of the process,
-/// and the writes under it (docs/architecture.md, Snapshot). Without the
-/// lock (the state directory or the lock file could not be made), nothing
-/// is loaded or written, and every tick tries again; a lock then found
-/// held is one log line.
-#[derive(Debug)]
-pub struct Writer<F> {
-    key: FsKey,
-    held: Option<(Locked<F>, Dev)>,
-    guard: Guard,
-    /// Whether a tick found the lock held by someone else (said once).
-    said_held: bool,
-}
-
-impl<F> Writer<F> {
-    pub fn has_lock(&self) -> bool {
-        self.held.is_some()
-    }
-}
-
-impl<F: std::fmt::Debug> Writer<F> {
-    /// Takes the lock, waiting at most [`START_LOCK_WAIT`].
-    pub fn start<H: Host<Fd = F>>(
-        host: &H,
-        key: FsKey,
-        guard: Guard,
-        state_dir: Option<&Path>,
-        log: &mut dyn FnMut(&str),
-    ) -> Result<Self, StartLock> {
-        let mut writer = Self {
-            key,
-            held: None,
-            guard,
-            said_held: false,
-        };
-        let lock = match host.state_lock(&writer.key) {
-            Ok(lock) => lock,
-            Err(e) => {
-                log(&format!(
-                    "index: no state directory or lock file ({e}): no snapshot is loaded or \
-                     written; trying again every {} min",
-                    SNAPSHOT_PERIOD.as_secs() / 60
-                ));
-                return Ok(writer);
-            }
-        };
-        let until = host.now().checked_add(START_LOCK_WAIT);
-        match host.flock_wait(lock.fd, LockMode::Exclusive, until) {
-            Ok(WaitLock::Acquired(locked)) => writer.held = Some((locked, lock.dir_dev)),
-            Ok(WaitLock::DeadlinePassed(_)) => {
-                return Err(StartLock::Held(format!(
-                    "another watch holds {} for this filesystem and user (state directory {}): \
-                     one watch per filesystem and state directory",
-                    writer.key.lock_name(),
-                    state_dir.map_or_else(|| "?".to_owned(), |d| d.display().to_string())
-                )));
-            }
-            Ok(WaitLock::Interrupted(_)) => return Err(StartLock::Interrupted),
-            Err(e) => log(&format!(
-                "index: the single-writer lock {}: {e}; no snapshot is loaded or written; \
-                 trying again every {} min",
-                writer.key.lock_name(),
-                SNAPSHOT_PERIOD.as_secs() / 60
-            )),
-        }
-        Ok(writer)
-    }
-
-    /// One snapshot write of `state` (a tick, or the stop). Without the
-    /// lock, tries to take it first, without waiting.
-    pub fn write<H: Host<Fd = F>>(
-        &mut self,
-        host: &H,
-        state: &TallyState,
-        log: &mut dyn FnMut(&str),
-    ) {
-        if self.held.is_none() && !self.try_lock(host, log) {
-            return;
-        }
-        let Some((locked, dir_fs)) = &self.held else {
-            unreachable!("locked above")
-        };
-        let bytes = match snapshot::encode(host, state, &self.key) {
-            Ok(bytes) => bytes,
-            Err(why) => {
-                return log(&format!(
-                    "index: snapshot {} not written: {why}",
-                    self.key.snapshot_name()
-                ));
-            }
-        };
-        let held = Held {
-            key: &self.key,
-            locked,
-            dir_fs: *dir_fs,
-        };
-        snapshot::write_held(host, state, held, self.guard, &bytes, &|_| None, log);
-    }
-
-    fn try_lock<H: Host<Fd = F>>(&mut self, host: &H, log: &mut dyn FnMut(&str)) -> bool {
-        let lock = match host.state_lock(&self.key) {
-            Ok(lock) => lock,
-            Err(_) => return false, // said at start
-        };
-        match host.flock_try(lock.fd, LockMode::Exclusive) {
-            Ok(crate::host::TryLock::Acquired(locked)) => {
-                log(&format!(
-                    "index: single-writer lock {} taken; snapshots are written from now on",
-                    self.key.lock_name()
-                ));
-                self.held = Some((locked, lock.dir_dev));
-                true
-            }
-            Ok(crate::host::TryLock::Busy(_)) => {
-                if !std::mem::replace(&mut self.said_held, true) {
-                    log(&format!(
-                        "index: {} is held by another writer; this watch writes no snapshot \
-                         while it is",
-                        self.key.lock_name()
-                    ));
-                }
-                false
-            }
-            Err(e) => {
-                log(&format!(
-                    "index: the single-writer lock {}: {e}",
-                    self.key.lock_name()
-                ));
-                false
-            }
-        }
-    }
+/// A size for the log: in bytes when known.
+fn shown(size: Size, bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| size.to_string(), format_bytes)
 }
 
 /// How [`run`] ended.
@@ -516,39 +418,156 @@ pub enum Ended {
     Stopped(Signal),
     /// Writing a record to stdout failed (exit 3, at once).
     OutputFailed(String),
+    /// A percentage goal, resolved at the first sample that worked (the
+    /// start's failed), has its target below its minimum (exit 2, as at
+    /// start).
+    Refused(String),
 }
 
-/// Runs a cycle on the live index: `ensure`'s reclaim
-/// ([`Prepared::execute`] on [`RunIndex::live`]), its progress lines to
-/// `progress`.
+/// What one cycle gets ([`cycle_once`] makes it, [`reclaim_cycle`] runs
+/// it).
+pub struct CycleRun<'a> {
+    /// The live index; `None` when the background tally did not let go of
+    /// it in time ([`live::LOCK_WAIT`]): the cycle runs on discovery alone.
+    pub index: Option<&'a mut TallyState>,
+    pub goal: GoalBytes,
+    pub timeout: Duration,
+    pub watch: WatchCycle,
+    pub log: &'a mut dyn FnMut(&str),
+}
+
+/// Runs a cycle: `watch`'s decisions refreshed for it ([`Prepared::for_cycle`]:
+/// owners resolved again, random groups shuffled again; a refusal is the
+/// cycle's error, nothing deleted), then `ensure`'s reclaim
+/// ([`Prepared::execute`]) on the live index ([`RunIndex::live`]; without
+/// one, an empty index: discovery alone), with the cycle's request.
 pub fn reclaim_cycle<H: Delete>(
     host: &H,
     prepared: &Prepared,
-    state: &mut TallyState,
-    progress: &mut dyn FnMut(&str),
+    draw_seed: &dyn Fn() -> Result<u64, String>,
+    run: CycleRun<'_>,
 ) -> Report {
-    let budget = state.index.budget_bytes();
-    let taken = std::mem::replace(state, TallyState::new(crate::index::Index::new(budget)));
-    let mut index = RunIndex::live(taken);
-    let report = prepared.execute(host, false, &mut index, progress);
-    *state = index.state;
-    report
+    let CycleRun {
+        index,
+        goal,
+        timeout,
+        watch,
+        log,
+    } = run;
+    let prepared = match prepared.for_cycle(host, draw_seed, log) {
+        Ok(prepared) => prepared,
+        Err((cause, why)) => {
+            log(&format!("error: {why}"));
+            return timed_report_from(host, Some((watch.origin, watch.origin_wall)), || {
+                let mut report = Report::new(Status::Error, None, false).with_goal(
+                    Size::Bytes(goal.min_free),
+                    Some(Size::Bytes(goal.target_free)),
+                );
+                report.min_free_bytes = Some(goal.min_free);
+                report.target_free_bytes = Some(goal.target_free);
+                report.errors.push(ErrorEntry::run(cause, why));
+                report
+            });
+        }
+    };
+    let request = prepared.request(
+        Size::Bytes(goal.min_free),
+        Some(Size::Bytes(goal.target_free)),
+        Some(timeout),
+        None,
+        Some(watch),
+    );
+    let fresh = || TallyState::new(crate::index::Index::new(crate::index::BUDGET_BYTES));
+    match index {
+        Some(state) => {
+            let mut live = RunIndex::live(std::mem::replace(state, fresh()));
+            let report = prepared.execute(host, &request, false, &mut live, log);
+            *state = live.state;
+            report
+        }
+        None => prepared.execute(host, &request, false, &mut RunIndex::live(fresh()), log),
+    }
+}
+
+/// One cycle from its triggering sample at `watch.origin` (the deadline
+/// and the record's times count from it): the live index taken within
+/// [`live::LOCK_WAIT`] (and never past the deadline), else none, said in
+/// one line; then `cycle`.
+pub fn cycle_once<H: Host, L: LiveIndex>(
+    host: &H,
+    watch: WatchCycle,
+    goal: GoalBytes,
+    timeout: Duration,
+    live: &mut L,
+    cycle: Cycle<'_>,
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    let deadline = watch
+        .origin
+        .checked_add(timeout)
+        .unwrap_or(MonoTime(Duration::MAX));
+    let until = host
+        .now()
+        .checked_add(live::LOCK_WAIT)
+        .map_or(deadline, |t| t.min(deadline));
+    live.with_state(until, |index| {
+        if index.is_none() {
+            log(
+                "index: the background tally did not let go of the live index within 1 s; \
+                 this cycle runs without it (each tier's discovery alone)",
+            );
+        }
+        cycle(CycleRun {
+            index,
+            goal,
+            timeout,
+            watch,
+            log,
+        })
+    })
+}
+
+/// One snapshot write: encoded with the live index (taken within
+/// [`live::LOCK_WAIT`]), written without it.
+fn write_snapshot<H: Host, L: LiveIndex>(
+    host: &H,
+    live: &mut L,
+    writer: &mut Writer<H::Fd>,
+    log: &mut dyn FnMut(&str),
+) {
+    let until = host
+        .now()
+        .checked_add(live::LOCK_WAIT)
+        .expect("monotonic time overflow");
+    let encoded = live.with_state(until, |state| match state {
+        Some(state) => writer.encode(host, state, log),
+        None => {
+            log(&format!(
+                "index: snapshot {} not written: the background tally did not let go of the \
+                 live index within 1 s",
+                writer.key().snapshot_name()
+            ));
+            None
+        }
+    });
+    if let Some(encoded) = encoded {
+        writer.write(host, &encoded, log);
+    }
 }
 
 /// The watcher's loop (docs/reference.md, The reclaim cycle): samples,
 /// cycles and snapshot ticks until a signal; then the stop's snapshot.
 ///
-/// - `cycle` runs one reclaim on the live index ([`reclaim_cycle`]);
+/// - `reclaim`: the goal and the cycle ([`reclaim_cycle`]); `None` under
+///   `--tally-only`, which only writes snapshots;
 /// - `record` takes each cycle's JSON line (`None`: no `--json`); its
 ///   failure ends the run at once ([`Ended::OutputFailed`]).
-#[allow(clippy::too_many_arguments)]
 pub fn run<H: Host, L: LiveIndex>(
     host: &H,
     watched: &Watched<H::Fd>,
-    goal: Option<Goal>,
+    mut reclaim: Option<(&mut Goal, Cycle<'_>)>,
     live: &mut L,
     writer: &mut Writer<H::Fd>,
-    cycle: Cycle<'_>,
     mut record: Option<Record<'_>>,
     log: &mut dyn FnMut(&str),
 ) -> Ended {
@@ -562,7 +581,7 @@ pub fn run<H: Host, L: LiveIndex>(
         if let Some(signal) = host.interrupted() {
             break signal;
         }
-        let until = match goal {
+        let until = match reclaim {
             Some(_) => next_snapshot.min(next_sample),
             None => next_snapshot,
         };
@@ -572,74 +591,85 @@ pub fn run<H: Host, L: LiveIndex>(
         }
         let now = host.now();
         if now >= next_snapshot {
-            live.with_state(|state| writer.write(host, state, log));
+            write_snapshot(host, live, writer, log);
             next_snapshot = after(next_snapshot, SNAPSHOT_PERIOD, host.now());
         }
-        let Some(goal) = goal else { continue };
+        let Some((goal, cycle)) = &mut reclaim else {
+            continue;
+        };
         if now < next_sample {
             continue;
         }
-        let sample = host.statvfs(&watched.fd).map(|s| s.avail_bytes);
-        match sample {
-            Ok(avail) if avail >= goal.min_free => {
-                if backoff.take().is_some() {
-                    log(&format!(
-                        "space recovered: {} available, at or above --min-free {}; back-off \
-                         ended",
-                        format_bytes(avail),
-                        format_bytes(goal.min_free)
-                    ));
-                }
+        let origin = (host.now(), host.wall_clock());
+        let sample = host.statvfs(&watched.fd);
+        let resolved = match &sample {
+            Ok(space) => match goal.resolve(space.size_bytes) {
+                Ok(bytes) => Some(bytes),
+                Err(why) => return Ended::Refused(why),
+            },
+            Err(_) => goal.resolved,
+        };
+        let avail = sample.as_ref().ok().map(|s| s.avail_bytes);
+        if let (Some(avail), Some(bytes)) = (avail, resolved)
+            && avail >= bytes.min_free
+        {
+            if backoff.take().is_some() {
+                log(&format!(
+                    "space recovered: {} available, at or above --min-free {}; back-off ended",
+                    format_bytes(avail),
+                    format_bytes(bytes.min_free)
+                ));
             }
-            sample => {
-                let avail = sample.as_ref().ok().copied();
-                if backoff.as_ref().is_none_or(|b| b.allows(host.now(), avail)) {
-                    cycles += 1;
-                    let report = match sample {
-                        Ok(avail) => {
-                            log(&format!(
-                                "cycle {cycles}: {} available, below --min-free {}; goal \
-                                 --target-free {}",
-                                format_bytes(avail),
-                                format_bytes(goal.min_free),
-                                format_bytes(goal.target_free)
-                            ));
-                            match same_filesystem(host, watched) {
-                                Ok(()) => live.with_state(|state| cycle(state, log)),
-                                Err(why) => failed_cycle(host, watched, goal, why, log),
-                            }
-                        }
-                        Err(e) => {
-                            log(&format!("cycle {cycles}: sampling the filesystem failed"));
-                            let why = format!("PATH {}: {e}", watched.path.display());
-                            failed_cycle(host, watched, goal, why, log)
-                        }
+        } else if backoff.as_ref().is_none_or(|b| b.allows(host.now(), avail)) {
+            // Below --min-free, or a sample that failed (it counts as below).
+            cycles += 1;
+            let report = match (&sample, resolved) {
+                (Ok(space), Some(bytes)) => {
+                    log(&format!(
+                        "cycle {cycles}: {} available, below --min-free {}; goal --target-free {}",
+                        format_bytes(space.avail_bytes),
+                        format_bytes(bytes.min_free),
+                        format_bytes(bytes.target_free)
+                    ));
+                    let watch = WatchCycle {
+                        expect_dev: watched.dev,
+                        origin: origin.0,
+                        origin_wall: origin.1,
                     };
-                    log(&end_line(cycles, &report));
-                    backoff = if backs_off(report.status) {
-                        let (class, causes) = classify(&report);
-                        let next = Backoff::after(
-                            class,
-                            causes,
-                            host.now(),
-                            report.avail_after_bytes,
-                            watched.size_bytes,
-                            backoff.as_ref(),
-                        );
-                        log(&next.log_line());
-                        Some(next)
-                    } else {
-                        None
+                    cycle_once(host, watch, bytes, goal.timeout, live, &mut **cycle, log)
+                }
+                (sample, _) => {
+                    let why = match sample {
+                        Err(e) => format!("PATH {}: {e}", watched.path.display()),
+                        Ok(_) => unreachable!("a sample that works resolves the goal"),
                     };
-                    if let Some(record) = record.as_deref_mut() {
-                        let watch = Json::Obj(vec![
-                            ("cycle", Json::U64(cycles)),
-                            ("backoff", Json::opt(backoff.as_ref(), Backoff::to_json)),
-                        ]);
-                        if let Err(why) = record(&report.to_watch_json(watch)) {
-                            return Ended::OutputFailed(why);
-                        }
-                    }
+                    log(&format!("cycle {cycles}: sampling the filesystem failed"));
+                    failed_cycle(host, watched, goal, origin, why, log)
+                }
+            };
+            log(&end_line(cycles, &report));
+            backoff = if backs_off(report.status) {
+                let (class, causes) = classify(&report);
+                let next = Backoff::after(
+                    class,
+                    causes,
+                    host.now(),
+                    report.avail_after_bytes,
+                    goal.resolved.map_or(0, |g| g.size_bytes),
+                    backoff.as_ref(),
+                );
+                log(&next.log_line());
+                Some(next)
+            } else {
+                None
+            };
+            if let Some(record) = record.as_deref_mut() {
+                let watch = Json::Obj(vec![
+                    ("cycle", Json::U64(cycles)),
+                    ("backoff", Json::opt(backoff.as_ref(), Backoff::to_json)),
+                ]);
+                if let Err(why) = record(&report.to_watch_json(watch)) {
+                    return Ended::OutputFailed(why);
                 }
             }
         }
@@ -651,60 +681,72 @@ pub fn run<H: Host, L: LiveIndex>(
             .to_owned(),
         other => format!("stopping on {}", other.name()),
     });
-    live.with_state(|state| writer.write(host, state, log));
+    write_snapshot(host, live, writer, log);
     Ended::Stopped(signal)
 }
 
 /// Runs a started `watch` with its background tally on a thread of its
-/// own (a real host, [`live::Threaded`]); `log` takes both threads'
-/// lines. The reclaim runs on the caller's thread at its priority.
-pub fn run_threaded<H: Delete + Sync>(
-    host: &H,
+/// own (a real host, [`live::Threaded`]); `log` takes both threads' lines.
+/// The reclaim runs on the caller's thread at its priority. `'static`
+/// because the tally thread is not joined if it is blocked in the kernel
+/// at the end ([`live::TallyThread`]).
+pub fn run_threaded<H: Delete + Sync + 'static>(
+    host: &'static H,
     started: Started<H::Fd>,
+    draw_seed: &dyn Fn() -> Result<u64, String>,
     record: Option<Record<'_>>,
-    log: &(dyn Fn(&str) + Sync),
+    log: &'static (dyn Fn(&str) + Sync),
 ) -> Ended {
     let Started {
         watched,
-        goal,
-        prepared,
+        reclaim,
         mut writer,
         state,
         sources,
     } = started;
-    let shared = live::Shared::new(state);
-    live::with_tally_thread(host, &shared, &sources, log, |ended| {
+    let shared = Arc::new(live::Shared::new(state));
+    live::with_tally_thread(host, Arc::clone(&shared), sources, log, |ended| {
         let mut live = live::Threaded::new(host, &shared, ended);
         let mut log_mut = |line: &str| log(line);
-        let mut cycle = |state: &mut TallyState, progress: &mut dyn FnMut(&str)| {
-            reclaim_cycle(host, &prepared, state, progress)
-        };
-        run(
-            host,
-            &watched,
-            goal,
-            &mut live,
-            &mut writer,
-            &mut cycle,
-            record,
-            &mut log_mut,
-        )
+        match reclaim {
+            Some(Reclaim { mut goal, prepared }) => {
+                let mut cycle = |run: CycleRun<'_>| reclaim_cycle(host, &prepared, draw_seed, run);
+                run(
+                    host,
+                    &watched,
+                    Some((&mut goal, &mut cycle)),
+                    &mut live,
+                    &mut writer,
+                    record,
+                    &mut log_mut,
+                )
+            }
+            None => run(
+                host,
+                &watched,
+                None,
+                &mut live,
+                &mut writer,
+                record,
+                &mut log_mut,
+            ),
+        }
     })
 }
 
 /// Runs a started `watch` with its background tally inline, on the
-/// caller's thread (the model, [`live::Inline`]). Returns how it ended
-/// and the live index.
+/// caller's thread and at its priority (the model, [`live::Inline`]).
+/// Returns how it ended and the live index.
 pub fn run_inline<H: Delete>(
     host: &H,
     started: Started<H::Fd>,
+    draw_seed: &dyn Fn() -> Result<u64, String>,
     record: Option<Record<'_>>,
     log: &mut dyn FnMut(&str),
 ) -> (Ended, TallyState) {
     let Started {
         watched,
-        goal,
-        prepared,
+        reclaim,
         mut writer,
         state,
         sources,
@@ -715,19 +757,29 @@ pub fn run_inline<H: Delete>(
     let mut tally_log = |line: &str| (log.borrow_mut())(line);
     let mut loop_log = |line: &str| (log.borrow_mut())(line);
     let mut live = live::Inline::new(host, state, sources, &mut tally_log);
-    let mut cycle = |state: &mut TallyState, progress: &mut dyn FnMut(&str)| {
-        reclaim_cycle(host, &prepared, state, progress)
+    let end = match reclaim {
+        Some(Reclaim { mut goal, prepared }) => {
+            let mut cycle = |run: CycleRun<'_>| reclaim_cycle(host, &prepared, draw_seed, run);
+            run(
+                host,
+                &watched,
+                Some((&mut goal, &mut cycle)),
+                &mut live,
+                &mut writer,
+                record,
+                &mut loop_log,
+            )
+        }
+        None => run(
+            host,
+            &watched,
+            None,
+            &mut live,
+            &mut writer,
+            record,
+            &mut loop_log,
+        ),
     };
-    let end = run(
-        host,
-        &watched,
-        goal,
-        &mut live,
-        &mut writer,
-        &mut cycle,
-        record,
-        &mut loop_log,
-    );
     (end, live.into_state())
 }
 
@@ -739,39 +791,24 @@ fn after(mut tick: MonoTime, period: Duration, now: MonoTime) -> MonoTime {
     tick
 }
 
-/// Whether `PATH` still resolves to the filesystem watched since start
-/// (docs/reference.md, The reclaim cycle): another device is a cycle
-/// error (`host`), and nothing is deleted.
-fn same_filesystem<H: Host>(host: &H, watched: &Watched<H::Fd>) -> Result<(), String> {
-    let at = resolve_unscreened(host, &watched.path, Want::Directory)
-        .map_err(|e| format!("PATH {}: {e}", watched.path.display()))?;
-    if at.stat.dev != watched.dev {
-        return Err(format!(
-            "PATH {} is now on device {}, not on the filesystem watched since start (device \
-             {}): nothing is reclaimed there (a mount stacked on PATH?)",
-            watched.path.display(),
-            at.stat.dev,
-            watched.dev
-        ));
-    }
-    Ok(())
-}
-
-/// A cycle that ended before the reclaim: status `error`, cause `host`
-/// (so back-off `retry`), nothing deleted.
+/// A cycle that ended at its triggering sample, which failed: status
+/// `error`, cause `host` (so back-off `retry`), nothing deleted. Its times
+/// count from the sample (`origin`).
 fn failed_cycle<H: Host>(
     host: &H,
     watched: &Watched<H::Fd>,
-    goal: Goal,
+    goal: &Goal,
+    origin: (MonoTime, Timestamp),
     why: String,
     log: &mut dyn FnMut(&str),
 ) -> Report {
     log(&format!("error: {why}"));
-    timed_report(host, || {
-        let mut report = Report::new(Status::Error, Some(&watched.path), false).with_goal(
-            Size::Bytes(goal.min_free),
-            Some(Size::Bytes(goal.target_free)),
-        );
+    timed_report_from(host, Some(origin), || {
+        let mut report = goal.report(&watched.path);
+        if let Some(bytes) = goal.resolved {
+            report.min_free_bytes = Some(bytes.min_free);
+            report.target_free_bytes = Some(bytes.target_free);
+        }
         report.mount = Some(watched.mount.clone());
         report.errors.push(ErrorEntry::run(ErrorCause::Host, why));
         report
@@ -824,5 +861,27 @@ mod tests {
         assert_eq!(after(at(0), ten, at(10)), at(20));
         // A cycle that took 95 s: the next sample is the tick after it.
         assert_eq!(after(at(10), ten, at(105)), at(110));
+    }
+
+    #[test]
+    fn a_goal_resolves_once_and_refuses_a_target_below_its_minimum() {
+        let mut goal = Goal {
+            min_free: Size::Percent(10),
+            target_free: Size::Percent(20),
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(60),
+            resolved: None,
+        };
+        let first = goal.resolve(1000).unwrap();
+        assert_eq!((first.min_free, first.target_free), (100, 200));
+        // Resolved at the first sample that worked, never again.
+        assert_eq!(goal.resolve(5000).unwrap(), first);
+        let mut bad = Goal {
+            min_free: Size::Bytes(500),
+            target_free: Size::Percent(10),
+            resolved: None,
+            ..goal.clone()
+        };
+        assert!(bad.resolve(1000).unwrap_err().contains("below --min-free"));
     }
 }

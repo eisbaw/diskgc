@@ -112,6 +112,7 @@ fn ensure(host: &ModelHost, select: &str) -> Report {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(select, &library, None, 1000).unwrap_or_else(|e| panic!("{e}")),
     };
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));

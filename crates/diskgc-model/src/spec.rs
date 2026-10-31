@@ -602,6 +602,19 @@ pub struct EventSpec {
     /// model changing (`watch`'s scripted curve).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other_used: Option<OtherUsedSpec>,
+    /// An account of the name service appears, changes its uid, or
+    /// (`uid: null`) disappears (`owners:` names resolve again at every
+    /// reclaim of a `watch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountSpec>,
+}
+
+/// An account name and its uid from now on (`None`: no such account).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSpec {
+    pub name: String,
+    pub uid: Option<u32>,
 }
 
 /// A mount, by its mount point, and its filesystem's new `other_used`.

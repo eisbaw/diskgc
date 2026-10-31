@@ -2648,6 +2648,7 @@ fn model_outcome(vector: &ProfileVector) -> Result<Outcome, String> {
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
         tally_budget: None,
+        watch: None,
         tier,
     };
     let paths = fixture_paths(&vector.host.tree);

@@ -159,6 +159,7 @@ fn request_select(selection: &str) -> Request {
         target_free: None,
         timeout: Some(Duration::from_secs(60)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(selection, &Library::builtin().unwrap(), None, 1000).unwrap(),
     }
 }

@@ -56,6 +56,7 @@ fn request() -> Request {
         target_free: Some(parse_size("19G").unwrap()),
         timeout: Some(Duration::from_secs(10)),
         tally_budget: None,
+        watch: None,
         tier: Tier::select(
             "profile:cargo-target",
             &Library::builtin().unwrap(),

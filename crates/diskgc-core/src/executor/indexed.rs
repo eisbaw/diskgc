@@ -151,8 +151,30 @@ pub(super) fn sync_tally<'t, H: Host>(
     let tiers = sync_tiers(tiers);
     // `watch`'s live index: the background tally keeps it, so a cycle
     // takes its queues from it as it is (docs/reference.md, `watch`: the
-    // live index replaces the synchronous tally).
-    if tiers.is_empty() || index.is_live() {
+    // live index replaces the synchronous tally), unless the tally's last
+    // listing of a selected source failed with a failure of the host: then
+    // no tier takes a queue, as after a synchronous tally that failed.
+    if index.is_live() {
+        let failed = tiers
+            .iter()
+            .flat_map(|t| &t.sources)
+            .find_map(|s| Some((&s.finder, index.state.source_failure(&s.finder)?)));
+        if let Some((finder, why)) = failed {
+            log(&format!(
+                "index: the background tally's last listing of {} (profile {}) failed: {why}; \
+                 no tier takes candidates from the index in this cycle (each tier's own \
+                 discovery decides)",
+                finder.root.display(),
+                finder.profile
+            ));
+            return SyncTallied::default();
+        }
+        return SyncTallied {
+            usable: true,
+            ..SyncTallied::default()
+        };
+    }
+    if tiers.is_empty() {
         return SyncTallied {
             usable: true,
             ..SyncTallied::default()
