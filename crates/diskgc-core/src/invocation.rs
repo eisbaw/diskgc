@@ -20,7 +20,7 @@ use crate::engine::Checkouts;
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::{Delete, Host, MountEntry};
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
-use crate::report::{ErrorCause, Report, Status};
+use crate::report::{ErrorCause, ErrorEntry, Report, Status};
 use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in};
 use crate::select;
 use crate::snapshot::RunIndex;
@@ -316,12 +316,24 @@ pub fn ensure<H: Delete>(
     match run(host, options, config, platform, log, progress) {
         Ok(report) => report,
         Err((cause, why)) => {
-            // Every refusal before the executor is exit 2 and deletes nothing.
+            // Every refusal before the executor deletes nothing; it is exit
+            // 2, or 3 when a host read failed ([`refusal_status`]).
             log(&format!("error: {why}"));
-            options
-                .report(Status::UsageError)
-                .usage_error_with_cause(cause, why)
+            let mut report = options.report(refusal_status(cause));
+            report.errors.push(ErrorEntry::run(cause, why));
+            report
         }
+    }
+}
+
+/// The status of a refusal before the executor (`ensure`'s and `watch`'s
+/// start): `error` (exit 3) when a host read failed (`host`: diskgc's own
+/// capability set), `usage_error` (exit 2) for every other cause.
+pub fn refusal_status(cause: ErrorCause) -> Status {
+    if cause == ErrorCause::Host {
+        Status::Error
+    } else {
+        Status::UsageError
     }
 }
 
@@ -542,8 +554,7 @@ pub fn prepare<H: Delete>(
             );
         }
     }
-    let uid =
-        executor::privileges(host, options.allow_root).map_err(|why| (ErrorCause::Safety, why))?;
+    let uid = executor::privileges(host, options.allow_root).map_err(|e| (e.cause, e.message))?;
     let owners = if options.allow_root {
         let config = config.expect("root mode requires config (refused above)");
         resolved_owners(host, config).map_err(|why| (ErrorCause::Config, why))?

@@ -992,23 +992,29 @@
             # verify MANAGER DIR: exit status of verify; its output in
             # DIR.log. The unit path is DIR and systemd's own units for that
             # manager (the targets default dependencies name), nothing else.
-            # System mode creates /run/systemd, and the sandbox has no /run
-            # and a read-only /: verify runs chrooted into a tmpfs root
-            # (binding /nix, /proc, /dev and the build directory) in a user
-            # and mount namespace of its own. Without unprivileged user
-            # namespaces unshare fails and so does the check.
+            # --user runs as is. System mode creates /run/systemd, and the
+            # sandbox has no /run and a read-only / (`--root=DIR` does not
+            # help: measured, it still creates /run/systemd), so it runs
+            # chrooted into a tmpfs root (binding /nix, /proc, /dev and
+            # $NIX_BUILD_TOP) in a user and mount namespace of its own.
+            # Without unprivileged user namespaces only that half fails.
             verify() {
-              local mode=
-              if [ "$1" = user ]; then mode=--user; fi
+              local units="$2:${pkgs.systemd}/example/systemd/$1"
+              local files=("$2/diskgc-watch@srv-ci\x2dbuilds.service" "$2/diskgc-watch@-.service")
+              if [ "$1" = user ]; then
+                SYSTEMD_UNIT_PATH="$units" systemd-analyze --user verify --man=no "''${files[@]}" \
+                  > "$2.log" 2>&1
+                return
+              fi
               unshare --map-root-user --mount sh -euc '
-                root=$1; shift
+                root=$1 top=$2; shift 2
                 mount -t tmpfs none "$root"
-                for d in nix proc dev build run tmp; do mkdir "$root/$d"; done
-                for d in nix proc dev build; do mount --rbind "/$d" "$root/$d"; done
+                for d in nix proc dev run tmp; do mkdir "$root/$d"; done
+                mkdir -p "$root$top"
+                for d in /nix /proc /dev "$top"; do mount --rbind "$d" "$root$d"; done
                 exec chroot "$root" "$@"
-              ' sh $TMPDIR/root env SYSTEMD_UNIT_PATH="$2:${pkgs.systemd}/example/systemd/$1" \
-                ${pkgs.systemd}/bin/systemd-analyze $mode verify --man=no \
-                "$2/diskgc-watch@srv-ci\x2dbuilds.service" "$2/diskgc-watch@-.service" \
+              ' sh $TMPDIR/root "$NIX_BUILD_TOP" env SYSTEMD_UNIT_PATH="$units" \
+                ${pkgs.systemd}/bin/systemd-analyze verify --man=no "''${files[@]}" \
                 > "$2.log" 2>&1
             }
             for manager in user system; do

@@ -62,6 +62,9 @@ FORBIDDEN_ANY = {
     "CPUSchedulingPolicy": "the reclaim must not run at lowered priority",
     "CPUWeight": "the reclaim must not run at lowered priority",
     "IOWeight": "the reclaim must not run at lowered priority",
+    # Forbidden outright, not only below some value: the unit cannot know
+    # the host's process count, and systemd's default hard limit (524288)
+    # is the one the design relies on (architecture.md, LimitNOFILE=).
     "LimitNOFILE": "a lower limit fails the in-use scan",
     "MemoryDenyWriteExecute": "crashes JIT command actions",
     "User": "the system template gets User= from a per-instance drop-in",
@@ -74,13 +77,18 @@ FORBIDDEN_UNLESS = {
     "ProtectSystem": ("no", "a mount namespace, and strict makes every tree read-only"),
 }
 # In a user manager every option that needs a mount namespace or edits the
-# capability bounding set implies PrivateUsers= (fatal).
+# capability bounding set implies PrivateUsers= (fatal). The list is the
+# Sandboxing and Capabilities options of systemd.exec (systemd 260) that do;
+# a new systemd may add more, which the doc-equality check still catches.
 FORBIDDEN_USER = {
     "CapabilityBoundingSet", "AmbientCapabilities", "ProtectClock", "PrivateDevices",
     "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs",
     "ProtectControlGroups", "ProtectHostname", "PrivateMounts", "PrivateIPC",
     "ReadOnlyPaths", "InaccessiblePaths", "TemporaryFileSystem", "BindPaths",
     "BindReadOnlyPaths", "RootDirectory", "RootImage", "MountAPIVFS",
+    "NoExecPaths", "ExecPaths", "MountFlags", "NetworkNamespacePath",
+    "IPCNamespacePath", "ExtensionImages", "ExtensionDirectories", "MountImages",
+    "LogNamespace",
 }
 
 SECTION = re.compile(r"^\[([A-Za-z]+)\]$")

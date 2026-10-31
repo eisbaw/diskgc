@@ -2049,15 +2049,6 @@ impl Host for LinuxHost {
         rustix::process::geteuid().as_raw()
     }
 
-    /// Through the `/proc` checked at start ([`LinuxHost::new`]: this
-    /// process's own pid namespace), so `self` is diskgc.
-    fn own_cap_effective(&self) -> Result<u64, HostError> {
-        let text = self.root().read(SELF_STATUS)?;
-        parse_status_ids(&text)
-            .map(|ids| ids.cap_effective)
-            .map_err(|e| HostError::invalid("parse", ProcRoot::shown(SELF_STATUS), e))
-    }
-
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
         lookup_account(name)
     }

@@ -1032,7 +1032,6 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::PidAlive,
             Op::Pressure,
             Op::StateWrite,
-            Op::OwnCapEffective,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}

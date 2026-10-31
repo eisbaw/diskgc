@@ -690,6 +690,13 @@ reclaim on any desktop):
     diskgc's namespace) (`ssh-agent`, `gpg-agent`, `(sd-pam)`); when no
     live task can be found, it is not excused.
 
+  None of the three applies while diskgc's effective set holds
+  `CAP_SYS_PTRACE` (every `--allow-root` run, Privileges): the kernel's
+  ptrace-read check then passes for every process of diskgc's user
+  namespace, setuid, more capable and non-dumpable ones included, so a
+  refusal comes from something else (an LSM, such as AppArmor's
+  `docker-default` profile with `--pid=host`) and the process blocks.
+
   One exception to "every read": when the last read finds it another
   user's (refused, none of its uids the user's: a `sudo` or `su` child
   after its `setresuid`), that stands, as for any other user's process.
@@ -3658,17 +3665,28 @@ How it holds:
   per-entry owner check for `owners:` to enforce. So is a `nix-store`
   tier (exit 2), for the same reason and because root's Nix bypasses the
   daemon ([`nix-store`](#nix-store)).
-- `--allow-root` also needs `CAP_SYS_PTRACE` in diskgc's effective
-  capability set, read once at start from `CapEff` in
-  `/proc/self/status`. Every `--allow-root` run (`ensure` and `watch`,
-  every mode, whatever the uid) exits 2 (`cause: safety`), deleting
-  nothing, when the set lacks it or cannot be read. Without it, a root
-  process holding a capability diskgc lacks is excused at the "more
-  capable" boundary ([In use](#in-use)) and its open files go unseen,
-  with no error. Docker's and Podman's default sets lack it (`--cap-add
-  SYS_PTRACE`); a systemd unit grants it with its
-  `CapabilityBoundingSet=` ([architecture.md](architecture.md#the-watch-units),
-  Root, which also says why the other capabilities may be missing).
+- `--allow-root` is for root, and needs `CAP_SYS_PTRACE` in diskgc's
+  effective capability set. Both are checked once at start, before
+  anything is measured or deleted, by every `--allow-root` run: `ensure`
+  and `watch`, every mode, `watch --tally-only` and `ensure --dry-run`
+  included (one rule for every mode, for simplicity, although those two
+  delete nothing):
+  - an effective uid other than 0 exits 2 (`cause: safety`, "--allow-root
+    is for root; drop it"), whatever capabilities the binary holds: the
+    in-use scan decides root mode by the uid, and a non-root diskgc
+    excuses a refused root process as another user's;
+  - a capability set (`CapEff:` of diskgc's own `/proc/<pid>/status`)
+    without `CAP_SYS_PTRACE` exits 2 (`cause: safety`). Without it, a root
+    process holding a capability diskgc lacks is excused at the "more
+    capable" boundary ([In use](#in-use)) and its open files go unseen,
+    with no error. Docker's and Podman's default sets lack it (`--cap-add
+    SYS_PTRACE`); a systemd unit grants it with its
+    `CapabilityBoundingSet=` ([architecture.md](architecture.md#the-watch-units),
+    Root, which also says why the other capabilities may be missing);
+  - a capability set that cannot be read is a failure of the host: exit 3
+    (`cause: host`, status `error`), as is a `/proc/self/status` that
+    cannot be read when diskgc starts (every command that builds its
+    host, with or without `--allow-root`; [architecture.md](architecture.md#deployment)).
 
 ## Deadlines
 

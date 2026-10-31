@@ -506,6 +506,55 @@ fn root_mode_does_not_excuse_an_unreadable_root_process() {
     }
 }
 
+/// TASK-44 review (Codex B1, mped S1): with `CAP_SYS_PTRACE` in diskgc's
+/// effective set the kernel refuses diskgc no process of its user
+/// namespace, so a refusal comes from elsewhere (an LSM: AppArmor's
+/// docker-default under `--pid=host`) and explains nothing. Root with only
+/// the four capabilities its unit grants (`CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
+/// `CAP_SYS_PTRACE`, `CAP_CHECKPOINT_RESTORE`) excuses none of the user's
+/// refused processes as setuid, more capable or non-dumpable: each keeps
+/// the candidate (`in_use_unknown`), as a refused root process does. The
+/// same processes are excused without the capability (the test above).
+#[test]
+fn with_cap_sys_ptrace_no_refused_process_of_the_user_is_excused() {
+    let four: u64 = (1 << 1) | (1 << 3) | (1 << 19) | (1 << 40);
+    let cases: [(&str, &[&str]); 5] = [
+        ("setuid", &["proc: denied", "euid: 2000"]),
+        ("more capable", &["proc: denied", "privileged: true"]),
+        ("non-dumpable", &["proc: denied", "non_dumpable: true"]),
+        ("root", &["proc: denied", "uid: 0"]),
+        (
+            "capable root",
+            &["proc: denied", "uid: 0", "privileged: true"],
+        ),
+    ];
+    for (own, caps) in [("root", "own_uid: 0"), ("user", "own_uid: 1000")] {
+        for (name, with) in cases {
+            if own == "user" && with.contains(&"uid: 0") {
+                continue; // another user's process to a non-root diskgc
+            }
+            let host = model(&format!(
+                "{}{caps}\nown_cap_effective: {four}\n",
+                processes(&[process(10, with), process(11, &[])])
+            ));
+            let (result, scan) = check_c(&host, true);
+            let skip = in_use_unknown(result);
+            assert!(skip.detail.contains("pid 10"), "{own}, {name}: {skip}");
+            assert!(
+                scan.notes().iter().all(|note| !note.contains("excused")),
+                "{own}, {name}: {:?}",
+                scan.notes()
+            );
+        }
+    }
+    // Another user's process stays excused: the documented visibility limit.
+    let host = model(&format!(
+        "{}own_cap_effective: {four}\n",
+        processes(&[process(10, &["proc: denied", "uid: 1001"])])
+    ));
+    assert_eq!(check_c(&host, true).0, Ok(()));
+}
+
 /// Every refused process of the user is read again before it is excused,
 /// the setuid and more capable ones too (an exec makes any process look
 /// that way for a moment); only another user's process is not.

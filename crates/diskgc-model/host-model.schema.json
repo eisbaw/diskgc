@@ -94,7 +94,7 @@
       }
     },
     "own_cap_effective": {
-      "description": "diskgc's own effective capability set (`CapEff:`, bit n is\ncapability n; YAML takes `0x...`), as `own_cap_effective` and its\nown `proc_status` read it. Default: every capability up to\n`CAP_CHECKPOINT_RESTORE` (40) when `own_uid` is 0, as real root has\nthem, and none otherwise.",
+      "description": "diskgc's own effective (and permitted) capability set as its own\n`proc_status` shows it (`CapEff:`, bit n is capability n; YAML\ntakes `0x...`). Default: every capability up to\n`CAP_CHECKPOINT_RESTORE` (40) when `own_uid` is 0, as real root has\nthem, and none otherwise.",
       "type": [
         "integer",
         "null"
@@ -1074,7 +1074,6 @@
         "proc_environ",
         "own_pid",
         "effective_uid",
-        "own_cap_effective",
         "account_uid",
         "inherit_lock",
         "proc_status",

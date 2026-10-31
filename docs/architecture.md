@@ -979,9 +979,6 @@ is accepted until measured otherwise.
 - **Who diskgc is, and what its children keep:** `effective_uid` (the
   ordinary-mode owner every entry must have, and what `{uid}` stands for;
   root mode uses the resolved `owners:` IDs for entry ownership),
-  `own_cap_effective` (its own effective capability set, which
-  `--allow-root` reads once at start for `CAP_SYS_PTRACE`,
-  [safety.md](safety.md#privileges)),
   `account_uid` (an `owners:` name's uid in the account database, through
   the name service; what uids are acceptable is the composition's policy)
   and `inherit_lock`, which makes a held lock inheritable by children by
@@ -1063,10 +1060,30 @@ which holds one variable:
 DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G
 ```
 
-systemd splits it at whitespace and honours no quotes inside it, so a
-`--select` expression with spaces does not survive: keep selections in
-the configuration's tiers, or replace `ExecStart=` in a drop-in (as the
-NixOS module does). The file is optional (`-`): without it `watch` has no
+The value goes through two stages (systemd.exec `EnvironmentFile=`,
+systemd.service Command lines; read in the systemd 260 manual, not yet
+run under a live manager here):
+
+1. **The file.** An unquoted value keeps its interior whitespace and every
+   quote after its first non-whitespace character, so the quotes of
+   `--select '...'` reach the variable as written. A value that *starts*
+   with a quote is a quoted value instead: its quotes are removed here,
+   so the line must start with a flag, not a quote.
+2. **`ExecStart=`'s `$DISKGC_WATCH_ARGS`.** Written as a word of its own,
+   it is split at whitespace with quotes respected, then the quotes are
+   removed: one argument per word, one for each quoted string.
+
+So a `--select` expression with spaces survives when it is quoted:
+
+```
+DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G --select 'profile:cargo-target && filter:idle-7d' --roots /home/me/src
+```
+
+gives `watch` the arguments `--min-free`, `30G`, `--target-free`,
+`60G`, `--select`, `profile:cargo-target && filter:idle-7d`, `--roots`,
+`/home/me/src`. Selections are still easier to keep in the
+configuration's tiers; the NixOS module replaces `ExecStart=` in a drop-in
+instead. The file is optional (`-`): without it `watch` has no
 thresholds, exits 2 naming `--min-free`, and the unit stays failed with
 diskgc's message instead of looping.
 
@@ -1168,14 +1185,8 @@ WantedBy=multi-user.target
   `map_files` links (`CAP_CHECKPOINT_RESTORE`). `CAP_DAC_READ_SEARCH` is
   not needed: the snapshot write links its `O_TMPFILE` through
   `/proc/self/fd` with `AT_SYMLINK_FOLLOW`, not `AT_EMPTY_PATH`.
-  `CAP_SYS_PTRACE` is mandatory: without it a root process holding a
-  capability diskgc lacks is excused at the "more capable" boundary
-  ([safety.md](safety.md#in-use)) and its open files go unseen, with no
-  error. So every `--allow-root` run exits 2 at start (`safety`) when
-  its effective set lacks `CAP_SYS_PTRACE`
-  ([safety.md](safety.md#privileges)). A root container without it
-  (Docker's and Podman's default sets lack it) is then refused; the e2e
-  runner adds it. The others fail safe
+  `CAP_SYS_PTRACE` is mandatory ([safety.md](safety.md#privileges)).
+  The others fail safe
   when missing (an unreadable tree is refused, an unreadable `map_files`
   link retains); `CAP_CHECKPOINT_RESTORE` does not exist before Linux
   5.9; there diskgc cannot hold it, and `map_files` links stay

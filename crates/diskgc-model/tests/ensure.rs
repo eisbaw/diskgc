@@ -2008,26 +2008,29 @@ fn the_deadline_during_the_reclaim_is_124() {
 fn root_is_refused_without_allow_root() {
     let root = host(&format!("own_uid: 0\n{}", yaml(true, "")));
     let error = executor::privileges(&root, false).expect_err("root refused");
-    assert!(error.contains("refuses to run as root"), "{error}");
+    assert_eq!(error.cause, ErrorCause::Safety);
+    assert!(error.message.contains("refuses to run as root"), "{error}");
     assert_eq!(executor::privileges(&root, true), Ok(0));
     let user = host(&yaml(true, ""));
     assert_eq!(executor::privileges(&user, false), Ok(1000));
     // Without --allow-root the capability set is not read at all.
-    assert_eq!(user.trace_count(Op::OwnCapEffective), 0);
+    assert_eq!(user.trace_count(Op::ProcStatus), 0);
     assert!(calls(&root, Op::Unlinkat).is_empty());
 }
 
-/// TASK-44 AC #4: `--allow-root` needs `CAP_SYS_PTRACE` in the effective
-/// set, read once through the port; every other capability does not
-/// replace it, it alone is enough, and a set that cannot be read refuses
-/// too. The rule is per `--allow-root`, not per uid: a non-root user's
-/// empty set is refused the same way. (The entry points, ensure in both
-/// modes and watch in both, are the vectors
-/// `allow-root-*-cap-sys-ptrace*.yaml` and watch.rs.)
+/// TASK-44 AC #4 and its review: `--allow-root` is for root (euid 0, which
+/// is how the in-use scan decides root mode), and needs `CAP_SYS_PTRACE` in
+/// the effective set, read once from diskgc's own `/proc` status. Every
+/// other capability does not replace it, it alone is enough; a non-root
+/// binary is refused even holding it (file capability `cap_sys_ptrace=ep`,
+/// Codex B1); a set that was read and lacks it is `safety`, one that could
+/// not be read is `host` (exit 3). (The entry points, ensure in both modes
+/// and watch in both, are the vectors `allow-root-*.yaml` and watch.rs.)
 #[test]
-fn allow_root_needs_cap_sys_ptrace_in_the_effective_set() {
+fn allow_root_needs_root_and_cap_sys_ptrace_in_the_effective_set() {
     let ptrace = 1u64 << executor::CAP_SYS_PTRACE;
     assert_eq!(ptrace, 0x80000, "CAP_SYS_PTRACE is capability 19");
+    let all = diskgc_model::state::ROOT_CAPABILITIES;
     let caps = |uid: u32, caps: Option<u64>| {
         let caps = caps.map_or(String::new(), |c| format!("own_cap_effective: {c}\n"));
         host(&format!("own_uid: {uid}\n{caps}{}", yaml(true, "")))
@@ -2035,29 +2038,46 @@ fn allow_root_needs_cap_sys_ptrace_in_the_effective_set() {
     // Root's default (every capability) and CAP_SYS_PTRACE alone pass.
     for host in [caps(0, None), caps(0, Some(ptrace))] {
         assert_eq!(executor::privileges(&host, true), Ok(0));
-        assert_eq!(host.trace_count(Op::OwnCapEffective), 1, "read once");
+        assert_eq!(host.trace_count(Op::ProcStatus), 1, "read once");
     }
-    // Everything but it, nothing, and a non-root user's empty set refuse.
-    for (uid, set) in [(0, !ptrace & ((1 << 41) - 1)), (0, 0), (1000, 0)] {
-        let host = caps(uid, Some(set));
-        let error = executor::privileges(&host, true).expect_err("refused");
+    // Root with everything but it, or nothing: safety.
+    for set in [!ptrace & all, 0] {
+        let error = executor::privileges(&caps(0, Some(set)), true).expect_err("refused");
+        assert_eq!(error.cause, ErrorCause::Safety);
         assert!(
-            error.contains("--allow-root needs CAP_SYS_PTRACE"),
+            error.message.contains("--allow-root needs CAP_SYS_PTRACE"),
             "{error}"
         );
-        assert!(error.contains(&format!("CapEff is {set:#018x}")), "{error}");
+        assert!(
+            error.message.contains(&format!("CapEff is {set:#018x}")),
+            "{error}"
+        );
     }
-    let user = caps(1000, None);
-    let error = executor::privileges(&user, true).expect_err("a user's set is empty");
-    assert!(error.contains("CapEff is 0x0000000000000000"), "{error}");
-    // Fail closed when the set cannot be read.
+    // Not root, with or without the capability: refused before it is read.
+    for set in [None, Some(ptrace), Some(all)] {
+        let user = caps(1000, set);
+        let error = executor::privileges(&user, true).expect_err("not root");
+        assert_eq!(error.cause, ErrorCause::Safety);
+        assert!(
+            error.message.contains("--allow-root is for root; drop it"),
+            "{error}"
+        );
+        assert_eq!(user.trace_count(Op::ProcStatus), 0);
+    }
+    // A set that cannot be read: a failure of the host, not a refusal.
     let unreadable = host(&format!(
-        "own_uid: 0\n{}events:\n  - {{at: {{op: own_cap_effective, nth: 1, when: before}}, fail: EIO}}\n",
+        "own_uid: 0\n{}events:\n  - {{at: {{op: proc_status, nth: 1, when: before}}, fail: EIO}}\n",
         yaml(true, "")
     ));
-    let error = executor::privileges(&unreadable, true).expect_err("unreadable refuses");
-    assert!(error.contains("could not be read"), "{error}");
-    assert!(error.contains("EIO"), "{error}");
+    let error = executor::privileges(&unreadable, true).expect_err("unreadable");
+    assert_eq!(error.cause, ErrorCause::Host);
+    assert!(
+        error
+            .message
+            .contains("could not read its own capability set"),
+        "{error}"
+    );
+    assert!(error.message.contains("EIO"), "{error}");
 }
 
 /// AC #6's logic (the binary's test runs it on a real host): a closed

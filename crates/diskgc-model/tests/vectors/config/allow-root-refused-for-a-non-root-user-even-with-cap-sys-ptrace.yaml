@@ -1,7 +1,8 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
-# TASK-44 AC #4: the rule is every --allow-root run, not only uid 0. A
-# non-root user's effective set is empty (the model's default for a
-# non-root own_uid), so --allow-root is refused at start (exit 2, safety).
+# TASK-44 review (Codex B1, mped S6): --allow-root is for root. A non-root
+# binary holding CAP_SYS_PTRACE (file capability cap_sys_ptrace=ep) is
+# refused at start (exit 2, safety): the in-use scan decides root mode by
+# euid 0, so it would excuse a refused root process as another user's.
 profile_vector: 1
 allow_root: true
 config: |
@@ -19,6 +20,7 @@ host:
   host_model: 1
   users: {tester: 1000}
   clock: 2026-10-15T03:00:00Z
+  own_cap_effective: 0x80000
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
@@ -28,9 +30,9 @@ host:
 expect:
   plan: []
   dry_run_exit: 2
-  dry_run_errors: [{cause: safety, contains: "CapEff is 0x0000000000000000"}]
+  dry_run_errors: [{cause: safety, contains: "--allow-root is for root; drop it"}]
   reclaim_exit: 2
-  errors: [{cause: safety, contains: "CapEff is 0x0000000000000000"}]
+  errors: [{cause: safety, contains: "--allow-root is for root; drop it"}]
   actions: []
   removed: []
   skipped: []

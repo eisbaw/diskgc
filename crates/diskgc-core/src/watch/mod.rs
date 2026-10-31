@@ -222,7 +222,9 @@ pub fn start<H: Delete>(
     log: &mut dyn FnMut(&str),
 ) -> Result<Started<H::Fd>, Refused> {
     let path = selection.path.as_path();
-    let refuse = |(cause, why): (ErrorCause, String)| Refused::usage(cause, path, why);
+    let refuse = |(cause, why): (ErrorCause, String)| {
+        Refused::with(crate::invocation::refusal_status(cause), cause, path, why)
+    };
     // 1, and privileges: the configuration, the selection, root.
     let prepared = prepare(host, selection, config, platform, log).map_err(refuse)?;
     let mut goal = match mode {

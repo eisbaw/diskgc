@@ -1103,9 +1103,6 @@ impl Host for Gated {
     fn effective_uid(&self) -> u32 {
         self.0.effective_uid()
     }
-    fn own_cap_effective(&self) -> Result<u64, HostError> {
-        self.0.own_cap_effective()
-    }
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
         self.0.account_uid(name)
     }

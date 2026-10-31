@@ -46,41 +46,79 @@ pub(super) fn measure_failure(
 /// `CAP_SYS_PTRACE`: its bit in a capability set (linux/capability.h).
 pub const CAP_SYS_PTRACE: u32 = 19;
 
-/// Privileges (docs/safety.md, Privileges): diskgc refuses to run as root
-/// without `--allow-root`, and refuses `--allow-root` (whatever the uid)
-/// unless its effective capability set holds `CAP_SYS_PTRACE`, read once
-/// here. Without it a root process holding a capability diskgc lacks is
-/// excused at the "more capable" boundary (docs/safety.md, In use) and its
-/// open files go unseen with no error; a set that cannot be read is
-/// refused the same way. The caller validates and resolves `owners:`
-/// before passing those IDs to the planner or reclaim. Returns the effective
-/// uid used for `{uid}` substitution, not an implicit ownership allowlist.
-pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, String> {
+/// Why [`privileges`] refused: `cause` is `safety` (exit 2) for a refusal
+/// by rule, `host` (exit 3) when diskgc could not read its own
+/// capability set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeError {
+    pub cause: ErrorCause,
+    pub message: String,
+}
+
+impl std::fmt::Display for PrivilegeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Privileges (docs/safety.md, Privileges), checked once at start:
+///
+/// - root without `--allow-root` is refused (`safety`);
+/// - `--allow-root` is for root: with another effective uid it is refused
+///   (`safety`), whatever capabilities the binary holds, because the
+///   in-use scan decides root mode by the uid;
+/// - `--allow-root` needs `CAP_SYS_PTRACE` in diskgc's effective set
+///   (`CapEff:` of its own `/proc` status): without it a root process
+///   holding a capability diskgc lacks is excused at the "more capable"
+///   boundary (docs/safety.md, In use) and its open files go unseen with
+///   no error. A set that was read and lacks it is refused (`safety`); a
+///   set that could not be read is a failure of the host (`host`).
+///
+/// The caller validates and resolves `owners:` before passing those IDs to
+/// the planner or reclaim. Returns the effective uid used for `{uid}`
+/// substitution, not an implicit ownership allowlist.
+pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, PrivilegeError> {
+    let refuse = |cause, message: String| Err(PrivilegeError { cause, message });
     let uid = host.effective_uid();
     if uid == 0 && !allow_root {
-        return Err(
+        return refuse(
+            ErrorCause::Safety,
             "diskgc refuses to run as root (uid 0) without --allow-root (docs/safety.md, \
              Privileges): run it as the user whose caches it frees"
                 .to_owned(),
         );
     }
-    if allow_root {
-        let needs = "--allow-root needs CAP_SYS_PTRACE in diskgc's effective capability set: \
-                     without it the open files of a root process more capable than diskgc go \
-                     unseen (docs/safety.md, Privileges)";
-        match host.own_cap_effective() {
-            Ok(caps) if caps & (1 << CAP_SYS_PTRACE) != 0 => {}
-            Ok(caps) => {
-                return Err(format!(
-                    "{needs}; CapEff is {caps:#018x}, without it. Grant it: a systemd unit's \
-                     CapabilityBoundingSet= (docs/architecture.md, Deployment), \
-                     `--cap-add SYS_PTRACE` for a container"
-                ));
-            }
-            Err(e) => return Err(format!("{needs}; it could not be read: {e}")),
-        }
+    if !allow_root {
+        return Ok(uid);
     }
-    Ok(uid)
+    if uid != 0 {
+        return refuse(
+            ErrorCause::Safety,
+            format!(
+                "--allow-root is for root; drop it (diskgc runs as uid {uid}; docs/safety.md, \
+                 Privileges)"
+            ),
+        );
+    }
+    let needs = "--allow-root needs CAP_SYS_PTRACE in diskgc's effective capability set: \
+                 without it the open files of a root process more capable than diskgc go \
+                 unseen (docs/safety.md, Privileges)";
+    match host.proc_status(host.own_pid()) {
+        Ok(own) if own.cap_effective & (1 << CAP_SYS_PTRACE) != 0 => Ok(uid),
+        Ok(own) => refuse(
+            ErrorCause::Safety,
+            format!(
+                "{needs}; CapEff is {:#018x}, without it. Grant it: a systemd unit's \
+                 CapabilityBoundingSet= (docs/architecture.md, Deployment), \
+                 `--cap-add SYS_PTRACE` for a container",
+                own.cap_effective
+            ),
+        ),
+        Err(e) => refuse(
+            ErrorCause::Host,
+            format!("{needs}; diskgc could not read its own capability set: {e}"),
+        ),
+    }
 }
 
 /// The requested filesystem, measured.

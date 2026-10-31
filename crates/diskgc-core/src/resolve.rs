@@ -779,9 +779,6 @@ pub(crate) mod tests {
         fn effective_uid(&self) -> u32 {
             unreachable!()
         }
-        fn own_cap_effective(&self) -> Result<u64, HostError> {
-            unreachable!()
-        }
         fn account_uid(&self, _: &str) -> Result<Option<u32>, HostError> {
             unreachable!()
         }

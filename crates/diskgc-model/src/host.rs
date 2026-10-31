@@ -1684,17 +1684,6 @@ impl Host for ModelHost {
         })
     }
 
-    fn own_cap_effective(&self) -> Result<u64, HostError> {
-        self.call(Op::OwnCapEffective, None, None, |inner| {
-            if let Some(errno) = inner.injected.take() {
-                let error = HostError::errno("read", "/proc/self/status", errno);
-                return (Err(error), None, errno_text(errno));
-            }
-            let caps = inner.state.own_cap_effective;
-            (Ok(caps), None, format!("{caps:#x}"))
-        })
-    }
-
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
         self.call(Op::AccountUid, None, None, |inner| {
             let uid = inner.state.users.get(name).copied();

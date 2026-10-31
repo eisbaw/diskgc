@@ -1245,12 +1245,6 @@ pub trait Host {
     /// (docs/safety.md, Privileges), and what `{uid}` stands for in paths.
     fn effective_uid(&self) -> u32;
 
-    /// diskgc's own effective capability set, `CapEff:` of
-    /// `/proc/self/status` (bit n is capability n,
-    /// [`crate::executor::CAP_SYS_PTRACE`] among them). Read once, at
-    /// start, by `--allow-root` runs (docs/safety.md, Privileges).
-    fn own_cap_effective(&self) -> Result<u64, HostError>;
-
     /// The uid of the account called `name` in this host's account
     /// database (`getpwnam_r` through the name service), `None` when it
     /// has no such account. Read only for `owners:` names under

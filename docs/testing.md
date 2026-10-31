@@ -409,8 +409,8 @@ How the format reads (the schema documents every key):
   names: 0, never on the local list). The top-level `own_uid_map` is diskgc's
   own (same default, `none` too), `own_uid` its user id (default 1000; 0
   models running as root), `own_cap_effective` its effective capability
-  set (default: every capability for uid 0, none otherwise; also what its
-  own `proc_status` shows), and `sandbox_gate` the pre-release gate as
+  set as its own `proc_status` shows it (default: every capability for
+  uid 0, none otherwise), and `sandbox_gate` the pre-release gate as
   `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
   deleting calls are refused; `refuses_deletes`: only the deleting calls
   are). `command_exit` is the exit code of a modelled command action
@@ -766,8 +766,9 @@ Model scenarios required by [safety.md](safety.md) and
     `--target-free`), invalid configuration, root without `--allow-root`,
     `--allow-root` without `CAP_SYS_PTRACE` in either mode
     (`watch_allow_root_without_cap_sys_ptrace_is_refused_at_start_in_both_modes`;
-    `ensure`'s are the `allow-root-*-cap-sys-ptrace*` vectors and
-    `allow_root_needs_cap_sys_ptrace_in_the_effective_set`; in a container
+    `--allow-root` not as root, an unreadable capability set (exit 3);
+    `ensure`'s are the `allow-root-*` vectors and
+    `allow_root_needs_root_and_cap_sys_ptrace_in_the_effective_set`; in a container
     `allow_root_without_cap_sys_ptrace_is_refused_in_every_mode`, root with
     every container capability but that one), a missing supplied root, a missing host lock file, a second `watch`
     with the same state directory after its 10 s wait (`second_watch_exits_2`,
@@ -2051,12 +2052,12 @@ more than the flake already builds.
    (for `/`), its `ExecStart` pointed at the packaged binary, and verified
    in system and `--user` mode with `SYSTEMD_UNIT_PATH` set to the
    templates and systemd's own units for that manager. Measured in the
-   build sandbox (systemd 26x): `--user` mode verifies with a scratch
-   `$HOME` and `$XDG_RUNTIME_DIR`; system mode fails creating
-   `/run/systemd` (the sandbox has no `/run` and a read-only `/`), so both
-   run chrooted into a tmpfs root in a user and mount namespace of their
-   own (`unshare`), which needs unprivileged user namespaces in the build
-   sandbox. `verify` exits 0 on unknown keys and bad values (it only
+   build sandbox: `--user` mode verifies as is, with a scratch `$HOME` and
+   `$XDG_RUNTIME_DIR`; system mode fails creating `/run/systemd` (the
+   sandbox has no `/run` and a read-only `/`; `--root=DIR` does not change
+   that), so it runs chrooted into a tmpfs root in a user and mount
+   namespace of its own (`unshare`). On a builder without unprivileged
+   user namespaces only the system half fails. `verify` exits 0 on unknown keys and bad values (it only
    warns), so any output fails the check; negative controls show a missing
    binary and an unknown key caught. TASK-45 adds the units the module
    renders for an example configuration, taken from the system toplevel

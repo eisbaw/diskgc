@@ -56,6 +56,7 @@ use crate::host::{
 use std::os::unix::ffi::OsStrExt;
 
 use super::{ScanError, environ};
+use crate::executor::CAP_SYS_PTRACE;
 use crate::host::PidNamespace;
 use crate::liveness::PidTable;
 use crate::liveness::pytest::{self, Lookup, ProcessFacts};
@@ -1038,6 +1039,10 @@ pub(crate) fn is_users(status: &ProcStatus, users: &[u32]) -> bool {
 ///   live task's `fd` directory is not its effective uid. Unknown owner
 ///   (no live task found): no excuse.
 ///
+/// None of the last three when diskgc's effective set holds
+/// `CAP_SYS_PTRACE` (`--allow-root` requires it): the kernel then refuses
+/// none of them, so a refusal is unexplained and blocks.
+///
 /// A same-uid process refused while dumpable and unprivileged (e.g. a shell
 /// running with another group, `newgrp`, which the kernel's check also
 /// compares) blocks. In root mode, any uid 0 in a refused process blocks:
@@ -1057,6 +1062,13 @@ pub(crate) fn excuse(
     }
     if !is_users(status, users) {
         return Some(Excuse::OtherUser);
+    }
+    // With CAP_SYS_PTRACE the kernel's ptrace-read check passes for every
+    // process of diskgc's user namespace, setuid, more capable or not
+    // dumpable alike: the refusal came from something else (an LSM), and
+    // excuses none of the three below.
+    if own.is_some_and(|own| own.cap_effective & (1 << CAP_SYS_PTRACE) != 0) {
+        return None;
     }
     if !users.contains(&status.uid.effective) {
         return Some(Excuse::SetUid);

@@ -45,7 +45,9 @@ mod tier_policy;
 
 pub use indexed::tally_sources;
 pub use plan::{dry_run, dry_run_grouped};
-pub use preflight::{CAP_SYS_PTRACE, MeasureFailure, goal_bytes, privileges, reach_path};
+pub use preflight::{
+    CAP_SYS_PTRACE, MeasureFailure, PrivilegeError, goal_bytes, privileges, reach_path,
+};
 pub use tier::{
     FsUnionSource, NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, SELECT_TIER,
     SelectionFailure, SourceKind, Tier, bind_protections,

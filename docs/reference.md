@@ -288,9 +288,9 @@ In this order; the first failure exits with its code and deletes nothing:
 
 1. Command line, configuration and the `--select` expression: exit 2 as
    for `ensure` (Configuration file, Selection grammar).
-2. Running as root without `--allow-root`, or `--allow-root` without
-   `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
-   (`safety`). In a
+2. Running as root without `--allow-root`, or `--allow-root` not as root
+   or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
+   (`safety`); a capability set that cannot be read: exit 3 (`host`). In a
    development build, the pre-release sandbox gate: exit 2 outside a test
    container ([safety.md](safety.md#pre-release-sandbox-gate)); not with
    `--tally-only`, which deletes nothing.
@@ -578,7 +578,18 @@ The development package (not the 0.1 release candidate, whose scope is
 [architecture.md](architecture.md#the-watch-units):
 `lib/systemd/user/diskgc-watch@.service` and
 `lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
-`/usr/local/bin/diskgc`. Install once, as root, from the package:
+`/usr/local/bin/diskgc`.
+
+**Which package.** A reclaiming instance needs a release package that
+includes `watch`; none is released yet. The development package refuses
+to delete outside test containers
+([safety.md](safety.md#pre-release-sandbox-gate)): its reclaiming
+`watch` exits 2 at start naming the sandbox gate, and the unit stays
+failed. Outside test containers it supports only `--tally-only`
+instances (Tally only), such as the CI runner's below. The steps are
+the same for both.
+
+Install once, as root, from the package:
 
 ```sh
 install -Dm0755 bin/diskgc /usr/local/bin/diskgc
@@ -602,6 +613,7 @@ below its size), go in that instance's environment file:
 
 ```sh
 install -Dm0644 share/doc/diskgc/examples/example.yaml ~/.config/diskgc/config.yaml
+# replace the example's Cargo root with directories you own, then:
 mkdir -p ~/.config/diskgc/watch
 echo 'DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G' > ~/.config/diskgc/watch/home.env
 diskgc check
@@ -896,8 +908,8 @@ kernel remains exit 2. A dry run with a host
 or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
-run as root or to run `--allow-root` without `CAP_SYS_PTRACE`,
-[safety.md](safety.md#privileges), a missing host lock file when reclaim is needed, with
+run as root, or to run `--allow-root` other than as root or without
+`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), a missing host lock file when reclaim is needed, with
 `cause: provisioning`, and, in
 development builds, the pre-release sandbox gate,
 [safety.md](safety.md#pre-release-sandbox-gate)),
