@@ -508,12 +508,12 @@ fn lookup_account(name: &str) -> Result<Option<u32>, HostError> {
 /// is the per-user lock there (docs/safety.md, Host lock); a session's
 /// `$XDG_RUNTIME_DIR` is never read.
 fn runtime_dir_is_users(uid: u32) -> bool {
-    rustix::fs::statat(
-        CWD,
-        format!("/run/user/{uid}").as_str(),
-        AtFlags::SYMLINK_NOFOLLOW,
-    )
-    .is_ok_and(|st| {
+    is_users_runtime_dir(Path::new(&format!("/run/user/{uid}")), uid)
+}
+
+/// Whether `dir` is a directory (not a symlink) of `uid` with mode 0700.
+fn is_users_runtime_dir(dir: &Path, uid: u32) -> bool {
+    rustix::fs::statat(CWD, dir, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|st| {
         FileType::from_mode(st.st_mode) == FileType::Directory
             && st.st_uid == uid
             && st.st_mode & 0o7777 == 0o700
@@ -6901,6 +6901,24 @@ mod tests {
         }
         assert!(error.is(Errno::EACCES), "{error}");
         assert!(diskgc_core::hostlock::environmental(error));
+    }
+
+    /// A runtime directory counts only as logind makes it: a directory, not
+    /// a symlink, of the user, mode 0700.
+    #[test]
+    fn only_the_users_own_0700_directory_is_a_runtime_directory() {
+        let tmp = TempDir::new();
+        let uid = rustix::process::geteuid().as_raw();
+        let dir = tmp.0.join("1000");
+        std::fs::create_dir(&dir).expect("dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        assert!(is_users_runtime_dir(&dir, uid));
+        assert!(!is_users_runtime_dir(&dir, uid + 1), "another user's");
+        std::os::unix::fs::symlink(&dir, tmp.0.join("link")).expect("symlink");
+        assert!(!is_users_runtime_dir(&tmp.0.join("link"), uid), "a symlink");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(!is_users_runtime_dir(&dir, uid), "mode 0755");
+        assert!(!is_users_runtime_dir(&tmp.0.join("absent"), uid));
     }
 
     /// The place is the system's, never the environment's: the runtime
