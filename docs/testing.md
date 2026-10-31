@@ -1967,10 +1967,10 @@ filesystem, processes and mounts from the developer's system.
 
 **Not covered end-to-end (for now):** deletion on real block filesystems
 (ext4 or xfs as separate mounts, btrfs), network filesystems, and live
-systemd (planned: Deployment units, below). A private ext4 VM disk covers the 40k dry-plan cost only. Rootless
-container behavior follows the test host's kernel; the pinned VM cases above
-cover the listed kernels. Other cases rest on model tests with model-only
-fields.
+systemd (planned: Deployment units, below). A private ext4 VM disk covers
+the 40k dry-plan cost only. Rootless container behavior follows the test
+host's kernel; the pinned VM cases above cover the listed kernels. Other
+cases rest on model tests with model-only fields.
 
 Why not FUSE (to model hosts): it has its own `flock`, `statx` and mount-id
 semantics, needs privileges, and is a large extra moving part. One
@@ -1997,25 +1997,22 @@ already builds.
 
 1. **Unit lint** (TASK-44; a unit test in `just check`; possible here).
    Both packaged templates carry `Type=exec`, `Restart=always`,
-   `RestartSec=30s`, `RestartPreventExitStatus=2`, `KillMode=mixed` and
-   the shipped hardening lines, and none that the hardening table rejects
-   (`ProtectProc=`, `ProcSubset=`, `PrivateTmp=`, `ProtectHome=`,
-   `ProtectSystem=strict`, `PrivateUsers=`, `PrivatePIDs=`,
-   `PrivateNetwork=`, `DynamicUser=`, `RestrictSUIDSGID=`, `Nice=`,
-   `IOSchedulingClass=`, `CPUSchedulingPolicy=`, a `SystemCallFilter=`
-   with `~@resources`). This is the check of the shipped unit's lines that
+   `RestartSec=30s`, `RestartPreventExitStatus=2`, `KillMode=mixed`,
+   `RestrictSUIDSGID=no` and the other shipped hardening lines, and no
+   option of a "no" or "fatal" row of the hardening table
+   ([architecture.md](architecture.md#hardening)), nor one its "not set"
+   rows exclude. This is the check of the shipped unit's lines that
    Deployment requires.
 2. **`systemd-analyze verify`** (TASK-44; a flake check that `just e2e`
    builds; possible here: `pkgs.systemd` is already in the flake for the
-   Nix image, so no new build input). Each template is linked under
+   Nix image, so no new build input; whether `--user` mode verifies
+   inside the Nix build sandbox, without a user manager or `$HOME`, is
+   unverified). Each template is linked under
    instance names (`diskgc-watch@srv-ci\x2dbuilds.service`, and
    `diskgc-watch@-.service` for `/`), its `ExecStart` pointed at the
    built binary, and verified in system and `--user` mode; TASK-45 adds
    the units the module renders for an example configuration, taken from
-   the system toplevel without booting it. Design evidence only, not this
-   check: on 2026-10-31 a draft of both templates (ExecStart pointed at
-   `true`) passed `systemd-analyze verify` and `systemd-analyze --user
-   verify` with systemd 260 on the development host.
+   the system toplevel without booting it.
 3. **tmpfiles create**: exists (`shipped_tmpfiles_and_example_work_in_container`,
    Shipped files above). TASK-44 adds both unit files to the package's
    installed-file check.
@@ -2025,8 +2022,12 @@ already builds.
    makes the system build fail with `diskgc check`'s message
    (`testers.testBuildFailure`); each assertion fires on its own example.
 5. **NixOS VM test** (TASK-45; one `nixosTest` flake check, like
-   `vm-release-tmp-reclaim`; deferred, not run here while the development
-   machine's disk is tight). Boot provisions `/run/diskgc/lock`; a
+   `vm-release-tmp-reclaim` but run by `just e2e-full`, not `just e2e`;
+   deferred, not run here while the development machine's disk is
+   tight). A first `switch-to-configuration` from a system without
+   diskgc starts the system instances, and the user instance once the
+   user's manager restarts (the step TASK-44's install notes name). Boot
+   provisions `/run/diskgc/lock`; a
    lingering user's user instance and a runner user's system `tallyOnly`
    instance are active; the `tallyOnly` instance's snapshot lands in the
    runner's `~/.local/state/diskgc` and that user's `ensure` starts from
@@ -2034,7 +2035,8 @@ already builds.
    edited configuration in effect; a second instance on the same
    filesystem and user, and a root instance without `--allow-root`, exit 2
    and stay failed (`NRestarts=0`); `systemctl show` reports the hardening
-   properties. With the release package only (the sandbox gate refuses
+   properties; a `--allow-root` instance whose capability set lacks
+   `CAP_SYS_PTRACE` exits 2. With the release package only (the sandbox gate refuses
    deletion in a VM, which is not a test container): a reclaiming
    instance keeps a candidate a process holds and deletes an unheld one,
    as the user and as an `allowRoot` instance with its capability set,
