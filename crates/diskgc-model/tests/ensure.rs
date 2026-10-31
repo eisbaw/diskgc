@@ -755,8 +755,11 @@ fn a_tier_budget_spent_after_its_plan_completed_is_no_grouped_error() {
 #[test]
 fn failed_space_sample_in_first_tier_stops_later_tiers_without_deletion() {
     let policy = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: first\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n      - name: later\n        select: profile:cargo-target\n        roots: [/home/mark/src]\n";
+    // statvfs: the first sample, under the host lock, then the first
+    // tier's own start (TASK-270: the first tier to run starts from the
+    // sample under the lock; only later tiers are sampled before they run).
     let model = format!(
-        "{}events:\n  - {{at: {{op: statvfs, path: /home/mark/src, nth: 4, when: before}}, fail: EIO}}\n",
+        "{}events:\n  - {{at: {{op: statvfs, path: /home/mark/src, nth: 3, when: before}}, fail: EIO}}\n",
         yaml(true, "")
     );
     let host = host(&model);

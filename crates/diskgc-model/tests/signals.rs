@@ -408,8 +408,12 @@ fn command_preflight_overrun_exits_met_when_space_appeared() {
     assert!(host.trace().iter().all(|call| call.op != Op::Unlinkat));
 }
 
+/// A command's executables are looked up only under the host lock, once
+/// the run needs to reclaim (TASK-270): a first sample that fails is the
+/// run's host error (exit 3) before any lookup, so a lookup that would
+/// overrun the deadline never runs.
 #[test]
-fn command_preflight_overrun_with_failed_first_sample_is_host_error() {
+fn failed_first_sample_is_a_host_error_before_any_command_lookup() {
     let extra = "  /usr/bin/pip: {mode: '0755'}\nevents:\n  - {at: {op: executable_file, path: /usr/bin/pip, nth: 1, when: before}, advance: 20m}\n  - {at: {op: openat2, path: /home/mark/src, nth: 1, when: before}, fail: EIO}\n";
     let host = common::host(&model(extra));
     let report = executor::ensure(&host, &command_request(), &[1000], &mut |_| {});
@@ -419,13 +423,9 @@ fn command_preflight_overrun_with_failed_first_sample_is_host_error() {
         report.errors[0].cause,
         diskgc_core::report::ErrorCause::Host
     );
-    assert!(
-        report
-            .overruns
-            .iter()
-            .any(|entry| entry.operation == "preflight" && entry.over_ms > 0),
-        "{report:#?}"
-    );
+    assert!(report.overruns.is_empty(), "{report:#?}");
+    assert_eq!(host.trace_count(Op::ExecutableFile), 0);
+    assert_eq!(host.unfired_events().len(), 1, "the lookup's event");
     assert!(host.trace().iter().all(|call| call.op != Op::Unlinkat));
 }
 
