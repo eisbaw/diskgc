@@ -2042,8 +2042,8 @@ Container tests cannot run inside the Nix build sandbox, so they run from
 ### Deployment units
 
 With the units and the module
-([architecture.md](architecture.md#deployment)); 1 to 3 exist (TASK-44),
-4 and 5 are TASK-45's. "Possible here" means it needs neither a VM nor
+([architecture.md](architecture.md#deployment)); 1 to 3 are TASK-44's,
+4 and 5 TASK-45's (their sources in `packaging/nixos/`). "Possible here" means it needs neither a VM nor
 more than the flake already builds.
 
 1. **Unit lint** (`tools/unit_lint.py`, run by `tools/test_unit_lint.py`
@@ -2074,38 +2074,69 @@ more than the flake already builds.
    namespace of its own (`unshare`). On a builder without unprivileged
    user namespaces only the system half fails. `verify` exits 0 on unknown keys and bad values (it only
    warns), so any output fails the check; negative controls show a missing
-   binary and an unknown key caught. TASK-45 adds the units the module
-   renders for an example configuration, taken from the system toplevel
-   without booting it.
+   binary and an unknown key caught. The module's drop-ins are verified
+   the same way on the packaged templates (4; the shell function is
+   shared, `systemdVerify` in flake.nix).
 3. **tmpfiles create**: `shipped_tmpfiles_and_example_work_in_container`
    (Shipped files above); `diskgc check` on `docs/example.yaml` is the
    flake check `config-check-sandbox`. The release candidate does not
    ship the units: 0.1 is the `ensure` MVP (PRD, Scope).
-4. **Module evaluation and build-time check** (TASK-45; flake checks, no
-   VM; possible here): the module evaluates for a user instance, a system
-   `tallyOnly` instance and an `allowRoot` instance; an invalid `settings`
-   makes the system build fail with `diskgc check`'s message
-   (`testers.testBuildFailure`); each assertion fires on its own example.
-5. **NixOS VM test** (TASK-45; one `nixosTest` flake check, like
-   `vm-release-tmp-reclaim` but run by `just e2e-full`, not `just e2e`;
-   deferred, not run here while the development machine's disk is
-   tight). A first `switch-to-configuration` from a system without
-   diskgc starts the system instances, and the user instance once the
-   user's manager restarts (the step TASK-44's install notes name). Boot
-   provisions `/run/diskgc/lock`; a
-   lingering user's user instance and a runner user's system `tallyOnly`
-   instance are active; the `tallyOnly` instance's snapshot lands in the
-   runner's `~/.local/state/diskgc` and that user's `ensure` starts from
-   it; SIGHUP makes an instance active again (`NRestarts=1`) with an
-   edited configuration in effect; a second instance on the same
-   filesystem and user, and a root instance without `--allow-root`, exit 2
-   and stay failed (`NRestarts=0`); `systemctl show` reports the hardening
-   properties; a `--allow-root` instance whose capability set lacks
-   `CAP_SYS_PTRACE` exits 2. With the release package only (the sandbox gate refuses
-   deletion in a VM, which is not a test container): a reclaiming
-   instance keeps a candidate a process holds and deletes an unheld one,
-   as the user and as an `allowRoot` instance with its capability set,
-   which is what proves that set.
+4. **Module evaluation and build-time check** (flake checks
+   `nixos-module-eval` and `nixos-module-bad-config`, built by `just e2e`;
+   no VM). NixOS evaluations of the user story (user instances, one with
+   its own `settings` and a quoted `--select`, one whose argument holds
+   `%h`, `$HOME`, quotes and a backslash) and a CI runner (a system
+   `tallyOnly` instance, an `allowRoot` one and one naming the global
+   file as `configFile`) are compared case by case with the expected
+   `ExecStart=` (escaped exactly as systemd unquotes it), the
+   `EnvironmentFile=` reset, `User=`/`ConditionUser=`, capability set,
+   `PATH` (none in user drop-ins; the system profile in system ones),
+   `wantedBy`, `restartTriggers` (only the file an instance reads),
+   `/etc` entries (copied, mode 0644, from the checked derivations),
+   the tmpfiles package and the linger warning. The `user` option's type
+   refuses a newline, the empty string, `@system`, a specifier, a UID,
+   whitespace and `:`, and accepts ordinary names; a system instance
+   with a newline in `user` fails the evaluation. Each assertion fires
+   alone on its own example, with its message (a system-scope user
+   typo and a system instance with no checked configuration included).
+   The drop-ins, staged on the packaged templates, pass
+   `systemd-analyze verify` (2) with no output, and the checked
+   configurations build. An invalid `settings` fails the derivation
+   `/etc/diskgc/config.yaml` comes from, with `diskgc check`'s message
+   (`testers.testBuildFailure`).
+5. **NixOS VM test** (`vm-nixos-module`, one `nixosTest` flake check,
+   like `vm-release-tmp-reclaim` but run by `just e2e-full`, not
+   `just e2e`), with the development package. A first
+   `switch-to-configuration` from a system without diskgc provisions
+   `/run/diskgc/lock`, starts the system instances and, by reloading the
+   lingering user's manager, the user instances; it exits 0, or 4
+   naming only instances refused below (a race of the switch). A runner
+   user's system `tallyOnly` instance (running as that user) and the
+   root `allowRoot` one are active; a stale generic-Linux `.env` file
+   does not reach the process (the `EnvironmentFile=` reset); a user
+   instance runs with its manager's `PATH`; of two of one user's
+   instances on one filesystem, one is active and the other exits 2
+   (`NRestarts=0`, naming the other watch's single-writer lock), as do a
+   root instance without `--allow-root` (naming it), an `allowRoot`
+   instance whose capability set lacks `CAP_SYS_PTRACE` (naming it) and
+   a reclaiming user instance (naming the sandbox gate); `systemctl show`
+   reports the shipped hardening properties, root's four capabilities,
+   and none of the "no" and "fatal" rows of the hardening table
+   (`ProtectProc`,
+   `ProcSubset`, `PrivatePIDs`, `PrivateNetwork`, `RemoveIPC`,
+   `DynamicUser`, `PrivateUsers`, `PrivateTmp`, `ProtectHome`,
+   `ProtectSystem`) on the runner, root and a user unit; the `tallyOnly`
+   instance's snapshot lands in the runner's `~/.local/state/diskgc` at
+   stop and the restarted instance starts from it; SIGHUP stops an
+   instance cleanly (its own log line), which restarts after 30 s
+   (`NRestarts=1`) and reads its edited configuration afresh (here an
+   invalid one: exit 2). Not shown: that the runner's `ensure` starts
+   from that snapshot (a dry run plans without the index, and the
+   sandbox gate refuses a reclaiming `ensure` before it loads one), and,
+   with a release package that includes `watch` only (none exists yet),
+   that a reclaiming instance keeps a candidate a process holds and
+   deletes an unheld one, as the user and as an `allowRoot` instance
+   with its capability set, which is what proves that set.
 
 ## Cargo toolchains under test
 

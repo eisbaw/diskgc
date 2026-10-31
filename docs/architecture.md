@@ -895,9 +895,10 @@ is accepted until measured otherwise.
     the binary is statically linked (musl) so it runs on any distribution;
   - *Cargo under test* is separate: pinned toolchains from the same locked
     rust-overlay, in the test image ([testing.md](testing.md#cargo-toolchains-under-test));
-  - outputs: `packages.default`, `nixosModules.default`,
-    `devShells.default`, `checks` (fast checks and evaluation of the NixOS
-    module), and the container images for the e2e tests.
+  - outputs: `packages.default` (the development package),
+    `nixosModules.default` (NixOS module, below), `devShells`, `checks`
+    and the rest are listed, each with its comment, in `flake.nix`;
+    [testing.md](testing.md) says which recipe builds which check.
 - **Cargo workspace:**
 
   The product workspace and the separate `diskgc-e2e` workspace both set
@@ -1037,9 +1038,9 @@ is accepted until measured otherwise.
   template; a user's `ensure` and the user template work without it,
   each user's reclaims then taking turns through a per-user lock only
   ([safety.md](safety.md#host-lock)).
-- **NixOS**, as one option: the module below. It renders the YAML, ships
-  the tmpfiles rule, runs `check` at build time, and starts the `watch`
-  instances.
+- **NixOS**, as one option: the module below. It renders the YAML,
+  provisions the host lock, runs `check` at build time, and
+  starts the `watch` instances.
 - **CI runners:** binary, YAML, the tmpfiles drop-in (or equivalent: it
   serialises the runner's reclaims with every other user's, and the
   system template requires it), and
@@ -1301,11 +1302,12 @@ today**: diskgc starts and runs blind (TASK-263).
 
 ### NixOS module
 
-`nixosModules.default`, under `services.diskgc`:
+`nixosModules.default` (source `packaging/nixos/module.nix`), under
+`services.diskgc`:
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | bool | `false` | the package on `PATH` (agents and hooks call `ensure`), its tmpfiles rule (`systemd.tmpfiles.packages`) and both templates (`systemd.packages`) |
+| `enable` | bool | `false` | the package on `PATH` (agents and hooks call `ensure`), its tmpfiles rule for the host lock (`systemd.tmpfiles.packages`) and both templates (`systemd.packages`) |
 | `package` | package | the flake's `packages.default` | a reclaiming instance needs a release package: a development package refuses to delete outside test containers, so the instance exits 2 naming the sandbox gate and stays failed. `tallyOnly` instances work with either. |
 | `settings` | null or YAML value | `null` | rendered to `/etc/diskgc/config.yaml` and checked at build time |
 | `instances` | attribute set of instances | `{}` | one `watch` each |
@@ -1315,8 +1317,8 @@ today**: diskgc starts and runs blind (TASK-263).
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `scope` | `"user"` or `"system"` | `"user"` | which manager runs it |
-| `user` | string | required | user scope: the account whose manager runs it (`ConditionUser=`); system scope: `User=` |
-| `path` | string | required | `PATH`; names the unit |
+| `user` | account name | required | an account in `users.users`: user scope, the one whose manager runs it (`ConditionUser=`); system scope, `User=`. A literal name (`[A-Za-z_][A-Za-z0-9_.-]*`, optionally ending in `$`): no UID, no special value such as `@system`, no specifier, whitespace or control character, so it cannot add a directive or mean root by being empty |
+| `path` | absolute path, as a string | required | `PATH`; names the unit |
 | `minFree` | null or string | `null` | `--min-free` when set |
 | `targetFree` | null or string | `null` | `--target-free` when set |
 | `tallyOnly` | bool | `false` | `--tally-only` |
@@ -1333,30 +1335,53 @@ today**: diskgc starts and runs blind (TASK-263).
   and resets `EnvironmentFile=` to nothing, so a stale `.env` file left
   from a generic-Linux install cannot inject flags. `--config` is
   `configFile`, else the instance's `settings` file; otherwise a system
-  instance gets `/etc/diskgc/config.yaml` and a user instance no
-  `--config` at all, so the watcher and the user's agents find the same
+  instance gets `/etc/diskgc/config.yaml`, which then is the module's
+  checked `settings` (asserted: a hand-placed file there is used only
+  when named as `configFile`), and a user instance no `--config` at all,
+  so the watcher and the user's agents find the same
   file by the usual lookup (`~/.config/diskgc/config.yaml`, then the
   module's `/etc/diskgc/config.yaml`) and share the snapshot's warmth.
   The drop-in also adds `User=` (system) or `ConditionUser=` (user),
   root's capability set for `allowRoot`, and `wantedBy`
   `multi-user.target` or `default.target`. The module writes no
-  environment files. Restart and hardening lines come from the packaged
-  template, so generic Linux and NixOS share one unit text. A system
-  instance restarts on `nixos-rebuild switch` when its configuration
-  changes (`restartTriggers`); a user instance picks it up at its next
-  restart (of the service, or of the user's manager).
+  environment files. NixOS gives every service a `PATH` of coreutils and
+  a few tools; a user instance's drop-in drops it, so the watcher runs
+  with its user manager's `PATH` (the session's) and finds `docker`,
+  `nix` and what command actions call as the user's agents do. A system
+  instance gets the system profile (`/run/current-system/sw`) on its
+  `PATH` for the same tools. Restart and hardening lines come from the
+  packaged template, so generic Linux and NixOS share one unit text. A
+  system instance restarts on `nixos-rebuild switch` when the checked
+  file it reads changes (`restartTriggers`: the global one only for an
+  instance that reads it); a user instance picks a change up at its
+  next restart (of the service, or of the user's manager).
+- **Switching** (measured in `vm-nixos-module`, nixpkgs 26.11). A switch
+  starts new system instances after it has re-run tmpfiles, so the host
+  lock exists at their start; it reloads every running user manager (a
+  lingering or logged-in user's), which starts that user's new
+  instances. That reload may come before tmpfiles: on the first switch
+  a reclaiming user instance may then take its per-user lock for a cycle
+  ([safety.md](safety.md#host-lock): which lock is decided at each
+  use). An instance diskgc refuses at start (exit 2) stays failed, and
+  may make the switch exit 4 naming it: whether the switch sees the
+  failure is a race (`Type=exec`, and the switch's short wait for units
+  to settle).
 - **Assertions** (evaluation fails, naming the instance), only where
   the module shapes the unit; flag combinations are diskgc's to refuse
   (exit 2, and the unit stays failed): one instance per unit name in each
   scope (user units live in `/etc/systemd/user` for every user, so two
   users cannot both have a user instance of one `path`); `allowRoot`
   only with `scope = "system"` and `user = "root"`; at most one of
-  `settings` and `configFile` per instance; a user-scope `user` is in
-  `users.users`. **Warning** (not an error): a user-scope `user` without
-  `users.users.<user>.linger`, whose watcher then stops at logout.
+  `settings` and `configFile` per instance; `user` is in `users.users`
+  (either scope: a system-scope typo would otherwise restart forever on
+  systemd's exit 217); a system instance has `configFile`, its own
+  `settings` or the global `settings`. **Warning** (not
+  an error): a user-scope `user` whose `users.users.<user>.linger` is not
+  `true`, whose watcher then stops at logout (`null` warns too: a
+  `loginctl enable-linger` is invisible to evaluation).
 - **Build-time check** (TASK-45). Each rendered file is the output of a
-  derivation that runs `diskgc check --config FILE` with the instance's
-  package and copies the file only when it exits 0; `environment.etc`
+  derivation that runs `diskgc check --config FILE` with the module's
+  `package` and copies the file only when it exits 0; `environment.etc`
   takes its source from that output, so an invalid configuration fails
   the system build before anything is deployed. `check` needs nothing
   from the machine ([reference.md](reference.md#check)): roots absent from
@@ -1418,9 +1443,11 @@ Not covered by Mark's decisions; each is the simplest sound option found.
    distribution packages and the module replace it.
 5. The system template has no `User=`: unset means root without
    capabilities, which exits 2.
-6. Root instances get the four-capability bounding set above (unproved
-   until the module's VM test), and `--allow-root` refuses to start
-   without `CAP_SYS_PTRACE`.
+6. Root instances get the four-capability bounding set above, and
+   `--allow-root` refuses to start without `CAP_SYS_PTRACE`. The set is
+   unproved until a release package that includes `watch` runs an
+   `allowRoot` reclaim (the module's VM test shows only that it is
+   applied and that the refusal works).
 7. `RestartSec=30s`, `KillMode=mixed`, `TimeoutStopSec=30s`, no
    `ExecReload=`.
 8. State stays in `User=`'s home (no `StateDirectory=`); system units pin
@@ -1434,10 +1461,10 @@ Not covered by Mark's decisions; each is the simplest sound option found.
     `extraArgs`; per-instance `settings`, configuration files copied into
     `/etc`; it does not set `users.users.<name>.linger` but warns when a
     user-scope user lacks it.
-11. One NixOS VM test for the module (TASK-45), run like
-    `vm-release-tmp-reclaim` but from `just e2e-full`, not `just e2e`,
-    although the PRD lists a VM test suite as a non-goal for now;
-    deferred while disk is tight.
+11. One NixOS VM test for the module (TASK-45, `vm-nixos-module`), run
+    like `vm-release-tmp-reclaim` but from `just e2e-full`, not
+    `just e2e`, although the PRD lists a VM test suite as a non-goal for
+    now.
 
 Accepted by the mped-architect review of 2026-10-31 with the adjustments
 above (Mark's confirmation still open).

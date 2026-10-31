@@ -63,6 +63,8 @@ e2e: _gcroot-dev
     python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.deployment-units
+    nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
+    nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
@@ -102,6 +104,8 @@ e2e-full: _gcroot-dev
     python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.deployment-units
+    nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
+    nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
@@ -123,6 +127,7 @@ e2e-full: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
+    nix build -L --no-link .#checks.x86_64-linux.vm-nixos-module
     just e2e-vm-cold-scale
 
 # The static binary, no Nix inside (docs/testing.md, Images).

@@ -673,9 +673,9 @@ systemctl daemon-reload
 systemctl enable --now diskgc-watch@srv-ci.service
 ```
 
-On NixOS, the module (TASK-45) installs and starts the instances
-instead; there a new user instance starts only after the user's manager
-restarts.
+On NixOS, the module installs and starts the instances instead
+([architecture.md](architecture.md#nixos-module): its options, and what
+a switch starts).
 
 ### `survey`
 

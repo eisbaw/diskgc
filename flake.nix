@@ -205,6 +205,43 @@
         }
       '';
 
+      # Shared by deployment-units and the NixOS module's nixos-module-eval
+      # (docs/testing.md, Deployment units, 2 and 4); the caller sets HOME,
+      # XDG_RUNTIME_DIR and makes $TMPDIR/root.
+      systemdVerify = ''
+        # verify MANAGER DIR FILE...: exit status of systemd-analyze verify
+        # of the FILEs; its output in DIR.log. The unit path is DIR and
+        # systemd's own units for that manager (the targets default
+        # dependencies name), nothing else.
+        # --user runs as is. System mode creates /run/systemd, and the
+        # sandbox has no /run and a read-only / (`--root=DIR` does not
+        # help: measured, it still creates /run/systemd), so it runs
+        # chrooted into a tmpfs root (binding /nix, /proc, /dev and
+        # $NIX_BUILD_TOP) in a user and mount namespace of its own.
+        # Without unprivileged user namespaces only that half fails.
+        verify() {
+          local units="$2:${pkgs.systemd}/example/systemd/$1"
+          local manager="$1" dir="$2"
+          shift 2
+          local files=("$@")
+          if [ "$manager" = user ]; then
+            SYSTEMD_UNIT_PATH="$units" systemd-analyze --user verify --man=no "''${files[@]}" \
+              > "$dir.log" 2>&1
+            return
+          fi
+          unshare --map-root-user --mount sh -euc '
+            root=$1 top=$2; shift 2
+            mount -t tmpfs none "$root"
+            for d in nix proc dev run tmp; do mkdir "$root/$d"; done
+            mkdir -p "$root$top"
+            for d in /nix /proc /dev "$top"; do mount --rbind "$d" "$root$d"; done
+            exec chroot "$root" "$@"
+          ' sh $TMPDIR/root "$NIX_BUILD_TOP" env SYSTEMD_UNIT_PATH="$units" \
+            ${pkgs.systemd}/bin/systemd-analyze verify --man=no "''${files[@]}" \
+            > "$dir.log" 2>&1
+        }
+      '';
+
       diskgc = craneLib.buildPackage (
         workspaceArgs
         // {
@@ -919,9 +956,33 @@
         vm-pidfd-linux-5-15 = vmPidfdLinux515;
         vm-pidfd-linux-5-8 = vmPidfdLinux58;
         vm-pidfd-linux-6-8 = vmPidfdLinux68;
+        vm-nixos-module = vmNixosModule;
+      };
+      # The NixOS module (docs/architecture.md, NixOS module). Its default
+      # package is the development package of the evaluating system.
+      nixosModule = import ./packaging/nixos/module.nix {
+        defaultPackage =
+          p:
+          self.packages.${p.stdenv.hostPlatform.system}.default
+            or (throw "diskgc: no package for ${p.stdenv.hostPlatform.system}; only ${system} is built");
+      };
+      # Its checks: evaluation and the build-time check (no VM), and one
+      # NixOS VM test, run by `just e2e-full` only (docs/testing.md,
+      # Deployment units, 4 and 5). Like the VM checks, the dev shell
+      # leaves them out: each evaluates NixOS systems.
+      nixosModuleChecks = import ./packaging/nixos/checks.nix {
+        inherit pkgs lib nixpkgs systemdVerify;
+        module = nixosModule;
+        package = diskgc;
+      };
+      vmNixosModule = import ./packaging/nixos/vm-test.nix {
+        inherit pkgs;
+        module = nixosModule;
       };
     in
     {
+      nixosModules.default = nixosModule;
+
       packages.${system} = {
         default = diskgc;
         release-01-candidate = diskgcRelease01;
@@ -991,37 +1052,14 @@
               ln -s diskgc-watch@.service "$2/diskgc-watch@srv-ci\x2dbuilds.service"
               ln -s diskgc-watch@.service "$2/diskgc-watch@-.service"
             }
-            # verify MANAGER DIR: exit status of verify; its output in
-            # DIR.log. The unit path is DIR and systemd's own units for that
-            # manager (the targets default dependencies name), nothing else.
-            # --user runs as is. System mode creates /run/systemd, and the
-            # sandbox has no /run and a read-only / (`--root=DIR` does not
-            # help: measured, it still creates /run/systemd), so it runs
-            # chrooted into a tmpfs root (binding /nix, /proc, /dev and
-            # $NIX_BUILD_TOP) in a user and mount namespace of its own.
-            # Without unprivileged user namespaces only that half fails.
-            verify() {
-              local units="$2:${pkgs.systemd}/example/systemd/$1"
-              local files=("$2/diskgc-watch@srv-ci\x2dbuilds.service" "$2/diskgc-watch@-.service")
-              if [ "$1" = user ]; then
-                SYSTEMD_UNIT_PATH="$units" systemd-analyze --user verify --man=no "''${files[@]}" \
-                  > "$2.log" 2>&1
-                return
-              fi
-              unshare --map-root-user --mount sh -euc '
-                root=$1 top=$2; shift 2
-                mount -t tmpfs none "$root"
-                for d in nix proc dev run tmp; do mkdir "$root/$d"; done
-                mkdir -p "$root$top"
-                for d in /nix /proc /dev "$top"; do mount --rbind "$d" "$root$d"; done
-                exec chroot "$root" "$@"
-              ' sh $TMPDIR/root "$NIX_BUILD_TOP" env SYSTEMD_UNIT_PATH="$units" \
-                ${pkgs.systemd}/bin/systemd-analyze verify --man=no "''${files[@]}" \
-                > "$2.log" 2>&1
+            ${systemdVerify}
+            # verify_staged MANAGER DIR: verify both instance names in DIR.
+            verify_staged() {
+              verify "$1" "$2" "$2/diskgc-watch@srv-ci\x2dbuilds.service" "$2/diskgc-watch@-.service"
             }
             for manager in user system; do
               stage $manager $TMPDIR/$manager "$bin"
-              if ! verify $manager $TMPDIR/$manager || [ -s $TMPDIR/$manager.log ]; then
+              if ! verify_staged $manager $TMPDIR/$manager || [ -s $TMPDIR/$manager.log ]; then
                 cat $TMPDIR/$manager.log >&2
                 echo "error: systemd-analyze verify rejected or warned about the $manager template" >&2
                 exit 1
@@ -1029,7 +1067,7 @@
               echo "$manager template: verified, no output"
 
               stage $manager $TMPDIR/$manager-nobin $TMPDIR/absent/diskgc
-              if verify $manager $TMPDIR/$manager-nobin; then
+              if verify_staged $manager $TMPDIR/$manager-nobin; then
                 cat $TMPDIR/$manager-nobin.log >&2
                 echo "error: negative control: verify accepted a missing binary ($manager)" >&2
                 exit 1
@@ -1037,7 +1075,7 @@
               grep -F 'is not executable' $TMPDIR/$manager-nobin.log
 
               stage $manager $TMPDIR/$manager-badkey "$bin" 'NoSuchKey=1'
-              verify $manager $TMPDIR/$manager-badkey || true
+              verify_staged $manager $TMPDIR/$manager-badkey || true
               if ! grep -F "Unknown key 'NoSuchKey'" $TMPDIR/$manager-badkey.log; then
                 cat $TMPDIR/$manager-badkey.log >&2
                 echo "error: negative control: verify said nothing about an unknown key ($manager)" >&2
@@ -1173,16 +1211,20 @@
         e2e-runner-release-01 = e2eRunnerRelease;
         e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
       }
+      // nixosModuleChecks
       // vmChecks;
 
       # The toolchain from rust-toolchain.toml (host target by default) plus
-      # the inputs of every check except the NixOS VM checks, which run only
-      # through `nix build` and whose guests (one per kernel point) would be
-      # evaluated by every `nix develop`. Run recipes as
+      # the inputs of every check except the NixOS VM and module checks,
+      # which run only through `nix build` and whose NixOS systems (one per
+      # kernel point or module example) would be evaluated by every
+      # `nix develop`. Run recipes as
       # `nix develop -c just <recipe>`.
       devShells.${system} = {
         default = craneLib.devShell {
-          checks = removeAttrs self.checks.${system} (builtins.attrNames vmChecks);
+          checks = removeAttrs self.checks.${system} (
+            builtins.attrNames vmChecks ++ builtins.attrNames nixosModuleChecks
+          );
           packages = [ pkgs.just pkgs.python3 pkgs.coreutils pkgs.cargo-mutants ];
           shellHook = devShellHook;
         };
