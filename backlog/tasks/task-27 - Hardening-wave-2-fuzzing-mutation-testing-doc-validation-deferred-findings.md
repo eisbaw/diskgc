@@ -3,8 +3,8 @@ id: TASK-27
 title: 'Hardening wave 2: fuzzing, mutation testing, doc validation, deferred findings'
 status: To Do
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+created_date: 2026-10-16 22:41
+updated_date: '2026-10-31T21:20:00Z'
 labels:
   - wave-2
   - hardening
@@ -28,6 +28,11 @@ Why: wave-2 surfaces are frozen; harden them once. cargo-fuzz on the grammar par
 - [x] #3 fuzz and mutants recipes exist in the justfile
 <!-- AC:END -->
 
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -40,9 +45,6 @@ For the 0.1 ensure MVP (2026-10-18): only this task's mutation-testing slice on 
 2026-10-23 integration: commit 8f0ba7d added five fuzz targets, corpus seeds, docs checks, and a bounded five-source mutation sweep. Parallel QA/MPED reviews found no source blocker; nix develop -c just check and exact nix develop -c just e2e passed on the committed tree, including Docker 7/7 and VMs. Scope inventory lists 850 mutants across five files. The preflight nix develop -c tools/mutants_container_smoke.sh --check-shard parse 0/16 exited 2: MemAvailable was about 10 GiB, below its 12 GiB guard for a 10 GiB capped container. No mutation shard or 30-minute fuzzer has run, so AC1/AC2/DoD remain open. No host files deleted.
 
 Orchestrator 2026-10-24 (COMPASS round 2): moved back to To Do: stalled on RAM, not in progress. Mark ruled 2026-10-24: run cargo-mutants in SMALLER SHARDS that fit current free RAM with the memory guard unchanged (no dedicated window). Run the 0.1 mutation slice together with TASK-13 AC3.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+2026-10-31: branches task27-clean/-hardening/-integrated archived as tags archive/task27-* (75-80% of their files already identical on master; the rest older versions). The live slice is the mutation run (TASK-177).
+<!-- SECTION:NOTES:END -->

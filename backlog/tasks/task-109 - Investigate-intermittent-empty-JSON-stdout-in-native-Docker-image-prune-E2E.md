@@ -3,8 +3,8 @@ id: TASK-109
 title: Investigate intermittent empty JSON stdout in native Docker image-prune E2E
 status: To Do
 assignee: []
-created_date: '2026-10-22 07:03'
-updated_date: '2026-10-25 08:38'
+created_date: 2026-10-22 07:03
+updated_date: '2026-10-31T21:20:00Z'
 labels:
   - testing
   - safety
@@ -37,4 +37,6 @@ A full nix develop -c just e2e run exited 1 after Docker 6/7: native_docker_imag
 Orchestrator 2026-10-23 (COMPASS consult): parked with a trigger: not reproduced after 20+ grouped runs; keep diagnostics in place and reopen on recurrence (record the raw diagnostics then).
 
 COMPASS round 3 (2026-10-25): lowered to Medium: seen only in the Docker suite (not 0.1). Becomes a blocker if an ensure --json run with empty stdout shows up in RC QA.
+
+2026-10-31: branch task109-ptrace-root (7 lines of extra diagnostics, uncommitted leftover) archived as tag archive/task109-ptrace-root; reopen from it on recurrence.
 <!-- SECTION:NOTES:END -->
