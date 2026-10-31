@@ -3,10 +3,10 @@ id: TASK-260
 title: >-
   protect and !profile miss a candidate under a bind mount of a protected
   subdirectory (overlaps_with compares ancestors only)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-31T01:54:00Z'
-updated_date: '2026-10-31T02:45:00Z'
+updated_date: '2026-10-31T03:23:00Z'
 labels:
   - safety
   - irreversible
@@ -28,4 +28,6 @@ Fix direction: a model test first (red); then compare each candidate ancestor's 
 Implemented on branch t260-protect-bind (30e07a0, from 947f3c4): overlaps_in_filesystem translates candidate and matches to (mountinfo device, root field + rest of path) and compares by name, before the ancestor-identity comparison (kept: hard links; it also confirms each compared path's mount live). Fails closed on an unplaceable path. Model: MountSpec.bind_root. Red on master: 6 of 7 new model tests (reclaim deleted /mnt/x/y); the 7th pins that a match containing a mount stops the run. Backport: hand-ported executor.rs patch dry-applies to release-0.1 (af3d503, git apply --cached --check on a temporary index); master's policy.rs diff does not (file absent there); the model hunk has one spec.rs context conflict. Not run: just e2e, containers, VMs.
 
 Follow-up d461065: Cargo discovery does not look inside profile entries, so a protected target can hold a mount; a second mount of that filesystem elsewhere was missed. overlaps_in_filesystem now also counts mounts of the candidate's device, at or below a match, whose root overlaps the candidate's place. Backport patch regenerated with this logic (tmp/t260-backport.patch in the worktree): dry-applies to release-0.1 af3d503.
+
+2026-10-31: merged (ff) at 3f8a1e7 after one review round (mped + Codex). Backport patch for release-0.1 saved at tmp/reviews/t260-backport-release-0.1.patch (applies cleanly, untested there). Follow-ups: TASK-264 (real-kernel subdirectory bind test), overlay upperdir/lowerdir comparison instead of refusal, timing with a large protect set.
 <!-- SECTION:NOTES:END -->
