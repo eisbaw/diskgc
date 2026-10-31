@@ -388,8 +388,10 @@ How the format reads (the schema documents every key):
   not answer; `dead: true` is a mount whose server never answers, and any
   call that reaches it (`openat2` to or below it, `statx`, `getdents`, a
   read, `statfs`, `statvfs`) fails the test, as it would hang on Linux. A repeated device requires `bind_of: <earlier mount id>` and
-  exposes that filesystem's root through a distinct mount ID. Filesystem
-  metadata must match; subdirectory binds are not represented.
+  exposes that filesystem's root through a distinct mount ID, or with
+  `bind_root: /dir` that directory of it (a path from the filesystem's
+  root, mountinfo's root field; missing directories are created).
+  Filesystem metadata must match.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
   `/proc` read errors; a pid that exits is `Gone`. What `status` shows,
@@ -510,6 +512,19 @@ Model scenarios required by [safety.md](safety.md) and
   next one is still tried, and after three in a row the tier's rest is
   skipped unchecked, any other outcome resetting the count
   (`vectors/inuse/busy-host-*`, TASK-144);
+- a bind mount of a subdirectory of a protected tree (TASK-260;
+  `/mnt/x` binds `/gen/x` of `/tmp`'s filesystem): a candidate under the
+  bind is `protected` while the match is the bind source's ancestor
+  `/tmp/gen`, and a candidate holding the source is `protected` while the
+  match lies under the bind; a reclaim through the bind deletes nothing
+  protected; the same for `!profile:` (`excluded`) and for kind
+  `cargo-target` on either side; a filesystem mounted inside a match
+  stops the run at enumeration (diskgc-model `tests/fs_dry_run.rs`
+  `protect_covers_a_bind_mount_of_a_protected_subdirectory` and its
+  neighbours, `tests/fs_reclaim.rs`
+  `a_reclaim_through_a_bind_of_a_protected_subdirectory_deletes_nothing_protected`,
+  `tests/ensure.rs` `a_cargo_target_under_a_bind_of_a_protected_subdirectory_is_protected`,
+  `a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree`);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must, each candidate
@@ -974,8 +989,9 @@ reader):
 - `processes[].mnt_ns`: a mount namespace label (default diskgc's), with
   `processes[].mountinfo` (its mount table lines: id, mount point, root
   field, device) and per held file a `mnt_id`;
-- a mount's `bind_of` extended to a subdirectory (`bind_of: {mount: 2,
-  path: /w/packages/a}`); today only whole-filesystem binds exist;
+- a bind of a subdirectory: landed as a mount's `bind_root` (TASK-260,
+  read by the `protect` and `!profile:` verdict), e.g. `bind_of: 2,
+  bind_root: /w/packages/a`;
 - a file's `content:` (exists) for pytest's `.lock`.
 
 **Owner PID** (`nix-shell-rc`):
@@ -1107,7 +1123,7 @@ the counterexample these turn into cases):
 | `node-project-keep-marker-kept` | all old; `p/node_modules/.diskgc-keep` | `keep_marker`: the operator's remedy for hand-edited dependencies |
 | `node-project-symlinked-node-modules-not-candidate` | `p/node_modules` a symlink to `/home/tester/shared/node_modules` | no candidate; the target preserved |
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
-| `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_of` subdirectory, `mountinfo` root `/w/packages/a`) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
+| `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_root: /w/packages/a`, the `mountinfo` root) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
 | `node-project-held-file-other-device-not-inside` | all old; a process holds `/home/tester/elsewhere/z` on another filesystem; its link text spoofed in the model to `/home/tester/p/z` | eligible: a device not in the tree is never inside, and nothing outside the tree is resolved |
 | `node-project-held-file-same-device-outside-eligible` | all old; a process holds `/home/tester/notes.txt` on the project's device | eligible: text outside the tree's path is not inside |
 | `node-project-container-bind-work-kept` | all old; a process with `mnt_ns: c1`, `root: /`, its mount table binding `/home/tester/p` at `/work` (mount id 968, root field `/home/tester/p`), holding `/work/src/a.js` (link text `/work/src/a.js`) | `in_use`, `fd`: translated through its mount table |
@@ -1118,7 +1134,7 @@ the counterexample these turn into cases):
 | `node-project-map-files-unreadable-retained` | all old; a mapping of a project file on the project's device whose `map_files` link cannot be read and whose `maps` pair the walk did not see | `in_use` (untranslatable) |
 | `node-project-untranslatable-retained` | all old; a process in another mount namespace holding a file on the project's device whose mount id is missing from its `mountinfo` | `in_use` (cannot be translated) |
 | `node-project-held-file-suffix-mismatch-retained` | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
-| `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_of` subdirectory); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
+| `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_root`); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
 | `node-project-pivot-root-process-not-under` | all old; a process whose `root` is `/srv/c` and cwd `/srv/c/work`, outside the project | eligible: its climb reaches the fixpoint without meeting the tree |
 | `node-project-ssh-agent-excused` | all old; the user's `non_dumpable` `ssh-agent` whose magic links cannot be opened | eligible: excused as In use excuses it |
 | `node-project-overlay-mapping-retained` | all old; a mapping whose `maps` device and inode are a lower layer's, of a file in the project | `in_use` (the stated availability cost) |

@@ -1212,6 +1212,140 @@ protect: [guard]
     nothing_locked_or_deleted(&host);
 }
 
+/// TASK-260: a bind mount of a SUBDIRECTORY of a protected tree, or one
+/// that exposes a protected match's subtree elsewhere, is an alias the
+/// ancestor identities never compare: `/mnt/x` shows `/tmp/gen/x`, a
+/// descendant of the match `/tmp/gen`. The verdict must translate both paths
+/// to (device, path from the filesystem root) through mountinfo.
+const SUBDIR_BIND_POLICY: &str = r#"version: 1
+profiles:
+  - name: gen
+    find: {roots: [/tmp], paths: [gen], type: dir}
+    where: {has: absent-marker}
+    action: delete
+    examples: {match: [/tmp/gen]}
+  - name: bound-y
+    find: {roots: [/mnt/x], paths: [y], type: dir}
+    action: delete
+    examples: {match: [/mnt/x/y]}
+  - name: entries
+    find: {roots: required, paths: ['*'], type: any}
+    action: delete
+    examples: {root: /srv, match: [/srv/x]}
+"#;
+
+/// `/mnt/x` (mount 40) binds the directory `/gen/x` of `/tmp`'s tmpfs.
+fn subdir_bind_model() -> String {
+    yaml("  /tmp/gen: {x: {y: {payload: {size: 1K}}, z: {payload: {size: 1K}}}}\n  /tmp/other: {payload: {size: 1K}}\n")
+        .replacen(
+            "tree:\n",
+            "  - {id: 40, at: /mnt/x, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, bind_root: /gen/x}\ntree:\n",
+            1,
+        )
+}
+
+fn subdir_bind_request(protect: &[&str], select: &str, roots: &[&str]) -> Request {
+    let text = format!("{SUBDIR_BIND_POLICY}protect: [{}]\n", protect.join(", "));
+    let config = config::parse(Path::new("/tmp/config.yaml"), text.as_bytes()).unwrap();
+    let roots: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
+    let mut request = Request {
+        path: PathBuf::from("/tmp"),
+        min_free: parse_size("1G").unwrap(),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select(select, &config.library, Some(&roots), 1000)
+            .unwrap_or_else(|e| panic!("{e}")),
+    };
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    request
+}
+
+#[test]
+fn protect_covers_a_bind_mount_of_a_protected_subdirectory() {
+    let host = host(&subdir_bind_model());
+    // The candidate lies under the bind; the protected match is its
+    // source's ancestor.
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&["gen"], "profile:entries", &["/mnt/x"]),
+    );
+    for candidate in ["/mnt/x/y", "/mnt/x/z"] {
+        assert_eq!(
+            reason_of(&report, candidate),
+            Some(Some(Reason::Protected)),
+            "{candidate}: {report:#?}"
+        );
+    }
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn protect_covers_a_candidate_holding_the_source_of_a_protected_bind() {
+    let host = host(&subdir_bind_model());
+    // The protected match lies under the bind; the candidate is its
+    // source's ancestor. An unrelated sibling stays eligible.
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&["bound-y"], "profile:entries", &["/tmp"]),
+    );
+    assert_eq!(
+        reason_of(&report, "/tmp/gen"),
+        Some(Some(Reason::Protected)),
+        "{report:#?}"
+    );
+    assert_eq!(reason_of(&report, "/tmp/other"), Some(None), "{report:#?}");
+    nothing_locked_or_deleted(&host);
+}
+
+/// A filesystem mounted inside a protected match is part of what the match
+/// shows, and a second mount of it elsewhere is an alias the translation to
+/// (device, path) does not see: the match itself is refused at enumeration
+/// (`contains_mount`), so the run stops before judging anything. The
+/// translation relies on that (docs/safety.md, Not protected, not
+/// excluded).
+#[test]
+fn protect_stops_the_run_on_a_filesystem_mounted_inside_a_match() {
+    let model = subdir_bind_model().replacen(
+        "tree:\n",
+        "  - {id: 50, at: /tmp/gen/m, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 30}\n  - {id: 51, at: /mnt/m, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 1, bind_of: 50}\ntree:\n  /tmp/gen/m/w: {payload: {size: 1K}}\n",
+        1,
+    );
+    let host = host(&model);
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&["gen"], "profile:entries", &["/mnt/m"]),
+    );
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|error| error
+            .message
+            .contains("protect `gen` cannot prove matches at /tmp/gen/m: contains_mount")),
+        "{report:#?}"
+    );
+    assert!(
+        report.plan.iter().all(|row| row.reason.is_some()),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+#[test]
+fn negated_profile_covers_a_bind_mount_of_its_subdirectory() {
+    let host = host(&subdir_bind_model());
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&[], "profile:entries && !profile:gen", &["/mnt/x"]),
+    );
+    assert_eq!(
+        reason_of(&report, "/mnt/x/y"),
+        Some(Some(Reason::Excluded)),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
 #[test]
 fn protect_scan_fails_closed_on_an_unsafe_bound_root() {
     let policy = r#"version: 1

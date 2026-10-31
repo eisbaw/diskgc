@@ -449,7 +449,8 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
             if !matches!(
                 source.at.to_str(),
                 Some("/tmp" | "/var/tmp" | "/home/tester")
-            ) || source.dev != mount.dev
+            ) || mount.bind_root.is_some()
+                || source.dev != mount.dev
                 || source.fs != mount.fs
                 || source.size != mount.size
                 || source.other_used != mount.other_used

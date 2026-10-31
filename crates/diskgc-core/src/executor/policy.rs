@@ -1,14 +1,14 @@
 //! The `protect` and `!profile:` verdicts on one candidate: matches
-//! enumerated by discovery, and overlap proved by path or by object
-//! identity below a screened mount chain (docs/safety.md, Filesystem
-//! candidates). [`super::tier_policy`] caches these per tier for delete
+//! enumerated by discovery, and overlap proved by path, by place in the
+//! filesystem (mountinfo's root field) or by object identity below a
+//! screened mount chain (docs/safety.md, Filesystem candidates). [`super::tier_policy`] caches these per tier for delete
 //! actions.
 
 use crate::cargo_target::{self, Stop};
 use crate::engine::{Reason, Skip};
 use crate::fs_kind;
-use crate::host::{DevIno, Host, HostError, MonoTime, MountEntry};
-use crate::resolve::{MountScreenError, Want, resolve_in, screen_mount_chain};
+use crate::host::{Dev, DevIno, Host, HostError, MonoTime, MountEntry};
+use crate::resolve::{MountScreenError, Want, mount_for, resolve_in, screen_mount_chain};
 use crate::select;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,10 +67,12 @@ pub(super) fn scan_protections<H: Host>(
     Ok(matches)
 }
 
-/// Compare names and object identity. A same-device bind mount can expose a
-/// protected subtree under a different name, so lexical prefixes alone are
-/// insufficient. Each equal ancestor object supplies a pair of relative
-/// paths; those paths overlap exactly when the underlying subtrees overlap.
+/// Compare names, places in the filesystem and object identity. A
+/// same-device bind mount can expose a protected subtree under a different
+/// name, so lexical prefixes alone are insufficient: [`overlaps_in_filesystem`]
+/// compares where each path is in its filesystem, which covers a bind of any
+/// directory (TASK-260); [`overlaps_with`] compares ancestor identities, which
+/// also catches another name of a protected file itself (a hard link).
 pub(super) fn overlaps_checked<H: Host>(
     host: &H,
     candidate: &Path,
@@ -107,6 +109,12 @@ pub(super) fn overlaps_checked_until<H: Host>(
         }
     };
     screen_overlap_mounts(&mounts, candidate, matches, check_time)?;
+    if overlaps_in_filesystem(&mounts, candidate, matches)? {
+        return Ok(true);
+    }
+    // Every path compared above is resolved here against the same table, and
+    // `resolve_in` refuses one whose live mount is not the table's: a "no
+    // overlap" rests on mounts confirmed live, not on the table alone.
     overlaps_with(candidate, matches, |path| {
         check_time()?;
         let at = resolve_in(host, &mounts, path, Want::Any)
@@ -152,6 +160,49 @@ pub(super) fn screen_overlap_mounts(
         })?;
     }
     Ok(())
+}
+
+/// Whether the candidate and a match are the same place in one filesystem
+/// or one lies inside the other: each translated to the device of the mount
+/// it is on and its path from that filesystem's root (the mount's mountinfo
+/// root field joined with the rest of the path), then compared by name. A
+/// bind mount of a protected tree's subdirectory, or of one of its
+/// ancestors, maps back to the protected tree. A filesystem mounted inside a
+/// match needs no translation: discovery refuses such a match, which stops
+/// the run (`protect`) or excludes the tier (`!profile:`).
+pub(super) fn overlaps_in_filesystem(
+    mounts: &[MountEntry],
+    candidate: &Path,
+    matches: &[PathBuf],
+) -> Result<bool, String> {
+    let (dev, at) = place_in_filesystem(mounts, candidate)?;
+    for protected in matches {
+        let (protected_dev, protected_at) = place_in_filesystem(mounts, protected)?;
+        if protected_dev == dev && select::overlaps(&at, &protected_at) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `path`'s device and path from its filesystem's root, from the mount table
+/// alone. An unclear table or a root field that is not an absolute path
+/// cannot be translated: that fails closed.
+fn place_in_filesystem(mounts: &[MountEntry], path: &Path) -> Result<(Dev, PathBuf), String> {
+    let mount = mount_for(mounts, path)
+        .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))?;
+    if !mount.fs_root.is_absolute() {
+        return Err(format!(
+            "cannot prove overlap at {}: mount {} has filesystem root {}, not an absolute path",
+            path.display(),
+            mount.mount_point.display(),
+            mount.fs_root.display()
+        ));
+    }
+    let below = path
+        .strip_prefix(&mount.mount_point)
+        .expect("mount_for returns a mount whose point is a prefix");
+    Ok((mount.dev, mount.fs_root.join(below)))
 }
 
 pub(super) fn overlaps_with(

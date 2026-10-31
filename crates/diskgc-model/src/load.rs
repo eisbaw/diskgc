@@ -309,16 +309,26 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 Some(mount_point(state, parent, rel).map_err(|m| LoadError::new(&at, m))?)
             }
         };
-        if spec.bind_of.is_none() {
-            let mut fs = Fs::new(dev, spec.fs.clone(), spec.size.0, spec.other_used.0, now);
-            fs.missing = spec.statx_missing.iter().copied().collect();
-            state.fss.insert(dev, fs);
-        }
+        let root = match (spec.bind_of, &spec.bind_root) {
+            (None, Some(_)) => return Err(LoadError::new(&at, "bind_root requires bind_of")),
+            (Some(source), Some(path)) => {
+                bind_root(state, source, path).map_err(|m| LoadError::new(&at, m))?
+            }
+            (Some(_), None) => state.fss[&dev].root,
+            (None, None) => {
+                let mut fs = Fs::new(dev, spec.fs.clone(), spec.size.0, spec.other_used.0, now);
+                fs.missing = spec.statx_missing.iter().copied().collect();
+                let root = fs.root;
+                state.fss.insert(dev, fs);
+                root
+            }
+        };
         state.mounts.push(Mount {
             id: spec.id,
             parent: spec.parent,
             dev,
             on,
+            root,
             read_only: spec.read_only,
             dead: spec.dead,
         });
@@ -328,6 +338,31 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
         return Err(LoadError::new("mounts", "there must be a mount at /"));
     }
     Ok(())
+}
+
+/// The directory `path` (from its filesystem's root, as mountinfo's root
+/// field shows it) of the filesystem mount `source` is on, created if
+/// missing. Mounts never cover a filesystem's own names, so this walks the
+/// filesystem's entries alone.
+fn bind_root(state: &mut State, source: u64, path: &Path) -> Result<u64, String> {
+    let mut here = Loc {
+        mnt: source,
+        ino: state.fs(source).root,
+    };
+    for name in normal_names(path).map_err(|f| format!("bind_root: {f:?}"))? {
+        let entry = state
+            .inode(here)
+            .entries()
+            .and_then(|e| e.get(name))
+            .copied();
+        here = match entry {
+            None => state
+                .create_in(here, name, Kind::Dir(BTreeMap::new()))
+                .map_err(|f| format!("{f:?}"))?,
+            Some(ino) => Loc { mnt: source, ino },
+        };
+    }
+    Ok(here.ino)
 }
 
 /// The directory at `rel` below the root of mount `parent`, created if

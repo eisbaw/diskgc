@@ -923,13 +923,20 @@
           "type": "string"
         },
         "bind_of": {
-          "description": "Bind the filesystem root of an earlier mount. The device and filesystem\nmetadata must match that mount; subdirectory binds are unsupported.",
+          "description": "Bind the filesystem of an earlier mount (its root, or `bind_root`).\nThe device and filesystem metadata must match that mount.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "bind_root": {
+          "description": "With `bind_of`: the directory of that filesystem this mount shows, as\na path from the filesystem's root (mountinfo's root field; absent:\n`/`). Missing directories are created, as for a mount point.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "dead": {
           "description": "The filesystem's server never answers (a dead FUSE daemon or NFS\nserver): `mountinfo` still lists the mount, but a call that reaches\nit (`openat2` to or below it, `statx`, `getdents`, a read, `statfs`,\n`statvfs`) would hang, so the model fails the test at that call. A\nbind of a dead mount needs its own `dead: true`.",

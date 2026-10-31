@@ -211,6 +211,14 @@ impl Fs {
         ino
     }
 
+    /// A directory entry naming `ino`: its directory and the name.
+    fn parent_entry(&self, ino: u64) -> Option<(u64, OsString)> {
+        self.inodes.iter().find_map(|(dir, inode)| {
+            let (name, _) = inode.entries()?.iter().find(|(_, child)| **child == ino)?;
+            Some((*dir, name.clone()))
+        })
+    }
+
     /// Inodes reachable from the root through directory entries.
     fn reachable(&self) -> BTreeSet<u64> {
         self.links().reachable.clone()
@@ -239,6 +247,10 @@ pub struct Mount {
     pub dev: Dev,
     /// The directory this mount covers, on its parent mount.
     pub on: Option<Loc>,
+    /// The inode of its filesystem it shows at its mount point: the
+    /// filesystem's root, or a subdirectory for a bind of one
+    /// ([`crate::spec::MountSpec::bind_root`]).
+    pub root: u64,
     pub read_only: bool,
     /// Its server never answers ([`crate::spec::MountSpec::dead`]).
     pub dead: bool,
@@ -485,7 +497,7 @@ impl State {
     pub fn mount_root(&self, mnt: u64) -> Loc {
         Loc {
             mnt,
-            ino: self.fs(mnt).root,
+            ino: self.mount(mnt).root,
         }
     }
 
@@ -530,24 +542,35 @@ impl State {
     /// directory reaches it any more).
     pub fn path_of(&self, loc: Loc) -> Option<PathBuf> {
         let mount = self.mount(loc.mnt);
-        let fs = self.fs(loc.mnt);
-        if loc.ino == fs.root {
+        if loc.ino == mount.root {
             return match mount.on {
                 None => Some(PathBuf::from("/")),
                 Some(on) => self.path_of(on),
             };
         }
-        let (parent, name) = fs.inodes.iter().find_map(|(ino, inode)| {
-            let entries = inode.entries()?;
-            let (name, _) = entries.iter().find(|(_, child)| **child == loc.ino)?;
-            Some((*ino, name))
-        })?;
+        let (parent, name) = self.fs(loc.mnt).parent_entry(loc.ino)?;
         Some(
             self.path_of(Loc {
                 mnt: loc.mnt,
                 ino: parent,
             })?
             .join(name),
+        )
+    }
+
+    /// The path of inode `ino` from its filesystem's root (what mountinfo's
+    /// root field shows for a mount of it); `None` once no directory names it.
+    fn fs_path(fs: &Fs, mut ino: u64) -> Option<PathBuf> {
+        let mut names = Vec::new();
+        while ino != fs.root {
+            let (parent, name) = fs.parent_entry(ino)?;
+            names.push(name);
+            ino = parent;
+        }
+        Some(
+            std::iter::once(OsStr::new("/"))
+                .chain(names.iter().rev().map(|name| name.as_os_str()))
+                .collect(),
         )
     }
 
@@ -569,12 +592,14 @@ impl State {
         }
         let dev = spec.dev.0;
         let fs = Fs::new(dev, spec.fs.clone(), spec.size.0, 0, self.wall_now());
+        let root = fs.root;
         self.fss.insert(dev, fs);
         self.mounts.push(Mount {
             id: spec.id,
             parent: Some(on.mnt),
             dev,
             on: Some(on),
+            root,
             read_only: false,
             dead: false,
         });
@@ -590,7 +615,9 @@ impl State {
                     id: m.id,
                     parent_id: m.parent.unwrap_or(0),
                     dev: m.dev,
-                    fs_root: PathBuf::from("/"),
+                    // An unlinked bind source: Linux appends `//deleted`.
+                    fs_root: Self::fs_path(fs, m.root)
+                        .unwrap_or_else(|| PathBuf::from("/(deleted)")),
                     mount_point: m
                         .on
                         .map_or(Some(PathBuf::from("/")), |on| self.path_of(on))
@@ -788,7 +815,11 @@ impl State {
             ctime: when(fs, StatxField::Ctime, inode.ctime),
             btime: when(fs, StatxField::Btime, inode.btime),
             mnt_id: when(fs, StatxField::MntId, loc.mnt),
-            mount_root: when(fs, StatxField::MountRoot, loc.ino == fs.root),
+            mount_root: when(
+                fs,
+                StatxField::MountRoot,
+                loc.ino == self.mount(loc.mnt).root,
+            ),
         }
     }
 

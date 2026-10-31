@@ -3718,6 +3718,46 @@ protect: [keep-me]
     executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// TASK-260: a reclaim through a bind mount of a protected tree's
+/// subdirectory (`/mnt/x` shows `/tmp/gen/x`; `protect` matches
+/// `/tmp/gen`) deletes nothing of the protected tree. Before the fix the
+/// candidate `/mnt/x/y` was judged unprotected and unlinked, and with it
+/// `/tmp/gen/x/y`. An unrelated root on the same filesystem is reclaimed.
+#[test]
+fn a_reclaim_through_a_bind_of_a_protected_subdirectory_deletes_nothing_protected() {
+    let mounts = "  - {id: 40, at: /mnt/x, fs: tmpfs, dev: \"0:42\", size: 1G, other_used: 500M, \
+                  parent: 1, bind_of: 30, bind_root: /gen/x}\n";
+    let tree = format!(
+        "  /tmp/gen/x/y: {}\n  /tmp/free/z: {}\n",
+        old_dir("1M"),
+        old_dir("1M")
+    );
+    let host = host(&yaml(mounts, &tree, ""));
+    let config = diskgc_core::config::parse(
+        Path::new("/tmp/protect.yaml"),
+        br#"version: 1
+profiles:
+  - name: gen
+    find: {roots: [/tmp], paths: [gen], type: dir}
+    action: delete
+    examples: {match: [/tmp/gen]}
+protect: [gen]
+"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut request = request("profile:anything", &["/mnt/x", "/tmp/free"], "/tmp", "100%");
+    request.tier.protections =
+        executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"));
+    let report = ensure(&host, &request);
+    assert_eq!(
+        skip_of(&report, "/mnt/x/y"),
+        Some(Reason::Protected),
+        "{report:#?}"
+    );
+    assert!(exists(&host, "/tmp/gen/x/y/f"), "{report:#?}");
+    assert!(!exists(&host, "/tmp/free/z"), "{report:#?}");
+}
+
 /// TASK-200: a delete judges its candidate against the tier's enumerated
 /// matches, but a protected match created inside the candidate after that
 /// enumeration and before the eligibility walk is a change the walk sees

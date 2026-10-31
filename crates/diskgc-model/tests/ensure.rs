@@ -149,6 +149,93 @@ fn cargo_protect_uses_its_own_bound_roots_in_dry_run() {
     assert!(calls(&host, Op::MayDelete).is_empty());
 }
 
+/// TASK-260, kind `cargo-target` on both sides of the verdict: `/mnt/old`
+/// binds `/home/mark/src/old` (mountinfo root `/mark/src/old` of `/home`'s
+/// filesystem), a subdirectory of the protected match `/home/mark/src`.
+const CARGO_BIND_POLICY: &str = r#"version: 1
+profiles:
+  - name: src-tree
+    find: {roots: [/home/mark], paths: [src], type: dir}
+    action: delete
+    examples: {match: [/home/mark/src]}
+  - name: projects
+    find: {roots: required, paths: ['*'], type: dir}
+    action: delete
+    examples: {root: /srv, match: [/srv/x]}
+"#;
+
+fn cargo_bind_request(protect: &str, select: &str, root: &str) -> Request {
+    let text = format!("{CARGO_BIND_POLICY}protect: [{protect}]\n");
+    let config = config::parse(Path::new("/tmp/protect.yaml"), text.as_bytes()).unwrap();
+    let roots = [root.to_owned()];
+    let mut request = Request {
+        path: PathBuf::from(SRC),
+        min_free: size("50G"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select(select, &config.library, Some(&roots), 1000)
+            .unwrap_or_else(|e| panic!("{e}")),
+    };
+    request.tier.protections = executor::bind_protections(&config, 1000, false).unwrap();
+    request
+}
+
+fn cargo_bind_yaml() -> String {
+    yaml(
+        true,
+        "  /home/mark/other/f: {mtime: 2026-10-01T00:00:00Z}\n",
+    )
+    .replacen(
+        "tree:\n",
+        "  - {id: 40, at: /mnt/old, fs: ext4, dev: \"254:2\", size: 100G, other_used: 80G, \
+         parent: 1, bind_of: 2, bind_root: /mark/src/old}\ntree:\n",
+        1,
+    )
+}
+
+#[test]
+fn a_cargo_target_under_a_bind_of_a_protected_subdirectory_is_protected() {
+    let host = host(&cargo_bind_yaml());
+    let report = dry_run(
+        &host,
+        &cargo_bind_request("src-tree", "profile:cargo-target", "/mnt/old"),
+    );
+    assert_eq!(
+        plan_reason(&report, "/mnt/old/target"),
+        Some(Some(Reason::Protected)),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
+#[test]
+fn a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree() {
+    let host = host(&cargo_bind_yaml());
+    let report = dry_run(
+        &host,
+        &cargo_bind_request(
+            "{profile: cargo-target, roots: [/mnt/old]}",
+            "profile:projects",
+            "/home/mark",
+        ),
+    );
+    // `/home/mark/src` holds the bind's source; no ancestor of it is an
+    // ancestor of the match `/mnt/old/target`.
+    assert_eq!(
+        plan_reason(&report, "/home/mark/src"),
+        Some(Some(Reason::Protected)),
+        "{report:#?}"
+    );
+    assert_eq!(
+        plan_reason(&report, "/home/mark/other"),
+        Some(None),
+        "{report:#?}"
+    );
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
 /// Runs `ensure` (privileges first, as the binary does); the log lines
 /// are printed for a failing test.
 fn ensure(host: &ModelHost, request: &Request) -> Report {

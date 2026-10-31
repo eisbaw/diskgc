@@ -64,6 +64,56 @@ fn root_bind_shares_inodes_but_keeps_a_mount_boundary() {
     );
 }
 
+/// `bind_root`: a bind of the directory `/a` of `/tmp`'s filesystem at
+/// `/mnt/a`, on another parent mount (TASK-260).
+fn subdir_bind_yaml() -> String {
+    tmp_yaml("").replace(
+        "tree:\n",
+        "  - {id: 31, at: /mnt/a, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, bind_root: /a}\ntree:\n",
+    )
+}
+
+#[test]
+fn subdir_bind_shows_that_directory_and_its_mountinfo_root() {
+    let host = host(&subdir_bind_yaml());
+    let source = host.stat_path(Path::new("/tmp/a/f")).expect("source");
+    let alias = host.stat_path(Path::new("/mnt/a/f")).expect("alias");
+    assert_eq!(source.dev_ino(), alias.dev_ino());
+    assert_ne!(source.mnt_id, alias.mnt_id);
+    let bind = host.mountinfo().unwrap().last().unwrap().clone();
+    assert_eq!(bind.fs_root, Path::new("/a"));
+    assert_eq!(bind.mount_point, Path::new("/mnt/a"));
+    // The bind's root is the mount root there; the same directory reached
+    // through /tmp is not.
+    let at_bind = resolve(&host, Path::new("/mnt/a"), Want::Directory).expect("bind");
+    assert_eq!(at_bind.stat.mount_root, Some(true));
+    assert_eq!(at_bind.mount.id, 31);
+    let at_source = resolve(&host, Path::new("/tmp/a"), Want::Directory).expect("source");
+    assert_eq!(at_source.stat.mount_root, Some(false));
+    assert_eq!(at_source.stat.dev_ino(), at_bind.stat.dev_ino());
+    // Nothing above the bound directory is reachable through the bind.
+    assert!(host.stat_path(Path::new("/mnt/a/a")).is_none());
+
+    assert_error_contains(
+        &subdir_bind_yaml().replace(
+            "\"0:42\", size: 1G, parent: 1, bind_of: 30, ",
+            "\"0:43\", size: 1G, parent: 1, ",
+        ),
+        "bind_root requires bind_of",
+    );
+    assert_error_contains(
+        &subdir_bind_yaml().replace("bind_root: /a", "bind_root: /a/f"),
+        "tree[/tmp/a]/f: declared twice",
+    );
+}
+
+fn assert_error_contains(yaml: &str, wanted: &str) {
+    match ModelHost::from_yaml(yaml) {
+        Ok(_) => panic!("loaded, but should not:\n{yaml}"),
+        Err(e) => assert!(e.to_string().contains(wanted), "{wanted:?} not in: {e}"),
+    }
+}
+
 #[test]
 fn cross_bind_rename_is_exdev_and_alias_reference_prevents_inode_reuse() {
     let model = diskgc_model::load::parse_yaml(&root_bind_yaml()).expect("model");

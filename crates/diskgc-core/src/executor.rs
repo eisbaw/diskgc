@@ -3455,7 +3455,7 @@ mod operator_message_tests {
 
 #[cfg(test)]
 mod best_fit_tests {
-    use super::policy::{overlaps_with, screen_overlap_mounts};
+    use super::policy::{overlaps_in_filesystem, overlaps_with, screen_overlap_mounts};
     use super::{CandidateQueue, Dev, MountEntry, Order};
     use crate::host::DevIno;
     use std::path::{Path, PathBuf};
@@ -3533,6 +3533,79 @@ mod best_fit_tests {
             |_| Err("cannot stat".to_owned()),
         );
         assert_eq!(error.unwrap_err(), "cannot stat");
+    }
+
+    /// A mount table: `/` (dev 8:1), `/tmp` (dev 0:42), `/mnt/x` binding
+    /// `/gen/x` of `/tmp`'s filesystem (TASK-260), and `/other` (dev 0:43)
+    /// whose filesystem has a directory of the same name `/gen`.
+    fn bind_table() -> Vec<MountEntry> {
+        let mount = |id, parent_id, point: &str, minor, root: &str| MountEntry {
+            id,
+            parent_id,
+            dev: Dev {
+                major: if minor == 1 { 8 } else { 0 },
+                minor,
+            },
+            fs_root: PathBuf::from(root),
+            mount_point: PathBuf::from(point),
+            fs_type: "tmpfs".to_owned(),
+            source: "fixture".to_owned(),
+            read_only: false,
+        };
+        vec![
+            mount(1, 0, "/", 1, "/"),
+            mount(2, 1, "/tmp", 42, "/"),
+            mount(3, 1, "/mnt/x", 42, "/gen/x"),
+            mount(4, 1, "/other", 43, "/"),
+        ]
+    }
+
+    #[test]
+    fn overlap_maps_a_subdirectory_bind_back_to_its_filesystem() {
+        let mounts = bind_table();
+        let overlaps = |candidate: &str, matched: &str| {
+            overlaps_in_filesystem(&mounts, Path::new(candidate), &[PathBuf::from(matched)])
+                .unwrap()
+        };
+        // Under the bind, against an ancestor of its source, both ways.
+        assert!(overlaps("/mnt/x/y", "/tmp/gen"));
+        assert!(overlaps("/tmp/gen", "/mnt/x/y"));
+        // The bind's root itself is `/tmp/gen/x`.
+        assert!(overlaps("/mnt/x", "/tmp/gen/x/y"));
+        // A sibling of the source, and one of its ancestors' siblings.
+        assert!(!overlaps("/mnt/x/y", "/tmp/gen/w"));
+        assert!(!overlaps("/mnt/x/y", "/tmp/other"));
+        // The same path from the root of another filesystem.
+        assert!(!overlaps("/other/gen/x/y", "/tmp/gen"));
+    }
+
+    #[test]
+    fn overlap_by_filesystem_place_fails_closed_on_an_unclear_table() {
+        let mut stacked = bind_table();
+        // Two mounts on one point, neither on the other: no topmost.
+        let mut twin = stacked[2].clone();
+        twin.id = 5;
+        stacked.push(twin);
+        let error = overlaps_in_filesystem(
+            &stacked,
+            Path::new("/mnt/x/y"),
+            &[PathBuf::from("/tmp/other")],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prove overlap at /mnt/x/y"),
+            "{error}"
+        );
+
+        let mut relative = bind_table();
+        relative[2].fs_root = PathBuf::from("gen/x");
+        let error = overlaps_in_filesystem(
+            &relative,
+            Path::new("/tmp/other"),
+            &[PathBuf::from("/mnt/x/y")],
+        )
+        .unwrap_err();
+        assert!(error.contains("not an absolute path"), "{error}");
     }
 
     #[test]

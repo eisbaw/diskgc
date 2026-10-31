@@ -205,10 +205,15 @@ pub struct MountSpec {
     pub fs: String,
     /// Device number `major:minor`. Reuse requires `bind_of`.
     pub dev: DevSpec,
-    /// Bind the filesystem root of an earlier mount. The device and filesystem
-    /// metadata must match that mount; subdirectory binds are unsupported.
+    /// Bind the filesystem of an earlier mount (its root, or `bind_root`).
+    /// The device and filesystem metadata must match that mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_of: Option<u64>,
+    /// With `bind_of`: the directory of that filesystem this mount shows, as
+    /// a path from the filesystem's root (mountinfo's root field; absent:
+    /// `/`). Missing directories are created, as for a mount point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_root: Option<PathBuf>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link
     /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
     #[serde(default, skip_serializing_if = "Option::is_none")]
