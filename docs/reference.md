@@ -1057,7 +1057,8 @@ is `host`.
   but lock files; nothing to reclaim, not listed in the result`), so the
   tier's `N target(s) below` count adds up. It remains discoverable and may
   appear as an ineligible `empty` plan row in `--dry-run`.
-- A root of a tier on another filesystem than `PATH`'s is not searched. It
+- A source root of a tier on another filesystem than `PATH`'s is not
+  searched (a negated profile's root is: its matches only exclude). It
   is one row per tier that has it (in `skipped`, or in `plan` for
   `--dry-run`), however many of the tier's sources share it: `candidate`
   is the root, `reason` is `other_fs`, `profile` is the first source

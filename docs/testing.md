@@ -528,6 +528,17 @@ Model scenarios required by [safety.md](safety.md) and
   `tests/ensure.rs` `a_cargo_target_under_a_bind_of_a_protected_subdirectory_is_protected`,
   `a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree`,
   `a_filesystem_mounted_inside_a_protected_cargo_target_is_protected_elsewhere`);
+  a filesystem mounted on a private bind of a protected subdirectory and
+  again elsewhere is `protected` there (the mount point placed on its
+  parent: `protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory`);
+  with any match, a candidate or match on an `overlay` mount is an error
+  and a reclaim through it deletes nothing
+  (`an_overlay_on_either_side_cannot_prove_no_overlap`,
+  `a_reclaim_through_an_overlay_with_a_protect_match_deletes_nothing`); a
+  negated profile's root on another filesystem is searched
+  (`a_negated_match_on_another_filesystem_is_searched`); a covered mount
+  still listed in the table cannot prove no overlap
+  (`a_covered_mount_in_the_table_cannot_prove_no_overlap`);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must, each candidate

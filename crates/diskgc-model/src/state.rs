@@ -615,7 +615,9 @@ impl State {
                     id: m.id,
                     parent_id: m.parent.unwrap_or(0),
                     dev: m.dev,
-                    // An unlinked bind source: Linux appends `//deleted`.
+                    // An unlinked bind source. Linux shows its old path with
+                    // `//deleted` appended; the model has forgotten the path,
+                    // so it shows a placeholder no protected path lies under.
                     fs_root: Self::fs_path(fs, m.root)
                         .unwrap_or_else(|| PathBuf::from("/(deleted)")),
                     mount_point: m

@@ -357,35 +357,53 @@ Immediately before acting, diskgc walks the candidate's whole tree
   network namespace are not seen, so a socket file used only from another
   network namespace looks stale and is deleted. Only the default is reachable until
   the configuration schema defines the setting.
-- **Not protected, not excluded:** no overlap, by name or by identity (a
-  same-device bind mount), with a `protect` match or a negated profile's
-  ([reference.md](reference.md#protect)). Overlap is proved three ways,
-  any one sufficing, for both kinds and both sides (the candidate inside a
-  match or holding one): by name; by place in the filesystem, each path
-  translated through mountinfo to the device of the mount it is on and its
-  path from that filesystem's root (the mount's root field joined with the
-  rest of the path), so a bind mount of any directory of a protected tree,
-  or of a directory holding one, maps back to it (TASK-260: `/mnt/x`
-  binding `/tmp/gen/x` under `protect` of `/tmp/gen`); and by object
-  identity, an ancestor of the candidate that is the same object as an
-  ancestor of the match, the rest of the two paths overlapping by name,
-  which also catches a hard link to a protected file. A path the table
-  cannot place (no mount, mounts stacked with no topmost, a root field
-  that is not an absolute path) cannot prove anything: an error, like an
-  unresolvable identity. The candidate and every match are then resolved
-  on the mount the table names, so their places rest on live mounts.
-  A filesystem mounted at or below a match is part of it: a mount of the
-  candidate's filesystem there whose root field overlaps the candidate's
-  place is an overlap too (a mount deep in a protected Cargo target,
-  where discovery does not look, bound again elsewhere; an `fs` match
-  holding a mount is refused at enumeration, `contains_mount`, which
-  stops the run or excludes the tier). Limits: the translation knows only
-  the mount table read for the check (a bind made after it is the
-  enumeration limit below) and compares places on one device only, so an
-  overlay's upper directory reached through the overlay, and a protected
-  file used as a loop-mounted image, do not overlap. Btrfs subvolumes are
-  reasoned (mountinfo names the subvolume in the root field), not tested
-  on one.
+- **Not protected, not excluded:** no overlap, by name, by place in the
+  filesystem or by identity, with a `protect` match or a negated
+  profile's ([reference.md](reference.md#protect)). Any one of the three
+  proves an overlap, for both kinds and both sides (the candidate inside a
+  match or holding one):
+  - by name;
+  - by place: each path translated through mountinfo to the device of the
+    mount it is on and its path from that filesystem's root (the mount's
+    root field joined with the rest of the path), so a bind mount of any
+    directory of a protected tree, or of a directory holding one, maps
+    back to it (TASK-260: `/mnt/x` binding `/tmp/gen/x` under `protect` of
+    `/tmp/gen`). A filesystem mounted at or below a match is part of it:
+    every mount showing the candidate's place (a mount of its device whose
+    root field overlaps it) is placed where it is attached, its mount
+    point on its parent mount, that one's on its own parent, and so on; an
+    overlap is counted when one of those places lies inside a match's
+    place on the same device, or a mount point lies at or below the
+    match's path (a mount deep in a protected Cargo target, where
+    discovery does not look, or on a private bind of a protected
+    subdirectory, shown again elsewhere; an `fs` match holding a mount is
+    refused at enumeration, `contains_mount`, which stops the run or
+    excludes the tier);
+  - by identity: an ancestor of the candidate that is the same object as
+    an ancestor of the match, the rest of the two paths overlapping by
+    name, which also catches a hard link to a protected file.
+
+  What cannot be proved apart is an error, like an unresolvable identity:
+  a path the table cannot place (no mount, mounts stacked with no
+  topmost, a root field that is not an absolute path, a mount point not
+  below its parent's, a parent chain that does not end); and, while there
+  is any match, a candidate or a match on an `overlay` mount: overlayfs
+  shows its upper and lower directories under its own device, and an
+  unlink through it removes the upper entry, so neither place nor
+  identity relates `/merged/gen/x` to a protected `/upper/gen`, nor
+  `/upper/gen/x` to a protected `/merged/gen` (`fuse-overlayfs` is FUSE,
+  refused by the mount screen; upper and lower directories are not parsed
+  from the mount options). The candidate and every match are resolved on
+  the mount the table names after the place check, so its "no overlap"
+  rests on live mounts (a covered mount, still listed, fails there). A
+  negated profile's roots are searched on every filesystem, not only
+  `PATH`'s: its matches only exclude (TASK-260). Limits: the translation
+  knows only the mount table read for the check (a bind made after it is
+  the enumeration limit below) and compares places on one device only,
+  so a protected file used as a loop-mounted image does not overlap what
+  the image holds. Btrfs subvolumes are reasoned (mountinfo names the
+  subvolume in the root field), not tested on one.
+
   `protect` matches are enumerated
   before the first deletion of the run and again before each later tier;
   a tier's negated profiles at its start. An incomplete enumeration stops
