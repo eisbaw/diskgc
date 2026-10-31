@@ -3,10 +3,10 @@ id: TASK-60
 title: >-
   Harness hardening from task-2 review: privileges, deadlines, image pruning,
   guards
-status: To Do
+status: Done
 assignee: []
 created_date: 2026-10-16 23:54
-updated_date: '2026-10-31T22:15:00Z'
+updated_date: '2026-10-31T22:28:00Z'
 labels:
   - wave-1
   - hardening
