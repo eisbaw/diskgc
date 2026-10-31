@@ -288,7 +288,9 @@ In this order; the first failure exits with its code and deletes nothing:
 
 1. Command line, configuration and the `--select` expression: exit 2 as
    for `ensure` (Configuration file, Selection grammar).
-2. Running as root without `--allow-root`: exit 2 (`safety`). In a
+2. Running as root without `--allow-root`, or `--allow-root` without
+   `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
+   (`safety`). In a
    development build, the pre-release sandbox gate: exit 2 outside a test
    container ([safety.md](safety.md#pre-release-sandbox-gate)); not with
    `--tally-only`, which deletes nothing.
@@ -569,6 +571,70 @@ snapshot instead of a cold synchronous tally.
   set the watcher's `--target-free` at or above the largest `--min-free`
   the agents ask for so that their `ensure` stays an instant no-op.
 
+#### Watch as a systemd service
+
+The development package (not the 0.1 release candidate, whose scope is
+`ensure`) ships the two templates of
+[architecture.md](architecture.md#the-watch-units):
+`lib/systemd/user/diskgc-watch@.service` and
+`lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
+`/usr/local/bin/diskgc`. Install once, as root, from the package:
+
+```sh
+install -Dm0755 bin/diskgc /usr/local/bin/diskgc
+install -Dm0644 lib/tmpfiles.d/diskgc.conf /etc/tmpfiles.d/diskgc.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf
+install -Dm0644 lib/systemd/user/diskgc-watch@.service /etc/systemd/user/diskgc-watch@.service
+install -Dm0644 lib/systemd/system/diskgc-watch@.service /etc/systemd/system/diskgc-watch@.service
+```
+
+`systemd-tmpfiles --create` makes the host lock now; at every boot
+systemd does it. Without it the watcher exits 2 (`provisioning`) and
+stays failed. A user may instead keep the user template in
+`~/.config/systemd/user/`.
+
+**Laptop owner**, as themselves. The instance name is the watched
+`PATH` escaped by `systemd-escape --path` (`/home` is `home`), and the
+thresholds go in that instance's environment file:
+
+```sh
+mkdir -p ~/.config/diskgc/watch
+echo 'DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G' > ~/.config/diskgc/watch/home.env
+diskgc check
+systemctl --user daemon-reload
+systemctl --user enable --now "diskgc-watch@$(systemd-escape --path /home).service"
+loginctl enable-linger "$USER"
+```
+
+`daemon-reload` comes before the first `enable`, so that the running
+manager loads the newly installed template.
+The user manager runs only while its user has a session; lingering keeps
+the watcher running after logout, for overnight agents. Without the
+environment file `watch` has no thresholds: it exits 2 naming
+`--min-free` and the unit stays failed (`systemctl --user status
+diskgc-watch@home.service` shows diskgc's message). Exit 2 is never
+restarted; any other end but `systemctl stop` (a SIGHUP's 0, 3, a
+panic) restarts after 30 s. After editing the
+configuration, `systemctl --user restart` the instance (Watch signals:
+diskgc does not reload).
+
+**CI operator**, as root, per watched filesystem: a `User=` drop-in (an
+instance without one runs as root without capabilities and exits 2), the
+environment file in `/etc/diskgc/watch/`, and the configuration in
+`/etc/diskgc/config.yaml` (the system template sets `DISKGC_CONFIG`):
+
+```sh
+mkdir -p '/etc/systemd/system/diskgc-watch@srv-ci.service.d' /etc/diskgc/watch
+printf '[Service]\nUser=gitlab-runner\n' > '/etc/systemd/system/diskgc-watch@srv-ci.service.d/user.conf'
+echo 'DISKGC_WATCH_ARGS=--tally-only --min-free 50G' > /etc/diskgc/watch/srv-ci.env
+systemctl daemon-reload
+systemctl enable --now diskgc-watch@srv-ci.service
+```
+
+On NixOS, the module (TASK-45) installs and starts the instances
+instead; there a new user instance starts only after the user's manager
+restarts.
+
 ### `survey`
 
 Planned; this build returns exit 2. Intended syntax:
@@ -826,7 +892,8 @@ kernel remains exit 2. A dry run with a host
 or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
-run as root, a missing host lock file when reclaim is needed, with
+run as root or to run `--allow-root` without `CAP_SYS_PTRACE`,
+[safety.md](safety.md#privileges), a missing host lock file when reclaim is needed, with
 `cause: provisioning`, and, in
 development builds, the pre-release sandbox gate,
 [safety.md](safety.md#pre-release-sandbox-gate)),

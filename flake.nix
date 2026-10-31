@@ -162,6 +162,18 @@
         install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
         install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
       '';
+      # The `watch` unit templates (docs/architecture.md, Deployment), for
+      # the user and the system manager. Only the development package ships
+      # them: 0.1 is the `ensure` MVP (PRD, Scope), and the release
+      # candidate's contents are TASK-67's. The directory, not each file, is
+      # the Nix input: `@` is not allowed in a store path name. stdenv's
+      # fixup moves lib/systemd/user to share/systemd/user and links the
+      # old path to it, so both paths reach the file.
+      watchUnits = ./packaging/systemd;
+      installWatchUnits = ''
+        install -Dm0644 ${watchUnits}/user/diskgc-watch@.service $out/lib/systemd/user/diskgc-watch@.service
+        install -Dm0644 ${watchUnits}/system/diskgc-watch@.service $out/lib/systemd/system/diskgc-watch@.service
+      '';
       # Capture complete readelf output before looking for dynamic-linker
       # records. A readelf | grep -q pipeline can make grep stop early and
       # report a misleading result when readelf receives SIGPIPE.
@@ -199,7 +211,7 @@
           cargoExtraArgs = "--locked --package diskgc";
           # Tests run once, in checks.workspace-tests.
           doCheck = false;
-          postInstall = installShippedFiles;
+          postInstall = installShippedFiles + installWatchUnits;
           meta.mainProgram = "diskgc";
         }
       );
@@ -946,6 +958,86 @@
           fi
           touch $out
         '';
+
+        # The packaged `watch` templates as systemd reads them
+        # (docs/testing.md, Deployment units, 2): each linked under two
+        # instance names (`srv-ci\x2dbuilds`, and `-` for `/`), its
+        # ExecStart pointed at the packaged binary, verified in system and
+        # --user mode against systemd's own units for that manager only.
+        # `systemd-analyze verify` only warns on unknown keys and bad values
+        # (exit 0), so any output fails the check; two negative controls
+        # show that a missing binary and an unknown key are caught. The exact
+        # text and the hardening lines are tools/unit_lint.py's (just check).
+        deployment-units = pkgs.runCommand "diskgc-deployment-units-check"
+          { nativeBuildInputs = [ pkgs.systemd pkgs.util-linux ]; }
+          ''
+            export HOME=$TMPDIR/home XDG_RUNTIME_DIR=$TMPDIR/run
+            mkdir -p $HOME $XDG_RUNTIME_DIR $TMPDIR/root
+            bin=${lib.getExe diskgc}
+            for manager in user system; do
+              cmp ${diskgc}/lib/systemd/$manager/diskgc-watch@.service \
+                ${watchUnits}/$manager/diskgc-watch@.service
+            done
+            # stage MANAGER DIR BIN [EXTRA-LINE]: the template in DIR, pointed
+            # at BIN, with both instance names linked to it.
+            stage() {
+              mkdir -p "$2"
+              sed "s|^ExecStart=/usr/local/bin/diskgc |ExecStart=$3 |" \
+                ${diskgc}/lib/systemd/$1/diskgc-watch@.service > "$2/diskgc-watch@.service"
+              grep -qF "ExecStart=$3 watch " "$2/diskgc-watch@.service"
+              if [ -n "''${4-}" ]; then printf '%s\n' "$4" >> "$2/diskgc-watch@.service"; fi
+              ln -s diskgc-watch@.service "$2/diskgc-watch@srv-ci\x2dbuilds.service"
+              ln -s diskgc-watch@.service "$2/diskgc-watch@-.service"
+            }
+            # verify MANAGER DIR: exit status of verify; its output in
+            # DIR.log. The unit path is DIR and systemd's own units for that
+            # manager (the targets default dependencies name), nothing else.
+            # System mode creates /run/systemd, and the sandbox has no /run
+            # and a read-only /: verify runs chrooted into a tmpfs root
+            # (binding /nix, /proc, /dev and the build directory) in a user
+            # and mount namespace of its own. Without unprivileged user
+            # namespaces unshare fails and so does the check.
+            verify() {
+              local mode=
+              if [ "$1" = user ]; then mode=--user; fi
+              unshare --map-root-user --mount sh -euc '
+                root=$1; shift
+                mount -t tmpfs none "$root"
+                for d in nix proc dev build run tmp; do mkdir "$root/$d"; done
+                for d in nix proc dev build; do mount --rbind "/$d" "$root/$d"; done
+                exec chroot "$root" "$@"
+              ' sh $TMPDIR/root env SYSTEMD_UNIT_PATH="$2:${pkgs.systemd}/example/systemd/$1" \
+                ${pkgs.systemd}/bin/systemd-analyze $mode verify --man=no \
+                "$2/diskgc-watch@srv-ci\x2dbuilds.service" "$2/diskgc-watch@-.service" \
+                > "$2.log" 2>&1
+            }
+            for manager in user system; do
+              stage $manager $TMPDIR/$manager "$bin"
+              if ! verify $manager $TMPDIR/$manager || [ -s $TMPDIR/$manager.log ]; then
+                cat $TMPDIR/$manager.log >&2
+                echo "error: systemd-analyze verify rejected or warned about the $manager template" >&2
+                exit 1
+              fi
+              echo "$manager template: verified, no output"
+
+              stage $manager $TMPDIR/$manager-nobin $TMPDIR/absent/diskgc
+              if verify $manager $TMPDIR/$manager-nobin; then
+                cat $TMPDIR/$manager-nobin.log >&2
+                echo "error: negative control: verify accepted a missing binary ($manager)" >&2
+                exit 1
+              fi
+              grep -F 'is not executable' $TMPDIR/$manager-nobin.log
+
+              stage $manager $TMPDIR/$manager-badkey "$bin" 'NoSuchKey=1'
+              verify $manager $TMPDIR/$manager-badkey || true
+              if ! grep -F "Unknown key 'NoSuchKey'" $TMPDIR/$manager-badkey.log; then
+                cat $TMPDIR/$manager-badkey.log >&2
+                echo "error: negative control: verify said nothing about an unknown key ($manager)" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
 
         # Guards acceptance criterion "statically linked": no program
         # interpreter and no shared-library dependencies, and it runs.

@@ -188,6 +188,11 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     if let Some(uid) = model.own_uid {
         state.own_uid = uid;
     }
+    state.own_cap_effective = model.own_cap_effective.unwrap_or(if state.own_uid == 0 {
+        crate::state::ROOT_CAPABILITIES
+    } else {
+        0
+    });
     state.users = model.users.clone();
     state.pid_namespace_initial = model.pid_namespace == crate::spec::PidNamespaceSpec::Initial;
     state.proc_hidepid = model.proc_hidepid;
@@ -1027,6 +1032,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::PidAlive,
             Op::Pressure,
             Op::StateWrite,
+            Op::OwnCapEffective,
         ];
         match (spec.at.op, spec.at.when) {
             (Some(op), Some(When::Before)) if fallible.contains(&op) => {}

@@ -13,6 +13,8 @@ usage: diskgc-e2e list            list the tests (name<TAB>tier)
        diskgc-e2e uname-2.6 -- PROGRAM ARGS...
                                   exec PROGRAM with personality UNAME26
                                   (uname reports a 2.6 kernel)
+       diskgc-e2e without-cap-sys-ptrace -- PROGRAM ARGS...
+                                  exec PROGRAM without CAP_SYS_PTRACE
 Runs only inside a diskgc test container; use `just e2e`.";
 
 fn main() {
@@ -27,6 +29,9 @@ fn main() {
         }
         [cmd, sep, rest @ ..] if cmd == "uname-2.6" && sep == "--" => {
             under_test::exec_with_uname26(rest)
+        }
+        [cmd, sep, rest @ ..] if cmd == "without-cap-sys-ptrace" && sep == "--" => {
+            under_test::exec_without_cap_sys_ptrace(rest)
         }
         _ => {
             eprintln!("{USAGE}");

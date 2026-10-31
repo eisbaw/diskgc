@@ -907,6 +907,61 @@ fn an_owner_name_gone_since_start_refuses_the_cycle() {
     assert_eq!(deletions(&host), 0);
 }
 
+/// TASK-44 AC #4: a `watch --allow-root` whose effective set lacks
+/// `CAP_SYS_PTRACE` exits 2 at start (`safety`) in both modes, before it
+/// reaches `PATH`, the host lock or the state directory; the same
+/// configuration with the capability starts (and stops on the SIGTERM).
+#[test]
+fn watch_allow_root_without_cap_sys_ptrace_is_refused_at_start_in_both_modes() {
+    let config = "version: 1\nowners: [tester]\nprofiles:\n  - {name: tmp-a, find: {roots: [/tmp], paths: [\"a*\"], type: dir}, action: delete, examples: {match: [/tmp/a0]}}\ngroups:\n  - name: g\n    tiers:\n      - {name: a, select: \"profile:tmp-a && filter:idle-1h\"}\n";
+    let file = ConfigFile::Read {
+        path: PathBuf::from("/etc/diskgc/config.yaml"),
+        bytes: config.as_bytes().to_vec(),
+    };
+    let selection = Selection {
+        select: None,
+        allow_root: true,
+        ..selection()
+    };
+    let ptrace = 1u64 << diskgc_core::executor::CAP_SYS_PTRACE;
+    let modes = [
+        reclaim("2G", "3G", "10s"),
+        Mode::TallyOnly { min_free: None },
+    ];
+    for mode in &modes {
+        for (caps, refused) in [(!ptrace & ((1 << 41) - 1), true), (ptrace, false)] {
+            let rest = format!(
+                "own_uid: 0\nown_cap_effective: {caps}\nusers: {{tester: 2000}}\nevents:\n  \
+                 - {{at: {{elapsed: 1m}}, signal: term}}\n"
+            );
+            let host = host(&yaml("1G", &old_candidates(1, "100M"), &rest));
+            let run = watch_with(&host, mode, &selection, &file);
+            assert_eq!(host.trace_count(Op::OwnCapEffective), 1, "read once");
+            if refused {
+                assert_eq!(run.ended, Err(2), "{mode:?}: {:?}", run.lines);
+                let report = run.lines.last().expect("the refusal's report");
+                let report: Value = serde_json::from_str(report).expect("JSON");
+                assert_eq!(report["errors"][0]["cause"], "safety", "{report}");
+                let message = report["errors"][0]["message"].as_str().unwrap();
+                assert!(
+                    message.contains("--allow-root needs CAP_SYS_PTRACE"),
+                    "{message}"
+                );
+                for op in [Op::Statvfs, Op::StateLock, Op::Flock, Op::Unlinkat] {
+                    assert_eq!(host.trace_count(op), 0, "{op} after the refusal");
+                }
+            } else {
+                assert_eq!(
+                    run.ended,
+                    Ok(Ended::Stopped(Signal::Term)),
+                    "{mode:?}: {:?}",
+                    run.lines
+                );
+            }
+        }
+    }
+}
+
 /// Codex 7 / mped N2: the first sample is not a start check. It fails at
 /// start, with percentage thresholds: `watch` starts (no exit 3); the
 /// loop's first sample fails too and is the first cycle (`error`, `host`,

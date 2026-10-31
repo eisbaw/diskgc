@@ -1,0 +1,37 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-44 AC #4: the rule is every --allow-root run, not only uid 0. A
+# non-root user's effective set is empty (the model's default for a
+# non-root own_uid), so --allow-root is refused at start (exit 2, safety).
+profile_vector: 1
+allow_root: true
+config: |
+  version: 1
+  profiles:
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp-probe}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  users: {tester: 1000}
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-tester: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "CapEff is 0x0000000000000000"}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: "CapEff is 0x0000000000000000"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-tester/f]

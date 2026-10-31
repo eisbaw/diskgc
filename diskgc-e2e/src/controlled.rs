@@ -578,6 +578,11 @@ impl<H: Host> Host for Controlled<H> {
         self.host.effective_uid()
     }
 
+    fn own_cap_effective(&self) -> Result<u64, HostError> {
+        self.before("own_cap_effective");
+        self.host.own_cap_effective()
+    }
+
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
         self.before("account_uid");
         self.host.account_uid(name)

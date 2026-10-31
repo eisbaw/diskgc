@@ -408,7 +408,9 @@ How the format reads (the schema documents every key):
   no `hidepid`); a mount's `fs:` name gives `fstatfs` its magic (unknown
   names: 0, never on the local list). The top-level `own_uid_map` is diskgc's
   own (same default, `none` too), `own_uid` its user id (default 1000; 0
-  models running as root), and `sandbox_gate` the pre-release gate as
+  models running as root), `own_cap_effective` its effective capability
+  set (default: every capability for uid 0, none otherwise; also what its
+  own `proc_status` shows), and `sandbox_gate` the pre-release gate as
   `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
   deleting calls are refused; `refuses_deletes`: only the deleting calls
   are). `command_exit` is the exit code of a modelled command action
@@ -762,7 +764,12 @@ Model scenarios required by [safety.md](safety.md) and
     *open*; one case per row of the start sequence):
     usage (no `--target-free`; `--interval 0`; `--tally-only` with
     `--target-free`), invalid configuration, root without `--allow-root`,
-    a missing supplied root, a missing host lock file, a second `watch`
+    `--allow-root` without `CAP_SYS_PTRACE` in either mode
+    (`watch_allow_root_without_cap_sys_ptrace_is_refused_at_start_in_both_modes`;
+    `ensure`'s are the `allow-root-*-cap-sys-ptrace*` vectors and
+    `allow_root_needs_cap_sys_ptrace_in_the_effective_set`; in a container
+    `allow_root_without_cap_sys_ptrace_is_refused_in_every_mode`, root with
+    every container capability but that one), a missing supplied root, a missing host lock file, a second `watch`
     with the same state directory after its 10 s wait (`second_watch_exits_2`,
     above), `--timeout 0`: the documented exit code, one
     JSON object with that `exit_code` under `--json`, no `Delete` call;
@@ -2020,32 +2027,44 @@ Container tests cannot run inside the Nix build sandbox, so they run from
 
 ### Deployment units
 
-Planned with the units and the module
-([architecture.md](architecture.md#deployment)); none of these exist yet.
-"Possible here" means it needs neither a VM nor more than the flake
-already builds.
+With the units and the module
+([architecture.md](architecture.md#deployment)); 1 to 3 exist (TASK-44),
+4 and 5 are TASK-45's. "Possible here" means it needs neither a VM nor
+more than the flake already builds.
 
-1. **Unit lint** (TASK-44; a unit test in `just check`; possible here).
-   Both packaged templates carry `Type=exec`, `Restart=always`,
-   `RestartSec=30s`, `RestartPreventExitStatus=2`, `KillMode=mixed`,
-   `RestrictSUIDSGID=no` and the other shipped hardening lines, and no
-   option of a "no" or "fatal" row of the hardening table
+1. **Unit lint** (`tools/unit_lint.py`, run by `tools/test_unit_lint.py`
+   in `just check`). Both templates in `packaging/systemd/` carry
+   `Type=exec`, `Restart=always`, `RestartSec=30s`,
+   `RestartPreventExitStatus=2`, `KillMode=mixed`, `RestrictSUIDSGID=no`
+   and the other shipped hardening lines, and no option of a "no" or
+   "fatal" row of the hardening table
    ([architecture.md](architecture.md#hardening)), nor one its "not set"
-   rows exclude. This is the check of the shipped unit's lines that
-   Deployment requires.
-2. **`systemd-analyze verify`** (TASK-44; a flake check that `just e2e`
-   builds; possible here: `pkgs.systemd` is already in the flake for the
-   Nix image, so no new build input; whether `--user` mode verifies
-   inside the Nix build sandbox, without a user manager or `$HOME`, is
-   unverified). Each template is linked under
-   instance names (`diskgc-watch@srv-ci\x2dbuilds.service`, and
-   `diskgc-watch@-.service` for `/`), its `ExecStart` pointed at the
-   built binary, and verified in system and `--user` mode; TASK-45 adds
-   the units the module renders for an example configuration, taken from
-   the system toplevel without booting it.
-3. **tmpfiles create**: exists (`shipped_tmpfiles_and_example_work_in_container`,
-   Shipped files above). TASK-44 adds both unit files to the package's
-   installed-file check.
+   rows exclude, nor, in the user template, one that implies
+   `PrivateUsers=`. The user template is exactly Deployment's "The user
+   unit, in full" block, and the system template that text with the next
+   block's additions, so the doc and the files cannot drift. The test
+   also bites each rule on edited copies.
+2. **`systemd-analyze verify`** (flake check `deployment-units`, built by
+   `just e2e`). Each template, as the development package installs it
+   (compared with its source), is linked under the instance names
+   `diskgc-watch@srv-ci\x2dbuilds.service` and `diskgc-watch@-.service`
+   (for `/`), its `ExecStart` pointed at the packaged binary, and verified
+   in system and `--user` mode with `SYSTEMD_UNIT_PATH` set to the
+   templates and systemd's own units for that manager. Measured in the
+   build sandbox (systemd 26x): `--user` mode verifies with a scratch
+   `$HOME` and `$XDG_RUNTIME_DIR`; system mode fails creating
+   `/run/systemd` (the sandbox has no `/run` and a read-only `/`), so both
+   run chrooted into a tmpfs root in a user and mount namespace of their
+   own (`unshare`), which needs unprivileged user namespaces in the build
+   sandbox. `verify` exits 0 on unknown keys and bad values (it only
+   warns), so any output fails the check; negative controls show a missing
+   binary and an unknown key caught. TASK-45 adds the units the module
+   renders for an example configuration, taken from the system toplevel
+   without booting it.
+3. **tmpfiles create**: `shipped_tmpfiles_and_example_work_in_container`
+   (Shipped files above); `diskgc check` on `docs/example.yaml` is the
+   flake check `config-check-sandbox`. The release candidate does not
+   ship the units: 0.1 is the `ensure` MVP (PRD, Scope).
 4. **Module evaluation and build-time check** (TASK-45; flake checks, no
    VM; possible here): the module evaluates for a user instance, a system
    `tallyOnly` instance and an `allowRoot` instance; an invalid `settings`

@@ -1684,6 +1684,17 @@ impl Host for ModelHost {
         })
     }
 
+    fn own_cap_effective(&self) -> Result<u64, HostError> {
+        self.call(Op::OwnCapEffective, None, None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                let error = HostError::errno("read", "/proc/self/status", errno);
+                return (Err(error), None, errno_text(errno));
+            }
+            let caps = inner.state.own_cap_effective;
+            (Ok(caps), None, format!("{caps:#x}"))
+        })
+    }
+
     fn account_uid(&self, name: &str) -> Result<Option<u32>, HostError> {
         self.call(Op::AccountUid, None, None, |inner| {
             let uid = inner.state.users.get(name).copied();
@@ -1720,8 +1731,8 @@ impl Host for ModelHost {
                     name: "diskgc".into(),
                     uid: Ids::same(inner.state.own_uid),
                     gid: Ids::same(crate::state::DEFAULT_ID),
-                    cap_permitted: 0,
-                    cap_effective: 0,
+                    cap_permitted: inner.state.own_cap_effective,
+                    cap_effective: inner.state.own_cap_effective,
                     uid_map: crate::state::uid_map(inner.state.own_uid_map.as_deref()),
                     fd_dir_owner: Some(inner.state.own_uid),
                 };

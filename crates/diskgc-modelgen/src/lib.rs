@@ -278,6 +278,7 @@ pub fn host_model(
                 own_pid: None,
                 own_uid_map: None,
                 own_uid: None,
+                own_cap_effective: None,
                 users: BTreeMap::new(),
                 pid_namespace: Default::default(),
                 proc_hidepid: false,

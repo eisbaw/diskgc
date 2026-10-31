@@ -1153,6 +1153,100 @@ pub fn root_mode_uses_protected_config_and_named_owner(ctx: &Ctx) -> TestResult 
     judged.assert_clean()
 }
 
+/// TASK-44 AC #4: container root whose effective set lacks only
+/// `CAP_SYS_PTRACE` (the harness's `without-cap-sys-ptrace` shim drops it
+/// from the bounding set before exec; Docker's and Podman's default sets
+/// lack it too) is refused at start, exit 2 with cause `safety`, by every
+/// `--allow-root` mode: `ensure`, `ensure --dry-run`, `watch --tally-only`
+/// and a reclaiming `watch`, with a protected `owners:` policy that the
+/// control run (same policy, the runner's `CAP_SYS_PTRACE`) accepts.
+/// Nothing is deleted: the oracle allows no entry.
+pub fn allow_root_without_cap_sys_ptrace_is_refused_in_every_mode(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdir("root-ptrace-work", 0o755, TESTER)?;
+    s.mkdir("root-ptrace-work/reclaim", 0o755, TESTER)?;
+    s.write_file(
+        "root-ptrace-work/reclaim/payload",
+        &[1u8; 4096],
+        0o600,
+        TESTER,
+    )?;
+    let config = b"version: 1\nowners: [tester]\nprofiles:\n  - name: root-ptrace-fixture\n    find: {roots: required, paths: [reclaim], type: dir}\n    action: delete\n    examples: {root: /tmp/root-ptrace-work, match: [/tmp/root-ptrace-work/reclaim]}\n";
+    ctx.run_diskgc
+        .write_file("root-ptrace-policy.yaml", config, 0o600, ROOT)?;
+    let common = [
+        "--allow-root",
+        "--json",
+        "--config",
+        "/run/diskgc/root-ptrace-policy.yaml",
+        "--select",
+        "profile:root-ptrace-fixture",
+        "--roots",
+        "/tmp/root-ptrace-work",
+    ];
+    let path = "/tmp/root-ptrace-work";
+    let diskgc = ctx.diskgc();
+    let diskgc = diskgc.to_str().ok_or("diskgc path is not UTF-8")?;
+    let modes: [&[&str]; 4] = [
+        &["ensure", "--min-free", "100%"],
+        &["ensure", "--dry-run", "--min-free", "100%"],
+        &["watch", "--tally-only"],
+        // Thresholds far below what the scratch tmpfs has free: should the
+        // refusal regress, this watch samples and never reclaims, and the
+        // shim's alarm ends it (as it ends the tally-only one).
+        &["watch", "--min-free", "1M", "--target-free", "1M"],
+    ];
+    let oracle = Oracle::arm(Fixture::new())?;
+    let control = ctx.run_as_root(&ctx.diskgc(), &[modes[1], &common[..], &[path]].concat())?;
+    let mut refused = Vec::new();
+    for mode in modes {
+        let argv = [
+            &["without-cap-sys-ptrace", "--", diskgc],
+            mode,
+            &common[..],
+            &[path],
+        ]
+        .concat();
+        refused.push(ctx.run_as_root(&ctx.self_exe, &argv)?);
+    }
+    let runs: Vec<&Run> = std::iter::once(&control).chain(&refused).collect();
+    let judged = oracle.judge_runs(&runs)?;
+    control.expect_code(0)?;
+    ensure!(
+        report(&control)?["status"] == "dry_run",
+        "{}",
+        control.stdout
+    );
+    for (mode, run) in modes.iter().zip(&refused) {
+        info!("{mode:?} without CAP_SYS_PTRACE: {}", run.stderr);
+        run.expect_code(2)?;
+        let r = report(run)?;
+        ensure!(r["status"] == "usage_error", "{mode:?}: {r}");
+        ensure!(r["errors"][0]["cause"] == "safety", "{mode:?}: {r}");
+        let message = r["errors"][0]["message"].as_str().unwrap_or_default();
+        ensure!(
+            message.contains("--allow-root needs CAP_SYS_PTRACE"),
+            "{mode:?}: {message}"
+        );
+        // The set diskgc read: everything the container grants but bit 19
+        // (CAP_DAC_OVERRIDE, bit 1, among them): root, not an empty set.
+        let caps = message
+            .split("CapEff is 0x")
+            .nth(1)
+            .and_then(|rest| u64::from_str_radix(&rest[..16.min(rest.len())], 16).ok())
+            .ok_or_else(|| format!("{mode:?}: no CapEff in {message}"))?;
+        ensure!(
+            caps & (1 << 19) == 0 && caps & (1 << 1) != 0,
+            "{mode:?}: CapEff {caps:#x}"
+        );
+    }
+    ensure!(
+        s.path("root-ptrace-work/reclaim/payload").exists(),
+        "a refused run deleted the fixture"
+    );
+    judged.assert_clean()
+}
+
 /// A static binary can honor a trusted numeric UID without an account name
 /// in the image. The root policy is protected and every deletion is judged.
 pub fn root_mode_uses_explicit_uid_without_passwd_entry(ctx: &Ctx) -> TestResult {

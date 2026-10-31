@@ -1,0 +1,24 @@
+[Unit]
+Description=diskgc watch of %f
+
+[Service]
+Type=exec
+EnvironmentFile=-%E/diskgc/watch/%i.env
+ExecStart=/usr/local/bin/diskgc watch $DISKGC_WATCH_ARGS "%f"
+Restart=always
+RestartSec=30s
+RestartPreventExitStatus=2
+KillMode=mixed
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=no
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

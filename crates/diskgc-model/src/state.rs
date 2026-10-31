@@ -391,6 +391,8 @@ pub struct State {
     pub own_uid_map: Option<String>,
     /// diskgc's own (effective) user id.
     pub own_uid: u32,
+    /// diskgc's own effective capability set (`CapEff:`).
+    pub own_cap_effective: u64,
     /// The account database: user name to uid.
     pub users: BTreeMap<String, u32>,
     /// Owner PID's preconditions as the held `/proc` answers them.
@@ -417,6 +419,10 @@ pub struct State {
     pub boot_id: String,
 }
 
+/// Every capability up to `CAP_CHECKPOINT_RESTORE` (40, the last one since
+/// Linux 5.9): a root process's effective set unless something dropped some.
+pub const ROOT_CAPABILITIES: u64 = (1 << 41) - 1;
+
 /// The boot id a model reports unless it says otherwise.
 pub const DEFAULT_BOOT_ID: &str = "00000000-0000-4000-8000-000000000001";
 
@@ -433,6 +439,7 @@ impl State {
             own_pid: DEFAULT_OWN_PID,
             own_uid_map: Some(INIT_UID_MAP.to_owned()),
             own_uid: DEFAULT_ID,
+            own_cap_effective: 0,
             users: BTreeMap::new(),
             pid_namespace_initial: true,
             proc_hidepid: false,

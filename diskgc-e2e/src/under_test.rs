@@ -791,6 +791,78 @@ pub fn exec_as_tester(argv: &[String]) -> i32 {
     exit::FAIL
 }
 
+/// `CAP_SYS_PTRACE` (linux/capability.h).
+const CAP_SYS_PTRACE: u32 = 19;
+
+/// How long PROGRAM may run under `without-cap-sys-ptrace`: its refusal
+/// takes milliseconds.
+const WITHOUT_PTRACE_ALARM_SECS: u32 = 30;
+
+/// `diskgc-e2e without-cap-sys-ptrace -- PROGRAM ARGS...`: drops
+/// `CAP_SYS_PTRACE` from the bounding set and the ambient set, checks that
+/// the inheritable set lacks it too, and execs PROGRAM. Run by container
+/// root, PROGRAM then starts with every capability of the container but
+/// that one (execve gives root its bounding set), as under Docker's or
+/// Podman's default set (TASK-44 AC #4). PROGRAM is expected to refuse at
+/// once: a `SIGALRM` after [`WITHOUT_PTRACE_ALARM_SECS`] (an alarm survives
+/// exec) ends one that does not, such as a `watch` whose refusal
+/// regressed, so the test fails instead of hanging. Returns only on
+/// failure.
+pub fn exec_without_cap_sys_ptrace(argv: &[String]) -> i32 {
+    let [program, args @ ..] = argv else {
+        eprintln!("diskgc-e2e without-cap-sys-ptrace: no program given");
+        return exit::USAGE;
+    };
+    let cap = libc::c_ulong::from(CAP_SYS_PTRACE);
+    // SAFETY: prctl with integer arguments only.
+    let dropped = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) } == 0
+        // SAFETY: as above.
+        && unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::c_ulong::from(libc::PR_CAP_AMBIENT_CLEAR_ALL.cast_unsigned()),
+                0,
+                0,
+                0,
+            )
+        } == 0;
+    if !dropped {
+        eprintln!(
+            "diskgc-e2e without-cap-sys-ptrace: prctl: {}",
+            std::io::Error::last_os_error()
+        );
+        return exit::FAIL;
+    }
+    let status = match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("diskgc-e2e without-cap-sys-ptrace: read /proc/self/status: {e}");
+            return exit::FAIL;
+        }
+    };
+    for line in ["CapInh:", "CapBnd:", "CapAmb:"] {
+        let set = status
+            .lines()
+            .find_map(|l| l.strip_prefix(line))
+            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok());
+        match set {
+            Some(set) if set & (1 << CAP_SYS_PTRACE) == 0 => {}
+            other => {
+                eprintln!(
+                    "diskgc-e2e without-cap-sys-ptrace: {line} {other:x?} still holds it (or \
+                     is unreadable); PROGRAM would keep CAP_SYS_PTRACE"
+                );
+                return exit::FAIL;
+            }
+        }
+    }
+    // SAFETY: alarm(2) takes a plain integer and touches no memory.
+    unsafe { libc::alarm(WITHOUT_PTRACE_ALARM_SECS) };
+    let error = Command::new(program).args(args).exec();
+    eprintln!("diskgc-e2e without-cap-sys-ptrace: exec {program}: {error}");
+    exit::FAIL
+}
+
 /// `personality(2)` flag that makes `uname` report a 2.6 release
 /// (`UNAME26` in linux/personality.h). Podman's default seccomp profile
 /// allows exactly this value.

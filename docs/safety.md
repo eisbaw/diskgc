@@ -3658,6 +3658,17 @@ How it holds:
   per-entry owner check for `owners:` to enforce. So is a `nix-store`
   tier (exit 2), for the same reason and because root's Nix bypasses the
   daemon ([`nix-store`](#nix-store)).
+- `--allow-root` also needs `CAP_SYS_PTRACE` in diskgc's effective
+  capability set, read once at start from `CapEff` in
+  `/proc/self/status`. Every `--allow-root` run (`ensure` and `watch`,
+  every mode, whatever the uid) exits 2 (`cause: safety`), deleting
+  nothing, when the set lacks it or cannot be read. Without it, a root
+  process holding a capability diskgc lacks is excused at the "more
+  capable" boundary ([In use](#in-use)) and its open files go unseen,
+  with no error. Docker's and Podman's default sets lack it (`--cap-add
+  SYS_PTRACE`); a systemd unit grants it with its
+  `CapabilityBoundingSet=` ([architecture.md](architecture.md#the-watch-units),
+  Root, which also says why the other capabilities may be missing).
 
 ## Deadlines
 

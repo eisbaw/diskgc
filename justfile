@@ -50,9 +50,10 @@ check:
 # budget is measured by the runner and is also the deadline for hung tests.
 # Host requirement: rootless Podman (not provided by the dev shell).
 
-# `check`, sandboxed config and release checks, and fast Nix and Docker container tests.
+# `check`, sandboxed config, unit and release checks, and fast Nix and Docker container tests.
 e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    nix build -L --no-link .#checks.x86_64-linux.deployment-units
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
@@ -89,6 +90,7 @@ e2e-vm-cold-scale: _gcroot-dev
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    nix build -L --no-link .#checks.x86_64-linux.deployment-units
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
     nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests

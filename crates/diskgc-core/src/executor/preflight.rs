@@ -43,8 +43,16 @@ pub(super) fn measure_failure(
     }
 }
 
+/// `CAP_SYS_PTRACE`: its bit in a capability set (linux/capability.h).
+pub const CAP_SYS_PTRACE: u32 = 19;
+
 /// Privileges (docs/safety.md, Privileges): diskgc refuses to run as root
-/// without `--allow-root`. The caller validates and resolves `owners:`
+/// without `--allow-root`, and refuses `--allow-root` (whatever the uid)
+/// unless its effective capability set holds `CAP_SYS_PTRACE`, read once
+/// here. Without it a root process holding a capability diskgc lacks is
+/// excused at the "more capable" boundary (docs/safety.md, In use) and its
+/// open files go unseen with no error; a set that cannot be read is
+/// refused the same way. The caller validates and resolves `owners:`
 /// before passing those IDs to the planner or reclaim. Returns the effective
 /// uid used for `{uid}` substitution, not an implicit ownership allowlist.
 pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, String> {
@@ -55,6 +63,22 @@ pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, String> {
              Privileges): run it as the user whose caches it frees"
                 .to_owned(),
         );
+    }
+    if allow_root {
+        let needs = "--allow-root needs CAP_SYS_PTRACE in diskgc's effective capability set: \
+                     without it the open files of a root process more capable than diskgc go \
+                     unseen (docs/safety.md, Privileges)";
+        match host.own_cap_effective() {
+            Ok(caps) if caps & (1 << CAP_SYS_PTRACE) != 0 => {}
+            Ok(caps) => {
+                return Err(format!(
+                    "{needs}; CapEff is {caps:#018x}, without it. Grant it: a systemd unit's \
+                     CapabilityBoundingSet= (docs/architecture.md, Deployment), \
+                     `--cap-add SYS_PTRACE` for a container"
+                ));
+            }
+            Err(e) => return Err(format!("{needs}; it could not be read: {e}")),
+        }
     }
     Ok(uid)
 }

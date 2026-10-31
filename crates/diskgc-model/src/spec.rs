@@ -65,6 +65,13 @@ pub struct HostModel {
     /// default 1000. `0` models diskgc run as root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_uid: Option<u32>,
+    /// diskgc's own effective capability set (`CapEff:`, bit n is
+    /// capability n; YAML takes `0x...`), as `own_cap_effective` and its
+    /// own `proc_status` read it. Default: every capability up to
+    /// `CAP_CHECKPOINT_RESTORE` (40) when `own_uid` is 0, as real root has
+    /// them, and none otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_cap_effective: Option<u64>,
     /// The account database (`account_uid`, through which `owners:` names
     /// resolve): user name to uid. A name not listed has no account.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -767,6 +774,7 @@ pub enum Op {
     ProcEnviron,
     OwnPid,
     EffectiveUid,
+    OwnCapEffective,
     AccountUid,
     InheritLock,
     ProcStatus,
@@ -820,6 +828,7 @@ impl Op {
             Self::ProcEnviron => "proc_environ",
             Self::OwnPid => "own_pid",
             Self::EffectiveUid => "effective_uid",
+            Self::OwnCapEffective => "own_cap_effective",
             Self::AccountUid => "account_uid",
             Self::InheritLock => "inherit_lock",
             Self::ProcStatus => "proc_status",

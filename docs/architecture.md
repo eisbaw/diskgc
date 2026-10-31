@@ -979,6 +979,9 @@ is accepted until measured otherwise.
 - **Who diskgc is, and what its children keep:** `effective_uid` (the
   ordinary-mode owner every entry must have, and what `{uid}` stands for;
   root mode uses the resolved `owners:` IDs for entry ownership),
+  `own_cap_effective` (its own effective capability set, which
+  `--allow-root` reads once at start for `CAP_SYS_PTRACE`,
+  [safety.md](safety.md#privileges)),
   `account_uid` (an `owners:` name's uid in the account database, through
   the name service; what uids are acceptable is the composition's policy)
   and `inherit_lock`, which makes a held lock inheritable by children by
@@ -1042,7 +1045,8 @@ filesystem and carry the same name, so the commands read alike:
 | `lib/systemd/system/diskgc-watch@.service` | system | `systemctl enable --now "diskgc-watch@$(systemd-escape --path /srv/ci).service"`, after a `User=` drop-in |
 
 Install by copying the user file to `/etc/systemd/user/` (every user) or
-`~/.config/systemd/user/`, the system file to `/etc/systemd/system/`.
+`~/.config/systemd/user/`, the system file to `/etc/systemd/system/`
+(the steps: [reference.md](reference.md#watch-as-a-systemd-service)).
 
 **The instance is `PATH`.** The instance name is `PATH` escaped by
 `systemd-escape --path` (`/` is `-`, `/home` is `home`, `/srv/ci-builds`
@@ -1167,12 +1171,11 @@ WantedBy=multi-user.target
   `CAP_SYS_PTRACE` is mandatory: without it a root process holding a
   capability diskgc lacks is excused at the "more capable" boundary
   ([safety.md](safety.md#in-use)) and its open files go unseen, with no
-  error. So (planned, a TASK-44 acceptance criterion; safety.md
-  Privileges takes the rule when it is implemented) every `--allow-root`
-  run exits 2 at start (`safety`) when its effective set lacks
-  `CAP_SYS_PTRACE`, read once from `CapEff` in `/proc/self/status`. A
-  root container without it (Docker's and Podman's default sets lack it)
-  is then refused; the e2e runner already adds it. The others fail safe
+  error. So every `--allow-root` run exits 2 at start (`safety`) when
+  its effective set lacks `CAP_SYS_PTRACE`
+  ([safety.md](safety.md#privileges)). A root container without it
+  (Docker's and Podman's default sets lack it) is then refused; the e2e
+  runner adds it. The others fail safe
   when missing (an unreadable tree is refused, an unreadable `map_files`
   link retains); `CAP_CHECKPOINT_RESTORE` does not exist before Linux
   5.9; there diskgc cannot hold it, and `map_files` links stay

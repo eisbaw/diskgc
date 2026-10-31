@@ -1521,6 +1521,12 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::root_mode_uses_protected_config_and_named_owner,
     },
     Test {
+        name: "allow_root_without_cap_sys_ptrace_is_refused_in_every_mode",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::allow_root_without_cap_sys_ptrace_is_refused_in_every_mode,
+    },
+    Test {
         name: "root_mode_uses_explicit_uid_without_passwd_entry",
         tier: Tier::Fast,
         expect: Expect::Pass,
