@@ -399,23 +399,52 @@ they never override the Invariants.
   its review findings survived only partly in task notes. -> Implementers
   commit WIP on their own branch whenever they stop (report, interruption,
   hand-back); briefs say so. Judged by: worktrees with uncommitted changes
-  and no live agent at the next retro (target 0). Status: new.
+  and no live agent at the next retro (target 0). Status: kept
+  (TASK-266: 0 dirty worktrees).
 - 2026-10-30, Retro TASK-250: only 3 of 26 merged shas got a qa line;
   master after the RC (index chain, TASK-182/196) had none. -> Standing
   master QA: after each merge touching an irreversible surface, start
   `just e2e-all` async on that master sha if no QA job is running; record
   `qa:` on it. Judged by: qa-line coverage of irreversible shas (target
-  >= 80%). Status: new.
+  >= 80%). Status: extend (TASK-266: 0 of 6 own qa lines, blocked by
+  disk; see the disk entry below).
 - 2026-10-30, Retro TASK-250: `just check` went red under host load from
   a live-host test asserting a settled /proc scan (TASK-239 AC1; found by
   the 10-27 review, not a gate). -> Live-host tests assert per branch of
   what the host may legitimately return (settled vs blocked scan), with
   the branch the host cannot force pinned by a model test. Judged by:
-  fast-check failures not reproducible solo (target 0). Status: new.
+  fast-check failures not reproducible solo (target 0). Status: kept
+  (TASK-266: 0).
+
+- 2026-10-31, Retro TASK-266: TASK-31 merged after an mped-only round;
+  a later Codex review found 3 single-event holes (refix TASK-252). Every
+  later deletion-path round ran mped + Codex in parallel and each found
+  blockers before merge. -> The one review round for deletion-path code
+  is mped AND Codex in parallel on a frozen snapshot worktree, before
+  merge; neither builds. Judged by: blockers found after merge in
+  deletion-path code (target 0). Status: new.
+- 2026-10-31, Retro TASK-266: disk fell 34 -> 7.1 GiB free; container
+  tests, QA and the watch walk were blocked ~5 h. Switching branches in a
+  warm worktree saved a 5-10 GB target per task. -> Reuse warm worktrees
+  (switch branches) instead of new ones; no new worktree, container or VM
+  job below 15 GiB; when a merge lands and disk >= 15 GiB, run the fast
+  suite plus that merge's container tests before the next implementer
+  starts. Judged by: irreversible shas without a container run at the next
+  retro (target 0). Status: new.
+- 2026-10-31, Retro TASK-266: TASK-252's extended index_authority
+  generator found a third bug the review missed. -> Index and
+  deletion-path tasks extend the relevant property generator with the new
+  mechanism before fixing. Judged by: review blockers per deletion-path
+  round (this window 1-2). Status: new.
 
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->
+- 2026-10-31: Nix's own min-free GC fired at ~7 GiB free and freed ~10
+  GiB (store paths only; repo untouched) - free space can jump; GC'd
+  outputs (VM images, runners) rebuild on the next QA.
+- 2026-10-31: the walk image's BusyBox `head` rejects `-c 40M`; fill walk
+  data with `dd bs=1M count=N`.
 - 2026-10-30: v0.1.0 is an annotated local tag on release-0.1 af3d503
   (tagged by Mark); TASK-67 was still To Do until closed on 10-30. The
   tracker can lag a release the user makes by hand: check `git tag`.
