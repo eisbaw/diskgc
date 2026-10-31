@@ -41,6 +41,7 @@ use diskgc_core::profile::{Library, describe};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{self, ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::units::{parse_duration, parse_size};
+use diskgc_core::watch::Mode;
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{read_config_file, read_root_config_file};
 
@@ -213,6 +214,9 @@ enum Invocation {
     Check(Option<OsString>),
     /// A command of the contract that this version does not have yet.
     NotYet(&'static str),
+    /// A reclaiming `watch` in a build whose catalog has none
+    /// ([`RECLAIMING_WATCH`]).
+    ReclaimingWatchNotInCatalog,
     UsageError(String),
 }
 
@@ -277,6 +281,9 @@ fn parse(args: &[OsString]) -> Invocation {
             Err(why) => Invocation::UsageError(format!("ensure: {why}")),
         },
         [command, rest @ ..] if command == "watch" => match watch::parse_watch(rest) {
+            Ok(args) if !RECLAIMING_WATCH && matches!(args.mode, Mode::Reclaim { .. }) => {
+                Invocation::ReclaimingWatchNotInCatalog
+            }
             Ok(args) => Invocation::Watch(args),
             Err(why) => Invocation::UsageError(format!("watch: {why}")),
         },
@@ -618,6 +625,14 @@ const CATALOG: Catalog = if cfg!(feature = "proposed-release-01-catalog") {
 } else {
     Catalog::Development
 };
+
+/// Whether this build runs a reclaiming `watch`. The release catalog, the
+/// one the gate-lifted `release-candidate` package carries, does not while
+/// no release decision covers it (TASK-276): it runs `watch --tally-only`
+/// only and refuses the rest with exit 2, as 0.1.0 refused every `watch`
+/// (docs/reference.md, Built-in profile library). The development build
+/// keeps it, behind the sandbox gate.
+const RECLAIMING_WATCH: bool = matches!(CATALOG, Catalog::Development);
 
 // TASK-195: removing the sandbox gate (diskgc-linux's
 // `release-without-sandbox-gate`) is only for the release package, which
@@ -983,6 +998,23 @@ fn finish(report: &Report, json: bool) -> ExitCode {
     }
 }
 
+/// A command this build does not run: exit 2 with `why` on stderr, and
+/// under `--json` the usage-error object every command fails with.
+fn not_yet(why: &str, json: bool) -> ExitCode {
+    log(&format!("error: {why}"));
+    if json {
+        output(
+            &format!(
+                "{}\n",
+                error_json(Status::UsageError, ErrorCause::Usage, why)
+            ),
+            EXIT_USAGE,
+        )
+    } else {
+        ExitCode::from(EXIT_USAGE)
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `--json` holds for every exit code when stdout works, usage errors
@@ -1040,25 +1072,22 @@ fn main() -> ExitCode {
                 }
             }
         },
-        Invocation::NotYet(command) => {
-            let why = format!(
+        Invocation::NotYet(command) => not_yet(
+            &format!(
                 "`{command}` is not in diskgc {} yet; its commands are ensure, watch, check and \
                  profiles",
                 env!("CARGO_PKG_VERSION")
-            );
-            log(&format!("error: {why}"));
-            if json {
-                output(
-                    &format!(
-                        "{}\n",
-                        error_json(Status::UsageError, ErrorCause::Usage, &why)
-                    ),
-                    EXIT_USAGE,
-                )
-            } else {
-                ExitCode::from(EXIT_USAGE)
-            }
-        }
+            ),
+            json,
+        ),
+        Invocation::ReclaimingWatchNotInCatalog => not_yet(
+            &format!(
+                "a reclaiming `watch` is not in diskgc {} yet; its commands are ensure, watch \
+                 --tally-only, check and profiles",
+                env!("CARGO_PKG_VERSION")
+            ),
+            json,
+        ),
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
             // touch the machine: an old kernel is the reason to report.
@@ -1332,6 +1361,33 @@ mod tests {
         );
         assert_eq!(version_line("0.2.0", Some("9c1e331")), "diskgc 0.2.0\n");
         assert_eq!(version_line("0.1.0", None), "diskgc 0.1.0\n");
+    }
+
+    /// TASK-276 open: the release catalog runs `watch --tally-only` only;
+    /// the development catalog keeps a reclaiming `watch`.
+    #[test]
+    fn only_the_development_catalog_parses_a_reclaiming_watch() {
+        let reclaim = parse(&args(&[
+            "watch",
+            "--min-free",
+            "1G",
+            "--target-free",
+            "2G",
+            "/p",
+        ]));
+        match CATALOG {
+            Catalog::Development => assert!(matches!(reclaim, Invocation::Watch(_))),
+            Catalog::ProposedRelease01 => {
+                assert_eq!(reclaim, Invocation::ReclaimingWatchNotInCatalog)
+            }
+        }
+        let tally = parse(&args(&["watch", "--tally-only", "/p"]));
+        assert!(matches!(tally, Invocation::Watch(_)), "{tally:?}");
+        // A syntax error is reported as such in either build.
+        assert!(matches!(
+            parse(&args(&["watch", "--min-free", "1G", "/p"])),
+            Invocation::UsageError(_)
+        ));
     }
 
     #[test]

@@ -861,13 +861,17 @@ the example configuration. It reads no configuration. `--help` and
 over `--json`.
 
 `diskgc --version` prints `diskgc VERSION` for a release (a version
-without a pre-release suffix, built from its tag), and `diskgc VERSION
+without a pre-release suffix, built only from its tag:
+[architecture.md](architecture.md#release-procedure)), and `diskgc VERSION
 (COMMIT)` for every other build, such as `diskgc 0.2.0-dev (9c1e331)`
-from master: the flake's packages compile in the commit they were built
-from (`-dirty` after it for a tree with uncommitted changes), and a build
-that was not told prints `unknown` (a plain `cargo build`, unless
-`DISKGC_GIT_REV` is set). The JSON `version` field is the package version
-alone.
+from master. The flake's two shipped packages (`default` and
+`release-candidate`) compile in the commit they were built from; after a
+tree with uncommitted changes `-dirty` follows the commit, which then
+names only the base those changes sit on. Test builds, and a plain
+`cargo build` unless `DISKGC_GIT_REV` is set, print `unknown`. So
+`--version` identifies a build only roughly: verification notes cite the
+commit (and whether the tree was clean) themselves. The JSON `version`
+field is the package version alone.
 
 ### `check`
 
@@ -1329,7 +1333,7 @@ file serves `watch` on a laptop and `ensure` on a runner.
 
 A configuration for diskgc 0.1 uses only the 0.1 built-ins
 (`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters; see
-[0.1 release notes](#01-release-notes)).
+[Release notes](#release-notes-next-release-draft)).
 It extends `docs/example.yaml` (the example the package installs) with a
 laptop's roots, a protected project and a pressure group:
 
@@ -2076,11 +2080,15 @@ The optional `proposed-release-01-catalog` build feature narrows the catalog.
 On its own it retains the development sandbox gate. The separate
 `release-candidate` package combines that feature with
 `diskgc-linux/release-without-sandbox-gate` for disposable-container testing;
-it is not approved for deployment. Built from master it is a development
-version (`diskgc 0.2.0-dev (COMMIT)`), not 0.1.0, and it includes master's
-reclaiming `watch` with the gate lifted: no released version has a
-reclaiming `watch` yet (0.1.0's exits 2), and whether the next release
-includes it is undecided (TASK-276). The candidate keeps `cargo-target`, the
+it is not approved for deployment. It is a release only when built from
+that release's tag; built from master it is a development version
+(`diskgc 0.2.0-dev (COMMIT)`), for disposable test containers only. While
+no release decision covers a reclaiming `watch` (TASK-276), this catalog
+runs `watch --tally-only` only: a reclaiming `watch` exits 2 before it
+looks at the machine ("a reclaiming `watch` is not in diskgc VERSION yet;
+its commands are ensure, watch --tally-only, check and profiles"), as
+every `watch` did in 0.1.0. The development build keeps a reclaiming
+`watch`, behind the sandbox gate. The candidate keeps `cargo-target`, the
 two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
 TASK-65, Mark 2026-10-24) and the seven idle filters, and rejects every
 operator-authored profile, including
@@ -2337,37 +2345,37 @@ its task notes.
 | `maven-repo` | Maven, `mvnd`, IDEs | none: a JVM holds a jar open only while it is loaded; the repository has no lock by default | none | Not a built-in. | Excluded. |
 | `nix-garbage` | the Nix store's own garbage collector | Nix's GC roots and lock (kind `nix-store`), not a `where` predicate | delegated | Not a built-in yet. | Governed by the `nix-store` protocol (TASK-36, TASK-118). |
 
-### 0.1 release notes
+### Release notes (next release, draft)
 
-**Status: released** as v0.1.0, the annotated tag on `release-0.1` at
-af3d503 (2026-10-30), whose package is that branch's
-`release-01-candidate` output. These notes are kept in step with master;
-where master changed behaviour after 0.1.0 (below), 0.1.0 behaves as the
-list says. Master's `release-candidate` package ships these notes but is
-a development build with more than 0.1 ([Built-in profile
-library](#built-in-profile-library)). The default development package
-stays sandbox gated.
+**Status: draft** for the release after 0.1.0, whose scope is not decided
+(TASK-276). This describes the release catalog as master builds it, the
+`release-candidate` package ([Built-in profile
+library](#built-in-profile-library)), which ships this section as
+`RELEASE-NOTES.md`. 0.1.0's own notes are frozen at its tag (v0.1.0 on
+`release-0.1`, af3d503): `git show v0.1.0:docs/reference.md`. The default
+development package stays sandbox gated.
 
-**Known issues in 0.1.0, fixed on master** (in no release yet):
+**Changes since 0.1.0** (on master, in no release yet):
 
-- TASK-242: `cargo-target` discovery descends into rootless Podman or
-  Docker image layers; only their permission bits keep a Cargo target
-  inside a layer from being planned for deletion.
-- TASK-260: `protect` and `!profile` miss a candidate reached through a
-  bind mount of a subdirectory of the protected or negated tree.
-- TASK-44: `--allow-root` is accepted from a non-root user, and with
-  `CAP_SYS_PTRACE` a process the kernel refused to show (an LSM) is
-  excused instead of keeping its candidate.
-- TASK-277: a non-root reclaim needs the provisioned host lock
-  `/run/diskgc/lock` and exits 2 (`cause: provisioning`) without it;
-  master takes a per-user lock instead (Install, item 2).
+- TASK-242: `cargo-target` discovery no longer descends into rootless
+  Podman or Docker image layers (in 0.1.0 only their permission bits kept
+  a Cargo target inside a layer from being planned for deletion).
+- TASK-260: `protect` and `!profile` also cover a candidate reached
+  through a bind mount of a subdirectory of the protected or negated tree.
+- TASK-44: `--allow-root` is refused unless diskgc runs as root, and with
+  `CAP_SYS_PTRACE` a process the kernel refused to show (an LSM) keeps its
+  candidate instead of being excused.
+- TASK-277: without the provisioned host lock `/run/diskgc/lock`, a
+  non-root reclaim takes a per-user lock (Install, item 2); 0.1.0 exits 2
+  (`cause: provisioning`).
 
-**Open in 0.1.0 and on master** (static readings, not reproduced):
-TASK-267, container storage behind a subdirectory bind is not recognised
-(the check probes lexical ancestors only); TASK-268, an overlay mounted
-inside a protected or negated match escapes the overlay refusal.
+**Open limits** (in 0.1.0 and on master; static readings, not
+reproduced): TASK-267, container storage behind a subdirectory bind is
+not recognised (the check probes lexical ancestors only); TASK-268, an
+overlay mounted inside a protected or negated match escapes the overlay
+refusal.
 
-**What 0.1 does.** One command frees space, two read-only ones explain
+**What it does.** One command frees space, two read-only ones explain
 it:
 
 - `diskgc ensure --min-free SIZE PATH` brings the filesystem of `PATH` up
@@ -2436,7 +2444,7 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   three are kept while any process of the same user has `TMPDIR` unset:
   such a process may run pytest with `/tmp` as its temp root, and the
   contract's unused-root row cannot rule that out. On a desktop session
-  that is nearly always. So 0.1 frees mostly sessions under the temp
+  that is nearly always. So it frees mostly sessions under the temp
   roots of ended `nix-shell.*` shells, and sessions older than pytest's
   own retention of three (which pytest's next run in the same temp root
   would also remove).
@@ -2527,7 +2535,8 @@ Docker and Nix parts of the profile schema stay provisional until the v1
 release review (task-49). `just docs-vs-binary BIN` runs what this
 reference documents against a build and reports any drift.
 
-**Not in 0.1.** `watch` and `survey` (both exit 2), the index (so
+**Not in the release catalog.** A reclaiming `watch` and `survey` (both
+exit 2; `watch --tally-only` runs), the index (so
 `--no-index` changes nothing and `--tally-budget` bounds only the
 synchronous tally), the Docker kinds, the Nix store kind, command actions,
 user profiles and overrides, `ipc: live-only` in `ensure`, and every other
@@ -2536,16 +2545,16 @@ built-in in the [library](#built-in-profile-library), including the other
 else). The `docs/ci-pre-job.sh` example stays in the source tree; the
 package does not install it.
 
-Evidence for the 0.1.0 package at its release, and what it does not cover:
+Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
-| Package contents | The actual `release-01-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile, the README, reference and release notes are installed); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
+| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile, the README, reference and release notes are installed); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
 | Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
 | Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `/tmp` contracts' container tests run the development binary; the packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
-| Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence were unresolved at release. |
+| Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy the candidate built from master. |
 
 ### User profiles
 

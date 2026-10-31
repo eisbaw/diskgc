@@ -5,7 +5,9 @@
 #
 # The base system has no diskgc; the `diskgc` specialisation enables the
 # module, so switching to it is a first switch.
-{ pkgs, module }:
+# `package` is the unstamped test build (flake.nix, mkDiskgc): the guest
+# stays cached across commits that change no source.
+{ pkgs, module, package }:
 let
   policy = roots: {
     version = 1;
@@ -47,6 +49,7 @@ pkgs.testers.nixosTest {
       specialisation.diskgc.configuration = {
         services.diskgc = {
           enable = true;
+          inherit package;
           settings = policy [ "/home/runner/src" ];
           instances = {
             # The laptop owner's watcher; tally-only, since the development

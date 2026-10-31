@@ -8,7 +8,12 @@
   lib,
   nixpkgs,
   module,
+  # The package the checks evaluate and build with: the unstamped test
+  # build (flake.nix, mkDiskgc), so that they stay cached across commits.
   package,
+  # The module's own default (packages.default, stamped with the commit);
+  # only compared by evaluation, never built here.
+  defaultPackage,
   # verify MANAGER DIR FILE...: systemd-analyze verify of FILEs with only DIR
   # and systemd's own units on the unit path; output to DIR.log (flake.nix).
   systemdVerify,
@@ -27,6 +32,7 @@ let
             fsType = "tmpfs";
           };
           system.stateVersion = "26.05";
+          services.diskgc.package = lib.mkDefault package;
         }
         extra
       ];
@@ -329,6 +335,11 @@ let
     laptop-tmpfiles = {
       got = lib.elem package laptop.systemd.tmpfiles.packages;
       want = true;
+    };
+    module-default-package = {
+      got = lib.unsafeDiscardStringContext
+        (evalFull { }).options.services.diskgc.package.default.drvPath;
+      want = lib.unsafeDiscardStringContext defaultPackage.drvPath;
     };
     laptop-units-package = {
       got = lib.elem package laptop.systemd.packages;

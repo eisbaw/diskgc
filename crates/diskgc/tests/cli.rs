@@ -42,17 +42,14 @@ fn json(out: &std::process::Output) -> Value {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout:?}"))
 }
 
-/// What `--version` prints for this build (docs/reference.md, Help and
-/// version): a development version is followed by the commit the build
-/// says it comes from, `unknown` when it does not say; a release version
-/// prints alone.
+/// What `--version` prints for a test build (docs/reference.md, `diskgc
+/// --version`). Test builds are never stamped with a commit (flake.nix,
+/// stampArgs goes to the shipped packages only; a plain `cargo test`
+/// leaves DISKGC_GIT_REV unset), so a development version says `unknown`.
 fn expected_version_line() -> String {
     let version = env!("CARGO_PKG_VERSION");
     if version.contains('-') {
-        let rev = option_env!("DISKGC_GIT_REV")
-            .filter(|r| !r.is_empty())
-            .unwrap_or("unknown");
-        format!("diskgc {version} ({rev})\n")
+        format!("diskgc {version} (unknown)\n")
     } else {
         format!("diskgc {version}\n")
     }
@@ -63,6 +60,39 @@ fn version_prints_name_and_package_version() {
     let out = diskgc(&["--version"]);
     assert!(out.status.success(), "status: {:?}", out.status);
     assert_eq!(text(&out.stdout), expected_version_line());
+}
+
+/// TASK-276 open: the release catalog refuses a reclaiming `watch` with
+/// exit 2 before it looks at the machine, in text and under `--json`.
+#[cfg(feature = "proposed-release-01-catalog")]
+#[test]
+fn the_release_catalog_refuses_a_reclaiming_watch() {
+    let watch = [
+        "watch",
+        "--min-free",
+        "1G",
+        "--target-free",
+        "2G",
+        "/nonexistent",
+    ];
+    let want = concat!(
+        "a reclaiming `watch` is not in diskgc ",
+        env!("CARGO_PKG_VERSION"),
+        " yet; its commands are ensure, watch --tally-only, check and profiles"
+    );
+    let out = diskgc(&watch);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert_eq!(text(&out.stderr), format!("diskgc: error: {want}\n"));
+
+    let mut with_json = watch.to_vec();
+    with_json.push("--json");
+    let out = diskgc(&with_json);
+    assert_eq!(out.status.code(), Some(2));
+    let error = json(&out);
+    assert_eq!(error["status"], "usage_error");
+    assert_eq!(error["errors"][0]["cause"], "usage");
+    assert_eq!(error["errors"][0]["message"], want);
 }
 
 #[test]

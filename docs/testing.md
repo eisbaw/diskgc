@@ -2523,8 +2523,8 @@ The VM check is part of `just e2e` and `just e2e-full`.
   - `/usr` is bind-mounted read-only by the harness, unlike a CI runner's;
   - the ordinary fast suite uses the development build with the pre-release
     sandbox gate. The separate release runner mounts the ungated
-    `release-candidate` package and runs catalog, action and package
-    negatives plus real Cargo CLI reclaim, busy-lock and dry-run journeys
+    `release-candidate` package and runs catalog, action, reclaiming-`watch`
+    and package negatives plus real Cargo CLI reclaim, busy-lock and dry-run journeys
     on both Nix and Debian images. The race tests use the test driver and
     do not establish race coverage for the packaged binary. The candidate
     is not approved for deployment;
@@ -2632,6 +2632,18 @@ lifted gate solely for testing in disposable containers. It is unapproved
 for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
 and Debian images through their candidate under-test runners.
+
+Every check, container and VM test runs the **unstamped tested build** of
+each package (flake.nix, `mkDiskgc`): the same source, features and
+compile as the shipped `packages.default` and `packages.release-candidate`,
+without the commit compiled into `--version` (it prints `(unknown)`), so
+that a commit changing no source reruns nothing. The shipped packages
+recompile only the binary crate with `DISKGC_GIT_REV`; the `version-stamp`
+check builds them and asserts their `--version` line and that nothing but
+`bin/` differs from the tested packages. So the tests establish the
+behaviour of equivalent source and features, not of the exact stamped
+executable. For a release version there is no stamp, and the shipped
+binary is the tested one (`release-candidate-package` compares them).
 
 ## Commands
 

@@ -77,20 +77,26 @@
       # Master carries the next release's version with a pre-release suffix
       # (0.2.0-dev); only the commit a release tag points at has a plain one.
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
-      # The commit the packages are built from, compiled into `diskgc
-      # --version` as DISKGC_GIT_REV (crates/diskgc/src/main.rs,
-      # version_line; docs/reference.md, `diskgc --version`): a dirty tree
-      # has only dirtyShortRev ("<rev>-dirty"), a source without Git (a
-      # tarball, a path: input) neither.
+      # A development version (one with a pre-release suffix) names its
+      # commit in `diskgc --version`; a release version never does
+      # (crates/diskgc/src/main.rs, version_line; docs/reference.md,
+      # `diskgc --version`; docs/architecture.md, Release procedure).
+      isDevVersion = lib.hasInfix "-" version;
+      # The commit the shipped packages are built from: a dirty tree has
+      # only dirtyShortRev ("<rev>-dirty", the base commit), a source
+      # without Git (a tarball, a path: input) neither.
       gitRev = self.shortRev or self.dirtyShortRev or "unknown";
-      # The line `--version` must print, for the package checks below.
-      versionLine =
-        if lib.hasInfix "-" version then "diskgc ${version} (${gitRev})" else "diskgc ${version}";
-      # Only the shipped packages carry the commit. It changes with every
-      # commit, so it is kept out of workspaceArgs: the dependency build,
-      # clippy and the tests stay cached across commits that change no
-      # source (their binaries print "unknown").
-      stampArgs = { DISKGC_GIT_REV = gitRev; };
+      # The stamp, compiled in as DISKGC_GIT_REV. It changes with every
+      # commit, so only packages.default, packages.release-candidate (and
+      # through it the NixOS module's default) and the version-stamp check
+      # carry it. Every other check and test consumer uses the unstamped
+      # `tested` build of the same source and features, which stays cached
+      # across commits that change no source. Empty for a release version,
+      # so a release's shipped build is its tested build.
+      stampArgs = lib.optionalAttrs isDevVersion { DISKGC_GIT_REV = gitRev; };
+      # The `--version` lines of the two builds, for the checks below.
+      testedVersionLine = if isDevVersion then "diskgc ${version} (unknown)" else "diskgc ${version}";
+      shippedVersionLine = if isDevVersion then "diskgc ${version} (${gitRev})" else "diskgc ${version}";
 
       # The test-sandbox marker constant (docs/testing.md, Safety interlock):
       # compiled into the binaries by include_bytes! and copied byte for byte
@@ -258,70 +264,101 @@
         }
       '';
 
-      diskgc = craneLib.buildPackage (
-        workspaceArgs
-        // stampArgs
-        // {
-          pname = "diskgc";
-          cargoArtifacts = workspaceDeps;
-          cargoExtraArgs = "--locked --package diskgc";
-          # Tests run once, in checks.workspace-tests.
-          doCheck = false;
-          postInstall = installShippedFiles + installWatchUnits;
-          meta.mainProgram = "diskgc";
-        }
-      );
+      # One diskgc build definition, as two packages sharing one compile:
+      # `tested` (no stamp) is what every check and test consumer uses;
+      # `shipped` adds stampArgs, so only the binary crate is compiled again
+      # (DISKGC_GIT_REV is read by option_env! there alone). For a release
+      # version stampArgs is empty and the two are one derivation.
+      mkDiskgc =
+        {
+          pname,
+          cargoExtraArgs,
+          postInstall,
+        }:
+        let
+          args = workspaceArgs // {
+            inherit pname cargoExtraArgs;
+            # Tests run once, in checks.workspace-tests.
+            doCheck = false;
+          };
+          compiled = craneLib.cargoBuild (args // { cargoArtifacts = workspaceDeps; });
+          build =
+            stamp:
+            craneLib.buildPackage (
+              args
+              // lib.optionalAttrs stamp stampArgs
+              // {
+                cargoArtifacts = compiled;
+                inherit postInstall;
+                meta.mainProgram = "diskgc";
+              }
+            );
+        in
+        {
+          tested = build false;
+          shipped = build true;
+        };
+
+      # The development package: gated, the development catalog.
+      diskgcBuilds = mkDiskgc {
+        pname = "diskgc";
+        cargoExtraArgs = "--locked --package diskgc";
+        postInstall = installShippedFiles + installWatchUnits;
+      };
+      diskgcTested = diskgcBuilds.tested;
+      diskgc = diskgcBuilds.shipped;
 
       # The release candidate built from this source: the 0.1 catalog with
       # the gate lifted. Keep the default development package gated; this is
       # the sole build that removes the gate, and it also narrows the
-      # embedded catalog. Built from master it is a development version
-      # (`diskgc 0.2.0-dev (COMMIT)`), not 0.1: v0.1.0 is the tag on
-      # release-0.1. It also has master's reclaiming `watch`, which no
-      # release decision covers yet (TASK-276; docs/reference.md, Built-in
-      # profile library). Test-only: not approved for deployment.
-      diskgcReleaseBuild = craneLib.buildPackage (
-        workspaceArgs
-        // stampArgs
-        // {
-          pname = "diskgc-release-candidate";
-          cargoArtifacts = workspaceDeps;
-          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate";
-          doCheck = false;
-          postInstall = installShippedFiles;
-          meta.mainProgram = "diskgc";
-        }
-      );
-      # The release package: the build above plus its documentation
+      # embedded catalog. A release only when built from its tag
+      # (docs/architecture.md, Release procedure); from any other commit a
+      # development version for disposable test containers
+      # (docs/reference.md, Built-in profile library).
+      diskgcReleaseBuilds = mkDiskgc {
+        pname = "diskgc-release-candidate";
+        cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate";
+        postInstall = installShippedFiles;
+      };
+      # The release package: a build above plus its documentation
       # (TASK-214: a user with only the package had --help and nothing
       # else). Assembled apart from the compile so that a docs edit copies
       # files instead of rebuilding the static binary. The release notes
       # are cut from docs/reference.md (their one home) at build time, and
       # reference.md and safety.md ship beside them so that their links
       # resolve; links into architecture.md and testing.md do not.
-      diskgcRelease = pkgs.runCommand "diskgc-release-candidate-${version}"
-        { inherit version; meta.mainProgram = "diskgc"; }
-        ''
-          cp -R ${diskgcReleaseBuild}/. $out
-          chmod -R u+w $out
-          doc=$out/share/doc/diskgc
-          install -Dm0644 ${./packaging/README.md} $doc/README.md
-          install -Dm0644 ${./docs/reference.md} $doc/reference.md
-          install -Dm0644 ${./docs/safety.md} $doc/safety.md
-          # From the section's heading to the next heading of its level;
-          # its in-page links (#x) point into reference.md.
-          awk '/^### 0\.1 release notes$/ { on = 1; print "# diskgc 0.1 release notes"; next }
-               on && /^#{1,3} / { exit }
-               on' ${./docs/reference.md} \
-            | sed 's/](#/](reference.md#/g' > $doc/RELEASE-NOTES.md
-          # Fail closed on a renamed heading or a cut that lost the body.
-          grep -qF '**Known limits.**' $doc/RELEASE-NOTES.md
-          grep -qF '**JSON contract.**' $doc/RELEASE-NOTES.md
-          if grep -q '^### User profiles' $doc/RELEASE-NOTES.md; then
-            echo "release notes ran into the next section" >&2
-            exit 1
-          fi
-        '';
+      mkReleasePackage =
+        build:
+        pkgs.runCommand "diskgc-release-candidate-${version}"
+          {
+            inherit version;
+            meta.mainProgram = "diskgc";
+          }
+          ''
+            cp -R ${build}/. $out
+            chmod -R u+w $out
+            doc=$out/share/doc/diskgc
+            install -Dm0644 ${./packaging/README.md} $doc/README.md
+            install -Dm0644 ${./docs/reference.md} $doc/reference.md
+            install -Dm0644 ${./docs/safety.md} $doc/safety.md
+            # From the section's heading to the next heading of its level;
+            # its in-page links (#x) point into reference.md.
+            awk '/^### Release notes \(next release, draft\)$/ { on = 1; print ${lib.escapeShellArg releaseNotesTitle}; next }
+                 on && /^#{1,3} / { exit }
+                 on' ${./docs/reference.md} \
+              | sed 's/](#/](reference.md#/g' > $doc/RELEASE-NOTES.md
+            # Fail closed on a renamed heading or a cut that lost the body.
+            grep -qF '**Known limits.**' $doc/RELEASE-NOTES.md
+            grep -qF '**JSON contract.**' $doc/RELEASE-NOTES.md
+            if grep -q '^### User profiles' $doc/RELEASE-NOTES.md; then
+              echo "release notes ran into the next section" >&2
+              exit 1
+            fi
+          '';
+      # The packaged notes' title names the build's version.
+      releaseNotesTitle = "# diskgc ${version} release notes";
+      diskgcReleaseTested = mkReleasePackage diskgcReleaseBuilds.tested;
+      diskgcRelease = mkReleasePackage diskgcReleaseBuilds.shipped;
 
       # A separate feature-built binary for catalog-policy container tests.
       # This is not the default package and retains the pre-release gate.
@@ -405,18 +442,18 @@
       );
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
-        cp ${lib.getExe diskgc} $out/bin/diskgc
-        cp ${lib.getExe diskgc} $out/bin/diskgc-development
+        cp ${lib.getExe diskgcTested} $out/bin/diskgc
+        cp ${lib.getExe diskgcTested} $out/bin/diskgc-development
         cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
-        cp ${lib.getExe diskgcRelease} $out/bin/diskgc-release
+        cp ${lib.getExe diskgcReleaseTested} $out/bin/diskgc-release
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
         # These copies fail the build if the Nix package omits either
         # shipped file. The test applies the actual drop-in in its container.
-        cp ${diskgc}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
-        cp ${diskgc}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
-        cp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-release-tmpfiles.conf
-        cp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-release-example.yaml
+        cp ${diskgcTested}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
+        cp ${diskgcTested}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        cp ${diskgcReleaseTested}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-release-tmpfiles.conf
+        cp ${diskgcReleaseTested}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-release-example.yaml
         ln -s ${pkgs.systemd}/bin/systemd-tmpfiles $out/bin/systemd-tmpfiles
         # TASK-97's real Buildah operation runs only in its disposable
         # container. Keep these pinned tools outside the large base image;
@@ -462,9 +499,9 @@
       e2eReleaseUnderTest = pkgs.runCommand "diskgc-e2e-release-under-test" { } ''
         cp -a ${e2eUnderTest} $out
         chmod -R u+w $out
-        cp ${lib.getExe diskgcRelease} $out/bin/diskgc
-        cp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
-        cp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        cp ${lib.getExe diskgcReleaseTested} $out/bin/diskgc
+        cp ${diskgcReleaseTested}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
+        cp ${diskgcReleaseTested}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
         touch $out/bin/diskgc-release-default
       '';
 
@@ -732,7 +769,7 @@
           # static fixture executable at that exact path; its probe holds
           # the spool open while LinuxHost inspects /proc.
           mkdir -p usr/bin
-          cp ${e2eUnderTest}/bin/diskgc-e2e usr/bin/buildah
+          cp ${e2eBins}/bin/diskgc-e2e usr/bin/buildah
           chmod 0755 usr/bin/buildah
         '';
         config = {
@@ -915,8 +952,8 @@
       # TASK-156: the release package reclaims genuinely old /tmp sessions.
       vmReleaseTmpReclaim = import ./diskgc-e2e/vm-release-tmp-reclaim.nix {
         inherit pkgs;
-        release = diskgcRelease;
-        inherit versionLine;
+        release = diskgcReleaseTested;
+        versionLine = testedVersionLine;
       };
       vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
         inherit pkgs;
@@ -996,11 +1033,13 @@
       nixosModuleChecks = import ./packaging/nixos/checks.nix {
         inherit pkgs lib nixpkgs systemdVerify;
         module = nixosModule;
-        package = diskgc;
+        package = diskgcTested;
+        defaultPackage = diskgc;
       };
       vmNixosModule = import ./packaging/nixos/vm-test.nix {
         inherit pkgs;
         module = nixosModule;
+        package = diskgcTested;
       };
     in
     {
@@ -1024,7 +1063,7 @@
       // vmChecks;
 
       checks.${system} = {
-        inherit diskgc;
+        diskgc = diskgcTested;
 
         # Static config validation must run in a Nix build sandbox: it may
         # read the config, but cannot require deployment roots or backends.
@@ -1032,7 +1071,7 @@
         # the decision ensure refuses with (TASK-194), which needs its host
         # to start in a build sandbox, and still exits 0.
         config-check-sandbox = pkgs.runCommand "diskgc-config-check-sandbox" { } ''
-          output=$(${lib.getExe diskgc} check --config ${./docs/example.yaml} 2> stderr)
+          output=$(${lib.getExe diskgcTested} check --config ${./docs/example.yaml} 2> stderr)
           case "$output" in
             *"profile:cargo-target && filter:idle-30d"*) ;;
             *) echo "check did not show the normalized tier" >&2; exit 1 ;;
@@ -1059,9 +1098,9 @@
           ''
             export HOME=$TMPDIR/home XDG_RUNTIME_DIR=$TMPDIR/run
             mkdir -p $HOME $XDG_RUNTIME_DIR $TMPDIR/root
-            bin=${lib.getExe diskgc}
+            bin=${lib.getExe diskgcTested}
             for manager in user system; do
-              cmp ${diskgc}/lib/systemd/$manager/diskgc-watch@.service \
+              cmp ${diskgcTested}/lib/systemd/$manager/diskgc-watch@.service \
                 ${watchUnits}/$manager/diskgc-watch@.service
             done
             # stage MANAGER DIR BIN [EXTRA-LINE]: the template in DIR, pointed
@@ -1069,7 +1108,7 @@
             stage() {
               mkdir -p "$2"
               sed "s|^ExecStart=/usr/local/bin/diskgc |ExecStart=$3 |" \
-                ${diskgc}/lib/systemd/$1/diskgc-watch@.service > "$2/diskgc-watch@.service"
+                ${diskgcTested}/lib/systemd/$1/diskgc-watch@.service > "$2/diskgc-watch@.service"
               grep -qF "ExecStart=$3 watch " "$2/diskgc-watch@.service"
               if [ -n "''${4-}" ]; then printf '%s\n' "$4" >> "$2/diskgc-watch@.service"; fi
               ln -s diskgc-watch@.service "$2/diskgc-watch@srv-ci\x2dbuilds.service"
@@ -1114,7 +1153,7 @@
           pkgs.runCommand "diskgc-static-check" { nativeBuildInputs = [ pkgs.binutils pkgs.stdenv.cc ]; }
             ''
               ${checkStaticElf}
-              bin=${lib.getExe diskgc}
+              bin=${lib.getExe diskgcTested}
               check_static_elf "$bin"
 
               # A locally compiled glibc-linked executable is the negative
@@ -1134,7 +1173,7 @@
                 exit 1
               fi
               got=$("$bin" --version)
-              want=${lib.escapeShellArg versionLine}
+              want=${lib.escapeShellArg testedVersionLine}
               if [ "$got" != "$want" ]; then
                 echo "error: --version printed '$got', expected '$want'" >&2
                 exit 1
@@ -1149,7 +1188,7 @@
         # needles (diskgc-e2e/src/release_check.rs).
         release-excludes-e2e = pkgs.runCommand "diskgc-release-excludes-e2e" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --shipped ${lib.getExe diskgcRelease} \
+            --shipped ${lib.getExe diskgcReleaseTested} \
             --dep-tree ${releaseDepTree} \
             --control ${e2eBins}/bin/diskgc-e2e-driver
           touch $out
@@ -1157,41 +1196,62 @@
 
         release-excludes-clock-offset = pkgs.runCommand "diskgc-release-excludes-clock-offset" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --clock-offset-excluded ${lib.getExe diskgcRelease} \
-            --clock-offset-control ${lib.getExe diskgc}
+            --clock-offset-excluded ${lib.getExe diskgcReleaseTested} \
+            --clock-offset-control ${lib.getExe diskgcTested}
           touch $out
         '';
 
         release-gate-needs-catalog = releaseGateNeedsCatalog;
 
-        release-package = pkgs.runCommand "diskgc-release-package-check"
+        # The release package as the tests see it (unstamped); for a
+        # release version also the shipped binary, which is then the same.
+        release-candidate-package = pkgs.runCommand "diskgc-release-candidate-package-check"
           { nativeBuildInputs = [ pkgs.binutils ]; }
           ''
             ${checkStaticElf}
-            bin=${lib.getExe diskgcRelease}
+            pkg=${diskgcReleaseTested}
+            bin=${lib.getExe diskgcReleaseTested}
             check_static_elf "$bin"
             if grep -aFq '/.diskgc-test-sandbox' "$bin"; then
               echo "candidate release binary still contains the sandbox marker" >&2
               exit 1
             fi
-            if ! grep -aFq '/.diskgc-test-sandbox' ${lib.getExe diskgc}; then
+            if ! grep -aFq '/.diskgc-test-sandbox' ${lib.getExe diskgcTested}; then
               echo "development control binary lacks the sandbox marker" >&2
               exit 1
             fi
-            cmp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
-            cmp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
-            cmp ${diskgcRelease}/share/doc/diskgc/README.md ${./packaging/README.md}
-            cmp ${diskgcRelease}/share/doc/diskgc/reference.md ${./docs/reference.md}
-            head -n 1 ${diskgcRelease}/share/doc/diskgc/RELEASE-NOTES.md \
-              | grep -qxF '# diskgc 0.1 release notes'
-            cmp ${lib.getExe diskgcRelease} ${lib.getExe diskgcReleaseBuild}
+            cmp $pkg/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
+            cmp $pkg/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
+            cmp $pkg/share/doc/diskgc/README.md ${./packaging/README.md}
+            cmp $pkg/share/doc/diskgc/reference.md ${./docs/reference.md}
+            head -n 1 $pkg/share/doc/diskgc/RELEASE-NOTES.md \
+              | grep -qxF ${lib.escapeShellArg releaseNotesTitle}
+            cmp "$bin" ${lib.getExe diskgcReleaseBuilds.tested}
             got=$("$bin" --version)
-            if [ "$got" != ${lib.escapeShellArg versionLine} ]; then
-              echo "error: --version printed '$got', expected '${versionLine}'" >&2
+            if [ "$got" != ${lib.escapeShellArg testedVersionLine} ]; then
+              echo "error: --version printed '$got', expected '${testedVersionLine}'" >&2
               exit 1
             fi
+            ${lib.optionalString (!isDevVersion) "cmp \"$bin\" ${lib.getExe diskgcRelease}"}
             touch $out
           '';
+
+        # The stamp: the shipped packages print their commit (a release
+        # version: the version alone), and differ from the tested ones only
+        # in the binary. The one check that builds the stamped packages; no
+        # VM, no container.
+        version-stamp = pkgs.runCommand "diskgc-version-stamp-check" { } ''
+          for bin in ${lib.getExe diskgc} ${lib.getExe diskgcRelease}; do
+            got=$("$bin" --version)
+            if [ "$got" != ${lib.escapeShellArg shippedVersionLine} ]; then
+              echo "error: $bin --version printed '$got', expected '${shippedVersionLine}'" >&2
+              exit 1
+            fi
+          done
+          diff -r --exclude=bin ${diskgcTested} ${diskgc}
+          diff -r --exclude=bin ${diskgcReleaseTested} ${diskgcRelease}
+          touch $out
+        '';
 
         workspace-fmt = craneLib.cargoFmt workspaceArgs;
 

@@ -3620,12 +3620,8 @@ package against a development positive control, for each of four traces:
 the offset path, the reader's error context and parse diagnostic, and the
 wall-clock overflow message. It is a byte-string check: it would not see an
 equivalent offset written without those strings. The default Nix package
-remains gated. The `release-candidate` output is test-only and unapproved
-for deployment: built from master it is a development version whose
-`--version` names its commit, not the v0.1.0 release (tagged on
-`release-0.1`), and it includes a reclaiming `watch` that no release
-decision covers (TASK-276). Its /tmp catalog is `nix-shell-rc` and
-`pytest-tmp` (TASK-65).
+remains gated. The `release-candidate` package's status and scope are
+in [reference.md](reference.md#built-in-profile-library).
 
 In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act
@@ -3634,9 +3630,12 @@ test drivers, is covered: both the image marker `/.diskgc-test-sandbox` and
 Podman's `/run/.containerenv` must exist (the same markers as the test
 interlock, see [testing.md](testing.md)). `check`, `survey`, `profiles`,
 `--dry-run` and `--tally-only` work anywhere. The gate is compiled in by
-default and removed only by release packages, from the 0.1 `ensure` MVP
-onwards (PRD, Scope; a dedicated build flag set in one place, by the release
-task), so it cannot be dropped
+default and removed only in the `release-candidate` package, which must
+also carry the release catalog (PRD, Safety boundaries; a dedicated build
+flag set in one place). That package is a release only when built from
+the release's tag; its status is in
+[reference.md](reference.md#built-in-profile-library). So the gate cannot
+be dropped
 by accident during development, and developers and AI agents cannot
 delete real data on their own machines with a work-in-progress build.
 The binary does not compile with the gate removed unless it also has the

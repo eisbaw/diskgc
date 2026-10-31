@@ -1054,6 +1054,24 @@ module, and `Restart=always` with `RestartPreventExitStatus=2`. The rest
 is listed under Choices to confirm. TASK-44 ships the units, TASK-45 the
 module; their tests are in [testing.md](testing.md#deployment-units).
 
+### Release procedure
+
+The version in `Cargo.toml` (`[workspace.package]`) says what a build is,
+and `diskgc --version` follows it
+([reference.md](reference.md), `diskgc --version`):
+
+- **Master** carries the next minor release with a pre-release suffix
+  (`0.2.0-dev`). Every build of it names its commit.
+- **A release** drops the suffix in exactly one commit, the one tagged
+  `v$VERSION` (annotated). Its `release-candidate` package is then the
+  release; it prints the version alone, and its shipped binary is its
+  tested one (no stamp). `just release-verify` fails on a plain version
+  whose `HEAD` is not that tag or whose tree is dirty, and passes a
+  development version.
+- **The next commit** on that release branch bumps to `X.Y.(Z+1)-dev`, so
+  a later build from the branch (a backport) is never mistaken for the
+  tag.
+
 ### The `watch` units
 
 A **user service by default**: the laptop owner runs `watch` under

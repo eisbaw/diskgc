@@ -116,8 +116,13 @@ kinds), and where those guarantees end. The protocols are in
 - The index never decides safety; every check runs at deletion time.
 - Development builds refuse to delete anything outside the test
   containers ([safety.md](docs/safety.md#pre-release-sandbox-gate)), so
-  work-in-progress builds cannot delete real data. Only release packages
-  (0.1 onwards, see Scope) are built without that gate.
+  work-in-progress builds cannot delete real data. One build lifts that
+  gate, the release-candidate package, and it must also carry the release
+  catalog. It is a release (0.1 onwards, see Scope) only when built from
+  that release's tag. Built from any other commit it is a development
+  version, named by its commit, for disposable test containers only. It
+  deletes only through the commands a release includes; others stay
+  refused until a release decision covers them.
 
 Limits, stated plainly: diskgc only sees the caller's own processes without
 root, and not even those of them the kernel will not show it (setuid, more

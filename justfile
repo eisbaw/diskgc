@@ -70,7 +70,8 @@ e2e: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-package
+    nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
+    nix build -L --no-link .#checks.x86_64-linux.version-stamp
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite fast --budget-secs 300
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
@@ -111,7 +112,8 @@ e2e-full: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-package
+    nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
+    nix build -L --no-link .#checks.x86_64-linux.version-stamp
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite full --budget-secs 3600
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
@@ -216,6 +218,12 @@ docs-check:
 # `--container NAME` against a walk env's BIN (e.g. /usr/local/bin/diskgc).
 docs-vs-binary BIN *ARGS:
     python3 tools/docs_vs_binary.py "{{BIN}}" {{ARGS}}
+
+# Fail unless a release version (no -dev suffix) is HEAD at its clean tag
+# v$VERSION; a development version passes (docs/architecture.md, Release
+# procedure). Read-only.
+release-verify:
+    python3 tools/release_verify.py
 
 # What CI runs: every flake check, then every container test.
 ci:

@@ -914,6 +914,12 @@ pub static TESTS: &[Test] = &[
         run: release_suite::candidate_rejects_docker_command_and_arbitrary_delete_policy,
     },
     Test {
+        name: "release_candidate_refuses_a_reclaiming_watch",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_refuses_a_reclaiming_watch,
+    },
+    Test {
         name: "release_candidate_checkout_policy_accepts_only_admitted_builtin",
         tier: Tier::Fast,
         expect: Expect::Pass,
