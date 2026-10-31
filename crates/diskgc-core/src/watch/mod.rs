@@ -305,9 +305,14 @@ pub fn start<H: Delete>(
     // without it) the per-user lock, made now (docs/safety.md, Host lock).
     match (hostlock::prepare(host), goal.is_some()) {
         (Ok(ReclaimLock::Host), _) => {}
-        (Ok(lock @ ReclaimLock::User(_)), _) => log(&format!(
+        (Ok(lock @ ReclaimLock::User(_)), true) => log(&format!(
             "the host lock {} is not provisioned: reclaims take the {lock} instead, so \
              reclaims by other users are not serialised with this watch's",
+            hostlock::host_lock_path().display()
+        )),
+        (Ok(lock @ ReclaimLock::User(_)), false) => log(&format!(
+            "the host lock {} is not provisioned: the tally pauses only while the {lock} \
+             is held (this user's reclaims), not for other users' reclaims",
             hostlock::host_lock_path().display()
         )),
         (

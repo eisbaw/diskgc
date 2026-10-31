@@ -356,6 +356,24 @@ fn a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock() {
     );
     let stat = host.stat_path(Path::new(USER_LOCK)).expect("made");
     assert_eq!((stat.uid, stat.perm), (Some(1000), Some(0o600)));
+    // --tally-only: no reclaims of its own; it says what it pauses for.
+    let tally_only = self::host(&model);
+    let run = watch(&tally_only, &Mode::TallyOnly { min_free: None });
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(
+        run.count(&format!(
+            "the tally pauses only while the per-user lock {USER_LOCK} is held"
+        )),
+        1,
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(deletions(&tally_only), 0);
 }
 
 /// Root (`--allow-root`) never falls back: a watch without the host lock
