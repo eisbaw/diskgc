@@ -1232,6 +1232,18 @@ profiles:
     find: {roots: required, paths: ['*'], type: any}
     action: delete
     examples: {root: /srv, match: [/srv/x]}
+  - name: upper-gen
+    find: {roots: [/upper], paths: [gen], type: dir}
+    action: delete
+    examples: {match: [/upper/gen]}
+  - name: merged-gen
+    find: {roots: [/merged], paths: [gen], type: dir}
+    action: delete
+    examples: {match: [/merged/gen]}
+  - name: home-mark
+    find: {roots: [/home], paths: [mark], type: dir}
+    action: delete
+    examples: {match: [/home/mark]}
 "#;
 
 /// `/mnt/x` (mount 40) binds the directory `/gen/x` of `/tmp`'s tmpfs.
@@ -1249,7 +1261,7 @@ fn subdir_bind_request(protect: &[&str], select: &str, roots: &[&str]) -> Reques
     let config = config::parse(Path::new("/tmp/config.yaml"), text.as_bytes()).unwrap();
     let roots: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
     let mut request = Request {
-        path: PathBuf::from("/tmp"),
+        path: PathBuf::from(roots[0].as_str()),
         min_free: parse_size("1G").unwrap(),
         target_free: None,
         timeout: Some(Duration::from_secs(600)),
@@ -1328,6 +1340,157 @@ fn protect_stops_the_run_on_a_filesystem_mounted_inside_a_match() {
         "{report:#?}"
     );
     nothing_locked_or_deleted(&host);
+}
+
+/// mped B1 on 4aa035c: a filesystem mounted on a PRIVATE bind of a
+/// protected subdirectory (`/mnt/x/sub`, not seen at `/tmp/gen/x/sub`) and
+/// again at `/mnt/f`. No path of a mount lies under `/tmp/gen`, so only the
+/// place the mount point is attached at (`/gen/x/sub` of the protected
+/// filesystem) relates the candidate to the match.
+#[test]
+fn protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory() {
+    let model = subdir_bind_model().replacen(
+        "tree:\n",
+        "  - {id: 50, at: /mnt/x/sub, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 40}\n  - {id: 51, at: /mnt/f, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 1, bind_of: 50}\ntree:\n  /mnt/f/w: {payload: {size: 1K}}\n",
+        1,
+    );
+    let host = host(&model);
+    assert!(host.stat_path(Path::new("/mnt/x/sub/w")).is_some());
+    assert!(host.stat_path(Path::new("/tmp/gen/x/sub/w")).is_none());
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&["gen"], "profile:entries", &["/mnt/f"]),
+    );
+    assert_eq!(
+        reason_of(&report, "/mnt/f/w"),
+        Some(Some(Reason::Protected)),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// Codex on 4aa035c: overlayfs shows its upper directory under its own
+/// device, and an unlink through it removes the upper entry, so neither a
+/// place nor an identity relates `/merged/gen/x` to `/upper/gen`. The model
+/// does not know an overlay's layers; the verdict refuses by type alone:
+/// with any match, a candidate or match on an overlay cannot be proved
+/// apart, an error (fail closed). Without matches nothing changes.
+#[test]
+fn an_overlay_on_either_side_cannot_prove_no_overlap() {
+    let model = yaml(
+        "  /upper/gen/x: {payload: {size: 1K}}\n  /merged/gen/x: {payload: {size: 1K}}\n",
+    )
+    .replacen(
+        "tree:\n",
+        "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    for (protect, select, root, candidate) in [
+        (
+            &["upper-gen"][..],
+            "profile:entries",
+            "/merged/gen",
+            "/merged/gen/x",
+        ),
+        (
+            &["merged-gen"][..],
+            "profile:entries",
+            "/upper/gen",
+            "/upper/gen/x",
+        ),
+        (
+            &[][..],
+            "profile:entries && !profile:upper-gen",
+            "/merged/gen",
+            "/merged/gen/x",
+        ),
+    ] {
+        // As for every proof that fails: the dry run stops with the error.
+        let report = dry_run(&host, &subdir_bind_request(protect, select, &[root]));
+        assert_eq!(report.status, Status::Error, "{report:#?}");
+        let wanted = format!("cannot prove overlap at {candidate}: it is on overlay mount /merged");
+        let other = "it is on overlay mount /merged";
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains(&wanted) || error.message.contains(other)),
+            "{protect:?} {select}: {report:#?}"
+        );
+    }
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(&[], "profile:entries", &["/merged/gen"]),
+    );
+    assert_eq!(
+        reason_of(&report, "/merged/gen/x"),
+        Some(None),
+        "{report:#?}"
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// A negated profile's root on another filesystem than PATH's was dropped
+/// with the tier's foreign source roots ("cannot free space"), so its
+/// matches excluded nothing: here the candidate lies inside the negated
+/// match `/home/mark` by name, on a tmpfs mounted below it, and was planned
+/// eligible (found while fixing the overlay case, whose refusal needs the
+/// negated matches too). Searched now, the match holds that mount, so the
+/// enumeration is uncertain and the tier is excluded (fail closed).
+#[test]
+fn a_negated_match_on_another_filesystem_is_searched() {
+    let model = yaml("  /home/mark/scratch/x: {payload: {size: 1K}}\n").replacen(
+        "tree:\n",
+        "  - {id: 70, at: /home/mark/scratch, fs: tmpfs, dev: \"0:70\", size: 1G, parent: 2}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    let report = dry_run(
+        &host,
+        &subdir_bind_request(
+            &[],
+            "profile:entries && !profile:home-mark",
+            &["/home/mark/scratch"],
+        ),
+    );
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|error| error
+            .message
+            .contains("!profile:home-mark discovery uncertain: a mount point inside")),
+        "{report:#?}"
+    );
+    // The negated root is searched, not reported as a skipped root.
+    assert_eq!(reason_of(&report, "/home"), None, "{report:#?}");
+    nothing_locked_or_deleted(&host);
+}
+
+/// mped S1: the place check reads the table alone, so its "no" holds only
+/// because the candidate and every match are then resolved on their live
+/// mounts. A covered mount stays listed: F at /a/b, later covered by G at
+/// /a, a bind of the protected `/gen`. The table places `/a/b/w` on F,
+/// apart from `/tmp/gen`; live, it is `/tmp/gen/b/w`. Discovery never hands
+/// such a path over (it refuses the root or the mount point), so the
+/// verdict is called directly.
+#[test]
+fn a_covered_mount_in_the_table_cannot_prove_no_overlap() {
+    let model = yaml("  /tmp/gen/b/w: {size: 1K}\n").replacen(
+        "tree:\n",
+        "  - {id: 50, at: /a/b, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 1}\n  - {id: 51, at: /a, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, bind_root: /gen}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    assert_eq!(
+        host.stat_path(Path::new("/a/b/w"))
+            .map(|stat| stat.dev_ino()),
+        host.stat_path(Path::new("/tmp/gen/b/w"))
+            .map(|stat| stat.dev_ino()),
+    );
+    let verdict =
+        executor::overlaps_checked(&host, Path::new("/a/b/w"), &[PathBuf::from("/tmp/gen")]);
+    let error = verdict.expect_err("a covered mount must not prove no overlap");
+    assert!(error.contains("cannot prove overlap at /a/b"), "{error}");
 }
 
 #[test]

@@ -3758,6 +3758,46 @@ protect: [gen]
     assert!(!exists(&host, "/tmp/free/z"), "{report:#?}");
 }
 
+/// Codex on 4aa035c: a reclaim through an overlay (`/merged`, whose upper
+/// directory could be the protected `/upper`) deletes nothing while a
+/// `protect` match exists: the overlap cannot be proved either way.
+#[test]
+fn a_reclaim_through_an_overlay_with_a_protect_match_deletes_nothing() {
+    let mounts = "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1}\n";
+    let tree = format!(
+        "  /upper/gen/x: {}\n  /merged/gen/x: {}\n",
+        old_dir("1M"),
+        old_dir("1M")
+    );
+    let host = host(&yaml(mounts, &tree, ""));
+    let config = diskgc_core::config::parse(
+        Path::new("/tmp/protect.yaml"),
+        br#"version: 1
+profiles:
+  - name: upper-gen
+    find: {roots: [/upper], paths: [gen], type: dir}
+    action: delete
+    examples: {match: [/upper/gen]}
+protect: [upper-gen]
+"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut request = request("profile:anything", &["/merged/gen"], "/merged", "100%");
+    request.tier.protections =
+        executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"));
+    let report = ensure(&host, &request);
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("overlay mount /merged")),
+        "{report:#?}"
+    );
+    assert!(exists(&host, "/merged/gen/x/f"));
+    assert!(calls(&host, Op::Unlinkat).is_empty());
+}
+
 /// TASK-200: a delete judges its candidate against the tier's enumerated
 /// matches, but a protected match created inside the candidate after that
 /// enumeration and before the eligibility walk is a change the walk sees

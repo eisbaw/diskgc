@@ -57,10 +57,10 @@ use plan::{
     FsUnionCandidate, discover_fs_union, docker_candidate, docker_storage, scan_negated,
     scan_union_negated, union_checkout_refusal, union_checkouts, union_guard_veto,
 };
-use policy::{
-    excluded_by, overlaps_checked, overlaps_checked_until, policy_skip, policy_verdict,
-    scan_protections,
-};
+// The overlap verdict alone, public so the model tests can pin what it
+// must refuse whatever discovery would hand it (a covered mount).
+pub use policy::overlaps_checked;
+use policy::{excluded_by, overlaps_checked_until, policy_skip, policy_verdict, scan_protections};
 use preflight::{
     Measured, deadline_before_first_sample, measure_failure, measure_until, nothing_searched,
     preflight_roots, roots_text, warn_if_host_lock_unready_timed,
@@ -3562,16 +3562,35 @@ mod best_fit_tests {
             mount(5, 1, "/proj/target/deps/fast", 60, "/"),
             mount(6, 1, "/mnt/fast", 60, "/"),
             mount(7, 1, "/proj/other/m", 60, "/elsewhere"),
+            // A filesystem mounted on the private bind /mnt/x only (not
+            // seen at /tmp/gen/x/sub) and again at /mnt/f; one mounted on
+            // that one in turn, and again at /mnt/g.
+            mount(8, 3, "/mnt/x/sub", 70, "/"),
+            mount(9, 1, "/mnt/f", 70, "/"),
+            mount(10, 8, "/mnt/x/sub/deeper", 71, "/"),
+            mount(11, 1, "/mnt/g", 71, "/"),
+            // A bind of a prefix sibling, and a root field with a space
+            // (`\040` in mountinfo, unescaped by the parser).
+            mount(12, 1, "/mnt/xy", 42, "/gen/xy"),
+            mount(13, 1, "/mnt/sp", 42, "/my proj/x"),
         ]
+    }
+
+    fn overlaps_by_place(mounts: &[MountEntry], candidate: &str, matched: &str) -> bool {
+        overlaps_in_filesystem(
+            mounts,
+            Path::new(candidate),
+            &[PathBuf::from(matched)],
+            || Ok(()),
+        )
+        .unwrap()
     }
 
     #[test]
     fn overlap_maps_a_subdirectory_bind_back_to_its_filesystem() {
         let mounts = bind_table();
-        let overlaps = |candidate: &str, matched: &str| {
-            overlaps_in_filesystem(&mounts, Path::new(candidate), &[PathBuf::from(matched)])
-                .unwrap()
-        };
+        let overlaps =
+            |candidate: &str, matched: &str| overlaps_by_place(&mounts, candidate, matched);
         // Under the bind, against an ancestor of its source, both ways.
         assert!(overlaps("/mnt/x/y", "/tmp/gen"));
         assert!(overlaps("/tmp/gen", "/mnt/x/y"));
@@ -3590,6 +3609,18 @@ mod best_fit_tests {
         assert!(overlaps("/mnt/fast", "/proj/other"));
         // Another filesystem whose root path overlaps the candidate's place.
         assert!(!overlaps("/other/q", "/proj/target"));
+        // Mounted on a place inside the match (through the private bind),
+        // one level and two levels down the parent chain (mped B1).
+        assert!(overlaps("/mnt/f/w", "/tmp/gen"));
+        assert!(overlaps("/mnt/f/w", "/tmp/gen/x/sub"));
+        assert!(!overlaps("/mnt/f/w", "/tmp/gen/w"));
+        assert!(overlaps("/mnt/g/q", "/tmp/gen"));
+        assert!(!overlaps("/mnt/g/q", "/tmp/other"));
+        // A prefix sibling is not inside; a root field with a space.
+        assert!(!overlaps("/mnt/xy/q", "/tmp/gen/x"));
+        assert!(overlaps("/mnt/xy/q", "/tmp/gen"));
+        assert!(overlaps("/mnt/sp/q", "/tmp/my proj"));
+        assert!(!overlaps("/mnt/sp/q", "/tmp/my"));
     }
 
     #[test]
@@ -3597,12 +3628,13 @@ mod best_fit_tests {
         let mut stacked = bind_table();
         // Two mounts on one point, neither on the other: no topmost.
         let mut twin = stacked[2].clone();
-        twin.id = 5;
+        twin.id = 50;
         stacked.push(twin);
         let error = overlaps_in_filesystem(
             &stacked,
             Path::new("/mnt/x/y"),
             &[PathBuf::from("/tmp/other")],
+            || Ok(()),
         )
         .unwrap_err();
         assert!(
@@ -3619,11 +3651,55 @@ mod best_fit_tests {
             ("/mnt/x/y", "/other/q"),
             ("/tmp/q", "/other/q"),
         ] {
-            let error =
-                overlaps_in_filesystem(&relative, Path::new(candidate), &[PathBuf::from(matched)])
-                    .unwrap_err();
+            let error = overlaps_in_filesystem(
+                &relative,
+                Path::new(candidate),
+                &[PathBuf::from(matched)],
+                || Ok(()),
+            )
+            .unwrap_err();
             assert!(error.contains("not an absolute path"), "{error}");
         }
+
+        // A mount whose point is not below its parent's, and a parent
+        // chain that loops, cannot be attached anywhere.
+        let mut misplaced = bind_table();
+        misplaced[7].parent_id = 4;
+        // Two mounts on one point, each the other's parent, one of them
+        // a mount of the candidate's filesystem.
+        let mut looped = bind_table();
+        let mut first = looped[10].clone();
+        (first.id, first.parent_id, first.mount_point) = (20, 21, PathBuf::from("/mnt/loop"));
+        let mut second = looped[0].clone();
+        (second.id, second.parent_id, second.mount_point) = (21, 20, PathBuf::from("/mnt/loop"));
+        looped.extend([first, second]);
+        for (table, candidate, wanted) in [
+            (
+                misplaced,
+                "/mnt/f/w",
+                "cannot be placed on its parent /other",
+            ),
+            (looped, "/mnt/g/q", "does not end"),
+        ] {
+            let error = overlaps_in_filesystem(
+                &table,
+                Path::new(candidate),
+                &[PathBuf::from("/home")],
+                || Ok(()),
+            )
+            .unwrap_err();
+            assert!(error.contains(wanted), "{error}");
+        }
+
+        // The deadline is polled per match.
+        let error = overlaps_in_filesystem(
+            &bind_table(),
+            Path::new("/mnt/x/y"),
+            &[PathBuf::from("/tmp/other")],
+            || Err("timed out".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "timed out");
     }
 
     #[test]

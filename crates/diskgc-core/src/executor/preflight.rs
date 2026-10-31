@@ -221,9 +221,12 @@ pub(super) fn warn_if_host_lock_unready_timed<H: Host>(
     );
 }
 
-/// A foreign root cannot free space on PATH. Omit it from every source and
-/// negated source before discovery, including union terms. Fatal root errors
-/// still exclude the whole tier because discovery may be incomplete.
+/// A foreign source root cannot free space on PATH. Omit it from every
+/// source before discovery, including union terms. A negated profile's root
+/// is kept wherever it is: its matches only exclude, and one on another
+/// filesystem can still overlap a candidate by name, place or through an
+/// overlay (TASK-260). Fatal root errors still exclude the whole tier
+/// because discovery may be incomplete.
 pub(super) struct RootPreflight {
     pub(super) errors: Vec<ErrorEntry>,
     pub(super) skipped: Vec<SkipEntry>,
@@ -240,20 +243,10 @@ impl RootPreflight {
         filtered
             .roots
             .retain(|root| !foreign.contains(root.as_path()));
-        for source in &mut filtered.negated {
-            source
-                .roots
-                .retain(|root| !foreign.contains(root.as_path()));
-        }
         for source in &mut filtered.fs_union {
             source
                 .roots
                 .retain(|root| !foreign.contains(root.as_path()));
-            for negated in &mut source.negated {
-                negated
-                    .roots
-                    .retain(|root| !foreign.contains(root.as_path()));
-            }
         }
         filtered
     }
@@ -281,23 +274,30 @@ pub(super) fn nothing_searched(tier: &Tier) -> String {
 }
 
 /// Check every source root against PATH's device before enumerating candidates.
-/// A missing root remains an empty source. A foreign root is reported and
-/// skipped while same-device roots proceed: once per tier, however many of
-/// its sources (a union's terms, a negated profile) share that root, so
-/// that every tier reports it exactly once (TASK-210, decided for 0.1: a
+/// A missing root remains an empty source. A foreign source root is
+/// reported and skipped while same-device roots proceed: once per tier,
+/// however many of its sources (a union's terms) share that root, so
+/// that every tier reports it exactly once. A negated profile's foreign
+/// root is screened like any root but neither skipped nor reported: it is
+/// searched (TASK-260) (TASK-210, decided for 0.1: a
 /// skipped `other_fs` row, no new JSON field). An unsafe or unreadable root
 /// excludes its tier; all roots are checked before another tier may delete.
 /// Compare devices, not mount ids: a bind mount of the requested filesystem
 /// can free space on PATH.
 pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPreflight {
+    // (profile, root, whether it is a negated profile's root)
     let mut roots = Vec::new();
-    roots.extend(tier.roots.iter().map(|root| (tier.profile.as_str(), root)));
+    roots.extend(
+        tier.roots
+            .iter()
+            .map(|root| (tier.profile.as_str(), root, false)),
+    );
     for source in &tier.negated {
         roots.extend(
             source
                 .roots
                 .iter()
-                .map(|root| (source.profile.as_str(), root)),
+                .map(|root| (source.profile.as_str(), root, true)),
         );
     }
     for source in &tier.fs_union {
@@ -305,14 +305,14 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
             source
                 .roots
                 .iter()
-                .map(|root| (source.profile.as_str(), root)),
+                .map(|root| (source.profile.as_str(), root, false)),
         );
         for negated in &source.negated {
             roots.extend(
                 negated
                     .roots
                     .iter()
-                    .map(|root| (negated.profile.as_str(), root)),
+                    .map(|root| (negated.profile.as_str(), root, true)),
             );
         }
     }
@@ -326,7 +326,7 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
     // its path components before resolve_in can open or stat any ancestor.
     let mut errors = Vec::new();
     let mut skipped = Vec::new();
-    roots.retain(|(profile, root)| {
+    roots.retain(|(profile, root, _)| {
         if !fs_kind::path_in_private_tmp(root) {
             return true;
         }
@@ -355,7 +355,7 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
             return RootPreflight { errors, skipped };
         }
     };
-    for (profile, root) in roots {
+    for (profile, root, negated_only) in roots {
         let mut error = |cause: ErrorCause, message: String| {
             errors.push(ErrorEntry {
                 tier: Some(tier.name.clone()),
@@ -368,7 +368,7 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
         // A local bind mount can sit below an unsafe ancestor: resolve_in
         // screens the full mount chain before it opens any of it.
         match resolve_in(host, &mounts, root, Want::Directory) {
-            Ok(resolved) if resolved.stat.dev != requested_dev => {
+            Ok(resolved) if resolved.stat.dev != requested_dev && !negated_only => {
                 if !skipped
                     .iter()
                     .any(|skip: &SkipEntry| skip.candidate.as_ref() == Some(root))

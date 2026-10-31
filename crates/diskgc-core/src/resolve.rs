@@ -216,6 +216,19 @@ pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountE
     }
 }
 
+/// Where `path`, a path on `mount` (at or below its mount point), is in
+/// that mount's filesystem: the mount's root field (mountinfo field 4)
+/// joined with the rest of `path`. `None` when `path` is not at or below the
+/// mount point or the root field is not an absolute path: nothing can be
+/// translated then. Nothing is looked up.
+pub fn place_in_filesystem(mount: &MountEntry, path: &Path) -> Option<PathBuf> {
+    let below = path.strip_prefix(&mount.mount_point).ok()?;
+    mount
+        .fs_root
+        .is_absolute()
+        .then(|| mount.fs_root.join(below))
+}
+
 /// A reason to refuse a root before opening it or any ancestor. A local
 /// bind mount at the final path does not make an unsafe parent traversable.
 #[derive(Debug, Clone, PartialEq, Eq)]
