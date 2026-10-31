@@ -9,17 +9,19 @@
 //!    `--min-free` the run ends there, without the host lock, the tally or
 //!    the snapshot.
 //! 2. The synchronous tally, before the host lock.
-//! 3. Under the host lock ([`Locked::walk`]): a fresh sample (another
-//!    reclaim may have freed the space), `protect` enumerated, then every
-//!    tier prepared ([`Locked::prepare_tier`]: roots on `PATH`'s filesystem,
-//!    command executables resolved, Docker backend bound) before any tier
-//!    may delete, then each prepared tier reclaimed in order.
+//! 3. Under the host lock ([`Tallied::walk`]), in this order:
+//!    [`Tallied::sample_and_protect`] (another reclaim may have freed the
+//!    space; `protect` enumerated), [`Tallied::prepare_all`] (every tier's
+//!    roots, command executables and Docker backend, [`Backend`]), and only
+//!    then [`Tallied::reclaim`], which takes what preparation returned: no
+//!    tier deletes before every tier was prepared.
 //! 4. One exit after the tally ([`Ending`]): the snapshot
-//!    ([`RunIndex::finish`]), then the final sample that decides the status,
-//!    then the host lock released. `finish` itself declines a write after a
-//!    signal or at the deadline, with one log line, so every run that
-//!    tallied either leaves a snapshot or says why not (PRD: each `ensure`
-//!    that tallies leaves a snapshot).
+//!    ([`RunIndex::finish`]; declined, with one line, when the host lock
+//!    was still held at the deadline), then the final sample that decides
+//!    the status, then the host lock released. `finish` itself declines a
+//!    write after a signal or at the deadline, with one log line, so every
+//!    run that tallied either leaves a snapshot or says why not (PRD: each
+//!    `ensure` that tallies leaves a snapshot).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,12 +30,10 @@ use std::time::Duration;
 use crate::command_action::{self, Preflight, Ready};
 use crate::docker_backend::{self, Binding, Bound};
 use crate::engine::Reason;
-use crate::host::{Delete, MonoTime};
+use crate::host::{Delete, Host, MonoTime};
 use crate::hostlock::{self, LockError};
 use crate::profile::Action;
-use crate::report::{
-    Final, Report, SkipEntry, Status, after_lock_timeout, conclude, human_space_values,
-};
+use crate::report::{Final, Report, Status, after_lock_timeout, conclude, human_space_values};
 use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::TallyState;
 use crate::units::format_bytes;
@@ -44,9 +44,9 @@ use super::preflight::{
 };
 use super::tier_policy::Protection;
 use super::{
-    NotesOncePerRun, Reclaim, Request, SourceKind, Tier, attempted_lock, deadline_before_reclaim,
-    deadline_of, deadline_passed, docker_candidate, docker_storage, final_sample, host_error,
-    indexed, lock_refusal, record_deadline_overrun, record_error, run_error, sample, taken,
+    NotesOncePerRun, Reclaim, Request, SourceKind, Tier, attempted_lock, deadline_of,
+    deadline_passed, docker_candidate, docker_storage, final_sample, host_error, indexed,
+    lock_refusal, record_deadline_overrun, record_error, run_error, sample, skip_entry, taken,
     timed_report_from, usage,
 };
 
@@ -84,8 +84,8 @@ pub fn ensure_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let tiers = std::slice::from_ref(&request.tier);
-    timed(host, request, tiers, &[Duration::ZERO], owners, index, log)
+    let tiers = [(request.tier.clone(), Duration::ZERO)];
+    timed(host, request, &tiers, owners, index, log)
 }
 
 /// Reclaim configured tiers in policy order under one host lock. All command
@@ -115,7 +115,26 @@ pub fn ensure_grouped_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    timed(host, request, tiers, tier_timeouts, owners, index, log)
+    if tiers.len() != tier_timeouts.len() {
+        return timed_report_from(
+            host,
+            request.watch.map(|w| (w.origin, w.origin_wall)),
+            || {
+                let message = format!(
+                    "{} configured tier(s) with {} timeout(s): each tier needs one",
+                    tiers.len(),
+                    tier_timeouts.len()
+                );
+                usage(request.report(Status::Error, false), log, message)
+            },
+        );
+    }
+    let tiers: Vec<(Tier, Duration)> = tiers
+        .iter()
+        .cloned()
+        .zip(tier_timeouts.iter().copied())
+        .collect();
+    timed(host, request, &tiers, owners, index, log)
 }
 
 /// [`run`], timed from the run's origin (a `watch` cycle's triggering
@@ -123,15 +142,14 @@ pub fn ensure_grouped_with_index<H: Delete>(
 fn timed<H: Delete>(
     host: &H,
     request: &Request,
-    tiers: &[Tier],
-    tier_timeouts: &[Duration],
+    tiers: &[(Tier, Duration)],
     owners: &[u32],
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let origin = request.watch.map(|w| (w.origin, w.origin_wall));
     timed_report_from(host, origin, || {
-        run(host, request, tiers, tier_timeouts, owners, index, log)
+        run(host, request, tiers, owners, index, log)
     })
 }
 
@@ -155,11 +173,29 @@ fn reclaimable(tier: &Tier) -> Result<(), String> {
     }
 }
 
+/// The deadline passed after the first sample, before the tally: the
+/// final sample decides 0 or 124.
+fn deadline_before_reclaim<H: Host>(
+    host: &H,
+    measured: &Measured<H::Fd>,
+    deadline: Option<MonoTime>,
+    mut report: Report,
+    log: &mut dyn FnMut(&str),
+    tier: &Tier,
+) -> Report {
+    report.avail_after_bytes = final_sample(host, measured, deadline, &mut report, log, tier);
+    report.status = conclude(
+        Final::of(report.avail_after_bytes, measured.min),
+        true,
+        !report.errors.is_empty(),
+    );
+    report
+}
+
 fn run<H: Delete>(
     host: &H,
     request: &Request,
-    tiers: &[Tier],
-    tier_timeouts: &[Duration],
+    tiers: &[(Tier, Duration)],
     owners: &[u32],
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
@@ -170,12 +206,12 @@ fn run<H: Delete>(
     let deadline = request.deadline(host);
     // Not a success until a path below says so.
     let mut report = request.report(Status::Error, false);
-    if tiers.is_empty() || tiers.len() != tier_timeouts.len() {
+    let Some((first, _)) = tiers.first() else {
         return usage(report, log, "configuration has no tiers to run".to_owned());
-    }
+    };
     if tiers
         .iter()
-        .any(|tier| tier.protections != tiers[0].protections)
+        .any(|(tier, _)| tier.protections != first.protections)
     {
         return usage(
             report,
@@ -184,7 +220,7 @@ fn run<H: Delete>(
         );
     }
     // Before anything else (the gate, the first sample, the host lock).
-    if let Some(refused) = tiers.iter().find_map(|tier| reclaimable(tier).err()) {
+    if let Some(refused) = tiers.iter().find_map(|(tier, _)| reclaimable(tier).err()) {
         return usage(report, log, refused);
     }
     let started = host.now();
@@ -217,7 +253,6 @@ fn run<H: Delete>(
         Err(_) if host.interrupted().is_some() => return report,
         Err(error) => return measure_failure(report, log, error),
     };
-    let first = &tiers[0];
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, first);
     }
@@ -239,7 +274,7 @@ fn run<H: Delete>(
     let tallied = indexed::sync_tally(
         host,
         index,
-        tiers,
+        tiers.iter().map(|(tier, _)| tier),
         Reclaimed {
             dev: measured.dev,
             fs: measured.at.mount.dev,
@@ -251,11 +286,10 @@ fn run<H: Delete>(
         log,
     );
     // From here on, every return goes through the one exit below.
-    let locked = Locked {
+    let run = Tallied {
         host,
         request,
         tiers,
-        tier_timeouts,
         owners,
         measured: &measured,
         deadline,
@@ -299,12 +333,17 @@ fn run<H: Delete>(
             }
         }
         let index = tallied.usable.then_some(&mut index.state);
-        locked.walk(index, &tallied.refused, &mut report, log)
+        run.walk(index, &tallied.refused, &mut report, log)
     };
     // The snapshot, before the final sample: the sample and the exit code
-    // see the space it takes (docs/architecture.md, Snapshot).
-    index.finish(host, log);
-    ending.conclude(&locked, &mut report, log);
+    // see the space it takes (docs/architecture.md, Snapshot). A run that
+    // waited for the host lock until its deadline writes none: the write
+    // would come after the deadline (exit 75 never writes).
+    match ending {
+        Ending::LockTimeout => index.decline("the host lock was still held at the deadline", log),
+        Ending::Decided | Ending::Concluded { .. } => index.finish(host, log),
+    }
+    ending.conclude(&run, &mut report, log);
     // Released only here, by closing, after the final sample.
     drop(host_lock);
     report
@@ -312,47 +351,45 @@ fn run<H: Delete>(
 
 /// How a run that tallied ends, decided under (or waiting for) the host
 /// lock and enacted by its one exit after the snapshot ([`run`]).
+#[derive(Debug, Clone, Copy)]
 enum Ending {
     /// The status is decided without a final sample: a signal, the host
     /// lock refused, or the sample under the lock failed.
     Decided,
-    /// The deadline passed waiting for the host lock: a fresh sample
-    /// decides 0, 75 or 3.
+    /// The deadline passed waiting for the host lock: no snapshot, and a
+    /// fresh sample decides 0, 75 or 3.
     LockTimeout,
-    /// An error of the run before any tier ran (`protect` could not be
-    /// enumerated): sampled for the report, the status stays `error`.
-    Failed,
-    /// The final sample concludes: after the walk, or the deadline
-    /// stopped it (`deadline_hit`), or the space was there under the lock
-    /// (the sample after the snapshot's write still decides).
-    Concluded { deadline_hit: bool },
+    /// The final sample concludes (0 when it meets `--min-free`, whatever
+    /// else happened): after the walk, after an error of the run (a
+    /// `protect` that cannot be enumerated), when the space was there under
+    /// the lock, or when the deadline stopped the run (`deadline_hit`).
+    /// `at` is the tier the run was at (in preparation or reclaiming), to
+    /// which a failure of that sample is attributed.
+    Concluded { deadline_hit: bool, at: usize },
 }
 
 impl Ending {
     fn conclude<H: Delete>(
         self,
-        run: &Locked<'_, H>,
+        run: &Tallied<'_, H>,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) {
         let (host, measured, deadline) = (run.host, run.measured, run.deadline);
-        let first = &run.tiers[0];
         match self {
             Self::Decided => {}
             Self::LockTimeout => {
                 // A fresh sample decides: the other holder may have freed enough.
+                let first = &run.tiers[0].0;
                 report.avail_after_bytes =
                     final_sample(host, measured, deadline, report, log, first);
                 report.status =
                     after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
             }
-            Self::Failed => {
+            Self::Concluded { deadline_hit, at } => {
+                let tier = &run.tiers[at].0;
                 report.avail_after_bytes =
-                    final_sample(host, measured, deadline, report, log, first);
-            }
-            Self::Concluded { deadline_hit } => {
-                report.avail_after_bytes =
-                    final_sample(host, measured, deadline, report, log, first);
+                    final_sample(host, measured, deadline, report, log, tier);
                 report.status = conclude(
                     Final::of(report.avail_after_bytes, measured.min),
                     deadline_hit || deadline_passed(host, deadline),
@@ -363,46 +400,93 @@ impl Ending {
     }
 }
 
+/// How a prepared tier acts: the one place its environment was checked
+/// ([`Tallied::prepare_tier`]), passed to its reclaim. Each action kind has
+/// exactly the backend it needs; a new kind (`nix-store`) adds a variant.
+#[derive(Debug, Clone)]
+pub(super) enum Backend {
+    /// diskgc's own deletion: `delete` and the Cargo lock protocol.
+    Files,
+    /// A command action's resolved executables.
+    Command(Ready),
+    /// A Docker prune: the resolved client and the backend bound under the
+    /// host lock (rebound right before the prune).
+    Docker { client: Ready, bound: Bound },
+}
+
+impl Backend {
+    /// The command of a command tier. Only an `Action::Command` tier runs a
+    /// command action, and [`Tallied::prepare_tier`] gives every such tier
+    /// a [`Backend::Command`].
+    pub(super) fn command(&self) -> &Ready {
+        match self {
+            Self::Command(ready) => ready,
+            Self::Files | Self::Docker { .. } => {
+                unreachable!("a command action runs only with its command resolved")
+            }
+        }
+    }
+}
+
 /// A tier ready to reclaim under the host lock: its roots on `PATH`'s
-/// filesystem only, its command executables resolved, its Docker backend
-/// bound ([`Locked::prepare_tier`]).
+/// filesystem only, and its backend.
 struct PreparedTier {
     tier: Tier,
-    command_ready: Option<Ready>,
-    docker_bound: Option<Bound>,
+    backend: Backend,
 }
 
 /// The run's deadline passed while a tier was prepared.
 struct PastDeadline;
 
-/// What the walk under the host lock needs from the run so far.
-struct Locked<'r, H: Delete> {
+/// A run that tallied: what the walk under the host lock needs from it.
+struct Tallied<'r, H: Delete> {
     host: &'r H,
     request: &'r Request,
-    tiers: &'r [Tier],
-    tier_timeouts: &'r [Duration],
+    /// The tiers in policy order, each with its own timeout (zero: none).
+    tiers: &'r [(Tier, Duration)],
     owners: &'r [u32],
     measured: &'r Measured<H::Fd>,
     deadline: Option<MonoTime>,
     run_started: MonoTime,
 }
 
-impl<H: Delete> Locked<'_, H> {
-    /// Everything under the host lock up to the end of the last tier.
+impl<H: Delete> Tallied<'_, H> {
+    /// Everything under the host lock up to the end of the last tier: no
+    /// tier is reclaimed before every tier was prepared.
     fn walk(
         &self,
-        mut index: Option<&mut TallyState>,
+        index: Option<&mut TallyState>,
         tally_refused: &BTreeMap<PathBuf, Reason>,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) -> Ending {
+        let protection = match self.sample_and_protect(report, log) {
+            Ok(protection) => protection,
+            Err(ending) => return ending,
+        };
+        let prepared = match self.prepare_all(report, log) {
+            Ok(prepared) => prepared,
+            Err(ending) => return ending,
+        };
+        self.reclaim(prepared, protection, index, tally_refused, report, log)
+    }
+
+    /// The sample under the lock (someone else, the reclaim we waited for,
+    /// may have freed the space meanwhile), then `protect` enumerated before
+    /// any tier may delete.
+    fn sample_and_protect(
+        &self,
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Protection, Ending> {
         let (host, measured, deadline) = (self.host, self.measured, self.deadline);
-        let first = &self.tiers[0];
-        let past_deadline = Ending::Concluded { deadline_hit: true };
+        let past_deadline = Ending::Concluded {
+            deadline_hit: true,
+            at: 0,
+        };
         if deadline_passed(host, deadline) {
-            return past_deadline;
+            return Err(past_deadline);
         }
-        // Someone else (the reclaim we waited for) may have freed it meanwhile.
         let started = host.now();
         let sampled = sample(host, measured);
         record_deadline_overrun(host, report, deadline, started, "statvfs", &measured.path);
@@ -412,21 +496,37 @@ impl<H: Delete> Locked<'_, H> {
                     "{} available now: --min-free is met, nothing to reclaim",
                     format_bytes(space.avail_bytes)
                 ));
-                return Ending::Concluded {
+                return Err(Ending::Concluded {
                     deadline_hit: false,
-                };
+                    at: 0,
+                });
             }
             Ok(_) => {}
             Err(error) => {
-                record_error(report, log, host_error(first, error));
-                return Ending::Decided;
+                record_error(report, log, host_error(&self.tiers[0].0, error));
+                return Err(Ending::Decided);
             }
         }
         if deadline_passed(host, deadline) {
-            return past_deadline;
+            return Err(past_deadline);
         }
+        self.protect(0, report, log)
+    }
+
+    /// `protect` enumerated for the tier at `at` (docs/safety.md, `protect`):
+    /// once before any tier may delete, and again before each later tier, so
+    /// that a tier's delete actions judge against its own (TASK-200). An
+    /// enumeration that fails is an error of the run, which ends.
+    fn protect(
+        &self,
+        at: usize,
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Protection, Ending> {
+        let (host, deadline) = (self.host, self.deadline);
+        let tier = &self.tiers[at].0;
         let started = host.now();
-        let protections = Protection::enumerate(host, &first.protections, deadline);
+        let enumerated = Protection::enumerate(host, &tier.protections, deadline);
         record_deadline_overrun(
             host,
             report,
@@ -436,46 +536,72 @@ impl<H: Delete> Locked<'_, H> {
             &self.request.path,
         );
         if deadline_passed(host, deadline) {
-            return past_deadline;
+            return Err(Ending::Concluded {
+                deadline_hit: true,
+                at,
+            });
         }
-        // Enumerated before any tier may delete (a protect that cannot be
-        // enumerated stops the run first), then again before each later tier:
-        // a tier's delete actions judge against its own (TASK-200).
-        let mut protection = match protections {
-            Ok(protection) => protection,
-            Err(error) => {
-                record_error(report, log, run_error(first, error));
-                return Ending::Failed;
+        enumerated.map_err(|error| {
+            record_error(report, log, run_error(tier, error));
+            Ending::Concluded {
+                deadline_hit: false,
+                at,
             }
+        })
+    }
+
+    /// Every tier prepared ([`Self::prepare_tier`]) before any may delete;
+    /// `None` for a tier that is excluded (reported), the others still run.
+    fn prepare_all(
+        &self,
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Vec<Option<PreparedTier>>, Ending> {
+        let past_deadline = |at| Ending::Concluded {
+            deadline_hit: true,
+            at,
         };
-        // Environmental checks of every tier finish under the host lock
-        // before any tier may delete. The action rechecks volatile binding.
         let mut prepared = Vec::with_capacity(self.tiers.len());
-        for tier in self.tiers {
-            if deadline_passed(host, deadline) {
-                return past_deadline;
+        for (at, (tier, _)) in self.tiers.iter().enumerate() {
+            if deadline_passed(self.host, self.deadline) {
+                return Err(past_deadline(at));
             }
             match self.prepare_tier(tier, report, log) {
                 Ok(tier) => prepared.push(tier),
-                Err(PastDeadline) => return past_deadline,
+                Err(PastDeadline) => return Err(past_deadline(at)),
             }
         }
+        Ok(prepared)
+    }
+
+    /// Each prepared tier reclaimed in policy order, until the goal, the
+    /// deadline, a signal or an error of the run.
+    fn reclaim(
+        &self,
+        prepared: Vec<Option<PreparedTier>>,
+        mut protection: Protection,
+        mut index: Option<&mut TallyState>,
+        tally_refused: &BTreeMap<PathBuf, Reason>,
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Ending {
+        let (host, measured, deadline) = (self.host, self.measured, self.deadline);
         let mut deadline_hit = false;
+        // The tier the run is at: the last one that began.
+        let mut at = 0;
         let mut a_tier_ran = false;
-        for (prepared, tier_timeout) in prepared.into_iter().zip(self.tier_timeouts) {
+        for (index_of_tier, (prepared, (_, tier_timeout))) in
+            prepared.into_iter().zip(self.tiers).enumerate()
+        {
             if host.interrupted().is_some() {
                 break;
             }
-            let Some(PreparedTier {
-                tier,
-                command_ready,
-                docker_bound,
-            }) = prepared
-            else {
+            let Some(PreparedTier { tier, backend }) = prepared else {
                 continue;
             };
+            at = index_of_tier;
             // Between tiers: the goal may be there. The first tier to run
-            // starts from the sample taken under the lock above.
+            // starts from the sample taken under the lock.
             if a_tier_ran {
                 let started = host.now();
                 let sampled = sample(host, measured);
@@ -501,26 +627,9 @@ impl<H: Delete> Locked<'_, H> {
                 (None, own) => own,
             };
             if a_tier_ran {
-                let started = host.now();
-                let enumerated = Protection::enumerate(host, &first.protections, deadline);
-                record_deadline_overrun(
-                    host,
-                    report,
-                    deadline,
-                    started,
-                    "protect",
-                    &self.request.path,
-                );
-                if deadline_passed(host, deadline) {
-                    deadline_hit = true;
-                    break;
-                }
-                match enumerated {
+                match self.protect(at, report, log) {
                     Ok(enumerated) => protection = enumerated,
-                    Err(error) => {
-                        record_error(report, log, run_error(&tier, error));
-                        break;
-                    }
+                    Err(ending) => return ending,
                 }
             }
             a_tier_ran = true;
@@ -530,8 +639,7 @@ impl<H: Delete> Locked<'_, H> {
                 measured,
                 deadline: tier_deadline,
                 tally_budget: self.request.tally_budget,
-                command_ready,
-                docker_bound,
+                backend,
                 protection: &protection,
                 report: &mut *report,
                 log: &mut *log,
@@ -562,14 +670,14 @@ impl<H: Delete> Locked<'_, H> {
                 break;
             }
         }
-        Ending::Concluded { deadline_hit }
+        Ending::Concluded { deadline_hit, at }
     }
 
     /// `tier`'s run-time checks under the host lock, before any tier may
     /// delete: its roots ([`preflight_roots`]: one on another filesystem
-    /// is skipped, an unsafe one excludes the tier), its command
-    /// executables (a tool not installed is a `missing` skip of the tier,
-    /// docs/safety.md, Command actions) and its Docker backend
+    /// is skipped, an unsafe one excludes the tier) and its [`Backend`]:
+    /// command executables (a tool not installed is a `missing` skip of the
+    /// tier, docs/safety.md, Command actions) and the Docker backend
     /// (docs/reference.md, Backend skips and errors). `Ok(None)`: the tier
     /// is excluded, reported, and the other tiers still run.
     fn prepare_tier(
@@ -578,10 +686,17 @@ impl<H: Delete> Locked<'_, H> {
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) -> Result<Option<PreparedTier>, PastDeadline> {
-        let (host, deadline, path) = (self.host, self.deadline, &self.request.path);
+        let (host, deadline) = (self.host, self.deadline);
         let started = host.now();
         let roots = preflight_roots(host, tier, self.measured.dev);
-        record_deadline_overrun(host, report, deadline, started, "preflight", path);
+        record_deadline_overrun(
+            host,
+            report,
+            deadline,
+            started,
+            "preflight",
+            &self.request.path,
+        );
         if deadline_passed(host, deadline) {
             return Err(PastDeadline);
         }
@@ -593,112 +708,131 @@ impl<H: Delete> Locked<'_, H> {
             return Ok(None);
         }
         let tier = roots.filtered_tier(tier);
-        let docker_argv = ["docker".to_owned()];
-        let argv = match &tier.action {
-            Action::Command { argv, .. } => Some(argv.as_slice()),
+        let backend = match &tier.action {
+            Action::Delete { .. } | Action::CargoLockProtocol => Backend::Files,
+            Action::Command { argv, .. } => match self.command(&tier, argv, report, log)? {
+                Some(ready) => Backend::Command(ready),
+                None => return Ok(None),
+            },
             Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
-                Some(docker_argv.as_slice())
-            }
-            Action::Delete { .. } | Action::CargoLockProtocol => None,
-        };
-        let command_ready = match argv {
-            None => None,
-            Some(argv) => {
-                let started = host.now();
-                let preflight = command_action::preflight(host, argv);
-                record_deadline_overrun(host, report, deadline, started, "preflight", path);
-                if deadline_passed(host, deadline) {
-                    return Err(PastDeadline);
-                }
-                match preflight {
-                    Ok(Preflight::Ready(ready)) => {
-                        log(&format!(
-                            "{}: command executables: {}",
-                            tier.name,
-                            ready
-                                .executables
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                        Some(ready)
-                    }
-                    Ok(Preflight::Missing(program)) => {
-                        log(&format!(
-                            "{}: profile `{}` is missing executable {program:?}",
-                            tier.name, tier.profile
-                        ));
-                        report.skipped.push(tier_skip(&tier, Reason::Missing, None));
-                        return Ok(None);
-                    }
-                    Err(error) => {
-                        record_error(report, log, run_error(&tier, error.to_string()));
-                        return Ok(None);
-                    }
-                }
+                let Some(client) = self.command(&tier, &["docker".to_owned()], report, log)? else {
+                    return Ok(None);
+                };
+                let Some(bound) = self.bind_docker(&tier, report, log)? else {
+                    return Ok(None);
+                };
+                Backend::Docker { client, bound }
             }
         };
-        let docker_bound = match tier.source {
-            SourceKind::DockerBuildCache | SourceKind::DockerImages => {
-                let started = host.now();
-                let inspected =
-                    docker_backend::inspect_backend(host, self.measured.dev, docker_storage(&tier));
-                record_deadline_overrun(host, report, deadline, started, "preflight", path);
-                if deadline_passed(host, deadline) {
-                    return Err(PastDeadline);
-                }
-                match inspected {
-                    Ok(Binding::Bound(bound)) => {
-                        log(&format!(
-                            "{}: Docker backend bound to {}",
-                            tier.name,
-                            docker_candidate(&tier, &bound).display()
-                        ));
-                        Some(bound)
-                    }
-                    Ok(Binding::Skipped(skip)) => {
-                        log(&format!(
-                            "{}: skip Docker backend: {}: {}",
-                            tier.name, skip.reason, skip.detail
-                        ));
-                        report
-                            .skipped
-                            .push(tier_skip(&tier, skip.reason, Some(skip.detail)));
-                        return Ok(None);
-                    }
-                    Err(error) => {
-                        record_error(
-                            report,
-                            log,
-                            run_error(&tier, format!("bind Docker backend: {error}")),
-                        );
-                        return Ok(None);
-                    }
-                }
-            }
-            SourceKind::CargoTarget | SourceKind::Fs(_) => None,
-        };
-        Ok(Some(PreparedTier {
-            tier,
-            command_ready,
-            docker_bound,
-        }))
+        Ok(Some(PreparedTier { tier, backend }))
     }
-}
 
-/// A skip of `tier` as a whole (`candidate: null`), refused before its
-/// discovery.
-fn tier_skip(tier: &Tier, reason: Reason, detail: Option<String>) -> SkipEntry {
-    SkipEntry {
-        tier: tier.name.clone(),
-        profile: tier.profile.clone(),
-        candidate: None,
-        count: 1,
-        examples: Vec::new(),
-        reason,
-        detail,
-        process_blockers: None,
-        estimated_bytes: None,
+    /// `argv`'s executables looked up on the host (its shape was checked
+    /// when the profile loaded). `Ok(None)`: the tier is excluded, as a
+    /// `missing` skip or an error of the tier.
+    fn command(
+        &self,
+        tier: &Tier,
+        argv: &[String],
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Option<Ready>, PastDeadline> {
+        let (host, deadline) = (self.host, self.deadline);
+        let started = host.now();
+        let preflight = command_action::preflight(host, argv);
+        record_deadline_overrun(
+            host,
+            report,
+            deadline,
+            started,
+            "preflight",
+            &self.request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return Err(PastDeadline);
+        }
+        match preflight {
+            Ok(Preflight::Ready(ready)) => {
+                log(&format!(
+                    "{}: command executables: {}",
+                    tier.name,
+                    ready
+                        .executables
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                Ok(Some(ready))
+            }
+            Ok(Preflight::Missing(program)) => {
+                log(&format!(
+                    "{}: profile `{}` is missing executable {program:?}",
+                    tier.name, tier.profile
+                ));
+                report
+                    .skipped
+                    .push(skip_entry(tier, None, Reason::Missing, None));
+                Ok(None)
+            }
+            Err(error) => {
+                record_error(report, log, run_error(tier, error.to_string()));
+                Ok(None)
+            }
+        }
+    }
+
+    /// The Docker backend of `tier` bound (docs/reference.md, Backend skips
+    /// and errors). `Ok(None)`: the tier is excluded, as a skip of the
+    /// backend or an error of the tier.
+    fn bind_docker(
+        &self,
+        tier: &Tier,
+        report: &mut Report,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Option<Bound>, PastDeadline> {
+        let (host, deadline) = (self.host, self.deadline);
+        let started = host.now();
+        let inspected =
+            docker_backend::inspect_backend(host, self.measured.dev, docker_storage(tier));
+        record_deadline_overrun(
+            host,
+            report,
+            deadline,
+            started,
+            "preflight",
+            &self.request.path,
+        );
+        if deadline_passed(host, deadline) {
+            return Err(PastDeadline);
+        }
+        match inspected {
+            Ok(Binding::Bound(bound)) => {
+                log(&format!(
+                    "{}: Docker backend bound to {}",
+                    tier.name,
+                    docker_candidate(tier, &bound).display()
+                ));
+                Ok(Some(bound))
+            }
+            Ok(Binding::Skipped(skip)) => {
+                log(&format!(
+                    "{}: skip Docker backend: {}: {}",
+                    tier.name, skip.reason, skip.detail
+                ));
+                report
+                    .skipped
+                    .push(skip_entry(tier, None, skip.reason, Some(skip.detail)));
+                Ok(None)
+            }
+            Err(error) => {
+                record_error(
+                    report,
+                    log,
+                    run_error(tier, format!("bind Docker backend: {error}")),
+                );
+                Ok(None)
+            }
+        }
     }
 }

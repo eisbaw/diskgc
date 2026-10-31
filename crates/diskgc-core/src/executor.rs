@@ -93,12 +93,13 @@ use crate::hostlock::{self, HeldLock, LockError, ReclaimLock};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{
-    ActionEntry, ErrorCause, ErrorEntry, Final, HeldEntry, OverrunEntry, Report, SkipEntry, Status,
-    conclude, signed_bytes,
+    ActionEntry, ErrorCause, ErrorEntry, HeldEntry, OverrunEntry, Report, SkipEntry, Status,
+    signed_bytes,
 };
 use crate::resolve::{Want, resolve};
 use crate::tally::TallyState;
 use crate::units::{Size, format_age, format_bytes};
+use entry::Backend;
 use tier_policy::{DeletePolicy, Protection};
 
 fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
@@ -466,21 +467,26 @@ fn final_sample<H: Host>(
     }
 }
 
-fn deadline_before_reclaim<H: Host>(
-    host: &H,
-    measured: &Measured<H::Fd>,
-    deadline: Option<MonoTime>,
-    mut report: Report,
-    log: &mut dyn FnMut(&str),
+/// A `skipped` row of `tier`'s profile with `detail`: `candidate` `None`
+/// for the tier as a whole (its profile refused before discovery: a
+/// missing executable, an unavailable backend).
+fn skip_entry(
     tier: &Tier,
-) -> Report {
-    report.avail_after_bytes = final_sample(host, measured, deadline, &mut report, log, tier);
-    report.status = conclude(
-        Final::of(report.avail_after_bytes, measured.min),
-        true,
-        !report.errors.is_empty(),
-    );
-    report
+    candidate: Option<&Path>,
+    reason: Reason,
+    detail: Option<String>,
+) -> SkipEntry {
+    SkipEntry {
+        tier: tier.name.clone(),
+        profile: tier.profile.clone(),
+        candidate: candidate.map(Path::to_owned),
+        count: 1,
+        examples: Vec::new(),
+        reason,
+        detail,
+        process_blockers: None,
+        estimated_bytes: None,
+    }
 }
 
 /// A fresh sample of the requested filesystem.
@@ -757,8 +763,9 @@ struct Reclaim<'a, 'l, H: Delete> {
     measured: &'a Measured<H::Fd>,
     deadline: Option<MonoTime>,
     tally_budget: Option<Duration>,
-    command_ready: Option<Ready>,
-    docker_bound: Option<Bound>,
+    /// What the tier acts through, checked under the host lock before any
+    /// tier ran ([`entry::Backend`]).
+    backend: Backend,
     /// The tier's `protect` matches ([`DeletePolicy`]).
     protection: &'a Protection,
     report: &'a mut Report,
@@ -893,29 +900,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             "{}: skip Docker backend: {reason}: {detail}",
             self.tier.name
         ));
-        self.report.skipped.push(SkipEntry {
-            tier: self.tier.name.clone(),
-            profile: self.tier.profile.clone(),
-            candidate: candidate.map(Path::to_owned),
-            count: 1,
-            examples: Vec::new(),
-            reason,
-            detail: Some(detail.to_owned()),
-            process_blockers: None,
-            estimated_bytes: None,
-        });
+        let entry = skip_entry(self.tier, candidate, reason, Some(detail.to_owned()));
+        self.report.skipped.push(entry);
     }
 
-    fn walk_docker(&mut self) {
+    /// The prune through `client` of the backend `bound` under the host
+    /// lock before any tier ran, rebound right before the prune.
+    fn walk_docker(&mut self, client: &Ready, bound: Bound) {
         if self.stop_if_interrupted() {
             return;
         }
-        // Bound under the host lock before any tier ran
-        // (`entry::Locked::prepare_tier`); rebound right before the prune.
-        let bound = self
-            .docker_bound
-            .clone()
-            .expect("a Docker tier runs only with its backend bound");
         let candidate = docker_candidate(self.tier, &bound);
         if self.protected_before_reclaim(&candidate) {
             return;
@@ -1010,12 +1004,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             _ => unreachable!("Docker tier with non-Docker action admitted by ensure"),
         }
-        let ready = self
-            .command_ready
-            .as_ref()
-            .expect("Docker executable preflighted");
         let run = CommandRun {
-            executable: ready.program.clone(),
+            executable: client.program.clone(),
             arguments,
             environment: vec![
                 ("DOCKER_HOST".into(), "unix:///var/run/docker.sock".into()),
@@ -1225,7 +1215,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     self.walk_fs_union(&rules, &mut checker);
                 }
             }
-            SourceKind::DockerBuildCache | SourceKind::DockerImages => self.walk_docker(),
+            SourceKind::DockerBuildCache | SourceKind::DockerImages => match &self.backend {
+                Backend::Docker { client, bound } => {
+                    let (client, bound) = (client.clone(), bound.clone());
+                    self.walk_docker(&client, bound);
+                }
+                Backend::Files | Backend::Command(_) => {
+                    unreachable!("a Docker tier is prepared with its Docker backend")
+                }
+            },
         }
         if !self.deadline_hit && !self.run_stopped && !self.stop_if_interrupted() {
             let started = self.host.now();
@@ -1814,7 +1812,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 }
             }
             Action::Command { argv, cwd } => {
-                let ready = self.command_ready.as_ref().expect("command preflighted");
+                let ready = self.backend.command();
                 let done = fs_kind::run_command_checked(
                     self.host,
                     judge,
@@ -2210,7 +2208,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         &alternatives,
                         checker,
                         fs_kind::CommandSpec {
-                            ready: self.command_ready.as_ref().expect("command preflighted"),
+                            ready: self.backend.command(),
                             argv,
                             cwd: *cwd,
                             need_bytes: self.measured.target.saturating_sub(avail),

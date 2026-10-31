@@ -3259,7 +3259,13 @@ the current instruction to test only on fake filesystems and in containers.
   lookup cannot select a different tool after preflight. Programs launched
   later by the configured tool are outside this preflight.
   A tool that is not installed makes the profile `missing` (skipped),
-  not an error.
+  not an error. The argv's shape is checked when the profile loads, so
+  that only the lookup on the host is left to the run (TASK-270): a
+  program name that is empty or holds NUL, and an `env` wrapper with an
+  option, an assignment with an empty or `-` name, or a `--` other than
+  one right after `env`, are load errors (exit 2, also in a dry run).
+  The preflight runs under the reclaim lock, once the run needs to
+  reclaim; a run whose goal is already met looks nothing up.
 - Runs in its own process group; killed after the tier's `timeout`;
   inherits the host lock (below).
 

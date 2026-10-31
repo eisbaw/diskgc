@@ -25,68 +25,116 @@ pub enum Preflight {
     Missing(String),
 }
 
+/// What preflight resolves in a command's argv: its program and, for an
+/// `env` wrapper, the program `env` runs and the `PATH` it is looked up in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgvShape<'a> {
+    pub program: &'a str,
+    pub env: Option<EnvShape<'a>>,
+}
+
+/// An `env` wrapper's assignments and command word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvShape<'a> {
+    /// The last `PATH=` assignment before the command word, if any.
+    pub path: Option<&'a str>,
+    /// The command word `env` runs and its position in the argv; `None`
+    /// when `env` only prints its environment.
+    pub inner: Option<(usize, &'a str)>,
+}
+
+/// The argv's shape, checked without the host: not empty, programs
+/// neither empty nor containing NUL, and an `env` wrapper in the one form
+/// preflight resolves (assignments, at most one leading `--`, no options).
+/// Profile loading refuses what fails here (exit 2, also in a dry run), so
+/// only the lookup of each program on the host is left to [`preflight`].
+pub fn argv_shape(argv: &[String]) -> Result<ArgvShape<'_>, String> {
+    let Some(first) = argv.first() else {
+        return Err("the argv list is empty".to_owned());
+    };
+    program_name(first)?;
+    let mut shape = ArgvShape {
+        program: first,
+        env: None,
+    };
+    if Path::new(first).file_name() != Some(OsStr::new("env")) {
+        return Ok(shape);
+    }
+    let mut env = EnvShape {
+        path: None,
+        inner: None,
+    };
+    for (index, word) in argv.iter().enumerate().skip(1) {
+        // GNU env accepts one option terminator before assignments.
+        // A later or repeated `--` is ambiguous with its command word;
+        // refusing it keeps preflight and execution on the same argv.
+        if index == 1 && word == "--" {
+            continue;
+        }
+        if word == "--" {
+            return Err("env has an unsupported or repeated `--` terminator".to_owned());
+        }
+        if let Some((key, value)) = word.split_once('=') {
+            if key.is_empty() || key.starts_with('-') {
+                return Err(format!("unsupported env assignment {word:?}"));
+            }
+            if key == "PATH" {
+                env.path = Some(value);
+            }
+            continue;
+        }
+        if word.starts_with('-') {
+            return Err(format!("env option {word:?} cannot be preflighted"));
+        }
+        program_name(word)?;
+        env.inner = Some((index, word));
+        break;
+    }
+    shape.env = Some(env);
+    Ok(shape)
+}
+
+fn program_name(program: &str) -> Result<(), String> {
+    if program.is_empty() || program.as_bytes().contains(&0) {
+        return Err(format!(
+            "the program name {program:?} is empty or contains NUL"
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve every executable of one command tier before its first action.
 /// A bare program uses the host's PATH; a path with a slash is made absolute
 /// from diskgc's original cwd, before a child fchdir to its candidate.
 /// `env` with assignments is the supported explicit wrapper form: its inner
-/// program is resolved against an assigned PATH if there is one.
+/// program is resolved against an assigned PATH if there is one. The argv's
+/// shape ([`argv_shape`]) is checked again here, so a caller that did not
+/// load it through a profile still cannot run an unchecked argv.
 pub fn preflight<H: Host>(host: &H, argv: &[String]) -> Result<Preflight, HostError> {
-    let Some(first) = argv.first() else {
-        return Err(HostError::invalid(
+    let shape = argv_shape(argv).map_err(|why| {
+        HostError::invalid(
             "preflight executable",
-            "command",
-            "the argv list is empty",
-        ));
-    };
-    let Some(program) = resolve_program(host, first, &host.command_path())? else {
-        return Ok(Preflight::Missing(first.clone()));
+            argv.first().map_or("command", String::as_str),
+            why,
+        )
+    })?;
+    let Some(program) = resolve_program(host, shape.program, &host.command_path())? else {
+        return Ok(Preflight::Missing(shape.program.to_owned()));
     };
     let mut executables = vec![program.clone()];
     let mut env_program_index = None;
-    if Path::new(first).file_name() == Some(OsStr::new("env")) {
-        let mut path = host.command_path();
-        for (index, word) in argv.iter().enumerate().skip(1) {
-            // GNU env accepts one option terminator before assignments.
-            // A later or repeated `--` is ambiguous with its command word;
-            // refusing it keeps preflight and execution on the same argv.
-            if index == 1 && word == "--" {
-                continue;
+    if let Some(EnvShape {
+        path,
+        inner: Some((index, word)),
+    }) = shape.env
+    {
+        let path = path.map_or_else(|| host.command_path(), OsString::from);
+        match resolve_program(host, word, &path)? {
+            Some(inner) => {
+                executables.push(inner);
+                env_program_index = Some(index);
             }
-            if word == "--" {
-                return Err(HostError::invalid(
-                    "preflight executable",
-                    first,
-                    "env has an unsupported or repeated `--` terminator",
-                ));
-            }
-            if let Some((key, value)) = word.split_once('=') {
-                if key.is_empty() || key.starts_with('-') {
-                    return Err(HostError::invalid(
-                        "preflight executable",
-                        first,
-                        format!("unsupported env assignment {word:?}"),
-                    ));
-                }
-                if key == "PATH" {
-                    path = OsString::from(value);
-                }
-                continue;
-            }
-            if word.starts_with('-') {
-                return Err(HostError::invalid(
-                    "preflight executable",
-                    first,
-                    format!("env option {word:?} cannot be preflighted"),
-                ));
-            }
-            match resolve_program(host, word, &path)? {
-                Some(inner) => {
-                    executables.push(inner);
-                    env_program_index = Some(index);
-                }
-                None => return Ok(Preflight::Missing(word.clone())),
-            }
-            break;
+            None => return Ok(Preflight::Missing(word.to_owned())),
         }
     }
     Ok(Preflight::Ready(Ready {
@@ -101,13 +149,8 @@ fn resolve_program<H: Host>(
     program: &str,
     search_path: &OsStr,
 ) -> Result<Option<PathBuf>, HostError> {
-    if program.is_empty() || program.as_bytes().contains(&0) {
-        return Err(HostError::invalid(
-            "preflight executable",
-            program,
-            "the program name is empty or contains NUL",
-        ));
-    }
+    program_name(program)
+        .map_err(|why| HostError::invalid("preflight executable", program, why))?;
     let named = Path::new(program);
     if program.contains('/') {
         let path = if named.is_absolute() {

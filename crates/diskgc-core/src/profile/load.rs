@@ -14,6 +14,7 @@ use super::spec::{
 };
 use super::temp_roots;
 use super::{Action, Body, Examples, Finds, IdleFor, Origin, Profile, Roots, Source, Where};
+use crate::command_action;
 use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
 use crate::select::{Syntax, is_name};
@@ -607,7 +608,14 @@ fn command(
              PATH and shown before anything runs (docs/safety.md, Command actions), so it \
              cannot be the candidate; pass `{{path}}` as an argument"
         )),
-        Some(_) => {}
+        Some(_) => {
+            if let Err(why) = command_action::argv_shape(argv) {
+                problems.push(format!(
+                    "`command` {argv:?} cannot be preflighted: {why} (docs/safety.md, Command \
+                     actions)"
+                ));
+            }
+        }
     }
     let cwd = match (cwd, entry_type?) {
         (Some(Cwd::Candidate), found @ (EntryType::File | EntryType::Any)) => {

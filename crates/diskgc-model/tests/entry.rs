@@ -26,7 +26,7 @@ use diskgc_core::config;
 use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, Request, SourceKind, Tier};
 use diskgc_core::profile::{Action, Library, parse_profiles};
-use diskgc_core::report::{Report, Status};
+use diskgc_core::report::{ErrorCause, Report, Status};
 use diskgc_core::snapshot::RunIndex;
 use diskgc_core::units::parse_size;
 use diskgc_model::ModelHost;
@@ -45,6 +45,10 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp], paths: ["a*"], type: dir}
   action: {command: [diskgc-no-such-tool, "{path}"]}
   examples: {match: [/tmp/a0]}
+- name: present-cleaner
+  find: {roots: [/tmp], paths: ["b*"], type: dir}
+  action: {command: [rm, -rf, "{path}"]}
+  examples: {match: [/tmp/b0]}
 - name: guard
   find: {roots: required, paths: ['*'], type: dir}
   action: delete
@@ -64,6 +68,8 @@ protect: [{profile: guard, roots: [/tmp/guard-link]}]
 const STATE: &str = "/home/u/.local/state/diskgc";
 const SNAPSHOT: &str = "/home/u/.local/state/diskgc/index-dev-0-42";
 const HOST_LOCK: &str = "/run/diskgc/lock";
+/// The fixture's `PATH` filesystem.
+const TMP: &str = "/tmp";
 const WRITTEN: &str = "index: snapshot index-dev-0-42 written: ";
 
 /// `/` (with the state directory), `/run` with the host lock, and a 1 GiB
@@ -185,7 +191,10 @@ fn met_under_the_host_lock_writes_the_snapshot_and_says_so() {
         assert_eq!(report.status, Status::Met, "{entry:?}: {report:#?}");
         assert!(report.actions.is_empty(), "{entry:?}: {report:#?}");
         assert!(
-            has(&lines, "below --min-free 700.0 MiB: taking the reclaim lock"),
+            has(
+                &lines,
+                "below --min-free 700.0 MiB: taking the reclaim lock"
+            ),
             "{entry:?}: {lines:#?}"
         );
         assert!(
@@ -249,8 +258,8 @@ fn a_protect_that_cannot_be_enumerated_still_writes_the_snapshot() {
 }
 
 /// The host lock held by another reclaim to the deadline: exit 75, the
-/// timeout logged, and the snapshot not written because the run's
-/// deadline has passed (docs/architecture.md, Snapshot: never past it),
+/// timeout logged, and the snapshot not written (docs/architecture.md,
+/// Snapshot: never past the deadline), declined by the exit itself and
 /// said in one line instead of nothing.
 #[test]
 fn a_host_lock_timeout_logs_it_and_why_no_snapshot_is_written() {
@@ -279,7 +288,8 @@ fn a_host_lock_timeout_logs_it_and_why_no_snapshot_is_written() {
         assert!(
             has(
                 &lines,
-                "index: snapshot index-dev-0-42 not written: the run's deadline has passed"
+                "index: snapshot index-dev-0-42 not written: the host lock was still held at the \
+                 deadline"
             ),
             "{entry:?}: {lines:#?}"
         );
@@ -355,4 +365,128 @@ fn an_action_without_a_reclaim_is_refused_alike_before_the_gate() {
         messages[0].contains("`profile:tmp-a`") && messages[0].contains("--dry-run"),
         "{messages:#?}"
     );
+}
+
+/// TASK-270 review (mped S4): the reclaim lock refused after the tally
+/// (no host lock, and a per-user lock directory that is a symlink: exit 2,
+/// `provisioning`, TASK-277): the snapshot is written all the same.
+#[test]
+fn a_refused_reclaim_lock_still_writes_the_snapshot() {
+    let unsafe_user_lock = "  /run/user/1000: {.: {mode: \"0700\"}, elsewhere: {.: {mode: \"0700\"}}, \
+                            diskgc: {symlink: /run/user/1000/elsewhere}}\n";
+    for entry in ENTRIES {
+        let host = host(
+            &yaml(unsafe_user_lock).replace(&format!("  {HOST_LOCK}: {{uid: 0, gid: 0}}\n"), ""),
+        );
+        let (report, lines) = run(&host, entry, &request(tier("profile:tmp-a"), "100%"));
+        assert_eq!(report.status, Status::UsageError, "{entry:?}: {report:#?}");
+        assert_eq!(
+            report.errors[0].cause,
+            ErrorCause::Provisioning,
+            "{entry:?}: {report:#?}"
+        );
+        assert!(
+            report.errors[0].message.contains("per-user lock"),
+            "{entry:?}: {report:#?}"
+        );
+        assert_snapshot_written(&host, entry, &lines);
+    }
+}
+
+/// TASK-270 review (mped S4): the sample under the host lock fails (exit
+/// 3): the snapshot of the tally is written all the same.
+#[test]
+fn a_failed_sample_under_the_host_lock_still_writes_the_snapshot() {
+    let failing = format!(
+        "events:\n  - {{at: {{op: statvfs, path: {TMP}, nth: 2, when: before}}, fail: EIO}}\n"
+    );
+    for entry in ENTRIES {
+        let host = host(&yaml(&failing));
+        let (report, lines) = run(&host, entry, &request(tier("profile:tmp-a"), "100%"));
+        assert!(host.unfired_events().is_empty(), "{entry:?}");
+        assert_eq!(report.status, Status::Error, "{entry:?}: {report:#?}");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.cause == ErrorCause::Host && e.message.contains("sampling")),
+            "{entry:?}: {report:#?}"
+        );
+        assert!(host_lock_taken(&host), "{entry:?}");
+        assert_snapshot_written(&host, entry, &lines);
+    }
+}
+
+/// TASK-270 review (mped S1): a `protect` that cannot be enumerated is an
+/// error of the run, but the exit code table puts 0 first: when the final
+/// sample meets `--min-free` (another process freed the space meanwhile),
+/// the run is met, its error still listed.
+#[test]
+fn a_protect_failure_with_the_space_there_at_the_final_sample_is_met() {
+    let config = config::parse(Path::new("/tmp/config.yaml"), UNSAFE_PROTECT.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let protections = executor::bind_protections(&config, 1000, false).expect("bound");
+    // statvfs of /tmp: the first sample, under the lock, the final one.
+    let freed = format!(
+        "  /tmp/guard-link: {{symlink: /tmp/protected}}\n  /tmp/protected: {{inside: {{}}}}\n\
+         events:\n  - {{at: {{op: statvfs, path: {TMP}, nth: 3, when: before}}, other_used: \
+         {{mount: /tmp, bytes: 0}}}}\n"
+    );
+    for entry in ENTRIES {
+        let host = host(&yaml(&freed));
+        let mut tier = tier("profile:tmp-a");
+        tier.protections = protections.clone();
+        let (report, _) = run(&host, entry, &request(tier, "700M"));
+        assert!(host.unfired_events().is_empty(), "{entry:?}");
+        assert_eq!(report.status, Status::Met, "{entry:?}: {report:#?}");
+        assert_eq!(report.exit_code(), 0);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("guard-link")),
+            "{entry:?}: {report:#?}"
+        );
+        assert!(report.actions.is_empty(), "{entry:?}: {report:#?}");
+    }
+}
+
+/// TASK-270 review (Codex blocker): the run's deadline passes while the
+/// second tier is prepared, then the final sample fails: the error names
+/// the tier the run was at, never the first one.
+#[test]
+fn a_failed_final_sample_names_the_tier_the_run_was_at() {
+    let library = library();
+    let mut first = Tier::select("profile:tmp-a", &library, None, 1000).expect("a tier");
+    first.name = "a".to_owned();
+    let mut second = Tier::select("profile:present-cleaner", &library, None, 1000).expect("a tier");
+    second.name = "b".to_owned();
+    // The lookup of b's program spends the deadline; then the third sample
+    // of /tmp (first, under the lock, final) fails.
+    let events = format!(
+        "events:\n  - {{at: {{op: executable_file, path: /usr/bin/rm, nth: 1, when: before}}, \
+         advance: 20m}}\n  - {{at: {{op: statvfs, path: {TMP}, nth: 3, when: before}}, fail: \
+         EIO}}\n"
+    );
+    let host = host(&yaml(&events));
+    let mut lines = Vec::new();
+    let report = executor::ensure_grouped_with_index(
+        &host,
+        &request(first.clone(), "100%"),
+        &[first, second],
+        &[Duration::ZERO, Duration::ZERO],
+        &[1000],
+        &mut RunIndex::snapshot(),
+        &mut |l| lines.push(l.to_owned()),
+    );
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    assert!(host.unfired_events().is_empty(), "{:#?}", host.trace());
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    let sampled = report
+        .errors
+        .iter()
+        .find(|e| e.message.contains("sampling available space"))
+        .unwrap_or_else(|| panic!("{report:#?}"));
+    assert_eq!(sampled.tier.as_deref(), Some("b"), "{report:#?}");
+    assert!(report.actions.is_empty(), "{report:#?}");
 }

@@ -1062,6 +1062,37 @@ fn the_program_is_never_the_candidate() {
     }
 }
 
+/// TASK-270 review (mped S2): an argv preflight could never resolve is a
+/// load error (exit 2, also in a dry run), not a run error found under
+/// the host lock; only the lookup on the host stays in the preflight.
+#[test]
+fn an_argv_preflight_cannot_resolve_is_refused_at_load() {
+    let command = |argv: &str| {
+        format!(
+            "- name: x\n  find: {{roots: [/tmp], paths: [\"x-*\"], type: dir}}\n  action: {{command: {argv}}}\n  examples: {{match: [/tmp/x-1]}}\n"
+        )
+    };
+    for argv in [
+        "[env, --, PATH=/usr/bin, go, clean]",
+        "[env, A=1, go]",
+        "[env]",
+    ] {
+        with_user(&command(argv)).unwrap_or_else(|e| panic!("{argv}: {e}"));
+    }
+    for (argv, why) in [
+        ("[env, --, --, rm]", "repeated `--`"),
+        ("[env, \"=x\", rm]", "unsupported env assignment"),
+        ("[env, \"-u=x\", rm]", "unsupported env assignment"),
+        ("[env, -i, rm]", "env option \"-i\""),
+        ("[env, A=1, \"\"]", "is empty or contains NUL"),
+        ("[\"a\\0b\"]", "is empty or contains NUL"),
+    ] {
+        let errors = user_errors(&command(argv));
+        assert_has(&errors, "cannot be preflighted");
+        assert_has(&errors, why);
+    }
+}
+
 #[test]
 fn kind_cargo_target_finds_by_structure_and_fixes_its_action() {
     with_user("- name: my-targets\n  kind: cargo-target\n  find: {roots: [/srv/ci]}\n")

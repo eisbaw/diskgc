@@ -410,6 +410,18 @@ impl RunIndex {
         let units = stats.singles + stats.blocks;
         write_held(host, units, held, guard, &bytes, &last_check, log);
     }
+
+    /// The run that seeded this index ends without a snapshot, for `why`:
+    /// one log line, no state operation. Nothing when the run did not
+    /// tally (nothing pending).
+    pub fn decline(&mut self, why: &str, log: &mut dyn FnMut(&str)) {
+        if let Some(Pending { key, .. }) = self.pending.take() {
+            log(&format!(
+                "index: snapshot {} not written: {why}",
+                key.snapshot_name()
+            ));
+        }
+    }
 }
 
 /// The single-writer lock of `key`, held exclusively, and the device of

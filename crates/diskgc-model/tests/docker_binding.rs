@@ -284,3 +284,27 @@ fn a_missing_docker_client_is_missing_after_one_query() {
     );
     assert_eq!(host.trace_count(Op::DockerQuery), 1);
 }
+
+/// TASK-270 review (mped S4): `--select` binds its Docker backend under
+/// the host lock before the tier runs, as a configured tier does. A
+/// backend that is not Docker Engine excludes the tier: one `skipped` row
+/// for the tier as a whole, no process scan, so `held_by_deleted_files`
+/// is unknown (`null`), and nothing is pruned.
+#[test]
+fn select_with_an_unsupported_backend_excludes_the_tier_before_it_runs() {
+    let model = BUNDLED.replace(
+        r#"version: '{"Platform":{"Name":"Docker Engine - Community"},"Version":"29.8.2"}'"#,
+        r#"version: '{"Platform":{"Name":"Podman Engine"},"Version":"5.8.7"}'"#,
+    );
+    assert_ne!(model, BUNDLED, "fixture server identity line moved");
+    let host = ModelHost::from_yaml(&model).expect("valid fake host");
+    let uid = executor::privileges(&host, false).unwrap();
+    let report = executor::ensure(&host, &request("docker-build-cache"), &[uid], &mut |_| {});
+    assert_eq!(report.exit_code(), 1, "{report:#?}");
+    assert_eq!(report.skipped.len(), 1, "{report:#?}");
+    assert_eq!(report.skipped[0].reason, Reason::UnsupportedBackend);
+    assert_eq!(report.skipped[0].candidate, None);
+    assert_eq!(report.held_by_deleted_files, None, "{report:#?}");
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(host.trace_count(Op::RunCommand), 0);
+}
