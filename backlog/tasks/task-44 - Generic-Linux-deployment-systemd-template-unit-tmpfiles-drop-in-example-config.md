@@ -5,8 +5,8 @@ title: >-
   config
 status: To Do
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+created_date: 2026-10-16 22:41
+updated_date: '2026-10-31T02:36:00Z'
 labels:
   - wave-5
   - deploy
@@ -29,6 +29,8 @@ Why: most users are not on NixOS. Ship a systemd template unit for watch (user a
 - [ ] #1 systemd-tmpfiles --root=<scratch> --create creates the lock file as specified (container test)
 - [ ] #2 example.yaml passes check
 - [ ] #3 systemd-analyze verify passes on an instance of the template unit with the binary present
+- [ ] #4 Every --allow-root run (ensure and watch, all modes) exits 2 at start (cause safety) when CAP_SYS_PTRACE is missing from its effective set, read once from CapEff in /proc/self/status; safety.md Privileges states the rule; a container test runs root without that capability and expects the refusal (docs/architecture.md Deployment, Root; TASK-119 review B1)
+- [ ] #5 Install steps in the README and release notes: systemd-tmpfiles --create for the host lock, then systemctl daemon-reload (or --user daemon-reload) before the first enable of a diskgc-watch@ instance; on NixOS a user instance starts only after the user's manager restarts (docs/architecture.md Deployment)
 <!-- AC:END -->
 
 ## Implementation Notes
