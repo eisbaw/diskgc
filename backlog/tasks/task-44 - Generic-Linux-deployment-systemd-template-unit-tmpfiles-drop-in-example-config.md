@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-10-31T04:43:00Z'
+updated_date: '2026-10-31T05:13:00Z'
 labels:
   - wave-5
   - deploy
@@ -50,4 +50,6 @@ Orchestrator 2026-10-23 (design audit): now depends on TASK-119 (unit/module des
 Orchestrator 2026-10-24 (COMPASS round 2): dependency changed from TASK-43 to TASK-32 (the unit needs watch). The tmpfiles drop-in and example config were delivered by TASK-66; those ACs are satisfied there and must not be re-implemented.
 
 Implementer 2026-10-31 (branch t44-units, b087673 + c797406): units in packaging/systemd/{user,system}/, shipped by the development package only (lib/systemd/{user,system}/; stdenv fixup moves lib/systemd/user to share/systemd/user and symlinks it back). NOT in release-01-candidate: 0.1 is the ensure MVP (PRD Scope), TASK-67 owns its contents. AC1: shipped_tmpfiles_and_example_work_in_container PASS (e2e-one, nix image). AC2: config-check-sandbox flake check builds. AC3: flake check deployment-units (system + --user verify, two instance names, packaged binary; system mode chrooted into a tmpfs root via unshare because the sandbox has no /run) + tools/unit_lint.py in just check. AC4: Host::own_cap_effective, executor::privileges refuses every --allow-root run without CAP_SYS_PTRACE (also non-root, also unreadable CapEff); model test, 3 vectors, watch model test, container test allow_root_without_cap_sys_ptrace_is_refused_in_every_mode (nix and debian images). AC5 only partly: install steps live in docs/reference.md 'Watch as a systemd service' (dev package); packaging/README.md and the 0.1 release notes are the 0.1 package's and do not mention watch units. Open: decide where watch install steps go once a release ships watch (TASK-47/49).
+
+Review round 1 (Codex + mped on d326603) fixed in d864c0d: --allow-root requires euid 0; CAP_SYS_PTRACE withholds SetUid/Privileged/NonDumpable excuses (gap predates TASK-44, also in master's release-01-candidate by code reading); unreadable CapEff is host/exit 3; Host::own_cap_effective dropped for proc_status(own_pid); --user verify unchrooted; reference.md states a reclaiming instance needs a release package with watch.
 <!-- SECTION:NOTES:END -->
