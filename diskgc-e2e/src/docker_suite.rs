@@ -168,6 +168,10 @@ fn require_tmpfs(path: &Path) -> TestResult {
 /// roots to verify their filesystem. Grant only search (no read/write) in
 /// this disposable fixture; the ordinary 0700 mode is tested separately as
 /// a fail-closed preflight, never silently assumed traversable.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Docker's storage roots in the disposable dind container, not scratch"
+)]
 fn grant_store_traversal() -> TestResult {
     for path in [
         "/var/lib/docker",
@@ -875,6 +879,10 @@ pub fn native_docker_prune_child_keeps_lock_after_parent_kill(ctx: &Ctx) -> Test
     let child_held_lock = flock_held(Path::new(HOST_LOCK))?;
     // Replace the public socket after diskgc pinned it and its prune child
     // reached the gate. A path-based client would now reach this decoy.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the disposable dind container's private Docker socket, replaced for the race"
+    )]
     std::fs::remove_file(SOCKET)
         .map_err(|error| format!("unlink private Docker socket for race test: {error}"))?;
     let decoy = UnixListener::bind(SOCKET)
@@ -1044,6 +1052,10 @@ pub fn native_docker_dangling_and_build_cache_prune(ctx: &Ctx) -> TestResult {
         "Buildx did not select the non-default builder: {builders}"
     );
     grant_store_traversal()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Docker's storage root in the disposable dind container, not scratch"
+    )]
     std::fs::set_permissions(
         "/var/lib/docker/buildkit",
         std::fs::Permissions::from_mode(0o711),

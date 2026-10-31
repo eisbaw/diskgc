@@ -955,6 +955,10 @@ fn lock_wait(
             TryLock::Busy(fd) => fd,
             TryLock::Acquired(_) => return Err("lock was free before the wait began".into()),
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the busy marker the harness asked this probe to write on scratch"
+        )]
         std::fs::write(marker, b"busy\n")
             .map_err(|e| format!("write busy marker {marker}: {e}"))?;
     }

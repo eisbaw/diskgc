@@ -133,6 +133,10 @@ pub fn containers_image_spool_held_by_buildah_is_in_use(ctx: &Ctx) -> TestResult
     commit.resume_and_finish()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the uid-mapping helpers and /etc/subuid, /etc/subgid go on the disposable container's overlay root, where Buildah looks"
+)]
 fn install_rootless_mapping_helpers(ctx: &Ctx) -> TestResult {
     for name in ["newuidmap", "newgidmap"] {
         let source = ctx.bin_dir.join(name);

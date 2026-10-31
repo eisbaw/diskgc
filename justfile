@@ -10,6 +10,11 @@
 # Implementation). The dev shell builds for the host (gnu) target; the flake's
 # package and checks build for static musl.
 
+# A hang guard for every Nix build a recipe starts (docs/testing.md,
+# Commands): a builder that prints nothing for 30 minutes fails. Appended
+# to the caller's NIX_CONFIG, never replacing it.
+export NIX_CONFIG := env("NIX_CONFIG", "") + "\nmax-silent-time = 1800"
+
 # Inspect project scratch, legacy /tmp/diskgc* and free space before a task.
 scratch-tally:
     python3 tools/scratch_tally.py
@@ -47,11 +52,15 @@ check:
 # destructive on the host, reuses the base image when its Nix hash is
 # already loaded, starts one rootless Podman container per test and reports
 # per-test durations (docs/testing.md, End-to-end tests in containers). The
-# budget is measured by the runner and is also the deadline for hung tests.
+# budget is measured by the runner and is also the deadline for hung tests
+# and for its setup (canary, Podman checks, image load, test listing).
+# `check` runs under a one-hour hang guard (tools/deadline.py keeps Ctrl-C
+# working, which coreutils `timeout` would not); Nix builds under NIX_CONFIG's.
 # Host requirement: rootless Podman (not provided by the dev shell).
 
 # `check`, sandboxed config, unit and release checks, and fast Nix and Docker container tests.
-e2e: check _gcroot-dev
+e2e: _gcroot-dev
+    python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.deployment-units
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
@@ -62,6 +71,7 @@ e2e: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.release-01-package
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite fast --budget-secs 300
+    python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
     just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-docker fast 300
@@ -88,7 +98,8 @@ e2e-vm-cold-scale: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
 
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
-e2e-full: check _gcroot-dev
+e2e-full: _gcroot-dev
+    python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
     nix build -L --no-link .#checks.x86_64-linux.deployment-units
     nix build -L --no-link .#checks.x86_64-linux.diskgc-static
@@ -99,6 +110,7 @@ e2e-full: check _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.release-01-package
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite full --budget-secs 3600
+    python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
     just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
@@ -115,13 +127,15 @@ e2e-full: check _gcroot-dev
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.
-e2e-debian: check _gcroot-dev
+e2e-debian: _gcroot-dev
+    python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
 
 # Native Docker Engine tests in a digest-pinned dind image under Podman.
-e2e-docker: check _gcroot-dev
+e2e-docker: _gcroot-dev
+    python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     just _e2e-docker full 900
 
@@ -161,10 +175,15 @@ _runner NAME *ARGS:
 _gcroot-dev:
     nix build -L -o .gcroots/dev .#devShells.x86_64-linux.default.inputDerivation
 
-# Then `nix store gc`; Podman's image copies go with `podman rmi`.
+# Then `nix store gc`; Podman's image copies go with `just e2e-images`.
 # Drops every GC root the container recipes made (.gcroots/).
 gcroots-drop:
     rm -rf .gcroots
+
+# Never another image, never one a container uses (tools/e2e_images.py).
+# List the e2e Podman image tags this checkout no longer uses; --apply removes them.
+e2e-images *ARGS:
+    python3 tools/e2e_images.py {{ARGS}}
 
 # Safety and integrated selection properties with many cases.
 soak:

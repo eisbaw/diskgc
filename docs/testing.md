@@ -1815,7 +1815,10 @@ filesystem, processes and mounts from the developer's system.
   pinned Buildah and UID mapping tool closure read-only from the host's Nix
   store into its disposable container. Its fixture uses a one-second idle
   floor to exercise the in-use check without waiting for the shipped
-  profile's three-day floor.
+  profile's three-day floor. The fixture copies `newuidmap` and
+  `newgidmap` in setuid; under the container's no-new-privileges (Container
+  setup) the setuid bit has no effect, and the test still passes (TASK-60,
+  2026-10-31), so this case does not rely on them.
 - **Dormant temp users:** a live process sets `TMPDIR` after exec, holds no
   descriptor in the directory and then sleeps. A ModelHost case and a
   disposable-container dry-run prove that a `tmp.*` delete profile would
@@ -2361,8 +2364,10 @@ Each container test runs in its own container (clean `/proc`, tests run in
 parallel) with `--cap-add SYS_ADMIN` (effective only inside the user
 namespace, needed for tmpfs, bind and stacked mounts and `unshare`),
 `--cap-add SYS_PTRACE` (container root's strace needs it to resolve the
-code under test's fds for `-y`; the code under test has no capabilities)
-and `--network=none`. The harness runs as container root and mounts a fresh
+code under test's fds for `-y`; the code under test has no capabilities),
+`--security-opt no-new-privileges` (no setuid binary or file capability
+can give the code under test privileges back; the bounding set still holds
+`SYS_ADMIN` and `SYS_PTRACE`) and `--network=none`. The harness runs as container root and mounts a fresh
 tmpfs per test at `/tmp` and `/var/tmp` (scratch for fixtures), at `/run/diskgc`
 (0755 root, where every image applies the packaged tmpfiles rule to create
 `/run/diskgc/lock`, 0644 root) and at `/home/tester` (0755 tester); it keeps
@@ -2373,7 +2378,10 @@ the image itself ships stays on the overlay root.
 permission checks, `/proc` access limits and diskgc's own refusal to run as
 root behave as on a real machine; other owners use mapped subuids (uid 1001
 in the image). strace attaches first and the traced process then drops to
-uid 1000 (groups, gid, uid) before exec; with `--seccomp-bpf` it stops only
+uid 1000 (groups, gid, uid) before exec; the credential test
+(`tester_cannot_read_other_users_mode000_dir`) requires its inheritable,
+permitted, effective and ambient capability sets to be empty and
+`NoNewPrivs` to be 1. With `--seccomp-bpf` it stops only
 at the traced calls, which the suite checks against a stated bound (a
 20,000-file create/stat/unlink churn: one seccomp filter more than the
 harness, at most 4 ptrace stops per file, at most 10 s). The Owner PID
@@ -2560,7 +2568,21 @@ CI settings). Three layers:
    work: a container sees the host's `/proc/cmdline`.)
 3. **Per operation:** every test asserts that the paths it touches are on
    the scratch tmpfs the harness mounted for it (checked by mount id), and
-   aborts otherwise.
+   aborts otherwise. Mounting a scratch tmpfs checks layer 2's markers
+   again first (`Scratch::mount`), so a code path that skipped the
+   binary's own check still mounts nothing. Fixture writes go through
+   `Scratch` (`scratch.rs`): `diskgc-e2e/clippy.toml` disallows std's
+   mutating filesystem calls (`fs::write`, `File::create`, `create_dir*`,
+   `remove_*`, `rename`, `copy`, `hard_link`, `set_permissions`, `symlink`,
+   `chown`, `lchown`) in the rest of the crate, and the `e2e-clippy` check
+   fails on a new one. Each existing use outside `scratch.rs` carries an
+   `#[expect(clippy::disallowed_methods, reason = ...)]` that says why it
+   is not a fixture write (the runner's host logs, the disposable
+   container's overlay root or `/proc` controls, a probe acting as its own
+   process, a name Scratch's UTF-8 paths cannot express); an expectation
+   that stops matching fails the check too. `OpenOptions::open` (it also
+   reads), rustix calls and spawned processes are not covered; they rest on
+   review and the other layers.
 
 The CI operator journey has one test-control file beside the image marker:
 `/.diskgc-test-clock-offset`, containing decimal positive seconds and one
@@ -2629,11 +2651,12 @@ snapshot, not proof that a path is safe to move.
 |---|---|---|
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus fast Nix-image tests, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup |
+| `e2e` | `check` plus fast Nix-image tests, the `e2e-one` retention check, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup (deadlines below) |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
+| `e2e-images [--apply]` | the e2e images' Podman tags this checkout's flake no longer uses; `--apply` removes them | when old images fill the disk; with no other e2e run starting |
 | `e2e-debian-one NAME` | the same on the Debian image | while working on one there |
 | `e2e-docker-one NAME` | one native Docker test in a disposable dind container | while working on one there |
 | `soak` | property tests with many cases | before a release, nightly CI |
@@ -2721,6 +2744,42 @@ each target, fix every crash with a saved regression, validate both contract
 documents, and run the mutation recipe. A surviving mutant must be tied to a
 specific reason or a new test. The ordinary `just e2e` gate and parallel QA
 and architecture reviews still apply before its commit.
+
+**Deadlines.** Each runner's budget is also the deadline of its setup: the
+interlock canary, the Podman checks, the base image load and the test
+listing run in their own process groups, which are killed when the run's
+deadline passes (for `one`, 15 minutes for setup, then 24 hours for the
+test, which only guards a hang), and the run fails naming the step. In the
+gate recipes `check` runs under `tools/deadline.py 3600` (a hang guard: a
+cold `check` took 841 s on 2026-10-31). Unlike coreutils `timeout`, it
+stays in the terminal's foreground process group and forwards Ctrl-C to the
+command's, so interrupting `just e2e` stops Cargo too. Every Nix build a
+recipe starts runs with `max-silent-time = 1800`, which the justfile
+appends to `NIX_CONFIG`: a builder that prints nothing for 30 minutes
+fails (the NixOS VM checks also have their test driver's own global
+timeout). Nix evaluation and substitution are not bounded by it
+(downloads have Nix's `stalled-download-timeout`). These limits guard
+hangs; external CPU load can still use up a suite budget before every
+selected test starts.
+
+**`e2e-one` retention.** `tools/e2e_one_retention.py` runs the real
+runner's `one` twice in `just e2e` and `just e2e-full`: on
+`runner_failure_probe_fails_on_purpose` (`Tier::Probe`: in no suite, it
+fails on purpose after setup), whose container must be kept, exited, with
+the probe's message in its log; and on `sandbox_trivial`, whose container
+must be gone. It then removes only those containers.
+
+**Old images.** A runner loads its image under a tag that is the image's
+Nix hash and never removes one, so each change of an image's inputs leaves
+a multi-gigabyte image behind, and an image a kept `e2e-one` container
+uses stays until that container is removed. `just e2e-images` lists the
+tags under `localhost/diskgc-e2e` and `localhost/diskgc-e2e-*` as current
+(the flake at this checkout uses them), in use (a container uses them) or
+old, and removes nothing; `just e2e-images --apply` runs `podman rmi` (never
+`--force`) on the old ones. Nothing else is listed or removed. A tag that
+is old here may be current in another worktree, which then loads it again;
+an e2e run there that is starting a container from it at that moment
+fails. The runner does not prune on its own for that reason.
 
 `nix flake check` can report every check passed while building nothing
 (its outputs are already in the store from an earlier build of the same

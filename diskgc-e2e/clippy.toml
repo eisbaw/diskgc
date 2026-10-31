@@ -1,0 +1,28 @@
+# Clippy settings for the e2e harness only (clippy reads the nearest
+# clippy.toml above the crate's manifest; the product workspace has none).
+#
+# Fixture writes go through `Scratch` (scratch.rs), which checks by mount id
+# that every path it touches is on the test's scratch tmpfs
+# (docs/testing.md, Safety interlock, layer 3). These std mutators bypass
+# that check, so each use outside scratch.rs needs a local
+# `#[expect(clippy::disallowed_methods, reason = "...")]` saying why the
+# write is not a fixture write. Not covered: `OpenOptions::open` (it also
+# reads) and rustix's calls; those rest on review and the other layers.
+disallowed-methods = [
+  { path = "std::fs::write", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::File::create", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::File::create_new", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::create_dir", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::create_dir_all", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::DirBuilder::create", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::remove_file", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::remove_dir", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::remove_dir_all", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::rename", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::copy", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::hard_link", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::fs::set_permissions", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::os::unix::fs::symlink", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::os::unix::fs::chown", reason = "fixture writes go through Scratch (scratch.rs)" },
+  { path = "std::os::unix::fs::lchown", reason = "fixture writes go through Scratch (scratch.rs)" },
+]

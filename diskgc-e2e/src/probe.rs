@@ -84,14 +84,24 @@ pub fn main(args: &[String]) -> i32 {
 }
 
 /// Prints this process's credentials from /proc/self/status, one
-/// `Name:\tvalues` line each, for Uid, Gid, Groups, CapEff and CapPrm.
+/// `Name:\tvalues` line each, for Uid, Gid, Groups, the capability sets
+/// (but the bounding set) and NoNewPrivs.
 fn whoami() -> Result<(), String> {
     let status = std::fs::read_to_string("/proc/self/status")
         .map_err(|e| format!("read /proc/self/status: {e}"))?;
     for line in status.lines() {
-        if ["Uid:", "Gid:", "Groups:", "CapEff:", "CapPrm:"]
-            .iter()
-            .any(|k| line.starts_with(k))
+        if [
+            "Uid:",
+            "Gid:",
+            "Groups:",
+            "CapInh:",
+            "CapPrm:",
+            "CapEff:",
+            "CapAmb:",
+            "NoNewPrivs:",
+        ]
+        .iter()
+        .any(|k| line.starts_with(k))
         {
             println!("{line}");
         }
@@ -110,6 +120,10 @@ fn read_dir(path: &Path) -> Result<(), String> {
 }
 
 /// Deletes each path (directories recursively).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a probe acts, as a process of its own, on the paths the test names; that is its purpose"
+)]
 fn remove(paths: &[String]) -> Result<(), String> {
     for path in paths.iter().map(PathBuf::from) {
         let meta = std::fs::symlink_metadata(&path)
@@ -127,6 +141,10 @@ fn remove(paths: &[String]) -> Result<(), String> {
 
 /// Unlinks the file and creates a new one with the same content at the same
 /// path: same path, new inode (what Cargo does to a `.cargo-lock`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a probe acts, as a process of its own, on the paths the test names; that is its purpose"
+)]
 fn recreate(path: &Path) -> Result<(), String> {
     let content = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     std::fs::remove_file(path).map_err(|e| format!("unlink {}: {e}", path.display()))?;
@@ -136,6 +154,10 @@ fn recreate(path: &Path) -> Result<(), String> {
 }
 
 /// Writes a copy next to the file and renames it over the original.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a probe acts, as a process of its own, on the paths the test names; that is its purpose"
+)]
 fn rename_over(path: &Path) -> Result<(), String> {
     let content = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut tmp = path.as_os_str().to_owned();
@@ -202,6 +224,10 @@ fn escape(case: &str) -> Result<(), String> {
 /// count first (the test compares it with the harness's to prove strace's
 /// filter is installed), then `churned N`, then its
 /// `voluntary_ctxt_switches` (about one per ptrace stop).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a probe acts, as a process of its own, on the paths the test names; that is its purpose"
+)]
 fn churn(dir: &Path, count: &str, stats: &str) -> Result<(), String> {
     let number = |text: &str, what: &str| -> Result<usize, String> {
         text.parse()

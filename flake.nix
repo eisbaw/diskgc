@@ -132,6 +132,8 @@
         fileset = lib.fileset.unions [
           workspaceFiles
           (craneLib.fileset.commonCargoSources ./diskgc-e2e)
+          # Its Clippy rules (e2e-clippy): fixture writes only through Scratch.
+          ./diskgc-e2e/clippy.toml
           # Producer lifecycle scenarios, embedded by lifecycle_suite.rs.
           ./diskgc-e2e/src/lifecycle
           ./docs/ci-pre-job.sh

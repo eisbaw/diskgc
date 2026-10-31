@@ -473,6 +473,10 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
         TESTER,
     )?;
     let prior = preflight_scratch_snapshot(ctx)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "overwrites in place a file Scratch created; Scratch has no overwrite"
+    )]
     fs::write(&bite, b"other")
         .map_err(|error| format!("overwrite nested snapshot bite {}: {error}", bite.display()))?;
     let changed = preflight_scratch_snapshot(ctx)?;
@@ -488,6 +492,10 @@ pub fn historical_ctime_originals_refuse_before_fixture_writes(ctx: &Ctx) -> Tes
         prior != changed,
         "nested overwrite did not change scratch snapshot"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "overwrites in place a file Scratch created; Scratch has no overwrite"
+    )]
     fs::write(&bite, b"first")
         .map_err(|error| format!("restore nested snapshot bite {}: {error}", bite.display()))?;
     let before = preflight_scratch_snapshot(ctx)?;
@@ -1918,6 +1926,10 @@ pub fn bind_root_alias_mutations_match_linux(ctx: &Ctx) -> TestResult {
         state.rename_path(source, &alias) == Err(Fault::Errno(Errno::EXDEV)),
         "model allowed a cross-mount rename"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "must fail with EXDEV: the kernel's refusal is what this asserts"
+    )]
     let kernel_error =
         fs::rename(source, &alias).expect_err("kernel must refuse a rename across bind mount IDs");
     ensure!(
@@ -2301,6 +2313,10 @@ impl SandboxClockOffset {
 
 impl Drop for SandboxClockOffset {
     fn drop(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the clock-offset control file the harness wrote on the disposable container's overlay root"
+        )]
         fs::remove_file(diskgc_linux::sandbox::CLOCK_OFFSET_PATH)
             .expect("remove the sandbox clock offset from the disposable container");
     }

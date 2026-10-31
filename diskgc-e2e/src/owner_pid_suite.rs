@@ -375,8 +375,16 @@ pub fn owner_pid_is_unknown_on_an_unlisted_filesystem(ctx: &Ctx) -> TestResult {
     }
     let overlay = OverlayMount::mount(ctx.scratch.root())?;
     let overlay_dir = overlay.at.join(format!("nix-develop-{dead}-1"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "inside an overlay mounted over scratch directories: another mount id, which Scratch refuses"
+    )]
     std::fs::create_dir(&overlay_dir)
         .map_err(|e| format!("mkdir {}: {e}", overlay_dir.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "inside an overlay mounted over scratch directories: another mount id, which Scratch refuses"
+    )]
     std::fs::write(overlay_dir.join("rc"), b"rc\n")
         .map_err(|e| format!("write rc in {}: {e}", overlay_dir.display()))?;
     for path in [overlay_dir.join("rc"), overlay_dir.clone()] {

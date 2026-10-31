@@ -559,6 +559,10 @@ pub(crate) fn part_of(parts: &[PlannedPart], path: &Path) -> Option<usize> {
 
 /// Appends a comment to the project's `src/main.rs`, so the next build
 /// compiles it again (a newer build than any before).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "edits a source file of a Cargo project the test made on scratch, as a developer would"
+)]
 pub(crate) fn edit_main(project: &Path) -> TestResult {
     let main = project.join("src/main.rs");
     let text = std::fs::read_to_string(&main).map_err(|e| format!("read {main:?}: {e}"))?;

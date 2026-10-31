@@ -56,6 +56,9 @@ pub enum Tier {
     Full,
     /// Only in the disposable, Nix-built QEMU guest with SYS_TIME.
     Vm,
+    /// In no suite: run only by name, to test the runner itself
+    /// ([`RUNNER_FAILURE_PROBE`]).
+    Probe,
 }
 
 impl Tier {
@@ -64,6 +67,7 @@ impl Tier {
             Tier::Fast => "fast",
             Tier::Full => "full",
             Tier::Vm => "vm",
+            Tier::Probe => "probe",
         }
     }
 
@@ -72,6 +76,7 @@ impl Tier {
             "fast" => Some(Tier::Fast),
             "full" => Some(Tier::Full),
             "vm" => Some(Tier::Vm),
+            "probe" => Some(Tier::Probe),
             _ => None,
         }
     }
@@ -1093,6 +1098,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: sandbox_trivial,
+    },
+    Test {
+        name: RUNNER_FAILURE_PROBE,
+        tier: Tier::Probe,
+        expect: Expect::Pass,
+        run: runner_failure_probe,
     },
     Test {
         name: "tester_cannot_read_other_users_mode000_dir",
@@ -2135,6 +2146,20 @@ fn to_str(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("non-UTF-8 path {}", path.display()))
 }
 
+/// A test that fails on purpose, after its setup, in no suite
+/// ([`Tier::Probe`]): `tools/e2e_one_retention.py` (in `just e2e`) runs it
+/// through the runner's `one` to check that a failed test's container is
+/// kept for inspection.
+pub const RUNNER_FAILURE_PROBE: &str = "runner_failure_probe_fails_on_purpose";
+
+/// What [`RUNNER_FAILURE_PROBE`] fails with; the retention check finds it in
+/// the kept container's log.
+pub const RUNNER_FAILURE_PROBE_MESSAGE: &str = "runner failure probe: failing on purpose";
+
+fn runner_failure_probe(_ctx: &Ctx) -> TestResult {
+    Err(RUNNER_FAILURE_PROBE_MESSAGE.to_owned())
+}
+
 /// The harness works end to end: host lock provisioned, scratch mounted,
 /// diskgc runs as tester under strace, and the oracle sees no change.
 fn sandbox_trivial(ctx: &Ctx) -> TestResult {
@@ -2208,7 +2233,8 @@ fn status_values<'a>(status: &'a str, name: &str) -> Result<Vec<&'a str>, String
         .ok_or_else(|| format!("no {name} line in {status:?}"))
 }
 
-/// The code under test runs as uid 1000 without capabilities or root's
+/// The code under test runs as uid 1000 without capabilities (none
+/// inheritable or ambient either), with no-new-privileges, without root's
 /// groups, and cannot read a mode-000 directory of another mapped uid.
 fn tester_cannot_read_other_users_mode000_dir(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
@@ -2244,13 +2270,21 @@ fn tester_cannot_read_other_users_mode000_dir(ctx: &Ctx) -> TestResult {
         "code under test kept supplementary groups other than tester's: {}",
         who.stdout
     );
-    for caps in ["CapEff:", "CapPrm:"] {
+    // Inheritable and ambient too: either could hand capabilities to a
+    // program the code under test execs.
+    for caps in ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"] {
         ensure!(
             status_values(&who.stdout, caps)? == ["0000000000000000"],
             "code under test has capabilities ({caps}): {}",
             who.stdout
         );
     }
+    ensure!(
+        status_values(&who.stdout, "NoNewPrivs:")? == ["1"],
+        "code under test can gain privileges through exec (the runner's \
+         --security-opt no-new-privileges is missing): {}",
+        who.stdout
+    );
 
     let other = s.path("other-private");
     let denied = ctx.probe_as_tester(&["read-dir", to_str(&other)?])?;

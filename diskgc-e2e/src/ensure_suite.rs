@@ -1859,6 +1859,10 @@ pub fn profiles_work_as_root_while_ensure_refuses(ctx: &Ctx) -> TestResult {
 /// FIFO, a directory, a symlink to a regular file) is refused, exit 2, on a
 /// real kernel: the FIFO is never opened (an open for reading would block
 /// until a writer came), and nothing is locked or deleted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "restores the host lock path on its own /run/diskgc tmpfs; Scratch has no rmdir"
+)]
 pub fn ensure_refuses_a_host_lock_that_is_no_regular_file(ctx: &Ctx) -> TestResult {
     work_dir(ctx)?;
     ctx.scratch.write_file("w/elsewhere", b"", 0o644, TESTER)?;

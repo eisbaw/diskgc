@@ -243,6 +243,10 @@ pub fn ns_hold(src: &Path, dst: &Path, file: &str) -> Result<(), String> {
 /// which it is root (`unshare -r`: uid and gid 0 mapped to its own), then
 /// holds FILE open. It holds every capability in that namespace, but the
 /// namespace belongs to tester, so tester may read it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "writes /proc/self/uid_map and gid_map, kernel controls rather than files"
+)]
 pub fn hold_userns(file: &Path) -> Result<(), String> {
     let (uid, gid) = (
         rustix::process::getuid().as_raw(),

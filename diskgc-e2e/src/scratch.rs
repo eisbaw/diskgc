@@ -17,6 +17,12 @@
 //! resolves to. Final components are never followed (`O_EXCL`, `lchown`,
 //! `AT_SYMLINK_NOFOLLOW`).
 
+// The one home of fixture writes (diskgc-e2e/clippy.toml).
+#![allow(
+    clippy::disallowed_methods,
+    reason = "Scratch checks every path it touches by mount id"
+)]
+
 use std::ffi::CString;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write;
@@ -91,6 +97,12 @@ impl Scratch {
     }
 
     fn mount_options(root: &str, mode: &str, owner: Owner, extra: &str) -> Result<Self, String> {
+        // A second guard behind the binary's own interlock (layer 2): a
+        // scratch mount is where every fixture write lands, so a caller
+        // that slipped past `interlock::enforce` still mounts nothing.
+        diskgc_linux::sandbox::check().map_err(|why| {
+            format!("refusing to mount scratch at {root} outside a diskgc test container: {why}")
+        })?;
         let root = PathBuf::from(root);
         let covered = mount_id(&root, false)?;
         let data = CString::new(format!(
@@ -553,5 +565,31 @@ impl Scratch {
         // creation; set the requested mode last.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
             .map_err(|e| format!("chmod {}: {e}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unit tests run in the Nix build sandbox, outside any test container:
+    /// the sandbox check refuses before `mount(2)` is tried (which would
+    /// fail there with EPERM, a different message).
+    #[test]
+    fn mounting_scratch_outside_a_test_container_is_refused_first() {
+        assert!(
+            diskgc_linux::sandbox::check().is_err(),
+            "unit tests must not run inside a diskgc test container"
+        );
+        for mounted in [
+            Scratch::mount("/nonexistent-diskgc-scratch", "0700", crate::ROOT),
+            Scratch::mount_sized("/nonexistent-diskgc-scratch", "0700", crate::ROOT, "1m"),
+        ] {
+            let error = mounted.unwrap_err();
+            assert!(
+                error.starts_with("refusing to mount scratch at /nonexistent-diskgc-scratch"),
+                "{error}"
+            );
+        }
     }
 }

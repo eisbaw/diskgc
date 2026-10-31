@@ -224,6 +224,10 @@ mod tests {
     struct TempDir(PathBuf);
 
     impl Drop for TempDir {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a unit test's own temporary directory, in the Nix build sandbox"
+        )]
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
@@ -231,6 +235,10 @@ mod tests {
 
     /// A missing or unreadable descriptor is an error: no image is assumed.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a unit test's own temporary directory, in the Nix build sandbox"
+    )]
     fn a_missing_or_unreadable_descriptor_is_an_error() {
         let guard =
             TempDir(std::env::temp_dir().join(format!("diskgc-e2e-image-{}", std::process::id())));

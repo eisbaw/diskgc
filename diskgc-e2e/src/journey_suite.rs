@@ -85,6 +85,10 @@ impl ClockOffset {
         self.set_raw(&format!("{seconds}\n"))
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the clock-offset control file the harness writes on the disposable container's overlay root"
+    )]
     fn set_raw(&self, content: &str) -> TestResult {
         let path = diskgc_linux::sandbox::CLOCK_OFFSET_PATH;
         std::fs::write(path, content).map_err(|error| format!("write {path}: {error}"))
@@ -93,6 +97,10 @@ impl ClockOffset {
 
 impl Drop for ClockOffset {
     fn drop(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the clock-offset control file the harness wrote on the disposable container's overlay root"
+        )]
         std::fs::remove_file(diskgc_linux::sandbox::CLOCK_OFFSET_PATH)
             .expect("remove clock offset from the disposable container");
     }
@@ -734,7 +742,7 @@ fn set_up_runner(ctx: &Ctx, toolchain: &Toolchain) -> Result<Busy, String> {
     s.write_file(HELD_LOG, &vec![b'x'; HELD_LOG_BYTES], 0o644, TESTER)?;
     let held_log = s.path(HELD_LOG);
     let holder = Holder::tester(ctx, &["hold", path_str(&held_log)?, "/"], &[])?;
-    std::fs::remove_file(&held_log).map_err(|e| format!("rm {}: {e}", held_log.display()))?;
+    s.remove_file(HELD_LOG)?;
 
     Ok(Busy {
         tests: tests_cargo,

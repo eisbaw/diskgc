@@ -107,6 +107,10 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, project: &Path, env: &[(&str, &str)])
 /// `unsupported_layout` (AC #1), and so is a `.cargo-lock` that is a FIFO
 /// or a directory; a future file time is `future_time` (an unknown age is
 /// never idle). Nothing is deleted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "replaces lock files Cargo made below scratch projects with a FIFO and a directory"
+)]
 pub fn cargo_targets_discovered_and_judged(ctx: &Ctx, toolchain: &Toolchain) -> TestResult {
     let s = &ctx.scratch;
     s.mkdirs("w/.claude/worktrees/agent", 0o755, TESTER)?;
@@ -506,6 +510,10 @@ fn newest_change_below(dir: &Path) -> Result<SystemTime, String> {
 /// `in_use`. It is eligible before and after (the control). The helper is
 /// started through a shell from inside `target/tmp`, so no argument is
 /// non-UTF-8 (the harness reads its arguments as UTF-8).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a non-UTF-8 name below the scratch root, which Scratch's UTF-8 relative paths cannot express"
+)]
 pub fn cargo_running_executable_below_a_non_utf8_name_keeps_its_target_in_use(
     ctx: &Ctx,
     toolchain: &Toolchain,

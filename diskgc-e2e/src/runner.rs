@@ -14,10 +14,15 @@
 //!    piped into `podman load`.
 //! 4. Lists the tests from inside a container (`diskgc-e2e list`).
 //! 5. Runs one container per selected test, in parallel, with
-//!    `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --network=none`, the binaries
+//!    `--security-opt no-new-privileges --cap-add SYS_ADMIN
+//!    --cap-add SYS_PTRACE --network=none`, the binaries
 //!    under test mounted read-only, and records each test's duration and log.
 //! 6. Reports, and fails when a test failed or the run exceeded its budget.
 //!    The budget is also a deadline: tests still running at it are killed.
+//!
+//! Steps 1 to 4 share the run's deadline too (the suite budget, or
+//! [`ONE_SETUP_LIMIT`] for `one`): a hung `podman` or image stream is killed
+//! with its process group, and the run fails naming the step ([`output_by`]).
 //!
 //! The Nix flake's `e2e-runner` package wraps this binary with the image and
 //! under-test paths, so `nix run .#e2e-runner -- run --suite fast` is all a
@@ -25,9 +30,11 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::suite::Tier;
@@ -204,15 +211,40 @@ pub fn main(args: &[String]) -> i32 {
     }
 }
 
+/// How long `one`'s setup (canary, Podman checks, image load, listing) may
+/// take: a cold load of the multi-gigabyte Nix image takes a few minutes.
+pub const ONE_SETUP_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+/// How long `one`'s test may run: it is interactive, so this only guards
+/// against a hang.
+const ONE_TEST_LIMIT: Duration = Duration::from_secs(24 * 3600);
+
+/// How long a cleanup `podman kill` or `podman rm` may take.
+const CLEANUP_LIMIT: Duration = Duration::from_secs(30);
+
+/// The deadline of the steps before the tests: a suite's budget covers
+/// them, so they share its deadline.
+pub fn setup_deadline(selection: &Selection, started: Instant) -> Instant {
+    match selection {
+        Selection::Suite { budget, .. } => started + *budget,
+        Selection::One { .. } => started + ONE_SETUP_LIMIT,
+    }
+}
+
 fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
     let started = Instant::now();
-    check_canary_refuses_on_host(config)?;
-    require_native_overlay_storage()?;
-    require_rootless()?;
-    ensure_base_image(config)?;
+    let setup_by = setup_deadline(selection, started);
+    check_canary_refuses_on_host(config, setup_by)?;
+    require_native_overlay_storage(setup_by)?;
+    require_rootless(setup_by)?;
+    ensure_base_image(config, setup_by)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the host-side runner's own log directory, not a fixture"
+    )]
     std::fs::create_dir_all(&config.log_dir)
         .map_err(|e| format!("create {}: {e}", config.log_dir.display()))?;
-    let (listed, image) = list_tests(config)?;
+    let (listed, image) = list_tests(config, setup_by)?;
 
     match selection {
         Selection::Suite {
@@ -239,23 +271,146 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
                     "no test named {name:?}; `just e2e-full` lists every test it runs"
                 ));
             };
-            // A day: e2e-one is interactive; the deadline only guards hangs.
-            let deadline = started + Duration::from_secs(24 * 3600);
+            let deadline = Instant::now() + ONE_TEST_LIMIT;
             let result = run_container(config, &test, deadline, true);
             Ok(report(&image, &[result], started.elapsed(), None))
         }
     }
 }
 
+/// Runs `command` like [`Command::output`], but in its own process group
+/// that is killed with `SIGKILL` once `deadline` passes, so a hung step
+/// fails the run instead of hanging it. `what` names the step in errors.
+/// Stdin is the caller's choice (default: inherited).
+pub fn output_by(command: &mut Command, deadline: Instant, what: &str) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("spawn {what}: {e}"))?;
+    // Pipes are drained on threads so a chatty step cannot block on a full
+    // pipe; the channel lets the wait give up at the deadline even if a
+    // helper outside the group keeps a pipe open.
+    let (sender, received) = mpsc::channel();
+    for (index, pipe) in [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut pipe = pipe.expect("stdout and stderr are piped");
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            // The receiver is gone only when the step already failed.
+            let _ = sender.send((index, read));
+        });
+    }
+    let status = wait_by(&mut child, deadline, what)?;
+    let mut pipes = [Vec::new(), Vec::new()];
+    for _ in 0..2 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (index, read) = received.recv_timeout(left).map_err(|_| {
+            // The leader is reaped, but a group member still holds the
+            // pipe, so the group id is still in use and cannot name an
+            // unrelated process.
+            kill_group(&child);
+            format!("{what} exited ({status}) but its output was still open at the deadline")
+        })?;
+        pipes[index] = read.map_err(|e| format!("read the output of {what}: {e}"))?;
+    }
+    let [stdout, stderr] = pipes;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Waits for `child` (the leader of its own process group) until
+/// `deadline`; then kills the group, reaps the leader and fails.
+fn wait_by(child: &mut Child, deadline: Instant, what: &str) -> Result<ExitStatus, String> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() >= deadline => {
+                kill_group(child);
+                // Reaping after SIGKILL returns at once unless the leader
+                // sleeps uninterruptibly in the kernel.
+                let _ = child.wait();
+                return Err(format!(
+                    "{what} was still running at the run's deadline; killed it"
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => {
+                kill_group(child);
+                let _ = child.wait();
+                return Err(format!("wait for {what}: {e}"));
+            }
+        }
+    }
+}
+
+/// `SIGKILL` to the process group `child` leads (spawned with
+/// `process_group(0)`): a step such as the image stream script can start
+/// helpers that would outlive their leader.
+fn kill_group(child: &Child) {
+    let pid = rustix::process::Pid::from_raw(child.id().cast_signed())
+        .expect("a child's pid is positive");
+    if let Err(e) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+        // ESRCH: the group is already gone, which is what we wanted.
+        if e != rustix::io::Errno::SRCH {
+            eprintln!("runner: kill process group {}: {e}", child.id());
+        }
+    }
+}
+
+/// `podman ARGS` with a deadline [`CLEANUP_LIMIT`] from now, for cleanup:
+/// a failure is printed (never silent) and returned.
+fn podman_cleanup(args: &[&str]) -> Result<(), String> {
+    let what = format!("podman {}", args.join(" "));
+    let out = output_by(
+        Command::new("podman").args(args).stdin(Stdio::null()),
+        Instant::now() + CLEANUP_LIMIT,
+        &what,
+    )
+    .and_then(|out| {
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{what} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    });
+    if let Err(e) = &out {
+        eprintln!("runner: {e}");
+    }
+    out
+}
+
 /// Interlock proof on every run: the do-nothing canary, run here on the
 /// host, must refuse. If it runs, the interlock is broken and nothing else
 /// is started.
-fn check_canary_refuses_on_host(config: &Config) -> Result<(), String> {
+fn check_canary_refuses_on_host(config: &Config, deadline: Instant) -> Result<(), String> {
     let canary = config.under_test.join("bin/diskgc-e2e-canary");
-    let out = Command::new(&canary)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("spawn interlock canary {}: {e}", canary.display()))?;
+    let out = output_by(
+        Command::new(&canary).stdin(Stdio::null()),
+        deadline,
+        &format!("interlock canary {}", canary.display()),
+    )?;
     if out.status.code() == Some(exit::INTERLOCK) {
         info!(
             "interlock canary refused to run on the host (exit {}), as it must: {}",
@@ -284,16 +439,18 @@ fn check_canary_refuses_on_host(config: &Config) -> Result<(), String> {
 /// driver (vfs, btrfs, ...) the container root is a different filesystem
 /// whose inode numbers and birth times the deletion oracle's snapshot keys
 /// were not validated on (false REPLACED, or replacements missed).
-fn require_native_overlay_storage() -> Result<(), String> {
-    let out = Command::new("podman")
-        .args([
-            "info",
-            "--format",
-            "{{.Store.GraphDriverName}}\n{{json .Store.GraphOptions}}",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("spawn podman (rootless Podman is a host requirement): {e}"))?;
+fn require_native_overlay_storage(deadline: Instant) -> Result<(), String> {
+    let out = output_by(
+        Command::new("podman")
+            .args([
+                "info",
+                "--format",
+                "{{.Store.GraphDriverName}}\n{{json .Store.GraphOptions}}",
+            ])
+            .stdin(Stdio::null()),
+        deadline,
+        "podman info (rootless Podman is a host requirement)",
+    )?;
     if !out.status.success() {
         return Err(format!(
             "podman info failed ({}): {}",
@@ -312,12 +469,14 @@ fn require_native_overlay_storage() -> Result<(), String> {
 /// `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`, which only a user namespace
 /// confines, and [`HOST_PID_NAMESPACE_ARGS`] would hand a rootful container
 /// the host's processes.
-fn require_rootless() -> Result<(), String> {
-    let out = Command::new("podman")
-        .args(["info", "--format", "{{.Host.Security.Rootless}}"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("spawn podman (rootless Podman is a host requirement): {e}"))?;
+fn require_rootless(deadline: Instant) -> Result<(), String> {
+    let out = output_by(
+        Command::new("podman")
+            .args(["info", "--format", "{{.Host.Security.Rootless}}"])
+            .stdin(Stdio::null()),
+        deadline,
+        "podman info (rootless Podman is a host requirement)",
+    )?;
     let answer = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() || answer.trim() != "true" {
         return Err(format!(
@@ -365,9 +524,9 @@ pub fn check_storage_driver(driver: &str, options_json: &str) -> Result<(), Stri
 }
 
 /// Loads the base image unless an image with its tag (its Nix hash) exists.
-fn ensure_base_image(config: &Config) -> Result<(), String> {
+fn ensure_base_image(config: &Config, deadline: Instant) -> Result<(), String> {
     let probe_started = Instant::now();
-    if image_exists(&config.image_ref)? {
+    if image_exists(&config.image_ref, deadline)? {
         info!(
             "base image {} already loaded: reused (checked in {:.2?})",
             config.image_ref,
@@ -381,19 +540,26 @@ fn ensure_base_image(config: &Config) -> Result<(), String> {
         config.image_stream.display()
     );
     let load_started = Instant::now();
+    let stream_what = format!("image stream {}", config.image_stream.display());
     let mut stream = Command::new(&config.image_stream)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .process_group(0)
         .spawn()
-        .map_err(|e| format!("spawn {}: {e}", config.image_stream.display()))?;
+        .map_err(|e| format!("spawn {stream_what}: {e}"))?;
     let image_tar = stream.stdout.take().expect("stdout is piped");
-    let load = Command::new("podman")
-        .args(["load", "--quiet"])
-        .stdin(image_tar)
-        .output()
-        .map_err(|e| format!("spawn podman load: {e}"))?;
-    let streamed = stream
-        .wait()
-        .map_err(|e| format!("wait for {}: {e}", config.image_stream.display()))?;
+    let load = output_by(
+        Command::new("podman")
+            .args(["load", "--quiet"])
+            .stdin(image_tar),
+        deadline,
+        "podman load of the base image",
+    )
+    .inspect_err(|_| {
+        kill_group(&stream);
+        let _ = stream.wait();
+    })?;
+    let streamed = wait_by(&mut stream, deadline, &stream_what)?;
     if !streamed.success() || !load.status.success() {
         return Err(format!(
             "loading the base image failed: stream {streamed}, podman load {}: {}",
@@ -401,7 +567,7 @@ fn ensure_base_image(config: &Config) -> Result<(), String> {
             String::from_utf8_lossy(&load.stderr)
         ));
     }
-    if !image_exists(&config.image_ref)? {
+    if !image_exists(&config.image_ref, deadline)? {
         return Err(format!(
             "podman load succeeded but {} does not exist; loaded: {}",
             config.image_ref,
@@ -416,15 +582,22 @@ fn ensure_base_image(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn image_exists(image_ref: &str) -> Result<bool, String> {
-    let status = Command::new("podman")
-        .args(["image", "exists", image_ref])
-        .status()
-        .map_err(|e| format!("spawn podman (rootless Podman is a host requirement): {e}"))?;
-    match status.code() {
+fn image_exists(image_ref: &str, deadline: Instant) -> Result<bool, String> {
+    let out = output_by(
+        Command::new("podman")
+            .args(["image", "exists", image_ref])
+            .stdin(Stdio::null()),
+        deadline,
+        "podman image exists (rootless Podman is a host requirement)",
+    )?;
+    match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(format!("podman image exists {image_ref}: {status}")),
+        _ => Err(format!(
+            "podman image exists {image_ref}: {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
     }
 }
 
@@ -484,6 +657,11 @@ fn podman_run_args(config: &Config, name: &str, keep: bool, extra: &[String]) ->
         name,
         "--pull=never",
         "--network=none",
+        // The code under test drops to tester with no capabilities; with
+        // no-new-privileges no setuid binary or file capability can give
+        // any back (the credential test checks `NoNewPrivs`).
+        "--security-opt",
+        "no-new-privileges",
         "--cap-add",
         "SYS_ADMIN",
         "--cap-add",
@@ -555,14 +733,20 @@ pub fn parse_listing(text: &str) -> Result<Vec<Listed>, String> {
 }
 
 /// The tests the image lists, and the image's name.
-fn list_tests(config: &Config) -> Result<(Vec<Listed>, String), String> {
+fn list_tests(config: &Config, deadline: Instant) -> Result<(Vec<Listed>, String), String> {
     let name = format!("diskgc-e2e-{}-list", std::process::id());
-    let out = Command::new("podman")
-        .args(podman_run_args(config, &name, false, &[]))
-        .arg("list")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("spawn podman: {e}"))?;
+    let out = output_by(
+        Command::new("podman")
+            .args(podman_run_args(config, &name, false, &[]))
+            .arg("list")
+            .stdin(Stdio::null()),
+        deadline,
+        "the test listing container",
+    )
+    .inspect_err(|_| {
+        // Killing the podman client leaves the container to conmon.
+        let _ = podman_cleanup(&["rm", "--force", "--ignore", "--time", "0", &name]);
+    })?;
     if !out.status.success() {
         return Err(format!(
             "listing the tests in a container failed ({}): {}",
@@ -662,6 +846,10 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
         return finish(Outcome::NotRun);
     }
     let container = container_name(std::process::id(), &test.name);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the host-side runner's per-test log, not a fixture"
+    )]
     let spawned = File::create(&log)
         .and_then(|f| Ok((f.try_clone()?, f)))
         .map_err(|e| format!("create log {}: {e}", log.display()))
@@ -691,7 +879,15 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     let mut child = match spawned {
         Ok(child) => child,
         Err(e) => {
-            let _ = std::fs::write(&log, format!("runner: {e}\n"));
+            eprintln!("runner: {}: {e}", test.name);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the host-side runner's own log file, not a fixture"
+            )]
+            let logged = std::fs::write(&log, format!("runner: {e}\n"));
+            if let Err(write) = logged {
+                eprintln!("runner: write {}: {write}", log.display());
+            }
             return finish(Outcome::Fail(None));
         }
     };
@@ -701,21 +897,14 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
             Ok(Some(status)) => break Outcome::Fail(status.code()),
             Ok(None) if Instant::now() >= deadline => {
                 // The budget is a deadline: stop the container, not only the
-                // podman client.
-                let _ = Command::new("podman")
-                    .args(["kill", &container])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                // podman client. Cleanup failures are printed by
+                // podman_cleanup; the outcome is TIMEOUT either way.
+                let _ = podman_cleanup(&["kill", &container]);
                 let _ = child.kill();
                 let _ = child.wait();
                 // `podman kill` can race the container's creation; make sure
                 // nothing of it keeps running.
-                let _ = Command::new("podman")
-                    .args(["rm", "--force", "--ignore", "--time", "0", &container])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                let _ = podman_cleanup(&["rm", "--force", "--ignore", "--time", "0", &container]);
                 break Outcome::TimedOut;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
@@ -727,10 +916,11 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     };
     if keep {
         if outcome == Outcome::Pass {
-            let _ = Command::new("podman")
-                .args(["rm", "--force", &container])
-                .stdout(Stdio::null())
-                .status();
+            if let Err(e) = podman_cleanup(&["rm", "--force", &container]) {
+                // A passing `one` must not leave its container behind.
+                eprintln!("runner: the test passed but its container was not removed: {e}");
+                return finish(Outcome::Fail(None));
+            }
         } else {
             eprintln!(
                 "container {container} kept for inspection: podman logs {container}; \
@@ -1068,6 +1258,127 @@ mod tests {
             );
         }
         assert_eq!(verdict(&[], d, None), exit::FAIL);
+    }
+
+    /// The runner failure probe fails on purpose, so no suite may select it.
+    #[test]
+    fn the_runner_failure_probe_is_in_no_suite() {
+        let probe = crate::suite::TESTS
+            .iter()
+            .find(|t| t.name == crate::suite::RUNNER_FAILURE_PROBE)
+            .expect("the probe is registered, so `one` can run it");
+        assert_eq!(probe.tier, Tier::Probe);
+        for test in crate::suite::TESTS.iter().filter(|t| t.tier == Tier::Probe) {
+            let listed = Listed {
+                name: test.name.to_owned(),
+                tier: test.tier,
+            };
+            for suite in [SuiteKind::Fast, SuiteKind::Full, SuiteKind::Release] {
+                assert!(!suite.includes(&listed), "{} in {suite:?}", test.name);
+            }
+        }
+        assert_eq!(Tier::parse(Tier::Probe.as_str()), Some(Tier::Probe));
+    }
+
+    #[test]
+    fn every_test_container_gets_no_new_privileges() {
+        for runtime in ["standard", "dind"] {
+            let mut a = args(GLOBAL);
+            a.extend(args(&["--runtime", runtime, "one", "sandbox_trivial"]));
+            let (config, _) = parse_args(&a).unwrap();
+            for keep in [false, true] {
+                let run = podman_run_args(&config, "c", keep, &[]);
+                let image = run.iter().position(|a| *a == config.image_ref).unwrap();
+                assert!(
+                    run[..image]
+                        .windows(2)
+                        .any(|w| w == ["--security-opt", "no-new-privileges"]),
+                    "{runtime}: {run:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn setup_shares_the_suite_deadline_and_one_has_its_own_limit() {
+        let started = Instant::now();
+        let suite = Selection::Suite {
+            suite: SuiteKind::Fast,
+            budget: Duration::from_secs(300),
+            jobs: 1,
+        };
+        assert_eq!(
+            setup_deadline(&suite, started),
+            started + Duration::from_secs(300)
+        );
+        let one = Selection::One { name: "t".into() };
+        assert_eq!(setup_deadline(&one, started), started + ONE_SETUP_LIMIT);
+    }
+
+    #[test]
+    fn a_setup_step_returns_its_output_before_the_deadline() {
+        let out = output_by(
+            Command::new("sh").args(["-c", "echo out; echo err >&2; exit 3"]),
+            Instant::now() + Duration::from_secs(60),
+            "probe",
+        )
+        .unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+    }
+
+    /// A hung step and its helpers are killed at the deadline, not waited
+    /// for: `wait` would otherwise keep the shell alive for a minute, and
+    /// a kill of the shell alone would leave its `sleep` running.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a unit test's own temporary file, in the Nix build sandbox"
+    )]
+    fn a_hung_setup_step_is_killed_with_its_group_at_the_deadline() {
+        let pid_file = std::env::temp_dir().join(format!("diskgc-e2e-hung-{}", std::process::id()));
+        let started = Instant::now();
+        let error = output_by(
+            Command::new("sh")
+                .args(["-c", r#"sleep 60 & echo $! > "$0"; wait"#])
+                .arg(&pid_file),
+            started + Duration::from_millis(300),
+            "hung probe",
+        )
+        .unwrap_err();
+        assert!(error.contains("hung probe was still running"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let helper = std::fs::read_to_string(&pid_file).unwrap();
+        std::fs::remove_file(&pid_file).unwrap();
+        // Killed: gone, or a zombie its new parent has not reaped yet.
+        let stat = format!("/proc/{}/stat", helper.trim());
+        let alive = || {
+            std::fs::read_to_string(&stat)
+                .ok()
+                .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| !rest.starts_with('Z')))
+                .unwrap_or(false)
+        };
+        let waited = Instant::now();
+        while alive() && waited.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the step's helper {} survived", helper.trim());
+    }
+
+    /// A helper that outlives its leader and keeps the output pipe open
+    /// fails the step at the deadline (the group kill then ends it).
+    #[test]
+    fn a_helper_holding_the_output_open_fails_the_step_at_the_deadline() {
+        let started = Instant::now();
+        let error = output_by(
+            Command::new("sh").args(["-c", "sleep 60 &"]),
+            started + Duration::from_millis(300),
+            "leaky probe",
+        )
+        .unwrap_err();
+        assert!(error.contains("output was still open"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

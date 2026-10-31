@@ -383,6 +383,10 @@ pub fn cargo_reclaim_changed_between_discovery_and_locking(
 /// test fails only on a hang (over 120 s) or a reclaim that does not
 /// complete. Under strace, which stops the driver at every unlink, so the
 /// time is an upper bound of an untraced run.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "fills a target dir that Cargo built below the scratch project"
+)]
 pub fn cargo_reclaim_lock_hold_time_on_a_large_target(ctx: &Ctx) -> TestResult {
     const FILES: usize = 100_000;
     let toolchain = Toolchain::fast()?;

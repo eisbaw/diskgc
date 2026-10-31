@@ -581,6 +581,10 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// The helper's side of the gate protocol (see [`Gate`]).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the gate protocol's marker beside the gate the harness made on scratch, written by the helper process"
+)]
 pub fn wait_at_gate(gate: &Path) -> Result<(), String> {
     let waiting = suffixed(gate, WAITING_SUFFIX);
     let go = suffixed(gate, GO_SUFFIX);

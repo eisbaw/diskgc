@@ -156,6 +156,10 @@ pub fn cargo_race_2_split_build_dir_on_a_target_first_built_whole(
         tested.failure()
     );
     info!("split-mode build, run and test succeed on a reclaimed whole target");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "removes the build dir Cargo made below the scratch project, between phases"
+    )]
     std::fs::remove_dir_all(&build_dir).map_err(|e| format!("rm -r {build_dir:?}: {e}"))?;
 
     // The race.
@@ -1545,9 +1549,7 @@ pub fn cargo_race_split_build_dir_is_never_reclaimed(
     expect_unsupported("idle")?;
 
     let gate = Gate::new(s, "split-build")?;
-    let main = p.join("src/main.rs");
-    let text = std::fs::read_to_string(&main).map_err(|e| e.to_string())?;
-    std::fs::write(&main, format!("{text}\n// edit\n")).map_err(|e| e.to_string())?;
+    crate::cargo_harness::edit_main(&p)?;
     let mut building = cargo(&["build"]).build_gate(&gate).spawn(ctx)?;
     gate.wait_until_waiting(REACH_TIMEOUT)?;
     let mut held = Vec::new();
@@ -1635,9 +1637,7 @@ pub fn cargo_race_shared_target_dir_from_cargo_config(
 
     // Race test 1: a build of p holding the shared target's locks.
     let gate = Gate::new(s, "shared-build")?;
-    let main = p.join("src/main.rs");
-    let text = std::fs::read_to_string(&main).map_err(|e| e.to_string())?;
-    std::fs::write(&main, format!("{text}\n// edit\n")).map_err(|e| e.to_string())?;
+    crate::cargo_harness::edit_main(&p)?;
     let holding = Cargo::new(toolchain, &p, &["build"])
         .build_gate(&gate)
         .spawn(ctx)?;
